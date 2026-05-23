@@ -6,17 +6,21 @@ event loop. Commands are read from stdin via asyncio.to_thread so they never
 block the trading event loop.
 
 Available commands:
-  status                  — Show all clients, status, P&L, broker bindings
-  halt <client_id>        — Immediately halt a client (no new orders)
-  resume <client_id>      — Re-enable a halted client
-  halt_all                — Halt all clients
-  reset_daily             — Reset daily P&L counters (normally auto at 09:15)
-  funds <client_id>       — Fetch live fund balances from broker
-  positions <client_id>   — Fetch live positions from broker
-  add_client <json>       — Register a new client profile at runtime
-  set_lots <id> <binding> <n> — Override lot_multiplier for a binding
-  drop_counts             — Show EventBus message drop counts per topic
-  quit                    — Graceful shutdown
+  status                        — Show all clients, status, P&L, broker bindings
+  halt <client_id>              — Immediately halt a client (no new orders)
+  resume <client_id>            — Re-enable a halted client
+  halt_all                      — Halt all clients
+  reset_daily                   — Reset daily P&L counters (normally auto at 09:15)
+  funds <client_id>             — Fetch live fund balances from broker
+  positions <client_id>         — Fetch live positions from broker
+  add_client <json>             — Register a new client profile at runtime
+  set_lots <id> <binding> <n>   — Override lot_multiplier for a binding
+  drop_counts                   — Show EventBus message drop counts per topic
+  worker_stats                  — Show per-client execution worker queue depths
+  state_status                  — Show SQLite snapshot stats (flush count, last save)
+  state_restore                 — Reload indicator + strategy state from last snapshot
+  rebalance <underlying>        — Force immediate ATM strike rebalance for underlying
+  quit                          — Graceful shutdown
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
+import os
+from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Awaitable, Optional
 
 from config.client_profiles import ClientRegistry, ClientProfile, BrokerBinding, RiskProfile
@@ -33,6 +38,8 @@ from data_layer.base_feeder import EventBus
 
 if TYPE_CHECKING:
     from execution_bridge.execution_router import ExecutionRouter
+    from matrix_engine.state_persistence import StatePersistence
+    from data_layer.strike_rebalancer import StrikeRebalancer
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +58,15 @@ class AdminConsole:
         bus: EventBus,
         registry: ClientRegistry,
         router: Optional["ExecutionRouter"] = None,
+        state_persistence: Optional["StatePersistence"] = None,
+        strike_rebalancer: Optional["StrikeRebalancer"] = None,
         shutdown_callback: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> None:
         self._bus = bus
         self._registry = registry
         self._router = router
+        self._state = state_persistence
+        self._rebalancer = strike_rebalancer
         self._shutdown = shutdown_callback
         self._running = False
 
@@ -83,19 +94,23 @@ class AdminConsole:
         args = parts[1:]
 
         handlers = {
-            "help":        self._cmd_help,
-            "status":      self._cmd_status,
-            "halt":        self._cmd_halt,
-            "resume":      self._cmd_resume,
-            "halt_all":    self._cmd_halt_all,
-            "reset_daily": self._cmd_reset_daily,
-            "funds":       self._cmd_funds,
-            "positions":   self._cmd_positions,
-            "add_client":  self._cmd_add_client,
-            "set_lots":    self._cmd_set_lots,
-            "drop_counts": self._cmd_drop_counts,
-            "quit":        self._cmd_quit,
-            "exit":        self._cmd_quit,
+            "help":          self._cmd_help,
+            "status":        self._cmd_status,
+            "halt":          self._cmd_halt,
+            "resume":        self._cmd_resume,
+            "halt_all":      self._cmd_halt_all,
+            "reset_daily":   self._cmd_reset_daily,
+            "funds":         self._cmd_funds,
+            "positions":     self._cmd_positions,
+            "add_client":    self._cmd_add_client,
+            "set_lots":      self._cmd_set_lots,
+            "drop_counts":   self._cmd_drop_counts,
+            "worker_stats":  self._cmd_worker_stats,
+            "state_status":  self._cmd_state_status,
+            "state_restore": self._cmd_state_restore,
+            "rebalance":     self._cmd_rebalance,
+            "quit":          self._cmd_quit,
+            "exit":          self._cmd_quit,
         }
         handler = handlers.get(cmd)
         if handler:
@@ -258,6 +273,100 @@ class AdminConsole:
         for topic, count in sorted(counts.items()):
             print(f"  {topic}: {count}", flush=True)
         print(flush=True)
+
+    async def _cmd_worker_stats(self, _: list) -> None:
+        """Show per-client execution worker queue depths and throughput."""
+        if not self._router:
+            print("No router attached.", flush=True)
+            return
+        stats = self._router.worker_stats()
+        if not stats:
+            print("No active workers.", flush=True)
+            return
+        print(f"\n{'Client':<15} {'Q Depth':>8} {'Processed':>10} {'Dropped':>8}", flush=True)
+        print("-" * 45, flush=True)
+        for s in stats:
+            print(
+                f"{s['client_id']:<15} {s['queue_depth']:>8} "
+                f"{s['processed']:>10} {s['dropped']:>8}",
+                flush=True,
+            )
+        print(flush=True)
+
+    async def _cmd_state_status(self, _: list) -> None:
+        """Show state persistence stats: flush count, DB path, file size."""
+        if self._state is None:
+            print("StatePersistence not attached (pass state_persistence= to AdminConsole).", flush=True)
+            return
+        db_path = self._state._db_path
+        flush_count = self._state.flush_count
+        size_kb = 0
+        try:
+            size_kb = os.path.getsize(db_path) // 1024
+        except OSError:
+            pass
+        print(f"\nState Persistence:", flush=True)
+        print(f"  DB path:     {db_path}", flush=True)
+        print(f"  DB size:     {size_kb} KB", flush=True)
+        print(f"  Flush count: {flush_count}", flush=True)
+        print(f"  Timestamp:   {datetime.now(IST).strftime('%H:%M:%S IST')}", flush=True)
+        print(flush=True)
+
+    async def _cmd_state_restore(self, _: list) -> None:
+        """
+        Reload indicator and strategy state from the most recent SQLite snapshot.
+        Prints a summary of what was restored.
+        """
+        if self._state is None:
+            print("StatePersistence not attached.", flush=True)
+            return
+        restored = await asyncio.to_thread(self._state.restore_state)
+        n_snap  = len(restored.get("snapshots", {}))
+        n_strat = len(restored.get("strategy_b", {}))
+        n_orders = len(restored.get("order_tickets", []))
+        n_risk   = len(restored.get("risk_params", {}))
+        print(f"\nState restored from {self._state._db_path}:", flush=True)
+        print(f"  Tech snapshots:    {n_snap}", flush=True)
+        print(f"  Strategy B states: {n_strat}", flush=True)
+        print(f"  Open order tickets: {n_orders}", flush=True)
+        print(f"  Risk param sets:   {n_risk}", flush=True)
+        if n_strat:
+            print("\n  Strategy B state:", flush=True)
+            for und, st in restored["strategy_b"].items():
+                print(
+                    f"    {und}: phase={st.get('phase')}  "
+                    f"rolling_base={st.get('rolling_base', 0):.0f}  "
+                    f"htf_level={st.get('htf_entry_level', 0):.0f}",
+                    flush=True,
+                )
+        print(flush=True)
+
+    async def _cmd_rebalance(self, args: list) -> None:
+        """
+        Force an immediate ATM strike rebalance for an underlying.
+        Usage: rebalance <underlying>   e.g.  rebalance NIFTY
+        """
+        if not args:
+            print("Usage: rebalance <underlying>   e.g.  rebalance NIFTY", flush=True)
+            return
+        underlying = args[0].upper()
+        if self._rebalancer is None:
+            print("StrikeRebalancer not attached (pass strike_rebalancer= to AdminConsole).", flush=True)
+            return
+        state = self._rebalancer._state.get(underlying)
+        if state is None:
+            print(f"Unknown underlying '{underlying}'.", flush=True)
+            return
+        print(f"Forcing rebalance for {underlying} ...", flush=True)
+        # Reset current_atm to force rebalance on next tick
+        state.current_atm = None
+        state.open_atm = None
+        stats = self._rebalancer.rebalance_stats()
+        print(
+            f"  {underlying}: ATM baseline cleared. Rebalance will trigger on next tick.\n"
+            f"  Total rebalances so far: {stats.get(underlying, 0)}",
+            flush=True,
+        )
 
     async def _cmd_quit(self, _: list) -> None:
         print("Shutting down...", flush=True)

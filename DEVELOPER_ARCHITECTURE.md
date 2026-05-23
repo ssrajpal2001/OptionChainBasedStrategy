@@ -18,14 +18,16 @@ OptionChainBasedStrategy/
 │
 ├── data_layer/
 │   ├── base_feeder.py           EventBus, IndexTick, OptionTick, CandleEvent (pub-sub backbone)
-│   ├── global_feeder.py         Websocket adapter: connects broker feed, normalizes & publishes ticks
+│   ├── global_feeder.py         WebSocket adapter: two-stage pipeline (_ws_loop + _parse_worker)
 │   ├── symbol_translator.py     InternalSymbol <-> broker-specific symbol format conversion
-│   └── tick_recorder.py         Async Parquet + ZStandard tick logger (non-blocking I/O)
+│   ├── tick_recorder.py         Async Parquet + ZStandard tick logger (non-blocking I/O)
+│   └── strike_rebalancer.py     Dynamic ATM strike monitor: resubscribes on 3-interval spot drift
 │
 ├── matrix_engine/
 │   ├── candle_cache.py          Tick -> OHLCV aggregation per timeframe; publishes CandleEvent
 │   ├── indicators.py            Vectorized NumPy: RSI(14), VWAP(500), ADX(20), EMA, ATR
-│   └── option_matrix.py         Live option chain: per-strike OI/DOI/IV, max-pain, PCR
+│   ├── option_matrix.py         Live option chain: per-strike OI/DOI/IV, max-pain, PCR
+│   └── state_persistence.py     SQLite snapshot on CANDLE_CLOSE; hot-reload on mid-day reboot
 │
 ├── strategies/
 │   ├── base_strategy.py         SignalPackage, ConfluenceEngine (meta-aggregator), BaseStrategy
@@ -35,18 +37,21 @@ OptionChainBasedStrategy/
 │
 ├── execution_bridge/
 │   ├── base_broker.py           BaseBroker ABC, MockBroker, BROKER_REGISTRY, OrderRequest/Fill
-│   ├── execution_router.py      Fan-out signal -> all clients x brokers (asyncio.gather)
+│   ├── parallel_worker_pool.py  ClientExecutionWorker (per-client asyncio.Queue) + WorkerPool
+│   ├── execution_router.py      Thin signal dispatcher: pool.dispatch() -> all workers simultaneously
 │   ├── broker_shoonya.py        Shoonya/Finvasia (NorenRestApiPy) - self-registers
 │   ├── broker_fyers.py          Fyers API v3 (fyers-apiv3) - self-registers
 │   ├── broker_angel.py          Angel One SmartAPI (smartapi-python + pyotp) - self-registers
-│   └── broker_dhan.py           Dhan HQ (dhanhq) - self-registers
+│   ├── broker_dhan.py           Dhan HQ (dhanhq) - self-registers
+│   └── broker_upstox.py         Upstox API v2 (upstox-python-sdk) - self-registers
 │
 ├── management/
 │   ├── client_manager.py        Subscribes ORDER_FILL; enforces drawdown limits; auto-halts
-│   └── admin_console.py         Async REPL (asyncio.to_thread stdin) for runtime ops
+│   └── admin_console.py         Async REPL with state monitoring and rebalancing commands
 │
 ├── backtester/
-│   └── historical_core.py       Event-driven backtester on recorded Parquet data
+│   ├── historical_core.py       Event-driven backtester on recorded Parquet data
+│   └── unified_iterator.py      Zero-copy Parquet pump through production engine stack
 │
 ├── main.py                      Bootstrap: argument parsing, mode selection, task launch
 ├── DEVELOPER_ARCHITECTURE.md    This file
@@ -66,15 +71,15 @@ EventBus (data_layer/base_feeder.py)
 
 ### Topic Constants (`config/global_config.py :: Topic`)
 
-| Topic            | Publisher              | Subscribers                    | Payload Type     |
-|------------------|------------------------|--------------------------------|------------------|
-| `index_tick`     | GlobalFeeder           | CandleCache, TickRecorder      | `IndexTick`      |
-| `option_tick`    | GlobalFeeder           | OptionMatrixEngine, Recorder   | `OptionTick`     |
-| `candle_close`   | CandleCache            | (diagnostic/debug only)        | `CandleEvent`    |
-| `matrix_snapshot`| CandleCache / OptionMatrix | ConfluenceEngine           | `TechSnapshot` / `ChainSnapshot` |
-| `signal`         | ConfluenceEngine       | ExecutionRouter                | `SignalPackage`  |
-| `order_fill`     | ExecutionRouter        | ClientManager                  | `OrderFill`      |
-| `system_event`   | Any                    | AdminConsole, logging           | `dict`           |
+| Topic            | Publisher              | Subscribers                              | Payload Type     |
+|------------------|------------------------|------------------------------------------|------------------|
+| `index_tick`     | GlobalFeeder           | CandleCache, TickRecorder, StrikeRebalancer | `IndexTick`   |
+| `option_tick`    | GlobalFeeder           | OptionMatrixEngine, Recorder             | `OptionTick`     |
+| `candle_close`   | CandleCache            | StatePersistence, diagnostic             | `CandleEvent`    |
+| `matrix_snapshot`| CandleCache / OptionMatrix | ConfluenceEngine                     | `TechSnapshot` / `ChainSnapshot` |
+| `signal`         | ConfluenceEngine       | ExecutionRouter                          | `SignalPackage`  |
+| `order_fill`     | ClientExecutionWorker  | ClientManager                            | `OrderFill`      |
+| `system_event`   | Any                    | AdminConsole, logging                    | `dict`           |
 
 **Backpressure policy**: if a subscriber queue is full (maxsize=20,000), the event is
 DROPPED (never blocked). The drop count is tracked per topic and visible via the
@@ -88,28 +93,45 @@ AdminConsole `drop_counts` command.
 WebSocket (broker)
        |
        v
-GlobalFeeder.run()                        [data_layer/global_feeder.py]
-  normalise raw frame -> IndexTick / OptionTick
+GlobalFeeder._ws_loop()                    [data_layer/global_feeder.py]
+  receive raw frames → _enqueue_raw()
+  (WebSocket thread NEVER parses — stays unblocked)
+       |
+       v   [asyncio Queue — RAW_QUEUE_SIZE = 50,000]
+       |
+GlobalFeeder._parse_worker()               [independent asyncio Task]
+  _parse_frame(raw) → IndexTick / OptionTick
   bus.publish("index_tick" / "option_tick", tick)
        |
-       +----> TickRecorder                [data_layer/tick_recorder.py]
+       +----> TickRecorder                 [data_layer/tick_recorder.py]
        |       asyncio.to_thread -> pyarrow.parquet write
        |
+       +----> StrikeRebalancer.run()       [data_layer/strike_rebalancer.py]
+       |       monitors spot drift from open-ATM
+       |       on drift >= 3 × strike_step:
+       |         feeder.unsubscribe_tokens(old_strikes - pinned)
+       |         feeder.subscribe_tokens(new_strikes)
+       |
        v
-CandleCache.run()                         [matrix_engine/candle_cache.py]
+CandleCache.run()                          [matrix_engine/candle_cache.py]
   bucket ticks into OHLCV per timeframe (5m, 15m, 75m)
   on bucket close:
     compute TechSnapshot (RSI, VWAP, ADX, EMA, ATR) via indicators.py
+    bus.publish("candle_close", CandleEvent)
     bus.publish("matrix_snapshot", TechSnapshot)
        |
+       +----> StatePersistence.run()       [matrix_engine/state_persistence.py]
+               on CANDLE_CLOSE:
+                 snapshot TechSnapshot + Strategy B state -> SQLite (asyncio.to_thread)
+       |
        v
-OptionMatrixEngine.run()                  [matrix_engine/option_matrix.py]
+OptionMatrixEngine.run()                   [matrix_engine/option_matrix.py]
   update ChainRow (OI, doi, IV, LTP) per option tick
   recompute PCR, max-pain, max-OI strikes
   bus.publish("matrix_snapshot", ChainSnapshot)
        |
        v
-ConfluenceEngine.run()                    [strategies/base_strategy.py]
+ConfluenceEngine.run()                     [strategies/base_strategy.py]
   hold latest TechSnapshot + ChainSnapshot per underlying
   when BOTH are fresh:
     for each strategy: evaluate(tech, chain) -> Optional[SignalPackage]
@@ -118,20 +140,103 @@ ConfluenceEngine.run()                    [strategies/base_strategy.py]
     bus.publish("signal", best_signal)
        |
        v
-ExecutionRouter._dispatch()               [execution_bridge/execution_router.py]
-  for each tradeable client x enabled broker:
-    translate InternalSymbol -> broker symbol (SymbolTranslator)
-    compute lot size (risk-based)
-    await broker.place_order(req)  ─┐ asyncio.gather
-    await broker.get_order_status()─┘ concurrent per client
-    bus.publish("order_fill", fill)
+ExecutionRouter._dispatch()                [execution_bridge/execution_router.py]
+  signal.is_valid() gate
+  pool.dispatch(signal)                    ← O(N) put_nowait(), returns in microseconds
+       |
+       v   [per-client asyncio.Queue(maxsize=100)]
+       |
+ClientExecutionWorker.run()  [N workers]   [execution_bridge/parallel_worker_pool.py]
+  each worker runs in its own asyncio Task
+  translate InternalSymbol -> broker symbol (SymbolTranslator)
+  compute lot size (risk-based)
+  await broker.place_order(req)
+  await broker.get_order_status()
+  bus.publish("order_fill", fill)
        |
        v
-ClientManager.run()                       [management/client_manager.py]
+ClientManager.run()                        [management/client_manager.py]
   update daily P&L
   check drawdown limit
   auto-halt breached clients
   bus.publish("system_event", HALT) if needed
+```
+
+---
+
+## Parallel Execution — ClientExecutionWorker Architecture
+
+```
+                    SignalPackage
+                         │
+              ExecutionRouter._dispatch()
+                         │
+              pool.dispatch(signal)  ← single O(N) loop, no await
+                    │   │   │
+          ┌─────────┘   │   └─────────┐
+          ▼             ▼             ▼
+  Worker[C001]    Worker[C002]    Worker[C003]
+  Queue[100]      Queue[100]      Queue[100]
+  asyncio.Task    asyncio.Task    asyncio.Task
+       │               │               │
+  Shoonya broker  Fyers broker    Upstox broker
+  await place()   await place()   await place()
+```
+
+**Key invariant**: Client A's network round-trip to Shoonya is completely isolated from
+Client B's call to Fyers. Both run simultaneously in their own asyncio Tasks.
+
+If a worker's queue fills (e.g., client's broker is down), that client's signal is
+dropped with a warning — all other clients are unaffected.
+
+---
+
+## Dynamic Strike Rebalancing
+
+```
+StrikeRebalancer (data_layer/strike_rebalancer.py)
+  Subscribes to: INDEX_TICK
+
+State per underlying:
+  open_atm       — ATM recorded on first tick at/after 09:15 IST
+  current_atm    — Most recent baseline (updated after each rebalance)
+  active_strikes — Currently subscribed set
+  pinned_strikes — Open-position strikes (NEVER unsubscribed)
+
+Rebalance trigger:
+  abs(new_atm - current_atm) >= 3 × strike_step
+
+On trigger:
+  new_window = ATM ± chain_depth strikes
+  to_unsub = active - new_window - pinned    # safe to drop
+  to_sub   = new_window - active            # need to add
+  await feeder.unsubscribe_tokens(to_unsub)
+  await feeder.subscribe_tokens(to_sub)
+  bus.publish(SYSTEM_EVENT, rebalance notice)
+```
+
+---
+
+## State Persistence & Mid-Day Reboot Recovery
+
+```
+StatePersistence (matrix_engine/state_persistence.py)
+  Subscribes to: CANDLE_CLOSE
+  Database:      data/state_snapshots.db (SQLite)
+
+Tables:
+  candle_snapshots   — RSI, VWAP, ADX, EMA, ATR per symbol×timeframe
+  strategy_b_state   — rolling_base, htf_entry_level, void_phase, void_since
+  order_tickets      — client_id, symbol, side, qty, order_id, avg_price (open/closed)
+  risk_params        — capital, daily_pnl, trade_count, is_halted
+
+Write path:
+  CANDLE_CLOSE → provider callbacks → batch dict → asyncio.to_thread(SQLite write)
+  Non-blocking: event loop is never stalled by disk I/O.
+
+Boot recovery:
+  on reboot: persist.restore_state() reads latest row per key
+  admin command: state_restore
 ```
 
 ---
@@ -147,20 +252,21 @@ Self-registration pattern — each `broker_*.py` module adds its factory at impo
 BROKER_REGISTRY["shoonya"] = lambda b, cid: ShoonyaBroker(b, cid)
 ```
 
-The `execution_bridge/__init__.py` imports all four broker modules, triggering registration.
+The `execution_bridge/__init__.py` imports all five broker modules, triggering registration.
 `create_broker(binding, client_id)` looks up the factory by `binding.provider`.
 
 ### Symbol Translation (data_layer/symbol_translator.py)
 
 All strategies produce `InternalSymbol(underlying, strike, option_type, expiry)`.
-`ExecutionRouter._translate()` calls the appropriate static method per binding provider:
+Worker `_translate()` calls the appropriate static method per binding provider:
 
-| Provider  | Example Output             | Format                               |
-|-----------|---------------------------|--------------------------------------|
-| Shoonya   | `NIFTY28MAY26C22000`       | `{SYMBOL}{DD}{MON}{YY}{C/P}{STRIKE}` |
-| Fyers     | `NSE:NIFTY2652822000CE`    | `{EX}:{SYMBOL}{YY}{M_CODE}{DD}{STRIKE}{CE/PE}` |
-| Angel One | `NIFTY28MAY2422000CE`      | `{SYMBOL}{DD}{MON}{YY}{STRIKE}{CE/PE}` |
-| Dhan      | security_id lookup key     | Pre-fetched from instrument CSV      |
+| Provider  | Example Output                     | Format                                   |
+|-----------|------------------------------------|------------------------------------------|
+| Shoonya   | `NIFTY28MAY26C22000`               | `{SYMBOL}{DD}{MON}{YY}{C/P}{STRIKE}`     |
+| Fyers     | `NSE:NIFTY2652822000CE`            | `{EX}:{SYMBOL}{YY}{M_CODE}{DD}{STRIKE}{CE/PE}` |
+| Angel One | `NIFTY28MAY2422000CE`              | `{SYMBOL}{DD}{MON}{YY}{STRIKE}{CE/PE}`   |
+| Dhan      | security_id lookup key             | Pre-fetched from instrument CSV          |
+| Upstox    | `NSE_FO\|NIFTY2526522000CE`        | `{SEGMENT}\|{SYMBOL}{YY}{DD}{MM}{STRIKE}{CE/PE}` |
 
 ---
 
@@ -179,7 +285,7 @@ ClientProfile
   _daily_pnl: float                        # runtime, reset at 09:15
 
 BrokerBinding
-  provider: "shoonya" | "fyers" | "angelone" | "dhan" | "mock"
+  provider: "shoonya" | "fyers" | "angelone" | "dhan" | "upstox" | "mock"
   lot_multiplier: float                    # Scale signal lots (e.g. 0.5x)
   credentials: user_id, api_key, totp_secret, ...
 ```
@@ -221,15 +327,20 @@ SignalPackage(
 ```
 State Machine:
 
-IDLE ──(OI spike + price near base)──> SETUP
-SETUP ──(reversal candle confirmed)──> CONFIRMED  ──> SIGNAL
-SETUP ──(price runs 2×ATR past level)──> VOID
-VOID ──(price retraces to entry_level + tolerance)──> CONFIRMED  ──> SIGNAL (Void Lift)
-Any ──(EOD or opposing signal)──> IDLE
+IDLE ──(OI spike + vol spike, price near resistance/support)──> BEARISH_TRAP / BULLISH_TRAP
+TRAP ──(stall_count >= N AND OI unwinding)──> CONFIRMED  ──> SIGNAL
+TRAP ──(price runs 2×ATR past trap level)──> VOID
+VOID ──(candle.low <= htf_entry_level + tolerance)──> CONFIRMED  ──> SIGNAL (Void Lift)
+       (void_lift is INVALID until this exact retest condition is met)
 
 Rolling Base:
   Any candle closing BELOW previous candle: rolling_base = min(rolling_base, c_low)
   This ensures the trap level tracks the weakest low dynamically.
+
+Void Lift Guard:
+  htf_entry_level must be non-zero (trap must have been detected first).
+  Retest condition: tech.c_low <= htf_entry_level + tol
+  tol = htf_entry_level × void_lift_retest_tolerance / 100   (default 0.10%)
 ```
 
 ---
@@ -245,9 +356,16 @@ Rolling Base:
 | EMA slow  | 21     | Standard exponential smoothing |
 | ATR       | 14     | True Range Wilder's avg        |
 
+Period constants are module-level in `matrix_engine/indicators.py`:
+`RSI_PERIOD=14`, `VWAP_WINDOW=500`, `ADX_PERIOD=20`.
+The public functions `rsi()`, `vwap()`, `adx()` accept **no period arguments** —
+impossible to accidentally pass a wrong value at any call site.
+
 ---
 
 ## Backtester
+
+### Historical Core (backtester/historical_core.py)
 
 ```
 HistoricalBacktester.run(underlying, start, end, capital)
@@ -264,20 +382,38 @@ Pipeline:
   -> BacktestReport (win rate, profit factor, max drawdown, per-trade log)
 ```
 
-**Cost model** (mirrors live execution): STT 0.0625% (sell side), exchange 0.035%,
-SEBI 0.0001%, GST 18% on brokerage+exchange, flat ₹20 brokerage per leg.
+### Unified Iterator (backtester/unified_iterator.py)
+
+Zero-copy Parquet event pump that routes historical ticks through the **production**
+engine stack without modifying any strategy code.
+
+```
+ParquetEventPump.merged_stream(sources)   ← heap-merge across symbol files
+       │
+       v   (IndexTick, time-ordered)
+       │
+UnifiedBacktestIterator._async_run()
+  bus.publish("index_tick", tick)         ← same path as live
+  CandleCache processes normally
+  CANDLE_CLOSE → ConfluenceEngine.evaluate_from_snapshot()
+  SignalPackage collected in ReplayResult
+```
+
+**Zero-copy contract**: Parquet columns read once as pyarrow arrays. Rows iterated
+as scalars — no secondary DataFrame buffer held in memory during replay.
 
 ---
 
 ## Session Lifecycle
 
 ```
-09:00 IST  pre_open_connect  GlobalFeeder: connect WebSocket, download instrument masters
-09:15 IST  market_open       CandleCache, OptionMatrix, Strategies all start processing
-           ClientManager      reset_all_daily() — clear P&L, trade counters, unhalt
-15:25 IST  near_close        Backtester: force EOD-exit all open positions
-15:30 IST  market_close      GlobalFeeder: unsubscribe, flush all buffers
-15:45 IST  eod_cleanup       TickRecorder: rotate Parquet files, rename with date stamp
+09:00 IST  pre_open_connect   GlobalFeeder: connect WebSocket, download instrument masters
+09:15 IST  market_open        CandleCache, OptionMatrix, Strategies all start processing
+                               StrikeRebalancer: record open-ATM for each underlying
+           ClientManager       reset_all_daily() — clear P&L, trade counters, unhalt
+15:25 IST  near_close         Backtester: force EOD-exit all open positions
+15:30 IST  market_close       GlobalFeeder: unsubscribe, flush all buffers
+15:45 IST  eod_cleanup        TickRecorder: rotate Parquet files, rename with date stamp
 ```
 
 ---
@@ -298,7 +434,7 @@ SEBI 0.0001%, GST 18% on brokerage+exchange, flat ₹20 brokerage per leg.
    ```
 5. Add the provider literal to `BrokerBinding.provider` in `config/client_profiles.py`
 6. Add symbol translation in `data_layer/symbol_translator.py`
-7. Handle the new provider case in `execution_bridge/execution_router.py::_translate()`
+7. Handle the new provider case in `execution_bridge/parallel_worker_pool.py::_translate()`
 
 ---
 
@@ -307,12 +443,13 @@ SEBI 0.0001%, GST 18% on brokerage+exchange, flat ₹20 brokerage per leg.
 1. Create `strategies/strategy_d_{name}.py`
 2. Subclass `BaseStrategy`, implement `evaluate(tech, chain, all_tf)`
 3. Return `None` (no signal) or a fully-populated `SignalPackage`
-4. Register in `main.py`:
+4. Add strategy letter to `_SOURCE_TO_LETTER` in `execution_bridge/parallel_worker_pool.py`
+5. Register in `main.py`:
    ```python
    from strategies.strategy_d_name import StrategyD_Name
    strategies = [..., StrategyD_Name(cfg)]
    ```
-5. Add `"D"` to `ClientProfile.enabled_strategies` for clients that should trade it
+6. Add `"D"` to `ClientProfile.enabled_strategies` for clients that should trade it
 
 ---
 
@@ -325,3 +462,6 @@ SEBI 0.0001%, GST 18% on brokerage+exchange, flat ₹20 brokerage per leg.
 - **EventBus drops over blocks** — slow consumers cause drops, not backpressure on publishers
 - **Credentials never logged or persisted** — only `binding.mask()` dict is safe to log
 - **SignalPackage is frozen** — strategies cannot mutate a signal after creation
+- **Indicator periods are hard-pinned** — no period arguments accepted at call sites
+- **Worker isolation** — one asyncio Task per client; no shared mutable state between workers
+- **State survives reboots** — SQLite snapshots on every CANDLE_CLOSE; `state_restore` on boot

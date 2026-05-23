@@ -23,6 +23,7 @@ pip install NorenRestApiPy       # Shoonya / Finvasia
 pip install fyers-apiv3          # Fyers
 pip install smartapi-python      # Angel One
 pip install dhanhq               # Dhan HQ
+pip install upstox-python-sdk    # Upstox
 ```
 
 ### Directory Bootstrap
@@ -141,6 +142,13 @@ set C001_DHAN_CLIENT_CODE=1234567890
 set C001_DHAN_ACCESS_TOKEN=eyJhbGciOi...
 ```
 
+#### Upstox Example
+```
+set C001_UPSTOX_API_KEY=your_api_key
+set C001_UPSTOX_API_SECRET=your_api_secret
+set C001_UPSTOX_ACCESS_TOKEN=eyJhbGciOi...
+```
+
 ### Step 3 — Wire Credentials in main.py
 
 Edit `_setup_live_clients()` in `main.py` to call `inject_credentials()` after loading:
@@ -190,19 +198,70 @@ client is automatically halted. No new orders will be placed until an operator r
 
 Launch any mode and the console starts automatically. Type commands at the `admin> ` prompt.
 
-| Command                         | Description                                         |
-|---------------------------------|-----------------------------------------------------|
-| `help`                          | Show all commands                                   |
-| `status`                        | Show all clients: P&L, tradeable status, brokers   |
-| `halt C001`                     | Immediately stop new orders for client C001         |
-| `resume C001`                   | Re-enable a halted client                           |
-| `halt_all`                      | Stop all clients (emergency kill switch)            |
-| `reset_daily`                   | Reset daily P&L counters (done auto at 09:15)       |
-| `funds C001`                    | Fetch live margin balance from all C001 brokers     |
-| `positions C001`                | Fetch live positions from all C001 brokers          |
-| `set_lots C001 C001_shoonya 2`  | Change lot multiplier for a specific binding        |
-| `drop_counts`                   | Show how many EventBus messages were dropped        |
-| `quit`                          | Graceful shutdown                                   |
+### Client Management
+
+| Command                         | Description                                          |
+|---------------------------------|------------------------------------------------------|
+| `help`                          | Show all commands                                    |
+| `status`                        | Show all clients: P&L, tradeable status, brokers    |
+| `halt C001`                     | Immediately stop new orders for client C001          |
+| `resume C001`                   | Re-enable a halted client                            |
+| `halt_all`                      | Stop all clients (emergency kill switch)             |
+| `reset_daily`                   | Reset daily P&L counters (done auto at 09:15)        |
+| `funds C001`                    | Fetch live margin balance from all C001 brokers      |
+| `positions C001`                | Fetch live positions from all C001 brokers           |
+| `set_lots C001 C001_shoonya 2`  | Change lot multiplier for a specific binding         |
+| `add_client <json>`             | Register a new client profile at runtime             |
+
+### Diagnostics
+
+| Command          | Description                                                       |
+|------------------|-------------------------------------------------------------------|
+| `drop_counts`    | Show how many EventBus messages were dropped per topic            |
+| `worker_stats`   | Show per-client execution worker queue depth and throughput       |
+
+### State Monitoring (Mid-Day Reboot Recovery)
+
+| Command          | Description                                                         |
+|------------------|---------------------------------------------------------------------|
+| `state_status`   | Show SQLite snapshot DB path, file size, and flush count            |
+| `state_restore`  | Reload indicator + Strategy B state from the most recent snapshot   |
+
+The system automatically snapshots RSI, VWAP, ADX, EMA, ATR values and Strategy B
+rolling base / void phase to SQLite on every candle close. If the system is restarted
+mid-day (e.g. after a crash), run `state_restore` to recover state without replaying
+the day's ticks from scratch.
+
+### Dynamic Strike Rebalancing
+
+| Command               | Description                                                    |
+|-----------------------|----------------------------------------------------------------|
+| `rebalance NIFTY`     | Force immediate ATM rebalance for NIFTY (or any index)        |
+
+The system automatically rebalances the option chain subscription when the underlying
+spot price drifts 3+ strike intervals from the market-open ATM. Use `rebalance <index>`
+to force an immediate rebalance if you suspect the subscription window is stale.
+
+### Quit
+
+| Command  | Description                  |
+|----------|------------------------------|
+| `quit`   | Graceful shutdown            |
+
+---
+
+## Mid-Day Reboot Procedure
+
+If the system crashes or is manually restarted during market hours:
+
+1. Start normally: `python main.py --mode live --index NIFTY`
+2. Wait for the admin console prompt.
+3. Run `state_restore` to reload indicator state and open positions from SQLite.
+4. Run `status` to verify all clients are in the expected state.
+5. Run `rebalance NIFTY` (and any other active index) to force a fresh ATM subscription.
+
+The system will recover Strategy B rolling_base and void phase state from the last
+snapshot — typically within 1 candle close of the crash time.
 
 ---
 
@@ -255,9 +314,9 @@ both Shoonya and Fyers simultaneously:
 }
 ```
 
-When a signal fires, orders are placed on **both** bindings **concurrently** via
-`asyncio.gather`. The two orders hit their respective brokers simultaneously — one
-broker's network latency never blocks the other.
+When a signal fires, each client's worker processes it independently. The system
+uses a **per-client isolated queue** architecture — Client A's broker network latency
+never delays Client B's order placement.
 
 ---
 
@@ -312,8 +371,11 @@ with a strong-body candle and RSI alignment.
 ### Strategy B — Liquidity Trap (Rolling Base + Void/Lift)
 Identifies institutional liquidity traps — high OI spikes that absorb buying/selling,
 followed by a sharp reversal. The Rolling Base tracks the weakest recent low dynamically.
-A "Void Lift" occurs when price runs far away (> 2x ATR) and then retraces back to the
-original entry level — providing a second entry at a potentially better price.
+
+**Void Lift**: If price runs more than 2x ATR beyond the trap level, the setup enters
+a VOID state. The void is lifted **only** when `candle.low ≤ htf_entry_level + 0.10%` —
+the price must physically retest the original structural level. Until that retest
+condition is met, the VOID state is considered invalid for trading.
 
 ### Strategy C — Panic Selling / Put Unwind
 Catches exhaustion after 3+ consecutive bearish candles with volume spike, sharp PCR drop,
@@ -339,9 +401,11 @@ python main.py --mode paper --log-level DEBUG
 
 Key log lines to monitor:
 - `SIGNAL DISPATCHED` — a signal passed all confluence gates
-- `Router: FILLED` — order confirmed filled by broker
+- `Worker[C001]: FILLED` — order confirmed filled by broker
 - `ClientManager: HALTED` — a client hit its daily loss limit
-- `EventBus: topic '...' dropped N events` — consumer is too slow (increase queue size or reduce timeframes)
+- `StrikeRebalancer: rebalancing` — ATM subscription window updated
+- `StatePersistence: snapshot loop started` — state snapshots active
+- `EventBus: topic '...' dropped N events` — consumer is too slow
 
 ---
 
@@ -362,6 +426,11 @@ Generate it using the Fyers web login and set it as `C001_FYERS_ACCESS_TOKEN` be
 pip install smartapi-python pyotp
 ```
 
+### "upstox-python-sdk not installed"
+```
+pip install upstox-python-sdk
+```
+
 ### Zero signals in backtest
 - Increase date range (minimum 2-3 weeks recommended)
 - Check log for indicator warm-up — strategies need at least 22 candles to start
@@ -370,3 +439,8 @@ pip install smartapi-python pyotp
 ### Orders not placed in live mode
 Run `funds C001` in the admin console to verify broker authentication succeeded.
 Check `logs/algo_*.log` for authentication errors.
+
+### State not recovered after restart
+Run `state_status` to verify the SQLite DB exists and has recent flush activity.
+If the DB is missing or empty (first day), state recovery is not possible — the
+system will warm up naturally after the first few candle closes.

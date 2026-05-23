@@ -144,10 +144,24 @@ class StrategyB_Trap(BaseStrategy):
 
         # ── Phase: VOID — wait for void lift condition ────────────────────────
         elif state.phase == _Phase.VOID:
+            # Guard: htf_entry_level must be set (trap must have been detected first)
+            if state.htf_entry_level == 0.0:
+                state.phase = _Phase.IDLE
+                return None
+
             tol = state.htf_entry_level * sp.void_lift_retest_tolerance / 100
-            # Void lifts when candle.low touches back down into the HTF entry level
-            if tech.c_low <= state.htf_entry_level + tol:
-                logger.debug("StratB: VOID LIFTED for %s — retest of HTF level %.0f", und, state.htf_entry_level)
+            # Void lifts ONLY when candle.low retests back to the HTF structural level.
+            # rolling_base must also be below htf_entry_level to confirm bearish pressure
+            # unwound (bullish trap) or price pulled back (bearish trap).
+            retest_hit = tech.c_low <= state.htf_entry_level + tol
+            # For bearish traps: rolling_base confirms downtrend is intact
+            # For bullish traps: rolling_base (which tracks highs) stays above level
+            if retest_hit:
+                logger.debug(
+                    "StratB: VOID LIFTED for %s — retest of HTF level %.0f "
+                    "(rolling_base=%.0f tol=%.2f)",
+                    und, state.htf_entry_level, state.rolling_base, tol,
+                )
                 state.phase = _Phase.CONFIRMED
             else:
                 return None    # Still in void
