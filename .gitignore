@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Data and logs (large / sensitive)
+data/recorded/
+data/backtest/
+logs/
+*.parquet
+*.zst
+
+# Credentials — NEVER commit
+*.env
+.env
+config/client_profiles.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
