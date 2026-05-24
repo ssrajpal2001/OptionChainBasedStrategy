@@ -300,6 +300,11 @@ async def _run_live(
 
     await router.start()
 
+    # Admin console runs as a detached background task — its completion or any
+    # internal stream error must NOT trigger the engine shutdown.  Only the
+    # engine primitives below participate in the FIRST_COMPLETED barrier.
+    admin_task = asyncio.create_task(admin.run(), name="admin_console")
+
     tasks = [
         asyncio.create_task(feeder.start(),            name="feeder"),
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
@@ -310,7 +315,6 @@ async def _run_live(
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
         asyncio.create_task(strike_cleanup.run(),       name="strike_cleanup"),
         asyncio.create_task(gap_handler.run(),          name="gap_handler"),
-        asyncio.create_task(admin.run(),                name="admin_console"),
         asyncio.create_task(shutdown_event.wait(),      name="shutdown_sentinel"),
     ]
 
@@ -328,12 +332,14 @@ async def _run_live(
     gap_handler.stop()
     await router.stop()
     await client_mgr.stop()
-    await admin.stop()   # also stops the dashboard server
+    await admin.stop()   # stops console + dashboard server + cancels dashboard task
     await feeder.stop()
 
-    for t in pending:
-        t.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+    # Cancel both the engine tasks and the detached admin task
+    for t in list(pending) + [admin_task]:
+        if not t.done():
+            t.cancel()
+    await asyncio.gather(*pending, admin_task, return_exceptions=True)
     logger.info("System stopped cleanly.")
 
 

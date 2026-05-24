@@ -124,7 +124,9 @@ class AdminConsole:
             )
             while self._running:
                 await asyncio.sleep(5.0)
-            return
+            # Park so the task never returns; teardown cancels it externally.
+            while True:
+                await asyncio.sleep(3600.0)
 
         # Interactive REPL — stdin is a real terminal.
         while self._running:
@@ -143,6 +145,12 @@ class AdminConsole:
                 await asyncio.sleep(0.5)
                 continue
             await self._dispatch(line)
+
+        # REPL exited via _cmd_quit() setting self._running = False.
+        # Park indefinitely so this coroutine never returns on its own —
+        # the caller (run_system.py) cancels this task during teardown.
+        while True:
+            await asyncio.sleep(3600.0)
 
     async def stop(self) -> None:
         self._running = False
