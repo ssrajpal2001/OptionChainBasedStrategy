@@ -1,642 +1,887 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>OptionChain AlgoTrader — Monitor</title>
+  <title>TERMINUS — OptionChain AlgoTrader</title>
+
+  <!-- Fonts: Orbitron (logo), Share Tech Mono (numbers), Rajdhani (UI labels) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Alpine.js CDN -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
   <script>
     tailwind.config = {
-      darkMode: 'class',
       theme: {
         extend: {
-          fontFamily: { mono: ['JetBrains Mono', 'Fira Code', 'monospace'] },
+          fontFamily: {
+            mono:    ['Share Tech Mono', 'monospace'],
+            display: ['Orbitron', 'monospace'],
+            ui:      ['Rajdhani', 'sans-serif'],
+          },
           colors: {
-            slate: {
-              950: '#020617',
+            t: {
+              bg:      '#04060c',
+              surface: '#070d18',
+              card:    '#0a1220',
+              border:  '#131f30',
+              dim:     '#1a2840',
+              cyan:    '#00d4ff',
+              green:   '#00e87a',
+              red:     '#ff3a4a',
+              amber:   '#f59e0b',
+              muted:   '#3a5470',
+              text:    '#7a9ab8',
+              bright:  '#c8daf0',
             }
+          },
+          boxShadow: {
+            'glow-cyan':  '0 0 12px rgba(0,212,255,0.35), 0 0 30px rgba(0,212,255,0.12)',
+            'glow-green': '0 0 12px rgba(0,232,122,0.35), 0 0 30px rgba(0,232,122,0.10)',
+            'glow-red':   '0 0 12px rgba(255,58,74,0.40), 0 0 30px rgba(255,58,74,0.15)',
+            'glow-amber': '0 0 12px rgba(245,158,11,0.35)',
           }
         }
       }
     }
   </script>
+
   <style>
     [x-cloak] { display: none !important; }
-    body { background-color: #020617; }
-    .card { background: rgba(15,23,42,0.9); border: 1px solid rgba(51,65,85,0.6); }
-    .metric-val { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
-    .feed-row { border-bottom: 1px solid rgba(51,65,85,0.3); }
-    .pulse-dot { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
-    .glow-green { box-shadow: 0 0 8px rgba(16,185,129,0.25); }
-    .glow-red   { box-shadow: 0 0 8px rgba(239,68,68,0.25); }
-    ::-webkit-scrollbar { width: 4px; }
+
+    /* ── Base ───────────────────────────────────────────────── */
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background-color: #04060c;
+      color: #7a9ab8;
+      font-family: 'Rajdhani', sans-serif;
+      font-size: 14px;
+      overflow-x: hidden;
+    }
+
+    /* ── Background grid ─────────────────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background-image:
+        linear-gradient(rgba(0,212,255,0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,255,0.025) 1px, transparent 1px);
+      background-size: 40px 40px;
+    }
+
+    /* ── Scanline overlay ────────────────────────────────────── */
+    body::after {
+      content: '';
+      position: fixed; inset: 0; z-index: 1000; pointer-events: none;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.08) 2px,
+        rgba(0,0,0,0.08) 4px
+      );
+    }
+
+    /* ── Card ────────────────────────────────────────────────── */
+    .t-card {
+      background: #0a1220;
+      border: 1px solid #131f30;
+      position: relative;
+    }
+    .t-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,212,255,0.4), transparent);
+    }
+
+    /* ── Typography ──────────────────────────────────────────── */
+    .font-mono  { font-family: 'Share Tech Mono', monospace; }
+    .font-disp  { font-family: 'Orbitron', monospace; }
+    .font-ui    { font-family: 'Rajdhani', sans-serif; }
+
+    /* ── Live value flash ────────────────────────────────────── */
+    @keyframes val-flash {
+      0%   { color: #00d4ff; text-shadow: 0 0 8px rgba(0,212,255,0.9); }
+      100% { color: inherit; text-shadow: none; }
+    }
+    .val-flash { animation: val-flash 0.8s ease-out forwards; }
+
+    /* ── Connection pulse ────────────────────────────────────── */
+    @keyframes conn-pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,232,122,0.5); }
+      50%       { opacity: 0.7; box-shadow: 0 0 0 4px rgba(0,232,122,0); }
+    }
+    .conn-live { animation: conn-pulse 2s ease-in-out infinite; }
+
+    /* ── Kill switch ring countdown ──────────────────────────── */
+    .kill-ring {
+      position: absolute; inset: -3px;
+      border-radius: 4px;
+      border: 2px solid transparent;
+      animation: kill-countdown 5s linear forwards;
+    }
+    @keyframes kill-countdown {
+      0%   { border-color: #ff3a4a; box-shadow: 0 0 8px rgba(255,58,74,0.8); }
+      100% { border-color: rgba(255,58,74,0.1); box-shadow: none; }
+    }
+
+    /* ── Drawdown bar ────────────────────────────────────────── */
+    .drawdown-bar { transition: width 0.6s ease; }
+
+    /* ── Scrollbar ───────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 3px; height: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(71,85,105,0.5); border-radius: 2px; }
+    ::-webkit-scrollbar-thumb { background: #1a2840; border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a5470; }
+
+    /* ── Section label ───────────────────────────────────────── */
+    .sec-label {
+      font-family: 'Rajdhani', sans-serif;
+      font-weight: 700;
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: #3a5470;
+    }
+
+    /* ── Indicator gauge background ──────────────────────────── */
+    .gauge-track {
+      background: #070d18;
+      border: 1px solid #131f30;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .gauge-fill { transition: width 0.5s ease; border-radius: 2px; }
+
+    /* ── RSI zone coloring ───────────────────────────────────── */
+    .rsi-ob { color: #ff3a4a; text-shadow: 0 0 6px rgba(255,58,74,0.6); }
+    .rsi-os { color: #00e87a; text-shadow: 0 0 6px rgba(0,232,122,0.6); }
+    .rsi-n  { color: #00d4ff; }
+
+    /* ── Index tab ───────────────────────────────────────────── */
+    .idx-tab {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700;
+      font-size: 12px; letter-spacing: 0.06em;
+      padding: 4px 12px; border-radius: 2px;
+      border: 1px solid transparent;
+      cursor: pointer; transition: all 0.15s;
+      color: #3a5470;
+    }
+    .idx-tab:hover { color: #7a9ab8; border-color: #1a2840; }
+    .idx-tab.active {
+      color: #00d4ff;
+      background: rgba(0,212,255,0.07);
+      border-color: rgba(0,212,255,0.3);
+      text-shadow: 0 0 8px rgba(0,212,255,0.5);
+    }
+
+    /* ── Button styles ───────────────────────────────────────── */
+    .btn-halt {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700;
+      font-size: 11px; letter-spacing: 0.1em;
+      padding: 3px 10px; border-radius: 2px;
+      background: rgba(255,58,74,0.1); border: 1px solid rgba(255,58,74,0.3);
+      color: #ff3a4a; cursor: pointer; transition: all 0.15s;
+    }
+    .btn-halt:hover { background: rgba(255,58,74,0.2); box-shadow: 0 0 8px rgba(255,58,74,0.3); }
+
+    .btn-resume {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700;
+      font-size: 11px; letter-spacing: 0.1em;
+      padding: 3px 10px; border-radius: 2px;
+      background: rgba(0,232,122,0.1); border: 1px solid rgba(0,232,122,0.3);
+      color: #00e87a; cursor: pointer; transition: all 0.15s;
+    }
+    .btn-resume:hover { background: rgba(0,232,122,0.2); box-shadow: 0 0 8px rgba(0,232,122,0.3); }
+
+    .btn-action {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700;
+      font-size: 12px; letter-spacing: 0.08em;
+      padding: 6px 16px; border-radius: 2px;
+      background: rgba(0,212,255,0.08); border: 1px solid rgba(0,212,255,0.25);
+      color: #00d4ff; cursor: pointer; transition: all 0.15s; width: 100%;
+    }
+    .btn-action:hover { background: rgba(0,212,255,0.15); box-shadow: 0 0 8px rgba(0,212,255,0.25); }
+
+    .btn-kill {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700;
+      font-size: 13px; letter-spacing: 0.1em;
+      padding: 8px 16px; border-radius: 2px;
+      background: rgba(255,58,74,0.12); border: 1px solid rgba(255,58,74,0.4);
+      color: #ff3a4a; cursor: pointer; transition: all 0.15s;
+      width: 100%; position: relative;
+    }
+    .btn-kill:hover { background: rgba(255,58,74,0.22); box-shadow: 0 0 16px rgba(255,58,74,0.4); }
+    .btn-kill.armed {
+      background: rgba(255,58,74,0.22);
+      box-shadow: 0 0 20px rgba(255,58,74,0.5);
+      color: #fff;
+    }
+
+    /* ── Input style ─────────────────────────────────────────── */
+    .t-input {
+      font-family: 'Share Tech Mono', monospace; font-size: 12px;
+      background: #070d18; border: 1px solid #1a2840;
+      color: #c8daf0; padding: 5px 8px; border-radius: 2px; width: 100%;
+      outline: none; transition: border-color 0.15s;
+    }
+    .t-input:focus { border-color: rgba(0,212,255,0.4); box-shadow: 0 0 6px rgba(0,212,255,0.15); }
+
+    /* ── Event feed row ──────────────────────────────────────── */
+    .feed-row {
+      font-family: 'Share Tech Mono', monospace; font-size: 11px;
+      padding: 4px 8px;
+      border-bottom: 1px solid rgba(19,31,48,0.6);
+      transition: background 0.1s;
+      display: flex; gap: 8px; align-items: baseline;
+    }
+    .feed-row:hover { background: rgba(255,255,255,0.02); }
+
+    /* ── Worker row ──────────────────────────────────────────── */
+    .worker-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 5px 8px;
+      border-bottom: 1px solid #131f30;
+      font-size: 12px;
+    }
+
+    /* ── Tradeable badge ─────────────────────────────────────── */
+    .badge-live {
+      font-size: 9px; letter-spacing: 0.12em; font-weight: 700;
+      padding: 1px 6px; border-radius: 1px;
+      background: rgba(0,232,122,0.12); border: 1px solid rgba(0,232,122,0.3);
+      color: #00e87a;
+    }
+    .badge-halted {
+      font-size: 9px; letter-spacing: 0.12em; font-weight: 700;
+      padding: 1px 6px; border-radius: 1px;
+      background: rgba(255,58,74,0.12); border: 1px solid rgba(255,58,74,0.3);
+      color: #ff3a4a;
+    }
+
+    /* ── Diagonal accent ─────────────────────────────────────── */
+    .diag-accent {
+      position: absolute; top: 0; right: 0;
+      width: 0; height: 0;
+      border-style: solid;
+      border-width: 0 16px 16px 0;
+      border-color: transparent rgba(0,212,255,0.25) transparent transparent;
+    }
+
+    /* ── EMA signal badge ────────────────────────────────────── */
+    .ema-bull { color: #00e87a; text-shadow: 0 0 6px rgba(0,232,122,0.6); }
+    .ema-bear { color: #ff3a4a; text-shadow: 0 0 6px rgba(255,58,74,0.6); }
+    .ema-neutral { color: #3a5470; }
+
+    /* ── Navbar height ───────────────────────────────────────── */
+    .navbar-h { height: 52px; }
+
+    /* ── Stagger fade-in for cards ───────────────────────────── */
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-up-1 { animation: fade-up 0.4s ease 0.05s both; }
+    .fade-up-2 { animation: fade-up 0.4s ease 0.12s both; }
+    .fade-up-3 { animation: fade-up 0.4s ease 0.20s both; }
+    .fade-up-4 { animation: fade-up 0.4s ease 0.28s both; }
+    .fade-up-5 { animation: fade-up 0.4s ease 0.36s both; }
   </style>
 </head>
 
-<body class="text-slate-200 antialiased min-h-screen" x-data="dashboard" x-cloak>
-
-<!-- ─── TOP NAVBAR ──────────────────────────────────────────────────────────── -->
-<nav class="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
-  <div class="max-w-screen-2xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
-
-    <!-- Logo -->
-    <div class="flex items-center gap-3 shrink-0">
-      <div class="w-7 h-7 rounded-lg bg-violet-600 flex items-center justify-center text-white font-bold text-xs">OC</div>
-      <span class="font-semibold text-slate-100 hidden sm:block">OptionChain AlgoTrader</span>
-    </div>
-
-    <!-- Center: index selector -->
-    <div class="flex items-center gap-2">
-      <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY']" :key="idx">
-        <button @click="activeIndex = idx"
-          class="px-3 py-1 text-xs rounded-full transition-all"
-          :class="activeIndex === idx
-            ? 'bg-violet-600 text-white font-semibold'
-            : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'">
-          <span x-text="idx"></span>
-        </button>
-      </template>
-    </div>
-
-    <!-- Right: clock + ws status -->
-    <div class="flex items-center gap-4 shrink-0">
-      <span class="text-xs font-mono text-slate-400" x-text="clock">--:--:-- IST</span>
-      <div class="flex items-center gap-1.5">
-        <span class="w-2 h-2 rounded-full"
-              :class="wsConnected ? 'bg-emerald-400 pulse-dot' : 'bg-red-500'"></span>
-        <span class="text-xs" :class="wsConnected ? 'text-emerald-400' : 'text-red-400'"
-              x-text="wsConnected ? 'LIVE' : 'OFFLINE'">OFFLINE</span>
-      </div>
-    </div>
-
-  </div>
-</nav>
-
-<!-- ─── MAIN LAYOUT ─────────────────────────────────────────────────────────── -->
-<div class="max-w-screen-2xl mx-auto px-4 py-5 space-y-5">
-
-  <!-- ── ROW 1: Market Overview ─────────────────────────────────────────────── -->
-  <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-
-    <!-- Spot price -->
-    <div class="card rounded-xl p-4 col-span-2 md:col-span-1">
-      <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">Spot Price</div>
-      <div class="metric-val text-3xl font-bold"
-           :class="spotChange >= 0 ? 'text-emerald-400' : 'text-red-400'"
-           x-text="currentSpot > 0 ? currentSpot.toLocaleString('en-IN', {minimumFractionDigits:2}) : '—'">—</div>
-      <div class="text-xs mt-1" :class="spotChange >= 0 ? 'text-emerald-500' : 'text-red-500'"
-           x-text="currentSpot > 0 ? (spotChange >= 0 ? '+' : '') + spotChange.toFixed(2) : ''"></div>
-      <div class="text-xs text-slate-500 mt-1" x-text="activeIndex"></div>
-    </div>
-
-    <!-- ATM Strike -->
-    <div class="card rounded-xl p-4">
-      <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">ATM Strike</div>
-      <div class="metric-val text-2xl font-bold text-violet-400"
-           x-text="currentAtm > 0 ? currentAtm.toLocaleString('en-IN') : '—'">—</div>
-      <div class="text-xs text-slate-500 mt-2">Dynamic window</div>
-    </div>
-
-    <!-- RSI -->
-    <div class="card rounded-xl p-4">
-      <div class="flex items-center justify-between mb-1">
-        <div class="text-xs text-slate-500 uppercase tracking-wider">RSI-14</div>
-        <span class="text-xs px-1.5 py-0.5 rounded"
-              :class="{
-                'bg-red-900/50 text-red-400': currentRsi >= 70,
-                'bg-emerald-900/50 text-emerald-400': currentRsi <= 30,
-                'bg-blue-900/50 text-blue-400': currentRsi > 30 && currentRsi < 70
-              }"
-              x-text="currentRsi >= 70 ? 'OVERBOUGHT' : currentRsi <= 30 ? 'OVERSOLD' : 'NEUTRAL'">—</span>
-      </div>
-      <div class="metric-val text-2xl font-bold"
-           :class="{
-             'text-red-400':   currentRsi >= 70,
-             'text-emerald-400': currentRsi <= 30,
-             'text-blue-400':  currentRsi > 30 && currentRsi < 70
-           }"
-           x-text="currentRsi > 0 ? currentRsi.toFixed(1) : '—'">—</div>
-      <!-- RSI bar -->
-      <div class="mt-2 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-        <div class="h-full rounded-full transition-all duration-300"
-             :class="currentRsi >= 70 ? 'bg-red-500' : currentRsi <= 30 ? 'bg-emerald-500' : 'bg-blue-500'"
-             :style="`width:${Math.min(100,currentRsi)}%`"></div>
-      </div>
-    </div>
-
-    <!-- ADX -->
-    <div class="card rounded-xl p-4">
-      <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">ADX-20</div>
-      <div class="metric-val text-2xl font-bold text-amber-400"
-           x-text="currentAdx > 0 ? currentAdx.toFixed(1) : '—'">—</div>
-      <div class="text-xs mt-1"
-           :class="{
-             'text-red-400':    currentAdx >= 50,
-             'text-amber-400':  currentAdx >= 25 && currentAdx < 50,
-             'text-slate-400':  currentAdx < 25
-           }"
-           x-text="adxLabel(currentAdx)">Weak</div>
-    </div>
-
-  </div>
-
-  <!-- ── ROW 2: Full indicator strip ──────────────────────────────────────────── -->
-  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-
-    <!-- VWAP -->
-    <div class="card rounded-xl p-3">
-      <div class="text-xs text-slate-500 mb-1">VWAP-500</div>
-      <div class="metric-val text-base font-semibold text-cyan-400"
-           x-text="currentVwap > 0 ? currentVwap.toLocaleString('en-IN',{minimumFractionDigits:2}) : '—'">—</div>
-      <div class="text-xs mt-0.5"
-           :class="currentSpot > currentVwap ? 'text-emerald-500' : 'text-red-500'"
-           x-text="currentVwap > 0 ? (currentSpot > currentVwap ? '▲ Above' : '▼ Below') : ''"></div>
-    </div>
-
-    <!-- EMA Fast -->
-    <div class="card rounded-xl p-3">
-      <div class="text-xs text-slate-500 mb-1">EMA-9</div>
-      <div class="metric-val text-base font-semibold text-sky-400"
-           x-text="currentEmaFast > 0 ? currentEmaFast.toLocaleString('en-IN',{minimumFractionDigits:2}) : '—'">—</div>
-    </div>
-
-    <!-- EMA Slow -->
-    <div class="card rounded-xl p-3">
-      <div class="text-xs text-slate-500 mb-1">EMA-21</div>
-      <div class="metric-val text-base font-semibold text-indigo-400"
-           x-text="currentEmaSlow > 0 ? currentEmaSlow.toLocaleString('en-IN',{minimumFractionDigits:2}) : '—'">—</div>
-    </div>
-
-    <!-- EMA crossover -->
-    <div class="card rounded-xl p-3">
-      <div class="text-xs text-slate-500 mb-1">EMA Signal</div>
-      <div class="text-sm font-semibold"
-           :class="currentEmaFast > currentEmaSlow ? 'text-emerald-400' : 'text-red-400'"
-           x-text="currentEmaFast > 0 && currentEmaSlow > 0 ? (currentEmaFast > currentEmaSlow ? '▲ BULLISH' : '▼ BEARISH') : '—'">—</div>
-    </div>
-
-    <!-- +DI / -DI -->
-    <div class="card rounded-xl p-3">
-      <div class="text-xs text-slate-500 mb-1">+DI / −DI</div>
-      <div class="metric-val text-base font-semibold">
-        <span class="text-emerald-400" x-text="currentPlusDI > 0 ? currentPlusDI.toFixed(1) : '—'">—</span>
-        <span class="text-slate-600"> / </span>
-        <span class="text-red-400"    x-text="currentMinusDI > 0 ? currentMinusDI.toFixed(1) : '—'">—</span>
-      </div>
-    </div>
-
-    <!-- Snapshot TF -->
-    <div class="card rounded-xl p-3">
-      <div class="text-xs text-slate-500 mb-1">Data TF</div>
-      <div class="metric-val text-base font-semibold text-slate-300"
-           x-text="currentTf > 0 ? currentTf + 'm' : '—'">—</div>
-      <div class="text-xs text-slate-500 mt-0.5" x-text="lastSnapshotTs || ''"></div>
-    </div>
-
-  </div>
-
-  <!-- ── ROW 3: Strategy B State ────────────────────────────────────────────── -->
-  <div class="card rounded-xl p-4">
-    <div class="flex items-center gap-2 mb-3">
-      <div class="w-1.5 h-1.5 rounded-full bg-violet-400"></div>
-      <span class="text-sm font-semibold text-slate-300">Strategy B — Liquidity Trap / Rolling Base</span>
-    </div>
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
-      <div>
-        <div class="text-xs text-slate-500 mb-1">Phase</div>
-        <span class="px-2 py-1 rounded text-xs font-semibold"
-              :class="{
-                'bg-slate-800 text-slate-400':     stratBPhase === '--' || stratBPhase === 'IDLE',
-                'bg-amber-900/60 text-amber-400 border border-amber-700':  stratBPhase === 'TRAP' || stratBPhase === 'BEARISH_TRAP' || stratBPhase === 'BULLISH_TRAP',
-                'bg-violet-900/60 text-violet-400 border border-violet-700': stratBPhase === 'VOID',
-                'bg-emerald-900/60 text-emerald-400 border border-emerald-700': stratBPhase === 'CONFIRMED',
-              }"
-              x-text="stratBPhase">--</span>
-      </div>
-      <div>
-        <div class="text-xs text-slate-500 mb-1">Rolling Base</div>
-        <div class="metric-val text-base font-semibold text-slate-200"
-             x-text="stratBBase > 0 ? stratBBase.toLocaleString('en-IN') : '—'">—</div>
-      </div>
-      <div>
-        <div class="text-xs text-slate-500 mb-1">HTF Entry Level</div>
-        <div class="metric-val text-base font-semibold text-orange-400"
-             x-text="stratBHtf > 0 ? stratBHtf.toLocaleString('en-IN') : '—'">—</div>
-      </div>
-      <div>
-        <div class="text-xs text-slate-500 mb-1">Void Lift</div>
-        <span class="px-2 py-1 rounded text-xs font-semibold"
-              :class="stratBVoidLift
-                ? 'bg-emerald-900/60 text-emerald-400 border border-emerald-700'
-                : 'bg-slate-800 text-slate-500'"
-              x-text="stratBVoidLift ? 'ACTIVE' : 'INACTIVE'">INACTIVE</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── ROW 4: Client Cards ───────────────────────────────────────────────── -->
-  <div>
-    <div class="flex items-center justify-between mb-3">
-      <h2 class="text-sm font-semibold text-slate-300">Client Accounts</h2>
-      <span class="text-xs text-slate-500" x-text="`${clients.length} registered`"></span>
-    </div>
-
-    <div x-show="clients.length === 0" class="card rounded-xl p-8 text-center text-slate-500 text-sm">
-      No clients registered. Add a client via the admin console or the registration panel below.
-    </div>
-
-    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
-      <template x-for="c in clients" :key="c.client_id">
-        <div class="card rounded-xl p-5 flex flex-col gap-3"
-             :class="c.tradeable ? '' : 'border-red-900/50'">
-
-          <!-- Header row -->
-          <div class="flex items-start justify-between">
-            <div>
-              <div class="font-semibold text-slate-100 text-sm" x-text="c.client_id"></div>
-              <div class="text-xs text-slate-500" x-text="c.name || c.client_id"></div>
-            </div>
-            <span class="text-xs px-2 py-0.5 rounded-full font-medium border"
-                  :class="c.tradeable
-                    ? 'bg-emerald-900/40 text-emerald-400 border-emerald-800'
-                    : 'bg-red-900/40 text-red-400 border-red-800'"
-                  x-text="c.tradeable ? 'ACTIVE' : 'HALTED'">
-            </span>
-          </div>
-
-          <!-- P&L -->
-          <div>
-            <div class="text-xs text-slate-500 mb-0.5">Daily P&L</div>
-            <div class="metric-val text-xl font-bold"
-                 :class="c.daily_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'"
-                 x-text="'₹ ' + (c.daily_pnl >= 0 ? '+' : '') + c.daily_pnl.toLocaleString('en-IN', {minimumFractionDigits:2})">
-            </div>
-          </div>
-
-          <!-- Drawdown bar -->
-          <div>
-            <div class="flex justify-between text-xs text-slate-500 mb-1">
-              <span>Drawdown</span>
-              <span x-text="`${pctUsed(c).toFixed(1)}% of ${c.daily_loss_pct}% limit`"></span>
-            </div>
-            <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
-              <div class="h-full rounded-full transition-all duration-500"
-                   :class="pctUsed(c) >= 75 ? 'bg-red-500' : pctUsed(c) >= 50 ? 'bg-amber-500' : 'bg-slate-500'"
-                   :style="`width:${pctUsed(c)}%`"></div>
-            </div>
-          </div>
-
-          <!-- Strategies + brokers -->
-          <div class="flex flex-wrap gap-1">
-            <template x-for="s in c.strategies" :key="s">
-              <span class="text-xs px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700"
-                    x-text="`Strategy ${s}`"></span>
-            </template>
-            <template x-for="b in c.brokers" :key="b">
-              <span class="text-xs px-1.5 py-0.5 rounded bg-violet-900/40 text-violet-400 border border-violet-800"
-                    x-text="b"></span>
-            </template>
-          </div>
-
-          <!-- Worker circuit breaker -->
-          <template x-if="workerFor(c.client_id)">
-            <div class="flex items-center justify-between text-xs">
-              <span class="text-slate-500">Circuit Breaker</span>
-              <span :class="workerFor(c.client_id)?.circuit_open ? 'text-red-400' : 'text-emerald-400'"
-                    x-text="workerFor(c.client_id)?.circuit_open ? 'OPEN ⚠' : 'CLOSED ✓'">
-              </span>
-            </div>
-          </template>
-
-          <!-- Halt / Resume buttons -->
-          <div class="flex gap-2 pt-1">
-            <button @click="haltClient(c.client_id)"
-                    class="flex-1 text-xs py-1.5 rounded border transition-colors
-                           bg-red-950/40 border-red-800 text-red-400
-                           hover:bg-red-900/60 active:scale-95">
-              Halt
-            </button>
-            <button @click="resumeClient(c.client_id)"
-                    class="flex-1 text-xs py-1.5 rounded border transition-colors
-                           bg-emerald-950/40 border-emerald-800 text-emerald-400
-                           hover:bg-emerald-900/60 active:scale-95">
-              Resume
-            </button>
-          </div>
-
-        </div>
-      </template>
-    </div>
-  </div>
-
-  <!-- ── ROW 5: Admin Controls ──────────────────────────────────────────────── -->
-  <div class="card rounded-xl p-5">
-    <h2 class="text-sm font-semibold text-slate-300 mb-4">Admin Controls</h2>
-
-    <div class="flex flex-wrap gap-3 items-center">
-
-      <!-- Kill Switch -->
-      <button @click="killSwitch()"
-              class="flex items-center gap-2 px-4 py-2.5 rounded-lg border font-semibold text-sm transition-all active:scale-95"
-              :class="confirmKill
-                ? 'bg-red-600 border-red-500 text-white animate-pulse'
-                : 'bg-red-950/50 border-red-800 text-red-400 hover:bg-red-900/50'">
-        <span>🚨</span>
-        <span x-text="confirmKill ? 'CONFIRM KILL SWITCH' : 'Emergency Kill Switch'"></span>
-      </button>
-
-      <!-- Rebalance buttons per index -->
-      <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY']" :key="idx">
-        <button @click="rebalance(idx)"
-                class="flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs transition-all active:scale-95
-                       bg-slate-800 border-slate-600 text-slate-300 hover:bg-slate-700">
-          <span>↺</span>
-          <span x-text="`Rebalance ${idx}`"></span>
-        </button>
-      </template>
-
-    </div>
-
-    <!-- Lot multiplier quick-set -->
-    <div class="mt-4 border-t border-slate-700/50 pt-4">
-      <div class="text-xs text-slate-500 mb-2">Quick Lot Multiplier Override</div>
-      <div class="flex flex-wrap gap-2 items-end">
-        <div>
-          <label class="text-xs text-slate-400 block mb-1">Client ID</label>
-          <input x-model="lotForm.client_id" type="text" placeholder="C001"
-                 class="w-24 text-xs px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-slate-200 focus:outline-none focus:border-violet-500" />
-        </div>
-        <div>
-          <label class="text-xs text-slate-400 block mb-1">Binding ID</label>
-          <input x-model="lotForm.binding_id" type="text" placeholder="C001_shoonya"
-                 class="w-36 text-xs px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-slate-200 focus:outline-none focus:border-violet-500" />
-        </div>
-        <div>
-          <label class="text-xs text-slate-400 block mb-1">Multiplier</label>
-          <input x-model.number="lotForm.multiplier" type="number" step="0.1" min="0.1" max="10" placeholder="1.0"
-                 class="w-20 text-xs px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-slate-200 focus:outline-none focus:border-violet-500" />
-        </div>
-        <button @click="setLots()"
-                class="px-3 py-1.5 text-xs rounded-lg bg-violet-600 hover:bg-violet-700 text-white transition-colors active:scale-95">
-          Apply
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── ROW 6: Live Event Feed ──────────────────────────────────────────────── -->
-  <div class="card rounded-xl p-4">
-    <div class="flex items-center justify-between mb-3">
-      <h2 class="text-sm font-semibold text-slate-300">Live Event Feed</h2>
-      <div class="flex items-center gap-3">
-        <span class="text-xs text-slate-500" x-text="`${feed.length} events`"></span>
-        <button @click="feed = []" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">
-          Clear
-        </button>
-      </div>
-    </div>
-
-    <div class="space-y-0 max-h-72 overflow-y-auto">
-      <div x-show="feed.length === 0" class="text-slate-600 text-xs py-4 text-center">
-        Awaiting events…
-      </div>
-      <template x-for="(msg, i) in feed" :key="i">
-        <div class="feed-row flex items-start gap-3 py-1.5 text-xs">
-          <span class="text-slate-600 font-mono shrink-0 w-20" x-text="msg.ts || ''"></span>
-          <span class="shrink-0 w-4 text-center" x-text="feedIcon(msg)"></span>
-          <span class="font-semibold shrink-0"
-                :class="feedBadgeColor(msg)"
-                x-text="msg.type === 'fill' ? 'FILL' : (msg.code || 'SYS')"></span>
-          <span class="text-slate-400 truncate" x-text="feedText(msg)"></span>
-        </div>
-      </template>
-    </div>
-  </div>
-
-</div><!-- end main -->
-
-<!-- ─── ALPINE.JS DATA CONTROLLER ───────────────────────────────────────────── -->
+<!-- ════════════════════════════════════════════════════════════════════════════
+     ALPINE COMPONENT
+════════════════════════════════════════════════════════════════════════════ -->
 <script>
 document.addEventListener('alpine:init', () => {
-  Alpine.data('dashboard', () => ({
+  Alpine.data('terminal', () => ({
 
-    // ── State ─────────────────────────────────────────────────────────────
-    ws:          null,
-    wsConnected: false,
-    activeIndex: 'NIFTY',
-    clock:       '',
+    /* ── State ──────────────────────────────────────────────── */
+    ws:            null,
+    wsConnected:   false,
+    activeIndex:   'NIFTY',
+    indices:       ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY'],
 
-    // Market data: keyed by symbol
-    spots: {},       // { NIFTY: { ltp, atm, prev_ltp, ts } }
-    snapshots: {},   // { NIFTY: { rsi, vwap, adx, ema_fast, ema_slow, plus_di, minus_di, tf, ts } }
+    spots:         {},   // { SYM: {ltp, atm, ts} }
+    snapshots:     {},   // { SYM: {rsi, vwap, adx, ema_fast, ema_slow, plus_di, minus_di, ...} }
+    clients:       [],
+    workers:       [],
+    events:        [],
 
-    // Strategy B
-    stratBPhase:    '--',
-    stratBBase:     0,
-    stratBHtf:      0,
-    stratBVoidLift: false,
+    istTime:       '--:--:--',
 
-    // Workers and clients (from heartbeat)
-    workers: [],
-    clients: [],
+    /* admin */
+    killArmed:     false,
+    killCountdown: 5,
+    _killTimer:    null,
+    rebalIdx:      'NIFTY',
+    lotCid:        '',
+    lotBid:        '',
+    lotMul:        1.0,
 
-    // Live event feed
-    feed: [],
+    /* ── Computed ────────────────────────────────────────────── */
+    get spot()   { return this.spots[this.activeIndex] || {}; },
+    get snap()   { return this.snapshots[this.activeIndex] || {}; },
+    get rsiVal() { return +(this.snap.rsi  || 0); },
+    get adxVal() { return +(this.snap.adx  || 0); },
+    get vwapVal(){ return +(this.snap.vwap || 0); },
+    get emaFast(){ return +(this.snap.ema_fast || 0); },
+    get emaSlow(){ return +(this.snap.ema_slow || 0); },
+    get plusDI() { return +(this.snap.plus_di  || 0); },
+    get minusDI(){ return +(this.snap.minus_di || 0); },
+    get emaSignal() {
+      if (!this.emaFast || !this.emaSlow) return 'NEUTRAL';
+      return this.emaFast > this.emaSlow ? 'BULL' : 'BEAR';
+    },
+    get rsiClass() {
+      if (this.rsiVal >= 70) return 'rsi-ob';
+      if (this.rsiVal <= 30) return 'rsi-os';
+      return 'rsi-n';
+    },
+    get diSignal() {
+      if (!this.plusDI || !this.minusDI) return 'FLAT';
+      return this.plusDI > this.minusDI ? '+DI' : '-DI';
+    },
 
-    // Admin state
-    confirmKill: false,
-    lotForm: { client_id: '', binding_id: '', multiplier: 1.0 },
-
-    // ── Computed ───────────────────────────────────────────────────────────
-    get currentSpot()     { return this.spots[this.activeIndex]?.ltp      || 0; },
-    get currentAtm()      { return this.spots[this.activeIndex]?.atm      || 0; },
-    get spotChange()      { const s = this.spots[this.activeIndex]; return s ? s.ltp - (s.prev_ltp || s.ltp) : 0; },
-    get currentRsi()      { return this.snapshots[this.activeIndex]?.rsi      || 0; },
-    get currentVwap()     { return this.snapshots[this.activeIndex]?.vwap     || 0; },
-    get currentAdx()      { return this.snapshots[this.activeIndex]?.adx      || 0; },
-    get currentEmaFast()  { return this.snapshots[this.activeIndex]?.ema_fast || 0; },
-    get currentEmaSlow()  { return this.snapshots[this.activeIndex]?.ema_slow || 0; },
-    get currentPlusDI()   { return this.snapshots[this.activeIndex]?.plus_di  || 0; },
-    get currentMinusDI()  { return this.snapshots[this.activeIndex]?.minus_di || 0; },
-    get currentTf()       { return this.snapshots[this.activeIndex]?.tf       || 0; },
-    get lastSnapshotTs()  { return this.snapshots[this.activeIndex]?.ts       || ''; },
-
-    // ── Lifecycle ──────────────────────────────────────────────────────────
+    /* ── Init ────────────────────────────────────────────────── */
     init() {
-      this.updateClock();
-      setInterval(() => this.updateClock(), 1000);
-      this.connectWs();
+      this._startClock();
+      this._connect();
     },
 
-    updateClock() {
-      const now = new Date();
-      this.clock = now.toLocaleTimeString('en-IN', {
-        timeZone: 'Asia/Kolkata',
-        hour12:   false, hour: '2-digit', minute: '2-digit', second: '2-digit',
-      }) + ' IST';
+    _startClock() {
+      const tick = () => {
+        this.istTime = new Date().toLocaleTimeString('en-IN', {
+          timeZone: 'Asia/Kolkata', hour12: false,
+          hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+      };
+      tick();
+      setInterval(tick, 1000);
     },
 
-    connectWs() {
+    /* ── WebSocket ───────────────────────────────────────────── */
+    _connect() {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const url   = `${proto}://${location.host}/ws`;
-      this.ws = new WebSocket(url);
-      this.ws.onopen    = () => { this.wsConnected = true; };
-      this.ws.onclose   = () => { this.wsConnected = false; setTimeout(() => this.connectWs(), 3000); };
-      this.ws.onerror   = () => { this.wsConnected = false; };
-      this.ws.onmessage = (e) => { try { this.handleMsg(JSON.parse(e.data)); } catch(_) {} };
+      try { this.ws = new WebSocket(`${proto}://${location.host}/ws`); }
+      catch { this._scheduleReconnect(); return; }
+
+      this.ws.onopen = () => {
+        this.wsConnected = true;
+        this._addEvent({type:'sys', code:'CONNECTED', msg:'Dashboard connected to engine', ts: this.istTime});
+      };
+      this.ws.onmessage = (e) => {
+        try { this._handle(JSON.parse(e.data)); } catch {}
+      };
+      this.ws.onclose = () => {
+        this.wsConnected = false;
+        this._addEvent({type:'sys', code:'DISCONNECTED', msg:'Connection lost — reconnecting in 3s', ts: this.istTime});
+        this._scheduleReconnect();
+      };
+      this.ws.onerror = () => this.ws.close();
     },
 
-    // ── Message dispatcher ─────────────────────────────────────────────────
-    handleMsg(msg) {
+    _scheduleReconnect() {
+      setTimeout(() => this._connect(), 3000);
+    },
+
+    _handle(msg) {
       if (msg.type === 'tick') {
-        const prev = this.spots[msg.sym]?.ltp || msg.ltp;
-        this.spots[msg.sym] = { ltp: msg.ltp, atm: msg.atm, prev_ltp: prev, ts: msg.ts };
-
+        this.spots = { ...this.spots, [msg.sym]: {ltp: msg.ltp, atm: msg.atm, ts: msg.ts} };
       } else if (msg.type === 'snapshot') {
-        // Keep lowest TF snapshot per symbol (most granular)
-        const cur = this.snapshots[msg.sym];
-        if (!cur || msg.tf <= cur.tf) {
-          this.snapshots[msg.sym] = {
-            rsi: msg.rsi, vwap: msg.vwap, adx: msg.adx,
-            plus_di: msg.plus_di, minus_di: msg.minus_di,
-            ema_fast: msg.ema_fast, ema_slow: msg.ema_slow,
-            tf: msg.tf, ts: msg.ts,
-          };
-        }
-
-      } else if (msg.type === 'stats') {
-        if (msg.name === 'workers') this.workers = msg.data || [];
-        if (msg.name === 'clients') this.clients = msg.data || [];
-        if (msg.name === 'strategy_b') {
-          this.stratBPhase    = msg.data?.phase    || '--';
-          this.stratBBase     = msg.data?.rolling_base   || 0;
-          this.stratBHtf      = msg.data?.htf_entry_level || 0;
-          this.stratBVoidLift = msg.data?.void_lift || false;
-        }
-
+        this.snapshots = { ...this.snapshots, [msg.sym]: msg };
       } else if (msg.type === 'fill') {
-        this.addFeed(msg);
-
+        this._addEvent({type:'fill', ...msg});
       } else if (msg.type === 'sys') {
-        this.addFeed(msg);
-        // Update strategy B phase from system events if embedded
-        if (msg.code === 'STRATEGY_B_STATE') {
-          try {
-            const d = JSON.parse(msg.msg || '{}');
-            this.stratBPhase    = d.phase    || this.stratBPhase;
-            this.stratBBase     = d.rolling_base    || this.stratBBase;
-            this.stratBHtf      = d.htf_entry_level || this.stratBHtf;
-            this.stratBVoidLift = d.void_lift        || this.stratBVoidLift;
-          } catch(_) {}
-        }
+        this._addEvent({type:'sys', ...msg});
+      } else if (msg.type === 'stats') {
+        if (msg.name === 'clients') this.clients = msg.data || [];
+        if (msg.name === 'workers') this.workers = msg.data || [];
       }
     },
 
-    addFeed(msg) {
-      this.feed.unshift(msg);
-      if (this.feed.length > 60) this.feed.pop();
+    _addEvent(evt) {
+      this.events.unshift(evt);
+      if (this.events.length > 60) this.events.pop();
     },
 
-    // ── Helpers ────────────────────────────────────────────────────────────
-    adxLabel(v) {
-      if (v >= 50) return 'Very Strong';
-      if (v >= 25) return 'Strong';
-      if (v >= 20) return 'Moderate';
-      if (v >  0) return 'Weak';
-      return '—';
-    },
-
-    pctUsed(c) {
-      if (!c.daily_pnl || c.daily_pnl >= 0) return 0;
-      const limit = c.capital * c.daily_loss_pct / 100;
-      return Math.min(100, Math.abs(c.daily_pnl) / limit * 100);
-    },
-
-    workerFor(clientId) {
-      return this.workers.find(w => w.client_id === clientId);
-    },
-
-    feedIcon(msg) {
-      if (msg.type === 'fill')          return '⚡';
-      if (msg.code === 'KILL_SWITCH')   return '🚨';
-      if (msg.code === 'GAP_OPEN')      return '⚠';
-      if (msg.code === 'MARKET_OPEN')   return '🔔';
-      if (msg.code === 'CLIENT_HALTED') return '🛑';
-      return '●';
-    },
-
-    feedBadgeColor(msg) {
-      if (msg.type === 'fill')                         return 'text-emerald-400';
-      if (msg.code === 'KILL_SWITCH')                  return 'text-red-400';
-      if (msg.code === 'GAP_OPEN')                     return 'text-amber-400';
-      if (msg.code === 'CLIENT_HALTED')                return 'text-orange-400';
-      if (msg.code === 'MARKET_OPEN' || msg.code === 'MARKET_CLOSE') return 'text-blue-400';
-      if (msg.code === 'FEEDER_RESTORED')              return 'text-cyan-400';
-      return 'text-slate-500';
-    },
-
-    feedText(msg) {
-      if (msg.type === 'fill') {
-        return `${msg.client_id}  ${msg.side} ${msg.qty} × ${msg.sym} @ ₹${msg.avg_price}`;
-      }
-      return msg.msg || msg.code || '';
-    },
-
-    // ── API calls ──────────────────────────────────────────────────────────
+    /* ── Admin actions ───────────────────────────────────────── */
     async haltClient(id) {
-      try {
-        const r = await fetch(`/api/halt/${id}`, { method: 'POST' });
-        const d = await r.json();
-        this.addFeed({ type: 'sys', code: 'ADMIN', msg: d.message, ts: this.clock });
-      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+      await fetch(`/api/halt/${id}`, {method:'POST'});
     },
-
     async resumeClient(id) {
-      try {
-        const r = await fetch(`/api/resume/${id}`, { method: 'POST' });
-        const d = await r.json();
-        this.addFeed({ type: 'sys', code: 'ADMIN', msg: d.message, ts: this.clock });
-      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+      await fetch(`/api/resume/${id}`, {method:'POST'});
     },
 
-    async killSwitch() {
-      if (!this.confirmKill) {
-        this.confirmKill = true;
-        setTimeout(() => { this.confirmKill = false; }, 5000);
+    armKill() {
+      if (this.killArmed) {
+        /* second click — execute */
+        this.killArmed = false;
+        clearInterval(this._killTimer);
+        fetch('/api/kill_switch', {method:'POST'});
         return;
       }
-      this.confirmKill = false;
-      try {
-        const r = await fetch('/api/kill_switch', { method: 'POST' });
-        const d = await r.json();
-        this.addFeed({ type: 'sys', code: 'KILL_SWITCH', msg: d.message, ts: this.clock });
-      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+      this.killArmed    = true;
+      this.killCountdown = 5;
+      this._killTimer = setInterval(() => {
+        this.killCountdown--;
+        if (this.killCountdown <= 0) {
+          clearInterval(this._killTimer);
+          this.killArmed = false;
+        }
+      }, 1000);
     },
 
-    async rebalance(underlying) {
-      try {
-        const r = await fetch(`/api/rebalance/${underlying}`, { method: 'POST' });
-        const d = await r.json();
-        this.addFeed({ type: 'sys', code: 'REBALANCE', msg: d.message, ts: this.clock });
-      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+    async rebalance() {
+      await fetch(`/api/rebalance/${this.rebalIdx}`, {method:'POST'});
     },
 
     async setLots() {
-      if (!this.lotForm.client_id || !this.lotForm.binding_id) return;
-      const { client_id, binding_id, multiplier } = this.lotForm;
-      try {
-        const r = await fetch(`/api/set_lots/${client_id}/${binding_id}/${multiplier}`, { method: 'POST' });
-        const d = await r.json();
-        this.addFeed({ type: 'sys', code: 'ADMIN', msg: d.message, ts: this.clock });
-      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+      if (!this.lotCid || !this.lotBid) return;
+      await fetch(`/api/set_lots/${this.lotCid}/${this.lotBid}/${this.lotMul}`, {method:'POST'});
     },
 
+    /* ── Helpers ─────────────────────────────────────────────── */
+    fmt(v, d=2) {
+      return Number(v||0).toLocaleString('en-IN', {minimumFractionDigits:d, maximumFractionDigits:d});
+    },
+    pnlClass(v) { return v >= 0 ? 'text-t-green' : 'text-t-red'; },
+    pnlGlow(v)  { return v >= 0 ? 'shadow-glow-green' : 'shadow-glow-red'; },
+    capPct(pnl, cap) {
+      if (!cap) return 0;
+      return Math.min(100, Math.abs(pnl / cap * 100 * 5)); /* visual scale ×5 */
+    },
+    evtColor(evt) {
+      if (evt.type === 'fill')                      return '#00e87a';
+      if (['KILL_SWITCH','DISCONNECTED'].includes(evt.code)) return '#ff3a4a';
+      if (evt.code === 'GAP_OPEN')                  return '#f59e0b';
+      if (evt.code === 'CONNECTED')                 return '#00d4ff';
+      return '#3a5470';
+    },
   }));
 });
 </script>
+
+<!-- ════════════════════════════════════════════════════════════════════════════
+     BODY
+════════════════════════════════════════════════════════════════════════════ -->
+<body x-data="terminal" x-cloak class="relative">
+<div class="relative z-10 flex flex-col min-h-screen">
+
+<!-- ─── NAVBAR ──────────────────────────────────────────────────────────────── -->
+<header class="navbar-h sticky top-0 z-50 flex items-center justify-between px-5 border-b border-t-border bg-t-bg/95 backdrop-blur-sm shrink-0">
+
+  <!-- Logo -->
+  <div class="flex items-center gap-3">
+    <div class="flex items-center gap-1.5">
+      <span class="font-disp text-lg font-black tracking-widest text-t-cyan"
+            style="text-shadow:0 0 16px rgba(0,212,255,0.7)">TERMINUS</span>
+      <span class="font-disp text-xs font-normal text-t-muted tracking-widest mt-0.5">v5</span>
+    </div>
+    <div class="w-px h-5 bg-t-border mx-1"></div>
+    <!-- Index tabs -->
+    <div class="flex gap-1">
+      <template x-for="idx in indices" :key="idx">
+        <button class="idx-tab" :class="{active: activeIndex===idx}" @click="activeIndex=idx" x-text="idx"></button>
+      </template>
+    </div>
+  </div>
+
+  <!-- Clock + WS Status -->
+  <div class="flex items-center gap-4">
+    <!-- IST Clock -->
+    <div class="font-mono text-xl text-t-bright tracking-widest"
+         style="text-shadow:0 0 10px rgba(200,218,240,0.3)" x-text="istTime"></div>
+    <div class="w-px h-5 bg-t-border"></div>
+    <!-- WS badge -->
+    <div class="flex items-center gap-2">
+      <div class="w-2 h-2 rounded-full"
+           :class="wsConnected ? 'bg-t-green conn-live' : 'bg-t-red'"
+           :style="wsConnected ? '' : 'animation:none'"></div>
+      <span class="font-ui font-bold text-xs tracking-widest uppercase"
+            :class="wsConnected ? 'text-t-green' : 'text-t-red'"
+            x-text="wsConnected ? 'LIVE' : 'OFFLINE'"></span>
+    </div>
+  </div>
+</header>
+
+<!-- ─── MAIN CONTENT ─────────────────────────────────────────────────────────── -->
+<main class="flex-1 grid grid-cols-1 xl:grid-cols-[340px_1fr_280px] gap-3 p-3 max-w-[1800px] w-full mx-auto">
+
+  <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════════ -->
+  <div class="flex flex-col gap-3">
+
+    <!-- Market Overview -->
+    <div class="t-card rounded p-4 fade-up-1 relative overflow-hidden">
+      <div class="diag-accent"></div>
+      <div class="sec-label mb-3">Market Overview · <span x-text="activeIndex"></span></div>
+
+      <!-- Spot Price -->
+      <div class="mb-3">
+        <div class="sec-label mb-1">SPOT PRICE</div>
+        <div class="font-mono text-4xl text-t-bright leading-none"
+             style="text-shadow:0 0 20px rgba(200,218,240,0.25)"
+             x-text="spot.ltp ? fmt(spot.ltp, 2) : '—'"></div>
+        <div class="font-ui text-xs text-t-muted mt-1" x-text="spot.ts || 'Waiting for tick…'"></div>
+      </div>
+
+      <div class="h-px bg-t-border mb-3"></div>
+
+      <!-- ATM Strike -->
+      <div>
+        <div class="sec-label mb-1">ATM STRIKE</div>
+        <div class="font-mono text-3xl text-t-cyan leading-none"
+             style="text-shadow:0 0 14px rgba(0,212,255,0.45)"
+             x-text="spot.atm ? fmt(spot.atm, 0) : '—'"></div>
+      </div>
+
+      <div class="h-px bg-t-border my-3"></div>
+
+      <!-- All indices mini strip -->
+      <div class="space-y-1.5">
+        <template x-for="idx in indices" :key="idx">
+          <div class="flex items-center justify-between py-1"
+               :class="idx===activeIndex ? 'opacity-100' : 'opacity-40'">
+            <span class="font-ui font-bold text-xs text-t-muted w-24" x-text="idx"></span>
+            <span class="font-mono text-sm" :class="idx===activeIndex ? 'text-t-bright' : 'text-t-text'"
+                  x-text="spots[idx]?.ltp ? fmt(spots[idx].ltp) : '—'"></span>
+            <span class="font-mono text-xs text-t-cyan"
+                  x-text="spots[idx]?.atm ? fmt(spots[idx].atm, 0) : '—'"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Indicators Strip -->
+    <div class="t-card rounded p-4 fade-up-2">
+      <div class="sec-label mb-4">Indicators · <span x-text="activeIndex"></span> · TF<span x-text="snap.tf || '—'"></span></div>
+
+      <!-- RSI -->
+      <div class="mb-4">
+        <div class="flex justify-between items-baseline mb-1.5">
+          <span class="font-ui font-bold text-xs text-t-muted">RSI-14</span>
+          <span class="font-mono text-lg font-bold" :class="rsiClass"
+                x-text="rsiVal ? fmt(rsiVal, 1) : '—'"></span>
+        </div>
+        <div class="gauge-track h-2">
+          <div class="gauge-fill h-full"
+               :style="`width:${rsiVal}%; background:${rsiVal>=70 ? '#ff3a4a' : rsiVal<=30 ? '#00e87a' : '#00d4ff'}`"></div>
+        </div>
+        <div class="flex justify-between mt-1">
+          <span class="font-mono text-xs text-t-muted">OS 30</span>
+          <span class="font-mono text-xs text-t-muted">OB 70</span>
+        </div>
+      </div>
+
+      <!-- VWAP -->
+      <div class="mb-4">
+        <div class="flex justify-between items-baseline mb-1">
+          <span class="font-ui font-bold text-xs text-t-muted">VWAP-500</span>
+          <span class="font-mono text-sm text-t-cyan" x-text="vwapVal ? fmt(vwapVal) : '—'"></span>
+        </div>
+        <div class="flex items-center gap-2" x-show="vwapVal && spot.ltp">
+          <span class="font-mono text-xs"
+                :class="spot.ltp > vwapVal ? 'text-t-green' : 'text-t-red'"
+                x-text="spot.ltp > vwapVal ? 'ABOVE VWAP ▲' : 'BELOW VWAP ▼'"></span>
+        </div>
+      </div>
+
+      <!-- ADX -->
+      <div class="mb-4">
+        <div class="flex justify-between items-baseline mb-1.5">
+          <span class="font-ui font-bold text-xs text-t-muted">ADX-20</span>
+          <span class="font-mono text-lg font-bold"
+                :class="adxVal >= 25 ? 'text-t-amber' : 'text-t-muted'"
+                x-text="adxVal ? fmt(adxVal, 1) : '—'"></span>
+        </div>
+        <div class="gauge-track h-2">
+          <div class="gauge-fill h-full bg-amber-500/60"
+               :style="`width:${Math.min(100, adxVal*2)}%`"></div>
+        </div>
+        <div class="flex justify-between mt-1">
+          <span class="font-mono text-xs text-t-muted">WEAK</span>
+          <span class="font-mono text-xs" :class="adxVal>=25?'text-t-amber':'text-t-muted'"
+                x-text="adxVal>=25?'TRENDING':'CHOPPY'"></span>
+          <span class="font-mono text-xs text-t-muted">STRONG</span>
+        </div>
+      </div>
+
+      <!-- EMA Signal -->
+      <div class="mb-4">
+        <div class="flex justify-between items-baseline mb-1">
+          <span class="font-ui font-bold text-xs text-t-muted">EMA CROSS</span>
+          <span class="font-mono text-sm font-bold"
+                :class="{'ema-bull': emaSignal==='BULL', 'ema-bear': emaSignal==='BEAR', 'ema-neutral': emaSignal==='NEUTRAL'}"
+                x-text="emaSignal"></span>
+        </div>
+        <div class="flex gap-4 text-xs font-mono text-t-muted">
+          <span>F <span class="text-t-text" x-text="emaFast ? fmt(emaFast) : '—'"></span></span>
+          <span>S <span class="text-t-text" x-text="emaSlow ? fmt(emaSlow) : '—'"></span></span>
+        </div>
+      </div>
+
+      <!-- +DI / -DI -->
+      <div>
+        <div class="flex justify-between items-baseline mb-1">
+          <span class="font-ui font-bold text-xs text-t-muted">DI SIGNAL</span>
+          <span class="font-mono text-sm font-bold"
+                :class="diSignal==='+DI' ? 'text-t-green' : diSignal==='-DI' ? 'text-t-red' : 'text-t-muted'"
+                x-text="diSignal"></span>
+        </div>
+        <div class="flex gap-6 text-xs font-mono">
+          <span class="text-t-green">+DI <span x-text="plusDI ? fmt(plusDI, 1) : '—'"></span></span>
+          <span class="text-t-red">−DI <span x-text="minusDI ? fmt(minusDI, 1) : '—'"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Worker Stats -->
+    <div class="t-card rounded p-4 fade-up-3">
+      <div class="sec-label mb-3">Execution Workers</div>
+      <div x-show="workers.length === 0" class="font-mono text-xs text-t-muted text-center py-3">
+        No worker data yet…
+      </div>
+      <div x-show="workers.length > 0">
+        <template x-for="w in workers" :key="w.client_id">
+          <div class="worker-row">
+            <span class="font-mono text-xs text-t-text" x-text="w.client_id"></span>
+            <div class="flex items-center gap-3">
+              <span class="font-mono text-xs text-t-muted">
+                <span class="text-t-text" x-text="w.placed || 0"></span> placed
+              </span>
+              <span class="font-mono text-xs text-t-muted">
+                <span :class="(w.errors||0) > 0 ? 'text-t-red' : 'text-t-green'" x-text="w.errors || 0"></span> err
+              </span>
+              <span class="font-mono text-xs"
+                    :class="w.running ? 'text-t-green' : 'text-t-muted'"
+                    x-text="w.running ? 'RUN' : 'IDLE'"></span>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ CENTER COLUMN ════════════════════════════════════════════════════════ -->
+  <div class="flex flex-col gap-3">
+
+    <!-- Client Cards Grid -->
+    <div>
+      <div class="sec-label mb-2 px-1">Client Portfolio</div>
+      <div x-show="clients.length === 0"
+           class="t-card rounded p-8 text-center font-mono text-xs text-t-muted fade-up-1">
+        Waiting for client data…
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <template x-for="(c, i) in clients" :key="c.client_id">
+          <div class="t-card rounded p-4 relative overflow-hidden fade-up-1">
+            <div class="diag-accent"></div>
+
+            <!-- Header row -->
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <div class="font-ui font-bold text-base text-t-bright" x-text="c.name || c.client_id"></div>
+                <div class="font-mono text-xs text-t-muted" x-text="c.client_id"></div>
+              </div>
+              <div class="flex items-center gap-2">
+                <span :class="c.tradeable ? 'badge-live' : 'badge-halted'"
+                      x-text="c.tradeable ? 'LIVE' : 'HALTED'"></span>
+                <button x-show="c.tradeable"  class="btn-halt"   @click="haltClient(c.client_id)">HALT</button>
+                <button x-show="!c.tradeable" class="btn-resume" @click="resumeClient(c.client_id)">RESUME</button>
+              </div>
+            </div>
+
+            <!-- Capital + P&L row -->
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <div class="sec-label mb-1">CAPITAL</div>
+                <div class="font-mono text-lg text-t-text" x-text="'₹' + fmt(c.capital, 0)"></div>
+              </div>
+              <div>
+                <div class="sec-label mb-1">DAILY P&L</div>
+                <div class="font-mono text-lg font-bold"
+                     :class="pnlClass(c.daily_pnl)"
+                     x-text="(c.daily_pnl >= 0 ? '+' : '') + '₹' + fmt(c.daily_pnl)"></div>
+              </div>
+            </div>
+
+            <!-- Drawdown bar -->
+            <div class="mb-3">
+              <div class="flex justify-between mb-1">
+                <span class="sec-label">DRAWDOWN</span>
+                <span class="font-mono text-xs text-t-muted"
+                      x-text="c.daily_loss_pct + '% limit'"></span>
+              </div>
+              <div class="gauge-track h-1.5">
+                <div class="drawdown-bar gauge-fill h-full"
+                     :style="`width:${capPct(c.daily_pnl, c.capital)}%;
+                              background:${c.daily_pnl < 0 ? '#ff3a4a' : '#00e87a'}`"></div>
+              </div>
+            </div>
+
+            <!-- Strategies + Brokers -->
+            <div class="flex gap-4 text-xs">
+              <div>
+                <span class="sec-label">STRATS </span>
+                <span class="font-mono text-t-muted" x-text="(c.strategies||[]).join(', ') || '—'"></span>
+              </div>
+              <div>
+                <span class="sec-label">BROKER </span>
+                <span class="font-mono text-t-cyan" x-text="(c.brokers||[]).join(', ') || '—'"></span>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Live Event Feed -->
+    <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:260px;max-height:400px">
+      <div class="flex items-center justify-between px-4 py-2.5 border-b border-t-border shrink-0">
+        <div class="sec-label">Live Event Feed</div>
+        <div class="flex items-center gap-1.5">
+          <div class="w-1.5 h-1.5 rounded-full" :class="wsConnected ? 'bg-t-green conn-live' : 'bg-t-muted'"></div>
+          <span class="font-mono text-xs text-t-muted" x-text="events.length + ' events'"></span>
+        </div>
+      </div>
+      <div class="flex-1 overflow-y-auto">
+        <div x-show="events.length === 0" class="font-mono text-xs text-t-muted text-center py-6">
+          No events yet…
+        </div>
+        <template x-for="(evt, i) in events" :key="i">
+          <div class="feed-row">
+            <span class="font-mono text-xs shrink-0" style="color:#3a5470" x-text="evt.ts || ''"></span>
+            <span class="font-mono text-xs shrink-0 w-5 uppercase text-center"
+                  :style="`color:${evtColor(evt)}`"
+                  x-text="evt.type === 'fill' ? '▲' : evt.type === 'sys' ? '●' : '○'"></span>
+            <span class="font-mono text-xs font-bold shrink-0"
+                  :style="`color:${evtColor(evt)}`"
+                  x-text="evt.code || evt.side || ''"></span>
+            <span class="font-mono text-xs text-t-muted truncate"
+                  x-text="evt.msg || (evt.sym ? evt.sym + ' ' + (evt.qty||'') + '@' + (evt.avg_price||'') : '')"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ RIGHT COLUMN ═════════════════════════════════════════════════════════ -->
+  <div class="flex flex-col gap-3">
+
+    <!-- Emergency Kill Switch -->
+    <div class="t-card rounded p-4 fade-up-1">
+      <div class="sec-label mb-3">Emergency Control</div>
+
+      <div class="relative mb-3">
+        <div x-show="killArmed" class="kill-ring" :key="killArmed"></div>
+        <button class="btn-kill" :class="{armed: killArmed}" @click="armKill()">
+          <div x-show="!killArmed" class="flex items-center justify-center gap-2">
+            <span style="font-size:16px">⬛</span>
+            <span>KILL SWITCH</span>
+          </div>
+          <div x-show="killArmed" class="flex items-center justify-center gap-2">
+            <span style="font-size:16px; animation: conn-pulse 0.5s infinite">⚠</span>
+            <span>CONFIRM KILL (<span x-text="killCountdown"></span>s)</span>
+          </div>
+        </button>
+      </div>
+      <p class="font-ui text-xs text-t-muted leading-relaxed">
+        Halts all clients immediately and broadcasts KILL_SWITCH to the engine. Requires two clicks within 5 seconds.
+      </p>
+    </div>
+
+    <!-- Manual Rebalance -->
+    <div class="t-card rounded p-4 fade-up-2">
+      <div class="sec-label mb-3">Manual Rebalance</div>
+      <div class="space-y-2">
+        <div>
+          <div class="sec-label mb-1">UNDERLYING</div>
+          <select class="t-input" x-model="rebalIdx">
+            <template x-for="idx in indices" :key="idx">
+              <option :value="idx" x-text="idx"></option>
+            </template>
+          </select>
+        </div>
+        <button class="btn-action" @click="rebalance()">
+          TRIGGER REBALANCE
+        </button>
+      </div>
+      <p class="font-ui text-xs text-t-muted mt-2 leading-relaxed">
+        Forces immediate ATM recalculation. Clears <code class="text-t-cyan">current_atm</code> so the next tick triggers a full rebalance.
+      </p>
+    </div>
+
+    <!-- Lot Multiplier Override -->
+    <div class="t-card rounded p-4 fade-up-3">
+      <div class="sec-label mb-3">Lot Multiplier Override</div>
+      <div class="space-y-2">
+        <div>
+          <div class="sec-label mb-1">CLIENT ID</div>
+          <input class="t-input" type="text" placeholder="e.g. C001" x-model="lotCid" />
+        </div>
+        <div>
+          <div class="sec-label mb-1">BINDING ID</div>
+          <input class="t-input" type="text" placeholder="e.g. mock_default" x-model="lotBid" />
+        </div>
+        <div>
+          <div class="sec-label mb-1">MULTIPLIER</div>
+          <input class="t-input" type="number" step="0.5" min="0.5" placeholder="1.0" x-model.number="lotMul" />
+        </div>
+        <button class="btn-action" @click="setLots()">
+          APPLY MULTIPLIER
+        </button>
+      </div>
+    </div>
+
+    <!-- System Stats -->
+    <div class="t-card rounded p-4 fade-up-4">
+      <div class="sec-label mb-3">System</div>
+      <div class="space-y-1.5">
+        <div class="flex justify-between items-center">
+          <span class="font-ui text-xs text-t-muted">CLIENTS</span>
+          <span class="font-mono text-sm text-t-text" x-text="clients.length"></span>
+        </div>
+        <div class="flex justify-between items-center">
+          <span class="font-ui text-xs text-t-muted">LIVE</span>
+          <span class="font-mono text-sm text-t-green"
+                x-text="clients.filter(c=>c.tradeable).length"></span>
+        </div>
+        <div class="flex justify-between items-center">
+          <span class="font-ui text-xs text-t-muted">HALTED</span>
+          <span class="font-mono text-sm text-t-red"
+                x-text="clients.filter(c=>!c.tradeable).length"></span>
+        </div>
+        <div class="h-px bg-t-border my-1"></div>
+        <div class="flex justify-between items-center">
+          <span class="font-ui text-xs text-t-muted">WORKERS</span>
+          <span class="font-mono text-sm text-t-text" x-text="workers.length"></span>
+        </div>
+        <div class="flex justify-between items-center">
+          <span class="font-ui text-xs text-t-muted">EVENTS</span>
+          <span class="font-mono text-sm text-t-text" x-text="events.length"></span>
+        </div>
+        <div class="flex justify-between items-center">
+          <span class="font-ui text-xs text-t-muted">ACTIVE IDX</span>
+          <span class="font-mono text-sm text-t-cyan" x-text="activeIndex"></span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end right col -->
+</main>
+
+<!-- ─── FOOTER ───────────────────────────────────────────────────────────────── -->
+<footer class="shrink-0 border-t border-t-border px-5 py-2 flex items-center justify-between">
+  <span class="font-mono text-xs text-t-muted">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
+  <span class="font-mono text-xs text-t-muted" x-text="'IST ' + istTime"></span>
+</footer>
+
+</div><!-- end z-10 flex col -->
 </body>
 </html>
