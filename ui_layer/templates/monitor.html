@@ -408,7 +408,7 @@ document.addEventListener('alpine:init', () => {
 
     _addEvent(evt) {
       this.events.unshift(evt);
-      if (this.events.length > 60) this.events.pop();
+      if (this.events.length > 100) this.events.pop();
     },
 
     /* ── Admin actions ───────────────────────────────────────── */

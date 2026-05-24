@@ -235,7 +235,10 @@ async def _run_live(
 
     from data_layer.base_feeder import EventBus
     from data_layer.global_feeder import GlobalFeeder
+    from data_layer.strike_rebalancer import StrikeRebalancer
+    from data_layer.strike_cleanup import StrikeCleanup
     from matrix_engine.candle_cache import CandleCache
+    from matrix_engine.gap_handler import GapHandler
     from matrix_engine.option_matrix import OptionMatrixEngine
     from strategies.base_strategy import ConfluenceEngine
     from strategies.strategy_a_oi import StrategyA_OIZone
@@ -247,12 +250,25 @@ async def _run_live(
 
     bus = EventBus()
     strategies = [StrategyA_OIZone(cfg), StrategyB_Trap(cfg), StrategyC_Panic(cfg)]
-    confluence   = ConfluenceEngine(bus, cfg, strategies)
-    candle_cache = CandleCache(bus, cfg)
+    confluence    = ConfluenceEngine(bus, cfg, strategies)
+    candle_cache  = CandleCache(bus, cfg)
     option_matrix = OptionMatrixEngine(bus, cfg)
-    feeder       = GlobalFeeder(bus, cfg)
-    router       = ExecutionRouter(bus, registry, cfg)
-    client_mgr   = ClientManager(bus, registry)
+    feeder        = GlobalFeeder(bus, cfg)
+    router        = ExecutionRouter(bus, registry, cfg)
+    client_mgr    = ClientManager(bus, registry)
+
+    # ── Data-layer operational modules ────────────────────────────────────────
+    rebalancer     = StrikeRebalancer(bus, cfg, feeder)
+    strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
+    gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
+
+    # Reset ATM baseline on gap-open so the rebalancer re-anchors to the new spot
+    async def _atm_reset_on_gap(underlying_: str, _opening_spot: float) -> None:
+        st = rebalancer._state.get(underlying_)
+        if st:
+            st.current_atm = None
+            st.open_atm    = None
+    gap_handler.register_reset_callback(_atm_reset_on_gap)
 
     # Optional web dashboard
     dashboard = None
@@ -262,7 +278,7 @@ async def _run_live(
             dashboard = DashboardServer(
                 bus, cfg, registry,
                 router=router,
-                rebalancer=None,  # wire rebalancer here if StrikeRebalancer is created
+                rebalancer=rebalancer,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -285,14 +301,17 @@ async def _run_live(
     await router.start()
 
     tasks = [
-        asyncio.create_task(feeder.start(),          name="feeder"),
-        asyncio.create_task(candle_cache.run(),       name="candle_cache"),
-        asyncio.create_task(option_matrix.run(),      name="option_matrix"),
-        asyncio.create_task(confluence.run(),         name="confluence"),
-        asyncio.create_task(router.run(),             name="router"),
-        asyncio.create_task(client_mgr.run(),         name="client_mgr"),
-        asyncio.create_task(admin.run(),              name="admin_console"),
-        asyncio.create_task(shutdown_event.wait(),    name="shutdown_sentinel"),
+        asyncio.create_task(feeder.start(),            name="feeder"),
+        asyncio.create_task(candle_cache.run(),         name="candle_cache"),
+        asyncio.create_task(option_matrix.run(),        name="option_matrix"),
+        asyncio.create_task(confluence.run(),           name="confluence"),
+        asyncio.create_task(router.run(),               name="router"),
+        asyncio.create_task(client_mgr.run(),           name="client_mgr"),
+        asyncio.create_task(rebalancer.run(),           name="rebalancer"),
+        asyncio.create_task(strike_cleanup.run(),       name="strike_cleanup"),
+        asyncio.create_task(gap_handler.run(),          name="gap_handler"),
+        asyncio.create_task(admin.run(),                name="admin_console"),
+        asyncio.create_task(shutdown_event.wait(),      name="shutdown_sentinel"),
     ]
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -304,6 +323,9 @@ async def _run_live(
 
     logger.info("Shutting down…")
     confluence.stop()
+    rebalancer.stop()
+    strike_cleanup.stop()
+    gap_handler.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # also stops the dashboard server
