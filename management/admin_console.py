@@ -34,6 +34,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Awaitable, Optional
 
@@ -102,6 +103,30 @@ class AdminConsole:
             )
 
         print("\n[AdminConsole] Ready.  Type 'help' for commands.\n", flush=True)
+
+        # Detect non-interactive stdin once, before any input() call.
+        # When stdin is not a real TTY (piped input, IDE debugger without a
+        # terminal, Docker without -it, Windows ConPTY during Uvicorn init),
+        # input() returns "" immediately on every call.  Calling it in a loop
+        # — even with asyncio.sleep between iterations — still spins and the
+        # phantom EOF signal keeps arriving.  The only safe fix is to skip the
+        # REPL entirely and park the task until an external stop() is issued.
+        _stdin_is_tty = (
+            sys.stdin is not None
+            and hasattr(sys.stdin, "isatty")
+            and sys.stdin.isatty()
+        )
+        if not _stdin_is_tty:
+            logger.info(
+                "AdminConsole [%s IST]: stdin is not a TTY — REPL disabled, "
+                "engine running headlessly. Use the web dashboard or send SIGTERM to stop.",
+                datetime.now(IST).strftime("%H:%M:%S"),
+            )
+            while self._running:
+                await asyncio.sleep(5.0)
+            return
+
+        # Interactive REPL — stdin is a real terminal.
         while self._running:
             try:
                 line: str = await asyncio.to_thread(self._readline)
@@ -110,10 +135,9 @@ class AdminConsole:
                     await asyncio.sleep(0.5)
                     continue
             except (EOFError, KeyboardInterrupt):
-                # Non-interactive stdin, VS Code terminal handshake, or Ctrl+C.
-                # Log and stay alive — only an explicit "quit"/"exit" shuts down.
                 logger.warning(
-                    "AdminConsole: stream interrupt at %s IST — staying alive.",
+                    "AdminConsole [%s IST]: stream interrupt — staying alive. "
+                    "Type 'quit' to stop.",
                     datetime.now(IST).strftime("%H:%M:%S"),
                 )
                 await asyncio.sleep(0.5)
