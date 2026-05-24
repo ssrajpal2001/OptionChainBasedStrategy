@@ -109,6 +109,10 @@ class AdminConsole:
                 break
             line = line.strip()
             if not line:
+                # Empty line from non-interactive stdin (piped input, VS Code terminal
+                # without a tty, Docker without -it). Sleep briefly to avoid spinning
+                # on a closed stdin, then let the engine keep running.
+                await asyncio.sleep(1.0)
                 continue
             await self._dispatch(line)
 
@@ -434,4 +438,6 @@ class AdminConsole:
         try:
             return input("admin> ")
         except EOFError:
-            return "quit"
+            # stdin is closed or non-interactive — return empty string so the
+            # run() loop sleeps and retries rather than triggering a shutdown.
+            return ""

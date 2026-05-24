@@ -329,7 +329,7 @@ async def _run_live(
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # also stops the dashboard server
-    feeder.stop()
+    await feeder.stop()
 
     for t in pending:
         t.cancel()
