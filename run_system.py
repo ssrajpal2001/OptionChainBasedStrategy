@@ -298,7 +298,13 @@ async def _run_live(
         dashboard_host=ui_host,
     )
 
+    # feeder.start() connects and spawns its own internal asyncio tasks, then
+    # returns immediately — it is a setup coroutine, not a run loop.  Calling
+    # it inside create_task() puts a already-completing task in the barrier,
+    # which fires FIRST_COMPLETED ~50 ms after boot.  Await it here alongside
+    # router.start() so the feeder is live before the barrier is entered.
     await router.start()
+    await feeder.start()
 
     # Admin console runs as a detached background task — its completion or any
     # internal stream error must NOT trigger the engine shutdown.  Only the
@@ -306,7 +312,6 @@ async def _run_live(
     admin_task = asyncio.create_task(admin.run(), name="admin_console")
 
     tasks = [
-        asyncio.create_task(feeder.start(),            name="feeder"),
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
         asyncio.create_task(option_matrix.run(),        name="option_matrix"),
         asyncio.create_task(confluence.run(),           name="confluence"),
@@ -321,9 +326,18 @@ async def _run_live(
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
     for t in done:
-        exc = t.exception() if not t.cancelled() else None
-        if exc and t.get_name() != "shutdown_sentinel":
-            logger.error("Task '%s' crashed: %s", t.get_name(), exc, exc_info=exc)
+        name = t.get_name()
+        if t.cancelled():
+            if name != "shutdown_sentinel":
+                logger.warning("Task '%s' was cancelled unexpectedly.", name)
+        else:
+            exc = t.exception()
+            if exc:
+                logger.error("Task '%s' crashed: %s", name, exc, exc_info=exc)
+            elif name != "shutdown_sentinel":
+                # A task returning normally (no exception) also fires FIRST_COMPLETED.
+                # Log it so the root cause is always visible in the shutdown trace.
+                logger.warning("Task '%s' completed normally — triggered shutdown.", name)
 
     logger.info("Shutting down…")
     confluence.stop()
