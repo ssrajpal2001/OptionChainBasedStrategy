@@ -409,6 +409,87 @@ Key log lines to monitor:
 
 ---
 
+## Automatic Gap-Opening Handling
+
+On days with significant pre-market news (RBI policy decisions, global events, election results),
+the NSE index can open more than 1% away from the prior close. If the system started with
+yesterday's ATM and indicator windows, RSI/VWAP/ADX values would be computed against a
+phantom baseline for the first 30-60 minutes, producing false signals.
+
+**The system detects and handles this automatically:**
+
+1. At **09:08 IST**, the system captures the pre-open reference price (from the NSE call-auction window).
+2. At **09:15:01 IST**, it compares the opening spot to the pre-open reference.
+3. If the drift exceeds **1%**, the system:
+   - Logs a `GAP OPEN DETECTED` warning with the drift percentage.
+   - Clears all candle history for the affected index (so RSI/VWAP/ADX start fresh).
+   - Resets the ATM subscription window to the true opening price.
+   - Resets all strategy state machines to IDLE.
+   - Publishes a `GAP_OPEN` system event (visible in logs).
+
+You will see log lines like:
+```
+WARNING  GapHandler: [NIFTY] GAP OPEN DETECTED — drift=1.42% (ref=22150.00 → open=22465.00). Triggering full reset cascade.
+INFO     GapHandler: [NIFTY] reset cascade complete (3 callbacks invoked).
+```
+
+**No action is required** — this reset happens automatically. Indicators will reach valid
+readings after the first 15+ candle closes (RSI warmup) and the first 500 closes (VWAP warmup).
+
+---
+
+## Rate-Limiting and Broker API Throttling
+
+Each broker has a documented API rate limit (typically 10 requests/second). If the system
+places two orders simultaneously and then polls for status, it could fire 4 API calls in
+rapid succession, triggering HTTP 429 (Too Many Requests) errors.
+
+**The system enforces limits automatically using a token-bucket rate limiter:**
+
+- Each broker binding has an independent token bucket (10 tokens/second, burst of 10).
+- Before every `place_order()` and `get_order_status()` call, the worker acquires a token.
+- If the bucket is temporarily empty, the worker waits the exact required time (e.g. 100ms
+  for a 10 req/s bucket) and then proceeds — **no orders are dropped, only delayed**.
+- The mock broker uses a 1000 req/s limit so backtests and demos run at full speed.
+
+**Viewing rate limiter stats in the admin console:**
+
+```
+admin> worker_stats
+```
+
+Output includes `rate_limiter` per binding:
+```json
+{
+  "client_id": "C001",
+  "rate_limiter": {
+    "C001_shoonya": {
+      "rate": 10.0,
+      "burst": 10,
+      "available_tokens": 7.3,
+      "total_acquired": 142,
+      "total_waits": 3
+    }
+  }
+}
+```
+
+`total_waits > 0` means the system has had to pace itself — this is normal during
+a signal burst. Consistently high `total_waits` may indicate the broker is slow to
+respond or that lot sizing should be reviewed to reduce API call frequency.
+
+**Adjusting rate limits (advanced):**
+
+Rate limits can be changed at runtime without restarting. Add to `main.py` or the
+admin console handler:
+```python
+worker._rate_limiter.override_rate("C001_shoonya", rate=5.0, burst=5)
+```
+Use this only if a broker lowers its documented limits or if you observe frequent 429s
+at the default 10 req/s setting.
+
+---
+
 ## Common Issues
 
 ### "No client profiles found"

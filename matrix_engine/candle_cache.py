@@ -217,6 +217,21 @@ class CandleCache:
     def get_all_snapshots(self, symbol: str, ltp: float) -> List[Optional[TechSnapshot]]:
         return [self.get_snapshot(symbol, tf, ltp) for tf in self._cfg.candle_timeframes]
 
+    def reset_symbol(self, symbol: str) -> None:
+        """
+        Clear all candle history for a symbol across every timeframe.
+        Called by GapHandler on gap-open events so RSI/VWAP/ADX buffers start
+        fresh from the true opening bar rather than carrying stale pre-gap data.
+        """
+        keys_to_clear = [k for k in self._series if k[0] == symbol]
+        for key in keys_to_clear:
+            del self._series[key]
+        if keys_to_clear:
+            logger.info(
+                "CandleCache: cleared %d series for %s (gap-open reset).",
+                len(keys_to_clear), symbol,
+            )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper

@@ -39,6 +39,7 @@ from config.client_profiles import ClientProfile
 from data_layer.base_feeder import EventBus
 from data_layer.symbol_translator import SymbolTranslator, InternalSymbol
 from execution_bridge.base_broker import BaseBroker, OrderRequest, OrderSide, OrderType
+from execution_bridge.rate_limiter import ClientRateLimiterRegistry
 from strategies.base_strategy import SignalPackage
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,14 @@ class ClientExecutionWorker:
         self._cfg = cfg
         self._queue: asyncio.Queue[SignalPackage] = asyncio.Queue(maxsize=_WORKER_QUEUE_SIZE)
         self._running = False
+
+        # Rate limiter — one TokenBucket per broker binding, keyed by binding_id
+        self._rate_limiter = ClientRateLimiterRegistry(client.client_id)
+        # Pre-build binding_id → provider map so _place() doesn't search the list each time
+        self._binding_provider: Dict[str, str] = {
+            b.binding_id: b.provider
+            for b in client.broker_bindings
+        }
 
         # Metrics
         self._processed = 0
@@ -289,7 +298,11 @@ class ClientExecutionWorker:
             client_id=self._client.client_id,
         )
         try:
+            provider = self._binding_provider.get(broker.binding_id, "mock")
+            bucket = self._rate_limiter.get_limiter(broker.binding_id, provider)
+            await bucket.acquire()
             order_id = await broker.place_order(req)
+            await bucket.acquire()
             fill: OrderFill = await broker.get_order_status(order_id)
             await self._bus.publish(Topic.ORDER_FILL, fill)
             self._client.record_trade(0.0)
@@ -436,6 +449,7 @@ class WorkerPool:
                 "total_failures": w._total_failures,
                 "circuit_open": w.circuit_is_open,
                 "task_alive": not self._tasks.get(w.client_id, _DEAD_SENTINEL).done(),
+                "rate_limiter": w._rate_limiter.all_stats(),
             }
             for w in self._workers.values()
         ]

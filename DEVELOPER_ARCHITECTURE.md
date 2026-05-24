@@ -21,13 +21,15 @@ OptionChainBasedStrategy/
 │   ├── global_feeder.py         WebSocket adapter: two-stage pipeline (_ws_loop + _parse_worker)
 │   ├── symbol_translator.py     InternalSymbol <-> broker-specific symbol format conversion
 │   ├── tick_recorder.py         Async Parquet + ZStandard tick logger (non-blocking I/O)
-│   └── strike_rebalancer.py     Dynamic ATM strike monitor: resubscribes on 3-interval spot drift
+│   ├── strike_rebalancer.py     Dynamic ATM strike monitor: resubscribes on 3-interval spot drift
+│   └── strike_cleanup.py        Post-exit stream GC: unsubscribes dead strikes after position close
 │
 ├── matrix_engine/
 │   ├── candle_cache.py          Tick -> OHLCV aggregation per timeframe; publishes CandleEvent
 │   ├── indicators.py            Vectorized NumPy: RSI(14), VWAP(500), ADX(20), EMA, ATR
 │   ├── option_matrix.py         Live option chain: per-strike OI/DOI/IV, max-pain, PCR
-│   └── state_persistence.py     SQLite snapshot on CANDLE_CLOSE; hot-reload on mid-day reboot
+│   ├── state_persistence.py     SQLite snapshot on CANDLE_CLOSE; hot-reload on mid-day reboot
+│   └── gap_handler.py           Gap-open detector: captures pre-open ref, triggers reset on >1% drift
 │
 ├── strategies/
 │   ├── base_strategy.py         SignalPackage, ConfluenceEngine (meta-aggregator), BaseStrategy
@@ -37,7 +39,8 @@ OptionChainBasedStrategy/
 │
 ├── execution_bridge/
 │   ├── base_broker.py           BaseBroker ABC, MockBroker, BROKER_REGISTRY, OrderRequest/Fill
-│   ├── parallel_worker_pool.py  ClientExecutionWorker (per-client asyncio.Queue) + WorkerPool
+│   ├── rate_limiter.py          Token-bucket rate limiter: 10 req/s per broker binding
+│   ├── parallel_worker_pool.py  ClientExecutionWorker (per-client asyncio.Queue + circuit breaker)
 │   ├── execution_router.py      Thin signal dispatcher: pool.dispatch() -> all workers simultaneously
 │   ├── broker_shoonya.py        Shoonya/Finvasia (NorenRestApiPy) - self-registers
 │   ├── broker_fyers.py          Fyers API v3 (fyers-apiv3) - self-registers
@@ -453,6 +456,104 @@ as scalars — no secondary DataFrame buffer held in memory during replay.
 
 ---
 
+## Phase 3 Operational Hardening
+
+### A. Stream Cleanup — `data_layer/strike_cleanup.py`
+
+Prevents bandwidth waste from dead option subscriptions after a position is closed.
+
+```
+StrikeCleanup
+  Subscribes to: ORDER_FILL, SYSTEM_EVENT
+
+  Dual cleanup condition (both must be true to unsubscribe):
+    1. open_count[(underlying, strike)] == 0   # no remaining live positions
+    2. strike NOT IN rebalancer.active_strikes  # outside current ATM window
+
+  On ORDER_FILL BUY  → increment open_count
+  On ORDER_FILL SELL → decrement open_count, check cleanup eligibility
+  On SYSTEM_EVENT POSITION_CLOSED (format: "UNDERLYING:STRIKE:OPTTYPE")
+                      → decrement open_count, check cleanup eligibility
+
+  If eligible: await feeder.unsubscribe_tokens([CE_token, PE_token])
+               rebalancer.unpin_strike(underlying, strike)
+
+  If strike is still in ATM window: leave subscribed (overhead is minimal,
+  may be needed for next signal without waiting for a new subscription round-trip)
+
+Public API:
+  notify_position_opened(underlying, strike)    # sync-safe increment
+  notify_position_closed(underlying, strike)    # sync-safe; schedules async cleanup
+  cleanup_stats() -> dict                       # cleanups_performed, skipped, open_positions
+```
+
+### B. Gap-Open Detection — `matrix_engine/gap_handler.py`
+
+Prevents poisoned indicator readings on gap-open days where overnight news moves
+the index > 1% away from the pre-market reference price.
+
+```
+GapHandler
+  Subscribes to: INDEX_TICK
+  Threshold: GAP_THRESHOLD = 0.01 (1%)
+
+  Phase 1 — Pre-open capture (09:08:00 – 09:14:59 IST):
+    First tick for each underlying at/after 09:08 IST records pre_open_ref price.
+    Source: NSE call-auction equilibrium price during pre-open session.
+
+  Phase 2 — Opening validation (first tick >= 09:15:01 IST):
+    drift = |opening_spot - pre_open_ref| / pre_open_ref
+    If drift > 1%: publish GAP_OPEN system event + fire all reset callbacks
+
+  Reset cascade (all callbacks run concurrently via asyncio.gather):
+    - candle_cache.reset_symbol(underlying)    # clear RSI/VWAP/ADX buffers
+    - rebalancer: set current_atm = None       # forces new ATM from opening price
+    - strategy state machines: reset to IDLE
+
+Registration in main.py or admin_console.py:
+  gap_handler.register_reset_callback(candle_cache.reset_symbol_async)
+  gap_handler.register_reset_callback(rebalancer.reset_atm)
+  gap_handler.register_reset_callback(strategy.reset_state_async)
+
+  Call daily_reset() at 15:45 IST to clear state for next session.
+
+SysEvent.GAP_OPEN message format:
+  "UNDERLYING:ref=PRICE:open=PRICE:drift=N.NNpct"
+```
+
+### C. Execution Rate Limiting — `execution_bridge/rate_limiter.py`
+
+Hard ceiling of 10 req/s per broker binding to prevent HTTP 429 errors.
+
+```
+TokenBucket (per binding, per client)
+  Algorithm: continuous token refill at rate tokens/second; burst capacity
+  acquire():
+    if tokens available: consume immediately, return (O(1), no yield)
+    else: sleep(deficit / rate) exactly, then return
+    (no busy-wait, no time.sleep — purely asyncio.sleep with computed duration)
+
+BrokerRateProfile per provider:
+  shoonya / fyers / angelone / dhan / upstox: rate=10.0/s, burst=10
+  mock: rate=1000.0/s, burst=1000  (effectively unlimited for testing)
+
+ClientRateLimiterRegistry (per ClientExecutionWorker)
+  get_limiter(binding_id, provider) -> TokenBucket   # lazy-creates on first call
+  override_rate(binding_id, rate, burst)             # runtime admin adjustment
+  all_stats() -> dict                                # token counts and wait stats
+
+Integration in ClientExecutionWorker._place():
+  bucket = self._rate_limiter.get_limiter(broker.binding_id, provider)
+  await bucket.acquire()           # before place_order()
+  order_id = await broker.place_order(req)
+  await bucket.acquire()           # before get_order_status()
+  fill = await broker.get_order_status(order_id)
+```
+
+Rate limiter stats appear in `WorkerPool.stats()` under `rate_limiter` key per client.
+
+---
+
 ## Key Design Invariants
 
 - **No `time.sleep` anywhere** — all yielding via `asyncio.wait_for(..., timeout=1.0)`
@@ -465,3 +566,5 @@ as scalars — no secondary DataFrame buffer held in memory during replay.
 - **Indicator periods are hard-pinned** — no period arguments accepted at call sites
 - **Worker isolation** — one asyncio Task per client; no shared mutable state between workers
 - **State survives reboots** — SQLite snapshots on every CANDLE_CLOSE; `state_restore` on boot
+- **Rate-limited broker calls** — `await bucket.acquire()` before every `place_order()` and `get_order_status()` call; never floods broker APIs
+- **Gap-safe indicator windows** — GapHandler clears CandleCache buffers on gap-open so RSI/VWAP/ADX never compute on cross-session data
