@@ -457,6 +457,31 @@ class WorkerPool:
     def worker(self, client_id: str) -> Optional[ClientExecutionWorker]:
         return self._workers.get(client_id)
 
+    async def add_worker(self, worker: ClientExecutionWorker) -> None:
+        """Register and immediately start a worker at runtime (live broker provisioning)."""
+        self._workers[worker.client_id] = worker
+        if self._running:
+            self._tasks[worker.client_id] = asyncio.create_task(
+                worker.run(), name=f"exec_worker_{worker.client_id}_live"
+            )
+            logger.info("WorkerPool: dynamically started worker for client %s.", worker.client_id)
+
+    def add_broker_to_worker(
+        self, client_id: str, binding_id: str, broker: "BaseBroker", provider: str
+    ) -> bool:
+        """
+        Inject a new broker into an already-running worker's broker map.
+
+        Returns True if the worker existed and was updated, False if the worker
+        does not exist yet (caller should use add_worker() instead).
+        """
+        w = self._workers.get(client_id)
+        if w is None:
+            return False
+        w._brokers[binding_id] = broker
+        w._binding_provider[binding_id] = provider
+        return True
+
     # ── Task watcher ──────────────────────────────────────────────────────────
 
     async def _watcher_loop(self) -> None:

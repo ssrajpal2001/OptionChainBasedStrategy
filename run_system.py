@@ -229,7 +229,7 @@ async def _run_live(
 ) -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting %s mode for %s%s", mode.upper(), underlying,
-                f" | Dashboard → http://localhost:{ui_port}" if ui else "")
+                f" | Dashboard http://localhost:{ui_port}" if ui else "")
 
     cfg.active_index = underlying
 
@@ -279,6 +279,7 @@ async def _run_live(
                 bus, cfg, registry,
                 router=router,
                 rebalancer=rebalancer,
+                feeder=feeder,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)

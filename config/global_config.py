@@ -155,6 +155,36 @@ class StrategyParams:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Auth Config — dashboard login credentials (must precede GlobalConfig)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class AuthConfig:
+    """
+    Dashboard login credentials.
+
+    Admin password and client PINs are read from environment variables so
+    they are never embedded in source code.
+
+    Environment variables:
+      TERMINUS_ADMIN_USER      — admin username  (default: "admin")
+      TERMINUS_ADMIN_PASSWORD  — admin password  (default: "admin123"  ← CHANGE IN PROD)
+      TERMINUS_CLIENT_PIN_<ID> — per-client PIN  (default: the client_id itself)
+    """
+    admin_username: str = field(
+        default_factory=lambda: os.getenv("TERMINUS_ADMIN_USER", "admin")
+    )
+    admin_password: str = field(
+        default_factory=lambda: os.getenv("TERMINUS_ADMIN_PASSWORD", "admin123")
+    )
+
+    @staticmethod
+    def client_pin(client_id: str) -> str:
+        """Return the dashboard PIN for a client (default = the client_id itself)."""
+        return os.getenv(f"TERMINUS_CLIENT_PIN_{client_id.upper()}", client_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Global System Config (single root object)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -164,6 +194,7 @@ class GlobalConfig:
     indicators: IndicatorParams = field(default_factory=IndicatorParams)
     storage: StorageConfig = field(default_factory=StorageConfig)
     strategy: StrategyParams = field(default_factory=StrategyParams)
+    auth: AuthConfig = field(default_factory=AuthConfig)
 
     # Active indices to monitor (feeder subscribes to all)
     monitored_indices: List[str] = field(

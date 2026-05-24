@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Set
 
 from config.global_config import IST, Topic
-from data_layer.base_feeder import EventBus, IndexTick
+from data_layer.base_feeder import EventBus, IndexTick, OptionTick
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +63,16 @@ class WsBridge:
         self._stats_providers: Dict[str, Callable[[], Any]] = {}
 
         # Subscribe once — queues are drained by independent sub-loops
-        self._tick_q = bus.subscribe(Topic.INDEX_TICK)
-        self._snap_q = bus.subscribe(Topic.MATRIX_SNAPSHOT)
-        self._fill_q = bus.subscribe(Topic.ORDER_FILL)
-        self._sys_q  = bus.subscribe(Topic.SYSTEM_EVENT)
+        self._tick_q   = bus.subscribe(Topic.INDEX_TICK)
+        self._snap_q   = bus.subscribe(Topic.MATRIX_SNAPSHOT)
+        self._fill_q   = bus.subscribe(Topic.ORDER_FILL)
+        self._sys_q    = bus.subscribe(Topic.SYSTEM_EVENT)
+        self._option_q = bus.subscribe(Topic.OPTION_TICK)
+
+        # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
+        self._spot_cache: Dict[str, float] = {}
+        # Option chain cache: key = "{underlying}_{strike}", value = row dict for IV matrix
+        self._option_cache: Dict[str, dict] = {}
 
     # ── Connection management ─────────────────────────────────────────────────
 
@@ -114,6 +120,7 @@ class WsBridge:
                 self._fill_loop(),
                 self._sys_loop(),
                 self._heartbeat_loop(),
+                self._option_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -130,6 +137,7 @@ class WsBridge:
             except asyncio.TimeoutError:
                 continue
             try:
+                self._spot_cache[tick.symbol] = tick.ltp
                 atm = self._compute_atm(tick.symbol, tick.ltp)
                 await self.broadcast({
                     "type": "tick",
@@ -208,6 +216,50 @@ class WsBridge:
                 })
             except Exception as exc:
                 logger.debug("WsBridge._sys_loop: %s", exc)
+
+    async def _option_loop(self) -> None:
+        """Cache incoming OptionTick events for the IV matrix endpoint."""
+        while self._running:
+            try:
+                tick: OptionTick = await asyncio.wait_for(self._option_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                key = f"{tick.underlying}_{int(tick.strike)}"
+                row = self._option_cache.get(key) or {
+                    "strike":   tick.strike,
+                    "is_atm":   False,
+                    "call_oi":  0, "call_iv":  0.0, "call_bid": 0.0, "call_ask": 0.0,
+                    "put_oi":   0, "put_iv":   0.0, "put_bid":  0.0, "put_ask":  0.0,
+                    "spread":   0.0,
+                }
+                # iv stored as decimal (0.18 = 18%) — convert to percentage for frontend
+                iv_pct = round(tick.iv * 100, 2) if tick.iv < 2.0 else round(tick.iv, 2)
+                if tick.option_type.upper() == "CE":
+                    row["call_oi"]  = int(tick.oi)
+                    row["call_iv"]  = iv_pct
+                    row["call_bid"] = round(float(tick.bid), 2)
+                    row["call_ask"] = round(float(tick.ask), 2)
+                else:
+                    row["put_oi"]   = int(tick.oi)
+                    row["put_iv"]   = iv_pct
+                    row["put_bid"]  = round(float(tick.bid), 2)
+                    row["put_ask"]  = round(float(tick.ask), 2)
+                # Bid-ask spread: average of call and put half-spreads
+                c_spread = row["call_ask"] - row["call_bid"]
+                p_spread = row["put_ask"]  - row["put_bid"]
+                row["spread"] = round((c_spread + p_spread) / 2, 2) if (c_spread + p_spread) > 0 else 0.0
+                # Mark ATM based on current spot
+                spot = self._spot_cache.get(tick.underlying, 0.0)
+                if spot > 0.0:
+                    step = (
+                        self._cfg.exchange.strike_steps.get(tick.underlying, 50.0)
+                        if self._cfg else 50.0
+                    )
+                    row["is_atm"] = (int(tick.strike) == int(_round_to_step(spot, step)))
+                self._option_cache[key] = row
+            except Exception as exc:
+                logger.debug("WsBridge._option_loop: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
         """Broadcast worker stats and client summaries every HEARTBEAT_INTERVAL seconds."""

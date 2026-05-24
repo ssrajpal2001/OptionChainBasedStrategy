@@ -164,6 +164,9 @@ class ClientProfile:
     def halt(self, reason: str = "") -> None:
         self._halted = True
 
+    def resume(self) -> None:
+        self._halted = False
+
     def reset_daily(self) -> None:
         self._daily_pnl = 0.0
         self._daily_trades = 0
@@ -266,6 +269,17 @@ class ClientRegistry:
                 notes=rec.get("notes", ""),
             )
             self._clients[profile.client_id] = profile
+
+    def add_broker_binding(self, client_id: str, binding: "BrokerBinding") -> None:
+        """Add a new BrokerBinding to a client at runtime (live provisioning)."""
+        client = self._clients.get(client_id)
+        if client is None:
+            raise KeyError(f"Client '{client_id}' not found.")
+        if any(b.binding_id == binding.binding_id for b in client.broker_bindings):
+            raise ValueError(
+                f"Binding '{binding.binding_id}' already exists on client '{client_id}'."
+            )
+        client.broker_bindings.append(binding)
 
     def inject_credentials(self, client_id: str, binding_id: str, **kwargs: str) -> None:
         """

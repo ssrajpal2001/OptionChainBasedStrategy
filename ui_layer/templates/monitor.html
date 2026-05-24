@@ -9,9 +9,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-  <!-- Tailwind CDN -->
+  <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
-
   <!-- Alpine.js CDN -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
 
@@ -26,263 +25,241 @@
           },
           colors: {
             t: {
-              bg:      '#04060c',
-              surface: '#070d18',
-              card:    '#0a1220',
-              border:  '#131f30',
-              dim:     '#1a2840',
-              cyan:    '#00d4ff',
-              green:   '#00e87a',
-              red:     '#ff3a4a',
-              amber:   '#f59e0b',
-              muted:   '#3a5470',
-              text:    '#7a9ab8',
-              bright:  '#c8daf0',
+              bg:      'var(--t-bg)',
+              surface: 'var(--t-surface)',
+              card:    'var(--t-card)',
+              border:  'var(--t-border)',
+              dim:     'var(--t-dim)',
+              cyan:    'var(--t-cyan)',
+              green:   'var(--t-green)',
+              red:     'var(--t-red)',
+              amber:   'var(--t-amber)',
+              muted:   'var(--t-muted)',
+              text:    'var(--t-text)',
+              bright:  'var(--t-bright)',
             }
           },
-          boxShadow: {
-            'glow-cyan':  '0 0 12px rgba(0,212,255,0.35), 0 0 30px rgba(0,212,255,0.12)',
-            'glow-green': '0 0 12px rgba(0,232,122,0.35), 0 0 30px rgba(0,232,122,0.10)',
-            'glow-red':   '0 0 12px rgba(255,58,74,0.40), 0 0 30px rgba(255,58,74,0.15)',
-            'glow-amber': '0 0 12px rgba(245,158,11,0.35)',
-          }
         }
       }
     }
   </script>
 
   <style>
-    [x-cloak] { display: none !important; }
+    /* ── CSS custom properties — midnight theme defaults ─────────────── */
+    :root {
+      --t-bg:       #04060c;
+      --t-surface:  #070d18;
+      --t-card:     #0a1220;
+      --t-border:   #131f30;
+      --t-dim:      #1a2840;
+      --t-cyan:     #00d4ff;
+      --t-green:    #00e87a;
+      --t-red:      #ff3a4a;
+      --t-amber:    #f59e0b;
+      --t-muted:    #3a5470;
+      --t-text:     #7a9ab8;
+      --t-bright:   #c8daf0;
+      /* RGB components for alpha variants */
+      --t-cyan-rgb:  0, 212, 255;
+      --t-green-rgb: 0, 232, 122;
+      --t-red-rgb:   255, 58, 74;
+      --t-amber-rgb: 245, 158, 11;
+    }
 
-    /* ── Base ───────────────────────────────────────────────── */
+    [x-cloak] { display: none !important; }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
     body {
-      background-color: #04060c;
-      color: #7a9ab8;
+      background-color: var(--t-bg);
+      color: var(--t-text);
       font-family: 'Rajdhani', sans-serif;
       font-size: 14px;
       overflow-x: hidden;
+      transition: background-color 0.3s, color 0.3s;
     }
 
-    /* ── Background grid ─────────────────────────────────────── */
+    /* ── Background grid ──────────────────────────────────────────────── */
     body::before {
       content: '';
       position: fixed; inset: 0; z-index: 0; pointer-events: none;
       background-image:
-        linear-gradient(rgba(0,212,255,0.025) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,212,255,0.025) 1px, transparent 1px);
+        linear-gradient(rgba(var(--t-cyan-rgb),0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(var(--t-cyan-rgb),0.025) 1px, transparent 1px);
       background-size: 40px 40px;
     }
-
-    /* ── Scanline overlay ────────────────────────────────────── */
+    /* ── Scanlines ────────────────────────────────────────────────────── */
     body::after {
       content: '';
       position: fixed; inset: 0; z-index: 1000; pointer-events: none;
       background: repeating-linear-gradient(
-        0deg,
-        transparent,
-        transparent 2px,
-        rgba(0,0,0,0.08) 2px,
-        rgba(0,0,0,0.08) 4px
+        0deg, transparent, transparent 2px,
+        rgba(0,0,0,0.07) 2px, rgba(0,0,0,0.07) 4px
       );
     }
 
-    /* ── Card ────────────────────────────────────────────────── */
+    /* ── Card ─────────────────────────────────────────────────────────── */
     .t-card {
-      background: #0a1220;
-      border: 1px solid #131f30;
+      background: var(--t-card);
+      border: 1px solid var(--t-border);
       position: relative;
+      transition: background 0.3s, border-color 0.3s;
     }
     .t-card::before {
       content: '';
       position: absolute; top: 0; left: 0; right: 0; height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(0,212,255,0.4), transparent);
+      background: linear-gradient(90deg, transparent, rgba(var(--t-cyan-rgb),0.4), transparent);
     }
 
-    /* ── Typography ──────────────────────────────────────────── */
-    .font-mono  { font-family: 'Share Tech Mono', monospace; }
-    .font-disp  { font-family: 'Orbitron', monospace; }
-    .font-ui    { font-family: 'Rajdhani', sans-serif; }
-
-    /* ── Live value flash ────────────────────────────────────── */
-    @keyframes val-flash {
-      0%   { color: #00d4ff; text-shadow: 0 0 8px rgba(0,212,255,0.9); }
-      100% { color: inherit; text-shadow: none; }
-    }
-    .val-flash { animation: val-flash 0.8s ease-out forwards; }
-
-    /* ── Connection pulse ────────────────────────────────────── */
-    @keyframes conn-pulse {
-      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,232,122,0.5); }
-      50%       { opacity: 0.7; box-shadow: 0 0 0 4px rgba(0,232,122,0); }
-    }
-    .conn-live { animation: conn-pulse 2s ease-in-out infinite; }
-
-    /* ── Kill switch ring countdown ──────────────────────────── */
-    .kill-ring {
-      position: absolute; inset: -3px;
-      border-radius: 4px;
-      border: 2px solid transparent;
-      animation: kill-countdown 5s linear forwards;
-    }
-    @keyframes kill-countdown {
-      0%   { border-color: #ff3a4a; box-shadow: 0 0 8px rgba(255,58,74,0.8); }
-      100% { border-color: rgba(255,58,74,0.1); box-shadow: none; }
-    }
-
-    /* ── Drawdown bar ────────────────────────────────────────── */
-    .drawdown-bar { transition: width 0.6s ease; }
-
-    /* ── Scrollbar ───────────────────────────────────────────── */
-    ::-webkit-scrollbar { width: 3px; height: 3px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #1a2840; border-radius: 2px; }
-    ::-webkit-scrollbar-thumb:hover { background: #3a5470; }
-
-    /* ── Section label ───────────────────────────────────────── */
+    /* ── Section label ────────────────────────────────────────────────── */
     .sec-label {
-      font-family: 'Rajdhani', sans-serif;
-      font-weight: 700;
-      font-size: 10px;
-      letter-spacing: 0.18em;
-      text-transform: uppercase;
-      color: #3a5470;
-    }
-
-    /* ── Indicator gauge background ──────────────────────────── */
-    .gauge-track {
-      background: #070d18;
-      border: 1px solid #131f30;
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    .gauge-fill { transition: width 0.5s ease; border-radius: 2px; }
-
-    /* ── RSI zone coloring ───────────────────────────────────── */
-    .rsi-ob { color: #ff3a4a; text-shadow: 0 0 6px rgba(255,58,74,0.6); }
-    .rsi-os { color: #00e87a; text-shadow: 0 0 6px rgba(0,232,122,0.6); }
-    .rsi-n  { color: #00d4ff; }
-
-    /* ── Index tab ───────────────────────────────────────────── */
-    .idx-tab {
       font-family: 'Rajdhani', sans-serif; font-weight: 700;
-      font-size: 12px; letter-spacing: 0.06em;
-      padding: 4px 12px; border-radius: 2px;
-      border: 1px solid transparent;
-      cursor: pointer; transition: all 0.15s;
-      color: #3a5470;
-    }
-    .idx-tab:hover { color: #7a9ab8; border-color: #1a2840; }
-    .idx-tab.active {
-      color: #00d4ff;
-      background: rgba(0,212,255,0.07);
-      border-color: rgba(0,212,255,0.3);
-      text-shadow: 0 0 8px rgba(0,212,255,0.5);
+      font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--t-muted);
     }
 
-    /* ── Button styles ───────────────────────────────────────── */
-    .btn-halt {
+    /* ── Input ────────────────────────────────────────────────────────── */
+    .t-input {
+      font-family: 'Share Tech Mono', monospace; font-size: 12px;
+      background: var(--t-surface); border: 1px solid var(--t-dim);
+      color: var(--t-bright); padding: 5px 8px; border-radius: 2px; width: 100%;
+      outline: none; transition: border-color 0.15s;
+    }
+    .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.5); box-shadow: 0 0 6px rgba(var(--t-cyan-rgb),0.15); }
+    .t-input option { background: var(--t-card); color: var(--t-bright); }
+
+    /* ── Buttons ──────────────────────────────────────────────────────── */
+    .btn-primary {
       font-family: 'Rajdhani', sans-serif; font-weight: 700;
-      font-size: 11px; letter-spacing: 0.1em;
-      padding: 3px 10px; border-radius: 2px;
-      background: rgba(255,58,74,0.1); border: 1px solid rgba(255,58,74,0.3);
-      color: #ff3a4a; cursor: pointer; transition: all 0.15s;
+      font-size: 13px; letter-spacing: 0.1em;
+      padding: 8px 20px; border-radius: 2px;
+      background: rgba(var(--t-cyan-rgb),0.12); border: 1px solid rgba(var(--t-cyan-rgb),0.35);
+      color: var(--t-cyan); cursor: pointer; transition: all 0.15s; width: 100%;
     }
-    .btn-halt:hover { background: rgba(255,58,74,0.2); box-shadow: 0 0 8px rgba(255,58,74,0.3); }
-
-    .btn-resume {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700;
-      font-size: 11px; letter-spacing: 0.1em;
-      padding: 3px 10px; border-radius: 2px;
-      background: rgba(0,232,122,0.1); border: 1px solid rgba(0,232,122,0.3);
-      color: #00e87a; cursor: pointer; transition: all 0.15s;
-    }
-    .btn-resume:hover { background: rgba(0,232,122,0.2); box-shadow: 0 0 8px rgba(0,232,122,0.3); }
-
+    .btn-primary:hover { background: rgba(var(--t-cyan-rgb),0.22); }
     .btn-action {
       font-family: 'Rajdhani', sans-serif; font-weight: 700;
       font-size: 12px; letter-spacing: 0.08em;
       padding: 6px 16px; border-radius: 2px;
-      background: rgba(0,212,255,0.08); border: 1px solid rgba(0,212,255,0.25);
-      color: #00d4ff; cursor: pointer; transition: all 0.15s; width: 100%;
+      background: rgba(var(--t-cyan-rgb),0.08); border: 1px solid rgba(var(--t-cyan-rgb),0.25);
+      color: var(--t-cyan); cursor: pointer; transition: all 0.15s; width: 100%;
     }
-    .btn-action:hover { background: rgba(0,212,255,0.15); box-shadow: 0 0 8px rgba(0,212,255,0.25); }
-
+    .btn-action:hover { background: rgba(var(--t-cyan-rgb),0.18); }
+    .btn-halt {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 11px; letter-spacing: 0.1em;
+      padding: 3px 10px; border-radius: 2px;
+      background: rgba(var(--t-red-rgb),0.1); border: 1px solid rgba(var(--t-red-rgb),0.3);
+      color: var(--t-red); cursor: pointer; transition: all 0.15s;
+    }
+    .btn-halt:hover { background: rgba(var(--t-red-rgb),0.2); }
+    .btn-resume {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 11px; letter-spacing: 0.1em;
+      padding: 3px 10px; border-radius: 2px;
+      background: rgba(var(--t-green-rgb),0.1); border: 1px solid rgba(var(--t-green-rgb),0.3);
+      color: var(--t-green); cursor: pointer; transition: all 0.15s;
+    }
+    .btn-resume:hover { background: rgba(var(--t-green-rgb),0.2); }
     .btn-kill {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700;
-      font-size: 13px; letter-spacing: 0.1em;
+      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 13px; letter-spacing: 0.1em;
       padding: 8px 16px; border-radius: 2px;
-      background: rgba(255,58,74,0.12); border: 1px solid rgba(255,58,74,0.4);
-      color: #ff3a4a; cursor: pointer; transition: all 0.15s;
+      background: rgba(var(--t-red-rgb),0.12); border: 1px solid rgba(var(--t-red-rgb),0.4);
+      color: var(--t-red); cursor: pointer; transition: all 0.15s;
       width: 100%; position: relative;
     }
-    .btn-kill:hover { background: rgba(255,58,74,0.22); box-shadow: 0 0 16px rgba(255,58,74,0.4); }
-    .btn-kill.armed {
-      background: rgba(255,58,74,0.22);
-      box-shadow: 0 0 20px rgba(255,58,74,0.5);
-      color: #fff;
+    .btn-kill:hover { background: rgba(var(--t-red-rgb),0.22); }
+    .btn-kill.armed { background: rgba(var(--t-red-rgb),0.22); color: var(--t-bright); }
+    .btn-add {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.08em;
+      padding: 8px 16px; border-radius: 2px;
+      background: rgba(var(--t-green-rgb),0.08); border: 1px solid rgba(var(--t-green-rgb),0.3);
+      color: var(--t-green); cursor: pointer; transition: all 0.15s; width: 100%;
     }
+    .btn-add:hover { background: rgba(var(--t-green-rgb),0.18); }
 
-    /* ── Input style ─────────────────────────────────────────── */
-    .t-input {
-      font-family: 'Share Tech Mono', monospace; font-size: 12px;
-      background: #070d18; border: 1px solid #1a2840;
-      color: #c8daf0; padding: 5px 8px; border-radius: 2px; width: 100%;
-      outline: none; transition: border-color 0.15s;
-    }
-    .t-input:focus { border-color: rgba(0,212,255,0.4); box-shadow: 0 0 6px rgba(0,212,255,0.15); }
-
-    /* ── Event feed row ──────────────────────────────────────── */
-    .feed-row {
-      font-family: 'Share Tech Mono', monospace; font-size: 11px;
-      padding: 4px 8px;
-      border-bottom: 1px solid rgba(19,31,48,0.6);
-      transition: background 0.1s;
-      display: flex; gap: 8px; align-items: baseline;
-    }
-    .feed-row:hover { background: rgba(255,255,255,0.02); }
-
-    /* ── Worker row ──────────────────────────────────────────── */
-    .worker-row {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 5px 8px;
-      border-bottom: 1px solid #131f30;
-      font-size: 12px;
-    }
-
-    /* ── Tradeable badge ─────────────────────────────────────── */
+    /* ── Badges ───────────────────────────────────────────────────────── */
     .badge-live {
-      font-size: 9px; letter-spacing: 0.12em; font-weight: 700;
-      padding: 1px 6px; border-radius: 1px;
-      background: rgba(0,232,122,0.12); border: 1px solid rgba(0,232,122,0.3);
-      color: #00e87a;
+      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 6px; border-radius: 1px;
+      background: rgba(var(--t-green-rgb),0.12); border: 1px solid rgba(var(--t-green-rgb),0.3); color: var(--t-green);
     }
     .badge-halted {
-      font-size: 9px; letter-spacing: 0.12em; font-weight: 700;
-      padding: 1px 6px; border-radius: 1px;
-      background: rgba(255,58,74,0.12); border: 1px solid rgba(255,58,74,0.3);
-      color: #ff3a4a;
+      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 6px; border-radius: 1px;
+      background: rgba(var(--t-red-rgb),0.12); border: 1px solid rgba(var(--t-red-rgb),0.3); color: var(--t-red);
+    }
+    .badge-role-admin {
+      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 8px; border-radius: 1px;
+      background: rgba(var(--t-amber-rgb),0.12); border: 1px solid rgba(var(--t-amber-rgb),0.35); color: var(--t-amber);
+    }
+    .badge-role-client {
+      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 8px; border-radius: 1px;
+      background: rgba(var(--t-cyan-rgb),0.12); border: 1px solid rgba(var(--t-cyan-rgb),0.3); color: var(--t-cyan);
     }
 
-    /* ── Diagonal accent ─────────────────────────────────────── */
-    .diag-accent {
-      position: absolute; top: 0; right: 0;
-      width: 0; height: 0;
-      border-style: solid;
-      border-width: 0 16px 16px 0;
-      border-color: transparent rgba(0,212,255,0.25) transparent transparent;
+    /* ── Gauges ───────────────────────────────────────────────────────── */
+    .gauge-track { background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 2px; overflow: hidden; }
+    .gauge-fill { transition: width 0.5s ease; border-radius: 2px; }
+
+    /* ── Index tab ────────────────────────────────────────────────────── */
+    .idx-tab {
+      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.06em;
+      padding: 4px 12px; border-radius: 2px; border: 1px solid transparent;
+      cursor: pointer; transition: all 0.15s; color: var(--t-muted);
+    }
+    .idx-tab:hover { color: var(--t-text); border-color: var(--t-dim); }
+    .idx-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.07); border-color: rgba(var(--t-cyan-rgb),0.3); }
+
+    /* ── Theme tab ────────────────────────────────────────────────────── */
+    .theme-tab {
+      font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 10px; letter-spacing: 0.1em;
+      padding: 3px 10px; border-radius: 2px; border: 1px solid transparent;
+      cursor: pointer; transition: all 0.15s; color: var(--t-muted); text-transform: uppercase;
+    }
+    .theme-tab:hover { color: var(--t-text); border-color: var(--t-dim); }
+    .theme-tab.active { color: var(--t-cyan); border-color: rgba(var(--t-cyan-rgb),0.3); background: rgba(var(--t-cyan-rgb),0.05); }
+
+    /* ── Login tab ────────────────────────────────────────────────────── */
+    /* ── Admin sub-nav tabs ───────────────────────────────────────────── */
+    .admin-tab {
+      font-family: 'Rajdhani', sans-serif;
+      font-size: 11px; font-weight: 700;
+      letter-spacing: 0.14em; text-transform: uppercase;
+      padding: 12px 22px; border: none;
+      border-bottom: 2px solid transparent;
+      background: transparent; color: var(--t-muted);
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .admin-tab:hover:not(.active) { color: var(--t-text); }
+    .admin-tab.active { color: var(--t-cyan); border-bottom-color: var(--t-cyan); }
+
+    .login-tab {
+      flex: 1; font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.1em;
+      padding: 8px; text-transform: uppercase; text-align: center;
+      border: 1px solid var(--t-border); color: var(--t-muted); cursor: pointer; transition: all 0.2s;
+    }
+    .login-tab:first-child { border-radius: 2px 0 0 2px; }
+    .login-tab:last-child  { border-radius: 0 2px 2px 0; border-left: none; }
+    .login-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.35); }
+
+    /* ── Kill ring countdown ──────────────────────────────────────────── */
+    .kill-ring {
+      position: absolute; inset: -3px; border-radius: 4px; border: 2px solid transparent;
+      animation: kill-countdown 5s linear forwards;
+    }
+    @keyframes kill-countdown {
+      0%   { border-color: var(--t-red); box-shadow: 0 0 8px rgba(var(--t-red-rgb),0.8); }
+      100% { border-color: rgba(var(--t-red-rgb),0.1); box-shadow: none; }
     }
 
-    /* ── EMA signal badge ────────────────────────────────────── */
-    .ema-bull { color: #00e87a; text-shadow: 0 0 6px rgba(0,232,122,0.6); }
-    .ema-bear { color: #ff3a4a; text-shadow: 0 0 6px rgba(255,58,74,0.6); }
-    .ema-neutral { color: #3a5470; }
-
-    /* ── Navbar height ───────────────────────────────────────── */
-    .navbar-h { height: 52px; }
-
-    /* ── Stagger fade-in for cards ───────────────────────────── */
+    /* ── Animations ───────────────────────────────────────────────────── */
+    @keyframes val-flash {
+      0%   { color: var(--t-cyan); }
+      100% { color: inherit; }
+    }
+    .val-flash { animation: val-flash 0.8s ease-out forwards; }
+    @keyframes conn-pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.5; }
+    }
+    .conn-live { animation: conn-pulse 2s ease-in-out infinite; }
     @keyframes fade-up {
       from { opacity: 0; transform: translateY(10px); }
       to   { opacity: 1; transform: translateY(0); }
@@ -291,7 +268,74 @@
     .fade-up-2 { animation: fade-up 0.4s ease 0.12s both; }
     .fade-up-3 { animation: fade-up 0.4s ease 0.20s both; }
     .fade-up-4 { animation: fade-up 0.4s ease 0.28s both; }
-    .fade-up-5 { animation: fade-up 0.4s ease 0.36s both; }
+    @keyframes slide-in {
+      from { opacity: 0; transform: scale(0.97) translateY(-8px); }
+      to   { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .slide-in { animation: slide-in 0.25s ease both; }
+
+    /* ── Feed row ─────────────────────────────────────────────────────── */
+    .feed-row {
+      font-family: 'Share Tech Mono', monospace; font-size: 11px;
+      padding: 4px 8px; border-bottom: 1px solid rgba(var(--t-border, #131f30),0.6);
+      display: flex; gap: 8px; align-items: baseline;
+    }
+    .feed-row:hover { background: rgba(var(--t-cyan-rgb),0.02); }
+
+    /* ── Worker row ───────────────────────────────────────────────────── */
+    .worker-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 5px 8px; border-bottom: 1px solid var(--t-border); font-size: 12px;
+    }
+
+    /* ── Diagonal accent ──────────────────────────────────────────────── */
+    .diag-accent {
+      position: absolute; top: 0; right: 0; width: 0; height: 0; border-style: solid;
+      border-width: 0 16px 16px 0;
+      border-color: transparent rgba(var(--t-cyan-rgb),0.25) transparent transparent;
+    }
+
+    /* ── EMA signals ──────────────────────────────────────────────────── */
+    .ema-bull { color: var(--t-green); }
+    .ema-bear { color: var(--t-red); }
+    .ema-neutral { color: var(--t-muted); }
+
+    /* ── RSI zone ─────────────────────────────────────────────────────── */
+    .rsi-ob { color: var(--t-red); }
+    .rsi-os { color: var(--t-green); }
+    .rsi-n  { color: var(--t-cyan); }
+
+    /* ── Drawdown bar ─────────────────────────────────────────────────── */
+    .drawdown-bar { transition: width 0.6s ease; }
+
+    /* ── IV wide-spread row highlight ────────────────────────────────── */
+    .iv-wide-spread td { background: rgba(var(--t-amber-rgb),0.05); }
+    .iv-wide-spread td:nth-child(4) { color: var(--t-amber) !important; font-weight: bold; }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 3px; height: 3px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--t-dim); border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--t-muted); }
+
+    /* ── Navbar height ────────────────────────────────────────────────── */
+    .navbar-h { height: 52px; }
+
+    /* ── Modal overlay ────────────────────────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(0,0,0,0.75); backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .modal-box {
+      background: var(--t-card); border: 1px solid var(--t-border);
+      border-radius: 4px; width: 100%; max-width: 480px; max-height: 90vh;
+      overflow-y: auto; padding: 24px; position: relative;
+    }
+    .modal-box::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(var(--t-cyan-rgb),0.6), transparent);
+    }
   </style>
 </head>
 
@@ -302,21 +346,67 @@
 document.addEventListener('alpine:init', () => {
   Alpine.data('terminal', () => ({
 
-    /* ── State ──────────────────────────────────────────────── */
-    ws:            null,
-    wsConnected:   false,
-    activeIndex:   'NIFTY',
-    indices:       ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY'],
+    /* ── Auth state ─────────────────────────────────────────────────── */
+    screen:         'login',   // 'login' | 'admin' | 'client'
+    adminTab:       'dashboard', // 'dashboard' | 'feeder'
+    authToken:      '',
+    authRole:       '',
+    authClientId:   '',
+    authClientName: '',
 
-    spots:         {},   // { SYM: {ltp, atm, ts} }
-    snapshots:     {},   // { SYM: {rsi, vwap, adx, ema_fast, ema_slow, plus_di, minus_di, ...} }
-    clients:       [],
-    workers:       [],
-    events:        [],
+    loginTab:    'admin',
+    loginUser:   '',
+    loginPass:   '',
+    loginCid:    '',
+    loginPin:    '',
+    loginError:  '',
+    loginLoading: false,
 
-    istTime:       '--:--:--',
+    /* ── Theme ──────────────────────────────────────────────────────── */
+    currentTheme: 'midnight',
+    showThemeMenu: false,
 
-    /* admin */
+    _themes: {
+      midnight: {
+        bg:'#04060c', surface:'#070d18', card:'#0a1220', border:'#131f30', dim:'#1a2840',
+        cyan:'#00d4ff', green:'#00e87a', red:'#ff3a4a', amber:'#f59e0b',
+        muted:'#3a5470', text:'#7a9ab8', bright:'#c8daf0',
+        cyanRgb:'0,212,255', greenRgb:'0,232,122', redRgb:'255,58,74', amberRgb:'245,158,11',
+      },
+      matrix: {
+        bg:'#000000', surface:'#060f06', card:'#0a170a', border:'#0f2a0f', dim:'#153a15',
+        cyan:'#00ff41', green:'#00ff41', red:'#ff0040', amber:'#aaff00',
+        muted:'#1a4020', text:'#44aa55', bright:'#88ff88',
+        cyanRgb:'0,255,65', greenRgb:'0,255,65', redRgb:'255,0,64', amberRgb:'170,255,0',
+      },
+      cyberpunk: {
+        bg:'#09090f', surface:'#0e0d1c', card:'#14122a', border:'#281848', dim:'#3a1e6e',
+        cyan:'#ffe040', green:'#00ffcc', red:'#ff0090', amber:'#ff7700',
+        muted:'#4a2880', text:'#b060f0', bright:'#fff0a0',
+        cyanRgb:'255,224,64', greenRgb:'0,255,204', redRgb:'255,0,144', amberRgb:'255,119,0',
+      },
+      light_pro: {
+        bg:'#f0f2f5', surface:'#e8ecf0', card:'#ffffff', border:'#d1d9e2', dim:'#aab8c6',
+        cyan:'#0c5fa8', green:'#15803d', red:'#b91c1c', amber:'#92400e',
+        muted:'#64748b', text:'#334155', bright:'#0f172a',
+        cyanRgb:'12,95,168', greenRgb:'21,128,61', redRgb:'185,28,28', amberRgb:'146,64,14',
+      },
+    },
+
+    /* ── Market data ────────────────────────────────────────────────── */
+    ws:           null,
+    wsConnected:  false,
+    activeIndex:  'NIFTY',
+    indices:      ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY'],
+    spots:        {},
+    snapshots:    {},
+    clients:      [],
+    workers:      [],
+    brokers:      [],
+    events:       [],
+    istTime:      '--:--:--',
+
+    /* ── Admin controls ─────────────────────────────────────────────── */
     killArmed:     false,
     killCountdown: 5,
     _killTimer:    null,
@@ -324,8 +414,62 @@ document.addEventListener('alpine:init', () => {
     lotCid:        '',
     lotBid:        '',
     lotMul:        1.0,
+    tokenCid:      '',
+    tokenBid:      '',
+    tokenVal:      '',
+    tokenMsg:      '',
+    tokenOk:       null,
 
-    /* ── Computed ────────────────────────────────────────────── */
+    /* ── Dual feeder ────────────────────────────────────────────────── */
+    dualCreds: {
+      upstox_client_id:'', upstox_api_key:'', upstox_secret:'',
+      upstox_access_token:'', upstox_totp:'',
+      fyers_client_id:'', fyers_app_key:'', fyers_access_token:'', fyers_totp:'',
+    },
+    dualMsg: '', dualOk: null, dualConnecting: false,
+    showUpstoxCreds: false, showFyersCreds: false,
+    upstoxMsg: '', upstoxOk: null, upstoxConnecting: false,
+    fyersMsg:  '', fyersOk:  null, fyersConnecting:  false,
+
+    /* ── RMS ─────────────────────────────────────────────────────────── */
+    rms: { max_drawdown_pct: 5.0, order_throttle_per_sec: 5, squareoff_time: '15:15', distance_filter_pct: 5.0 },
+    rmsMsg: '', rmsSaved: false,
+    liquidateArmed: false, liquidateCountdown: 5, _liquidateTimer: null,
+
+    /* ── IV Matrix ───────────────────────────────────────────────────── */
+    ivMatrix: [], ivSpreadThreshold: 15,
+
+    /* ── DB / Recovery ───────────────────────────────────────────────── */
+    checkpointMsg: '', warmBootMsg: '', lastCheckpointTs: '—',
+
+    /* ── Audit ───────────────────────────────────────────────────────── */
+    auditLines: [], auditLoading: false,
+
+    /* ── Telemetry ───────────────────────────────────────────────────── */
+    telemetry: { upstox_latency_ms: 0, fyers_latency_ms: 0, ws_clients: 0 },
+
+    /* ── Admin feeder panel ─────────────────────────────────────────── */
+    feederProvider:  'mock',
+    feederCreds:     { user_id:'', password:'', api_key:'', access_token:'' },
+    feederMsg:       '',
+    feederOk:        null,
+    feederConnecting: false,
+    supportedFeeders: ['mock','shoonya','dhan','fyers','angelone'],
+
+    /* ── Client broker modal ────────────────────────────────────────── */
+    showBrokerModal: false,
+    newBroker: {
+      provider:'mock', binding_id:'', label:'',
+      user_id:'', password:'', api_key:'', api_secret:'',
+      totp_secret:'', vendor_code:'', imei:'', client_code:'',
+      access_token:'', lot_multiplier: 1.0,
+    },
+    brokerProviders: ['mock','shoonya','dhan','fyers','angelone'],
+    brokerAddMsg:    '',
+    brokerAddOk:     null,
+    brokerAddLoading: false,
+
+    /* ── Computed ────────────────────────────────────────────────────── */
     get spot()   { return this.spots[this.activeIndex] || {}; },
     get snap()   { return this.snapshots[this.activeIndex] || {}; },
     get rsiVal() { return +(this.snap.rsi  || 0); },
@@ -348,61 +492,162 @@ document.addEventListener('alpine:init', () => {
       if (!this.plusDI || !this.minusDI) return 'FLAT';
       return this.plusDI > this.minusDI ? '+DI' : '-DI';
     },
+    get myClient() {
+      return this.clients.find(c => c.client_id === this.authClientId) || null;
+    },
+    get myBrokers() {
+      return this.brokers.filter(b => b.client_id === this.authClientId);
+    },
+    get myEvents() {
+      return this.events.filter(e => e.type !== 'fill' || e.client_id === this.authClientId);
+    },
 
-    /* ── Init ────────────────────────────────────────────────── */
+    /* ── Init ────────────────────────────────────────────────────────── */
     init() {
       this._startClock();
-      this._connect();
+      const saved = localStorage.getItem('terminus_theme') || 'midnight';
+      this.applyTheme(saved, false);
+      setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadRms(); }, 2500);
+      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); } }, 10000);
+      setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
     },
 
     _startClock() {
       const tick = () => {
         this.istTime = new Date().toLocaleTimeString('en-IN', {
           timeZone: 'Asia/Kolkata', hour12: false,
-          hour: '2-digit', minute: '2-digit', second: '2-digit'
+          hour: '2-digit', minute: '2-digit', second: '2-digit',
         });
       };
       tick();
       setInterval(tick, 1000);
     },
 
-    /* ── WebSocket ───────────────────────────────────────────── */
+    /* ── Theme engine ────────────────────────────────────────────────── */
+    applyTheme(name, save = true) {
+      const t = this._themes[name] || this._themes.midnight;
+      this.currentTheme = name;
+      if (save) localStorage.setItem('terminus_theme', name);
+      const r = document.documentElement.style;
+      r.setProperty('--t-bg',       t.bg);
+      r.setProperty('--t-surface',  t.surface);
+      r.setProperty('--t-card',     t.card);
+      r.setProperty('--t-border',   t.border);
+      r.setProperty('--t-dim',      t.dim);
+      r.setProperty('--t-cyan',     t.cyan);
+      r.setProperty('--t-green',    t.green);
+      r.setProperty('--t-red',      t.red);
+      r.setProperty('--t-amber',    t.amber);
+      r.setProperty('--t-muted',    t.muted);
+      r.setProperty('--t-text',     t.text);
+      r.setProperty('--t-bright',   t.bright);
+      r.setProperty('--t-cyan-rgb',  t.cyanRgb);
+      r.setProperty('--t-green-rgb', t.greenRgb);
+      r.setProperty('--t-red-rgb',   t.redRgb);
+      r.setProperty('--t-amber-rgb', t.amberRgb);
+      document.body.style.backgroundColor = t.bg;
+      document.body.style.color = t.text;
+      this.showThemeMenu = false;
+    },
+
+    /* ── Auth ────────────────────────────────────────────────────────── */
+    async login() {
+      this.loginError = '';
+      this.loginLoading = true;
+      try {
+        // Read from DOM directly — works even if Alpine x-model binding is not active
+        var isAdmin = (this.loginTab || 'admin') === 'admin';
+        var user = (document.getElementById('inp-admin-user') || {}).value || this.loginUser || '';
+        var pass = (document.getElementById('inp-admin-pass') || {}).value || this.loginPass || '';
+        var cid  = (document.getElementById('inp-client-cid') || {}).value || this.loginCid  || '';
+        var pin  = (document.getElementById('inp-client-pin') || {}).value || this.loginPin  || '';
+        user = user.trim(); cid = cid.trim();
+        if (isAdmin && (!user || !pass)) {
+          this.loginError = 'Enter username and password.';
+          return;
+        }
+        if (!isAdmin && (!cid || !pin)) {
+          this.loginError = 'Enter Client ID and PIN.';
+          return;
+        }
+        var body = isAdmin
+          ? { role: 'admin',  username: user, password: pass }
+          : { role: 'client', username: cid,  password: pin  };
+        const r = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+          const det = d.detail;
+          this.loginError = typeof det === 'string' ? det
+            : Array.isArray(det) ? det.map(e => e.msg || JSON.stringify(e)).join(' · ')
+            : (det ? JSON.stringify(det) : 'Login failed.');
+          return;
+        }
+        this.authToken      = d.access_token;
+        this.authRole       = d.role;
+        this.authClientId   = d.client_id   || '';
+        this.authClientName = d.client_name || d.username || '';
+        this.screen         = d.role === 'admin' ? 'admin' : 'client';
+        this.loginPass      = '';
+        this.loginPin       = '';
+        this._connect();
+      } catch (e) {
+        this.loginError = 'Network error — server unreachable.';
+      } finally {
+        this.loginLoading = false;
+      }
+    },
+
+    logout() {
+      if (this.ws) { this.ws.close(); this.ws = null; }
+      this.authToken = ''; this.authRole = ''; this.authClientId = '';
+      this.screen = 'login'; this.wsConnected = false;
+      this.clients = []; this.workers = []; this.brokers = []; this.events = [];
+      this.spots = {}; this.snapshots = {};
+    },
+
+    /* ── WebSocket ───────────────────────────────────────────────────── */
     _connect() {
+      if (!this.authToken) return;
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      try { this.ws = new WebSocket(`${proto}://${location.host}/ws`); }
+      try { this.ws = new WebSocket(`${proto}://${location.host}/ws?token=${this.authToken}`); }
       catch { this._scheduleReconnect(); return; }
 
       this.ws.onopen = () => {
         this.wsConnected = true;
-        this._addEvent({type:'sys', code:'CONNECTED', msg:'Dashboard connected to engine', ts: this.istTime});
+        this._addEvent({ type:'sys', code:'CONNECTED', msg:'Dashboard connected', ts: this.istTime });
       };
-      this.ws.onmessage = (e) => {
-        try { this._handle(JSON.parse(e.data)); } catch {}
-      };
-      this.ws.onclose = () => {
+      this.ws.onmessage = e => { try { this._handle(JSON.parse(e.data)); } catch {} };
+      this.ws.onclose   = () => {
         this.wsConnected = false;
-        this._addEvent({type:'sys', code:'DISCONNECTED', msg:'Connection lost — reconnecting in 3s', ts: this.istTime});
-        this._scheduleReconnect();
+        if (this.screen !== 'login') {
+          this._addEvent({ type:'sys', code:'DISCONNECTED', msg:'Reconnecting in 3s…', ts: this.istTime });
+          this._scheduleReconnect();
+        }
       };
       this.ws.onerror = () => this.ws.close();
     },
 
     _scheduleReconnect() {
-      setTimeout(() => this._connect(), 3000);
+      if (this.screen !== 'login') setTimeout(() => this._connect(), 3000);
     },
 
     _handle(msg) {
       if (msg.type === 'tick') {
-        this.spots = { ...this.spots, [msg.sym]: {ltp: msg.ltp, atm: msg.atm, ts: msg.ts} };
+        this.spots = { ...this.spots, [msg.sym]: { ltp: msg.ltp, atm: msg.atm, ts: msg.ts } };
       } else if (msg.type === 'snapshot') {
         this.snapshots = { ...this.snapshots, [msg.sym]: msg };
       } else if (msg.type === 'fill') {
-        this._addEvent({type:'fill', ...msg});
+        this._addEvent({ type:'fill', ...msg });
       } else if (msg.type === 'sys') {
-        this._addEvent({type:'sys', ...msg});
+        this._addEvent({ type:'sys', ...msg });
       } else if (msg.type === 'stats') {
         if (msg.name === 'clients') this.clients = msg.data || [];
         if (msg.name === 'workers') this.workers = msg.data || [];
+        if (msg.name === 'brokers') this.brokers = msg.data || [];
       }
     },
 
@@ -411,58 +656,233 @@ document.addEventListener('alpine:init', () => {
       if (this.events.length > 100) this.events.pop();
     },
 
-    /* ── Admin actions ───────────────────────────────────────── */
-    async haltClient(id) {
-      await fetch(`/api/halt/${id}`, {method:'POST'});
+    /* ── Auth-aware fetch ────────────────────────────────────────────── */
+    async _fetch(url, opts = {}) {
+      if (!opts.headers) opts.headers = {};
+      if (this.authToken) opts.headers['Authorization'] = `Bearer ${this.authToken}`;
+      if (opts.json !== undefined) {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(opts.json);
+        opts.method = opts.method || 'POST';
+        delete opts.json;
+      }
+      const r = await fetch(url, opts);
+      if (r.status === 401 || r.status === 403) { this.logout(); return null; }
+      return r;
     },
-    async resumeClient(id) {
-      await fetch(`/api/resume/${id}`, {method:'POST'});
-    },
+
+    /* ── Admin actions ───────────────────────────────────────────────── */
+    async haltClient(id) { await this._fetch(`/api/halt/${id}`, { method:'POST' }); },
+    async resumeClient(id) { await this._fetch(`/api/resume/${id}`, { method:'POST' }); },
 
     armKill() {
       if (this.killArmed) {
-        /* second click — execute */
-        this.killArmed = false;
-        clearInterval(this._killTimer);
-        fetch('/api/kill_switch', {method:'POST'});
+        this.killArmed = false; clearInterval(this._killTimer);
+        this._fetch('/api/kill_switch', { method:'POST' });
         return;
       }
-      this.killArmed    = true;
-      this.killCountdown = 5;
+      this.killArmed = true; this.killCountdown = 5;
       this._killTimer = setInterval(() => {
         this.killCountdown--;
-        if (this.killCountdown <= 0) {
-          clearInterval(this._killTimer);
-          this.killArmed = false;
-        }
+        if (this.killCountdown <= 0) { clearInterval(this._killTimer); this.killArmed = false; }
       }, 1000);
     },
 
-    async rebalance() {
-      await fetch(`/api/rebalance/${this.rebalIdx}`, {method:'POST'});
-    },
+    async rebalance() { await this._fetch(`/api/rebalance/${this.rebalIdx}`, { method:'POST' }); },
 
     async setLots() {
       if (!this.lotCid || !this.lotBid) return;
-      await fetch(`/api/set_lots/${this.lotCid}/${this.lotBid}/${this.lotMul}`, {method:'POST'});
+      await this._fetch(`/api/set_lots/${this.lotCid}/${this.lotBid}/${this.lotMul}`, { method:'POST' });
     },
 
-    /* ── Helpers ─────────────────────────────────────────────── */
+    async updateToken() {
+      if (!this.tokenCid || !this.tokenBid) return;
+      this.tokenMsg = '';
+      const body = { client_id: this.tokenCid, binding_id: this.tokenBid };
+      if (this.tokenVal) body.access_token = this.tokenVal;
+      try {
+        const r = await this._fetch('/api/client/update_token', { json: body });
+        if (!r) return;
+        const d = await r.json();
+        this.tokenOk  = r.ok;
+        this.tokenMsg = d.message || d.detail || (r.ok ? 'Authenticated.' : 'Failed.');
+      } catch {
+        this.tokenOk = false; this.tokenMsg = 'Request failed.';
+      }
+    },
+
+    async connectFeeder() {
+      this.feederMsg = ''; this.feederOk = null; this.feederConnecting = true;
+      try {
+        const body = { provider: this.feederProvider, ...this.feederCreds };
+        const r = await this._fetch('/api/admin/feeder/connect', { json: body });
+        if (!r) return;
+        const d = await r.json();
+        this.feederOk  = r.ok;
+        this.feederMsg = d.message || d.detail || (r.ok ? 'Connected.' : 'Failed.');
+      } catch {
+        this.feederOk = false; this.feederMsg = 'Request failed.';
+      } finally {
+        this.feederConnecting = false;
+      }
+    },
+
+    /* ── Client actions ──────────────────────────────────────────────── */
+    async addBroker() {
+      this.brokerAddMsg = ''; this.brokerAddOk = null; this.brokerAddLoading = true;
+      try {
+        const r = await this._fetch('/api/client/register_broker', { json: { ...this.newBroker } });
+        if (!r) return;
+        const d = await r.json();
+        this.brokerAddOk  = r.ok;
+        this.brokerAddMsg = d.message || d.detail || (r.ok ? 'Broker registered.' : 'Failed.');
+        if (r.ok) {
+          setTimeout(() => { this.showBrokerModal = false; this.brokerAddMsg = ''; }, 2000);
+        }
+      } catch {
+        this.brokerAddOk = false; this.brokerAddMsg = 'Request failed.';
+      } finally {
+        this.brokerAddLoading = false;
+      }
+    },
+
+    /* ── Helpers ─────────────────────────────────────────────────────── */
     fmt(v, d=2) {
-      return Number(v||0).toLocaleString('en-IN', {minimumFractionDigits:d, maximumFractionDigits:d});
+      return Number(v||0).toLocaleString('en-IN', { minimumFractionDigits:d, maximumFractionDigits:d });
     },
-    pnlClass(v) { return v >= 0 ? 'text-t-green' : 'text-t-red'; },
-    pnlGlow(v)  { return v >= 0 ? 'shadow-glow-green' : 'shadow-glow-red'; },
-    capPct(pnl, cap) {
-      if (!cap) return 0;
-      return Math.min(100, Math.abs(pnl / cap * 100 * 5)); /* visual scale ×5 */
-    },
+    pnlClass(v)  { return v >= 0 ? 'text-t-green' : 'text-t-red'; },
+    capPct(pnl, cap) { if (!cap) return 0; return Math.min(100, Math.abs(pnl/cap*100*5)); },
     evtColor(evt) {
-      if (evt.type === 'fill')                      return '#00e87a';
-      if (['KILL_SWITCH','DISCONNECTED'].includes(evt.code)) return '#ff3a4a';
-      if (evt.code === 'GAP_OPEN')                  return '#f59e0b';
-      if (evt.code === 'CONNECTED')                 return '#00d4ff';
-      return '#3a5470';
+      if (evt.type === 'fill')                           return 'var(--t-green)';
+      if (['KILL_SWITCH','DISCONNECTED'].includes(evt.code)) return 'var(--t-red)';
+      if (evt.code === 'GAP_OPEN')                       return 'var(--t-amber)';
+      if (evt.code === 'CONNECTED')                      return 'var(--t-cyan)';
+      return 'var(--t-muted)';
+    },
+    themeLabel(k) { return { midnight:'MIDNIGHT', matrix:'MATRIX', cyberpunk:'CYBERPUNK', light_pro:'LIGHT PRO' }[k] || k; },
+
+    /* ── Dual feeder ─────────────────────────────────────────────────────── */
+    async connectUpstox() {
+      this.upstoxMsg = ''; this.upstoxOk = null; this.upstoxConnecting = true;
+      try {
+        const payload = {
+          client_id:    this.dualCreds.upstox_client_id,
+          api_key:      this.dualCreds.upstox_api_key,
+          secret:       this.dualCreds.upstox_secret,
+          access_token: this.dualCreds.upstox_access_token,
+          totp:         this.dualCreds.upstox_totp,
+        };
+        const r = await this._fetch('/api/admin/feeder/connect/upstox', { json: payload });
+        if (!r) return;
+        const d = await r.json();
+        this.upstoxOk  = r.ok;
+        this.upstoxMsg = d.message || d.detail || (r.ok ? 'Upstox feed active.' : 'Failed.');
+      } catch { this.upstoxOk = false; this.upstoxMsg = 'Request failed.'; }
+      finally   { this.upstoxConnecting = false; }
+    },
+
+    async connectFyers() {
+      this.fyersMsg = ''; this.fyersOk = null; this.fyersConnecting = true;
+      try {
+        const payload = {
+          client_id:    this.dualCreds.fyers_client_id,
+          app_key:      this.dualCreds.fyers_app_key,
+          access_token: this.dualCreds.fyers_access_token,
+          totp:         this.dualCreds.fyers_totp,
+        };
+        const r = await this._fetch('/api/admin/feeder/connect/fyers', { json: payload });
+        if (!r) return;
+        const d = await r.json();
+        this.fyersOk  = r.ok;
+        this.fyersMsg = d.message || d.detail || (r.ok ? 'Fyers feed active.' : 'Failed.');
+      } catch { this.fyersOk = false; this.fyersMsg = 'Request failed.'; }
+      finally   { this.fyersConnecting = false; }
+    },
+
+    async connectDual() {
+      this.dualMsg = ''; this.dualOk = null; this.dualConnecting = true;
+      try {
+        const r = await this._fetch('/api/admin/feeder/connect_dual', { json: this.dualCreds });
+        if (!r) return;
+        const d = await r.json();
+        this.dualOk  = r.ok;
+        this.dualMsg = d.message || d.detail || (r.ok ? 'Dual feed active.' : 'Failed.');
+      } catch { this.dualOk = false; this.dualMsg = 'Request failed.'; }
+      finally   { this.dualConnecting = false; }
+    },
+
+    /* ── RMS ─────────────────────────────────────────────────────────────── */
+    async saveRms() {
+      try {
+        const r = await this._fetch('/api/admin/rms', { json: this.rms });
+        if (!r) return;
+        this.rmsSaved = r.ok;
+        this.rmsMsg   = r.ok ? 'RMS config saved.' : 'Save failed.';
+        setTimeout(() => { this.rmsMsg = ''; }, 3000);
+      } catch { this.rmsMsg = 'Request failed.'; }
+    },
+
+    armLiquidate() {
+      if (this.liquidateArmed) {
+        clearInterval(this._liquidateTimer); this.liquidateArmed = false;
+        this._fetch('/api/admin/force_liquidate', { method: 'POST' });
+        return;
+      }
+      this.liquidateArmed = true; this.liquidateCountdown = 5;
+      this._liquidateTimer = setInterval(() => {
+        this.liquidateCountdown--;
+        if (this.liquidateCountdown <= 0) { clearInterval(this._liquidateTimer); this.liquidateArmed = false; }
+      }, 1000);
+    },
+
+    /* ── DB / Recovery ───────────────────────────────────────────────────── */
+    async checkpoint() {
+      const r = await this._fetch('/api/admin/checkpoint', { method: 'POST' });
+      if (r && r.ok) {
+        const d = await r.json();
+        this.checkpointMsg  = 'Checkpoint saved at ' + (d.ts || '').substring(11, 19) + ' IST';
+        this.lastCheckpointTs = (d.ts || '').substring(11, 19);
+      } else { this.checkpointMsg = 'Checkpoint failed.'; }
+      setTimeout(() => { this.checkpointMsg = ''; }, 4000);
+    },
+
+    async warmBoot() {
+      const r = await this._fetch('/api/admin/warm_boot', { method: 'POST' });
+      this.warmBootMsg = (r && r.ok) ? 'Warm boot recovery initiated.' : 'Warm boot failed.';
+      setTimeout(() => { this.warmBootMsg = ''; }, 4000);
+    },
+
+    /* ── Audit ───────────────────────────────────────────────────────────── */
+    async loadAudit() {
+      this.auditLoading = true;
+      try {
+        const r = await this._fetch('/api/admin/audit_log');
+        if (r && r.ok) { const d = await r.json(); this.auditLines = d.lines || []; }
+      } catch {} finally { this.auditLoading = false; }
+    },
+
+    /* ── RMS load ────────────────────────────────────────────────────────── */
+    async loadRms() {
+      try {
+        const r = await this._fetch('/api/admin/rms');
+        if (r && r.ok) { const d = await r.json(); this.rms = { ...this.rms, ...d }; }
+      } catch {}
+    },
+
+    /* ── Telemetry ───────────────────────────────────────────────────────── */
+    async loadTelemetry() {
+      try {
+        const r = await this._fetch('/api/admin/telemetry');
+        if (r && r.ok) { const d = await r.json(); this.telemetry = d; }
+      } catch {}
+    },
+
+    /* ── IV Matrix ───────────────────────────────────────────────────────── */
+    async loadIvMatrix() {
+      try {
+        const r = await this._fetch('/api/admin/iv_matrix');
+        if (r && r.ok) { const d = await r.json(); this.ivMatrix = d.strikes || []; }
+      } catch {}
     },
   }));
 });
@@ -474,45 +894,198 @@ document.addEventListener('alpine:init', () => {
 <body x-data="terminal" x-cloak class="relative">
 <div class="relative z-10 flex flex-col min-h-screen">
 
-<!-- ─── NAVBAR ──────────────────────────────────────────────────────────────── -->
-<header class="navbar-h sticky top-0 z-50 flex items-center justify-between px-5 border-b border-t-border bg-t-bg/95 backdrop-blur-sm shrink-0">
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     LOGIN SCREEN
+════════════════════════════════════════════════════════════════════════════ -->
+<div x-show="screen === 'login'"
+     class="fixed inset-0 z-50 flex items-center justify-center p-4"
+     style="background: var(--t-bg)">
 
-  <!-- Logo -->
+  <div class="w-full max-w-sm slide-in">
+    <!-- Logo -->
+    <div class="text-center mb-8">
+      <div class="font-display text-3xl font-black tracking-widest" style="color:var(--t-cyan); text-shadow:0 0 20px rgba(var(--t-cyan-rgb),0.7)">TERMINUS</div>
+      <div class="font-mono text-xs mt-1" style="color:var(--t-muted)">OptionChain AlgoTrader · NSE Options</div>
+    </div>
+
+    <!-- Login card -->
+    <div class="t-card rounded p-6">
+      <!-- Role tabs -->
+      <div class="flex mb-5">
+        <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'">ADMIN</button>
+        <button class="login-tab" :class="{ active: loginTab==='client' }" @click="loginTab='client'">CLIENT</button>
+      </div>
+
+      <!-- Admin form -->
+      <div x-show="loginTab === 'admin'" class="space-y-3">
+        <div>
+          <div class="sec-label mb-1">USERNAME</div>
+          <input id="inp-admin-user" class="t-input" type="text" placeholder="admin"
+                 x-model="loginUser" @keydown.enter="login()" autocomplete="username" />
+        </div>
+        <div>
+          <div class="sec-label mb-1">PASSWORD</div>
+          <input id="inp-admin-pass" class="t-input" type="password" placeholder="••••••••"
+                 x-model="loginPass" @keydown.enter="login()" autocomplete="current-password" />
+        </div>
+      </div>
+
+      <!-- Client form -->
+      <div x-show="loginTab === 'client'" class="space-y-3">
+        <div>
+          <div class="sec-label mb-1">CLIENT ID</div>
+          <input id="inp-client-cid" class="t-input" type="text" placeholder="e.g. C001"
+                 x-model="loginCid" @keydown.enter="login()" autocomplete="username" />
+        </div>
+        <div>
+          <div class="sec-label mb-1">PIN</div>
+          <input id="inp-client-pin" class="t-input" type="password" placeholder="••••"
+                 x-model="loginPin" @keydown.enter="login()" autocomplete="current-password" />
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div x-show="loginError" class="mt-3 font-mono text-xs px-2 py-1.5 rounded"
+           style="color:var(--t-red); background:rgba(var(--t-red-rgb),0.08); border:1px solid rgba(var(--t-red-rgb),0.2)"
+           x-text="loginError"></div>
+
+      <button class="btn-primary mt-5" @click="login()" :disabled="loginLoading">
+        <span x-show="!loginLoading">LOGIN</span>
+        <span x-show="loginLoading">AUTHENTICATING…</span>
+      </button>
+    </div>
+
+    <!-- Theme switcher on login screen -->
+    <div class="flex justify-center gap-2 mt-4">
+      <template x-for="k in ['midnight','matrix','cyberpunk','light_pro']" :key="k">
+        <button class="theme-tab" :class="{ active: currentTheme===k }" @click="applyTheme(k)" x-text="themeLabel(k)"></button>
+      </template>
+    </div>
+
+    <div class="text-center mt-4">
+      <span class="font-mono text-xs" style="color:var(--t-muted)">Default admin: admin / admin123 · Default client PIN = client ID</span>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     DASHBOARD (admin + client share the navbar)
+════════════════════════════════════════════════════════════════════════════ -->
+<div x-show="screen !== 'login'" class="flex flex-col min-h-screen">
+
+<!-- ── NAVBAR ──────────────────────────────────────────────────────────────── -->
+<header class="navbar-h sticky top-0 z-50 flex items-center justify-between px-5 border-b shrink-0"
+        style="background: rgba(var(--t-bg-val, 4, 6, 12), 0.95); border-color: var(--t-border); backdrop-filter: blur(8px);"
+        x-init="$el.style.setProperty('background', `color-mix(in srgb, var(--t-bg) 95%, transparent)`)">
+
+  <!-- Left: Logo + index tabs (admin only) -->
   <div class="flex items-center gap-3">
     <div class="flex items-center gap-1.5">
-      <span class="font-disp text-lg font-black tracking-widest text-t-cyan"
-            style="text-shadow:0 0 16px rgba(0,212,255,0.7)">TERMINUS</span>
-      <span class="font-disp text-xs font-normal text-t-muted tracking-widest mt-0.5">v5</span>
+      <span class="font-display text-lg font-black tracking-widest" style="color:var(--t-cyan); text-shadow:0 0 14px rgba(var(--t-cyan-rgb),0.6)">TERMINUS</span>
+      <span class="font-display text-xs font-normal tracking-widest mt-0.5" style="color:var(--t-muted)">v6</span>
     </div>
-    <div class="w-px h-5 bg-t-border mx-1"></div>
-    <!-- Index tabs -->
+    <div class="w-px h-5 mx-1" style="background:var(--t-border)"></div>
+    <!-- Index tabs shown to all authenticated users -->
     <div class="flex gap-1">
       <template x-for="idx in indices" :key="idx">
-        <button class="idx-tab" :class="{active: activeIndex===idx}" @click="activeIndex=idx" x-text="idx"></button>
+        <button class="idx-tab" :class="{ active: activeIndex===idx }" @click="activeIndex=idx" x-text="idx"></button>
       </template>
     </div>
   </div>
 
-  <!-- Clock + WS Status -->
-  <div class="flex items-center gap-4">
+  <!-- Right: theme switcher + role badge + IST + WS status + logout -->
+  <div class="flex items-center gap-3">
+    <!-- Theme switcher -->
+    <div class="relative">
+      <button @click="showThemeMenu = !showThemeMenu"
+              class="font-mono text-xs px-2 py-1 rounded border flex items-center gap-1.5"
+              style="color:var(--t-muted); border-color:var(--t-border); background:var(--t-surface)">
+        <span>⬡</span> <span x-text="themeLabel(currentTheme)"></span>
+      </button>
+      <div x-show="showThemeMenu" @click.outside="showThemeMenu=false"
+           class="absolute right-0 top-8 z-50 rounded border p-1 space-y-0.5 min-w-[120px]"
+           style="background:var(--t-card); border-color:var(--t-border)">
+        <template x-for="k in ['midnight','matrix','cyberpunk','light_pro']" :key="k">
+          <button @click="applyTheme(k)"
+                  class="block w-full text-left font-mono text-xs px-3 py-1.5 rounded"
+                  :style="currentTheme===k ? 'color:var(--t-cyan); background:rgba(var(--t-cyan-rgb),0.08)' : 'color:var(--t-muted)'"
+                  x-text="themeLabel(k)"></button>
+        </template>
+      </div>
+    </div>
+
+    <div class="w-px h-4" style="background:var(--t-border)"></div>
+
+    <!-- Role badge -->
+    <div :class="authRole==='admin' ? 'badge-role-admin' : 'badge-role-client'"
+         x-text="authRole==='admin' ? 'ADMIN' : authClientName || authClientId"></div>
+
     <!-- IST Clock -->
-    <div class="font-mono text-xl text-t-bright tracking-widest"
-         style="text-shadow:0 0 10px rgba(200,218,240,0.3)" x-text="istTime"></div>
-    <div class="w-px h-5 bg-t-border"></div>
+    <div class="font-mono text-xl tracking-widest" style="color:var(--t-bright)" x-text="istTime"></div>
+
+    <div class="w-px h-4" style="background:var(--t-border)"></div>
+
     <!-- WS badge -->
-    <div class="flex items-center gap-2">
-      <div class="w-2 h-2 rounded-full"
-           :class="wsConnected ? 'bg-t-green conn-live' : 'bg-t-red'"
-           :style="wsConnected ? '' : 'animation:none'"></div>
+    <div class="flex items-center gap-1.5">
+      <div class="w-2 h-2 rounded-full" :class="wsConnected ? 'conn-live' : ''"
+           :style="`background:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"></div>
       <span class="font-ui font-bold text-xs tracking-widest uppercase"
-            :class="wsConnected ? 'text-t-green' : 'text-t-red'"
+            :style="`color:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"
             x-text="wsConnected ? 'LIVE' : 'OFFLINE'"></span>
     </div>
+
+    <div class="w-px h-4" style="background:var(--t-border)"></div>
+
+    <!-- Logout -->
+    <button @click="logout()"
+            class="font-mono text-xs px-2 py-1 rounded border"
+            style="color:var(--t-muted); border-color:var(--t-border); background:var(--t-surface)">
+      LOGOUT
+    </button>
   </div>
 </header>
 
-<!-- ─── MAIN CONTENT ─────────────────────────────────────────────────────────── -->
-<main class="flex-1 grid grid-cols-1 xl:grid-cols-[340px_1fr_280px] gap-3 p-3 max-w-[1800px] w-full mx-auto">
+<!-- ── ADMIN SUB-NAV ───────────────────────────────────────────────────────── -->
+<div x-show="screen === 'admin'" x-cloak
+     class="sticky z-40 flex items-center border-b shrink-0"
+     style="top:52px; background:var(--t-surface); border-color:var(--t-border)">
+  <div class="flex px-3">
+    <button class="admin-tab" :class="{active: adminTab==='dashboard'}"
+            @click="adminTab='dashboard'">DASHBOARD</button>
+    <button class="admin-tab" :class="{active: adminTab==='feeder'}"
+            @click="adminTab='feeder'">&#x26A1; DATA FEEDER</button>
+  </div>
+  <!-- Live feed status pills pinned to the right -->
+  <div class="ml-auto flex items-center gap-4 px-5">
+    <div class="flex items-center gap-1.5">
+      <div class="w-1.5 h-1.5 rounded-full"
+           :style="`background:${telemetry.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"></div>
+      <span class="font-mono text-xs"
+            :style="`color:${telemetry.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"
+            x-text="telemetry.upstox_latency_ms>0 ? 'UPSTOX '+telemetry.upstox_latency_ms.toFixed(0)+'ms' : 'UPSTOX IDLE'"></span>
+    </div>
+    <div class="flex items-center gap-1.5">
+      <div class="w-1.5 h-1.5 rounded-full"
+           :style="`background:${telemetry.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"></div>
+      <span class="font-mono text-xs"
+            :style="`color:${telemetry.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"
+            x-text="telemetry.fyers_latency_ms>0 ? 'FYERS '+telemetry.fyers_latency_ms.toFixed(0)+'ms' : 'FYERS IDLE'"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     ADMIN LAYOUT
+════════════════════════════════════════════════════════════════════════════ -->
+<main x-show="screen === 'admin'"
+      class="flex-1 flex flex-col gap-3 p-3 max-w-[1800px] w-full mx-auto">
+
+  <!-- ════════════════════ DASHBOARD TAB ════════════════════════════════════ -->
+  <div x-show="adminTab === 'dashboard'" class="flex flex-col gap-3 flex-1">
+
+  <!-- ══ 3-COLUMN GRID ═══════════════════════════════════════════════════════ -->
+  <div class="flex-1 grid grid-cols-1 xl:grid-cols-[340px_1fr_280px] gap-3">
 
   <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════════ -->
   <div class="flex flex-col gap-3">
@@ -521,38 +1094,23 @@ document.addEventListener('alpine:init', () => {
     <div class="t-card rounded p-4 fade-up-1 relative overflow-hidden">
       <div class="diag-accent"></div>
       <div class="sec-label mb-3">Market Overview · <span x-text="activeIndex"></span></div>
-
-      <!-- Spot Price -->
       <div class="mb-3">
         <div class="sec-label mb-1">SPOT PRICE</div>
-        <div class="font-mono text-4xl text-t-bright leading-none"
-             style="text-shadow:0 0 20px rgba(200,218,240,0.25)"
-             x-text="spot.ltp ? fmt(spot.ltp, 2) : '—'"></div>
-        <div class="font-ui text-xs text-t-muted mt-1" x-text="spot.ts || 'Waiting for tick…'"></div>
+        <div class="font-mono text-4xl leading-none" style="color:var(--t-bright)" x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
+        <div class="font-ui text-xs mt-1" style="color:var(--t-muted)" x-text="spot.ts || 'Waiting…'"></div>
       </div>
-
-      <div class="h-px bg-t-border mb-3"></div>
-
-      <!-- ATM Strike -->
+      <div class="h-px my-3" style="background:var(--t-border)"></div>
       <div>
         <div class="sec-label mb-1">ATM STRIKE</div>
-        <div class="font-mono text-3xl text-t-cyan leading-none"
-             style="text-shadow:0 0 14px rgba(0,212,255,0.45)"
-             x-text="spot.atm ? fmt(spot.atm, 0) : '—'"></div>
+        <div class="font-mono text-3xl leading-none" style="color:var(--t-cyan)" x-text="spot.atm ? fmt(spot.atm, 0) : '—'"></div>
       </div>
-
-      <div class="h-px bg-t-border my-3"></div>
-
-      <!-- All indices mini strip -->
+      <div class="h-px my-3" style="background:var(--t-border)"></div>
       <div class="space-y-1.5">
         <template x-for="idx in indices" :key="idx">
-          <div class="flex items-center justify-between py-1"
-               :class="idx===activeIndex ? 'opacity-100' : 'opacity-40'">
-            <span class="font-ui font-bold text-xs text-t-muted w-24" x-text="idx"></span>
-            <span class="font-mono text-sm" :class="idx===activeIndex ? 'text-t-bright' : 'text-t-text'"
-                  x-text="spots[idx]?.ltp ? fmt(spots[idx].ltp) : '—'"></span>
-            <span class="font-mono text-xs text-t-cyan"
-                  x-text="spots[idx]?.atm ? fmt(spots[idx].atm, 0) : '—'"></span>
+          <div class="flex items-center justify-between py-1" :class="idx===activeIndex ? 'opacity-100' : 'opacity-40'">
+            <span class="font-ui font-bold text-xs w-24" style="color:var(--t-muted)" x-text="idx"></span>
+            <span class="font-mono text-sm" :style="`color:${idx===activeIndex ? 'var(--t-bright)' : 'var(--t-text)'}`" x-text="spots[idx]?.ltp ? fmt(spots[idx].ltp) : '—'"></span>
+            <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="spots[idx]?.atm ? fmt(spots[idx].atm,0) : '—'"></span>
           </div>
         </template>
       </div>
@@ -560,83 +1118,71 @@ document.addEventListener('alpine:init', () => {
 
     <!-- Indicators Strip -->
     <div class="t-card rounded p-4 fade-up-2">
-      <div class="sec-label mb-4">Indicators · <span x-text="activeIndex"></span> · TF<span x-text="snap.tf || '—'"></span></div>
-
-      <!-- RSI -->
+      <div class="sec-label mb-4">Indicators · <span x-text="activeIndex"></span> · TF<span x-text="snap.tf||'—'"></span></div>
+      <!-- RSI-14 -->
       <div class="mb-4">
         <div class="flex justify-between items-baseline mb-1.5">
-          <span class="font-ui font-bold text-xs text-t-muted">RSI-14</span>
-          <span class="font-mono text-lg font-bold" :class="rsiClass"
-                x-text="rsiVal ? fmt(rsiVal, 1) : '—'"></span>
+          <span class="sec-label">RSI-14</span>
+          <span class="font-mono text-lg font-bold" :class="rsiClass" x-text="rsiVal ? fmt(rsiVal,1) : '—'"></span>
         </div>
         <div class="gauge-track h-2">
-          <div class="gauge-fill h-full"
-               :style="`width:${rsiVal}%; background:${rsiVal>=70 ? '#ff3a4a' : rsiVal<=30 ? '#00e87a' : '#00d4ff'}`"></div>
+          <div class="gauge-fill h-full" :style="`width:${rsiVal}%; background:${rsiVal>=70?'var(--t-red)':rsiVal<=30?'var(--t-green)':'var(--t-cyan)'}`"></div>
         </div>
         <div class="flex justify-between mt-1">
-          <span class="font-mono text-xs text-t-muted">OS 30</span>
-          <span class="font-mono text-xs text-t-muted">OB 70</span>
+          <span class="font-mono text-xs" style="color:var(--t-muted)">OS 30</span>
+          <span class="font-mono text-xs" style="color:var(--t-muted)">OB 70</span>
         </div>
       </div>
-
-      <!-- VWAP -->
+      <!-- VWAP-500 -->
       <div class="mb-4">
         <div class="flex justify-between items-baseline mb-1">
-          <span class="font-ui font-bold text-xs text-t-muted">VWAP-500</span>
-          <span class="font-mono text-sm text-t-cyan" x-text="vwapVal ? fmt(vwapVal) : '—'"></span>
+          <span class="sec-label">VWAP-500</span>
+          <span class="font-mono text-sm" style="color:var(--t-cyan)" x-text="vwapVal ? fmt(vwapVal) : '—'"></span>
         </div>
-        <div class="flex items-center gap-2" x-show="vwapVal && spot.ltp">
-          <span class="font-mono text-xs"
-                :class="spot.ltp > vwapVal ? 'text-t-green' : 'text-t-red'"
+        <div x-show="vwapVal && spot.ltp">
+          <span class="font-mono text-xs" :style="`color:${spot.ltp > vwapVal ? 'var(--t-green)' : 'var(--t-red)'}`"
                 x-text="spot.ltp > vwapVal ? 'ABOVE VWAP ▲' : 'BELOW VWAP ▼'"></span>
         </div>
       </div>
-
-      <!-- ADX -->
+      <!-- ADX-20 -->
       <div class="mb-4">
         <div class="flex justify-between items-baseline mb-1.5">
-          <span class="font-ui font-bold text-xs text-t-muted">ADX-20</span>
-          <span class="font-mono text-lg font-bold"
-                :class="adxVal >= 25 ? 'text-t-amber' : 'text-t-muted'"
-                x-text="adxVal ? fmt(adxVal, 1) : '—'"></span>
+          <span class="sec-label">ADX-20</span>
+          <span class="font-mono text-lg font-bold" :style="`color:${adxVal>=25?'var(--t-amber)':'var(--t-muted)'}`" x-text="adxVal ? fmt(adxVal,1) : '—'"></span>
         </div>
         <div class="gauge-track h-2">
-          <div class="gauge-fill h-full bg-amber-500/60"
-               :style="`width:${Math.min(100, adxVal*2)}%`"></div>
+          <div class="gauge-fill h-full" :style="`width:${Math.min(100,adxVal*2)}%; background:var(--t-amber); opacity:0.6`"></div>
         </div>
         <div class="flex justify-between mt-1">
-          <span class="font-mono text-xs text-t-muted">WEAK</span>
-          <span class="font-mono text-xs" :class="adxVal>=25?'text-t-amber':'text-t-muted'"
-                x-text="adxVal>=25?'TRENDING':'CHOPPY'"></span>
-          <span class="font-mono text-xs text-t-muted">STRONG</span>
+          <span class="font-mono text-xs" style="color:var(--t-muted)">WEAK</span>
+          <span class="font-mono text-xs" :style="`color:${adxVal>=25?'var(--t-amber)':'var(--t-muted)'}`" x-text="adxVal>=25?'TRENDING':'CHOPPY'"></span>
+          <span class="font-mono text-xs" style="color:var(--t-muted)">STRONG</span>
         </div>
       </div>
-
-      <!-- EMA Signal -->
+      <!-- EMA Cross -->
       <div class="mb-4">
         <div class="flex justify-between items-baseline mb-1">
-          <span class="font-ui font-bold text-xs text-t-muted">EMA CROSS</span>
+          <span class="sec-label">EMA CROSS</span>
           <span class="font-mono text-sm font-bold"
-                :class="{'ema-bull': emaSignal==='BULL', 'ema-bear': emaSignal==='BEAR', 'ema-neutral': emaSignal==='NEUTRAL'}"
+                :class="{'ema-bull':emaSignal==='BULL','ema-bear':emaSignal==='BEAR','ema-neutral':emaSignal==='NEUTRAL'}"
                 x-text="emaSignal"></span>
         </div>
-        <div class="flex gap-4 text-xs font-mono text-t-muted">
-          <span>F <span class="text-t-text" x-text="emaFast ? fmt(emaFast) : '—'"></span></span>
-          <span>S <span class="text-t-text" x-text="emaSlow ? fmt(emaSlow) : '—'"></span></span>
+        <div class="flex gap-4 text-xs font-mono" style="color:var(--t-muted)">
+          <span>F <span style="color:var(--t-text)" x-text="emaFast ? fmt(emaFast) : '—'"></span></span>
+          <span>S <span style="color:var(--t-text)" x-text="emaSlow ? fmt(emaSlow) : '—'"></span></span>
         </div>
       </div>
-
-      <!-- +DI / -DI -->
+      <!-- DI -->
       <div>
         <div class="flex justify-between items-baseline mb-1">
-          <span class="font-ui font-bold text-xs text-t-muted">DI SIGNAL</span>
+          <span class="sec-label">DI SIGNAL</span>
           <span class="font-mono text-sm font-bold"
-                :class="diSignal==='+DI' ? 'text-t-green' : diSignal==='-DI' ? 'text-t-red' : 'text-t-muted'"
+                :style="`color:${diSignal==='+DI'?'var(--t-green)':diSignal==='-DI'?'var(--t-red)':'var(--t-muted)'}`"
                 x-text="diSignal"></span>
         </div>
         <div class="flex gap-6 text-xs font-mono">
-          <span class="text-t-green">+DI <span x-text="plusDI ? fmt(plusDI, 1) : '—'"></span></span>
-          <span class="text-t-red">−DI <span x-text="minusDI ? fmt(minusDI, 1) : '—'"></span></span>
+          <span style="color:var(--t-green)">+DI <span x-text="plusDI ? fmt(plusDI,1) : '—'"></span></span>
+          <span style="color:var(--t-red)">−DI <span x-text="minusDI ? fmt(minusDI,1) : '—'"></span></span>
         </div>
       </div>
     </div>
@@ -644,29 +1190,28 @@ document.addEventListener('alpine:init', () => {
     <!-- Worker Stats -->
     <div class="t-card rounded p-4 fade-up-3">
       <div class="sec-label mb-3">Execution Workers</div>
-      <div x-show="workers.length === 0" class="font-mono text-xs text-t-muted text-center py-3">
-        No worker data yet…
+      <div x-show="workers.length === 0" class="font-mono text-xs py-4 text-center leading-relaxed" style="color:var(--t-muted)">
+        No execution workers active.<br/>
+        <span style="color:var(--t-dim)">Run <span style="color:var(--t-amber)">add_client --id C001 --capital 500000</span> in the terminal to register a client.</span>
       </div>
-      <div x-show="workers.length > 0">
-        <template x-for="w in workers" :key="w.client_id">
-          <div class="worker-row">
-            <span class="font-mono text-xs text-t-text" x-text="w.client_id"></span>
-            <div class="flex items-center gap-3">
-              <span class="font-mono text-xs text-t-muted">
-                <span class="text-t-text" x-text="w.placed || 0"></span> placed
-              </span>
-              <span class="font-mono text-xs text-t-muted">
-                <span :class="(w.errors||0) > 0 ? 'text-t-red' : 'text-t-green'" x-text="w.errors || 0"></span> err
-              </span>
-              <span class="font-mono text-xs"
-                    :class="w.running ? 'text-t-green' : 'text-t-muted'"
-                    x-text="w.running ? 'RUN' : 'IDLE'"></span>
-            </div>
+      <template x-for="w in workers" :key="w.client_id">
+        <div class="worker-row">
+          <span class="font-mono text-xs" style="color:var(--t-text)" x-text="w.client_id"></span>
+          <div class="flex items-center gap-3">
+            <span class="font-mono text-xs" style="color:var(--t-muted)">
+              <span style="color:var(--t-text)" x-text="w.processed||0"></span> ok
+            </span>
+            <span class="font-mono text-xs" :style="`color:${(w.total_failures||0)>0?'var(--t-red)':'var(--t-green)'}`"
+                  x-text="(w.total_failures||0) + ' err'"></span>
+            <span class="font-mono text-xs"
+                  :style="`color:${w.circuit_open?'var(--t-red)':w.task_alive?'var(--t-green)':'var(--t-muted)'}`"
+                  x-text="w.circuit_open ? 'OPEN' : w.task_alive ? 'RUN' : 'DEAD'"></span>
           </div>
-        </template>
-      </div>
+        </div>
+      </template>
     </div>
-  </div>
+
+  </div><!-- end left col -->
 
   <!-- ══ CENTER COLUMN ════════════════════════════════════════════════════════ -->
   <div class="flex flex-col gap-3">
@@ -674,102 +1219,106 @@ document.addEventListener('alpine:init', () => {
     <!-- Client Cards Grid -->
     <div>
       <div class="sec-label mb-2 px-1">Client Portfolio</div>
-      <div x-show="clients.length === 0"
-           class="t-card rounded p-8 text-center font-mono text-xs text-t-muted fade-up-1">
+      <div x-show="clients.length === 0" class="t-card rounded p-8 text-center font-mono text-xs fade-up-1" style="color:var(--t-muted)">
         Waiting for client data…
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <template x-for="(c, i) in clients" :key="c.client_id">
+        <template x-for="(c,i) in clients" :key="c.client_id">
           <div class="t-card rounded p-4 relative overflow-hidden fade-up-1">
             <div class="diag-accent"></div>
-
-            <!-- Header row -->
             <div class="flex items-center justify-between mb-3">
               <div>
-                <div class="font-ui font-bold text-base text-t-bright" x-text="c.name || c.client_id"></div>
-                <div class="font-mono text-xs text-t-muted" x-text="c.client_id"></div>
+                <div class="font-ui font-bold text-base" style="color:var(--t-bright)" x-text="c.name||c.client_id"></div>
+                <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="c.client_id"></div>
               </div>
               <div class="flex items-center gap-2">
-                <span :class="c.tradeable ? 'badge-live' : 'badge-halted'"
-                      x-text="c.tradeable ? 'LIVE' : 'HALTED'"></span>
+                <span :class="c.tradeable ? 'badge-live' : 'badge-halted'" x-text="c.tradeable ? 'LIVE' : 'HALTED'"></span>
                 <button x-show="c.tradeable"  class="btn-halt"   @click="haltClient(c.client_id)">HALT</button>
                 <button x-show="!c.tradeable" class="btn-resume" @click="resumeClient(c.client_id)">RESUME</button>
               </div>
             </div>
-
-            <!-- Capital + P&L row -->
             <div class="grid grid-cols-2 gap-3 mb-3">
               <div>
                 <div class="sec-label mb-1">CAPITAL</div>
-                <div class="font-mono text-lg text-t-text" x-text="'₹' + fmt(c.capital, 0)"></div>
+                <div class="font-mono text-lg" style="color:var(--t-text)" x-text="'₹' + fmt(c.capital,0)"></div>
               </div>
               <div>
                 <div class="sec-label mb-1">DAILY P&L</div>
-                <div class="font-mono text-lg font-bold"
-                     :class="pnlClass(c.daily_pnl)"
-                     x-text="(c.daily_pnl >= 0 ? '+' : '') + '₹' + fmt(c.daily_pnl)"></div>
+                <div class="font-mono text-lg font-bold" :class="pnlClass(c.daily_pnl)"
+                     x-text="(c.daily_pnl>=0?'+':'')+'₹'+fmt(c.daily_pnl)"></div>
               </div>
             </div>
-
-            <!-- Drawdown bar -->
             <div class="mb-3">
               <div class="flex justify-between mb-1">
                 <span class="sec-label">DRAWDOWN</span>
-                <span class="font-mono text-xs text-t-muted"
-                      x-text="c.daily_loss_pct + '% limit'"></span>
+                <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="c.daily_loss_pct+'% limit'"></span>
               </div>
               <div class="gauge-track h-1.5">
                 <div class="drawdown-bar gauge-fill h-full"
-                     :style="`width:${capPct(c.daily_pnl, c.capital)}%;
-                              background:${c.daily_pnl < 0 ? '#ff3a4a' : '#00e87a'}`"></div>
+                     :style="`width:${capPct(c.daily_pnl,c.capital)}%; background:${c.daily_pnl<0?'var(--t-red)':'var(--t-green)'}`"></div>
               </div>
             </div>
-
-            <!-- Strategies + Brokers -->
             <div class="flex gap-4 text-xs">
-              <div>
-                <span class="sec-label">STRATS </span>
-                <span class="font-mono text-t-muted" x-text="(c.strategies||[]).join(', ') || '—'"></span>
-              </div>
-              <div>
-                <span class="sec-label">BROKER </span>
-                <span class="font-mono text-t-cyan" x-text="(c.brokers||[]).join(', ') || '—'"></span>
-              </div>
+              <div><span class="sec-label">STRATS </span><span class="font-mono" style="color:var(--t-muted)" x-text="(c.strategies||[]).join(', ')||'—'"></span></div>
+              <div><span class="sec-label">BROKER </span><span class="font-mono" style="color:var(--t-cyan)" x-text="(c.brokers||[]).join(', ')||'—'"></span></div>
             </div>
           </div>
         </template>
       </div>
+    </div>
+
+    <!-- Broker Connectivity -->
+    <div class="t-card rounded fade-up-2">
+      <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+        <div class="sec-label">Broker Connectivity</div>
+        <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="brokers.length + ' binding' + (brokers.length!==1?'s':'')"></span>
+      </div>
+      <div x-show="brokers.length === 0" class="font-mono text-xs py-5 px-4 text-center leading-relaxed" style="color:var(--t-muted)">
+        No client sub-accounts active.<br/>
+        <span style="color:var(--t-dim)">Execute <span style="color:var(--t-amber)">add_client</span> in the AdminConsole terminal to hook an execution worker.</span>
+      </div>
+      <template x-for="b in brokers" :key="b.client_id+'/'+b.binding_id">
+        <div class="flex items-center justify-between px-4 py-2.5 border-b last:border-b-0" style="border-color:rgba(var(--t-border),0.5)">
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="w-2 h-2 rounded-full shrink-0 conn-live" :style="`background:${b.is_authenticated?'var(--t-green)':'var(--t-red)'}`"></div>
+            <div class="min-w-0">
+              <div class="font-mono text-xs leading-tight" style="color:var(--t-bright)" x-text="b.client_name+' · '+b.binding_id"></div>
+              <div class="font-ui text-xs" style="color:var(--t-muted)" x-text="b.provider.toUpperCase()+(b.label?' — '+b.label:'')"></div>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 shrink-0 ml-3">
+            <span class="font-mono text-xs" :style="`color:${b.api_key_set?'var(--t-green)':'var(--t-muted)'}`" x-text="b.api_key_set?'KEY ✓':'NO KEY'"></span>
+            <span :class="b.is_authenticated?'badge-live':'badge-halted'" x-text="b.is_authenticated?'AUTH':'UNAUTH'"></span>
+          </div>
+        </div>
+      </template>
     </div>
 
     <!-- Live Event Feed -->
-    <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:260px;max-height:400px">
-      <div class="flex items-center justify-between px-4 py-2.5 border-b border-t-border shrink-0">
+    <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:240px;max-height:380px">
+      <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
         <div class="sec-label">Live Event Feed</div>
         <div class="flex items-center gap-1.5">
-          <div class="w-1.5 h-1.5 rounded-full" :class="wsConnected ? 'bg-t-green conn-live' : 'bg-t-muted'"></div>
-          <span class="font-mono text-xs text-t-muted" x-text="events.length + ' events'"></span>
+          <div class="w-1.5 h-1.5 rounded-full" :class="wsConnected?'conn-live':''" :style="`background:${wsConnected?'var(--t-green)':'var(--t-muted)'}`"></div>
+          <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="events.length + ' events'"></span>
         </div>
       </div>
       <div class="flex-1 overflow-y-auto">
-        <div x-show="events.length === 0" class="font-mono text-xs text-t-muted text-center py-6">
-          No events yet…
-        </div>
-        <template x-for="(evt, i) in events" :key="i">
+        <div x-show="events.length===0" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">No events yet…</div>
+        <template x-for="(evt,i) in events" :key="i">
           <div class="feed-row">
-            <span class="font-mono text-xs shrink-0" style="color:#3a5470" x-text="evt.ts || ''"></span>
-            <span class="font-mono text-xs shrink-0 w-5 uppercase text-center"
-                  :style="`color:${evtColor(evt)}`"
-                  x-text="evt.type === 'fill' ? '▲' : evt.type === 'sys' ? '●' : '○'"></span>
-            <span class="font-mono text-xs font-bold shrink-0"
-                  :style="`color:${evtColor(evt)}`"
-                  x-text="evt.code || evt.side || ''"></span>
-            <span class="font-mono text-xs text-t-muted truncate"
-                  x-text="evt.msg || (evt.sym ? evt.sym + ' ' + (evt.qty||'') + '@' + (evt.avg_price||'') : '')"></span>
+            <span class="font-mono text-xs shrink-0" style="color:var(--t-muted)" x-text="evt.ts||''"></span>
+            <span class="font-mono text-xs shrink-0 w-4 uppercase text-center" :style="`color:${evtColor(evt)}`"
+                  x-text="evt.type==='fill'?'▲':'●'"></span>
+            <span class="font-mono text-xs font-bold shrink-0" :style="`color:${evtColor(evt)}`" x-text="evt.code||evt.side||''"></span>
+            <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
+                  x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
           </div>
         </template>
       </div>
     </div>
-  </div>
+
+  </div><!-- end center col -->
 
   <!-- ══ RIGHT COLUMN ═════════════════════════════════════════════════════════ -->
   <div class="flex flex-col gap-3">
@@ -777,65 +1326,50 @@ document.addEventListener('alpine:init', () => {
     <!-- Emergency Kill Switch -->
     <div class="t-card rounded p-4 fade-up-1">
       <div class="sec-label mb-3">Emergency Control</div>
-
       <div class="relative mb-3">
         <div x-show="killArmed" class="kill-ring" :key="killArmed"></div>
-        <button class="btn-kill" :class="{armed: killArmed}" @click="armKill()">
-          <div x-show="!killArmed" class="flex items-center justify-center gap-2">
-            <span style="font-size:16px">⬛</span>
-            <span>KILL SWITCH</span>
-          </div>
-          <div x-show="killArmed" class="flex items-center justify-center gap-2">
-            <span style="font-size:16px; animation: conn-pulse 0.5s infinite">⚠</span>
-            <span>CONFIRM KILL (<span x-text="killCountdown"></span>s)</span>
-          </div>
+        <button class="btn-kill" :class="{armed:killArmed}" @click="armKill()">
+          <div x-show="!killArmed" class="flex items-center justify-center gap-2"><span>⬛</span><span>KILL SWITCH</span></div>
+          <div x-show="killArmed"  class="flex items-center justify-center gap-2"><span>⚠</span><span>CONFIRM KILL (<span x-text="killCountdown"></span>s)</span></div>
         </button>
       </div>
-      <p class="font-ui text-xs text-t-muted leading-relaxed">
-        Halts all clients immediately and broadcasts KILL_SWITCH to the engine. Requires two clicks within 5 seconds.
-      </p>
+      <p class="font-ui text-xs leading-relaxed" style="color:var(--t-muted)">Halts all clients + broadcasts KILL_SWITCH. Two clicks within 5 s.</p>
     </div>
 
     <!-- Manual Rebalance -->
-    <div class="t-card rounded p-4 fade-up-2">
+    <div class="t-card rounded p-4 fade-up-3">
       <div class="sec-label mb-3">Manual Rebalance</div>
       <div class="space-y-2">
-        <div>
-          <div class="sec-label mb-1">UNDERLYING</div>
-          <select class="t-input" x-model="rebalIdx">
-            <template x-for="idx in indices" :key="idx">
-              <option :value="idx" x-text="idx"></option>
-            </template>
-          </select>
-        </div>
-        <button class="btn-action" @click="rebalance()">
-          TRIGGER REBALANCE
-        </button>
+        <select class="t-input" x-model="rebalIdx">
+          <template x-for="idx in indices" :key="idx"><option :value="idx" x-text="idx"></option></template>
+        </select>
+        <button class="btn-action" @click="rebalance()">TRIGGER REBALANCE</button>
       </div>
-      <p class="font-ui text-xs text-t-muted mt-2 leading-relaxed">
-        Forces immediate ATM recalculation. Clears <code class="text-t-cyan">current_atm</code> so the next tick triggers a full rebalance.
-      </p>
     </div>
 
-    <!-- Lot Multiplier Override -->
+    <!-- Lot Multiplier -->
     <div class="t-card rounded p-4 fade-up-3">
       <div class="sec-label mb-3">Lot Multiplier Override</div>
       <div class="space-y-2">
-        <div>
-          <div class="sec-label mb-1">CLIENT ID</div>
-          <input class="t-input" type="text" placeholder="e.g. C001" x-model="lotCid" />
-        </div>
-        <div>
-          <div class="sec-label mb-1">BINDING ID</div>
-          <input class="t-input" type="text" placeholder="e.g. mock_default" x-model="lotBid" />
-        </div>
-        <div>
-          <div class="sec-label mb-1">MULTIPLIER</div>
-          <input class="t-input" type="number" step="0.5" min="0.5" placeholder="1.0" x-model.number="lotMul" />
-        </div>
-        <button class="btn-action" @click="setLots()">
-          APPLY MULTIPLIER
-        </button>
+        <input class="t-input" type="text" placeholder="Client ID e.g. C001" x-model="lotCid" />
+        <input class="t-input" type="text" placeholder="Binding ID" x-model="lotBid" />
+        <input class="t-input" type="number" step="0.5" min="0.5" placeholder="1.0" x-model.number="lotMul" />
+        <button class="btn-action" @click="setLots()">APPLY MULTIPLIER</button>
+      </div>
+    </div>
+
+    <!-- Token Re-Authentication -->
+    <div class="t-card rounded p-4 fade-up-4">
+      <div class="sec-label mb-3">Broker Re-Authentication</div>
+      <div class="space-y-2">
+        <input class="t-input" type="text" placeholder="Client ID" x-model="tokenCid" autocomplete="off"/>
+        <input class="t-input" type="text" placeholder="Binding ID" x-model="tokenBid" autocomplete="off"/>
+        <input class="t-input" type="password" placeholder="Access token (optional)" x-model="tokenVal" autocomplete="new-password"/>
+        <button class="btn-action" @click="updateToken()">AUTHENTICATE &amp; REBOOT</button>
+        <div x-show="tokenMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+             :style="tokenOk ? 'color:var(--t-green); background:rgba(var(--t-green-rgb),0.05); border:1px solid rgba(var(--t-green-rgb),0.2)'
+                             : 'color:var(--t-red); background:rgba(var(--t-red-rgb),0.05); border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="tokenMsg"></div>
       </div>
     </div>
 
@@ -843,45 +1377,602 @@ document.addEventListener('alpine:init', () => {
     <div class="t-card rounded p-4 fade-up-4">
       <div class="sec-label mb-3">System</div>
       <div class="space-y-1.5">
-        <div class="flex justify-between items-center">
-          <span class="font-ui text-xs text-t-muted">CLIENTS</span>
-          <span class="font-mono text-sm text-t-text" x-text="clients.length"></span>
-        </div>
-        <div class="flex justify-between items-center">
-          <span class="font-ui text-xs text-t-muted">LIVE</span>
-          <span class="font-mono text-sm text-t-green"
-                x-text="clients.filter(c=>c.tradeable).length"></span>
-        </div>
-        <div class="flex justify-between items-center">
-          <span class="font-ui text-xs text-t-muted">HALTED</span>
-          <span class="font-mono text-sm text-t-red"
-                x-text="clients.filter(c=>!c.tradeable).length"></span>
-        </div>
-        <div class="h-px bg-t-border my-1"></div>
-        <div class="flex justify-between items-center">
-          <span class="font-ui text-xs text-t-muted">WORKERS</span>
-          <span class="font-mono text-sm text-t-text" x-text="workers.length"></span>
-        </div>
-        <div class="flex justify-between items-center">
-          <span class="font-ui text-xs text-t-muted">EVENTS</span>
-          <span class="font-mono text-sm text-t-text" x-text="events.length"></span>
-        </div>
-        <div class="flex justify-between items-center">
-          <span class="font-ui text-xs text-t-muted">ACTIVE IDX</span>
-          <span class="font-mono text-sm text-t-cyan" x-text="activeIndex"></span>
-        </div>
+        <div class="flex justify-between"><span class="sec-label">CLIENTS</span><span class="font-mono text-sm" style="color:var(--t-text)" x-text="clients.length"></span></div>
+        <div class="flex justify-between"><span class="sec-label">LIVE</span><span class="font-mono text-sm" style="color:var(--t-green)" x-text="clients.filter(c=>c.tradeable).length"></span></div>
+        <div class="flex justify-between"><span class="sec-label">HALTED</span><span class="font-mono text-sm" style="color:var(--t-red)" x-text="clients.filter(c=>!c.tradeable).length"></span></div>
+        <div class="h-px my-1" style="background:var(--t-border)"></div>
+        <div class="flex justify-between"><span class="sec-label">WORKERS</span><span class="font-mono text-sm" style="color:var(--t-text)" x-text="workers.length"></span></div>
+        <div class="flex justify-between"><span class="sec-label">ACTIVE IDX</span><span class="font-mono text-sm" style="color:var(--t-cyan)" x-text="activeIndex"></span></div>
+        <div class="flex justify-between"><span class="sec-label">EVENTS</span><span class="font-mono text-sm" style="color:var(--t-text)" x-text="events.length"></span></div>
       </div>
     </div>
 
   </div><!-- end right col -->
-</main>
+  </div><!-- end 3-column grid -->
 
-<!-- ─── FOOTER ───────────────────────────────────────────────────────────────── -->
-<footer class="shrink-0 border-t border-t-border px-5 py-2 flex items-center justify-between">
-  <span class="font-mono text-xs text-t-muted">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
-  <span class="font-mono text-xs text-t-muted" x-text="'IST ' + istTime"></span>
+  </div><!-- end dashboard tab -->
+
+  <!-- ════════════════════ FEEDER TAB ═══════════════════════════════════════ -->
+  <div x-show="adminTab === 'feeder'" class="flex flex-col gap-3 flex-1">
+
+  <!-- ════════════════════ BLOCK A: DUAL ACTIVE-ACTIVE FEEDER ════════════════ -->
+  <div class="t-card rounded p-4 relative overflow-hidden fade-up-1"
+       style="border-color:rgba(var(--t-cyan-rgb),0.3);background:linear-gradient(135deg,var(--t-card) 0%,rgba(var(--t-cyan-rgb),0.03) 100%)">
+    <div class="absolute top-0 left-0 right-0 h-0.5"
+         style="background:linear-gradient(90deg,transparent,rgba(var(--t-cyan-rgb),0.6),transparent)"></div>
+    <div class="flex flex-col xl:flex-row xl:items-start gap-4 mb-4">
+      <div class="shrink-0">
+        <div class="sec-label mb-0.5">Active-Active Infrastructure</div>
+        <div class="font-display text-sm font-black tracking-widest" style="color:var(--t-cyan)">DUAL STREAM FEEDER CONNECTION CONTROLS</div>
+      </div>
+      <!-- Telemetry badges -->
+      <div class="flex items-center gap-4 xl:ml-auto">
+        <div class="text-center">
+          <div class="sec-label">UPSTOX LATENCY</div>
+          <div class="font-mono text-lg font-bold"
+               :style="`color:${telemetry.upstox_latency_ms>50?'var(--t-amber)':telemetry.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"
+               x-text="telemetry.upstox_latency_ms ? telemetry.upstox_latency_ms.toFixed(1)+'ms' : '—'"></div>
+        </div>
+        <div class="w-px h-8" style="background:var(--t-border)"></div>
+        <div class="text-center">
+          <div class="sec-label">FYERS LATENCY</div>
+          <div class="font-mono text-lg font-bold"
+               :style="`color:${telemetry.fyers_latency_ms>50?'var(--t-amber)':telemetry.fyers_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"
+               x-text="telemetry.fyers_latency_ms ? telemetry.fyers_latency_ms.toFixed(1)+'ms' : '—'"></div>
+        </div>
+        <div class="w-px h-8" style="background:var(--t-border)"></div>
+        <div class="text-center">
+          <div class="sec-label">WS CLIENTS</div>
+          <div class="font-mono text-lg font-bold" style="color:var(--t-text)" x-text="telemetry.ws_clients||0"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <!-- Upstox column -->
+      <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+        <div class="flex items-center gap-2 mb-3">
+          <div class="font-ui font-bold text-sm tracking-widest" style="color:var(--t-cyan)">UPSTOX API v2</div>
+          <button @click="showUpstoxCreds=!showUpstoxCreds" class="font-mono text-xs px-2 py-0.5 rounded"
+                  style="border:1px solid var(--t-border);color:var(--t-muted)"
+                  x-text="showUpstoxCreds?'▲ HIDE':'▼ EXPAND'"></button>
+        </div>
+        <div x-show="showUpstoxCreds"
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
+             class="grid grid-cols-2 gap-2">
+          <div><div class="sec-label mb-1">CLIENT ID</div><input class="t-input" type="text" x-model="dualCreds.upstox_client_id" placeholder="client id" autocomplete="off"/></div>
+          <div><div class="sec-label mb-1">API KEY</div><input class="t-input" type="password" x-model="dualCreds.upstox_api_key" placeholder="api key" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">SECRET TOKEN</div><input class="t-input" type="password" x-model="dualCreds.upstox_secret" placeholder="secret key" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">ACCESS TOKEN</div><input class="t-input" type="password" x-model="dualCreds.upstox_access_token" placeholder="daily access token" autocomplete="new-password"/></div>
+          <div class="col-span-2"><div class="sec-label mb-1">TOTP KEY</div><input class="t-input" type="password" x-model="dualCreds.upstox_totp" placeholder="6-digit TOTP or base32 seed" autocomplete="new-password"/></div>
+        </div>
+        <!-- Upstox individual connect -->
+        <div class="flex items-center gap-2 mt-3">
+          <button class="btn-action" style="border-color:rgba(var(--t-cyan-rgb),0.45);color:var(--t-cyan);width:auto;padding:7px 20px;font-size:11px;letter-spacing:.12em"
+                  @click="connectUpstox()" :disabled="upstoxConnecting">
+            <span x-show="!upstoxConnecting">&#x26A1; CONNECT UPSTOX FEED</span>
+            <span x-show="upstoxConnecting">CONNECTING…</span>
+          </button>
+          <div x-show="upstoxMsg" class="font-mono text-xs px-2 py-1 rounded"
+               :style="upstoxOk?'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)':'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+               x-text="upstoxMsg"></div>
+        </div>
+        <div x-show="!showUpstoxCreds" class="font-mono text-xs mt-2" style="color:var(--t-muted)">
+          <span :style="`color:${dualCreds.upstox_access_token?'var(--t-green)':'var(--t-muted)'}`"
+                x-text="dualCreds.upstox_access_token ? '● TOKEN SET' : '○ No credentials entered'"></span>
+        </div>
+      </div>
+
+      <!-- Fyers column -->
+      <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+        <div class="flex items-center gap-2 mb-3">
+          <div class="font-ui font-bold text-sm tracking-widest" style="color:var(--t-amber)">FYERS API v3</div>
+          <button @click="showFyersCreds=!showFyersCreds" class="font-mono text-xs px-2 py-0.5 rounded"
+                  style="border:1px solid var(--t-border);color:var(--t-muted)"
+                  x-text="showFyersCreds?'▲ HIDE':'▼ EXPAND'"></button>
+        </div>
+        <div x-show="showFyersCreds"
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
+             class="grid grid-cols-2 gap-2">
+          <div><div class="sec-label mb-1">CLIENT ID</div><input class="t-input" type="text" x-model="dualCreds.fyers_client_id" placeholder="client id" autocomplete="off"/></div>
+          <div><div class="sec-label mb-1">APP KEY</div><input class="t-input" type="password" x-model="dualCreds.fyers_app_key" placeholder="app key" autocomplete="new-password"/></div>
+          <div class="col-span-2"><div class="sec-label mb-1">ACCESS TOKEN</div><input class="t-input" type="password" x-model="dualCreds.fyers_access_token" placeholder="auth code / access token" autocomplete="new-password"/></div>
+          <div class="col-span-2"><div class="sec-label mb-1">TOTP KEY</div><input class="t-input" type="password" x-model="dualCreds.fyers_totp" placeholder="6-digit TOTP or base32 seed" autocomplete="new-password"/></div>
+        </div>
+        <!-- Fyers individual connect -->
+        <div class="flex items-center gap-2 mt-3">
+          <button class="btn-action" style="border-color:rgba(var(--t-amber-rgb),0.45);color:var(--t-amber);width:auto;padding:7px 20px;font-size:11px;letter-spacing:.12em"
+                  @click="connectFyers()" :disabled="fyersConnecting">
+            <span x-show="!fyersConnecting">&#x26A1; CONNECT FYERS FEED</span>
+            <span x-show="fyersConnecting">CONNECTING…</span>
+          </button>
+          <div x-show="fyersMsg" class="font-mono text-xs px-2 py-1 rounded"
+               :style="fyersOk?'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)':'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+               x-text="fyersMsg"></div>
+        </div>
+        <div x-show="!showFyersCreds" class="font-mono text-xs mt-2" style="color:var(--t-muted)">
+          <span :style="`color:${dualCreds.fyers_access_token?'var(--t-amber)':'var(--t-muted)'}`"
+                x-text="dualCreds.fyers_access_token ? '● TOKEN SET' : '○ No credentials entered'"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 mt-4">
+      <button class="btn-primary" style="width:auto;min-width:300px;padding:9px 28px"
+              @click="connectDual()" :disabled="dualConnecting">
+        <span x-show="!dualConnecting">&#x27F3; INITIALIZE COMPLETE DUAL ENGINE</span>
+        <span x-show="dualConnecting">ESTABLISHING DUAL STREAM…</span>
+      </button>
+      <div x-show="dualMsg" class="font-mono text-xs px-3 py-2 rounded"
+           :style="dualOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.25)'
+                          : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.25)'"
+           x-text="dualMsg"></div>
+    </div>
+  </div>
+
+  <!-- ════════════════════ BLOCK B + C: RMS PANEL + IV MATRIX ════════════════ -->
+  <div class="grid grid-cols-1 xl:grid-cols-[400px_1fr] gap-3">
+
+    <!-- Block B: Global RMS Panel -->
+    <div class="t-card rounded p-4 fade-up-2">
+      <div class="sec-label mb-0.5">Risk Management System</div>
+      <div class="font-display text-sm font-black tracking-widest mb-4" style="color:var(--t-red)">GLOBAL RMS PANEL</div>
+      <div class="space-y-3">
+        <div>
+          <div class="sec-label mb-1">MAX DAILY DRAWDOWN CEILING (%)</div>
+          <input class="t-input" type="number" step="0.5" min="0.5" max="100" x-model.number="rms.max_drawdown_pct" placeholder="5.0"/>
+          <div class="font-mono text-xs mt-1" style="color:var(--t-muted)">Aggregate loss > limit triggers global KILL SWITCH</div>
+        </div>
+        <div>
+          <div class="sec-label mb-1">ORDER THROTTLE LIMIT (orders/sec)</div>
+          <input class="t-input" type="number" step="1" min="1" x-model.number="rms.order_throttle_per_sec" placeholder="5"/>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">AUTO SQUARE-OFF (HH:MM IST)</div>
+            <input class="t-input" type="text" placeholder="15:15" x-model="rms.squareoff_time"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">DISTANCE FILTER (% from ATM)</div>
+            <input class="t-input" type="number" step="0.5" min="0" x-model.number="rms.distance_filter_pct" placeholder="5.0"/>
+          </div>
+        </div>
+        <button class="btn-action" @click="saveRms()">SAVE RMS CONFIG</button>
+        <div x-show="rmsMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+             :style="rmsSaved?'color:var(--t-green);background:rgba(var(--t-green-rgb),0.06);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                             :'color:var(--t-red);background:rgba(var(--t-red-rgb),0.06);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="rmsMsg"></div>
+        <div class="h-px" style="background:var(--t-border)"></div>
+        <div>
+          <div class="sec-label mb-2">Emergency Liquidation</div>
+          <div class="relative">
+            <div x-show="liquidateArmed" class="kill-ring" :key="liquidateArmed"></div>
+            <button class="btn-kill" :class="{armed:liquidateArmed}" @click="armLiquidate()">
+              <div x-show="!liquidateArmed" class="flex items-center justify-center gap-2"><span>&#x26A0;</span><span>FORCE LIQUIDATE ALL POSITIONS</span></div>
+              <div x-show="liquidateArmed"  class="flex items-center justify-center gap-2"><span>&#x26A0;</span><span>CONFIRM LIQUIDATE (<span x-text="liquidateCountdown"></span>s)</span></div>
+            </button>
+          </div>
+          <p class="font-ui text-xs mt-2 leading-relaxed" style="color:var(--t-muted)">Loops all active clients, transmits market-exit requests, halts all strategy execution. 2-click / 5 s window.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Block C: Option Chain IV Matrix -->
+    <div class="t-card rounded fade-up-2 flex flex-col" style="min-height:320px">
+      <div class="flex items-center justify-between px-4 py-3 border-b shrink-0" style="border-color:var(--t-border)">
+        <div>
+          <div class="sec-label mb-0.5">Live Option Chain</div>
+          <div class="font-ui font-bold text-sm tracking-wider" style="color:var(--t-bright)">IV MATRIX &middot; <span x-text="activeIndex"></span></div>
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="flex items-center gap-1">
+            <span class="sec-label">SPREAD ALERT &gt;</span>
+            <input class="t-input" type="number" style="width:60px" x-model.number="ivSpreadThreshold"/>
+          </div>
+          <button @click="loadIvMatrix()" class="font-mono text-xs px-2 py-1 rounded border"
+                  style="color:var(--t-muted);border-color:var(--t-border)">&#x27F3;</button>
+        </div>
+      </div>
+      <div class="flex-1 overflow-auto">
+        <table class="w-full text-xs font-mono" style="border-collapse:collapse">
+          <thead>
+            <tr style="background:var(--t-surface)">
+              <th class="px-3 py-2 text-left sec-label">STRIKE</th>
+              <th class="px-3 py-2 text-right sec-label">CALL OI</th>
+              <th class="px-3 py-2 text-right sec-label">CALL IV%</th>
+              <th class="px-3 py-2 text-center sec-label">SPREAD</th>
+              <th class="px-3 py-2 text-right sec-label">PUT IV%</th>
+              <th class="px-3 py-2 text-right sec-label">PUT OI</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-if="ivMatrix.length === 0">
+              <tr><td colspan="6" class="text-center py-8" style="color:var(--t-muted)">Waiting for option chain data… tick stream must be flowing</td></tr>
+            </template>
+            <template x-for="row in ivMatrix" :key="row.strike">
+              <tr :style="`border-bottom:1px solid var(--t-border);${row.is_atm?'background:rgba(var(--t-cyan-rgb),0.05)':''}`"
+                  :class="row.spread > ivSpreadThreshold ? 'iv-wide-spread' : ''">
+                <td class="px-3 py-1.5 font-bold"
+                    :style="`color:${row.is_atm?'var(--t-cyan)':'var(--t-text)'}`"
+                    x-text="row.strike + (row.is_atm?' ◆':'')"></td>
+                <td class="px-3 py-1.5 text-right" style="color:var(--t-muted)"
+                    x-text="(row.call_oi/1000).toFixed(0)+'K'"></td>
+                <td class="px-3 py-1.5 text-right font-bold"
+                    :style="`color:${row.call_iv>30?'var(--t-red)':row.call_iv>20?'var(--t-amber)':'var(--t-green)'}`"
+                    x-text="row.call_iv ? row.call_iv.toFixed(1)+'%' : '—'"></td>
+                <td class="px-3 py-1.5 text-center"
+                    :style="`color:${row.spread>ivSpreadThreshold?'var(--t-amber)':'var(--t-muted)'}`"
+                    x-text="row.spread ? row.spread.toFixed(1) : '—'"></td>
+                <td class="px-3 py-1.5 text-right font-bold"
+                    :style="`color:${row.put_iv>30?'var(--t-red)':row.put_iv>20?'var(--t-amber)':'var(--t-green)'}`"
+                    x-text="row.put_iv ? row.put_iv.toFixed(1)+'%' : '—'"></td>
+                <td class="px-3 py-1.5 text-right" style="color:var(--t-muted)"
+                    x-text="(row.put_oi/1000).toFixed(0)+'K'"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- end RMS + IV row -->
+
+  <!-- ════════════════════ BLOCK D + E: DB CACHE + SEBI COMPLIANCE ═══════════ -->
+  <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+
+    <!-- Block D: DB Cache & Warm Recovery -->
+    <div class="t-card rounded p-4 fade-up-3">
+      <div class="sec-label mb-0.5">State Persistence</div>
+      <div class="font-display text-sm font-black tracking-widest mb-4" style="color:var(--t-green)">DATABASE CACHE &amp; WARM RECOVERY</div>
+      <div class="grid grid-cols-2 gap-3 mb-4">
+        <div>
+          <div class="sec-label">LAST CHECKPOINT</div>
+          <div class="font-mono text-sm mt-1" style="color:var(--t-text)" x-text="lastCheckpointTs"></div>
+        </div>
+        <div>
+          <div class="sec-label">CACHED STRIKES</div>
+          <div class="font-mono text-sm mt-1" style="color:var(--t-cyan)" x-text="ivMatrix.length + ' loaded'"></div>
+        </div>
+      </div>
+      <div class="space-y-2">
+        <button class="btn-action" @click="checkpoint()">&#x1F4BE; MANUAL SYSTEM CHECKPOINT</button>
+        <button class="btn-action" style="border-color:rgba(var(--t-amber-rgb),0.4);color:var(--t-amber)"
+                @click="warmBoot()">&#x21BA; EXECUTE WARM BOOT RECOVERY</button>
+      </div>
+      <div x-show="checkpointMsg || warmBootMsg" class="font-mono text-xs mt-3 px-2 py-1.5 rounded"
+           style="color:var(--t-green);background:rgba(var(--t-green-rgb),0.06);border:1px solid rgba(var(--t-green-rgb),0.2)"
+           x-text="checkpointMsg || warmBootMsg"></div>
+    </div>
+
+    <!-- Block E: SEBI Compliance Filters -->
+    <div class="t-card rounded p-4 fade-up-3">
+      <div class="sec-label mb-0.5">Regulatory Controls</div>
+      <div class="font-display text-sm font-black tracking-widest mb-4" style="color:var(--t-amber)">SEBI COMPLIANCE FILTERS</div>
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">AUTO SQUARE-OFF TIME (IST)</div>
+            <input class="t-input" type="text" placeholder="15:15" x-model="rms.squareoff_time"/>
+            <div class="font-mono text-xs mt-1" style="color:var(--t-muted)">Intraday exchange cutoff (SEBI)</div>
+          </div>
+          <div>
+            <div class="sec-label mb-1">EXECUTION DISTANCE FILTER (%)</div>
+            <input class="t-input" type="number" step="0.5" min="0" x-model.number="rms.distance_filter_pct" placeholder="5.0"/>
+            <div class="font-mono text-xs mt-1" style="color:var(--t-muted)">Max % variance from ATM for order placement</div>
+          </div>
+        </div>
+        <button class="btn-action" @click="saveRms()">APPLY COMPLIANCE CONFIG</button>
+      </div>
+    </div>
+
+  </div><!-- end DB + Compliance row -->
+
+  <!-- ════════════════════ MASTER AUDIT TRAIL ════════════════════════════════ -->
+  <div class="t-card rounded fade-up-4 flex flex-col" style="min-height:280px;max-height:420px">
+    <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+      <div>
+        <div class="sec-label mb-0.5">Regulatory Compliance</div>
+        <div class="font-ui font-bold tracking-wider" style="color:var(--t-bright)">MASTER SYSTEM AUDIT TRAIL</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button @click="loadAudit()" :disabled="auditLoading"
+                class="font-mono text-xs px-3 py-1 rounded border"
+                style="color:var(--t-muted);border-color:var(--t-border)">
+          <span x-show="!auditLoading">&#x27F3; REFRESH</span>
+          <span x-show="auditLoading">LOADING…</span>
+        </button>
+        <a :href="authToken ? '/api/admin/audit_log/csv?token='+authToken : '#'"
+           class="font-mono text-xs px-3 py-1 rounded border"
+           style="color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.35);text-decoration:none">
+          &#x1F4E5; EXPORT CSV
+        </a>
+      </div>
+    </div>
+    <div class="flex-1 overflow-y-auto">
+      <div x-show="auditLines.length===0" class="font-mono text-xs text-center py-8" style="color:var(--t-muted)">
+        No audit entries — click &#x27F3; REFRESH to load the latest system log.
+      </div>
+      <template x-for="(line,i) in auditLines" :key="i">
+        <div class="feed-row"
+             :style="`color:${line.includes('ERROR')||line.includes('FAIL')?'var(--t-red)':line.includes('WARN')?'var(--t-amber)':line.includes('SUCCESS')||line.includes('AUTH')?'var(--t-green)':'var(--t-muted)'}`"
+             x-text="line"></div>
+      </template>
+    </div>
+  </div>
+
+  </div><!-- end feeder tab -->
+
+</main><!-- end admin layout -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     CLIENT LAYOUT
+════════════════════════════════════════════════════════════════════════════ -->
+<main x-show="screen === 'client'"
+      class="flex-1 grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3 p-3 max-w-[1200px] w-full mx-auto">
+
+  <!-- ══ CLIENT LEFT ══════════════════════════════════════════════════════════ -->
+  <div class="flex flex-col gap-3">
+
+    <!-- My Portfolio -->
+    <div class="t-card rounded p-5 fade-up-1 relative overflow-hidden">
+      <div class="diag-accent"></div>
+      <div class="sec-label mb-3">My Portfolio</div>
+      <template x-if="myClient">
+        <div>
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <div class="font-ui font-bold text-xl" style="color:var(--t-bright)" x-text="myClient.name||myClient.client_id"></div>
+              <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="myClient.client_id"></div>
+            </div>
+            <span :class="myClient.tradeable ? 'badge-live' : 'badge-halted'" x-text="myClient.tradeable ? 'LIVE' : 'HALTED'"></span>
+          </div>
+          <div class="grid grid-cols-3 gap-4 mb-4">
+            <div>
+              <div class="sec-label mb-1">CAPITAL</div>
+              <div class="font-mono text-lg" style="color:var(--t-text)" x-text="'₹' + fmt(myClient.capital,0)"></div>
+            </div>
+            <div>
+              <div class="sec-label mb-1">DAILY P&L</div>
+              <div class="font-mono text-xl font-bold" :class="pnlClass(myClient.daily_pnl)"
+                   x-text="(myClient.daily_pnl>=0?'+':'')+'₹'+fmt(myClient.daily_pnl)"></div>
+            </div>
+            <div>
+              <div class="sec-label mb-1">RISK LIMIT</div>
+              <div class="font-mono text-lg" style="color:var(--t-muted)" x-text="myClient.daily_loss_pct+'%'"></div>
+            </div>
+          </div>
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="sec-label">DRAWDOWN EXPOSURE</span>
+              <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="myClient.daily_loss_pct+'% limit'"></span>
+            </div>
+            <div class="gauge-track h-2">
+              <div class="drawdown-bar gauge-fill h-full"
+                   :style="`width:${capPct(myClient.daily_pnl,myClient.capital)}%; background:${myClient.daily_pnl<0?'var(--t-red)':'var(--t-green)'}`"></div>
+            </div>
+          </div>
+          <div class="mt-3 flex gap-6 text-xs">
+            <div><span class="sec-label">STRATEGIES </span><span class="font-mono" style="color:var(--t-muted)" x-text="(myClient.strategies||[]).join(', ')||'—'"></span></div>
+          </div>
+        </div>
+      </template>
+      <div x-show="!myClient" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">Loading portfolio…</div>
+    </div>
+
+    <!-- Market Overview (own index) -->
+    <div class="t-card rounded p-4 fade-up-2">
+      <div class="sec-label mb-3">Market · <span x-text="activeIndex"></span></div>
+      <div class="grid grid-cols-2 gap-4 mb-3">
+        <div>
+          <div class="sec-label mb-1">SPOT</div>
+          <div class="font-mono text-3xl leading-none" style="color:var(--t-bright)" x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
+        </div>
+        <div>
+          <div class="sec-label mb-1">ATM</div>
+          <div class="font-mono text-3xl leading-none" style="color:var(--t-cyan)" x-text="spot.atm ? fmt(spot.atm,0) : '—'"></div>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2 text-xs">
+        <div class="t-card rounded p-2">
+          <div class="sec-label">RSI-14</div>
+          <div class="font-mono text-sm font-bold mt-0.5" :class="rsiClass" x-text="rsiVal ? fmt(rsiVal,1) : '—'"></div>
+        </div>
+        <div class="t-card rounded p-2">
+          <div class="sec-label">ADX-20</div>
+          <div class="font-mono text-sm font-bold mt-0.5" :style="`color:${adxVal>=25?'var(--t-amber)':'var(--t-muted)'}`" x-text="adxVal ? fmt(adxVal,1) : '—'"></div>
+        </div>
+        <div class="t-card rounded p-2">
+          <div class="sec-label">EMA</div>
+          <div class="font-mono text-sm font-bold mt-0.5" :class="{'ema-bull':emaSignal==='BULL','ema-bear':emaSignal==='BEAR','ema-neutral':emaSignal==='NEUTRAL'}" x-text="emaSignal"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- My Event Feed -->
+    <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:220px;max-height:340px">
+      <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+        <div class="sec-label">My Activity Feed</div>
+        <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="myEvents.length + ' events'"></span>
+      </div>
+      <div class="flex-1 overflow-y-auto">
+        <div x-show="myEvents.length===0" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">No events yet…</div>
+        <template x-for="(evt,i) in myEvents" :key="i">
+          <div class="feed-row">
+            <span class="font-mono text-xs shrink-0" style="color:var(--t-muted)" x-text="evt.ts||''"></span>
+            <span class="font-mono text-xs font-bold shrink-0" :style="`color:${evtColor(evt)}`" x-text="evt.code||evt.side||''"></span>
+            <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
+                  x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+  </div><!-- end client left -->
+
+  <!-- ══ CLIENT RIGHT ══════════════════════════════════════════════════════════ -->
+  <div class="flex flex-col gap-3">
+
+    <!-- My Broker Integrations -->
+    <div class="t-card rounded fade-up-1">
+      <div class="flex items-center justify-between px-4 py-3 border-b shrink-0" style="border-color:var(--t-border)">
+        <div>
+          <div class="sec-label">My Broker Integrations</div>
+          <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)" x-text="myBrokers.length + ' binding' + (myBrokers.length!==1?'s':'')"></div>
+        </div>
+      </div>
+
+      <!-- Broker cards -->
+      <div x-show="myBrokers.length === 0" class="px-4 py-6 font-mono text-xs text-center" style="color:var(--t-muted)">
+        No brokers connected yet.<br/>Add one below to start trading.
+      </div>
+      <template x-for="b in myBrokers" :key="b.binding_id">
+        <div class="px-4 py-3 border-b last:border-b-0 flex items-center justify-between" style="border-color:var(--t-border)">
+          <div class="flex items-center gap-3">
+            <div class="w-2 h-2 rounded-full shrink-0" :class="b.is_authenticated ? 'conn-live' : ''"
+                 :style="`background:${b.is_authenticated?'var(--t-green)':'var(--t-red)'}`"></div>
+            <div>
+              <div class="font-mono text-xs" style="color:var(--t-bright)" x-text="b.binding_id"></div>
+              <div class="font-ui text-xs" style="color:var(--t-muted)" x-text="b.provider.toUpperCase()+(b.label?' — '+b.label:'')"></div>
+            </div>
+          </div>
+          <span :class="b.is_authenticated?'badge-live':'badge-halted'" x-text="b.is_authenticated?'AUTH':'UNAUTH'"></span>
+        </div>
+      </template>
+
+      <!-- Add broker button -->
+      <div class="p-4">
+        <button class="btn-add" @click="showBrokerModal=true; brokerAddMsg=''; brokerAddOk=null;">
+          [+] PROVISION NEW BROKER CHANNEL
+        </button>
+      </div>
+    </div>
+
+    <!-- Client system info -->
+    <div class="t-card rounded p-4 fade-up-2">
+      <div class="sec-label mb-3">Session Info</div>
+      <div class="space-y-1.5">
+        <div class="flex justify-between"><span class="sec-label">CLIENT ID</span><span class="font-mono text-sm" style="color:var(--t-cyan)" x-text="authClientId"></span></div>
+        <div class="flex justify-between"><span class="sec-label">ACTIVE IDX</span><span class="font-mono text-sm" style="color:var(--t-text)" x-text="activeIndex"></span></div>
+        <div class="flex justify-between"><span class="sec-label">BROKERS</span><span class="font-mono text-sm" style="color:var(--t-text)" x-text="myBrokers.length"></span></div>
+        <div class="flex justify-between"><span class="sec-label">FEED STATUS</span>
+          <span class="font-mono text-sm" :style="`color:${wsConnected?'var(--t-green)':'var(--t-red)'}`" x-text="wsConnected?'LIVE':'OFFLINE'"></span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end client right -->
+</main><!-- end client layout -->
+
+
+<!-- ── FOOTER ─────────────────────────────────────────────────────────────── -->
+<footer class="shrink-0 border-t px-5 py-2 flex items-center justify-between" style="border-color:var(--t-border)">
+  <span class="font-mono text-xs" style="color:var(--t-muted)">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
+  <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="'IST ' + istTime"></span>
 </footer>
 
+</div><!-- end dashboard -->
 </div><!-- end z-10 flex col -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     BROKER ADD MODAL (client)
+════════════════════════════════════════════════════════════════════════════ -->
+<div x-show="showBrokerModal" class="modal-overlay" @keydown.escape.window="showBrokerModal=false">
+  <div class="modal-box slide-in">
+    <div class="flex items-center justify-between mb-5">
+      <div>
+        <div class="font-display text-sm font-bold tracking-widest" style="color:var(--t-cyan)">PROVISION NEW BROKER CHANNEL</div>
+        <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Credentials are never stored — authenticated live via broker API</div>
+      </div>
+      <button @click="showBrokerModal=false" class="font-mono text-lg leading-none" style="color:var(--t-muted)">✕</button>
+    </div>
+
+    <div class="space-y-3">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="sec-label mb-1">BROKER</div>
+          <select class="t-input" x-model="newBroker.provider">
+            <template x-for="p in brokerProviders" :key="p">
+              <option :value="p" x-text="p.toUpperCase()"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <div class="sec-label mb-1">BINDING ID</div>
+          <input class="t-input" type="text" placeholder="e.g. shoonya_main" x-model="newBroker.binding_id" autocomplete="off"/>
+        </div>
+      </div>
+      <div>
+        <div class="sec-label mb-1">LABEL (optional)</div>
+        <input class="t-input" type="text" placeholder="e.g. Main Account" x-model="newBroker.label" autocomplete="off"/>
+      </div>
+
+      <div class="h-px" style="background:var(--t-border)"></div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="sec-label mb-1">USER ID / CLIENT CODE</div>
+          <input class="t-input" type="text" placeholder="broker user id" x-model="newBroker.user_id" autocomplete="off"/>
+        </div>
+        <div>
+          <div class="sec-label mb-1">PASSWORD</div>
+          <input class="t-input" type="password" placeholder="broker password" x-model="newBroker.password" autocomplete="new-password"/>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="sec-label mb-1">API KEY</div>
+          <input class="t-input" type="password" placeholder="api key" x-model="newBroker.api_key" autocomplete="new-password"/>
+        </div>
+        <div>
+          <div class="sec-label mb-1">API SECRET</div>
+          <input class="t-input" type="password" placeholder="api secret" x-model="newBroker.api_secret" autocomplete="new-password"/>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="sec-label mb-1">TOTP SECRET (2FA)</div>
+          <input class="t-input" type="password" placeholder="base32 TOTP seed" x-model="newBroker.totp_secret" autocomplete="new-password"/>
+        </div>
+        <div>
+          <div class="sec-label mb-1">ACCESS TOKEN (optional)</div>
+          <input class="t-input" type="password" placeholder="pre-fetched token" x-model="newBroker.access_token" autocomplete="new-password"/>
+        </div>
+      </div>
+
+      <!-- Shoonya-specific fields -->
+      <div x-show="newBroker.provider === 'shoonya'" class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="sec-label mb-1">VENDOR CODE</div>
+          <input class="t-input" type="text" x-model="newBroker.vendor_code" autocomplete="off"/>
+        </div>
+        <div>
+          <div class="sec-label mb-1">IMEI</div>
+          <input class="t-input" type="text" x-model="newBroker.imei" autocomplete="off"/>
+        </div>
+      </div>
+
+      <div>
+        <div class="sec-label mb-1">LOT MULTIPLIER</div>
+        <input class="t-input" type="number" step="0.5" min="0.5" placeholder="1.0" x-model.number="newBroker.lot_multiplier"/>
+      </div>
+
+      <!-- Result message -->
+      <div x-show="brokerAddMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+           :style="brokerAddOk ? 'color:var(--t-green); background:rgba(var(--t-green-rgb),0.05); border:1px solid rgba(var(--t-green-rgb),0.2)'
+                               : 'color:var(--t-red); background:rgba(var(--t-red-rgb),0.05); border:1px solid rgba(var(--t-red-rgb),0.2)'"
+           x-text="brokerAddMsg"></div>
+
+      <button class="btn-add" @click="addBroker()" :disabled="brokerAddLoading">
+        <span x-show="!brokerAddLoading">SAVE &amp; BOOTSTRAP WORKER THREAD</span>
+        <span x-show="brokerAddLoading">CONNECTING TO BROKER…</span>
+      </button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

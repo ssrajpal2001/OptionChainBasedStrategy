@@ -21,7 +21,7 @@ import logging
 import random
 import time
 from datetime import datetime, date, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config.global_config import IST, Topic, SysEvent, GlobalConfig
 from data_layer.base_feeder import (
@@ -151,14 +151,267 @@ class MockFeeder(BaseFeeder):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DedupBuffer — per-symbol tick deduplication for dual-feed setups
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DedupBuffer:
+    """
+    Tracks the last accepted (monotonic_ts, ltp) per symbol.
+
+    accept() returns True (and updates state) when:
+      • first tick for the symbol, OR
+      • >= 100 ms elapsed since last accepted tick, OR
+      • price moved more than 1e-4 (absolute).
+
+    All other ticks are silently dropped → returns False.
+    """
+
+    def __init__(self) -> None:
+        self._last: Dict[str, Tuple[float, float]] = {}   # symbol → (ts, ltp)
+
+    def accept(self, symbol: str, ltp: float) -> bool:
+        now = time.monotonic()
+        entry = self._last.get(symbol)
+        if entry is None:
+            self._last[symbol] = (now, ltp)
+            return True
+        prev_ts, prev_ltp = entry
+        if (now - prev_ts) >= 0.100 or abs(ltp - prev_ltp) > 1e-4:
+            self._last[symbol] = (now, ltp)
+            return True
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UpstoxFeeder — stub for Upstox API v2 WebSocket feed
+# ─────────────────────────────────────────────────────────────────────────────
+
+class UpstoxFeeder(BaseFeeder):
+    """
+    Stub feeder for Upstox API v2.
+
+    If the `upstox_client` SDK is not installed, connect() logs a warning and
+    returns False. _ws_loop idles — replace with real SDK WebSocket wiring when
+    the SDK is available.
+    """
+
+    def __init__(self, bus: EventBus, cfg: GlobalConfig = None) -> None:  # type: ignore[assignment]
+        super().__init__(bus)
+        self._cfg = cfg
+        self._creds: Dict[str, str] = {}
+        try:
+            import upstox_client  # noqa: F401
+            self._sdk_available = True
+        except ImportError:
+            self._sdk_available = False
+
+    def set_credentials(self, creds: Dict[str, str]) -> None:
+        self._creds = creds
+
+    async def connect(self) -> bool:
+        if not self._sdk_available:
+            logger.warning(
+                "UpstoxFeeder: upstox_client SDK not installed — "
+                "pip install upstox-client.  Feeder will not connect."
+            )
+            return False
+        self._connected = True
+        logger.info("UpstoxFeeder: connected (stub).")
+        return True
+
+    async def disconnect(self) -> None:
+        self._running = False
+        self._connected = False
+
+    async def subscribe_tokens(self, tokens: List[str]) -> None:
+        logger.debug("UpstoxFeeder: subscribe_tokens %d tokens (stub).", len(tokens))
+
+    async def unsubscribe_tokens(self, tokens: List[str]) -> None:
+        pass
+
+    async def _ws_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(1)
+
+    async def _parse_frame(self, raw: Any) -> None:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FyersFeeder — stub for Fyers API v3 WebSocket feed
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FyersFeeder(BaseFeeder):
+    """
+    Stub feeder for Fyers API v3.
+
+    If `fyers_apiv3` is not installed, connect() logs a warning and returns
+    False. _ws_loop idles — replace with real FyersDataSocket wiring when
+    the SDK is available.
+    """
+
+    def __init__(self, bus: EventBus, cfg: GlobalConfig = None) -> None:  # type: ignore[assignment]
+        super().__init__(bus)
+        self._cfg = cfg
+        self._creds: Dict[str, str] = {}
+        try:
+            import fyers_apiv3  # noqa: F401
+            self._sdk_available = True
+        except ImportError:
+            self._sdk_available = False
+
+    def set_credentials(self, creds: Dict[str, str]) -> None:
+        self._creds = creds
+
+    async def connect(self) -> bool:
+        if not self._sdk_available:
+            logger.warning(
+                "FyersFeeder: fyers_apiv3 SDK not installed — "
+                "pip install fyers-apiv3.  Feeder will not connect."
+            )
+            return False
+        self._connected = True
+        logger.info("FyersFeeder: connected (stub).")
+        return True
+
+    async def disconnect(self) -> None:
+        self._running = False
+        self._connected = False
+
+    async def subscribe_tokens(self, tokens: List[str]) -> None:
+        logger.debug("FyersFeeder: subscribe_tokens %d tokens (stub).", len(tokens))
+
+    async def unsubscribe_tokens(self, tokens: List[str]) -> None:
+        pass
+
+    async def _ws_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(1)
+
+    async def _parse_frame(self, raw: Any) -> None:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DualFeeder — concurrent active-active dual-provider feed manager
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DualFeeder:
+    """
+    Manages Upstox + Fyers feeders concurrently (active-active).
+
+    Each provider runs in its own asyncio Task. A crash in one does NOT
+    affect the other. Exponential back-off reconnect is per-provider.
+    All ticks pass through DedupBuffer before being published so
+    duplicate ticks from the trailing provider are silently discarded.
+    Per-provider latency (ms) is tracked in _latency.
+    """
+
+    MAX_RECONNECT_DELAY = 60
+
+    def __init__(self, bus: EventBus, cfg: GlobalConfig) -> None:
+        self._bus = bus
+        self._cfg = cfg
+        self._running = False
+        self._dedup = DedupBuffer()
+        self._latency: Dict[str, float] = {}
+        self._tasks: List[asyncio.Task] = []
+        self._feeders: Dict[str, BaseFeeder] = {}
+
+    async def start(self, upstox_creds: Dict[str, str], fyers_creds: Dict[str, str]) -> None:
+        self._running = True
+        upstox = UpstoxFeeder(self._bus, self._cfg)
+        upstox.set_credentials(upstox_creds)
+        fyers = FyersFeeder(self._bus, self._cfg)
+        fyers.set_credentials(fyers_creds)
+
+        for provider, feeder in (("upstox", upstox), ("fyers", fyers)):
+            try:
+                ok = await feeder.connect()
+            except Exception as exc:
+                logger.warning("DualFeeder: %s connect raised: %s — continuing.", provider, exc)
+                ok = False
+            if ok:
+                self._feeders[provider] = feeder
+                task = asyncio.create_task(
+                    self._run_stream(provider, feeder),
+                    name=f"dual_feeder_{provider}",
+                )
+                self._tasks.append(task)
+                logger.info("DualFeeder: %s stream task started.", provider)
+            else:
+                logger.warning("DualFeeder: %s failed to connect — stream not started.", provider)
+
+    async def stop(self) -> None:
+        self._running = False
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._tasks.clear()
+        for provider, feeder in self._feeders.items():
+            try:
+                feeder.stop()
+                await feeder.disconnect()
+            except Exception as exc:
+                logger.debug("DualFeeder: %s disconnect raised: %s", provider, exc)
+        self._feeders.clear()
+        logger.info("DualFeeder: stopped.")
+
+    async def _run_stream(self, provider: str, feeder: BaseFeeder) -> None:
+        reconnect_attempts = 0
+        while self._running:
+            try:
+                await feeder.run()
+                break  # clean exit
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                delay = min(2 ** reconnect_attempts, self.MAX_RECONNECT_DELAY)
+                logger.error(
+                    "DualFeeder: %s stream error: %s — reconnecting in %.0fs (attempt %d).",
+                    provider, exc, delay, reconnect_attempts + 1,
+                )
+                await asyncio.sleep(delay)
+                reconnect_attempts += 1
+                try:
+                    await feeder.disconnect()
+                    ok = await feeder.connect()
+                except Exception as reconnect_exc:
+                    logger.warning("DualFeeder: %s reconnect raised: %s", provider, reconnect_exc)
+                    ok = False
+                if ok:
+                    reconnect_attempts = 0
+                    logger.info("DualFeeder: %s reconnected successfully.", provider)
+
+    async def _wrap_publish_index(self, provider: str, feeder: BaseFeeder, tick: IndexTick) -> None:
+        t0 = time.monotonic()
+        if self._dedup.accept(tick.symbol, tick.ltp):
+            await feeder._publish_index(tick)
+            self._latency[provider] = (time.monotonic() - t0) * 1000.0
+
+    @property
+    def is_running(self) -> bool:
+        return self._running and any(f.is_connected for f in self._feeders.values())
+
+    @property
+    def latency(self) -> Dict[str, float]:
+        return dict(self._latency)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Feeder Registry — maps provider string → feeder class
 # ─────────────────────────────────────────────────────────────────────────────
 
 _FEEDER_REGISTRY: Dict[str, type] = {
-    "mock": MockFeeder,
-    # "shoonya": ShoonyaFeeder,   ← registered when broker module is imported
+    "mock":   MockFeeder,
+    "upstox": UpstoxFeeder,
+    "fyers":  FyersFeeder,
+    # "shoonya": ShoonyaFeeder,
     # "dhan": DhanFeeder,
-    # "fyers": FyersFeeder,
     # "angelone": AngelOneFeeder,
 }
 
@@ -192,9 +445,11 @@ class GlobalFeeder:
         self._feeder: Optional[BaseFeeder] = None
         self._feeder_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._tick_listener_task: Optional[asyncio.Task] = None
         self._last_tick_ts: float = 0.0
         self._reconnect_delay: float = 2.0
         self._running = False
+        self._dual_feeder: Optional[DualFeeder] = None
 
     async def start(self) -> None:
         """Create feeder, connect, and launch the run + heartbeat tasks."""
@@ -216,6 +471,7 @@ class GlobalFeeder:
         self._last_tick_ts = time.monotonic()
         self._feeder_task = asyncio.create_task(self._run_feeder(), name="global_feeder_run")
         self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="global_feeder_hb")
+        self._tick_listener_task = asyncio.create_task(self._tick_listener(), name="global_feeder_tick_listener")
 
         await self._bus.publish(Topic.SYSTEM_EVENT, SystemEvent(SysEvent.FEEDER_RESTORED, provider))
         logger.info("GlobalFeeder: Started with provider='%s'.", provider)
@@ -225,13 +481,16 @@ class GlobalFeeder:
         if self._feeder:
             self._feeder.stop()
             await self._feeder.disconnect()
-        for task in (self._feeder_task, self._heartbeat_task):
+        for task in (self._feeder_task, self._heartbeat_task, self._tick_listener_task):
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+        if self._dual_feeder is not None:
+            await self._dual_feeder.stop()
+            self._dual_feeder = None
         logger.info("GlobalFeeder: Stopped.")
 
     async def subscribe_tokens(self, tokens: list) -> None:
@@ -243,6 +502,48 @@ class GlobalFeeder:
         """Proxy token unsubscription to the active inner feeder."""
         if self._feeder is not None:
             await self._feeder.unsubscribe_tokens(tokens)
+
+    async def start_dual(self, upstox_creds: Dict[str, str], fyers_creds: Dict[str, str]) -> None:
+        """
+        Bootstrap an active-active DualFeeder. Stops any existing DualFeeder first.
+        The single-provider feeder continues running alongside.
+        """
+        if self._dual_feeder is not None:
+            await self._dual_feeder.stop()
+            self._dual_feeder = None
+        dual = DualFeeder(self._bus, self._cfg)
+        await dual.start(upstox_creds, fyers_creds)
+        self._dual_feeder = dual
+        await self._bus.publish(
+            Topic.SYSTEM_EVENT,
+            SystemEvent(SysEvent.FEEDER_RESTORED, "dual_active_active"),
+        )
+        logger.info("GlobalFeeder: DualFeeder (active-active) started.")
+
+    async def start_single(self, provider: str, creds: Dict[str, str]) -> None:
+        """
+        Bootstrap a single-provider stream via DualFeeder.
+        The other provider slot receives empty creds and idles gracefully.
+        Replaces any existing DualFeeder instance.
+        """
+        if self._dual_feeder is not None:
+            await self._dual_feeder.stop()
+            self._dual_feeder = None
+        dual = DualFeeder(self._bus, self._cfg)
+        upstox_creds = creds if provider == "upstox" else {}
+        fyers_creds  = creds if provider == "fyers"  else {}
+        await dual.start(upstox_creds, fyers_creds)
+        self._dual_feeder = dual
+        await self._bus.publish(
+            Topic.SYSTEM_EVENT,
+            SystemEvent(SysEvent.FEEDER_RESTORED, f"single_{provider}"),
+        )
+        logger.info("GlobalFeeder: single-provider '%s' feeder started.", provider)
+
+    @property
+    def dual_latency(self) -> Dict[str, float]:
+        """Per-provider latency dict from the DualFeeder, or {} if inactive."""
+        return self._dual_feeder.latency if self._dual_feeder is not None else {}
 
     async def _run_feeder(self) -> None:
         while self._running:
@@ -270,6 +571,13 @@ class GlobalFeeder:
                 )
             else:
                 self._reconnect_delay = 2.0
+                self._last_tick_ts = time.monotonic()
+                # disconnect() set _running=False which exits _ws_loop → run() returns → task done.
+                # Must restart the feeder run loop so ticks resume.
+                if not self._feeder_task or self._feeder_task.done():
+                    self._feeder_task = asyncio.create_task(
+                        self._run_feeder(), name="global_feeder_run"
+                    )
                 logger.info("GlobalFeeder: Reconnected.")
                 await self._bus.publish(
                     Topic.SYSTEM_EVENT, SystemEvent(SysEvent.FEEDER_RESTORED, "reconnect_ok")
@@ -287,9 +595,22 @@ class GlobalFeeder:
                 logger.warning("GlobalFeeder: No ticks for %.0f seconds — triggering reconnect.", silence)
                 await self._reconnect()
 
-    def record_tick(self) -> None:
-        """Called by the EventBus interceptor to update heartbeat timestamp."""
-        self._last_tick_ts = time.monotonic()
+    async def _tick_listener(self) -> None:
+        """
+        Subscribes to INDEX_TICK and refreshes _last_tick_ts on every arrival.
+        This is the only correct way to drive the heartbeat — avoids the need
+        for any external caller to invoke record_tick().
+        """
+        from config.global_config import Topic
+        q = self._bus.subscribe(Topic.INDEX_TICK)
+        while self._running:
+            try:
+                await asyncio.wait_for(q.get(), timeout=1.0)
+                self._last_tick_ts = time.monotonic()
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
 
     @property
     def is_running(self) -> bool:
