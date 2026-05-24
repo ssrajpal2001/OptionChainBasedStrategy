@@ -44,6 +44,13 @@ from config.global_config import IST, Topic, GlobalConfig
 from data_layer.base_feeder import EventBus, IndexTick, OptionTick, CandleEvent
 from matrix_engine.candle_cache import CandleCache
 
+# System-event topics that are published by live-market modules (GapHandler,
+# StrikeCleanup, ClientManager, etc.) but have no meaning during historical
+# replay.  The iterator subscribes to this topic so its queue is always drained
+# and never fills up — preventing silent EventBus drops that would look like
+# legitimate backpressure in the topic drop-count metrics.
+_DRAIN_TOPICS = (Topic.SYSTEM_EVENT,)
+
 logger = logging.getLogger(__name__)
 
 
@@ -219,6 +226,11 @@ class UnifiedBacktestIterator:
         # Signal collector (async queue consumed synchronously)
         self._signal_q = self._bus.subscribe(Topic.SIGNAL)
         self._candle_q = self._bus.subscribe(Topic.CANDLE_CLOSE)
+        # Subscribe to system events so any GAP_OPEN / POSITION_CLOSED / KILL_SWITCH
+        # events emitted by modules wired into the replay bus are drained silently.
+        # Without this subscriber the EventBus would DROP them (put_nowait on a
+        # queue that nobody reads), which shows up as false positives in drop_stats().
+        self._sys_q = self._bus.subscribe(Topic.SYSTEM_EVENT)
 
     def run(
         self,
@@ -281,6 +293,15 @@ class UnifiedBacktestIterator:
                 if sig not in result.signals:
                     result.signals.append(sig)
                     result.signals_generated += 1
+
+            # Drain system events — silently discard GAP_OPEN, POSITION_CLOSED,
+            # FEEDER_DOWN, REBALANCE notices, etc.  These are live-market lifecycle
+            # events that have no effect on historical replay; consuming them here
+            # prevents false positives in EventBus drop_stats() and ensures the
+            # queue never fills up if any production module fires system events
+            # during a replay run.
+            while not self._sys_q.empty():
+                self._sys_q.get_nowait()
 
         # Allow CandleCache run loop to process remaining queued ticks
         await asyncio.sleep(0)

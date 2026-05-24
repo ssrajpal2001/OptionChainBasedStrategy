@@ -19,20 +19,31 @@ How it works:
     If |opening - reference| / reference > GAP_THRESHOLD (default 1%), a gap
     has been detected.
 
-  Phase 3 — Reset cascade (on gap detected, async, non-blocking):
-    1. Publish SYSTEM_EVENT GAP_OPEN so all subscribers can react.
-    2. Call every registered async reset callback with (underlying, opening_spot).
-       Callbacks are registered by the application layer:
-         gap_handler.register_reset_callback(candle_cache.reset_symbol_async)
-         gap_handler.register_reset_callback(rebalancer.reset_atm)
-         gap_handler.register_reset_callback(strategy_a.reset_state)
-         ...
-    3. Log the gap size so the operator is alerted via structured logs.
+  Phase 3 — Reset cascade (on gap detected, strictly sequenced):
+    Step A — Candle buffer clear + restore (must complete first):
+      1. CandleCache.reset_symbol(underlying) — wipe all stale ring-buffers.
+      2. asyncio.to_thread(state_persistence.restore_candle_history(...))
+         — re-populate last 500 OHLCV rows from SQLite so that RSI(14),
+         ADX(20), and VWAP(500) are at full analytical parity before any
+         strategy logic runs.  This step MUST precede strategy resets.
+    Step B — Strategy + infrastructure callbacks (run concurrently):
+      3. All registered async callbacks: rebalancer.reset_atm, strategy
+         state machine resets, etc.  These receive (underlying, opening_spot).
+    Step C — Bus notification:
+      4. Publish SYSTEM_EVENT GAP_OPEN so downstream monitors can react.
 
-  After the reset, the rebalancer re-derives ATM from the new opening price,
-  candle buffers accumulate fresh bars, and indicators reach valid readings
-  within their warmup periods (RSI after 15 bars, ADX after ~42 bars, VWAP
-  after 500 bars).
+  Strict ordering of Steps A → B is critical: if strategies reset before the
+  candle buffers are re-populated, their first evaluation fires against empty
+  indicator arrays and produces either errors or trivially-incorrect signals.
+
+Constructor args:
+  candle_cache       (CandleCache, optional)       — enables internal clear+restore
+  state_persistence  (StatePersistence, optional)  — provides restore_candle_history()
+
+  If candle_cache is not provided, the clear+restore step is skipped entirely and
+  the caller is responsible for registering a callback that handles it.
+  If candle_cache IS provided but state_persistence is NOT, buffers are cleared but
+  not restored — a WARNING is logged, and indicators need natural warmup.
 
 No time.sleep.  All async.
 """
@@ -83,18 +94,35 @@ class GapHandler:
     """
     Monitors INDEX_TICK events, captures the pre-open reference price at
     09:08 IST, and at 09:15:01 IST checks whether the opening spot has gapped
-    beyond GAP_THRESHOLD.  On a detected gap, fires all registered async reset
-    callbacks and publishes a GAP_OPEN system event.
+    beyond GAP_THRESHOLD.
 
-    Registration example (in main.py or admin_console.py):
-        gap_handler.register_reset_callback(candle_cache.reset_symbol_async)
+    On a detected gap, the reset cascade is strictly sequenced:
+      1. Clear CandleCache ring-buffers for the underlying.
+      2. Re-populate from SQLite (asyncio.to_thread) — indicators reach full
+         parity BEFORE strategy callbacks fire.
+      3. Fire all registered async strategy/infrastructure reset callbacks.
+      4. Publish GAP_OPEN system event.
+
+    Wiring in main.py:
+        gap_handler = GapHandler(bus, cfg,
+                                 candle_cache=cache,
+                                 state_persistence=persist)
         gap_handler.register_reset_callback(rebalancer.reset_atm)
         gap_handler.register_reset_callback(strategy_a.reset_state_async)
+        gap_handler.register_reset_callback(strategy_b.reset_state_async)
     """
 
-    def __init__(self, bus: EventBus, cfg: GlobalConfig) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        cfg: GlobalConfig,
+        candle_cache=None,       # CandleCache — if set, manages clear+restore internally
+        state_persistence=None,  # StatePersistence — source for restore_candle_history()
+    ) -> None:
         self._bus = bus
         self._cfg = cfg
+        self._candle_cache = candle_cache
+        self._state_persistence = state_persistence
         self._tick_queue = bus.subscribe(Topic.INDEX_TICK)
         self._running = False
         self._state: Dict[str, _GapState] = {
@@ -106,8 +134,11 @@ class GapHandler:
 
     def register_reset_callback(self, cb: ResetCallback) -> None:
         """
-        Register an async callback to invoke when a gap-open is detected.
+        Register an async callback invoked after candle buffers are restored.
         Signature: async (underlying: str, opening_spot: float) -> None
+
+        These callbacks fire AFTER the candle clear+restore completes, so
+        strategy state machines evaluate against repopulated indicator arrays.
         """
         self._callbacks.append(cb)
         logger.debug("GapHandler: registered reset callback %s.", getattr(cb, "__qualname__", repr(cb)))
@@ -202,9 +233,14 @@ class GapHandler:
         state: _GapState,
     ) -> None:
         """
-        Orchestrate the full reset cascade when a gap is detected.
-        All callbacks run concurrently via asyncio.gather so no single slow
-        callback delays the others.
+        Strictly sequenced reset cascade:
+          Step A — clear stale candle buffers and re-populate from DB (awaited).
+          Step B — fire all registered strategy/infra callbacks concurrently.
+          Step C — publish GAP_OPEN on the bus.
+
+        The await on Step A guarantees that when strategy callbacks in Step B
+        call evaluate(), they are reading against DB-restored indicator arrays,
+        not empty deques.
         """
         state.gap_fired = True
 
@@ -214,17 +250,10 @@ class GapHandler:
             underlying, drift * 100, state.pre_open_ref, opening_spot,
         )
 
-        # Publish GAP_OPEN system event — strategies/monitors react independently
-        evt = SystemEvent(
-            code=SysEvent.GAP_OPEN,
-            message=(
-                f"{underlying}:ref={state.pre_open_ref:.2f}:"
-                f"open={opening_spot:.2f}:drift={drift*100:.2f}pct"
-            ),
-        )
-        await self._bus.publish(Topic.SYSTEM_EVENT, evt)
+        # Step A: clear + restore candle buffers BEFORE any callback fires
+        await self._clear_and_restore_candles(underlying)
 
-        # Fire all registered reset callbacks concurrently
+        # Step B: fire strategy reset callbacks concurrently
         if self._callbacks:
             results = await asyncio.gather(
                 *[cb(underlying, opening_spot) for cb in self._callbacks],
@@ -238,7 +267,66 @@ class GapHandler:
                         underlying, cb_name, res,
                     )
 
+        # Step C: publish system event (after callbacks so subscribers see consistent state)
+        evt = SystemEvent(
+            code=SysEvent.GAP_OPEN,
+            message=(
+                f"{underlying}:ref={state.pre_open_ref:.2f}:"
+                f"open={opening_spot:.2f}:drift={drift*100:.2f}pct"
+            ),
+        )
+        await self._bus.publish(Topic.SYSTEM_EVENT, evt)
+
         logger.info(
             "GapHandler: [%s] reset cascade complete (%d callbacks invoked).",
             underlying, len(self._callbacks),
         )
+
+    async def _clear_and_restore_candles(self, underlying: str) -> None:
+        """
+        Clear the stale candle ring-buffers for this underlying, then
+        immediately re-populate from SQLite so RSI(14), VWAP(500), and ADX(20)
+        are at full analytical parity before any strategy evaluation runs.
+
+        All SQLite I/O runs in asyncio.to_thread() — event loop never stalled.
+        """
+        if self._candle_cache is None:
+            # Caller manages candle reset via registered callbacks
+            return
+
+        # Wipe stale ring-buffers across all timeframes for this underlying
+        self._candle_cache.reset_symbol(underlying)
+
+        if self._state_persistence is None:
+            logger.warning(
+                "GapHandler: [%s] candle buffers cleared but no StatePersistence "
+                "provided — RSI/VWAP/ADX need natural warmup (15/42/500 bars).",
+                underlying,
+            )
+            return
+
+        # Re-populate from SQLite: last 500 bars per symbol×timeframe
+        try:
+            history = await asyncio.to_thread(
+                self._state_persistence.restore_candle_history,
+                [underlying],
+                self._cfg.candle_timeframes,
+                500,
+            )
+            loaded_rows = 0
+            for (sym, tf), df in history.items():
+                if not df.empty:
+                    self._candle_cache.load_history(sym, tf, df)
+                    loaded_rows += len(df)
+            logger.info(
+                "GapHandler: [%s] candle buffers cleared and restored — "
+                "%d rows reloaded across %d symbol×timeframe pair(s). "
+                "RSI/VWAP/ADX at full parity.",
+                underlying, loaded_rows, len(history),
+            )
+        except Exception as exc:
+            logger.warning(
+                "GapHandler: [%s] DB restore failed after gap clear: %s — "
+                "indicators will need natural warmup.",
+                underlying, exc,
+            )
