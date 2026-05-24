@@ -234,6 +234,16 @@ class GlobalFeeder:
                     pass
         logger.info("GlobalFeeder: Stopped.")
 
+    async def subscribe_tokens(self, tokens: list) -> None:
+        """Proxy token subscription to the active inner feeder."""
+        if self._feeder is not None:
+            await self._feeder.subscribe_tokens(tokens)
+
+    async def unsubscribe_tokens(self, tokens: list) -> None:
+        """Proxy token unsubscription to the active inner feeder."""
+        if self._feeder is not None:
+            await self._feeder.unsubscribe_tokens(tokens)
+
     async def _run_feeder(self) -> None:
         while self._running:
             try:
