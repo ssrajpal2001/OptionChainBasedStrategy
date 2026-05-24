@@ -410,11 +410,20 @@ class DashboardServer:
 
         @app.get("/api/admin/feeder/status", tags=["Admin"])
         async def api_feeder_status(_: dict = Depends(_require_admin)):
-            feeder = _srv._feeder
+            feeder   = _srv._feeder
+            provider = (
+                feeder.active_provider
+                if feeder and hasattr(feeder, "active_provider")
+                else _srv._cfg.primary_feeder_provider
+            )
+            connected = feeder.is_running if feeder else False
+            dual_lat  = feeder.dual_latency if feeder and hasattr(feeder, "dual_latency") else {}
             return {
-                "ts":        datetime.now(IST).isoformat(),
-                "provider":  _srv._cfg.primary_feeder_provider,
-                "connected": feeder.is_running if feeder else False,
+                "ts":                datetime.now(IST).isoformat(),
+                "provider":          provider,
+                "connected":         connected,
+                "upstox_latency_ms": round(dual_lat.get("upstox", 0.0), 3),
+                "fyers_latency_ms":  round(dual_lat.get("fyers",  0.0), 3),
             }
 
         @app.post("/api/admin/feeder/connect", tags=["Admin"])
@@ -612,7 +621,7 @@ class DashboardServer:
             except Exception as exc:
                 logger.error("Dashboard: upstox connect failed: %s", exc)
                 raise HTTPException(502, f"Upstox connect failed: {exc}")
-            return {"ok": True, "message": "Upstox feed stream initialized."}
+            return {"ok": True, "message": "Upstox feed stream initialized.", "provider": "upstox"}
 
         @app.post("/api/admin/feeder/connect/fyers", tags=["Admin"])
         async def api_feeder_connect_fyers(
@@ -636,7 +645,7 @@ class DashboardServer:
             except Exception as exc:
                 logger.error("Dashboard: fyers connect failed: %s", exc)
                 raise HTTPException(502, f"Fyers connect failed: {exc}")
-            return {"ok": True, "message": "Fyers feed stream initialized."}
+            return {"ok": True, "message": "Fyers feed stream initialized.", "provider": "fyers"}
 
         # ── ADMIN — dual active-active feeder ────────────────────────────────
 
@@ -669,7 +678,7 @@ class DashboardServer:
             except Exception as exc:
                 logger.error("Dashboard: start_dual failed: %s", exc)
                 raise HTTPException(502, f"Dual feeder connect failed: {exc}")
-            return {"ok": True, "message": "Dual active-active feed established."}
+            return {"ok": True, "message": "Dual active-active feed established.", "provider": "dual"}
 
         # ── ADMIN — RMS config ────────────────────────────────────────────────
 

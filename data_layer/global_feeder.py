@@ -450,6 +450,7 @@ class GlobalFeeder:
         self._reconnect_delay: float = 2.0
         self._running = False
         self._dual_feeder: Optional[DualFeeder] = None
+        self._active_provider: str = "mock"
 
     async def start(self) -> None:
         """Create feeder, connect, and launch the run + heartbeat tasks."""
@@ -473,6 +474,7 @@ class GlobalFeeder:
         self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="global_feeder_hb")
         self._tick_listener_task = asyncio.create_task(self._tick_listener(), name="global_feeder_tick_listener")
 
+        self._active_provider = provider
         await self._bus.publish(Topic.SYSTEM_EVENT, SystemEvent(SysEvent.FEEDER_RESTORED, provider))
         logger.info("GlobalFeeder: Started with provider='%s'.", provider)
 
@@ -514,6 +516,7 @@ class GlobalFeeder:
         dual = DualFeeder(self._bus, self._cfg)
         await dual.start(upstox_creds, fyers_creds)
         self._dual_feeder = dual
+        self._active_provider = "dual"
         await self._bus.publish(
             Topic.SYSTEM_EVENT,
             SystemEvent(SysEvent.FEEDER_RESTORED, "dual_active_active"),
@@ -534,6 +537,7 @@ class GlobalFeeder:
         fyers_creds  = creds if provider == "fyers"  else {}
         await dual.start(upstox_creds, fyers_creds)
         self._dual_feeder = dual
+        self._active_provider = provider
         await self._bus.publish(
             Topic.SYSTEM_EVENT,
             SystemEvent(SysEvent.FEEDER_RESTORED, f"single_{provider}"),
@@ -613,5 +617,12 @@ class GlobalFeeder:
                 break
 
     @property
+    def active_provider(self) -> str:
+        """Currently active provider name: 'mock', 'upstox', 'fyers', or 'dual'."""
+        return self._active_provider
+
+    @property
     def is_running(self) -> bool:
-        return self._running and (self._feeder is not None and self._feeder.is_connected)
+        primary_ok = self._running and (self._feeder is not None and self._feeder.is_connected)
+        dual_ok = self._dual_feeder is not None and self._dual_feeder.is_running
+        return primary_ok or dual_ok

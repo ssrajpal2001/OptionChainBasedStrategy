@@ -448,6 +448,9 @@ document.addEventListener('alpine:init', () => {
     /* ── Telemetry ───────────────────────────────────────────────────── */
     telemetry: { upstox_latency_ms: 0, fyers_latency_ms: 0, ws_clients: 0 },
 
+    /* ── Feeder system status ────────────────────────────────────────── */
+    systemStatus: { provider: 'mock', connected: false, upstox_latency_ms: 0, fyers_latency_ms: 0 },
+
     /* ── Admin feeder panel ─────────────────────────────────────────── */
     feederProvider:  'mock',
     feederCreds:     { user_id:'', password:'', api_key:'', access_token:'' },
@@ -507,8 +510,8 @@ document.addEventListener('alpine:init', () => {
       this._startClock();
       const saved = localStorage.getItem('terminus_theme') || 'midnight';
       this.applyTheme(saved, false);
-      setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadRms(); }, 2500);
-      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); } }, 10000);
+      setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadRms(); this.loadFeederStatus(); }, 2500);
+      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
     },
 
@@ -775,8 +778,15 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch('/api/admin/feeder/connect/upstox', { json: payload });
         if (!r) return;
         const d = await r.json();
-        this.upstoxOk  = r.ok;
-        this.upstoxMsg = d.message || d.detail || (r.ok ? 'Upstox feed active.' : 'Failed.');
+        if (r.ok) {
+          this.upstoxOk  = true;
+          this.upstoxMsg = 'Connected';
+          this.upstoxConnecting = false;
+          await this.loadFeederStatus();
+        } else {
+          this.upstoxOk  = false;
+          this.upstoxMsg = d.detail || d.message || 'Connect failed.';
+        }
       } catch { this.upstoxOk = false; this.upstoxMsg = 'Request failed.'; }
       finally   { this.upstoxConnecting = false; }
     },
@@ -793,8 +803,15 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch('/api/admin/feeder/connect/fyers', { json: payload });
         if (!r) return;
         const d = await r.json();
-        this.fyersOk  = r.ok;
-        this.fyersMsg = d.message || d.detail || (r.ok ? 'Fyers feed active.' : 'Failed.');
+        if (r.ok) {
+          this.fyersOk  = true;
+          this.fyersMsg = 'Connected';
+          this.fyersConnecting = false;
+          await this.loadFeederStatus();
+        } else {
+          this.fyersOk  = false;
+          this.fyersMsg = d.detail || d.message || 'Connect failed.';
+        }
       } catch { this.fyersOk = false; this.fyersMsg = 'Request failed.'; }
       finally   { this.fyersConnecting = false; }
     },
@@ -807,6 +824,7 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         this.dualOk  = r.ok;
         this.dualMsg = d.message || d.detail || (r.ok ? 'Dual feed active.' : 'Failed.');
+        if (r.ok) await this.loadFeederStatus();
       } catch { this.dualOk = false; this.dualMsg = 'Request failed.'; }
       finally   { this.dualConnecting = false; }
     },
@@ -859,6 +877,14 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch('/api/admin/audit_log');
         if (r && r.ok) { const d = await r.json(); this.auditLines = d.lines || []; }
       } catch {} finally { this.auditLoading = false; }
+    },
+
+    /* ── Feeder status ───────────────────────────────────────────────────── */
+    async loadFeederStatus() {
+      try {
+        const r = await this._fetch('/api/admin/feeder/status');
+        if (r && r.ok) { const d = await r.json(); this.systemStatus = d; }
+      } catch {}
     },
 
     /* ── RMS load ────────────────────────────────────────────────────────── */
@@ -1058,19 +1084,29 @@ document.addEventListener('alpine:init', () => {
   </div>
   <!-- Live feed status pills pinned to the right -->
   <div class="ml-auto flex items-center gap-4 px-5">
+    <!-- Active provider badge -->
+    <span class="font-mono text-xs px-2 py-0.5 rounded"
+          :style="systemStatus.connected
+            ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.25)'
+            : 'color:var(--t-muted);border:1px solid var(--t-border)'"
+          x-text="systemStatus.provider === 'upstox' ? 'ACTIVE: UPSTOX'
+                 : systemStatus.provider === 'fyers'  ? 'ACTIVE: FYERS'
+                 : systemStatus.provider === 'dual'   ? 'DUAL ACTIVE-ACTIVE'
+                 : 'MOCK FEED'"></span>
+    <div class="w-px h-4" style="background:var(--t-border)"></div>
     <div class="flex items-center gap-1.5">
       <div class="w-1.5 h-1.5 rounded-full"
-           :style="`background:${telemetry.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"></div>
+           :style="`background:${systemStatus.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"></div>
       <span class="font-mono text-xs"
-            :style="`color:${telemetry.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"
-            x-text="telemetry.upstox_latency_ms>0 ? 'UPSTOX '+telemetry.upstox_latency_ms.toFixed(0)+'ms' : 'UPSTOX IDLE'"></span>
+            :style="`color:${systemStatus.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"
+            x-text="systemStatus.upstox_latency_ms>0 ? 'UPSTOX '+systemStatus.upstox_latency_ms.toFixed(0)+'ms' : 'UPSTOX IDLE'"></span>
     </div>
     <div class="flex items-center gap-1.5">
       <div class="w-1.5 h-1.5 rounded-full"
-           :style="`background:${telemetry.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"></div>
+           :style="`background:${systemStatus.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"></div>
       <span class="font-mono text-xs"
-            :style="`color:${telemetry.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"
-            x-text="telemetry.fyers_latency_ms>0 ? 'FYERS '+telemetry.fyers_latency_ms.toFixed(0)+'ms' : 'FYERS IDLE'"></span>
+            :style="`color:${systemStatus.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"
+            x-text="systemStatus.fyers_latency_ms>0 ? 'FYERS '+systemStatus.fyers_latency_ms.toFixed(0)+'ms' : 'FYERS IDLE'"></span>
     </div>
   </div>
 </div>
@@ -1404,6 +1440,23 @@ document.addEventListener('alpine:init', () => {
       <div class="shrink-0">
         <div class="sec-label mb-0.5">Active-Active Infrastructure</div>
         <div class="font-display text-sm font-black tracking-widest" style="color:var(--t-cyan)">DUAL STREAM FEEDER CONNECTION CONTROLS</div>
+        <!-- Live provider status badge -->
+        <div class="flex items-center gap-2 mt-2">
+          <div class="w-2 h-2 rounded-full shrink-0"
+               :class="systemStatus.connected ? 'conn-live' : ''"
+               :style="`background:${systemStatus.connected?'var(--t-green)':'var(--t-muted)'}`"></div>
+          <span class="font-mono text-xs font-bold"
+                :style="`color:${systemStatus.connected?'var(--t-green)':'var(--t-muted)'}`"
+                x-text="systemStatus.provider === 'upstox' ? 'ACTIVE: UPSTOX FEED'
+                       : systemStatus.provider === 'fyers'  ? 'ACTIVE: FYERS FEED'
+                       : systemStatus.provider === 'dual'   ? 'ACTIVE-ACTIVE DUAL FEED'
+                       : systemStatus.connected             ? 'FEED STREAM ACTIVE'
+                       : 'MOCK FEED STREAM'"></span>
+          <span class="font-mono text-xs px-2 py-0.5 rounded"
+                style="border:1px solid rgba(var(--t-amber-rgb),0.3)"
+                :style="`color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.07)`"
+                x-text="(systemStatus.provider || 'mock').toUpperCase() + ' PROVIDER'"></span>
+        </div>
       </div>
       <!-- Telemetry badges -->
       <div class="flex items-center gap-4 xl:ml-auto">
