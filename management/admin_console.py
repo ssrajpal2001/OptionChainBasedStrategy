@@ -105,14 +105,18 @@ class AdminConsole:
         while self._running:
             try:
                 line: str = await asyncio.to_thread(self._readline)
+                line = line.strip()
+                if not line:
+                    await asyncio.sleep(0.5)
+                    continue
             except (EOFError, KeyboardInterrupt):
-                break
-            line = line.strip()
-            if not line:
-                # Empty line from non-interactive stdin (piped input, VS Code terminal
-                # without a tty, Docker without -it). Sleep briefly to avoid spinning
-                # on a closed stdin, then let the engine keep running.
-                await asyncio.sleep(1.0)
+                # Non-interactive stdin, VS Code terminal handshake, or Ctrl+C.
+                # Log and stay alive — only an explicit "quit"/"exit" shuts down.
+                logger.warning(
+                    "AdminConsole: stream interrupt at %s IST — staying alive.",
+                    datetime.now(IST).strftime("%H:%M:%S"),
+                )
+                await asyncio.sleep(0.5)
                 continue
             await self._dispatch(line)
 
