@@ -5,6 +5,10 @@ Provides a non-blocking command interface that runs inside the main asyncio
 event loop. Commands are read from stdin via asyncio.to_thread so they never
 block the trading event loop.
 
+If a DashboardServer is wired in via the dashboard_server parameter, the
+console starts it as a background asyncio.create_task() on first run — the
+web UI server runs completely independently of the REPL loop.
+
 Available commands:
   status                        — Show all clients, status, P&L, broker bindings
   halt <client_id>              — Immediately halt a client (no new orders)
@@ -20,6 +24,7 @@ Available commands:
   state_status                  — Show SQLite snapshot stats (flush count, last save)
   state_restore                 — Reload indicator + strategy state from last snapshot
   rebalance <underlying>        — Force immediate ATM strike rebalance for underlying
+  dashboard                     — Show web dashboard URL and connection count
   quit                          — Graceful shutdown
 """
 
@@ -40,6 +45,7 @@ if TYPE_CHECKING:
     from execution_bridge.execution_router import ExecutionRouter
     from matrix_engine.state_persistence import StatePersistence
     from data_layer.strike_rebalancer import StrikeRebalancer
+    from ui_layer.dashboard_server import DashboardServer
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,9 @@ class AdminConsole:
         state_persistence: Optional["StatePersistence"] = None,
         strike_rebalancer: Optional["StrikeRebalancer"] = None,
         shutdown_callback: Optional[Callable[[], Awaitable[None]]] = None,
+        dashboard_server: Optional["DashboardServer"] = None,
+        dashboard_port: int = 8080,
+        dashboard_host: str = "0.0.0.0",
     ) -> None:
         self._bus = bus
         self._registry = registry
@@ -68,10 +77,30 @@ class AdminConsole:
         self._state = state_persistence
         self._rebalancer = strike_rebalancer
         self._shutdown = shutdown_callback
+        self._dashboard = dashboard_server
+        self._dashboard_port = dashboard_port
+        self._dashboard_host = dashboard_host
+        self._dashboard_task: Optional[asyncio.Task] = None
         self._running = False
 
     async def run(self) -> None:
         self._running = True
+
+        # Start web dashboard as a fully-independent background task
+        if self._dashboard is not None and self._dashboard_task is None:
+            self._dashboard_task = asyncio.create_task(
+                self._dashboard.serve(
+                    host=self._dashboard_host,
+                    port=self._dashboard_port,
+                ),
+                name="dashboard_server",
+            )
+            print(
+                f"\n[Dashboard] http://{self._dashboard_host}:{self._dashboard_port}  "
+                f"(WebSocket: ws://{self._dashboard_host}:{self._dashboard_port}/ws)\n",
+                flush=True,
+            )
+
         print("\n[AdminConsole] Ready.  Type 'help' for commands.\n", flush=True)
         while self._running:
             try:
@@ -85,6 +114,14 @@ class AdminConsole:
 
     async def stop(self) -> None:
         self._running = False
+        if self._dashboard is not None:
+            self._dashboard.stop()
+        if self._dashboard_task is not None and not self._dashboard_task.done():
+            self._dashboard_task.cancel()
+            try:
+                await self._dashboard_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     # ── Command Dispatcher ────────────────────────────────────────────────────
 
@@ -109,6 +146,7 @@ class AdminConsole:
             "state_status":  self._cmd_state_status,
             "state_restore": self._cmd_state_restore,
             "rebalance":     self._cmd_rebalance,
+            "dashboard":     self._cmd_dashboard,
             "quit":          self._cmd_quit,
             "exit":          self._cmd_quit,
         }
@@ -365,6 +403,21 @@ class AdminConsole:
         print(
             f"  {underlying}: ATM baseline cleared. Rebalance will trigger on next tick.\n"
             f"  Total rebalances so far: {stats.get(underlying, 0)}",
+            flush=True,
+        )
+
+    async def _cmd_dashboard(self, _: list) -> None:
+        """Show web dashboard URL and current WebSocket connection count."""
+        if self._dashboard is None:
+            print("Dashboard not configured (pass dashboard_server= to AdminConsole).", flush=True)
+            return
+        bridge = self._dashboard.ws_bridge
+        n = len(bridge._connections)
+        host = self._dashboard_host if self._dashboard_host != "0.0.0.0" else "localhost"
+        print(
+            f"\n  Dashboard URL:   http://{host}:{self._dashboard_port}\n"
+            f"  WebSocket:       ws://{host}:{self._dashboard_port}/ws\n"
+            f"  Active clients:  {n}\n",
             flush=True,
         )
 

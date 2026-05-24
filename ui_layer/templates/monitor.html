@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OptionChain AlgoTrader — Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { mono: ['JetBrains Mono', 'Fira Code', 'monospace'] },
+          colors: {
+            slate: {
+              950: '#020617',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    [x-cloak] { display: none !important; }
+    body { background-color: #020617; }
+    .card { background: rgba(15,23,42,0.9); border: 1px solid rgba(51,65,85,0.6); }
+    .metric-val { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+    .feed-row { border-bottom: 1px solid rgba(51,65,85,0.3); }
+    .pulse-dot { animation: pulse 2s cubic-bezier(0.4,0,0.6,1) infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .glow-green { box-shadow: 0 0 8px rgba(16,185,129,0.25); }
+    .glow-red   { box-shadow: 0 0 8px rgba(239,68,68,0.25); }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(71,85,105,0.5); border-radius: 2px; }
+  </style>
+</head>
+
+<body class="text-slate-200 antialiased min-h-screen" x-data="dashboard" x-cloak>
+
+<!-- ─── TOP NAVBAR ──────────────────────────────────────────────────────────── -->
+<nav class="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
+  <div class="max-w-screen-2xl mx-auto px-4 h-14 flex items-center justify-between gap-4">
+
+    <!-- Logo -->
+    <div class="flex items-center gap-3 shrink-0">
+      <div class="w-7 h-7 rounded-lg bg-violet-600 flex items-center justify-center text-white font-bold text-xs">OC</div>
+      <span class="font-semibold text-slate-100 hidden sm:block">OptionChain AlgoTrader</span>
+    </div>
+
+    <!-- Center: index selector -->
+    <div class="flex items-center gap-2">
+      <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY']" :key="idx">
+        <button @click="activeIndex = idx"
+          class="px-3 py-1 text-xs rounded-full transition-all"
+          :class="activeIndex === idx
+            ? 'bg-violet-600 text-white font-semibold'
+            : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'">
+          <span x-text="idx"></span>
+        </button>
+      </template>
+    </div>
+
+    <!-- Right: clock + ws status -->
+    <div class="flex items-center gap-4 shrink-0">
+      <span class="text-xs font-mono text-slate-400" x-text="clock">--:--:-- IST</span>
+      <div class="flex items-center gap-1.5">
+        <span class="w-2 h-2 rounded-full"
+              :class="wsConnected ? 'bg-emerald-400 pulse-dot' : 'bg-red-500'"></span>
+        <span class="text-xs" :class="wsConnected ? 'text-emerald-400' : 'text-red-400'"
+              x-text="wsConnected ? 'LIVE' : 'OFFLINE'">OFFLINE</span>
+      </div>
+    </div>
+
+  </div>
+</nav>
+
+<!-- ─── MAIN LAYOUT ─────────────────────────────────────────────────────────── -->
+<div class="max-w-screen-2xl mx-auto px-4 py-5 space-y-5">
+
+  <!-- ── ROW 1: Market Overview ─────────────────────────────────────────────── -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+
+    <!-- Spot price -->
+    <div class="card rounded-xl p-4 col-span-2 md:col-span-1">
+      <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">Spot Price</div>
+      <div class="metric-val text-3xl font-bold"
+           :class="spotChange >= 0 ? 'text-emerald-400' : 'text-red-400'"
+           x-text="currentSpot > 0 ? currentSpot.toLocaleString('en-IN', {minimumFractionDigits:2}) : '—'">—</div>
+      <div class="text-xs mt-1" :class="spotChange >= 0 ? 'text-emerald-500' : 'text-red-500'"
+           x-text="currentSpot > 0 ? (spotChange >= 0 ? '+' : '') + spotChange.toFixed(2) : ''"></div>
+      <div class="text-xs text-slate-500 mt-1" x-text="activeIndex"></div>
+    </div>
+
+    <!-- ATM Strike -->
+    <div class="card rounded-xl p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">ATM Strike</div>
+      <div class="metric-val text-2xl font-bold text-violet-400"
+           x-text="currentAtm > 0 ? currentAtm.toLocaleString('en-IN') : '—'">—</div>
+      <div class="text-xs text-slate-500 mt-2">Dynamic window</div>
+    </div>
+
+    <!-- RSI -->
+    <div class="card rounded-xl p-4">
+      <div class="flex items-center justify-between mb-1">
+        <div class="text-xs text-slate-500 uppercase tracking-wider">RSI-14</div>
+        <span class="text-xs px-1.5 py-0.5 rounded"
+              :class="{
+                'bg-red-900/50 text-red-400': currentRsi >= 70,
+                'bg-emerald-900/50 text-emerald-400': currentRsi <= 30,
+                'bg-blue-900/50 text-blue-400': currentRsi > 30 && currentRsi < 70
+              }"
+              x-text="currentRsi >= 70 ? 'OVERBOUGHT' : currentRsi <= 30 ? 'OVERSOLD' : 'NEUTRAL'">—</span>
+      </div>
+      <div class="metric-val text-2xl font-bold"
+           :class="{
+             'text-red-400':   currentRsi >= 70,
+             'text-emerald-400': currentRsi <= 30,
+             'text-blue-400':  currentRsi > 30 && currentRsi < 70
+           }"
+           x-text="currentRsi > 0 ? currentRsi.toFixed(1) : '—'">—</div>
+      <!-- RSI bar -->
+      <div class="mt-2 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+        <div class="h-full rounded-full transition-all duration-300"
+             :class="currentRsi >= 70 ? 'bg-red-500' : currentRsi <= 30 ? 'bg-emerald-500' : 'bg-blue-500'"
+             :style="`width:${Math.min(100,currentRsi)}%`"></div>
+      </div>
+    </div>
+
+    <!-- ADX -->
+    <div class="card rounded-xl p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wider mb-1">ADX-20</div>
+      <div class="metric-val text-2xl font-bold text-amber-400"
+           x-text="currentAdx > 0 ? currentAdx.toFixed(1) : '—'">—</div>
+      <div class="text-xs mt-1"
+           :class="{
+             'text-red-400':    currentAdx >= 50,
+             'text-amber-400':  currentAdx >= 25 && currentAdx < 50,
+             'text-slate-400':  currentAdx < 25
+           }"
+           x-text="adxLabel(currentAdx)">Weak</div>
+    </div>
+
+  </div>
+
+  <!-- ── ROW 2: Full indicator strip ──────────────────────────────────────────── -->
+  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+
+    <!-- VWAP -->
+    <div class="card rounded-xl p-3">
+      <div class="text-xs text-slate-500 mb-1">VWAP-500</div>
+      <div class="metric-val text-base font-semibold text-cyan-400"
+           x-text="currentVwap > 0 ? currentVwap.toLocaleString('en-IN',{minimumFractionDigits:2}) : '—'">—</div>
+      <div class="text-xs mt-0.5"
+           :class="currentSpot > currentVwap ? 'text-emerald-500' : 'text-red-500'"
+           x-text="currentVwap > 0 ? (currentSpot > currentVwap ? '▲ Above' : '▼ Below') : ''"></div>
+    </div>
+
+    <!-- EMA Fast -->
+    <div class="card rounded-xl p-3">
+      <div class="text-xs text-slate-500 mb-1">EMA-9</div>
+      <div class="metric-val text-base font-semibold text-sky-400"
+           x-text="currentEmaFast > 0 ? currentEmaFast.toLocaleString('en-IN',{minimumFractionDigits:2}) : '—'">—</div>
+    </div>
+
+    <!-- EMA Slow -->
+    <div class="card rounded-xl p-3">
+      <div class="text-xs text-slate-500 mb-1">EMA-21</div>
+      <div class="metric-val text-base font-semibold text-indigo-400"
+           x-text="currentEmaSlow > 0 ? currentEmaSlow.toLocaleString('en-IN',{minimumFractionDigits:2}) : '—'">—</div>
+    </div>
+
+    <!-- EMA crossover -->
+    <div class="card rounded-xl p-3">
+      <div class="text-xs text-slate-500 mb-1">EMA Signal</div>
+      <div class="text-sm font-semibold"
+           :class="currentEmaFast > currentEmaSlow ? 'text-emerald-400' : 'text-red-400'"
+           x-text="currentEmaFast > 0 && currentEmaSlow > 0 ? (currentEmaFast > currentEmaSlow ? '▲ BULLISH' : '▼ BEARISH') : '—'">—</div>
+    </div>
+
+    <!-- +DI / -DI -->
+    <div class="card rounded-xl p-3">
+      <div class="text-xs text-slate-500 mb-1">+DI / −DI</div>
+      <div class="metric-val text-base font-semibold">
+        <span class="text-emerald-400" x-text="currentPlusDI > 0 ? currentPlusDI.toFixed(1) : '—'">—</span>
+        <span class="text-slate-600"> / </span>
+        <span class="text-red-400"    x-text="currentMinusDI > 0 ? currentMinusDI.toFixed(1) : '—'">—</span>
+      </div>
+    </div>
+
+    <!-- Snapshot TF -->
+    <div class="card rounded-xl p-3">
+      <div class="text-xs text-slate-500 mb-1">Data TF</div>
+      <div class="metric-val text-base font-semibold text-slate-300"
+           x-text="currentTf > 0 ? currentTf + 'm' : '—'">—</div>
+      <div class="text-xs text-slate-500 mt-0.5" x-text="lastSnapshotTs || ''"></div>
+    </div>
+
+  </div>
+
+  <!-- ── ROW 3: Strategy B State ────────────────────────────────────────────── -->
+  <div class="card rounded-xl p-4">
+    <div class="flex items-center gap-2 mb-3">
+      <div class="w-1.5 h-1.5 rounded-full bg-violet-400"></div>
+      <span class="text-sm font-semibold text-slate-300">Strategy B — Liquidity Trap / Rolling Base</span>
+    </div>
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div>
+        <div class="text-xs text-slate-500 mb-1">Phase</div>
+        <span class="px-2 py-1 rounded text-xs font-semibold"
+              :class="{
+                'bg-slate-800 text-slate-400':     stratBPhase === '--' || stratBPhase === 'IDLE',
+                'bg-amber-900/60 text-amber-400 border border-amber-700':  stratBPhase === 'TRAP' || stratBPhase === 'BEARISH_TRAP' || stratBPhase === 'BULLISH_TRAP',
+                'bg-violet-900/60 text-violet-400 border border-violet-700': stratBPhase === 'VOID',
+                'bg-emerald-900/60 text-emerald-400 border border-emerald-700': stratBPhase === 'CONFIRMED',
+              }"
+              x-text="stratBPhase">--</span>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-1">Rolling Base</div>
+        <div class="metric-val text-base font-semibold text-slate-200"
+             x-text="stratBBase > 0 ? stratBBase.toLocaleString('en-IN') : '—'">—</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-1">HTF Entry Level</div>
+        <div class="metric-val text-base font-semibold text-orange-400"
+             x-text="stratBHtf > 0 ? stratBHtf.toLocaleString('en-IN') : '—'">—</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-500 mb-1">Void Lift</div>
+        <span class="px-2 py-1 rounded text-xs font-semibold"
+              :class="stratBVoidLift
+                ? 'bg-emerald-900/60 text-emerald-400 border border-emerald-700'
+                : 'bg-slate-800 text-slate-500'"
+              x-text="stratBVoidLift ? 'ACTIVE' : 'INACTIVE'">INACTIVE</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ROW 4: Client Cards ───────────────────────────────────────────────── -->
+  <div>
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-slate-300">Client Accounts</h2>
+      <span class="text-xs text-slate-500" x-text="`${clients.length} registered`"></span>
+    </div>
+
+    <div x-show="clients.length === 0" class="card rounded-xl p-8 text-center text-slate-500 text-sm">
+      No clients registered. Add a client via the admin console or the registration panel below.
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+      <template x-for="c in clients" :key="c.client_id">
+        <div class="card rounded-xl p-5 flex flex-col gap-3"
+             :class="c.tradeable ? '' : 'border-red-900/50'">
+
+          <!-- Header row -->
+          <div class="flex items-start justify-between">
+            <div>
+              <div class="font-semibold text-slate-100 text-sm" x-text="c.client_id"></div>
+              <div class="text-xs text-slate-500" x-text="c.name || c.client_id"></div>
+            </div>
+            <span class="text-xs px-2 py-0.5 rounded-full font-medium border"
+                  :class="c.tradeable
+                    ? 'bg-emerald-900/40 text-emerald-400 border-emerald-800'
+                    : 'bg-red-900/40 text-red-400 border-red-800'"
+                  x-text="c.tradeable ? 'ACTIVE' : 'HALTED'">
+            </span>
+          </div>
+
+          <!-- P&L -->
+          <div>
+            <div class="text-xs text-slate-500 mb-0.5">Daily P&L</div>
+            <div class="metric-val text-xl font-bold"
+                 :class="c.daily_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'"
+                 x-text="'₹ ' + (c.daily_pnl >= 0 ? '+' : '') + c.daily_pnl.toLocaleString('en-IN', {minimumFractionDigits:2})">
+            </div>
+          </div>
+
+          <!-- Drawdown bar -->
+          <div>
+            <div class="flex justify-between text-xs text-slate-500 mb-1">
+              <span>Drawdown</span>
+              <span x-text="`${pctUsed(c).toFixed(1)}% of ${c.daily_loss_pct}% limit`"></span>
+            </div>
+            <div class="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+              <div class="h-full rounded-full transition-all duration-500"
+                   :class="pctUsed(c) >= 75 ? 'bg-red-500' : pctUsed(c) >= 50 ? 'bg-amber-500' : 'bg-slate-500'"
+                   :style="`width:${pctUsed(c)}%`"></div>
+            </div>
+          </div>
+
+          <!-- Strategies + brokers -->
+          <div class="flex flex-wrap gap-1">
+            <template x-for="s in c.strategies" :key="s">
+              <span class="text-xs px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700"
+                    x-text="`Strategy ${s}`"></span>
+            </template>
+            <template x-for="b in c.brokers" :key="b">
+              <span class="text-xs px-1.5 py-0.5 rounded bg-violet-900/40 text-violet-400 border border-violet-800"
+                    x-text="b"></span>
+            </template>
+          </div>
+
+          <!-- Worker circuit breaker -->
+          <template x-if="workerFor(c.client_id)">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-slate-500">Circuit Breaker</span>
+              <span :class="workerFor(c.client_id)?.circuit_open ? 'text-red-400' : 'text-emerald-400'"
+                    x-text="workerFor(c.client_id)?.circuit_open ? 'OPEN ⚠' : 'CLOSED ✓'">
+              </span>
+            </div>
+          </template>
+
+          <!-- Halt / Resume buttons -->
+          <div class="flex gap-2 pt-1">
+            <button @click="haltClient(c.client_id)"
+                    class="flex-1 text-xs py-1.5 rounded border transition-colors
+                           bg-red-950/40 border-red-800 text-red-400
+                           hover:bg-red-900/60 active:scale-95">
+              Halt
+            </button>
+            <button @click="resumeClient(c.client_id)"
+                    class="flex-1 text-xs py-1.5 rounded border transition-colors
+                           bg-emerald-950/40 border-emerald-800 text-emerald-400
+                           hover:bg-emerald-900/60 active:scale-95">
+              Resume
+            </button>
+          </div>
+
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── ROW 5: Admin Controls ──────────────────────────────────────────────── -->
+  <div class="card rounded-xl p-5">
+    <h2 class="text-sm font-semibold text-slate-300 mb-4">Admin Controls</h2>
+
+    <div class="flex flex-wrap gap-3 items-center">
+
+      <!-- Kill Switch -->
+      <button @click="killSwitch()"
+              class="flex items-center gap-2 px-4 py-2.5 rounded-lg border font-semibold text-sm transition-all active:scale-95"
+              :class="confirmKill
+                ? 'bg-red-600 border-red-500 text-white animate-pulse'
+                : 'bg-red-950/50 border-red-800 text-red-400 hover:bg-red-900/50'">
+        <span>🚨</span>
+        <span x-text="confirmKill ? 'CONFIRM KILL SWITCH' : 'Emergency Kill Switch'"></span>
+      </button>
+
+      <!-- Rebalance buttons per index -->
+      <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY']" :key="idx">
+        <button @click="rebalance(idx)"
+                class="flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs transition-all active:scale-95
+                       bg-slate-800 border-slate-600 text-slate-300 hover:bg-slate-700">
+          <span>↺</span>
+          <span x-text="`Rebalance ${idx}`"></span>
+        </button>
+      </template>
+
+    </div>
+
+    <!-- Lot multiplier quick-set -->
+    <div class="mt-4 border-t border-slate-700/50 pt-4">
+      <div class="text-xs text-slate-500 mb-2">Quick Lot Multiplier Override</div>
+      <div class="flex flex-wrap gap-2 items-end">
+        <div>
+          <label class="text-xs text-slate-400 block mb-1">Client ID</label>
+          <input x-model="lotForm.client_id" type="text" placeholder="C001"
+                 class="w-24 text-xs px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-slate-200 focus:outline-none focus:border-violet-500" />
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 block mb-1">Binding ID</label>
+          <input x-model="lotForm.binding_id" type="text" placeholder="C001_shoonya"
+                 class="w-36 text-xs px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-slate-200 focus:outline-none focus:border-violet-500" />
+        </div>
+        <div>
+          <label class="text-xs text-slate-400 block mb-1">Multiplier</label>
+          <input x-model.number="lotForm.multiplier" type="number" step="0.1" min="0.1" max="10" placeholder="1.0"
+                 class="w-20 text-xs px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-slate-200 focus:outline-none focus:border-violet-500" />
+        </div>
+        <button @click="setLots()"
+                class="px-3 py-1.5 text-xs rounded-lg bg-violet-600 hover:bg-violet-700 text-white transition-colors active:scale-95">
+          Apply
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ROW 6: Live Event Feed ──────────────────────────────────────────────── -->
+  <div class="card rounded-xl p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-slate-300">Live Event Feed</h2>
+      <div class="flex items-center gap-3">
+        <span class="text-xs text-slate-500" x-text="`${feed.length} events`"></span>
+        <button @click="feed = []" class="text-xs text-slate-500 hover:text-slate-300 transition-colors">
+          Clear
+        </button>
+      </div>
+    </div>
+
+    <div class="space-y-0 max-h-72 overflow-y-auto">
+      <div x-show="feed.length === 0" class="text-slate-600 text-xs py-4 text-center">
+        Awaiting events…
+      </div>
+      <template x-for="(msg, i) in feed" :key="i">
+        <div class="feed-row flex items-start gap-3 py-1.5 text-xs">
+          <span class="text-slate-600 font-mono shrink-0 w-20" x-text="msg.ts || ''"></span>
+          <span class="shrink-0 w-4 text-center" x-text="feedIcon(msg)"></span>
+          <span class="font-semibold shrink-0"
+                :class="feedBadgeColor(msg)"
+                x-text="msg.type === 'fill' ? 'FILL' : (msg.code || 'SYS')"></span>
+          <span class="text-slate-400 truncate" x-text="feedText(msg)"></span>
+        </div>
+      </template>
+    </div>
+  </div>
+
+</div><!-- end main -->
+
+<!-- ─── ALPINE.JS DATA CONTROLLER ───────────────────────────────────────────── -->
+<script>
+document.addEventListener('alpine:init', () => {
+  Alpine.data('dashboard', () => ({
+
+    // ── State ─────────────────────────────────────────────────────────────
+    ws:          null,
+    wsConnected: false,
+    activeIndex: 'NIFTY',
+    clock:       '',
+
+    // Market data: keyed by symbol
+    spots: {},       // { NIFTY: { ltp, atm, prev_ltp, ts } }
+    snapshots: {},   // { NIFTY: { rsi, vwap, adx, ema_fast, ema_slow, plus_di, minus_di, tf, ts } }
+
+    // Strategy B
+    stratBPhase:    '--',
+    stratBBase:     0,
+    stratBHtf:      0,
+    stratBVoidLift: false,
+
+    // Workers and clients (from heartbeat)
+    workers: [],
+    clients: [],
+
+    // Live event feed
+    feed: [],
+
+    // Admin state
+    confirmKill: false,
+    lotForm: { client_id: '', binding_id: '', multiplier: 1.0 },
+
+    // ── Computed ───────────────────────────────────────────────────────────
+    get currentSpot()     { return this.spots[this.activeIndex]?.ltp      || 0; },
+    get currentAtm()      { return this.spots[this.activeIndex]?.atm      || 0; },
+    get spotChange()      { const s = this.spots[this.activeIndex]; return s ? s.ltp - (s.prev_ltp || s.ltp) : 0; },
+    get currentRsi()      { return this.snapshots[this.activeIndex]?.rsi      || 0; },
+    get currentVwap()     { return this.snapshots[this.activeIndex]?.vwap     || 0; },
+    get currentAdx()      { return this.snapshots[this.activeIndex]?.adx      || 0; },
+    get currentEmaFast()  { return this.snapshots[this.activeIndex]?.ema_fast || 0; },
+    get currentEmaSlow()  { return this.snapshots[this.activeIndex]?.ema_slow || 0; },
+    get currentPlusDI()   { return this.snapshots[this.activeIndex]?.plus_di  || 0; },
+    get currentMinusDI()  { return this.snapshots[this.activeIndex]?.minus_di || 0; },
+    get currentTf()       { return this.snapshots[this.activeIndex]?.tf       || 0; },
+    get lastSnapshotTs()  { return this.snapshots[this.activeIndex]?.ts       || ''; },
+
+    // ── Lifecycle ──────────────────────────────────────────────────────────
+    init() {
+      this.updateClock();
+      setInterval(() => this.updateClock(), 1000);
+      this.connectWs();
+    },
+
+    updateClock() {
+      const now = new Date();
+      this.clock = now.toLocaleTimeString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        hour12:   false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+      }) + ' IST';
+    },
+
+    connectWs() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const url   = `${proto}://${location.host}/ws`;
+      this.ws = new WebSocket(url);
+      this.ws.onopen    = () => { this.wsConnected = true; };
+      this.ws.onclose   = () => { this.wsConnected = false; setTimeout(() => this.connectWs(), 3000); };
+      this.ws.onerror   = () => { this.wsConnected = false; };
+      this.ws.onmessage = (e) => { try { this.handleMsg(JSON.parse(e.data)); } catch(_) {} };
+    },
+
+    // ── Message dispatcher ─────────────────────────────────────────────────
+    handleMsg(msg) {
+      if (msg.type === 'tick') {
+        const prev = this.spots[msg.sym]?.ltp || msg.ltp;
+        this.spots[msg.sym] = { ltp: msg.ltp, atm: msg.atm, prev_ltp: prev, ts: msg.ts };
+
+      } else if (msg.type === 'snapshot') {
+        // Keep lowest TF snapshot per symbol (most granular)
+        const cur = this.snapshots[msg.sym];
+        if (!cur || msg.tf <= cur.tf) {
+          this.snapshots[msg.sym] = {
+            rsi: msg.rsi, vwap: msg.vwap, adx: msg.adx,
+            plus_di: msg.plus_di, minus_di: msg.minus_di,
+            ema_fast: msg.ema_fast, ema_slow: msg.ema_slow,
+            tf: msg.tf, ts: msg.ts,
+          };
+        }
+
+      } else if (msg.type === 'stats') {
+        if (msg.name === 'workers') this.workers = msg.data || [];
+        if (msg.name === 'clients') this.clients = msg.data || [];
+        if (msg.name === 'strategy_b') {
+          this.stratBPhase    = msg.data?.phase    || '--';
+          this.stratBBase     = msg.data?.rolling_base   || 0;
+          this.stratBHtf      = msg.data?.htf_entry_level || 0;
+          this.stratBVoidLift = msg.data?.void_lift || false;
+        }
+
+      } else if (msg.type === 'fill') {
+        this.addFeed(msg);
+
+      } else if (msg.type === 'sys') {
+        this.addFeed(msg);
+        // Update strategy B phase from system events if embedded
+        if (msg.code === 'STRATEGY_B_STATE') {
+          try {
+            const d = JSON.parse(msg.msg || '{}');
+            this.stratBPhase    = d.phase    || this.stratBPhase;
+            this.stratBBase     = d.rolling_base    || this.stratBBase;
+            this.stratBHtf      = d.htf_entry_level || this.stratBHtf;
+            this.stratBVoidLift = d.void_lift        || this.stratBVoidLift;
+          } catch(_) {}
+        }
+      }
+    },
+
+    addFeed(msg) {
+      this.feed.unshift(msg);
+      if (this.feed.length > 60) this.feed.pop();
+    },
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    adxLabel(v) {
+      if (v >= 50) return 'Very Strong';
+      if (v >= 25) return 'Strong';
+      if (v >= 20) return 'Moderate';
+      if (v >  0) return 'Weak';
+      return '—';
+    },
+
+    pctUsed(c) {
+      if (!c.daily_pnl || c.daily_pnl >= 0) return 0;
+      const limit = c.capital * c.daily_loss_pct / 100;
+      return Math.min(100, Math.abs(c.daily_pnl) / limit * 100);
+    },
+
+    workerFor(clientId) {
+      return this.workers.find(w => w.client_id === clientId);
+    },
+
+    feedIcon(msg) {
+      if (msg.type === 'fill')          return '⚡';
+      if (msg.code === 'KILL_SWITCH')   return '🚨';
+      if (msg.code === 'GAP_OPEN')      return '⚠';
+      if (msg.code === 'MARKET_OPEN')   return '🔔';
+      if (msg.code === 'CLIENT_HALTED') return '🛑';
+      return '●';
+    },
+
+    feedBadgeColor(msg) {
+      if (msg.type === 'fill')                         return 'text-emerald-400';
+      if (msg.code === 'KILL_SWITCH')                  return 'text-red-400';
+      if (msg.code === 'GAP_OPEN')                     return 'text-amber-400';
+      if (msg.code === 'CLIENT_HALTED')                return 'text-orange-400';
+      if (msg.code === 'MARKET_OPEN' || msg.code === 'MARKET_CLOSE') return 'text-blue-400';
+      if (msg.code === 'FEEDER_RESTORED')              return 'text-cyan-400';
+      return 'text-slate-500';
+    },
+
+    feedText(msg) {
+      if (msg.type === 'fill') {
+        return `${msg.client_id}  ${msg.side} ${msg.qty} × ${msg.sym} @ ₹${msg.avg_price}`;
+      }
+      return msg.msg || msg.code || '';
+    },
+
+    // ── API calls ──────────────────────────────────────────────────────────
+    async haltClient(id) {
+      try {
+        const r = await fetch(`/api/halt/${id}`, { method: 'POST' });
+        const d = await r.json();
+        this.addFeed({ type: 'sys', code: 'ADMIN', msg: d.message, ts: this.clock });
+      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+    },
+
+    async resumeClient(id) {
+      try {
+        const r = await fetch(`/api/resume/${id}`, { method: 'POST' });
+        const d = await r.json();
+        this.addFeed({ type: 'sys', code: 'ADMIN', msg: d.message, ts: this.clock });
+      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+    },
+
+    async killSwitch() {
+      if (!this.confirmKill) {
+        this.confirmKill = true;
+        setTimeout(() => { this.confirmKill = false; }, 5000);
+        return;
+      }
+      this.confirmKill = false;
+      try {
+        const r = await fetch('/api/kill_switch', { method: 'POST' });
+        const d = await r.json();
+        this.addFeed({ type: 'sys', code: 'KILL_SWITCH', msg: d.message, ts: this.clock });
+      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+    },
+
+    async rebalance(underlying) {
+      try {
+        const r = await fetch(`/api/rebalance/${underlying}`, { method: 'POST' });
+        const d = await r.json();
+        this.addFeed({ type: 'sys', code: 'REBALANCE', msg: d.message, ts: this.clock });
+      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+    },
+
+    async setLots() {
+      if (!this.lotForm.client_id || !this.lotForm.binding_id) return;
+      const { client_id, binding_id, multiplier } = this.lotForm;
+      try {
+        const r = await fetch(`/api/set_lots/${client_id}/${binding_id}/${multiplier}`, { method: 'POST' });
+        const d = await r.json();
+        this.addFeed({ type: 'sys', code: 'ADMIN', msg: d.message, ts: this.clock });
+      } catch(e) { this.addFeed({ type: 'sys', code: 'ERROR', msg: String(e), ts: this.clock }); }
+    },
+
+  }));
+});
+</script>
+</body>
+</html>
