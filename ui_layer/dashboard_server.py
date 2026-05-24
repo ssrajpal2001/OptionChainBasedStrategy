@@ -116,6 +116,17 @@ try:
         squareoff_time:         str   = "15:15"
         distance_filter_pct:    float = 5.0
 
+    class _ClientRegisterSchema(_PydanticBase):
+        client_id:          str
+        name:               str   = ""
+        capital:            float = 500_000.0
+        provider:           str   = "mock"
+        binding_id:         str   = ""
+        lot_multiplier:     float = 1.0
+        max_risk_pct:       float = 1.0
+        max_daily_loss_pct: float = 3.0
+        strategies:         List[str] = ["A", "B", "C"]
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -753,6 +764,109 @@ class DashboardServer:
             })
             logger.info("Dashboard: warm boot requested at %s.", now_ist)
             return {"ok": True, "ts": now_ist}
+
+        # ── ADMIN — client profile management ────────────────────────────────
+
+        @app.get("/api/admin/clients", tags=["Admin"])
+        async def api_clients_list(_: dict = Depends(_require_admin)):
+            if _srv._registry is None:
+                return {"clients": [], "ts": datetime.now(IST).isoformat()}
+            clients = []
+            for c in _srv._registry._clients.values():
+                d = _build_client_dict(c)
+                d["halted"]         = bool(getattr(c, "_halted", False))
+                d["lot_multiplier"] = float(c.risk.size_multiplier)
+                d["broker_bindings"] = [
+                    {"binding_id": b.binding_id, "provider": b.provider, "enabled": b.enabled}
+                    for b in c.broker_bindings
+                ]
+                clients.append(d)
+            return {"clients": clients, "ts": datetime.now(IST).isoformat()}
+
+        @app.post("/api/admin/clients/register", tags=["Admin"])
+        async def api_clients_register(
+            body: _ClientRegisterSchema, _: dict = Depends(_require_admin),
+        ):
+            from config.client_profiles import ClientProfile, RiskProfile, BrokerBinding
+
+            if _srv._registry is None:
+                raise HTTPException(503, "ClientRegistry not available.")
+            risk = RiskProfile(
+                capital=body.capital,
+                max_risk_per_trade_pct=body.max_risk_pct,
+                max_daily_loss_pct=body.max_daily_loss_pct,
+                size_multiplier=body.lot_multiplier,
+            )
+            try:
+                risk.validate()
+            except AssertionError as exc:
+                raise HTTPException(400, str(exc))
+
+            profile = ClientProfile(
+                client_id=body.client_id,
+                name=body.name,
+                risk=risk,
+                enabled_strategies=body.strategies or ["A", "B", "C"],
+            )
+            try:
+                _srv._registry.register(profile)
+            except ValueError as exc:
+                raise HTTPException(409, str(exc))
+
+            if body.binding_id:
+                binding = BrokerBinding(
+                    binding_id=body.binding_id,
+                    provider=body.provider or "mock",
+                    lot_multiplier=body.lot_multiplier,
+                )
+                profile.broker_bindings.append(binding)
+                if _srv._router:
+                    try:
+                        from execution_bridge.base_broker import create_broker
+                        from execution_bridge.parallel_worker_pool import ClientExecutionWorker
+                        broker = create_broker(binding, body.client_id)
+                        _srv._router._brokers.setdefault(body.client_id, {})[body.binding_id] = broker
+                        worker = ClientExecutionWorker(
+                            client=profile,
+                            brokers=_srv._router._brokers[body.client_id],
+                            bus=_srv._bus,
+                            cfg=_srv._cfg,
+                        )
+                        await _srv._router._pool.add_worker(worker)
+                        logger.info("Dashboard: spawned worker for new client %s.", body.client_id)
+                    except Exception as exc:
+                        logger.warning("Dashboard: worker spawn for %s failed: %s", body.client_id, exc)
+
+            await _srv._bus.publish(Topic.SYSTEM_EVENT, {
+                "event":     "CLIENT_REGISTERED",
+                "client_id": body.client_id,
+            })
+            logger.info("Dashboard: registered client %s.", body.client_id)
+            return {"ok": True, "message": f"Client '{body.client_id}' registered and live."}
+
+        @app.post("/api/admin/clients/{client_id}/reauth", tags=["Admin"])
+        async def api_clients_reauth(
+            client_id: str, _: dict = Depends(_require_admin),
+        ):
+            client = _srv._registry.get(client_id) if _srv._registry else None
+            if client is None:
+                raise HTTPException(404, f"Client {client_id!r} not found.")
+            if _srv._router is None:
+                raise HTTPException(503, "ExecutionRouter not wired to dashboard.")
+            client_brokers = _srv._router._brokers.get(client_id) or {}
+            if not client_brokers:
+                raise HTTPException(404, f"No broker workers found for client {client_id!r}.")
+            results = []
+            for binding_id, broker in client_brokers.items():
+                ok = await broker.authenticate()
+                results.append({"binding_id": binding_id, "ok": ok})
+                event = "AUTH_SUCCESS" if ok else "AUTH_FAILED"
+                await _srv._bus.publish(Topic.SYSTEM_EVENT, {
+                    "event": event, "client_id": client_id, "binding_id": binding_id,
+                })
+            all_ok = all(r["ok"] for r in results)
+            logger.info("Dashboard: reauth %s — %s.", client_id, "OK" if all_ok else "PARTIAL_FAIL")
+            return {"ok": all_ok, "results": results}
 
         # ── ADMIN — IV matrix ─────────────────────────────────────────────────
 

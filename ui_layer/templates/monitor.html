@@ -443,7 +443,16 @@ document.addEventListener('alpine:init', () => {
     checkpointMsg: '', warmBootMsg: '', lastCheckpointTs: '—',
 
     /* ── Audit ───────────────────────────────────────────────────────── */
-    auditLines: [], auditLoading: false,
+    auditLines: [], auditLoading: false, auditClientFilter: '',
+
+    /* ── Client Profiles ─────────────────────────────────────────────── */
+    clientProfiles: [],
+    clientRegLoading: false, clientRegMsg: '', clientRegOk: null,
+    newClient: {
+      client_id: '', name: '', capital: 500000, provider: 'mock',
+      binding_id: '', lot_multiplier: 1.0, max_risk_pct: 1.0,
+      max_daily_loss_pct: 3.0, strategies: ['A','B','C'],
+    },
 
     /* ── Telemetry ───────────────────────────────────────────────────── */
     telemetry: { upstox_latency_ms: 0, fyers_latency_ms: 0, ws_clients: 0 },
@@ -513,6 +522,7 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadRms(); this.loadFeederStatus(); }, 2500);
       setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') this.loadClientProfiles(); }, 5000);
     },
 
     _startClock() {
@@ -910,6 +920,45 @@ document.addEventListener('alpine:init', () => {
         if (r && r.ok) { const d = await r.json(); this.ivMatrix = d.strikes || []; }
       } catch {}
     },
+
+    /* ── Client Profiles ─────────────────────────────────────────────────── */
+    async loadClientProfiles() {
+      try {
+        const r = await this._fetch('/api/admin/clients');
+        if (r && r.ok) { const d = await r.json(); this.clientProfiles = d.clients || []; }
+      } catch {}
+    },
+
+    async registerClient() {
+      this.clientRegMsg = ''; this.clientRegOk = null; this.clientRegLoading = true;
+      try {
+        const r = await this._fetch('/api/admin/clients/register', { json: { ...this.newClient } });
+        if (!r) return;
+        const d = await r.json();
+        this.clientRegOk  = r.ok;
+        this.clientRegMsg = d.message || d.detail || (r.ok ? 'Client registered.' : 'Failed.');
+        if (r.ok) {
+          await this.loadClientProfiles();
+          this.newClient = { client_id:'', name:'', capital:500000, provider:'mock',
+            binding_id:'', lot_multiplier:1.0, max_risk_pct:1.0, max_daily_loss_pct:3.0, strategies:['A','B','C'] };
+        }
+      } catch { this.clientRegOk = false; this.clientRegMsg = 'Request failed.'; }
+      finally   { this.clientRegLoading = false; }
+    },
+
+    async reauthWorker(cid) {
+      try {
+        const r = await this._fetch(`/api/admin/clients/${cid}/reauth`, { method: 'POST' });
+        if (r && r.ok) {
+          this._addEvent({ type:'sys', code:'AUTH_OK', msg:`${cid} re-authenticated`, ts: this.istTime });
+        } else {
+          this._addEvent({ type:'sys', code:'AUTH_FAIL', msg:`${cid} re-auth failed`, ts: this.istTime });
+        }
+        await this.loadClientProfiles();
+      } catch {
+        this._addEvent({ type:'sys', code:'ERROR', msg:`reauth error for ${cid}`, ts: this.istTime });
+      }
+    },
   }));
 });
 </script>
@@ -1081,6 +1130,8 @@ document.addEventListener('alpine:init', () => {
             @click="adminTab='dashboard'">DASHBOARD</button>
     <button class="admin-tab" :class="{active: adminTab==='feeder'}"
             @click="adminTab='feeder'">&#x26A1; DATA FEEDER</button>
+    <button class="admin-tab" :class="{active: adminTab==='clients'}"
+            @click="adminTab='clients'; loadClientProfiles()">&#x1F465; CLIENT PROFILES</button>
   </div>
   <!-- Live feed status pills pinned to the right -->
   <div class="ml-auto flex items-center gap-4 px-5">
@@ -1730,6 +1781,8 @@ document.addEventListener('alpine:init', () => {
         <div class="font-ui font-bold tracking-wider" style="color:var(--t-bright)">MASTER SYSTEM AUDIT TRAIL</div>
       </div>
       <div class="flex items-center gap-2">
+        <input class="t-input" type="text" placeholder="Filter Client ID…" x-model="auditClientFilter"
+               style="width:140px;font-size:11px;padding:4px 8px"/>
         <button @click="loadAudit()" :disabled="auditLoading"
                 class="font-mono text-xs px-3 py-1 rounded border"
                 style="color:var(--t-muted);border-color:var(--t-border)">
@@ -1747,7 +1800,7 @@ document.addEventListener('alpine:init', () => {
       <div x-show="auditLines.length===0" class="font-mono text-xs text-center py-8" style="color:var(--t-muted)">
         No audit entries — click &#x27F3; REFRESH to load the latest system log.
       </div>
-      <template x-for="(line,i) in auditLines" :key="i">
+      <template x-for="(line,i) in auditLines.filter(l => !auditClientFilter || l.includes(auditClientFilter))" :key="i">
         <div class="feed-row"
              :style="`color:${line.includes('ERROR')||line.includes('FAIL')?'var(--t-red)':line.includes('WARN')?'var(--t-amber)':line.includes('SUCCESS')||line.includes('AUTH')?'var(--t-green)':'var(--t-muted)'}`"
              x-text="line"></div>
@@ -1756,6 +1809,199 @@ document.addEventListener('alpine:init', () => {
   </div>
 
   </div><!-- end feeder tab -->
+
+  <!-- ════════════════════ CLIENT PROFILES TAB ══════════════════════════════ -->
+  <div x-show="adminTab === 'clients'" class="flex flex-col gap-3 flex-1">
+
+  <!-- ══ BLOCK A: MULTI-TENANT MONITORING GRID ════════════════════════════════ -->
+  <div class="t-card rounded fade-up-1" style="border-color:rgba(var(--t-cyan-rgb),0.2)">
+    <div class="flex items-center justify-between px-4 py-3 border-b shrink-0" style="border-color:var(--t-border)">
+      <div>
+        <div class="sec-label mb-0.5">Execution Engine</div>
+        <div class="font-display text-sm font-black tracking-widest" style="color:var(--t-cyan)">MULTI-TENANT CLIENT REGISTRY</div>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="font-mono text-xs px-2 py-0.5 rounded" style="border:1px solid rgba(var(--t-cyan-rgb),0.25);color:var(--t-cyan)"
+              x-text="clientProfiles.length + ' client' + (clientProfiles.length!==1?'s':'')"></span>
+        <button @click="loadClientProfiles()"
+                class="font-mono text-xs px-3 py-1 rounded border"
+                style="color:var(--t-muted);border-color:var(--t-border)">&#x27F3; REFRESH</button>
+      </div>
+    </div>
+    <div x-show="clientProfiles.length === 0" class="font-mono text-xs text-center py-8" style="color:var(--t-muted)">
+      No client profiles registered — use the provisioning form below to add the first account.
+    </div>
+    <div x-show="clientProfiles.length > 0" class="overflow-x-auto">
+      <table class="w-full text-xs font-mono" style="border-collapse:collapse">
+        <thead>
+          <tr style="background:var(--t-surface)">
+            <th class="px-3 py-2.5 text-left sec-label">CLIENT ID</th>
+            <th class="px-3 py-2.5 text-left sec-label">NAME</th>
+            <th class="px-3 py-2.5 text-right sec-label">CAPITAL</th>
+            <th class="px-3 py-2.5 text-right sec-label">LOT MUL</th>
+            <th class="px-3 py-2.5 text-right sec-label">DAILY MTM</th>
+            <th class="px-3 py-2.5 text-left sec-label">BROKER</th>
+            <th class="px-3 py-2.5 text-center sec-label">STATUS</th>
+            <th class="px-3 py-2.5 text-center sec-label">ACTIONS</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template x-for="c in clientProfiles" :key="c.client_id">
+            <tr :style="`border-bottom:1px solid var(--t-border);${c.halted?'background:rgba(var(--t-red-rgb),0.03)':c.tradeable?'':'background:rgba(var(--t-amber-rgb),0.03)'}`">
+              <td class="px-3 py-2 font-bold" style="color:var(--t-bright)" x-text="c.client_id"></td>
+              <td class="px-3 py-2" style="color:var(--t-text)" x-text="c.name || '—'"></td>
+              <td class="px-3 py-2 text-right" style="color:var(--t-muted)" x-text="'&#8377;' + fmt(c.capital, 0)"></td>
+              <td class="px-3 py-2 text-right font-bold"
+                  :style="`color:${c.lot_multiplier>1?'var(--t-amber)':c.lot_multiplier<1?'var(--t-muted)':'var(--t-text)'}`"
+                  x-text="c.lot_multiplier + 'x'"></td>
+              <td class="px-3 py-2 text-right font-bold"
+                  :class="(c.daily_pnl||0) >= 0 ? 'text-t-green' : 'text-t-red'"
+                  x-text="((c.daily_pnl||0)>=0?'+':'')+'&#8377;'+fmt(c.daily_pnl||0)"></td>
+              <td class="px-3 py-2" style="color:var(--t-cyan)"
+                  x-text="(c.brokers||[]).join(', ') || '—'"></td>
+              <td class="px-3 py-2 text-center">
+                <span :class="c.tradeable ? 'badge-live' : 'badge-halted'"
+                      x-text="c.halted ? 'HALTED' : c.tradeable ? 'LIVE' : 'BLOCKED'"></span>
+              </td>
+              <td class="px-3 py-2">
+                <div class="flex items-center justify-center gap-1.5">
+                  <button x-show="c.tradeable"  class="btn-halt"   @click="haltClient(c.client_id); loadClientProfiles()">HALT</button>
+                  <button x-show="!c.tradeable" class="btn-resume" @click="resumeClient(c.client_id); loadClientProfiles()">RESUME</button>
+                  <button class="font-ui font-bold text-xs px-2 py-1 rounded border cursor-pointer"
+                          style="background:rgba(var(--t-amber-rgb),0.07);border-color:rgba(var(--t-amber-rgb),0.3);color:var(--t-amber)"
+                          @click="reauthWorker(c.client_id)">&#x1F504; RE-AUTH</button>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ══ BLOCK B: CLIENT ACCOUNT PROVISIONING FORM ════════════════════════════ -->
+  <div class="t-card rounded p-4 fade-up-2"
+       style="border-color:rgba(var(--t-green-rgb),0.2);background:linear-gradient(135deg,var(--t-card) 0%,rgba(var(--t-green-rgb),0.02) 100%)">
+    <div class="absolute top-0 left-0 right-0 h-0.5"
+         style="background:linear-gradient(90deg,transparent,rgba(var(--t-green-rgb),0.5),transparent)"></div>
+    <div class="sec-label mb-0.5">Onboarding</div>
+    <div class="font-display text-sm font-black tracking-widest mb-4" style="color:var(--t-green)">NEW CLIENT ACCOUNT PROVISIONING</div>
+
+    <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+
+      <!-- Left: identity + capital -->
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">CLIENT ID *</div>
+            <input class="t-input" type="text" placeholder="e.g. C001" x-model="newClient.client_id" autocomplete="off"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">DISPLAY NAME</div>
+            <input class="t-input" type="text" placeholder="e.g. Rahul Sharma" x-model="newClient.name" autocomplete="off"/>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">CAPITAL ALLOCATION (INR)</div>
+            <input class="t-input" type="number" step="50000" min="10000" placeholder="500000" x-model.number="newClient.capital"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">LOT MULTIPLIER</div>
+            <input class="t-input" type="number" step="0.5" min="0.5" placeholder="1.0" x-model.number="newClient.lot_multiplier"/>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">MAX RISK / TRADE (%)</div>
+            <input class="t-input" type="number" step="0.1" min="0.1" max="5" placeholder="1.0" x-model.number="newClient.max_risk_pct"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">MAX DAILY LOSS (%)</div>
+            <input class="t-input" type="number" step="0.5" min="0.5" max="10" placeholder="3.0" x-model.number="newClient.max_daily_loss_pct"/>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: initial broker binding (optional) -->
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">INITIAL BROKER PROVIDER</div>
+            <select class="t-input" x-model="newClient.provider">
+              <template x-for="p in ['mock','shoonya','dhan','fyers','angelone','upstox']" :key="p">
+                <option :value="p" x-text="p.toUpperCase()"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <div class="sec-label mb-1">BINDING ID (optional)</div>
+            <input class="t-input" type="text" placeholder="e.g. main_shoonya" x-model="newClient.binding_id" autocomplete="off"/>
+          </div>
+        </div>
+        <div>
+          <div class="sec-label mb-1">ENABLED STRATEGIES</div>
+          <div class="flex gap-2">
+            <template x-for="s in ['A','B','C']" :key="s">
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" :value="s"
+                       :checked="newClient.strategies.includes(s)"
+                       @change="e => { if(e.target.checked) { if(!newClient.strategies.includes(s)) newClient.strategies.push(s); } else { newClient.strategies = newClient.strategies.filter(x=>x!==s); } }"
+                       class="rounded"/>
+                <span class="font-mono text-xs" style="color:var(--t-text)" x-text="'Strategy '+s"></span>
+              </label>
+            </template>
+          </div>
+          <div class="font-mono text-xs mt-1.5" style="color:var(--t-muted)">
+            A = OI Zone Breakout &nbsp;|&nbsp; B = Liquidity Trap &nbsp;|&nbsp; C = Panic Scanner
+          </div>
+        </div>
+        <div class="flex items-center gap-3 pt-1">
+          <button class="btn-add" style="min-width:220px" @click="registerClient()" :disabled="clientRegLoading || !newClient.client_id">
+            <span x-show="!clientRegLoading">[+] REGISTER &amp; SPAWN WORKER</span>
+            <span x-show="clientRegLoading">PROVISIONING…</span>
+          </button>
+        </div>
+        <div x-show="clientRegMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+             :style="clientRegOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.06);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                                 : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.06);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="clientRegMsg"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══ BLOCK C: CLIENT-SCOPED AUDIT LOG ═════════════════════════════════════ -->
+  <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:240px;max-height:360px">
+    <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+      <div>
+        <div class="sec-label mb-0.5">Compliance</div>
+        <div class="font-ui font-bold tracking-wider" style="color:var(--t-bright)">CLIENT AUDIT TRAIL</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <input class="t-input" type="text" placeholder="Filter by Client ID…" x-model="auditClientFilter"
+               style="width:160px;font-size:11px;padding:4px 8px"/>
+        <button @click="loadAudit()" :disabled="auditLoading"
+                class="font-mono text-xs px-3 py-1 rounded border"
+                style="color:var(--t-muted);border-color:var(--t-border)">
+          <span x-show="!auditLoading">&#x27F3;</span>
+          <span x-show="auditLoading">…</span>
+        </button>
+      </div>
+    </div>
+    <div class="flex-1 overflow-y-auto">
+      <div x-show="auditLines.length===0" class="font-mono text-xs text-center py-8" style="color:var(--t-muted)">
+        Click &#x27F3; to load audit log — then filter by Client ID above.
+      </div>
+      <template x-for="(line,i) in auditLines.filter(l => !auditClientFilter || l.includes(auditClientFilter))" :key="i">
+        <div class="feed-row"
+             :style="`color:${line.includes('ERROR')||line.includes('FAIL')?'var(--t-red)':line.includes('WARN')?'var(--t-amber)':line.includes('SUCCESS')||line.includes('AUTH')||line.includes('REGIST')?'var(--t-green)':'var(--t-muted)'}`"
+             x-text="line"></div>
+      </template>
+    </div>
+  </div>
+
+  </div><!-- end clients tab -->
 
 </main><!-- end admin layout -->
 
