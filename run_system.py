@@ -282,6 +282,7 @@ async def _run_live(
                 router=router,
                 rebalancer=rebalancer,
                 feeder=feeder,
+                trap_engine=trap_engine,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)

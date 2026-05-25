@@ -266,8 +266,9 @@ class TrapTradingEngine:
         self._cfg     = cfg
         self._queue   = bus.subscribe(Topic.CANDLE_CLOSE)
         self._running = False
-        self._states:  Dict[str, _SymbolState] = {}
-        self._signals: int = 0
+        self._states:         Dict[str, _SymbolState] = {}
+        self._signals:        int = 0
+        self._last_indicators: Dict[str, dict] = {}  # cached per-symbol after each LTF bar
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -297,6 +298,46 @@ class TrapTradingEngine:
 
     def state_snapshot(self) -> Dict[str, str]:
         return {sym: st.phase.name for sym, st in self._states.items()}
+
+    def telemetry_snapshot(self) -> dict:
+        """Return a per-symbol telemetry dict for the admin dashboard endpoint."""
+        out: dict = {}
+        for sym, st in self._states.items():
+            ind  = self._last_indicators.get(sym, {})
+            sup  = st.supply_zones[-1] if st.supply_zones else None
+            dem  = st.demand_zones[-1] if st.demand_zones else None
+            out[sym] = {
+                "phase":                 st.phase.name,
+                "is_void_state":         st.phase == _Phase.VOID,
+                "rolling_base":          round(st.rolling_base,      2),
+                "trap_high":             round(st.trap_high,         2),
+                "htf_entry_level":       round(st.htf_entry_level,   2),
+                "htf_supply_zone_high":  round(sup.upper, 2) if sup else None,
+                "htf_supply_zone_low":   round(sup.lower, 2) if sup else None,
+                "htf_demand_zone_high":  round(dem.upper, 2) if dem else None,
+                "htf_demand_zone_low":   round(dem.lower, 2) if dem else None,
+                "supply_zones": [
+                    {"upper": round(z.upper, 2), "lower": round(z.lower, 2),
+                     "ts": z.origin_ts.isoformat()}
+                    for z in st.supply_zones
+                ],
+                "demand_zones": [
+                    {"upper": round(z.upper, 2), "lower": round(z.lower, 2),
+                     "ts": z.origin_ts.isoformat()}
+                    for z in st.demand_zones
+                ],
+                "current_rsi_14":  ind.get("rsi"),
+                "current_vwap_500": ind.get("vwap"),
+                "current_adx_20":  ind.get("adx"),
+                "current_pdi":     ind.get("pdi"),
+                "current_mdi":     ind.get("mdi"),
+                "void_since":      st.void_since.isoformat() if st.void_since else None,
+                "ltf_bar_count":   len(st.ltf_buf),
+                "htf_bar_count":   len(st.htf_buf),
+                "signal_count":    self._signals,
+                "ind_ts":          ind.get("ts"),
+            }
+        return out
 
     # ── Candle router ─────────────────────────────────────────────────────────
 
@@ -399,6 +440,17 @@ class TrapTradingEngine:
         atr_val           = atr(h_arr, l_arr, cl_arr)
         ema_fast_val      = ema(cl_arr, 9)
         ema_slow_val      = ema(cl_arr, 21)
+
+        # Cache latest computed indicators so the telemetry endpoint can read them
+        self._last_indicators[c.symbol] = {
+            "rsi":  round(float(rsi_val),  2),
+            "vwap": round(float(vwap_val), 2),
+            "adx":  round(float(adx_val),  2),
+            "pdi":  round(float(pdi),      2),
+            "mdi":  round(float(mdi),      2),
+            "atr":  round(float(atr_val),  4),
+            "ts":   datetime.now(IST).isoformat(),
+        }
 
         spot = c.close
 

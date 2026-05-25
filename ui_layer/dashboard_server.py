@@ -187,6 +187,7 @@ class DashboardServer:
         router=None,      # ExecutionRouter
         rebalancer=None,  # StrikeRebalancer
         feeder=None,      # GlobalFeeder — optional, for admin feeder management
+        trap_engine=None, # TrapTradingEngine — optional, for strategy telemetry
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -194,6 +195,7 @@ class DashboardServer:
         self._router = router
         self._rebalancer = rebalancer
         self._feeder = feeder
+        self._trap_engine = trap_engine
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -870,6 +872,21 @@ class DashboardServer:
                 "feeder": _srv._auth_alerts.get("feeder", ""),
                 "ts":     datetime.now(IST).isoformat(),
             }
+
+        # ── ADMIN — strategy telemetry (TrapTradingEngine live state) ────────
+
+        @app.get("/api/admin/strategy/telemetry", tags=["Admin"])
+        async def api_strategy_telemetry(_: dict = Depends(_require_admin)):
+            now_ist = datetime.now(IST).isoformat()
+            eng = _srv._trap_engine
+            if eng is None:
+                return {"ts": now_ist, "trap_engine": {}, "active": False}
+            try:
+                snapshot = eng.telemetry_snapshot()
+                return {"ts": now_ist, "trap_engine": snapshot, "active": True}
+            except Exception as exc:
+                logger.warning("Dashboard: strategy telemetry read failed: %s", exc)
+                return {"ts": now_ist, "trap_engine": {}, "active": False, "error": str(exc)}
 
         # ── ADMIN — approve client + assign strategies ────────────────────────
 

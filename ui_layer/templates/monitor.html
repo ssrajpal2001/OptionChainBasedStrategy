@@ -308,6 +308,13 @@
     /* ── Drawdown bar ─────────────────────────────────────────────────── */
     .drawdown-bar { transition: width 0.6s ease; }
 
+    /* ── Zone approach blink ─────────────────────────────────────────── */
+    @keyframes zone-approach {
+      0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(var(--t-amber-rgb),0.6); }
+      50%       { opacity: 0.55; box-shadow: none; }
+    }
+    .zone-approach-blink { animation: zone-approach 0.7s ease-in-out infinite; }
+
     /* ── IV wide-spread row highlight ────────────────────────────────── */
     .iv-wide-spread td { background: rgba(var(--t-amber-rgb),0.05); }
     .iv-wide-spread td:nth-child(4) { color: var(--t-amber) !important; font-weight: bold; }
@@ -480,6 +487,9 @@ document.addEventListener('alpine:init', () => {
     /* ── Telemetry ───────────────────────────────────────────────────── */
     telemetry: { upstox_latency_ms: 0, fyers_latency_ms: 0, ws_clients: 0 },
 
+    /* ── Strategy telemetry ─────────────────────────────────────────── */
+    strategyTelemetry: { trap_engine: {}, active: false, ts: '' },
+
     /* ── Feeder system status ────────────────────────────────────────── */
     systemStatus: { provider: 'mock', connected: false, upstox_latency_ms: 0, fyers_latency_ms: 0 },
 
@@ -545,6 +555,15 @@ document.addEventListener('alpine:init', () => {
     get myEvents() {
       return this.events.filter(e => e.type !== 'fill' || e.client_id === this.authClientId);
     },
+    get trapState() {
+      return (this.strategyTelemetry.trap_engine || {})[this.activeIndex] || {};
+    },
+    _zoneProximity(price, zoneHigh, zoneLow) {
+      if (!price || (!zoneHigh && !zoneLow)) return false;
+      const tol = 0.001;
+      return (zoneHigh && Math.abs(price - zoneHigh) / zoneHigh < tol)
+          || (zoneLow  && Math.abs(price - zoneLow)  / zoneLow  < tol);
+    },
 
     /* ── Init ────────────────────────────────────────────────────────── */
     init() {
@@ -554,6 +573,7 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadRms(); this.loadFeederStatus(); }, 2500);
       setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') this.loadStrategyTelemetry(); }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); } }, 5000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
     },
@@ -959,6 +979,14 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await this._fetch('/api/admin/telemetry');
         if (r && r.ok) { const d = await r.json(); this.telemetry = d; }
+      } catch {}
+    },
+
+    /* ── Strategy telemetry ──────────────────────────────────────────────── */
+    async loadStrategyTelemetry() {
+      try {
+        const r = await this._fetch('/api/admin/strategy/telemetry');
+        if (r && r.ok) { const d = await r.json(); this.strategyTelemetry = d; }
       } catch {}
     },
 
@@ -1514,6 +1542,197 @@ document.addEventListener('alpine:init', () => {
           <span style="color:var(--t-green)">+DI <span x-text="plusDI ? fmt(plusDI,1) : '—'"></span></span>
           <span style="color:var(--t-red)">−DI <span x-text="minusDI ? fmt(minusDI,1) : '—'"></span></span>
         </div>
+      </div>
+    </div>
+
+    <!-- Trap Trading Structural Coordinates -->
+    <div class="t-card rounded p-4 fade-up-3 relative overflow-hidden">
+      <!-- accent line -->
+      <div class="absolute top-0 left-0 right-0 h-0.5"
+           style="background:linear-gradient(90deg,transparent,rgba(var(--t-amber-rgb),0.5),transparent)"></div>
+
+      <!-- Header -->
+      <div class="flex items-center justify-between mb-3">
+        <div>
+          <div class="sec-label">TRAP TRADING STRUCTURAL COORDINATES</div>
+          <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">75m HTF · 5m LTF · <span x-text="activeIndex"></span></div>
+        </div>
+        <!-- Phase badge -->
+        <span class="font-mono text-xs px-2 py-0.5 rounded font-bold"
+              :style="trapState.phase === 'VOID'     ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.35)'
+                    : trapState.phase === 'ARMED'    ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.1);border:1px solid rgba(var(--t-green-rgb),0.3)'
+                    : trapState.phase === 'ZONE_WATCH'? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border:1px solid rgba(var(--t-cyan-rgb),0.25)'
+                    : 'color:var(--t-muted);border:1px solid var(--t-border)'"
+              x-text="trapState.phase || 'IDLE'"></span>
+      </div>
+
+      <!-- ── Component A: HTF Supply Zone ─────────────────────────────── -->
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="font-mono text-xs font-bold tracking-wide" style="color:var(--t-amber)">INSTITUTIONAL SUPPLY ZONE</span>
+          <!-- Proximity blink: within ±0.1% of either boundary -->
+          <span x-show="_zoneProximity(spot.ltp, trapState.htf_supply_zone_high, trapState.htf_supply_zone_low)"
+                class="zone-approach-blink font-mono text-xs px-1.5 py-0.5 rounded"
+                style="color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.15);border:1px solid rgba(var(--t-amber-rgb),0.45)">
+            APPROACHING
+          </span>
+        </div>
+        <div class="grid grid-cols-2 gap-1.5">
+          <div class="rounded px-2 py-1.5" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.18)">
+            <div class="sec-label mb-0.5" style="color:rgba(var(--t-amber-rgb),0.6)">HIGH</div>
+            <div class="font-mono text-sm font-bold" style="color:var(--t-amber)"
+                 x-text="trapState.htf_supply_zone_high ? fmt(trapState.htf_supply_zone_high) : '—'"></div>
+          </div>
+          <div class="rounded px-2 py-1.5" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.18)">
+            <div class="sec-label mb-0.5" style="color:rgba(var(--t-amber-rgb),0.6)">LOW</div>
+            <div class="font-mono text-sm font-bold" style="color:var(--t-amber)"
+                 x-text="trapState.htf_supply_zone_low ? fmt(trapState.htf_supply_zone_low) : '—'"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Component A: HTF Demand Zone ─────────────────────────────── -->
+      <div class="mb-3">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="font-mono text-xs font-bold tracking-wide" style="color:var(--t-green)">INSTITUTIONAL DEMAND ZONE</span>
+          <span x-show="_zoneProximity(spot.ltp, trapState.htf_demand_zone_high, trapState.htf_demand_zone_low)"
+                class="zone-approach-blink font-mono text-xs px-1.5 py-0.5 rounded"
+                style="color:var(--t-green);background:rgba(var(--t-green-rgb),0.12);border:1px solid rgba(var(--t-green-rgb),0.4)">
+            APPROACHING
+          </span>
+        </div>
+        <div class="grid grid-cols-2 gap-1.5">
+          <div class="rounded px-2 py-1.5" style="background:rgba(var(--t-green-rgb),0.05);border:1px solid rgba(var(--t-green-rgb),0.15)">
+            <div class="sec-label mb-0.5" style="color:rgba(var(--t-green-rgb),0.5)">HIGH</div>
+            <div class="font-mono text-sm font-bold" style="color:var(--t-green)"
+                 x-text="trapState.htf_demand_zone_high ? fmt(trapState.htf_demand_zone_high) : '—'"></div>
+          </div>
+          <div class="rounded px-2 py-1.5" style="background:rgba(var(--t-green-rgb),0.05);border:1px solid rgba(var(--t-green-rgb),0.15)">
+            <div class="sec-label mb-0.5" style="color:rgba(var(--t-green-rgb),0.5)">LOW</div>
+            <div class="font-mono text-sm font-bold" style="color:var(--t-green)"
+                 x-text="trapState.htf_demand_zone_low ? fmt(trapState.htf_demand_zone_low) : '—'"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="h-px my-3" style="background:var(--t-border)"></div>
+
+      <!-- ── Component B: Rolling Base + Void State ────────────────────── -->
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        <!-- Rolling Base -->
+        <div class="rounded px-2 py-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
+          <div class="sec-label mb-0.5">ROLLING BASE (5m)</div>
+          <div class="font-mono text-base font-bold" style="color:var(--t-bright)"
+               x-text="trapState.rolling_base ? fmt(trapState.rolling_base) : '—'"></div>
+          <!-- Direction arrow vs spot -->
+          <div x-show="trapState.rolling_base && spot.ltp" class="font-mono text-xs mt-0.5"
+               :style="`color:${spot.ltp > trapState.rolling_base ? 'var(--t-green)' : 'var(--t-red)'}`"
+               x-text="spot.ltp > (trapState.rolling_base||0) ? 'SPOT ABOVE' : 'SPOT BELOW'"></div>
+        </div>
+        <!-- Void State Card -->
+        <div class="rounded px-2 py-2"
+             :style="trapState.is_void_state
+               ? 'background:rgba(var(--t-amber-rgb),0.1);border:1px solid rgba(var(--t-amber-rgb),0.35)'
+               : 'background:rgba(var(--t-green-rgb),0.05);border:1px solid rgba(var(--t-green-rgb),0.2)'">
+          <div class="sec-label mb-0.5">ENGINE STATE</div>
+          <div class="font-mono text-xs font-bold"
+               :style="trapState.is_void_state ? 'color:var(--t-amber)' : 'color:var(--t-green)'"
+               x-text="trapState.is_void_state ? 'VOIDED' : (trapState.phase || 'IDLE')"></div>
+          <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)"
+               x-text="trapState.is_void_state ? 'Await low <= entry' : 'Monitoring'"></div>
+        </div>
+      </div>
+
+      <!-- Void warning banner -->
+      <div x-show="trapState.is_void_state"
+           class="flex items-center gap-2 px-2 py-1.5 rounded mb-2 zone-approach-blink"
+           style="background:rgba(var(--t-amber-rgb),0.1);border:1px solid rgba(var(--t-amber-rgb),0.3)">
+        <span style="color:var(--t-amber)">&#9888;</span>
+        <div>
+          <div class="font-mono text-xs font-bold" style="color:var(--t-amber)">ENGINE STATE: VOIDED</div>
+          <div class="font-mono text-xs" style="color:var(--t-muted)">Awaiting candle.low &lt;= entry_level (<span x-text="trapState.htf_entry_level ? fmt(trapState.htf_entry_level) : '—'"></span>)</div>
+        </div>
+      </div>
+      <!-- Armed banner -->
+      <div x-show="!trapState.is_void_state && trapState.phase && trapState.phase !== 'IDLE'"
+           class="flex items-center gap-2 px-2 py-1.5 rounded mb-2"
+           style="background:rgba(var(--t-green-rgb),0.05);border:1px solid rgba(var(--t-green-rgb),0.2)">
+        <span style="color:var(--t-green)">&#128737;</span>
+        <span class="font-mono text-xs font-bold" style="color:var(--t-green)">ENGINE STATE: ARMED</span>
+      </div>
+
+      <div class="h-px my-3" style="background:var(--t-border)"></div>
+
+      <!-- ── Component C: Indicator Scale Panel ────────────────────────── -->
+      <div class="space-y-2.5">
+        <!-- RSI-14 -->
+        <div>
+          <div class="flex justify-between items-baseline mb-1">
+            <span class="sec-label">RSI (14)</span>
+            <span class="font-mono text-sm font-bold"
+                  :style="(trapState.current_rsi_14||0) >= 70 ? 'color:var(--t-red)'
+                        : (trapState.current_rsi_14||0) <= 30 ? 'color:var(--t-green)'
+                        : 'color:var(--t-cyan)'"
+                  x-text="trapState.current_rsi_14 != null ? trapState.current_rsi_14.toFixed(1) : '—'"></span>
+          </div>
+          <div class="gauge-track h-1.5">
+            <div class="gauge-fill h-full"
+                 :style="`width:${trapState.current_rsi_14||0}%;
+                   background:${(trapState.current_rsi_14||0)>=70?'var(--t-red)'
+                              :(trapState.current_rsi_14||0)<=30?'var(--t-green)':'var(--t-cyan)'}`"></div>
+          </div>
+          <div class="flex justify-between mt-0.5">
+            <span class="font-mono text-xs" style="color:var(--t-muted)">OS 30</span>
+            <span class="font-mono text-xs" style="color:var(--t-muted)">OB 70</span>
+          </div>
+        </div>
+        <!-- VWAP-500 -->
+        <div>
+          <div class="flex justify-between items-baseline mb-0.5">
+            <span class="sec-label">VWAP (500)</span>
+            <span class="font-mono text-sm" style="color:var(--t-cyan)"
+                  x-text="trapState.current_vwap_500 != null ? fmt(trapState.current_vwap_500) : '—'"></span>
+          </div>
+          <div x-show="trapState.current_vwap_500 && spot.ltp" class="flex items-center justify-between">
+            <span class="font-mono text-xs" style="color:var(--t-muted)">Distance</span>
+            <span class="font-mono text-xs font-bold"
+                  :style="`color:${spot.ltp > (trapState.current_vwap_500||0) ? 'var(--t-green)' : 'var(--t-red)'}`"
+                  x-text="trapState.current_vwap_500 && spot.ltp
+                    ? ((spot.ltp-(trapState.current_vwap_500||0))/(trapState.current_vwap_500||1)*100).toFixed(2)+'%'
+                    : ''"></span>
+          </div>
+        </div>
+        <!-- ADX-20 -->
+        <div>
+          <div class="flex justify-between items-baseline mb-1">
+            <span class="sec-label">ADX (20)</span>
+            <span class="font-mono text-sm font-bold"
+                  :style="(trapState.current_adx_20||0) >= 20
+                    ? ((trapState.current_adx_20||0)>=30 ? 'color:var(--t-amber)' : 'color:var(--t-text)')
+                    : 'color:var(--t-muted)'"
+                  x-text="trapState.current_adx_20 != null ? trapState.current_adx_20.toFixed(1) : '—'"></span>
+          </div>
+          <div class="gauge-track h-1.5">
+            <div class="gauge-fill h-full"
+                 :style="`width:${Math.min(100,(trapState.current_adx_20||0)*2)}%;
+                   background:var(--t-amber);
+                   opacity:${(trapState.current_adx_20||0)>=20?0.75:0.2}`"></div>
+          </div>
+          <div class="flex justify-between mt-0.5">
+            <span class="font-mono text-xs" style="color:var(--t-muted)">WEAK &lt;20</span>
+            <span class="font-mono text-xs"
+                  :style="`color:${(trapState.current_adx_20||0)>=20?'var(--t-amber)':'var(--t-muted)'}`"
+                  x-text="(trapState.current_adx_20||0)>=20?'TRENDING':'CHOPPY'"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer: update timestamp + bar counts -->
+      <div class="flex justify-between items-center mt-3 pt-2" style="border-top:1px solid var(--t-border)">
+        <span class="font-mono text-xs" style="color:var(--t-muted)"
+              x-text="'LTF ' + (trapState.ltf_bar_count||0) + ' bars · HTF ' + (trapState.htf_bar_count||0) + ' bars'"></span>
+        <span class="font-mono text-xs" style="color:var(--t-muted)"
+              x-text="strategyTelemetry.ts ? (strategyTelemetry.ts||'').substring(11,19)+' IST' : '—'"></span>
       </div>
     </div>
 
