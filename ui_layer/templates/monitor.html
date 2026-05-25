@@ -454,6 +454,25 @@ document.addEventListener('alpine:init', () => {
       max_daily_loss_pct: 3.0, strategies: ['A','B','C'],
     },
 
+    /* ── Phase 7 — self-registration ────────────────────────────────── */
+    regForm: { client_id:'', name:'', email:'', password:'', confirm_password:'', capital:500000, max_risk_pct:1.0, max_daily_loss_pct:3.0 },
+    regMsg: '', regOk: null, regLoading: false,
+
+    /* ── Phase 7 — client lifecycle ─────────────────────────────────── */
+    clientStatus:  null,    // full /api/client/status response
+    clientPhase:   'onboarding', // 'onboarding' | 'pending' | 'active'
+    botLoading:    false, botMsg: '', botOk: null,
+    setIndexMsg:   '', setIndexOk: null,
+    portalBroker:  { binding_id:'', provider:'mock', label:'', user_id:'', api_key:'', api_secret:'', totp_secret:'', access_token:'', lot_multiplier:1.0 },
+    portalBrokerMsg: '', portalBrokerOk: null, portalBrokerLoading: false,
+    showPortalBrokerForm: false,
+
+    /* ── Phase 7 — admin pending approvals ──────────────────────────── */
+    pendingClients: [],
+    pendingLoading: false,
+    approveAssignments: {}, // { [cid]: { [binding_id]: strategy } }
+    approveMsg: {}, approveOk: {},
+
     /* ── Telemetry ───────────────────────────────────────────────────── */
     telemetry: { upstox_latency_ms: 0, fyers_latency_ms: 0, ws_clients: 0 },
 
@@ -510,6 +529,15 @@ document.addEventListener('alpine:init', () => {
     get myBrokers() {
       return this.brokers.filter(b => b.client_id === this.authClientId);
     },
+    get csBindings() {
+      return (this.clientStatus && this.clientStatus.bindings) || [];
+    },
+    get csBotActive() {
+      return this.clientStatus ? !!this.clientStatus.is_client_bot_active : false;
+    },
+    get csTargetIndex() {
+      return (this.clientStatus && this.clientStatus.target_index) || 'NIFTY';
+    },
     get myEvents() {
       return this.events.filter(e => e.type !== 'fill' || e.client_id === this.authClientId);
     },
@@ -522,7 +550,8 @@ document.addEventListener('alpine:init', () => {
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadRms(); this.loadFeederStatus(); }, 2500);
       setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
-      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') this.loadClientProfiles(); }, 5000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); } }, 5000);
+      setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
     },
 
     _startClock() {
@@ -607,6 +636,11 @@ document.addEventListener('alpine:init', () => {
         this.loginPass      = '';
         this.loginPin       = '';
         this._connect();
+        if (d.role === 'client') {
+          setTimeout(() => this.loadClientStatus(), 800);
+        } else if (d.role === 'admin') {
+          setTimeout(() => this.loadPendingClients(), 1000);
+        }
       } catch (e) {
         this.loginError = 'Network error — server unreachable.';
       } finally {
@@ -959,6 +993,134 @@ document.addEventListener('alpine:init', () => {
         this._addEvent({ type:'sys', code:'ERROR', msg:`reauth error for ${cid}`, ts: this.istTime });
       }
     },
+
+    /* ── Phase 7 — self-registration ────────────────────────────────────── */
+    async selfRegister() {
+      this.regMsg = ''; this.regOk = null; this.regLoading = true;
+      try {
+        if (this.regForm.password !== this.regForm.confirm_password) {
+          this.regMsg = 'Passwords do not match.'; this.regOk = false; return;
+        }
+        const body = {
+          client_id: this.regForm.client_id.trim(),
+          name: this.regForm.name.trim(),
+          email: this.regForm.email.trim(),
+          password: this.regForm.password,
+          capital: this.regForm.capital,
+          max_risk_pct: this.regForm.max_risk_pct,
+          max_daily_loss_pct: this.regForm.max_daily_loss_pct,
+        };
+        const r = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        this.regOk  = r.ok;
+        this.regMsg = d.message || d.detail || (r.ok ? 'Registered. Awaiting admin approval.' : 'Registration failed.');
+        if (r.ok) { setTimeout(() => { this.loginTab = 'client'; this.regMsg = ''; }, 2500); }
+      } catch { this.regOk = false; this.regMsg = 'Network error.'; }
+      finally   { this.regLoading = false; }
+    },
+
+    /* ── Phase 7 — client lifecycle ─────────────────────────────────────── */
+    async loadClientStatus() {
+      try {
+        const r = await this._fetch('/api/client/status');
+        if (r && r.ok) {
+          const d = await r.json();
+          this.clientStatus = d;
+          this.clientPhase  = d.phase || 'onboarding';
+        }
+      } catch {}
+    },
+
+    async startBot() {
+      this.botMsg = ''; this.botOk = null; this.botLoading = true;
+      try {
+        const r = await this._fetch('/api/client/start_bot', { method: 'POST' });
+        if (!r) return;
+        const d = await r.json();
+        this.botOk  = r.ok;
+        this.botMsg = d.message || d.detail || (r.ok ? 'Bot activated.' : 'Start failed.');
+        if (r.ok) await this.loadClientStatus();
+      } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
+      finally   { this.botLoading = false; }
+    },
+
+    async stopBot() {
+      this.botMsg = ''; this.botOk = null; this.botLoading = true;
+      try {
+        const r = await this._fetch('/api/client/stop_bot', { method: 'POST' });
+        if (!r) return;
+        const d = await r.json();
+        this.botOk  = r.ok;
+        this.botMsg = d.message || d.detail || 'Bot deactivated.';
+        if (r.ok) await this.loadClientStatus();
+      } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
+      finally   { this.botLoading = false; }
+    },
+
+    async toggleTrade(bindingId) {
+      try {
+        const r = await this._fetch(`/api/client/set_trade/${bindingId}`, { method: 'POST' });
+        if (r && r.ok) await this.loadClientStatus();
+      } catch {}
+    },
+
+    async setClientIndex(idx) {
+      this.setIndexMsg = ''; this.setIndexOk = null;
+      try {
+        const r = await this._fetch('/api/client/set_index', { json: { index: idx } });
+        if (!r) return;
+        const d = await r.json();
+        this.setIndexOk  = r.ok;
+        this.setIndexMsg = r.ok ? '' : (d.detail || 'Failed.');
+        if (r.ok) { this.activeIndex = idx; await this.loadClientStatus(); }
+      } catch { this.setIndexOk = false; this.setIndexMsg = 'Request failed.'; }
+    },
+
+    async addPortalBroker() {
+      this.portalBrokerMsg = ''; this.portalBrokerOk = null; this.portalBrokerLoading = true;
+      try {
+        const r = await this._fetch('/api/client/add_broker', { json: { ...this.portalBroker } });
+        if (!r) return;
+        const d = await r.json();
+        this.portalBrokerOk  = r.ok;
+        this.portalBrokerMsg = d.message || d.detail || (r.ok ? 'Broker saved.' : 'Failed.');
+        if (r.ok) {
+          await this.loadClientStatus();
+          setTimeout(() => { this.showPortalBrokerForm = false; this.portalBrokerMsg = ''; }, 2200);
+        }
+      } catch { this.portalBrokerOk = false; this.portalBrokerMsg = 'Request failed.'; }
+      finally   { this.portalBrokerLoading = false; }
+    },
+
+    /* ── Phase 7 — admin pending approvals ──────────────────────────────── */
+    async loadPendingClients() {
+      this.pendingLoading = true;
+      try {
+        const r = await this._fetch('/api/admin/clients/pending');
+        if (r && r.ok) { const d = await r.json(); this.pendingClients = d.pending || []; }
+      } catch {} finally { this.pendingLoading = false; }
+    },
+
+    async approveClient(cid) {
+      const assignments = this.approveAssignments[cid] || {};
+      try {
+        const r = await this._fetch(`/api/admin/clients/${cid}/approve`, {
+          json: { strategy_assignments: assignments },
+        });
+        if (!r) return;
+        const d = await r.json();
+        this.approveOk[cid]  = r.ok;
+        this.approveMsg[cid] = d.message || d.detail || (r.ok ? 'Approved.' : 'Failed.');
+        if (r.ok) { await this.loadPendingClients(); await this.loadClientProfiles(); }
+      } catch {
+        this.approveOk[cid] = false;
+        this.approveMsg[cid] = 'Request failed.';
+      }
+    },
   }));
 });
 </script>
@@ -987,8 +1149,9 @@ document.addEventListener('alpine:init', () => {
     <div class="t-card rounded p-6">
       <!-- Role tabs -->
       <div class="flex mb-5">
-        <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'">ADMIN</button>
-        <button class="login-tab" :class="{ active: loginTab==='client' }" @click="loginTab='client'">CLIENT</button>
+        <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'" style="border-radius:2px 0 0 2px;border-right:none">ADMIN</button>
+        <button class="login-tab" :class="{ active: loginTab==='client' }" @click="loginTab='client'" style="border-right:none">CLIENT</button>
+        <button class="login-tab" :class="{ active: loginTab==='register' }" @click="loginTab='register'" style="border-radius:0 2px 2px 0">REGISTER</button>
       </div>
 
       <!-- Admin form -->
@@ -1019,12 +1182,65 @@ document.addEventListener('alpine:init', () => {
         </div>
       </div>
 
-      <!-- Error -->
-      <div x-show="loginError" class="mt-3 font-mono text-xs px-2 py-1.5 rounded"
+      <!-- Registration form -->
+      <div x-show="loginTab === 'register'" class="space-y-2.5">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <div class="sec-label mb-1">CLIENT ID *</div>
+            <input class="t-input" type="text" placeholder="e.g. C001" x-model="regForm.client_id" autocomplete="off"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">NAME</div>
+            <input class="t-input" type="text" placeholder="Full name" x-model="regForm.name" autocomplete="name"/>
+          </div>
+        </div>
+        <div>
+          <div class="sec-label mb-1">EMAIL</div>
+          <input class="t-input" type="email" placeholder="you@example.com" x-model="regForm.email" autocomplete="email"/>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <div class="sec-label mb-1">PASSWORD *</div>
+            <input class="t-input" type="password" placeholder="min 6 chars" x-model="regForm.password" autocomplete="new-password"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">CONFIRM *</div>
+            <input class="t-input" type="password" placeholder="repeat" x-model="regForm.confirm_password" autocomplete="new-password"/>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <div class="sec-label mb-1">CAPITAL (INR)</div>
+            <input class="t-input" type="number" step="50000" x-model.number="regForm.capital"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">RISK %</div>
+            <input class="t-input" type="number" step="0.1" min="0.1" max="5" x-model.number="regForm.max_risk_pct"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">LOSS LIMIT %</div>
+            <input class="t-input" type="number" step="0.5" min="1" max="10" x-model.number="regForm.max_daily_loss_pct"/>
+          </div>
+        </div>
+        <div x-show="regMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+             :style="regOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                           : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="regMsg"></div>
+        <button class="btn-primary" @click="selfRegister()" :disabled="regLoading || !regForm.client_id || !regForm.password">
+          <span x-show="!regLoading">SUBMIT REGISTRATION</span>
+          <span x-show="regLoading">SUBMITTING…</span>
+        </button>
+        <div class="font-mono text-xs text-center pt-1" style="color:var(--t-muted)">
+          After registering, log in as CLIENT. Admin must approve before trading begins.
+        </div>
+      </div>
+
+      <!-- Error (admin/client login) -->
+      <div x-show="loginTab !== 'register' && loginError" class="mt-3 font-mono text-xs px-2 py-1.5 rounded"
            style="color:var(--t-red); background:rgba(var(--t-red-rgb),0.08); border:1px solid rgba(var(--t-red-rgb),0.2)"
            x-text="loginError"></div>
 
-      <button class="btn-primary mt-5" @click="login()" :disabled="loginLoading">
+      <button x-show="loginTab !== 'register'" class="btn-primary mt-5" @click="login()" :disabled="loginLoading">
         <span x-show="!loginLoading">LOGIN</span>
         <span x-show="loginLoading">AUTHENTICATING…</span>
       </button>
@@ -1971,6 +2187,64 @@ document.addEventListener('alpine:init', () => {
     </div>
   </div>
 
+  <!-- ══ BLOCK B2: PENDING CLIENT APPROVALS ══════════════════════════════════ -->
+  <div class="t-card rounded fade-up-3">
+    <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+      <div>
+        <div class="sec-label mb-0.5">Pending Approvals</div>
+        <div class="font-ui font-bold tracking-wider" style="color:var(--t-amber)">AWAITING ADMIN ACTIVATION</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="font-mono text-xs px-2 py-0.5 rounded" style="background:rgba(var(--t-amber-rgb),0.1);border:1px solid rgba(var(--t-amber-rgb),0.3);color:var(--t-amber)" x-text="pendingClients.length + ' pending'"></span>
+        <button @click="loadPendingClients()" :disabled="pendingLoading"
+                class="font-mono text-xs px-3 py-1 rounded border"
+                style="color:var(--t-muted);border-color:var(--t-border)">
+          <span x-show="!pendingLoading">&#x27F3;</span><span x-show="pendingLoading">…</span>
+        </button>
+      </div>
+    </div>
+    <div x-show="pendingClients.length === 0" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">
+      No pending registrations.
+    </div>
+    <div class="divide-y" style="border-color:var(--t-border)">
+      <template x-for="pc in pendingClients" :key="pc.client_id">
+        <div class="px-4 py-3">
+          <div class="flex items-center justify-between mb-2">
+            <div>
+              <span class="font-mono text-sm" style="color:var(--t-bright)" x-text="pc.client_id"></span>
+              <span class="font-ui text-xs ml-3" style="color:var(--t-muted)" x-text="(pc.name||'')+(pc.email?' · '+pc.email:'')"></span>
+            </div>
+            <span class="font-mono text-xs" style="color:var(--t-text)">Capital: <span x-text="'INR ' + (pc.capital||500000).toLocaleString('en-IN')"></span></span>
+          </div>
+          <!-- Broker bindings with strategy assignment -->
+          <div x-show="(pc.bindings||[]).length > 0" class="space-y-1.5 mb-2.5">
+            <div class="sec-label mb-1">BROKER BINDINGS — ASSIGN STRATEGY</div>
+            <template x-for="b in (pc.bindings||[])" :key="b.binding_id">
+              <div class="flex items-center gap-3 text-xs">
+                <span class="font-mono" style="color:var(--t-cyan);min-width:120px" x-text="b.binding_id"></span>
+                <span class="font-ui" style="color:var(--t-muted);min-width:80px" x-text="(b.provider||'').toUpperCase()+(b.label?' — '+b.label:'')"></span>
+                <select class="t-input" style="max-width:100px;font-size:11px;padding:3px 6px"
+                        @change="if(!approveAssignments[pc.client_id])approveAssignments[pc.client_id]={}; approveAssignments[pc.client_id][b.binding_id]=$event.target.value">
+                  <option value="">— assign —</option>
+                  <option value="A">STRATEGY A</option>
+                  <option value="B">STRATEGY B</option>
+                  <option value="C">STRATEGY C</option>
+                </select>
+              </div>
+            </template>
+          </div>
+          <div x-show="!(pc.bindings||[]).length" class="font-mono text-xs mb-2" style="color:var(--t-muted)">No broker bindings yet — client must add brokers first.</div>
+          <div class="flex items-center gap-3">
+            <button class="btn-resume" style="max-width:160px" @click="approveClient(pc.client_id)">APPROVE &amp; ACTIVATE</button>
+            <div x-show="approveMsg[pc.client_id]" class="font-mono text-xs px-2 py-1 rounded"
+                 :style="approveOk[pc.client_id] ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.06)' : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.06)'"
+                 x-text="approveMsg[pc.client_id]"></div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
   <!-- ══ BLOCK C: CLIENT-SCOPED AUDIT LOG ═════════════════════════════════════ -->
   <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:240px;max-height:360px">
     <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
@@ -2007,162 +2281,311 @@ document.addEventListener('alpine:init', () => {
 
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
-     CLIENT LAYOUT
+     CLIENT LAYOUT — Phase 7 (3-phase: onboarding / pending / active)
 ════════════════════════════════════════════════════════════════════════════ -->
-<main x-show="screen === 'client'"
-      class="flex-1 grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3 p-3 max-w-[1200px] w-full mx-auto">
+<main x-show="screen === 'client'" class="flex-1 p-4 max-w-[900px] w-full mx-auto">
 
-  <!-- ══ CLIENT LEFT ══════════════════════════════════════════════════════════ -->
-  <div class="flex flex-col gap-3">
+  <!-- ══ PHASE: ONBOARDING (no brokers yet) ═══════════════════════════════════ -->
+  <div x-show="clientPhase === 'onboarding'" class="slide-in">
+    <div class="t-card rounded p-8 text-center max-w-lg mx-auto mt-8">
+      <div class="font-display text-2xl font-bold tracking-wider mb-2" style="color:var(--t-cyan)">WELCOME</div>
+      <div class="font-ui text-base mb-1" style="color:var(--t-bright)" x-text="(clientStatus&&clientStatus.name)||authClientId"></div>
+      <div class="font-mono text-xs mb-6" style="color:var(--t-muted)">Account registered. Add your broker credentials to continue.</div>
 
-    <!-- My Portfolio -->
-    <div class="t-card rounded p-5 fade-up-1 relative overflow-hidden">
-      <div class="diag-accent"></div>
-      <div class="sec-label mb-3">My Portfolio</div>
-      <template x-if="myClient">
-        <div>
-          <div class="flex items-center justify-between mb-4">
-            <div>
-              <div class="font-ui font-bold text-xl" style="color:var(--t-bright)" x-text="myClient.name||myClient.client_id"></div>
-              <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="myClient.client_id"></div>
-            </div>
-            <span :class="myClient.tradeable ? 'badge-live' : 'badge-halted'" x-text="myClient.tradeable ? 'LIVE' : 'HALTED'"></span>
-          </div>
-          <div class="grid grid-cols-3 gap-4 mb-4">
-            <div>
-              <div class="sec-label mb-1">CAPITAL</div>
-              <div class="font-mono text-lg" style="color:var(--t-text)" x-text="'₹' + fmt(myClient.capital,0)"></div>
-            </div>
-            <div>
-              <div class="sec-label mb-1">DAILY P&L</div>
-              <div class="font-mono text-xl font-bold" :class="pnlClass(myClient.daily_pnl)"
-                   x-text="(myClient.daily_pnl>=0?'+':'')+'₹'+fmt(myClient.daily_pnl)"></div>
-            </div>
-            <div>
-              <div class="sec-label mb-1">RISK LIMIT</div>
-              <div class="font-mono text-lg" style="color:var(--t-muted)" x-text="myClient.daily_loss_pct+'%'"></div>
-            </div>
+      <!-- Add broker form -->
+      <div class="text-left space-y-3">
+        <div class="font-ui font-bold text-sm tracking-wider mb-1" style="color:var(--t-text)">ADD BROKER CHANNEL</div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">BINDING ID</div>
+            <input class="t-input" type="text" placeholder="e.g. main_broker" x-model="portalBroker.binding_id" autocomplete="off"/>
           </div>
           <div>
-            <div class="flex justify-between mb-1">
-              <span class="sec-label">DRAWDOWN EXPOSURE</span>
-              <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="myClient.daily_loss_pct+'% limit'"></span>
-            </div>
-            <div class="gauge-track h-2">
-              <div class="drawdown-bar gauge-fill h-full"
-                   :style="`width:${capPct(myClient.daily_pnl,myClient.capital)}%; background:${myClient.daily_pnl<0?'var(--t-red)':'var(--t-green)'}`"></div>
-            </div>
+            <div class="sec-label mb-1">PROVIDER</div>
+            <select class="t-input" x-model="portalBroker.provider">
+              <template x-for="p in brokerProviders" :key="p">
+                <option :value="p" x-text="p.toUpperCase()"></option>
+              </template>
+            </select>
           </div>
-          <div class="mt-3 flex gap-6 text-xs">
-            <div><span class="sec-label">STRATEGIES </span><span class="font-mono" style="color:var(--t-muted)" x-text="(myClient.strategies||[]).join(', ')||'—'"></span></div>
-          </div>
-        </div>
-      </template>
-      <div x-show="!myClient" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">Loading portfolio…</div>
-    </div>
-
-    <!-- Market Overview (own index) -->
-    <div class="t-card rounded p-4 fade-up-2">
-      <div class="sec-label mb-3">Market · <span x-text="activeIndex"></span></div>
-      <div class="grid grid-cols-2 gap-4 mb-3">
-        <div>
-          <div class="sec-label mb-1">SPOT</div>
-          <div class="font-mono text-3xl leading-none" style="color:var(--t-bright)" x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
         </div>
         <div>
-          <div class="sec-label mb-1">ATM</div>
-          <div class="font-mono text-3xl leading-none" style="color:var(--t-cyan)" x-text="spot.atm ? fmt(spot.atm,0) : '—'"></div>
+          <div class="sec-label mb-1">LABEL (optional)</div>
+          <input class="t-input" type="text" placeholder="e.g. Main Trading Account" x-model="portalBroker.label" autocomplete="off"/>
         </div>
-      </div>
-      <div class="grid grid-cols-3 gap-2 text-xs">
-        <div class="t-card rounded p-2">
-          <div class="sec-label">RSI-14</div>
-          <div class="font-mono text-sm font-bold mt-0.5" :class="rsiClass" x-text="rsiVal ? fmt(rsiVal,1) : '—'"></div>
-        </div>
-        <div class="t-card rounded p-2">
-          <div class="sec-label">ADX-20</div>
-          <div class="font-mono text-sm font-bold mt-0.5" :style="`color:${adxVal>=25?'var(--t-amber)':'var(--t-muted)'}`" x-text="adxVal ? fmt(adxVal,1) : '—'"></div>
-        </div>
-        <div class="t-card rounded p-2">
-          <div class="sec-label">EMA</div>
-          <div class="font-mono text-sm font-bold mt-0.5" :class="{'ema-bull':emaSignal==='BULL','ema-bear':emaSignal==='BEAR','ema-neutral':emaSignal==='NEUTRAL'}" x-text="emaSignal"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- My Event Feed -->
-    <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:220px;max-height:340px">
-      <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
-        <div class="sec-label">My Activity Feed</div>
-        <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="myEvents.length + ' events'"></span>
-      </div>
-      <div class="flex-1 overflow-y-auto">
-        <div x-show="myEvents.length===0" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">No events yet…</div>
-        <template x-for="(evt,i) in myEvents" :key="i">
-          <div class="feed-row">
-            <span class="font-mono text-xs shrink-0" style="color:var(--t-muted)" x-text="evt.ts||''"></span>
-            <span class="font-mono text-xs font-bold shrink-0" :style="`color:${evtColor(evt)}`" x-text="evt.code||evt.side||''"></span>
-            <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
-                  x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">USER ID</div>
+            <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
           </div>
-        </template>
-      </div>
-    </div>
-
-  </div><!-- end client left -->
-
-  <!-- ══ CLIENT RIGHT ══════════════════════════════════════════════════════════ -->
-  <div class="flex flex-col gap-3">
-
-    <!-- My Broker Integrations -->
-    <div class="t-card rounded fade-up-1">
-      <div class="flex items-center justify-between px-4 py-3 border-b shrink-0" style="border-color:var(--t-border)">
+          <div>
+            <div class="sec-label mb-1">API KEY</div>
+            <input class="t-input" type="password" x-model="portalBroker.api_key" autocomplete="new-password"/>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">API SECRET</div>
+            <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">TOTP SECRET (2FA)</div>
+            <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
+          </div>
+        </div>
         <div>
-          <div class="sec-label">My Broker Integrations</div>
-          <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)" x-text="myBrokers.length + ' binding' + (myBrokers.length!==1?'s':'')"></div>
+          <div class="sec-label mb-1">ACCESS TOKEN (pre-fetched, optional)</div>
+          <input class="t-input" type="password" x-model="portalBroker.access_token" autocomplete="new-password"/>
         </div>
-      </div>
-
-      <!-- Broker cards -->
-      <div x-show="myBrokers.length === 0" class="px-4 py-6 font-mono text-xs text-center" style="color:var(--t-muted)">
-        No brokers connected yet.<br/>Add one below to start trading.
-      </div>
-      <template x-for="b in myBrokers" :key="b.binding_id">
-        <div class="px-4 py-3 border-b last:border-b-0 flex items-center justify-between" style="border-color:var(--t-border)">
-          <div class="flex items-center gap-3">
-            <div class="w-2 h-2 rounded-full shrink-0" :class="b.is_authenticated ? 'conn-live' : ''"
-                 :style="`background:${b.is_authenticated?'var(--t-green)':'var(--t-red)'}`"></div>
-            <div>
-              <div class="font-mono text-xs" style="color:var(--t-bright)" x-text="b.binding_id"></div>
-              <div class="font-ui text-xs" style="color:var(--t-muted)" x-text="b.provider.toUpperCase()+(b.label?' — '+b.label:'')"></div>
-            </div>
-          </div>
-          <span :class="b.is_authenticated?'badge-live':'badge-halted'" x-text="b.is_authenticated?'AUTH':'UNAUTH'"></span>
-        </div>
-      </template>
-
-      <!-- Add broker button -->
-      <div class="p-4">
-        <button class="btn-add" @click="showBrokerModal=true; brokerAddMsg=''; brokerAddOk=null;">
-          [+] PROVISION NEW BROKER CHANNEL
+        <div x-show="portalBrokerMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+             :style="portalBrokerOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                                    : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="portalBrokerMsg"></div>
+        <button class="btn-add" @click="addPortalBroker()" :disabled="portalBrokerLoading || !portalBroker.binding_id">
+          <span x-show="!portalBrokerLoading">[+] SAVE BROKER CREDENTIALS</span>
+          <span x-show="portalBrokerLoading">SAVING…</span>
         </button>
       </div>
     </div>
+  </div>
 
-    <!-- Client system info -->
-    <div class="t-card rounded p-4 fade-up-2">
-      <div class="sec-label mb-3">Session Info</div>
-      <div class="space-y-1.5">
-        <div class="flex justify-between"><span class="sec-label">CLIENT ID</span><span class="font-mono text-sm" style="color:var(--t-cyan)" x-text="authClientId"></span></div>
-        <div class="flex justify-between"><span class="sec-label">ACTIVE IDX</span><span class="font-mono text-sm" style="color:var(--t-text)" x-text="activeIndex"></span></div>
-        <div class="flex justify-between"><span class="sec-label">BROKERS</span><span class="font-mono text-sm" style="color:var(--t-text)" x-text="myBrokers.length"></span></div>
-        <div class="flex justify-between"><span class="sec-label">FEED STATUS</span>
-          <span class="font-mono text-sm" :style="`color:${wsConnected?'var(--t-green)':'var(--t-red)'}`" x-text="wsConnected?'LIVE':'OFFLINE'"></span>
+  <!-- ══ PHASE: PENDING APPROVAL ══════════════════════════════════════════════ -->
+  <div x-show="clientPhase === 'pending'" class="slide-in">
+    <div class="t-card rounded p-8 text-center max-w-lg mx-auto mt-8">
+      <div class="font-display text-2xl font-bold tracking-wider mb-3" style="color:var(--t-amber)">AWAITING ACTIVATION</div>
+      <div class="font-ui text-base mb-1" style="color:var(--t-bright)" x-text="(clientStatus&&clientStatus.name)||authClientId"></div>
+      <div class="font-mono text-xs mb-6 leading-relaxed" style="color:var(--t-muted)">
+        Your account and broker credentials have been submitted.<br/>
+        The admin is reviewing your account. Once approved, you will be able to start the trading bot.
+      </div>
+      <!-- List submitted brokers -->
+      <div x-show="csBindings.length > 0" class="text-left mb-6">
+        <div class="sec-label mb-2">SUBMITTED BROKER CHANNELS</div>
+        <template x-for="b in csBindings" :key="b.binding_id">
+          <div class="flex items-center justify-between py-2 border-b" style="border-color:var(--t-border)">
+            <div class="flex items-center gap-3">
+              <div class="w-2 h-2 rounded-full" style="background:var(--t-amber)"></div>
+              <span class="font-mono text-xs" style="color:var(--t-bright)" x-text="b.binding_id"></span>
+              <span class="font-ui text-xs" style="color:var(--t-muted)" x-text="(b.provider||'').toUpperCase()+(b.label?' — '+b.label:'')"></span>
+            </div>
+            <span class="font-mono text-xs" style="color:var(--t-amber)">PENDING</span>
+          </div>
+        </template>
+      </div>
+      <!-- Add more brokers while pending -->
+      <button class="btn-action mb-3" @click="showPortalBrokerForm=!showPortalBrokerForm" x-text="showPortalBrokerForm?'CANCEL':'[+] ADD ANOTHER BROKER'"></button>
+      <div x-show="showPortalBrokerForm" class="text-left space-y-2.5 mt-3">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <div class="sec-label mb-1">BINDING ID</div>
+            <input class="t-input" type="text" x-model="portalBroker.binding_id" autocomplete="off"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">PROVIDER</div>
+            <select class="t-input" x-model="portalBroker.provider">
+              <template x-for="p in brokerProviders" :key="p"><option :value="p" x-text="p.toUpperCase()"></option></template>
+            </select>
+          </div>
         </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div><div class="sec-label mb-1">USER ID</div><input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/></div>
+          <div><div class="sec-label mb-1">API KEY</div><input class="t-input" type="password" x-model="portalBroker.api_key" autocomplete="new-password"/></div>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div><div class="sec-label mb-1">API SECRET</div><input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">TOTP SECRET</div><input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/></div>
+        </div>
+        <div x-show="portalBrokerMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+             :style="portalBrokerOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                                    : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="portalBrokerMsg"></div>
+        <button class="btn-add" @click="addPortalBroker()" :disabled="portalBrokerLoading||!portalBroker.binding_id">
+          <span x-show="!portalBrokerLoading">SAVE BROKER</span><span x-show="portalBrokerLoading">SAVING…</span>
+        </button>
+      </div>
+      <div class="mt-5">
+        <button class="btn-action" @click="loadClientStatus()" style="max-width:180px;margin:0 auto">CHECK STATUS</button>
       </div>
     </div>
+  </div>
 
-  </div><!-- end client right -->
+  <!-- ══ PHASE: ACTIVE TRADING ════════════════════════════════════════════════ -->
+  <div x-show="clientPhase === 'active'" class="grid grid-cols-1 xl:grid-cols-[1fr_300px] gap-3 slide-in">
+
+    <!-- LEFT -->
+    <div class="flex flex-col gap-3">
+
+      <!-- Portfolio header -->
+      <div class="t-card rounded p-5 fade-up-1 relative overflow-hidden">
+        <div class="diag-accent"></div>
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <div class="font-ui font-bold text-xl" style="color:var(--t-bright)" x-text="(clientStatus&&clientStatus.name)||authClientId"></div>
+            <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="authClientId"></div>
+          </div>
+          <span :class="clientStatus&&clientStatus.tradeable ? 'badge-live' : 'badge-halted'"
+                x-text="clientStatus&&clientStatus.tradeable ? 'LIVE' : 'HALTED'"></span>
+        </div>
+        <div class="grid grid-cols-3 gap-4 mb-4">
+          <div>
+            <div class="sec-label mb-1">CAPITAL</div>
+            <div class="font-mono text-lg" style="color:var(--t-text)" x-text="clientStatus ? 'INR ' + fmt(clientStatus.capital,0) : '—'"></div>
+          </div>
+          <div>
+            <div class="sec-label mb-1">DAILY P&L</div>
+            <div class="font-mono text-xl font-bold" :class="pnlClass(clientStatus&&clientStatus.daily_pnl||0)"
+                 x-text="clientStatus ? (clientStatus.daily_pnl>=0?'+':'')+'INR '+fmt(clientStatus.daily_pnl) : '—'"></div>
+          </div>
+          <div>
+            <div class="sec-label mb-1">TARGET INDEX</div>
+            <div class="font-mono text-lg" style="color:var(--t-cyan)" x-text="csTargetIndex"></div>
+          </div>
+        </div>
+        <!-- Drawdown bar -->
+        <div>
+          <div class="flex justify-between mb-1">
+            <span class="sec-label">DRAWDOWN EXPOSURE</span>
+            <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="clientStatus?clientStatus.daily_loss_pct+'% limit':''"></span>
+          </div>
+          <div class="gauge-track h-2">
+            <div class="drawdown-bar gauge-fill h-full"
+                 :style="`width:${capPct(clientStatus&&clientStatus.daily_pnl||0,clientStatus&&clientStatus.capital||500000)}%; background:${(clientStatus&&clientStatus.daily_pnl||0)<0?'var(--t-red)':'var(--t-green)'}`"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Market overview -->
+      <div class="t-card rounded p-4 fade-up-2">
+        <div class="flex items-center justify-between mb-3">
+          <div class="sec-label">Market · <span x-text="activeIndex"></span></div>
+          <!-- Index selector -->
+          <div class="flex gap-1">
+            <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY']" :key="idx">
+              <button class="idx-tab" :class="{active: activeIndex===idx}"
+                      @click="setClientIndex(idx)" x-text="idx"></button>
+            </template>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-4 mb-3">
+          <div>
+            <div class="sec-label mb-1">SPOT</div>
+            <div class="font-mono text-3xl leading-none" style="color:var(--t-bright)" x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
+          </div>
+          <div>
+            <div class="sec-label mb-1">ATM</div>
+            <div class="font-mono text-3xl leading-none" style="color:var(--t-cyan)" x-text="spot.atm ? fmt(spot.atm,0) : '—'"></div>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 text-xs">
+          <div class="t-card rounded p-2">
+            <div class="sec-label">RSI-14</div>
+            <div class="font-mono text-sm font-bold mt-0.5" :class="rsiClass" x-text="rsiVal ? fmt(rsiVal,1) : '—'"></div>
+          </div>
+          <div class="t-card rounded p-2">
+            <div class="sec-label">ADX-20</div>
+            <div class="font-mono text-sm font-bold mt-0.5" :style="`color:${adxVal>=25?'var(--t-amber)':'var(--t-muted)'}`" x-text="adxVal ? fmt(adxVal,1) : '—'"></div>
+          </div>
+          <div class="t-card rounded p-2">
+            <div class="sec-label">EMA</div>
+            <div class="font-mono text-sm font-bold mt-0.5" :class="{'ema-bull':emaSignal==='BULL','ema-bear':emaSignal==='BEAR','ema-neutral':emaSignal==='NEUTRAL'}" x-text="emaSignal"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Event feed -->
+      <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:200px;max-height:300px">
+        <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+          <div class="sec-label">Activity Feed</div>
+          <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="myEvents.length + ' events'"></span>
+        </div>
+        <div class="flex-1 overflow-y-auto">
+          <div x-show="myEvents.length===0" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">No events yet…</div>
+          <template x-for="(evt,i) in myEvents" :key="i">
+            <div class="feed-row">
+              <span class="font-mono text-xs shrink-0" style="color:var(--t-muted)" x-text="evt.ts||''"></span>
+              <span class="font-mono text-xs font-bold shrink-0" :style="`color:${evtColor(evt)}`" x-text="evt.code||evt.side||''"></span>
+              <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
+                    x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
+            </div>
+          </template>
+        </div>
+      </div>
+
+    </div><!-- end active left -->
+
+    <!-- RIGHT -->
+    <div class="flex flex-col gap-3">
+
+      <!-- Master bot toggle -->
+      <div class="t-card rounded p-4 fade-up-1">
+        <div class="sec-label mb-3">BOT CONTROL</div>
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <div class="font-ui font-bold tracking-wider" :style="`color:${csBotActive?'var(--t-green)':'var(--t-muted)'}`"
+                 x-text="csBotActive ? 'BOT ACTIVE' : 'BOT INACTIVE'"></div>
+            <div class="font-mono text-xs" style="color:var(--t-muted)">Master trading switch</div>
+          </div>
+          <div class="w-3 h-3 rounded-full" :class="csBotActive?'conn-live':''"
+               :style="`background:${csBotActive?'var(--t-green)':'var(--t-red)'}`"></div>
+        </div>
+        <div class="flex gap-2">
+          <button class="btn-resume" style="flex:1" @click="startBot()" :disabled="botLoading||csBotActive">
+            <span x-show="!botLoading">START</span><span x-show="botLoading">…</span>
+          </button>
+          <button class="btn-halt" style="flex:1" @click="stopBot()" :disabled="botLoading||!csBotActive">STOP</button>
+        </div>
+        <div x-show="botMsg" class="mt-2 font-mono text-xs px-2 py-1.5 rounded"
+             :style="botOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                           : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="botMsg"></div>
+      </div>
+
+      <!-- Broker bindings + per-broker trade toggle -->
+      <div class="t-card rounded fade-up-2">
+        <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+          <div>
+            <div class="sec-label">BROKER CHANNELS</div>
+            <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)" x-text="csBindings.length+' binding'+(csBindings.length!==1?'s':'')"></div>
+          </div>
+        </div>
+        <div x-show="csBindings.length===0" class="px-4 py-5 font-mono text-xs text-center" style="color:var(--t-muted)">No broker bindings yet.</div>
+        <template x-for="b in csBindings" :key="b.binding_id">
+          <div class="px-4 py-3 border-b last:border-b-0" style="border-color:var(--t-border)">
+            <div class="flex items-center justify-between mb-1">
+              <div class="flex items-center gap-2">
+                <div class="w-2 h-2 rounded-full shrink-0" :style="`background:${b.is_trade_enabled?'var(--t-green)':'var(--t-muted)'}`"></div>
+                <span class="font-mono text-xs" style="color:var(--t-bright)" x-text="b.binding_id"></span>
+              </div>
+              <!-- Trade enable toggle -->
+              <button @click="toggleTrade(b.binding_id)"
+                      class="font-mono text-xs px-2 py-0.5 rounded border transition-all"
+                      :style="b.is_trade_enabled ? 'color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.3);background:rgba(var(--t-green-rgb),0.08)'
+                                                 : 'color:var(--t-muted);border-color:var(--t-border);background:transparent'"
+                      x-text="b.is_trade_enabled ? 'TRADE ON' : 'TRADE OFF'"></button>
+            </div>
+            <div class="flex justify-between text-xs mt-0.5">
+              <span class="font-ui" style="color:var(--t-muted)" x-text="(b.provider||'').toUpperCase()+(b.label?' — '+b.label:'')"></span>
+              <span class="font-mono" style="color:var(--t-muted)" x-text="b.assigned_strategy?'Strategy '+b.assigned_strategy:''"></span>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- Session info -->
+      <div class="t-card rounded p-4 fade-up-3">
+        <div class="sec-label mb-3">Session</div>
+        <div class="space-y-1.5 text-xs">
+          <div class="flex justify-between"><span class="sec-label">CLIENT ID</span><span class="font-mono" style="color:var(--t-cyan)" x-text="authClientId"></span></div>
+          <div class="flex justify-between"><span class="sec-label">TARGET INDEX</span><span class="font-mono" style="color:var(--t-text)" x-text="csTargetIndex"></span></div>
+          <div class="flex justify-between"><span class="sec-label">FEED</span>
+            <span class="font-mono" :style="`color:${wsConnected?'var(--t-green)':'var(--t-red)'}`" x-text="wsConnected?'LIVE':'OFFLINE'"></span>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- end active right -->
+  </div><!-- end active grid -->
+
 </main><!-- end client layout -->
 
 

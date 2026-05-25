@@ -37,7 +37,7 @@ import hmac
 import logging
 import os
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from config.global_config import IST, Topic, SysEvent
 from data_layer.base_feeder import EventBus
@@ -127,6 +127,33 @@ try:
         max_daily_loss_pct: float = 3.0
         strategies:         List[str] = ["A", "B", "C"]
 
+    # Phase 7 — multi-tenant lifecycle schemas
+    class _ClientSelfRegisterSchema(_PydanticBase):
+        client_id:          str
+        name:               str   = ""
+        email:              str   = ""
+        password:           str
+        capital:            float = 500_000.0
+        max_risk_pct:       float = 1.0
+        max_daily_loss_pct: float = 3.0
+
+    class _ApproveClientSchema(_PydanticBase):
+        strategy_assignments: Dict[str, str] = {}  # binding_id -> "A"/"B"/"C"
+
+    class _AddPortalBrokerSchema(_PydanticBase):
+        binding_id:     str
+        provider:       str
+        label:          str   = ""
+        user_id:        str   = ""
+        api_key:        str   = ""
+        api_secret:     str   = ""
+        totp_secret:    str   = ""
+        access_token:   str   = ""
+        lot_multiplier: float = 1.0
+
+    class _SetIndexSchema(_PydanticBase):
+        index: str  # NIFTY / BANKNIFTY / FINNIFTY
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -169,6 +196,9 @@ class DashboardServer:
         self._feeder = feeder
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
+
+        from data_layer.client_db import ClientDB
+        self._client_db = ClientDB()
 
         # Register heartbeat providers
         self._ws_bridge.register_stats_provider("clients", self._client_summary)
@@ -280,19 +310,37 @@ class DashboardServer:
                 return {"access_token": token, "token_type": "bearer", "role": "admin"}
 
             elif role == "client":
+                # Try registry first (approved, active clients)
                 client = _srv._registry.get(username) if _srv._registry else None
-                if client is None or not client.active:
-                    raise HTTPException(status_code=401, detail="Client not found or inactive.")
-                expected = auth_cfg.client_pin(username)
-                if not hmac.compare_digest(password, expected):
-                    raise HTTPException(status_code=401, detail="Invalid client PIN.")
+                if client is not None and client.active:
+                    # Legacy clients use PIN; DB clients use password
+                    pw_ok = _srv._client_db.verify_client_password(username, password)
+                    if not pw_ok:
+                        # Fall back to legacy PIN
+                        expected = auth_cfg.client_pin(username)
+                        if not hmac.compare_digest(password, expected):
+                            raise HTTPException(status_code=401, detail="Invalid client credentials.")
+                    token = create_token(username, "client", username)
+                    return {
+                        "access_token": token,
+                        "token_type":   "bearer",
+                        "role":         "client",
+                        "client_id":    username,
+                        "client_name":  getattr(client, "name", username),
+                    }
+                # Not in registry — check ClientDB (pending / newly registered)
+                db_client = _srv._client_db.get_client_sync(username)
+                if db_client is None:
+                    raise HTTPException(status_code=401, detail="Client not found.")
+                if not _srv._client_db.verify_client_password(username, password):
+                    raise HTTPException(status_code=401, detail="Invalid client credentials.")
                 token = create_token(username, "client", username)
                 return {
                     "access_token": token,
-                    "token_type": "bearer",
-                    "role": "client",
-                    "client_id": username,
-                    "client_name": getattr(client, "name", username),
+                    "token_type":   "bearer",
+                    "role":         "client",
+                    "client_id":    username,
+                    "client_name":  db_client.get("name", username),
                 }
 
             raise HTTPException(status_code=400, detail="role must be 'admin' or 'client'.")
@@ -606,6 +654,270 @@ class DashboardServer:
                     f"authenticated and registered for client {cid}."
                 ),
             }
+
+        # ── PUBLIC — self-registration ───────────────────────────────────────
+
+        @app.post("/api/auth/register", tags=["Auth"])
+        async def api_self_register(body: _ClientSelfRegisterSchema):
+            existing = _srv._client_db.get_client_sync(body.client_id)
+            if existing is not None:
+                raise HTTPException(409, f"Client ID '{body.client_id}' already exists.")
+            if len(body.password) < 6:
+                raise HTTPException(400, "Password must be at least 6 characters.")
+            await _srv._client_db.register_client(
+                client_id=body.client_id,
+                name=body.name,
+                email=body.email,
+                password=body.password,
+                capital=body.capital,
+                max_risk_pct=body.max_risk_pct,
+                max_daily_loss_pct=body.max_daily_loss_pct,
+            )
+            logger.info("Dashboard: self-registered client %s (pending approval).", body.client_id)
+            return {"ok": True, "message": "Registration submitted. Awaiting admin approval."}
+
+        # ── CLIENT — lifecycle status ─────────────────────────────────────────
+
+        @app.get("/api/client/status", tags=["Client"])
+        async def api_client_status(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            # Check registry first
+            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            if reg_client is not None:
+                bindings = _srv._client_db.get_bindings_safe_sync(cid)
+                return {
+                    "phase":               "active",
+                    "client_id":           cid,
+                    "name":                getattr(reg_client, "name", cid),
+                    "is_admin_approved":   True,
+                    "is_client_bot_active": getattr(reg_client, "is_client_bot_active", False),
+                    "target_index":        getattr(reg_client, "target_index", "NIFTY"),
+                    "capital":             float(reg_client.risk.capital),
+                    "daily_pnl":           round(float(getattr(reg_client, "_daily_pnl", 0.0)), 2),
+                    "tradeable":           reg_client.is_tradeable(),
+                    "bindings":            bindings,
+                }
+            # Not in registry — check DB
+            db_client = _srv._client_db.get_client_sync(cid)
+            if db_client is None:
+                raise HTTPException(404, "Client not found.")
+            bindings = _srv._client_db.get_bindings_safe_sync(cid)
+            phase = "pending" if bindings else "onboarding"
+            if db_client.get("is_admin_approved"):
+                phase = "active"
+            return {
+                "phase":               phase,
+                "client_id":           cid,
+                "name":                db_client.get("name", cid),
+                "is_admin_approved":   bool(db_client.get("is_admin_approved", 0)),
+                "is_client_bot_active": bool(db_client.get("is_client_bot_active", 0)),
+                "target_index":        db_client.get("target_index", "NIFTY"),
+                "capital":             float(db_client.get("capital", 500_000.0)),
+                "daily_pnl":           0.0,
+                "tradeable":           False,
+                "bindings":            bindings,
+            }
+
+        # ── CLIENT — add broker binding (portal onboarding) ───────────────────
+
+        @app.post("/api/client/add_broker", tags=["Client"])
+        async def api_client_add_broker(
+            body: _AddPortalBrokerSchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            await _srv._client_db.upsert_binding(
+                client_id=cid,
+                binding_id=body.binding_id,
+                provider=body.provider,
+                label=body.label,
+                user_id=body.user_id,
+                api_key=body.api_key,
+                api_secret=body.api_secret,
+                totp_secret=body.totp_secret,
+                access_token=body.access_token,
+                lot_multiplier=body.lot_multiplier,
+            )
+            logger.info("Dashboard: client %s added broker binding %s.", cid, body.binding_id)
+            return {"ok": True, "message": f"Broker '{body.binding_id}' saved. Awaiting admin strategy assignment."}
+
+        # ── CLIENT — start bot (pre-flight validation) ────────────────────────
+
+        @app.post("/api/client/start_bot", tags=["Client"])
+        async def api_client_start_bot(user: dict = Depends(_require_client)):
+            from execution_bridge.base_broker import create_broker
+            from execution_bridge.parallel_worker_pool import ClientExecutionWorker
+            from config.client_profiles import BrokerBinding
+
+            cid = user.get("client_id", "")
+            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            if reg_client is None:
+                raise HTTPException(403, "Client not yet approved or not active.")
+            if not reg_client.is_admin_approved:
+                raise HTTPException(403, "Account not yet approved by admin.")
+
+            # Pre-flight: authenticate all trade-enabled bindings
+            bindings_db = _srv._client_db.get_bindings_sync(cid)
+            failed_ids: List[str] = []
+            for b in bindings_db:
+                if not b.get("is_trade_enabled", 1):
+                    continue
+                bb = next(
+                    (x for x in reg_client.broker_bindings if x.binding_id == b["binding_id"]),
+                    None,
+                )
+                if bb is None:
+                    continue
+                try:
+                    broker = create_broker(bb, cid)
+                    ok = await broker.authenticate()
+                    if not ok:
+                        failed_ids.append(b["binding_id"])
+                except Exception as exc:
+                    logger.warning("Dashboard: pre-flight auth error for %s/%s: %s", cid, b["binding_id"], exc)
+                    failed_ids.append(b["binding_id"])
+
+            if failed_ids:
+                raise HTTPException(
+                    401,
+                    f"Authentication failed for: {', '.join(failed_ids)}. "
+                    "Token expired or invalid. Please update your access token and try again.",
+                )
+
+            # Activate bot flag
+            reg_client.is_client_bot_active = True
+            await _srv._client_db.upsert_client(cid, is_client_bot_active=1)
+
+            await _srv._bus.publish(Topic.SYSTEM_EVENT, {
+                "event": "CLIENT_BOT_STARTED", "client_id": cid,
+            })
+            logger.info("Dashboard: client %s started bot.", cid)
+            return {"ok": True, "message": "Bot activated. Pre-flight authentication passed."}
+
+        # ── CLIENT — stop bot ─────────────────────────────────────────────────
+
+        @app.post("/api/client/stop_bot", tags=["Client"])
+        async def api_client_stop_bot(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            if reg_client is not None:
+                reg_client.is_client_bot_active = False
+                reg_client.halt("CLIENT_STOPPED_BOT")
+            await _srv._client_db.upsert_client(cid, is_client_bot_active=0)
+            await _srv._bus.publish(Topic.SYSTEM_EVENT, {
+                "event": "CLIENT_BOT_STOPPED", "client_id": cid,
+            })
+            logger.info("Dashboard: client %s stopped bot.", cid)
+            return {"ok": True, "message": "Bot deactivated."}
+
+        # ── CLIENT — per-broker trade toggle ──────────────────────────────────
+
+        @app.post("/api/client/set_trade/{binding_id}", tags=["Client"])
+        async def api_client_set_trade(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            # Read current state and toggle
+            bindings = _srv._client_db.get_bindings_safe_sync(cid)
+            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+            if b is None:
+                raise HTTPException(404, f"Binding '{binding_id}' not found.")
+            new_state = not bool(b.get("is_trade_enabled", 1))
+            await _srv._client_db.set_trade_enabled(cid, binding_id, new_state)
+            # Mirror in in-memory profile
+            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            if reg_client:
+                for rb in reg_client.broker_bindings:
+                    if rb.binding_id == binding_id:
+                        rb.is_trade_enabled = new_state
+            return {"ok": True, "binding_id": binding_id, "is_trade_enabled": new_state}
+
+        # ── CLIENT — set target index ─────────────────────────────────────────
+
+        @app.post("/api/client/set_index", tags=["Client"])
+        async def api_client_set_index(
+            body: _SetIndexSchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+            idx = body.index.upper()
+            if idx not in allowed:
+                raise HTTPException(400, f"Invalid index. Allowed: {sorted(allowed)}")
+            await _srv._client_db.upsert_client(cid, target_index=idx)
+            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            if reg_client is not None:
+                reg_client.target_index = idx
+            return {"ok": True, "target_index": idx}
+
+        # ── ADMIN — pending clients ───────────────────────────────────────────
+
+        @app.get("/api/admin/clients/pending", tags=["Admin"])
+        async def api_pending_clients(_: dict = Depends(_require_admin)):
+            rows = _srv._client_db.get_pending_clients_sync()
+            return {"pending": rows, "ts": datetime.now(IST).isoformat()}
+
+        # ── ADMIN — approve client + assign strategies ────────────────────────
+
+        @app.post("/api/admin/clients/{client_id}/approve", tags=["Admin"])
+        async def api_approve_client(
+            client_id: str,
+            body: _ApproveClientSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            from config.client_profiles import ClientProfile, RiskProfile, BrokerBinding
+
+            db_client = _srv._client_db.get_client_sync(client_id)
+            if db_client is None:
+                raise HTTPException(404, f"Client '{client_id}' not found in DB.")
+
+            # Write strategy assignments and set approved flag
+            for binding_id, strategy in body.strategy_assignments.items():
+                await _srv._client_db.set_assigned_strategy(client_id, binding_id, strategy)
+            await _srv._client_db.upsert_client(client_id, is_admin_approved=1)
+
+            # Build ClientProfile and register in registry
+            if _srv._registry is not None and _srv._registry.get(client_id) is None:
+                strategies_raw = db_client.get("enabled_strategies") or "A,B,C"
+                strategies = [s.strip() for s in strategies_raw.split(",") if s.strip()]
+                risk = RiskProfile(
+                    capital=float(db_client.get("capital", 500_000)),
+                    max_risk_per_trade_pct=float(db_client.get("max_risk_pct", 1.0)),
+                    max_daily_loss_pct=float(db_client.get("max_daily_loss_pct", 3.0)),
+                )
+                profile = ClientProfile(
+                    client_id=client_id,
+                    name=db_client.get("name", ""),
+                    email=db_client.get("email", ""),
+                    risk=risk,
+                    enabled_strategies=strategies,
+                    is_admin_approved=True,
+                    target_index=db_client.get("target_index", "NIFTY"),
+                )
+                for b in _srv._client_db.get_bindings_sync(client_id):
+                    strategy_for_b = body.strategy_assignments.get(b["binding_id"], b.get("assigned_strategy", ""))
+                    profile.broker_bindings.append(BrokerBinding(
+                        binding_id=b["binding_id"],
+                        provider=b["provider"],      # type: ignore[arg-type]
+                        label=b.get("label", ""),
+                        user_id=b.get("user_id", ""),
+                        api_key=b.get("api_key", ""),
+                        api_secret=b.get("api_secret", ""),
+                        totp_secret=b.get("totp_secret", ""),
+                        access_token=b.get("access_token", ""),
+                        lot_multiplier=float(b.get("lot_multiplier", 1.0)),
+                        enabled=bool(b.get("enabled", 1)),
+                        assigned_strategy=strategy_for_b,
+                        is_trade_enabled=bool(b.get("is_trade_enabled", 1)),
+                    ))
+                try:
+                    _srv._registry.register(profile)
+                except ValueError:
+                    pass  # already registered from a previous call
+
+            await _srv._bus.publish(Topic.SYSTEM_EVENT, {
+                "event": "CLIENT_APPROVED", "client_id": client_id,
+            })
+            logger.info("Dashboard: approved client %s with strategies %s.", client_id, body.strategy_assignments)
+            return {"ok": True, "message": f"Client '{client_id}' approved and activated."}
 
         # ── ADMIN — single-provider feeder connects ──────────────────────────
 
@@ -988,6 +1300,8 @@ class DashboardServer:
                     port,
                 )
                 return
+
+        await self._client_db.initialise()
 
         config = uvicorn.Config(
             app=self._app,

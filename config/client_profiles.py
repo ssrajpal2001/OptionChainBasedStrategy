@@ -43,6 +43,12 @@ class BrokerBinding:
     client_code: str = ""               # Angel One-specific
     access_token: str = ""              # Override (pre-fetched)
 
+    # Lifecycle / strategy assignment (DB-backed)
+    assigned_strategy: str = ""          # Admin-pinned strategy: "A", "B", or "C"
+    is_trade_enabled: bool = True        # Client per-broker trade switch
+    token_generated_at: str = ""         # IST ISO timestamp of last token refresh
+    token_expiry_at: str = ""            # IST ISO timestamp of token expiry
+
     # Execution params per binding
     lot_multiplier: float = 1.0         # Scale signal lots (e.g. 0.5 = half size)
     enabled: bool = True
@@ -129,6 +135,11 @@ class ClientProfile:
     created_date: str = field(default_factory=lambda: str(date.today()))
     notes: str = ""
 
+    # Lifecycle flags (DB-backed, admin + client controlled)
+    is_admin_approved: bool = False      # Set True by admin on approval
+    is_client_bot_active: bool = False   # Set by client master toggle
+    target_index: str = "NIFTY"         # Client-selected index (NIFTY / BANKNIFTY / FINNIFTY)
+
     # Runtime state — not persisted
     _daily_pnl: float = field(default=0.0, compare=False, repr=False)
     _daily_trades: int = field(default=0, compare=False, repr=False)
@@ -150,6 +161,10 @@ class ClientProfile:
     def is_tradeable(self) -> bool:
         """Return True if this client can receive new trade signals."""
         if not self.active or self._halted:
+            return False
+        if not self.is_admin_approved:
+            return False
+        if not self.is_client_bot_active:
             return False
         if self._daily_trades >= self.risk.max_daily_trades:
             return False
@@ -186,6 +201,9 @@ class ClientProfile:
             "active": self.active,
             "created_date": self.created_date,
             "notes": self.notes,
+            "is_admin_approved": self.is_admin_approved,
+            "is_client_bot_active": self.is_client_bot_active,
+            "target_index": self.target_index,
         }
 
 
@@ -267,6 +285,10 @@ class ClientRegistry:
                 active=rec.get("active", True),
                 created_date=rec.get("created_date", str(date.today())),
                 notes=rec.get("notes", ""),
+                # Lifecycle flags — existing JSON profiles treated as pre-approved
+                is_admin_approved=rec.get("is_admin_approved", True),
+                is_client_bot_active=rec.get("is_client_bot_active", False),
+                target_index=rec.get("target_index", "NIFTY"),
             )
             self._clients[profile.client_id] = profile
 
