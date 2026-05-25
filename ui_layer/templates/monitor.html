@@ -423,8 +423,9 @@ document.addEventListener('alpine:init', () => {
     /* ── Dual feeder ────────────────────────────────────────────────── */
     dualCreds: {
       upstox_client_id:'', upstox_api_key:'', upstox_secret:'',
-      upstox_access_token:'', upstox_totp:'',
-      fyers_client_id:'', fyers_app_key:'', fyers_access_token:'', fyers_totp:'',
+      upstox_password:'', upstox_totp:'',
+      fyers_client_id:'', fyers_app_key:'', fyers_secret:'',
+      fyers_pin:'', fyers_totp:'',
     },
     dualMsg: '', dualOk: null, dualConnecting: false,
     showUpstoxCreds: false, showFyersCreds: false,
@@ -463,7 +464,7 @@ document.addEventListener('alpine:init', () => {
     clientPhase:   'onboarding', // 'onboarding' | 'pending' | 'active'
     botLoading:    false, botMsg: '', botOk: null,
     setIndexMsg:   '', setIndexOk: null,
-    portalBroker:  { binding_id:'', provider:'mock', label:'', user_id:'', api_key:'', api_secret:'', totp_secret:'', access_token:'', lot_multiplier:1.0 },
+    portalBroker:  { binding_id:'', provider:'mock', label:'', user_id:'', api_key:'', api_secret:'', totp_secret:'', lot_multiplier:1.0 },
     portalBrokerMsg: '', portalBrokerOk: null, portalBrokerLoading: false,
     showPortalBrokerForm: false,
 
@@ -473,6 +474,9 @@ document.addEventListener('alpine:init', () => {
     approveAssignments: {}, // { [cid]: { [binding_id]: strategy } }
     approveMsg: {}, approveOk: {},
 
+    /* ── Auth alerts ─────────────────────────────────────────────────── */
+    authAlerts: { feeder: '' },
+
     /* ── Telemetry ───────────────────────────────────────────────────── */
     telemetry: { upstox_latency_ms: 0, fyers_latency_ms: 0, ws_clients: 0 },
 
@@ -481,7 +485,7 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Admin feeder panel ─────────────────────────────────────────── */
     feederProvider:  'mock',
-    feederCreds:     { user_id:'', password:'', api_key:'', access_token:'' },
+    feederCreds:     { user_id:'', password:'', api_key:'', totp_secret:'' },
     feederMsg:       '',
     feederOk:        null,
     feederConnecting: false,
@@ -493,7 +497,7 @@ document.addEventListener('alpine:init', () => {
       provider:'mock', binding_id:'', label:'',
       user_id:'', password:'', api_key:'', api_secret:'',
       totp_secret:'', vendor_code:'', imei:'', client_code:'',
-      access_token:'', lot_multiplier: 1.0,
+      lot_multiplier: 1.0,
     },
     brokerProviders: ['mock','shoonya','dhan','fyers','angelone'],
     brokerAddMsg:    '',
@@ -548,7 +552,7 @@ document.addEventListener('alpine:init', () => {
       const saved = localStorage.getItem('terminus_theme') || 'midnight';
       this.applyTheme(saved, false);
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadRms(); this.loadFeederStatus(); }, 2500);
-      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); } }, 10000);
+      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); } }, 5000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
@@ -808,16 +812,26 @@ document.addEventListener('alpine:init', () => {
     },
     themeLabel(k) { return { midnight:'MIDNIGHT', matrix:'MATRIX', cyberpunk:'CYBERPUNK', light_pro:'LIGHT PRO' }[k] || k; },
 
+    /* ── Auth alerts ─────────────────────────────────────────────────────── */
+    async loadAuthAlerts() {
+      try {
+        const r = await this._fetch('/api/admin/auth_alerts');
+        if (!r || !r.ok) return;
+        const d = await r.json();
+        this.authAlerts.feeder = d.feeder || '';
+      } catch { /* silent */ }
+    },
+
     /* ── Dual feeder ─────────────────────────────────────────────────────── */
     async connectUpstox() {
       this.upstoxMsg = ''; this.upstoxOk = null; this.upstoxConnecting = true;
       try {
         const payload = {
-          client_id:    this.dualCreds.upstox_client_id,
-          api_key:      this.dualCreds.upstox_api_key,
-          secret:       this.dualCreds.upstox_secret,
-          access_token: this.dualCreds.upstox_access_token,
-          totp:         this.dualCreds.upstox_totp,
+          client_id:   this.dualCreds.upstox_client_id,
+          api_key:     this.dualCreds.upstox_api_key,
+          secret:      this.dualCreds.upstox_secret,
+          password:    this.dualCreds.upstox_password,
+          totp_secret: this.dualCreds.upstox_totp,
         };
         const r = await this._fetch('/api/admin/feeder/connect/upstox', { json: payload });
         if (!r) return;
@@ -839,10 +853,11 @@ document.addEventListener('alpine:init', () => {
       this.fyersMsg = ''; this.fyersOk = null; this.fyersConnecting = true;
       try {
         const payload = {
-          client_id:    this.dualCreds.fyers_client_id,
-          app_key:      this.dualCreds.fyers_app_key,
-          access_token: this.dualCreds.fyers_access_token,
-          totp:         this.dualCreds.fyers_totp,
+          client_id:   this.dualCreds.fyers_client_id,
+          app_key:     this.dualCreds.fyers_app_key,
+          secret:      this.dualCreds.fyers_secret,
+          pin:         this.dualCreds.fyers_pin,
+          totp_secret: this.dualCreds.fyers_totp,
         };
         const r = await this._fetch('/api/admin/feeder/connect/fyers', { json: payload });
         if (!r) return;
@@ -1384,6 +1399,18 @@ document.addEventListener('alpine:init', () => {
 <main x-show="screen === 'admin'"
       class="flex-1 flex flex-col gap-3 p-3 max-w-[1800px] w-full mx-auto">
 
+  <!-- ── Feeder auth failure banner ──────────────────────────────────────── -->
+  <div x-show="authAlerts.feeder" x-cloak
+       class="flex items-start gap-3 px-4 py-3 rounded font-mono text-xs"
+       style="background:rgba(var(--t-red-rgb),0.12);border:1px solid rgba(var(--t-red-rgb),0.4);color:var(--t-red)">
+    <span style="font-size:1.1rem;line-height:1">&#9888;</span>
+    <div>
+      <div class="font-bold mb-0.5">CRITICAL: Core Data Feeder Auto-Authentication Failed. Verify API Secrets.</div>
+      <div style="color:var(--t-muted)" x-text="authAlerts.feeder"></div>
+    </div>
+    <button @click="authAlerts.feeder=''" class="ml-auto text-lg leading-none" style="color:var(--t-muted)">&times;</button>
+  </div>
+
   <!-- ════════════════════ DASHBOARD TAB ════════════════════════════════════ -->
   <div x-show="adminTab === 'dashboard'" class="flex flex-col gap-3 flex-1">
 
@@ -1761,11 +1788,11 @@ document.addEventListener('alpine:init', () => {
              x-transition:enter="transition ease-out duration-200"
              x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
              class="grid grid-cols-2 gap-2">
-          <div><div class="sec-label mb-1">CLIENT ID</div><input class="t-input" type="text" x-model="dualCreds.upstox_client_id" placeholder="client id" autocomplete="off"/></div>
+          <div><div class="sec-label mb-1">CLIENT ID</div><input class="t-input" type="text" x-model="dualCreds.upstox_client_id" placeholder="client id / mobile" autocomplete="off"/></div>
           <div><div class="sec-label mb-1">API KEY</div><input class="t-input" type="password" x-model="dualCreds.upstox_api_key" placeholder="api key" autocomplete="new-password"/></div>
-          <div><div class="sec-label mb-1">SECRET TOKEN</div><input class="t-input" type="password" x-model="dualCreds.upstox_secret" placeholder="secret key" autocomplete="new-password"/></div>
-          <div><div class="sec-label mb-1">ACCESS TOKEN</div><input class="t-input" type="password" x-model="dualCreds.upstox_access_token" placeholder="daily access token" autocomplete="new-password"/></div>
-          <div class="col-span-2"><div class="sec-label mb-1">TOTP KEY</div><input class="t-input" type="password" x-model="dualCreds.upstox_totp" placeholder="6-digit TOTP or base32 seed" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">SECRET KEY</div><input class="t-input" type="password" x-model="dualCreds.upstox_secret" placeholder="api secret key" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">LOGIN PASSWORD</div><input class="t-input" type="password" x-model="dualCreds.upstox_password" placeholder="upstox login password" autocomplete="new-password"/></div>
+          <div class="col-span-2"><div class="sec-label mb-1">TOTP BASE32 SEED</div><input class="t-input" type="password" x-model="dualCreds.upstox_totp" placeholder="base32 TOTP authenticator seed" autocomplete="new-password"/></div>
         </div>
         <!-- Upstox individual connect -->
         <div class="flex items-center gap-2 mt-3">
@@ -1779,8 +1806,8 @@ document.addEventListener('alpine:init', () => {
                x-text="upstoxMsg"></div>
         </div>
         <div x-show="!showUpstoxCreds" class="font-mono text-xs mt-2" style="color:var(--t-muted)">
-          <span :style="`color:${dualCreds.upstox_access_token?'var(--t-green)':'var(--t-muted)'}`"
-                x-text="dualCreds.upstox_access_token ? '● TOKEN SET' : '○ No credentials entered'"></span>
+          <span :style="`color:${(dualCreds.upstox_client_id&&dualCreds.upstox_totp)?'var(--t-cyan)':'var(--t-muted)'}`"
+                x-text="(dualCreds.upstox_client_id&&dualCreds.upstox_totp) ? '● TOTP SEED SET — auto-auth ready' : '○ No credentials entered'"></span>
         </div>
       </div>
 
@@ -1796,10 +1823,11 @@ document.addEventListener('alpine:init', () => {
              x-transition:enter="transition ease-out duration-200"
              x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
              class="grid grid-cols-2 gap-2">
-          <div><div class="sec-label mb-1">CLIENT ID</div><input class="t-input" type="text" x-model="dualCreds.fyers_client_id" placeholder="client id" autocomplete="off"/></div>
-          <div><div class="sec-label mb-1">APP KEY</div><input class="t-input" type="password" x-model="dualCreds.fyers_app_key" placeholder="app key" autocomplete="new-password"/></div>
-          <div class="col-span-2"><div class="sec-label mb-1">ACCESS TOKEN</div><input class="t-input" type="password" x-model="dualCreds.fyers_access_token" placeholder="auth code / access token" autocomplete="new-password"/></div>
-          <div class="col-span-2"><div class="sec-label mb-1">TOTP KEY</div><input class="t-input" type="password" x-model="dualCreds.fyers_totp" placeholder="6-digit TOTP or base32 seed" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">FY ID (Client ID)</div><input class="t-input" type="text" x-model="dualCreds.fyers_client_id" placeholder="XJ12345" autocomplete="off"/></div>
+          <div><div class="sec-label mb-1">APP KEY (App ID)</div><input class="t-input" type="password" x-model="dualCreds.fyers_app_key" placeholder="XXXXX-100" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">SECRET KEY</div><input class="t-input" type="password" x-model="dualCreds.fyers_secret" placeholder="app secret key" autocomplete="new-password"/></div>
+          <div><div class="sec-label mb-1">4-DIGIT PIN</div><input class="t-input" type="password" x-model="dualCreds.fyers_pin" placeholder="Fyers 4-digit PIN" autocomplete="new-password" maxlength="4"/></div>
+          <div class="col-span-2"><div class="sec-label mb-1">TOTP BASE32 SEED</div><input class="t-input" type="password" x-model="dualCreds.fyers_totp" placeholder="base32 TOTP authenticator seed" autocomplete="new-password"/></div>
         </div>
         <!-- Fyers individual connect -->
         <div class="flex items-center gap-2 mt-3">
@@ -1813,8 +1841,8 @@ document.addEventListener('alpine:init', () => {
                x-text="fyersMsg"></div>
         </div>
         <div x-show="!showFyersCreds" class="font-mono text-xs mt-2" style="color:var(--t-muted)">
-          <span :style="`color:${dualCreds.fyers_access_token?'var(--t-amber)':'var(--t-muted)'}`"
-                x-text="dualCreds.fyers_access_token ? '● TOKEN SET' : '○ No credentials entered'"></span>
+          <span :style="`color:${(dualCreds.fyers_client_id&&dualCreds.fyers_totp)?'var(--t-amber)':'var(--t-muted)'}`"
+                x-text="(dualCreds.fyers_client_id&&dualCreds.fyers_totp) ? '● TOTP SEED SET — auto-auth ready' : '○ No credentials entered'"></span>
         </div>
       </div>
     </div>
@@ -2333,10 +2361,6 @@ document.addEventListener('alpine:init', () => {
             <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
           </div>
         </div>
-        <div>
-          <div class="sec-label mb-1">ACCESS TOKEN (pre-fetched, optional)</div>
-          <input class="t-input" type="password" x-model="portalBroker.access_token" autocomplete="new-password"/>
-        </div>
         <div x-show="portalBrokerMsg" class="font-mono text-xs px-2 py-1.5 rounded"
              :style="portalBrokerOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
                                     : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
@@ -2414,6 +2438,18 @@ document.addEventListener('alpine:init', () => {
 
     <!-- LEFT -->
     <div class="flex flex-col gap-3">
+
+      <!-- Auth failure alert -->
+      <div x-show="botOk === false && botMsg" x-cloak
+           class="flex items-start gap-3 px-4 py-3 rounded font-mono text-xs"
+           style="background:rgba(var(--t-red-rgb),0.12);border:1px solid rgba(var(--t-red-rgb),0.4);color:var(--t-red)">
+        <span style="font-size:1.1rem;line-height:1">&#9888;</span>
+        <div>
+          <div class="font-bold mb-0.5">Authentication Failed: Automated daily token generation failed in the background. Please notify the administrator or verify your saved API credentials.</div>
+          <div style="color:var(--t-muted)" x-text="botMsg"></div>
+        </div>
+        <button @click="botOk=null;botMsg=''" class="ml-auto text-lg leading-none" style="color:var(--t-muted)">&times;</button>
+      </div>
 
       <!-- Portfolio header -->
       <div class="t-card rounded p-5 fade-up-1 relative overflow-hidden">
@@ -2658,10 +2694,6 @@ document.addEventListener('alpine:init', () => {
         <div>
           <div class="sec-label mb-1">TOTP SECRET (2FA)</div>
           <input class="t-input" type="password" placeholder="base32 TOTP seed" x-model="newBroker.totp_secret" autocomplete="new-password"/>
-        </div>
-        <div>
-          <div class="sec-label mb-1">ACCESS TOKEN (optional)</div>
-          <input class="t-input" type="password" placeholder="pre-fetched token" x-model="newBroker.access_token" autocomplete="new-password"/>
         </div>
       </div>
 

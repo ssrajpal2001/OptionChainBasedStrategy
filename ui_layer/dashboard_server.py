@@ -77,12 +77,12 @@ try:
         totp_secret:  Optional[str] = None
 
     class _FeederConnectSchema(_PydanticBase):
-        provider:     str
-        user_id:      Optional[str] = None
-        password:     Optional[str] = None
-        api_key:      Optional[str] = None
-        api_secret:   Optional[str] = None
-        access_token: Optional[str] = None
+        provider:    str
+        user_id:     Optional[str] = None
+        password:    Optional[str] = None
+        api_key:     Optional[str] = None
+        api_secret:  Optional[str] = None
+        totp_secret: Optional[str] = None
 
     class _BrokerProvisionSchema(_PydanticBase):
         binding_id:     str
@@ -100,15 +100,16 @@ try:
         lot_multiplier: float = 1.0
 
     class _DualFeederSchema(_PydanticBase):
-        upstox_client_id:    str = ""
-        upstox_api_key:      str = ""
-        upstox_secret:       str = ""
-        upstox_access_token: str = ""
-        upstox_totp:         str = ""
-        fyers_client_id:     str = ""
-        fyers_app_key:       str = ""
-        fyers_access_token:  str = ""
-        fyers_totp:          str = ""
+        upstox_client_id: str = ""
+        upstox_api_key:   str = ""
+        upstox_secret:    str = ""
+        upstox_password:  str = ""
+        upstox_totp:      str = ""  # base32 TOTP seed
+        fyers_client_id:  str = ""
+        fyers_app_key:    str = ""
+        fyers_secret:     str = ""
+        fyers_pin:        str = ""  # 4-digit Fyers PIN
+        fyers_totp:       str = ""  # base32 TOTP seed
 
     class _RmsConfigSchema(_PydanticBase):
         max_drawdown_pct:       float = 5.0
@@ -148,7 +149,6 @@ try:
         api_key:        str   = ""
         api_secret:     str   = ""
         totp_secret:    str   = ""
-        access_token:   str   = ""
         lot_multiplier: float = 1.0
 
     class _SetIndexSchema(_PydanticBase):
@@ -199,6 +199,7 @@ class DashboardServer:
 
         from data_layer.client_db import ClientDB
         self._client_db = ClientDB()
+        self._auth_alerts: dict = {"feeder": ""}
 
         # Register heartbeat providers
         self._ws_bridge.register_stats_provider("clients", self._client_summary)
@@ -514,9 +515,6 @@ class DashboardServer:
 
             # Inject optional credentials into the feeder registry or cfg before start
             # (Real broker feeders read these from their BrokerBinding or cfg at connect time)
-            if body.access_token:
-                _srv._cfg.__dict__.setdefault("_feeder_creds", {})
-                _srv._cfg.__dict__["_feeder_creds"]["access_token"] = body.access_token
             if body.user_id:
                 _srv._cfg.__dict__.setdefault("_feeder_creds", {})
                 _srv._cfg.__dict__["_feeder_creds"]["user_id"] = body.user_id
@@ -725,18 +723,26 @@ class DashboardServer:
             body: _AddPortalBrokerSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            await _srv._client_db.upsert_binding(
-                client_id=cid,
-                binding_id=body.binding_id,
-                provider=body.provider,
-                label=body.label,
-                user_id=body.user_id,
-                api_key=body.api_key,
-                api_secret=body.api_secret,
-                totp_secret=body.totp_secret,
-                access_token=body.access_token,
-                lot_multiplier=body.lot_multiplier,
-            )
+            if not body.binding_id.strip():
+                raise HTTPException(400, "binding_id is required.")
+            try:
+                await _srv._client_db.upsert_binding(
+                    client_id=cid,
+                    binding_id=body.binding_id,
+                    provider=body.provider,
+                    label=body.label,
+                    user_id=body.user_id,
+                    api_key=body.api_key,
+                    api_secret=body.api_secret,
+                    totp_secret=body.totp_secret,
+                    access_token="",
+                    lot_multiplier=body.lot_multiplier,
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("Dashboard: add_broker DB error for %s: %s", cid, exc)
+                raise HTTPException(500, f"Failed to save broker credentials: {exc}")
             logger.info("Dashboard: client %s added broker binding %s.", cid, body.binding_id)
             return {"ok": True, "message": f"Broker '{body.binding_id}' saved. Awaiting admin strategy assignment."}
 
@@ -744,9 +750,7 @@ class DashboardServer:
 
         @app.post("/api/client/start_bot", tags=["Client"])
         async def api_client_start_bot(user: dict = Depends(_require_client)):
-            from execution_bridge.base_broker import create_broker
-            from execution_bridge.parallel_worker_pool import ClientExecutionWorker
-            from config.client_profiles import BrokerBinding
+            from broker_auth.headless_auth import headless_engine as _he
 
             cid = user.get("client_id", "")
             reg_client = _srv._registry.get(cid) if _srv._registry else None
@@ -755,22 +759,27 @@ class DashboardServer:
             if not reg_client.is_admin_approved:
                 raise HTTPException(403, "Account not yet approved by admin.")
 
-            # Pre-flight: authenticate all trade-enabled bindings
+            # Pre-flight: headless authenticate all trade-enabled bindings
             bindings_db = _srv._client_db.get_bindings_sync(cid)
             failed_ids: List[str] = []
             for b in bindings_db:
                 if not b.get("is_trade_enabled", 1):
                     continue
-                bb = next(
-                    (x for x in reg_client.broker_bindings if x.binding_id == b["binding_id"]),
-                    None,
-                )
-                if bb is None:
-                    continue
                 try:
-                    broker = create_broker(bb, cid)
-                    ok = await broker.authenticate()
+                    ok, msg, token = await _he.authenticate_binding(b, cid, _srv._client_db)
+                    if ok and token:
+                        # Mirror fresh token into in-memory binding
+                        bb = next(
+                            (x for x in reg_client.broker_bindings if x.binding_id == b["binding_id"]),
+                            None,
+                        )
+                        if bb is not None:
+                            bb.access_token = token
                     if not ok:
+                        logger.warning(
+                            "Dashboard: pre-flight auth failed [%s/%s]: %s",
+                            cid, b["binding_id"], msg,
+                        )
                         failed_ids.append(b["binding_id"])
                 except Exception as exc:
                     logger.warning("Dashboard: pre-flight auth error for %s/%s: %s", cid, b["binding_id"], exc)
@@ -855,6 +864,13 @@ class DashboardServer:
             rows = _srv._client_db.get_pending_clients_sync()
             return {"pending": rows, "ts": datetime.now(IST).isoformat()}
 
+        @app.get("/api/admin/auth_alerts", tags=["Admin"])
+        async def api_auth_alerts(_: dict = Depends(_require_admin)):
+            return {
+                "feeder": _srv._auth_alerts.get("feeder", ""),
+                "ts":     datetime.now(IST).isoformat(),
+            }
+
         # ── ADMIN — approve client + assign strategies ────────────────────────
 
         @app.post("/api/admin/clients/{client_id}/approve", tags=["Admin"])
@@ -933,12 +949,29 @@ class DashboardServer:
             except Exception:
                 raise HTTPException(400, "Invalid JSON body.")
             creds = {
-                "client_id":    raw.get("client_id", ""),
-                "api_key":      raw.get("api_key", ""),
-                "secret":       raw.get("secret", ""),
-                "access_token": raw.get("access_token", ""),
-                "totp":         raw.get("totp", ""),
+                "client_id":   raw.get("client_id", ""),
+                "api_key":     raw.get("api_key", ""),
+                "secret":      raw.get("secret", ""),
+                "password":    raw.get("password", ""),
+                "totp_secret": raw.get("totp_secret", "") or raw.get("totp", ""),
             }
+            # Auto-generate access token via headless TOTP auth
+            try:
+                from broker_auth.headless_auth import headless_engine as _he
+                ok, msg, token = await _he.validate_feeder_creds("upstox", creds)
+                if ok and token:
+                    creds["access_token"] = token
+                    _srv._auth_alerts["feeder"] = ""
+                else:
+                    _srv._auth_alerts["feeder"] = f"Upstox auth failed: {msg}"
+                    logger.error("Dashboard: Upstox headless auth failed: %s", msg)
+                    raise HTTPException(502, f"Upstox headless auth failed: {msg}")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                _srv._auth_alerts["feeder"] = f"Upstox auth error: {exc}"
+                logger.error("Dashboard: Upstox auth error: %s", exc)
+                raise HTTPException(502, f"Upstox auth error: {exc}")
             try:
                 await feeder.start_single("upstox", creds)
             except Exception as exc:
@@ -958,11 +991,29 @@ class DashboardServer:
             except Exception:
                 raise HTTPException(400, "Invalid JSON body.")
             creds = {
-                "client_id":    raw.get("client_id", ""),
-                "app_key":      raw.get("app_key", ""),
-                "access_token": raw.get("access_token", ""),
-                "totp":         raw.get("totp", ""),
+                "client_id":   raw.get("client_id", ""),
+                "app_key":     raw.get("app_key", ""),
+                "secret":      raw.get("secret", ""),
+                "pin":         raw.get("pin", ""),
+                "totp_secret": raw.get("totp_secret", "") or raw.get("totp", ""),
             }
+            # Auto-generate access token via headless TOTP auth
+            try:
+                from broker_auth.headless_auth import headless_engine as _he
+                ok, msg, token = await _he.validate_feeder_creds("fyers", creds)
+                if ok and token:
+                    creds["access_token"] = token
+                    _srv._auth_alerts["feeder"] = ""
+                else:
+                    _srv._auth_alerts["feeder"] = f"Fyers auth failed: {msg}"
+                    logger.error("Dashboard: Fyers headless auth failed: %s", msg)
+                    raise HTTPException(502, f"Fyers headless auth failed: {msg}")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                _srv._auth_alerts["feeder"] = f"Fyers auth error: {exc}"
+                logger.error("Dashboard: Fyers auth error: %s", exc)
+                raise HTTPException(502, f"Fyers auth error: {exc}")
             try:
                 await feeder.start_single("fyers", creds)
             except Exception as exc:
@@ -983,19 +1034,44 @@ class DashboardServer:
                 raw = await request.json()
             except Exception:
                 raise HTTPException(400, "Invalid JSON body.")
+
             upstox_creds = {
-                "client_id":    raw.get("upstox_client_id", ""),
-                "api_key":      raw.get("upstox_api_key", ""),
-                "secret":       raw.get("upstox_secret", ""),
-                "access_token": raw.get("upstox_access_token", ""),
-                "totp":         raw.get("upstox_totp", ""),
+                "client_id":   raw.get("upstox_client_id", ""),
+                "api_key":     raw.get("upstox_api_key", ""),
+                "secret":      raw.get("upstox_secret", ""),
+                "password":    raw.get("upstox_password", ""),
+                "totp_secret": raw.get("upstox_totp", ""),
             }
             fyers_creds = {
-                "client_id":    raw.get("fyers_client_id", ""),
-                "app_key":      raw.get("fyers_app_key", ""),
-                "access_token": raw.get("fyers_access_token", ""),
-                "totp":         raw.get("fyers_totp", ""),
+                "client_id":   raw.get("fyers_client_id", ""),
+                "app_key":     raw.get("fyers_app_key", ""),
+                "secret":      raw.get("fyers_secret", ""),
+                "pin":         raw.get("fyers_pin", ""),
+                "totp_secret": raw.get("fyers_totp", ""),
             }
+
+            # Auto-generate tokens for both providers via headless auth
+            from broker_auth.headless_auth import headless_engine as _he
+            failures = []
+            ok_u, msg_u, tok_u = await _he.validate_feeder_creds("upstox", upstox_creds)
+            if ok_u and tok_u:
+                upstox_creds["access_token"] = tok_u
+            else:
+                failures.append(f"Upstox: {msg_u}")
+
+            ok_f, msg_f, tok_f = await _he.validate_feeder_creds("fyers", fyers_creds)
+            if ok_f and tok_f:
+                fyers_creds["access_token"] = tok_f
+            else:
+                failures.append(f"Fyers: {msg_f}")
+
+            if failures:
+                alert = "CRITICAL: " + " | ".join(failures)
+                _srv._auth_alerts["feeder"] = alert
+                logger.error("Dashboard: dual feeder auth failed: %s", alert)
+                raise HTTPException(502, f"Headless auth failed: {'; '.join(failures)}")
+
+            _srv._auth_alerts["feeder"] = ""
             try:
                 await feeder.start_dual(upstox_creds, fyers_creds)
             except Exception as exc:
