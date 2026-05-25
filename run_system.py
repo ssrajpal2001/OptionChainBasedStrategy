@@ -244,6 +244,7 @@ async def _run_live(
     from strategies.strategy_a_oi import StrategyA_OIZone
     from strategies.strategy_b_trap import StrategyB_Trap
     from strategies.strategy_c_panic import StrategyC_Panic
+    from strategies.trap_trading_engine import TrapTradingEngine
     from execution_bridge import ExecutionRouter
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
@@ -251,6 +252,7 @@ async def _run_live(
     bus = EventBus()
     strategies = [StrategyA_OIZone(cfg), StrategyB_Trap(cfg), StrategyC_Panic(cfg)]
     confluence    = ConfluenceEngine(bus, cfg, strategies)
+    trap_engine   = TrapTradingEngine(bus, cfg)
     candle_cache  = CandleCache(bus, cfg)
     option_matrix = OptionMatrixEngine(bus, cfg)
     feeder        = GlobalFeeder(bus, cfg)
@@ -316,6 +318,7 @@ async def _run_live(
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
         asyncio.create_task(option_matrix.run(),        name="option_matrix"),
         asyncio.create_task(confluence.run(),           name="confluence"),
+        asyncio.create_task(trap_engine.run(),          name="trap_engine"),
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -342,6 +345,7 @@ async def _run_live(
 
     logger.info("Shutting down…")
     confluence.stop()
+    trap_engine.stop()
     rebalancer.stop()
     strike_cleanup.stop()
     gap_handler.stop()

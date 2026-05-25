@@ -55,9 +55,10 @@ _WATCHER_INTERVAL_SECONDS = 10.0   # Task health-check cadence
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SOURCE_TO_LETTER: Dict[str, str] = {
-    "OI_Zone_Breakout": "A",
-    "Liquidity_Trap":   "B",
-    "Panic_Scanner":    "C",
+    "OI_Zone_Breakout":   "A",
+    "Liquidity_Trap":     "B",
+    "TrapTrading_Engine": "B",
+    "Panic_Scanner":      "C",
 }
 
 

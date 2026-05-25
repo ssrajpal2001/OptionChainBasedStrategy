@@ -39,9 +39,10 @@ class Direction(Enum):
 
 
 class StrategyID(Enum):
-    A_OI_ZONE  = "OI_Zone_Breakout"
-    B_TRAP     = "Liquidity_Trap"
-    C_PANIC    = "Panic_Scanner"
+    A_OI_ZONE    = "OI_Zone_Breakout"
+    B_TRAP       = "Liquidity_Trap"
+    C_PANIC      = "Panic_Scanner"
+    TRAP_ENGINE  = "TrapTrading_Engine"
 
 
 @dataclass(frozen=True)
