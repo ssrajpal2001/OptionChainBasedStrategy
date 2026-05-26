@@ -598,6 +598,16 @@ document.addEventListener('alpine:init', () => {
     strategyConfigMsg: '',
     strategyConfigOk: null,
 
+    /* ── Per-index strategy config (rule builder) ────────────────────── */
+    adminSelectedIndex: 'NIFTY',
+    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor'
+    adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
+    indexConfig: {},    // keyed by index name; each has { sell_straddle: {}, iron_condor: {} }
+    indexConfigLoading: false,
+    indexConfigSaving:  false,
+    indexConfigMsg:     '',
+    indexConfigOk:      null,
+
     /* ── Risk command center ─────────────────────────────────────────── */
     riskSummary: { total_capital: 0, total_net_mtm: 0, total_open_lots: 0, avg_slippage_pts: 0, client_count: 0, clients: [], risk_manager_active: false, ts: '' },
     killAllStep: 0,          // 0=idle 1=confirm-pending 2=executing
@@ -716,6 +726,7 @@ document.addEventListener('alpine:init', () => {
       this.loadRms();
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); }, 800);
       setTimeout(() => { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); }, 1200);
+      setTimeout(() => { this.loadIndexConfig(this.adminSelectedIndex); }, 1500);
     },
 
     _startClock() {
@@ -1309,6 +1320,117 @@ document.addEventListener('alpine:init', () => {
       this.strategyConfigSaving = false;
     },
 
+    /* ── Per-index strategy config helpers ─────────────────────────────── */
+    _ssDefaults() {
+      return {
+        entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
+        entry_workflow_mode: 'hybrid',
+        entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
+        profit_target_enabled: true, profit_pct: 30.0,
+        sl_enabled: true, sl_pct: 200.0,
+        tsl_enabled: false, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
+        tsl_scalable: { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
+        guardrail_roc: { enabled: true, roc_limit_pct: 1.5 },
+        guardrail_pnl: { enabled: false, pnl_limit: -5000 },
+        max_trades: 1,
+        per_day: {
+          monday:    { enabled: false, target_pts: 0, sl_pts: 0 },
+          tuesday:   { enabled: false, target_pts: 0, sl_pts: 0 },
+          wednesday: { enabled: false, target_pts: 0, sl_pts: 0 },
+          thursday:  { enabled: false, target_pts: 0, sl_pts: 0 },
+          friday:    { enabled: false, target_pts: 0, sl_pts: 0 },
+        }
+      };
+    },
+    _icDefaults(idx) {
+      const strikes = { NIFTY:{s:200,w:200}, BANKNIFTY:{s:400,w:500}, FINNIFTY:{s:200,w:200}, SENSEX:{s:500,w:500}, MIDCPNIFTY:{s:150,w:200} };
+      const d = strikes[idx] || {s:200,w:200};
+      return { squareoff_time: '15:15', entry_rules: [], exit_rules: [],
+               rsi_min: 40, rsi_max: 60, adx_max: 25, profit_pct: 50, sl_pct: 200,
+               short_otm_pts: d.s, wing_width_pts: d.w };
+    },
+    _ensureIndexConfig(idx) {
+      if (!this.indexConfig[idx]) {
+        this.indexConfig[idx] = { sell_straddle: this._ssDefaults(), iron_condor: this._icDefaults(idx) };
+      }
+      if (!this.indexConfig[idx].sell_straddle) this.indexConfig[idx].sell_straddle = this._ssDefaults();
+      if (!this.indexConfig[idx].iron_condor)   this.indexConfig[idx].iron_condor   = this._icDefaults(idx);
+      // Ensure rule arrays exist
+      const ss = this.indexConfig[idx].sell_straddle;
+      if (!Array.isArray(ss.entry_rules_beginning)) ss.entry_rules_beginning = [];
+      if (!Array.isArray(ss.entry_rules_reentry))   ss.entry_rules_reentry   = [];
+      if (!Array.isArray(ss.exit_rules))             ss.exit_rules             = [];
+      if (!ss.tsl_scalable) ss.tsl_scalable = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
+      if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: true, roc_limit_pct: 1.5 };
+      if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, pnl_limit: -5000 };
+      if (!ss.per_day) ss.per_day = { monday:{enabled:false,target_pts:0,sl_pts:0}, tuesday:{enabled:false,target_pts:0,sl_pts:0}, wednesday:{enabled:false,target_pts:0,sl_pts:0}, thursday:{enabled:false,target_pts:0,sl_pts:0}, friday:{enabled:false,target_pts:0,sl_pts:0} };
+      const ic = this.indexConfig[idx].iron_condor;
+      if (!Array.isArray(ic.entry_rules)) ic.entry_rules = [];
+      if (!Array.isArray(ic.exit_rules))  ic.exit_rules  = [];
+    },
+    async selectAdminIndex(idx) {
+      this.adminSelectedIndex = idx;
+      if (!this.indexConfig[idx]) await this.loadIndexConfig(idx);
+      else this._ensureIndexConfig(idx);
+    },
+    async loadIndexConfig(idx) {
+      this.indexConfigLoading = true;
+      try {
+        const r = await this._fetch(`/api/admin/strategy/config/${idx}`);
+        if (r && r.ok) {
+          const d = await r.json();
+          this.indexConfig[idx] = { sell_straddle: d.sell_straddle || {}, iron_condor: d.iron_condor || {} };
+        }
+      } catch {}
+      this._ensureIndexConfig(idx);
+      this.indexConfigLoading = false;
+    },
+    async saveIndexConfig() {
+      this.indexConfigSaving = true;
+      this.indexConfigMsg = '';
+      this.indexConfigOk = null;
+      const idx = this.adminSelectedIndex;
+      try {
+        const payload = this.indexConfig[idx] || {};
+        const r = await this._fetch(`/api/admin/strategy/config/${idx}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!r) throw new Error('No response');
+        const d = await r.json();
+        this.indexConfigOk  = d.ok !== false;
+        this.indexConfigMsg = d.message || (d.ok ? 'Configuration applied.' : (d.error || 'Update failed.'));
+      } catch (e) {
+        this.indexConfigOk  = false;
+        this.indexConfigMsg = 'Network error: ' + (e.message || String(e));
+      }
+      this.indexConfigSaving = false;
+    },
+    _newRule() {
+      return { indicator: 'rsi', operator: 'AND', openBrackets: '', closeBrackets: '', tf: '5', period: 14, operator_sym: '>', threshold: 50 };
+    },
+    addRule(ruleKey) {
+      const ss = (this.indexConfig[this.adminSelectedIndex] || {}).sell_straddle;
+      if (!ss) return;
+      if (!Array.isArray(ss[ruleKey])) ss[ruleKey] = [];
+      ss[ruleKey].push(this._newRule());
+    },
+    removeRule(ruleKey, i) {
+      const ss = (this.indexConfig[this.adminSelectedIndex] || {}).sell_straddle;
+      if (ss && Array.isArray(ss[ruleKey])) ss[ruleKey].splice(i, 1);
+    },
+    addIcRule(ruleKey) {
+      const ic = (this.indexConfig[this.adminSelectedIndex] || {}).iron_condor;
+      if (!ic) return;
+      if (!Array.isArray(ic[ruleKey])) ic[ruleKey] = [];
+      ic[ruleKey].push(this._newRule());
+    },
+    removeIcRule(ruleKey, i) {
+      const ic = (this.indexConfig[this.adminSelectedIndex] || {}).iron_condor;
+      if (ic && Array.isArray(ic[ruleKey])) ic[ruleKey].splice(i, 1);
+    },
+
     /* ── Risk command center ─────────────────────────────────────────────── */
     async loadRiskSummary() {
       try {
@@ -1744,7 +1866,7 @@ document.addEventListener('alpine:init', () => {
     <button class="admin-tab" :class="{active: adminTab==='dashboard'}"
             @click="adminTab='dashboard'">DASHBOARD</button>
     <button class="admin-tab" :class="{active: adminTab==='strategies'}"
-            @click="adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadStrategyTelemetry()">&#x2699; STRATEGY ADMIN</button>
+            @click="adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadStrategyTelemetry(); loadIndexConfig(adminSelectedIndex)">&#x2699; STRATEGY ADMIN</button>
     <button class="admin-tab" :class="{active: adminTab==='feeder'}"
             @click="adminTab='feeder'">&#x26A1; DATA FEEDER</button>
     <button class="admin-tab" :class="{active: adminTab==='clients'}"
@@ -2282,9 +2404,24 @@ document.addEventListener('alpine:init', () => {
   <!-- ════════════════════ STRATEGY ADMIN TAB ══════════════════════════════ -->
   <div x-show="adminTab === 'strategies'" class="flex flex-col gap-3 flex-1">
 
+  <!-- ── Instrument Selector ───────────────────────────────────────────── -->
+  <div class="flex items-center gap-2 px-4 pt-3 pb-1 border-b" style="border-color:var(--t-border)">
+    <span class="sec-label mr-2">INSTRUMENT</span>
+    <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY']" :key="idx">
+      <button @click="selectAdminIndex(idx)"
+              class="font-display font-bold text-xs px-3 py-1.5 rounded transition-all"
+              :style="adminSelectedIndex===idx
+                ? 'background:rgba(var(--t-cyan-rgb),0.18);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.5)'
+                : 'background:transparent;color:var(--t-muted);border:1px solid var(--t-border)'"
+              x-text="idx"></button>
+    </template>
+    <span x-show="indexConfigLoading" class="font-mono text-xs ml-2" style="color:var(--t-amber)">loading…</span>
+    <span class="ml-auto font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex + ' — SELECT INSTRUMENT TO CONFIGURE'"></span>
+  </div>
+
   <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 p-4">
 
-  <!-- ══ LEFT COLUMN — Live Strategy Telemetry ══════════════════════════════ -->
+  <!-- ══ LEFT COLUMN — Live Telemetry (selected index only) ════════════════ -->
   <div class="flex flex-col gap-3">
 
     <!-- Strategy Status Cards -->
@@ -2294,11 +2431,11 @@ document.addEventListener('alpine:init', () => {
         <span class="font-mono text-xs" style="color:var(--t-muted)"
               x-text="strategyRegistry.ts ? strategyRegistry.ts.substring(11,19)+' IST' : ''"></span>
       </div>
-      <div x-show="strategyRegistry.strategies.length === 0"
+      <div x-show="strategyRegistry.strategies.filter(s=>s.underlying===adminSelectedIndex).length === 0"
            class="font-mono text-xs py-3 text-center" style="color:var(--t-muted)">
-        No premium strategies running.
+        No strategies running for <span x-text="adminSelectedIndex"></span>.
       </div>
-      <template x-for="s in strategyRegistry.strategies" :key="s.type+'_'+s.underlying">
+      <template x-for="s in strategyRegistry.strategies.filter(s=>s.underlying===adminSelectedIndex)" :key="s.type+'_'+s.underlying">
         <div class="rounded p-3 mb-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-2">
@@ -2464,84 +2601,583 @@ document.addEventListener('alpine:init', () => {
 
   </div><!-- end left col -->
 
-  <!-- ══ RIGHT COLUMN — Dynamic Config Forms ════════════════════════════════ -->
+  <!-- ══ RIGHT COLUMN — Rule Builder & Config ══════════════════════════════ -->
   <div class="flex flex-col gap-3">
 
-    <!-- Config response message -->
-    <div x-show="strategyConfigMsg" class="rounded px-3 py-2 font-mono text-xs"
-         :style="`background:${strategyConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${strategyConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${strategyConfigOk?'var(--t-green)':'var(--t-red)'}`"
-         x-text="strategyConfigMsg"></div>
+    <!-- Save result banner -->
+    <div x-show="indexConfigMsg" class="rounded px-3 py-2 font-mono text-xs"
+         :style="`background:${indexConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${indexConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${indexConfigOk?'var(--t-green)':'var(--t-red)'}`"
+         x-text="indexConfigMsg"></div>
 
-    <!-- ── Global RMS ──────────────────────────────────────────────────── -->
+    <!-- ── Strategy tabs: SELL STRADDLE | IRON CONDOR ──────────────────── -->
+    <div class="t-card rounded" style="overflow:hidden">
+      <div class="flex border-b" style="border-color:var(--t-border)">
+        <button @click="adminStrategyTab='sell_straddle'"
+                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
+                :style="adminStrategyTab==='sell_straddle'
+                  ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
+                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
+          SELL STRADDLE
+        </button>
+        <button @click="adminStrategyTab='iron_condor'"
+                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
+                :style="adminStrategyTab==='iron_condor'
+                  ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
+                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
+          IRON CONDOR
+        </button>
+        <div class="ml-auto flex items-center px-3">
+          <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
+        </div>
+      </div>
+
+      <!-- ══ SELL STRADDLE config ══════════════════════════════════════════ -->
+      <div x-show="adminStrategyTab==='sell_straddle'" class="p-4 flex flex-col gap-3">
+
+        <!-- Time settings -->
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="sec-label">Entry Start</label>
+            <input type="text" class="t-input mt-0.5" placeholder="09:20"
+                   x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_start">
+          </div>
+          <div>
+            <label class="sec-label">Entry Cutoff</label>
+            <input type="text" class="t-input mt-0.5" placeholder="12:00"
+                   x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_end">
+          </div>
+          <div>
+            <label class="sec-label">Square-off</label>
+            <input type="text" class="t-input mt-0.5" placeholder="15:15"
+                   x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.squareoff_time">
+          </div>
+        </div>
+
+        <!-- Workflow mode + max trades -->
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="sec-label">Entry Mode</label>
+            <select class="t-input mt-0.5"
+                    x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_workflow_mode">
+              <option value="hybrid">Hybrid (Begin + Re-entry)</option>
+              <option value="beginning_only">Beginning Only</option>
+              <option value="reentry_only">Re-entry Only</option>
+            </select>
+          </div>
+          <div>
+            <label class="sec-label">Max Trades / Day</label>
+            <input type="number" min="1" max="10" class="t-input mt-0.5"
+                   x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.max_trades">
+          </div>
+        </div>
+
+        <!-- Sub-tabs for rule sections -->
+        <div class="flex gap-1 mt-1 flex-wrap">
+          <template x-for="[tab,label] in [['entry_begin','ENTRY (BEGIN)'],['reentry','RE-ENTRY'],['exit','EXIT'],['guardrails','GUARDRAILS'],['tsl','TSL'],['per_day','PER DAY']]" :key="tab">
+            <button @click="adminSubTab=tab"
+                    class="font-display font-bold text-xs px-3 py-1 rounded transition-all"
+                    :style="adminSubTab===tab
+                      ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.4)'
+                      : 'color:var(--t-muted);border:1px solid var(--t-border)'"
+                    x-text="label"></button>
+          </template>
+        </div>
+
+        <!-- ── ENTRY (BEGIN) rules ───────────────────────────── -->
+        <template x-if="adminSubTab==='entry_begin'">
+          <div>
+            <div class="sec-label mb-2">ENTRY CONDITIONS — BEGINNING OF SESSION</div>
+            <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
+              <div>
+                <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[])" :key="i">
+                  <div x-data="{}" class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                    <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px">
+                      <option>AND</option><option>OR</option>
+                    </select>
+                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
+                    <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
+                      <option value="rsi">RSI</option>
+                      <option value="vwap">VWAP</option>
+                      <option value="adx">ADX</option>
+                      <option value="roc">ROC</option>
+                      <option value="slope">Slope</option>
+                      <option value="advanced">Advanced</option>
+                    </select>
+                    <template x-if="rule.indicator!=='advanced' && rule.indicator!=='vwap'">
+                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px" title="Period">
+                    </template>
+                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px" title="TF (min)">
+                    <template x-if="rule.indicator==='advanced'">
+                      <select x-model="rule.operand1" class="t-input" style="width:90px;font-size:10px">
+                        <option value="LTP">LTP</option><option value="VWAP">VWAP</option>
+                        <option value="EMA_FAST">EMA Fast</option><option value="EMA_SLOW">EMA Slow</option>
+                      </select>
+                    </template>
+                    <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                      <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option><option>=</option>
+                    </select>
+                    <template x-if="rule.indicator==='advanced'">
+                      <select x-model="rule.operand2" class="t-input" style="width:90px;font-size:10px">
+                        <option value="VWAP">VWAP</option><option value="LTP">LTP</option>
+                        <option value="EMA_FAST">EMA Fast</option><option value="EMA_SLOW">EMA Slow</option>
+                        <option value="value">Fixed Value</option>
+                      </select>
+                    </template>
+                    <template x-if="rule.indicator!=='advanced'">
+                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px" title="Threshold">
+                    </template>
+                    <template x-if="rule.indicator==='advanced' && rule.operand2==='value'">
+                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input" style="width:60px">
+                    </template>
+                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
+                    <button @click="removeRule('entry_rules_beginning', i)" class="btn-halt px-2 py-1 ml-auto" title="Remove">✕</button>
+                  </div>
+                </template>
+                <div x-show="!(indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[]).length"
+                     class="font-mono text-xs py-2 text-center" style="color:var(--t-muted)">
+                  No conditions — entry always allowed in time window.
+                </div>
+                <button @click="addRule('entry_rules_beginning')" class="btn-add mt-2">+ ADD CONDITION</button>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- ── RE-ENTRY rules ────────────────────────────────── -->
+        <template x-if="adminSubTab==='reentry'">
+          <div>
+            <div class="sec-label mb-2">RE-ENTRY CONDITIONS</div>
+            <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
+              <div>
+                <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[])" :key="i">
+                  <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                    <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
+                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
+                    <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
+                      <option value="rsi">RSI</option><option value="vwap">VWAP</option><option value="adx">ADX</option>
+                      <option value="roc">ROC</option><option value="slope">Slope</option><option value="advanced">Advanced</option>
+                    </select>
+                    <template x-if="rule.indicator!=='advanced' && rule.indicator!=='vwap'">
+                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
+                    </template>
+                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                    <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                      <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
+                    </select>
+                    <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
+                    <button @click="removeRule('entry_rules_reentry', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
+                  </div>
+                </template>
+                <div x-show="!(indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[]).length"
+                     class="font-mono text-xs py-2 text-center" style="color:var(--t-muted)">No re-entry conditions defined.</div>
+                <button @click="addRule('entry_rules_reentry')" class="btn-add mt-2">+ ADD CONDITION</button>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- ── EXIT rules ────────────────────────────────────── -->
+        <template x-if="adminSubTab==='exit'">
+          <div>
+            <div class="sec-label mb-2">EXIT CONDITIONS</div>
+            <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
+              <div>
+                <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[])" :key="i">
+                  <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                    <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
+                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
+                    <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
+                      <option value="rsi">RSI</option><option value="vwap">VWAP</option><option value="adx">ADX</option>
+                      <option value="roc">ROC</option><option value="slope">Slope</option><option value="advanced">Advanced</option>
+                    </select>
+                    <template x-if="rule.indicator!=='advanced' && rule.indicator!=='vwap'">
+                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
+                    </template>
+                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                    <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                      <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
+                    </select>
+                    <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
+                    <button @click="removeRule('exit_rules', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
+                  </div>
+                </template>
+                <div x-show="!(indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[]).length"
+                     class="font-mono text-xs py-2 text-center" style="color:var(--t-muted)">No custom exit conditions — using only P&amp;L targets.</div>
+                <button @click="addRule('exit_rules')" class="btn-add mt-2">+ ADD CONDITION</button>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- ── GUARDRAILS toggles ────────────────────────────── -->
+        <template x-if="adminSubTab==='guardrails'">
+          <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
+            <div class="flex flex-col gap-2">
+              <div class="sec-label mb-1">EXIT GUARDRAILS &amp; TARGETS</div>
+
+              <!-- Profit Target -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-green)">PROFIT TARGET</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.profit_target_enabled" class="accent-green-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.profit_target_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.profit_target_enabled?'var(--t-green)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">Target %</label>
+                  <input type="number" step="1" class="t-input" style="width:80px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.profit_pct">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">of premium received</span>
+                </div>
+              </div>
+
+              <!-- Hard SL -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-red)">HARD STOP LOSS</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.sl_enabled" class="accent-red-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.sl_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.sl_enabled?'var(--t-red)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">SL %</label>
+                  <input type="number" step="10" class="t-input" style="width:80px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.sl_pct">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">of premium (200 = 2× premium)</span>
+                </div>
+              </div>
+
+              <!-- ROC Guardrail -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ROC GUARDRAIL</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">ROC Limit %</label>
+                  <input type="number" step="0.1" class="t-input" style="width:80px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.roc_limit_pct">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">spot move per tick</span>
+                </div>
+              </div>
+
+              <!-- P&L Guardrail -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">P&amp;L GUARDRAIL</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">P&amp;L Limit (₹)</label>
+                  <input type="number" step="500" class="t-input" style="width:100px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.pnl_limit">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">exit if MTM falls below</span>
+                </div>
+              </div>
+            </div>
+          </template>
+        </template>
+
+        <!-- ── TSL config ────────────────────────────────────── -->
+        <template x-if="adminSubTab==='tsl'">
+          <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
+            <div class="flex flex-col gap-2">
+              <div class="sec-label mb-1">TRAILING STOP LOSS</div>
+
+              <!-- Basic TSL -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">TRAILING SL</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.tsl_enabled">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.tsl_enabled?'ENABLED':'DISABLED'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.tsl_enabled?'var(--t-cyan)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="sec-label">Lock at % profit</label>
+                    <input type="number" step="1" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.trail_lock_pct">
+                  </div>
+                  <div>
+                    <label class="sec-label">Floor % below peak</label>
+                    <input type="number" step="1" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.trail_floor_pct">
+                  </div>
+                </div>
+              </div>
+
+              <!-- Scalable TSL -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">SCALABLE TSL</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.enabled">
+                    <span class="font-mono text-xs"
+                          x-text="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.enabled?'ENABLED':'DISABLED'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.enabled?'var(--t-cyan)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="sec-label">Base Profit (₹) <span style="color:var(--t-muted)">— when TSL starts</span></label>
+                    <input type="number" step="500" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.base_profit">
+                  </div>
+                  <div>
+                    <label class="sec-label">Base Lock (₹) <span style="color:var(--t-muted)">— initial floor</span></label>
+                    <input type="number" step="500" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.base_lock">
+                  </div>
+                  <div>
+                    <label class="sec-label">Step Profit (₹) <span style="color:var(--t-muted)">— per step up</span></label>
+                    <input type="number" step="250" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.step_profit">
+                  </div>
+                  <div>
+                    <label class="sec-label">Step Lock (₹) <span style="color:var(--t-muted)">— floor rise per step</span></label>
+                    <input type="number" step="250" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.step_lock">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </template>
+
+        <!-- ── PER DAY overrides ─────────────────────────────── -->
+        <template x-if="adminSubTab==='per_day'">
+          <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
+            <div>
+              <div class="sec-label mb-2">PER-DAY OVERRIDES <span style="color:var(--t-muted);font-weight:400">— optional daily target/SL override (0 = use global)</span></div>
+              <table class="w-full font-mono text-xs" style="border-collapse:collapse">
+                <thead>
+                  <tr style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
+                    <th class="text-left py-1 pr-2">Day</th>
+                    <th class="text-center py-1 px-2">Enable</th>
+                    <th class="text-center py-1 px-2">Target pts</th>
+                    <th class="text-center py-1 px-2">SL pts</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="day in ['monday','tuesday','wednesday','thursday','friday']" :key="day">
+                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04)">
+                      <td class="py-1 pr-2 uppercase font-bold" style="color:var(--t-bright)" x-text="day.substring(0,3)"></td>
+                      <td class="text-center py-1 px-2">
+                        <input type="checkbox" :x-model="`indexConfig.${adminSelectedIndex}.sell_straddle.per_day.${day}.enabled`"
+                               :checked="(((indexConfig[adminSelectedIndex]||{}).sell_straddle||{}).per_day||{})[day]?.enabled"
+                               @change="((indexConfig[adminSelectedIndex].sell_straddle.per_day||{})[day]||{}).enabled = $event.target.checked">
+                      </td>
+                      <td class="text-center py-1 px-1">
+                        <input type="number" step="10" class="t-input text-center" style="width:70px"
+                               :value="(((indexConfig[adminSelectedIndex]||{}).sell_straddle||{}).per_day||{})[day]?.target_pts || 0"
+                               @input="((indexConfig[adminSelectedIndex].sell_straddle.per_day||{})[day]||{}).target_pts = +$event.target.value">
+                      </td>
+                      <td class="text-center py-1 px-1">
+                        <input type="number" step="10" class="t-input text-center" style="width:70px"
+                               :value="(((indexConfig[adminSelectedIndex]||{}).sell_straddle||{}).per_day||{})[day]?.sl_pts || 0"
+                               @input="((indexConfig[adminSelectedIndex].sell_straddle.per_day||{})[day]||{}).sl_pts = +$event.target.value">
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </template>
+
+      </div><!-- end sell_straddle config -->
+
+      <!-- ══ IRON CONDOR config ════════════════════════════════════════════ -->
+      <div x-show="adminStrategyTab==='iron_condor'" class="p-4 flex flex-col gap-3">
+        <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].iron_condor">
+          <div class="flex flex-col gap-3">
+
+            <!-- Basic params -->
+            <div>
+              <div class="sec-label mb-2">PARAMETERS — <span x-text="adminSelectedIndex"></span></div>
+              <div class="grid grid-cols-3 gap-2">
+                <div>
+                  <label class="sec-label">RSI Min</label>
+                  <input type="number" step="1" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.rsi_min">
+                </div>
+                <div>
+                  <label class="sec-label">RSI Max</label>
+                  <input type="number" step="1" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.rsi_max">
+                </div>
+                <div>
+                  <label class="sec-label">ADX Max</label>
+                  <input type="number" step="1" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.adx_max">
+                </div>
+                <div>
+                  <label class="sec-label">Profit Target %</label>
+                  <input type="number" step="5" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.profit_pct">
+                </div>
+                <div>
+                  <label class="sec-label">Stop Loss %</label>
+                  <input type="number" step="10" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.sl_pct">
+                </div>
+                <div>
+                  <label class="sec-label">Square-off Time</label>
+                  <input type="text" placeholder="15:15" class="t-input mt-0.5"
+                         x-model="indexConfig[adminSelectedIndex].iron_condor.squareoff_time">
+                </div>
+              </div>
+            </div>
+
+            <!-- Strike Distances -->
+            <div>
+              <div class="sec-label mb-2">STRIKE DISTANCES — <span x-text="adminSelectedIndex"></span></div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="sec-label">Short OTM pts</label>
+                  <input type="number" step="50" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.short_otm_pts">
+                </div>
+                <div>
+                  <label class="sec-label">Wing Width pts</label>
+                  <input type="number" step="50" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.wing_width_pts">
+                </div>
+              </div>
+            </div>
+
+            <!-- Entry rules -->
+            <div>
+              <div class="sec-label mb-2">ENTRY CONDITIONS (optional — overrides RSI/ADX simple check)</div>
+              <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].iron_condor.entry_rules||[])" :key="i">
+                <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
+                  <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
+                    <option value="rsi">RSI</option><option value="adx">ADX</option>
+                    <option value="vwap">VWAP</option><option value="roc">ROC</option>
+                  </select>
+                  <template x-if="rule.indicator!=='vwap'">
+                    <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
+                  </template>
+                  <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                  <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                    <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
+                  </select>
+                  <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                  <button @click="removeIcRule('entry_rules', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
+                </div>
+              </template>
+              <div x-show="!(indexConfig[adminSelectedIndex].iron_condor.entry_rules||[]).length"
+                   class="font-mono text-xs py-2 text-center" style="color:var(--t-muted)">
+                Using simple RSI/ADX bounds above. Add rules to override.
+              </div>
+              <button @click="addIcRule('entry_rules')" class="btn-add mt-2">+ ADD ENTRY CONDITION</button>
+            </div>
+
+            <!-- Exit rules -->
+            <div>
+              <div class="sec-label mb-2">EXIT CONDITIONS (optional)</div>
+              <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].iron_condor.exit_rules||[])" :key="i">
+                <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
+                  <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
+                    <option value="rsi">RSI</option><option value="adx">ADX</option>
+                    <option value="vwap">VWAP</option><option value="roc">ROC</option>
+                  </select>
+                  <template x-if="rule.indicator!=='vwap'">
+                    <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
+                  </template>
+                  <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                  <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                    <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
+                  </select>
+                  <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                  <button @click="removeIcRule('exit_rules', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
+                </div>
+              </template>
+              <div x-show="!(indexConfig[adminSelectedIndex].iron_condor.exit_rules||[]).length"
+                   class="font-mono text-xs py-2 text-center" style="color:var(--t-muted)">
+                Using profit/SL targets only. Add rules for custom exit signals.
+              </div>
+              <button @click="addIcRule('exit_rules')" class="btn-add mt-2">+ ADD EXIT CONDITION</button>
+            </div>
+
+          </div>
+        </template>
+        <div x-show="!indexConfig[adminSelectedIndex] || !indexConfig[adminSelectedIndex].iron_condor"
+             class="font-mono text-xs py-4 text-center" style="color:var(--t-muted)">
+          Loading Iron Condor config for <span x-text="adminSelectedIndex"></span>…
+        </div>
+      </div><!-- end iron_condor config -->
+
+    </div><!-- end strategy tabs card -->
+
+    <!-- ── Global RMS (applies to all indices) ─────────────────────────── -->
     <div class="t-card rounded p-4">
       <div class="sec-label mb-3">GLOBAL RISK MANAGEMENT SYSTEM</div>
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Max Daily Drawdown (%)</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.rms_max_drawdown_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">Max Daily Drawdown (%)</label>
+          <input type="number" step="0.1" x-model.number="strategyConfig.rms_max_drawdown_pct" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Order Throttle (orders/sec)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.rms_order_throttle"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">Order Throttle (orders/sec)</label>
+          <input type="number" step="1" x-model.number="strategyConfig.rms_order_throttle" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Auto Square-off Time (HH:MM)</label>
-          <input type="text" x-model="strategyConfig.rms_squareoff_time" placeholder="15:15"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">Auto Square-off Time (HH:MM)</label>
+          <input type="text" x-model="strategyConfig.rms_squareoff_time" placeholder="15:15" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">ATM Distance Filter (%)</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.rms_distance_filter_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">ATM Distance Filter (%)</label>
+          <input type="number" step="0.1" x-model.number="strategyConfig.rms_distance_filter_pct" class="t-input mt-0.5">
         </div>
       </div>
     </div>
 
-    <!-- ── Indicator Periods ──────────────────────────────────────────── -->
+    <!-- ── Indicator Periods ────────────────────────────────────────────── -->
     <div class="t-card rounded p-4">
-      <div class="sec-label mb-3">DYNAMIC INDICATOR CRITERIA</div>
+      <div class="sec-label mb-3">DYNAMIC INDICATOR PERIODS</div>
       <div class="grid grid-cols-3 gap-3 mb-3">
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">RSI Period</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_rsi_period"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">RSI Period</label>
+          <input type="number" step="1" x-model.number="strategyConfig.ind_rsi_period" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">VWAP Window (bars)</label>
-          <input type="number" step="10" x-model.number="strategyConfig.ind_vwap_window"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">VWAP Window (bars)</label>
+          <input type="number" step="10" x-model.number="strategyConfig.ind_vwap_window" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">ADX Lookback</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_adx_period"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">ADX Lookback</label>
+          <input type="number" step="1" x-model.number="strategyConfig.ind_adx_period" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">EMA Fast</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_ema_fast"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">EMA Fast</label>
+          <input type="number" step="1" x-model.number="strategyConfig.ind_ema_fast" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">EMA Slow</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_ema_slow"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">EMA Slow</label>
+          <input type="number" step="1" x-model.number="strategyConfig.ind_ema_slow" class="t-input mt-0.5">
         </div>
         <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">HTF (minutes)</label>
-          <input type="number" step="5" x-model.number="strategyConfig.ind_htf_minutes"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
+          <label class="sec-label">HTF (minutes)</label>
+          <input type="number" step="5" x-model.number="strategyConfig.ind_htf_minutes" class="t-input mt-0.5">
         </div>
       </div>
       <div class="flex items-center gap-2 p-2 rounded font-mono text-xs"
@@ -2550,206 +3186,26 @@ document.addEventListener('alpine:init', () => {
       </div>
     </div>
 
-    <!-- ── Iron Condor Config ─────────────────────────────────────────── -->
-    <div class="t-card rounded p-4">
-      <div class="sec-label mb-3">IRON CONDOR — STRATEGY ALLOCATION MATRIX</div>
-      <div class="grid grid-cols-3 gap-3 mb-3">
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">RSI Min</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ic_rsi_min"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">RSI Max</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ic_rsi_max"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">ADX Max (&lt; x = no trend)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ic_adx_max"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Profit Target (%)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ic_profit_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Stop Loss (%)</label>
-          <input type="number" step="10" x-model.number="strategyConfig.ic_sl_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Square-off Time</label>
-          <input type="text" x-model="strategyConfig.ic_squareoff_time" placeholder="15:15"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-      </div>
-      <div class="sec-label mb-2" style="color:var(--t-muted)">PER-INDEX STRIKE DISTANCES (pts)</div>
-      <div class="grid grid-cols-2 gap-2">
-        <template x-for="[idx, otmKey, wingKey] in [['NIFTY','ic_nifty_otm','ic_nifty_wing'],['BANKNIFTY','ic_banknifty_otm','ic_banknifty_wing'],['FINNIFTY','ic_finnifty_otm','ic_finnifty_wing'],['SENSEX','ic_sensex_otm','ic_sensex_wing'],['MIDCPNIFTY','ic_midcp_otm','ic_midcp_wing']]">
-          <div class="rounded p-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
-            <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-cyan)" x-text="idx"></div>
-            <div class="flex gap-2">
-              <div class="flex-1">
-                <label class="font-mono text-xs" style="color:var(--t-muted)">OTM pts</label>
-                <input type="number" step="50" :x-model.number="`strategyConfig[otmKey]`"
-                       :value="strategyConfig[otmKey]"
-                       @input="strategyConfig[otmKey] = parseFloat($event.target.value) || 0"
-                       class="w-full mt-0.5 px-2 py-1 rounded font-mono text-xs"
-                       style="background:var(--t-card);border:1px solid var(--t-border);color:var(--t-text)">
-              </div>
-              <div class="flex-1">
-                <label class="font-mono text-xs" style="color:var(--t-muted)">Wing pts</label>
-                <input type="number" step="50" :value="strategyConfig[wingKey]"
-                       @input="strategyConfig[wingKey] = parseFloat($event.target.value) || 0"
-                       class="w-full mt-0.5 px-2 py-1 rounded font-mono text-xs"
-                       style="background:var(--t-card);border:1px solid var(--t-border);color:var(--t-text)">
-              </div>
-            </div>
-          </div>
-        </template>
-      </div>
-    </div>
-
-    <!-- ── Sell Straddle Config ──────────────────────────────────────── -->
-    <div class="t-card rounded p-4">
-      <div class="sec-label mb-3">SELL STRADDLE — STRATEGY ALLOCATION MATRIX</div>
-      <div class="grid grid-cols-3 gap-3">
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Entry Start</label>
-          <input type="text" x-model="strategyConfig.ss_entry_start" placeholder="09:20"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Entry Cutoff</label>
-          <input type="text" x-model="strategyConfig.ss_entry_end" placeholder="12:00"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Square-off Time</label>
-          <input type="text" x-model="strategyConfig.ss_squareoff_time" placeholder="15:15"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">RSI Min</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ss_rsi_min"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">RSI Max</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ss_rsi_max"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">ADX Max</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ss_adx_max"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Profit Target (%)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ss_profit_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Stop Loss (%)</label>
-          <input type="number" step="10" x-model.number="strategyConfig.ss_sl_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Trail Lock (%)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ss_trail_lock_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Trail Floor (%)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ss_trail_floor_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Max Trades/Day</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ss_max_trades"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">ROC Limit (%)</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.ss_roc_limit_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-      </div>
-    </div>
-
-    <!-- ── Trap Trading Config ────────────────────────────────────────── -->
-    <div class="t-card rounded p-4">
-      <div class="sec-label mb-3">TRAP TRADING — SIGNAL ENGINE PARAMETERS</div>
-      <div class="grid grid-cols-3 gap-3">
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">ADX Threshold</label>
-          <input type="number" step="1" x-model.number="strategyConfig.tt_adx_threshold"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Volume Spike ×</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.tt_volume_spike_mult"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Swing Lookback (bars)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.tt_swing_lookback"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Zone Tolerance (%)</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.tt_zone_tol_pct"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">Void ATR Multiplier</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.tt_void_atr_mult"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-        <div>
-          <label class="font-mono text-xs" style="color:var(--t-muted)">HTF Timeframe (min)</label>
-          <input type="number" step="5" x-model.number="strategyConfig.tt_htf_minutes"
-                 class="w-full mt-0.5 px-2 py-1 rounded font-mono text-sm"
-                 style="background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-text)">
-        </div>
-      </div>
-    </div>
-
-    <!-- ── Persistent Control Strip ──────────────────────────────────── -->
+    <!-- ── Control strip ───────────────────────────────────────────────── -->
     <div class="t-card rounded p-4" style="border:1px solid var(--t-border)">
       <div class="flex flex-col sm:flex-row gap-3">
-        <button @click="submitStrategyConfig()"
-                :disabled="strategyConfigSaving"
+        <!-- Per-index save -->
+        <button @click="saveIndexConfig()"
+                :disabled="indexConfigSaving"
                 class="flex-1 font-mono text-xs font-bold py-2.5 px-4 rounded transition-all"
                 style="background:var(--t-cyan);color:#0a0e14;border:none;cursor:pointer;letter-spacing:0.08em"
+                :style="indexConfigSaving?'opacity:0.6;cursor:not-allowed':''">
+          <span x-show="!indexConfigSaving" x-text="'SAVE & APPLY — ' + adminSelectedIndex"></span>
+          <span x-show="indexConfigSaving">DEPLOYING…</span>
+        </button>
+        <!-- Global RMS / indicators save -->
+        <button @click="submitStrategyConfig()"
+                :disabled="strategyConfigSaving"
+                class="font-mono text-xs font-bold py-2.5 px-4 rounded transition-all"
+                style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.35);cursor:pointer;letter-spacing:0.08em"
                 :style="strategyConfigSaving?'opacity:0.6;cursor:not-allowed':''">
-          <span x-show="!strategyConfigSaving">SAVE &amp; APPLY CONFIGURATION</span>
-          <span x-show="strategyConfigSaving">DEPLOYING…</span>
+          <span x-show="!strategyConfigSaving">SAVE GLOBAL RMS</span>
+          <span x-show="strategyConfigSaving">SAVING…</span>
         </button>
         <button @click="if(killConfirm){triggerKillSwitch()}else{killConfirm=true;killConfirmTs=Date.now()}"
                 class="font-mono text-xs font-bold py-2.5 px-4 rounded transition-all"
@@ -2760,9 +3216,12 @@ document.addEventListener('alpine:init', () => {
           <span x-show="killConfirm" style="color:var(--t-red)">&#x26A0; CONFIRM LIQUIDATE ALL?</span>
         </button>
       </div>
-      <div x-show="strategyConfigSaving" class="mt-2 font-mono text-xs text-center" style="color:var(--t-muted)">
+      <div x-show="indexConfigSaving || strategyConfigSaving" class="mt-2 font-mono text-xs text-center" style="color:var(--t-muted)">
         Injecting parameters into live strategy loops…
       </div>
+      <div x-show="strategyConfigMsg && !indexConfigMsg" class="mt-2 rounded px-3 py-1.5 font-mono text-xs"
+           :style="`background:${strategyConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${strategyConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${strategyConfigOk?'var(--t-green)':'var(--t-red)'}`"
+           x-text="strategyConfigMsg"></div>
     </div>
 
   </div><!-- end right col -->

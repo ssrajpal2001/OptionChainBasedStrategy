@@ -1213,6 +1213,62 @@ class DashboardServer:
             logger.info("strategy/config/update: all strategies reconfigured live.")
             return {"ok": True, "message": "Runtime configuration live-deployed to all strategies."}
 
+        # ── ADMIN — per-index strategy config (rule builder) ─────────────────
+
+        @app.get("/api/admin/strategy/config/{index}", tags=["Admin"])
+        async def api_index_config_get(index: str, _: dict = Depends(_require_admin)):
+            from data_layer.runtime_config import RuntimeConfig
+            idx = index.upper()
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            if idx not in allowed:
+                raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
+            return {
+                "index": idx,
+                "sell_straddle": RuntimeConfig.index_section(idx, "sell_straddle"),
+                "iron_condor":   RuntimeConfig.index_section(idx, "iron_condor"),
+            }
+
+        @app.post("/api/admin/strategy/config/{index}", tags=["Admin"])
+        async def api_index_config_save(
+            index: str, request: Request, _: dict = Depends(_require_admin),
+        ):
+            from data_layer.runtime_config import RuntimeConfig
+            idx = index.upper()
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            if idx not in allowed:
+                raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
+            try:
+                body = await request.json()
+            except Exception:
+                raise HTTPException(400, "Invalid JSON body.")
+
+            # Validate and persist each strategy section if present
+            if "sell_straddle" in body:
+                RuntimeConfig.set_index_section(idx, "sell_straddle", body["sell_straddle"])
+                for ss in (_srv._sell_straddles or []):
+                    if getattr(ss, "_underlying", None) == idx:
+                        try:
+                            ss.reconfigure()
+                        except Exception as exc:
+                            logger.warning("reconfigure SS[%s]: %s", idx, exc)
+
+            if "iron_condor" in body:
+                RuntimeConfig.set_index_section(idx, "iron_condor", body["iron_condor"])
+                for ic in (_srv._iron_condors or []):
+                    if getattr(ic, "_underlying", None) == idx:
+                        try:
+                            ic.reconfigure()
+                        except Exception as exc:
+                            logger.warning("reconfigure IC[%s]: %s", idx, exc)
+
+            logger.info("Dashboard: per-index config saved for %s.", idx)
+            return {"ok": True, "message": f"Config for {idx} saved and injected into running strategies."}
+
+        @app.get("/api/admin/strategy/config/all/indices", tags=["Admin"])
+        async def api_all_indices_config(_: dict = Depends(_require_admin)):
+            from data_layer.runtime_config import RuntimeConfig
+            return RuntimeConfig.get_all_indices()
+
         # ── ADMIN — portfolio risk command center ────────────────────────────
 
         @app.get("/api/admin/risk/summary", tags=["Admin"])

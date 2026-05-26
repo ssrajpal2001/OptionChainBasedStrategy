@@ -9,9 +9,13 @@ Usage:
     from data_layer.runtime_config import RuntimeConfig
     cfg = RuntimeConfig.get()
     rsi_period = cfg["indicators"]["rsi_period"]          # 14
-    ic_rsi_min = cfg["iron_condor"]["rsi_min"]            # 40.0
 
-    RuntimeConfig.update(patch_dict)   # live-update + persist
+    # Per-index config (new, rule-builder based):
+    ss_cfg = RuntimeConfig.index_section("NIFTY", "sell_straddle")
+    ic_cfg = RuntimeConfig.index_section("NIFTY", "iron_condor")
+
+    RuntimeConfig.update(patch_dict)                       # flat section update
+    RuntimeConfig.set_index_section("NIFTY", "sell_straddle", data)  # per-index
 """
 
 from __future__ import annotations
@@ -25,6 +29,76 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "strategy_config.json")
+
+# ── Per-index sell_straddle defaults ─────────────────────────────────────────
+_SS_INDEX_DEFAULT: Dict[str, Any] = {
+    "entry_start":           "09:20",
+    "entry_end":             "12:00",
+    "squareoff_time":        "15:15",
+    "entry_workflow_mode":   "hybrid",       # hybrid | beginning_only | reentry_only
+    "entry_rules_beginning": [],
+    "entry_rules_reentry":   [],
+    "exit_rules":            [],
+    "profit_target_enabled": True,
+    "profit_pct":            30.0,
+    "sl_enabled":            True,
+    "sl_pct":                200.0,
+    "tsl_enabled":           False,
+    "trail_lock_pct":        20.0,
+    "trail_floor_pct":       10.0,
+    "tsl_scalable": {
+        "enabled":      False,
+        "base_profit":  3000,
+        "base_lock":    1500,
+        "step_profit":  1000,
+        "step_lock":    500,
+    },
+    "guardrail_roc": {"enabled": True,  "roc_limit_pct": 1.5},
+    "guardrail_pnl": {"enabled": False, "pnl_limit": -5000},
+    "max_trades": 1,
+    "per_day": {
+        "monday":    {"enabled": False, "target_pts": 0, "sl_pts": 0},
+        "tuesday":   {"enabled": False, "target_pts": 0, "sl_pts": 0},
+        "wednesday": {"enabled": False, "target_pts": 0, "sl_pts": 0},
+        "thursday":  {"enabled": False, "target_pts": 0, "sl_pts": 0},
+        "friday":    {"enabled": False, "target_pts": 0, "sl_pts": 0},
+    },
+}
+
+# ── Per-index iron_condor defaults (strike distances vary per index) ──────────
+_IC_BASE_DEFAULT: Dict[str, Any] = {
+    "squareoff_time":  "15:15",
+    "entry_rules":     [],
+    "exit_rules":      [],
+    "rsi_min":         40.0,
+    "rsi_max":         60.0,
+    "adx_max":         25.0,
+    "profit_pct":      50.0,
+    "sl_pct":          200.0,
+}
+
+_IC_STRIKE_DEFAULTS: Dict[str, Dict[str, float]] = {
+    "NIFTY":      {"short_otm_pts": 200.0, "wing_width_pts": 200.0},
+    "BANKNIFTY":  {"short_otm_pts": 400.0, "wing_width_pts": 500.0},
+    "FINNIFTY":   {"short_otm_pts": 200.0, "wing_width_pts": 200.0},
+    "SENSEX":     {"short_otm_pts": 500.0, "wing_width_pts": 500.0},
+    "MIDCPNIFTY": {"short_otm_pts": 150.0, "wing_width_pts": 200.0},
+}
+
+_ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"]
+
+def _ic_index_default(index: str) -> Dict[str, Any]:
+    strikes = _IC_STRIKE_DEFAULTS.get(index, {"short_otm_pts": 200.0, "wing_width_pts": 200.0})
+    return {**_IC_BASE_DEFAULT, **strikes}
+
+def _build_index_defaults() -> Dict[str, Any]:
+    return {
+        idx: {
+            "sell_straddle": copy.deepcopy(_SS_INDEX_DEFAULT),
+            "iron_condor":   _ic_index_default(idx),
+        }
+        for idx in _ALL_INDICES
+    }
 
 _DEFAULTS: Dict[str, Any] = {
     "rms": {
@@ -42,6 +116,7 @@ _DEFAULTS: Dict[str, Any] = {
         "htf_minutes":  75,
         "ltf_minutes":  5,
     },
+    # Legacy flat sections kept for backward compat with old strategy code
     "iron_condor": {
         "squareoff_time": "15:15",
         "rsi_min":  40.0,
@@ -80,6 +155,8 @@ _DEFAULTS: Dict[str, Any] = {
         "zone_tolerance_pct":     0.5,
         "void_atr_mult":          2.0,
     },
+    # New per-index config section
+    "indices": _build_index_defaults(),
 }
 
 # In-memory live copy — mutated by update()
@@ -157,3 +234,50 @@ class RuntimeConfig:
     @staticmethod
     def defaults() -> Dict[str, Any]:
         return copy.deepcopy(_DEFAULTS)
+
+    @staticmethod
+    def index_section(index: str, strategy: str) -> Dict[str, Any]:
+        """Return per-index strategy config, falling back to defaults."""
+        _ensure_loaded()
+        return copy.deepcopy(
+            _live.get("indices", {}).get(index, {}).get(strategy, {})
+            or _build_index_defaults().get(index, {}).get(strategy, {})
+        )
+
+    @staticmethod
+    def get_all_indices() -> Dict[str, Any]:
+        """Return the full per-index config block."""
+        _ensure_loaded()
+        defaults = _build_index_defaults()
+        stored = _live.get("indices", {})
+        result = {}
+        for idx in _ALL_INDICES:
+            result[idx] = {
+                "sell_straddle": _deep_merge(
+                    defaults[idx]["sell_straddle"],
+                    stored.get(idx, {}).get("sell_straddle", {}),
+                ),
+                "iron_condor": _deep_merge(
+                    defaults[idx]["iron_condor"],
+                    stored.get(idx, {}).get("iron_condor", {}),
+                ),
+            }
+        return result
+
+    @staticmethod
+    def set_index_section(index: str, strategy: str, data: Dict[str, Any]) -> None:
+        """Persist per-index strategy config."""
+        global _live
+        _ensure_loaded()
+        _live.setdefault("indices", {}).setdefault(index, {})[strategy] = data
+        _save_to_disk(_live)
+        logger.info("RuntimeConfig: index[%s][%s] saved.", index, strategy)
+
+    @staticmethod
+    def set_index_config(index: str, data: Dict[str, Any]) -> None:
+        """Persist full per-index config (sell_straddle + iron_condor together)."""
+        global _live
+        _ensure_loaded()
+        _live.setdefault("indices", {})[index] = data
+        _save_to_disk(_live)
+        logger.info("RuntimeConfig: index[%s] full config saved.", index)
