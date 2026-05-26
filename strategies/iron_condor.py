@@ -104,33 +104,31 @@ class IronCondorStrategy:
         self._running = False
         self._position: Optional[IronCondorPosition] = None
         self._spot: float = 0.0
-        self._atm: float = 0.0
-        self._rsi: float = 50.0
-        self._adx: float = 0.0
         self._tasks: list = []
 
         self._load_thresholds()
 
     def _load_thresholds(self) -> None:
-        ic = RuntimeConfig.section("iron_condor")
-        self._squareoff_time = _parse_time(ic.get("squareoff_time", "15:15"))
-        self._rsi_min   = float(ic.get("rsi_min",   40.0))
-        self._rsi_max   = float(ic.get("rsi_max",   60.0))
-        self._adx_max   = float(ic.get("adx_max",   25.0))
-        self._profit_pct = float(ic.get("profit_pct", 50.0)) / 100.0
-        self._sl_pct     = float(ic.get("sl_pct",    200.0)) / 100.0
-
-        per_idx = ic.get("per_index", {}).get(self._underlying, {})
-        self._short_otm  = float(per_idx.get("short_otm_pts",  200.0))
-        self._wing_width = float(per_idx.get("wing_width_pts", 200.0))
+        from data_layer.runtime_config import RuntimeConfig
+        ic = RuntimeConfig.index_section(self._underlying, "iron_condor")
+        self._start_time      = _parse_time(ic.get("start_time",      "09:16"))
+        self._squareoff_time  = _parse_time(ic.get("squareoff_time",  "15:15"))
+        self._entry_day       = str(ic.get("entry_day", "daily"))
+        self._profit_target   = float(ic.get("profit_target_inr", 5000.0))
+        self._stoploss        = float(ic.get("stoploss_inr",       2000.0))
+        self._ratio_threshold = float(ic.get("ratio_exit_threshold", 3.0))
+        self._short_otm       = float(ic.get("short_leg_otm_pts",   200.0))
+        self._long_otm        = float(ic.get("long_leg_otm_pts",    300.0))
+        self._lot_size        = int(ic.get("lot_size",  65))
+        self._strike_step     = int(ic.get("strike_step", 50))
 
     def reconfigure(self) -> None:
         self._load_thresholds()
         logger.info(
-            "IronCondor[%s]: reconfigured — rsi=%.0f–%.0f adx<%.0f profit=%.0f%% sl=%.0f%%",
+            "IronCondor[%s]: reconfigured — entry=%s sq=%s profit=₹%.0f sl=₹%.0f ratio=%.1fx",
             self._underlying,
-            self._rsi_min, self._rsi_max, self._adx_max,
-            self._profit_pct * 100, self._sl_pct * 100,
+            self._start_time, self._squareoff_time,
+            self._profit_target, self._stoploss, self._ratio_threshold,
         )
 
     def start(self) -> None:
@@ -202,27 +200,25 @@ class IronCondorStrategy:
         # Reload thresholds every candle
         self._load_thresholds()
 
-        if now.time() >= self._squareoff_time:
+        # Time gate: only enter between start_time and squareoff_time
+        if now.time() < self._start_time or now.time() >= self._squareoff_time:
             return
         if self._position and self._position.status == "open":
-            return
-
-        if not (self._rsi_min <= self._rsi <= self._rsi_max):
-            return
-        if self._adx >= self._adx_max:
             return
 
         spot = self._spot
         if spot <= 0:
             return
 
-        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        step = self._strike_step
         atm  = round(spot / step) * step
 
+        # short legs at ±short_leg_otm_pts from ATM
+        # long (hedge) legs at ±long_leg_otm_pts from ATM
         short_ce_strike = atm + self._short_otm
         short_pe_strike = atm - self._short_otm
-        long_ce_strike  = short_ce_strike + self._wing_width
-        long_pe_strike  = short_pe_strike - self._wing_width
+        long_ce_strike  = atm + self._long_otm
+        long_pe_strike  = atm - self._long_otm
 
         logger.info(
             "IronCondor[%s]: entry signal at ATM=%.0f | "
@@ -254,40 +250,42 @@ class IronCondorStrategy:
             await self._close_position("time_exit")
             return
 
-        current_value = sum(
-            (leg.ltp * (-1 if leg.side == "sell" else 1))
-            for leg in pos.legs if leg.filled
-        )
-        unrealized = pos.net_credit - current_value
+        # MTM P&L in ₹
+        call_entry_net = pos.short_ce.entry_price - pos.long_ce.entry_price
+        put_entry_net  = pos.short_pe.entry_price - pos.long_pe.entry_price
+        call_live_net  = pos.short_ce.ltp - pos.long_ce.ltp
+        put_live_net   = pos.short_pe.ltp - pos.long_pe.ltp
+        open_pnl_pts = (call_entry_net - call_live_net) + (put_entry_net - put_live_net)
+        pnl_inr = open_pnl_pts * self._lot_size
 
-        if unrealized >= pos.profit_target:
+        if pnl_inr >= self._profit_target:
             logger.info(
-                "IronCondor[%s]: profit target hit — unrealized=%.2f target=%.2f",
-                self._underlying, unrealized, pos.profit_target,
+                "IronCondor[%s]: profit target hit — ₹%.0f >= ₹%.0f",
+                self._underlying, pnl_inr, self._profit_target,
             )
             await self._close_position("profit_target")
             return
 
-        if -unrealized >= pos.stop_loss:
+        if pnl_inr <= -self._stoploss:
             logger.info(
-                "IronCondor[%s]: stop loss hit — loss=%.2f limit=%.2f",
-                self._underlying, -unrealized, pos.stop_loss,
+                "IronCondor[%s]: stop loss hit — ₹%.0f <= -₹%.0f",
+                self._underlying, pnl_inr, self._stoploss,
             )
             await self._close_position("stop_loss")
             return
 
-        if self._spot >= pos.short_ce.strike:
-            logger.warning(
-                "IronCondor[%s]: CE side breached — spot=%.0f >= short_ce=%.0f.",
-                self._underlying, self._spot, pos.short_ce.strike,
-            )
-            await self._close_position("ce_breach")
-        elif self._spot <= pos.short_pe.strike:
-            logger.warning(
-                "IronCondor[%s]: PE side breached — spot=%.0f <= short_pe=%.0f.",
-                self._underlying, self._spot, pos.short_pe.strike,
-            )
-            await self._close_position("pe_breach")
+        # Ratio check: roll side if one short leg has ballooned vs the other
+        ce_ltp = pos.short_ce.ltp
+        pe_ltp = pos.short_pe.ltp
+        if ce_ltp > 0 and pe_ltp > 0:
+            if ce_ltp / pe_ltp >= self._ratio_threshold:
+                logger.warning("IronCondor[%s]: CE ratio %.2fx — rolling call side.", self._underlying, ce_ltp / pe_ltp)
+                await self._close_position("ce_ratio_breach")
+                return
+            if pe_ltp / ce_ltp >= self._ratio_threshold:
+                logger.warning("IronCondor[%s]: PE ratio %.2fx — rolling put side.", self._underlying, pe_ltp / ce_ltp)
+                await self._close_position("pe_ratio_breach")
+                return
 
     async def _close_position(self, reason: str) -> None:
         if not self._position:
@@ -307,11 +305,6 @@ class IronCondorStrategy:
 
     # ── Public accessors ─────────────────────────────────────────────────────
 
-    def update_indicators(self, rsi: float, adx: float, atm: float) -> None:
-        self._rsi = rsi
-        self._adx = adx
-        self._atm = atm
-
     @property
     def has_open_position(self) -> bool:
         return self._position is not None and self._position.status == "open"
@@ -322,10 +315,9 @@ class IronCondorStrategy:
 
     @property
     def entry_allowed(self) -> bool:
-        return (
-            self._rsi_min <= self._rsi <= self._rsi_max
-            and self._adx < self._adx_max
-        )
+        from datetime import datetime
+        now = datetime.now(IST).time()
+        return self._start_time <= now < self._squareoff_time
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

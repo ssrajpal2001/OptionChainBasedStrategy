@@ -1330,28 +1330,34 @@ document.addEventListener('alpine:init', () => {
         sl_enabled: true, sl_pct: 200.0,
         tsl_enabled: false, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
         tsl_scalable: { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
-        guardrail_roc: { enabled: true, roc_limit_pct: 1.5 },
-        guardrail_pnl: { enabled: false, pnl_limit: -5000 },
+        guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
+        guardrail_pnl: { enabled: false, target_pts: 100.0, stoploss_pts: -60.0 },
         ratio_exit:    { enabled: false, threshold: 3.0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         smart_rolling_enabled: false,
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
         max_trades: 1,
         per_day: {
-          monday:    { enabled: false, target_pts: 0, sl_pts: 0 },
-          tuesday:   { enabled: false, target_pts: 0, sl_pts: 0 },
-          wednesday: { enabled: false, target_pts: 0, sl_pts: 0 },
-          thursday:  { enabled: false, target_pts: 0, sl_pts: 0 },
-          friday:    { enabled: false, target_pts: 0, sl_pts: 0 },
+          monday:    { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          tuesday:   { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          wednesday: { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          thursday:  { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          friday:    { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
         }
       };
     },
     _icDefaults(idx) {
       const strikes = { NIFTY:{s:200,w:200}, BANKNIFTY:{s:400,w:500}, FINNIFTY:{s:200,w:200}, SENSEX:{s:500,w:500}, MIDCPNIFTY:{s:150,w:200} };
       const d = strikes[idx] || {s:200,w:200};
-      return { squareoff_time: '15:15',
-               rsi_min: 40, rsi_max: 60, adx_max: 25, profit_pct: 50, sl_pct: 200,
-               short_otm_pts: d.s, wing_width_pts: d.w };
+      return {
+        enabled: true, start_time: '09:16', squareoff_time: '15:15',
+        entry_day: 'daily', product_type: 'MIS',
+        lot_size: 65, strike_step: 50,
+        max_adjustments_per_side: 3, roll_step_pts: 5,
+        profit_target_inr: 5000, stoploss_inr: 2000,
+        ratio_exit_threshold: 3.0,
+        short_leg_otm_pts: d.s, long_leg_otm_pts: d.w,
+      };
     },
     _ensureIndexConfig(idx) {
       if (!this.indexConfig[idx]) {
@@ -1365,13 +1371,18 @@ document.addEventListener('alpine:init', () => {
       if (!Array.isArray(ss.entry_rules_reentry))   ss.entry_rules_reentry   = [];
       if (!Array.isArray(ss.exit_rules))             ss.exit_rules             = [];
       if (!ss.tsl_scalable) ss.tsl_scalable = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
-      if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: true, roc_limit_pct: 1.5 };
-      if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, pnl_limit: -5000 };
+      if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
+      if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, target_pts: 100.0, stoploss_pts: -60.0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (ss.smart_rolling_enabled === undefined) ss.smart_rolling_enabled = false;
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
-      if (!ss.per_day) ss.per_day = { monday:{enabled:false,target_pts:0,sl_pts:0}, tuesday:{enabled:false,target_pts:0,sl_pts:0}, wednesday:{enabled:false,target_pts:0,sl_pts:0}, thursday:{enabled:false,target_pts:0,sl_pts:0}, friday:{enabled:false,target_pts:0,sl_pts:0} };
+      const _dayDef = () => ({ enabled:false, single_trade_target_pts:0, single_trade_stoploss_pts:0, guardrail_pnl:{target_pts:0,stoploss_pts:0} });
+      if (!ss.per_day) ss.per_day = { monday:_dayDef(), tuesday:_dayDef(), wednesday:_dayDef(), thursday:_dayDef(), friday:_dayDef() };
+      for (const d of ['monday','tuesday','wednesday','thursday','friday']) {
+        if (!ss.per_day[d]) ss.per_day[d] = _dayDef();
+        if (!ss.per_day[d].guardrail_pnl) ss.per_day[d].guardrail_pnl = { target_pts:0, stoploss_pts:0 };
+      }
     },
     async selectAdminIndex(idx) {
       this.adminSelectedIndex = idx;
@@ -2717,6 +2728,7 @@ document.addEventListener('alpine:init', () => {
                       <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
                         <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="close">Close</option>
                       </select>
                     </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
@@ -2727,6 +2739,7 @@ document.addEventListener('alpine:init', () => {
                       <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
                         <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="close">Close</option>
                         <option value="VALUE">Fixed Value</option>
                       </select>
                     </template>
@@ -2773,6 +2786,7 @@ document.addEventListener('alpine:init', () => {
                       <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
                         <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="close">Close</option>
                       </select>
                     </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
@@ -2782,6 +2796,7 @@ document.addEventListener('alpine:init', () => {
                       <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
                         <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="close">Close</option>
                         <option value="VALUE">Fixed Value</option>
                       </select>
                     </template>
@@ -2826,6 +2841,7 @@ document.addEventListener('alpine:init', () => {
                       <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
                         <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="close">Close</option>
                       </select>
                     </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
@@ -2835,6 +2851,7 @@ document.addEventListener('alpine:init', () => {
                       <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
                         <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="close">Close</option>
                         <option value="VALUE">Fixed Value</option>
                       </select>
                     </template>
@@ -2901,36 +2918,58 @@ document.addEventListener('alpine:init', () => {
               <!-- ROC Guardrail -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ROC GUARDRAIL</span>
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ROC TREND GUARDRAIL</span>
                   <label class="flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled" class="accent-yellow-400">
                     <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled?'ON':'OFF'"
                           :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
                   </label>
                 </div>
-                <div class="flex items-center gap-2">
-                  <label class="sec-label">ROC Limit %</label>
-                  <input type="number" step="0.1" class="t-input" style="width:80px"
-                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.roc_limit_pct">
-                  <span class="font-mono text-xs" style="color:var(--t-muted)">spot move per tick</span>
+                <div class="grid grid-cols-4 gap-2">
+                  <div>
+                    <label class="sec-label">TF (min)</label>
+                    <input type="number" step="1" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.tf">
+                  </div>
+                  <div>
+                    <label class="sec-label">Length</label>
+                    <input type="number" step="1" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.length">
+                  </div>
+                  <div>
+                    <label class="sec-label">Target (pts)</label>
+                    <input type="number" step="1" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.target">
+                  </div>
+                  <div>
+                    <label class="sec-label">SL (pts)</label>
+                    <input type="number" step="1" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.stoploss">
+                  </div>
                 </div>
               </div>
 
               <!-- P&L Guardrail -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">P&amp;L GUARDRAIL</span>
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">SESSION P&amp;L GUARDRAIL</span>
                   <label class="flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled" class="accent-yellow-400">
                     <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'ON':'OFF'"
                           :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
                   </label>
                 </div>
-                <div class="flex items-center gap-2">
-                  <label class="sec-label">P&amp;L Limit (₹)</label>
-                  <input type="number" step="500" class="t-input" style="width:100px"
-                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.pnl_limit">
-                  <span class="font-mono text-xs" style="color:var(--t-muted)">exit if MTM falls below</span>
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="flex items-center gap-2">
+                    <label class="sec-label">Default Target (pts)</label>
+                    <input type="number" step="10" class="t-input" style="width:80px"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.target_pts">
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <label class="sec-label">Default SL (pts)</label>
+                    <input type="number" step="10" class="t-input" style="width:80px"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.stoploss_pts">
+                  </div>
                 </div>
               </div>
 
@@ -3085,40 +3124,52 @@ document.addEventListener('alpine:init', () => {
         <!-- ── PER DAY overrides ─────────────────────────────── -->
         <template x-if="adminSubTab==='per_day'">
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
-            <div>
-              <div class="sec-label mb-2">PER-DAY OVERRIDES <span style="color:var(--t-muted);font-weight:400">— optional daily target/SL override (0 = use global)</span></div>
-              <table class="w-full font-mono text-xs" style="border-collapse:collapse">
-                <thead>
-                  <tr style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
-                    <th class="text-left py-1 pr-2">Day</th>
-                    <th class="text-center py-1 px-2">Enable</th>
-                    <th class="text-center py-1 px-2">Target pts</th>
-                    <th class="text-center py-1 px-2">SL pts</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template x-for="day in ['monday','tuesday','wednesday','thursday','friday']" :key="day">
-                    <tr style="border-bottom:1px solid rgba(255,255,255,0.04)">
-                      <td class="py-1 pr-2 uppercase font-bold" style="color:var(--t-bright)" x-text="day.substring(0,3)"></td>
-                      <td class="text-center py-1 px-2">
-                        <input type="checkbox" :x-model="`indexConfig.${adminSelectedIndex}.sell_straddle.per_day.${day}.enabled`"
-                               :checked="(((indexConfig[adminSelectedIndex]||{}).sell_straddle||{}).per_day||{})[day]?.enabled"
-                               @change="((indexConfig[adminSelectedIndex].sell_straddle.per_day||{})[day]||{}).enabled = $event.target.checked">
-                      </td>
-                      <td class="text-center py-1 px-1">
-                        <input type="number" step="10" class="t-input text-center" style="width:70px"
-                               :value="(((indexConfig[adminSelectedIndex]||{}).sell_straddle||{}).per_day||{})[day]?.target_pts || 0"
-                               @input="((indexConfig[adminSelectedIndex].sell_straddle.per_day||{})[day]||{}).target_pts = +$event.target.value">
-                      </td>
-                      <td class="text-center py-1 px-1">
-                        <input type="number" step="10" class="t-input text-center" style="width:70px"
-                               :value="(((indexConfig[adminSelectedIndex]||{}).sell_straddle||{}).per_day||{})[day]?.sl_pts || 0"
-                               @input="((indexConfig[adminSelectedIndex].sell_straddle.per_day||{})[day]||{}).sl_pts = +$event.target.value">
-                      </td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
+            <div class="flex flex-col gap-3">
+              <div class="sec-label mb-1">PER-DAY OVERRIDES <span style="color:var(--t-muted);font-weight:400">— leave 0 to use global defaults</span></div>
+              <template x-for="day in ['monday','tuesday','wednesday','thursday','friday']" :key="day">
+                <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex items-center justify-between mb-2">
+                    <span class="font-display font-bold text-xs uppercase" style="color:var(--t-bright)" x-text="day"></span>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox"
+                             :checked="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).enabled"
+                             @change="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].enabled = $event.target.checked">
+                      <span class="font-mono text-xs"
+                            :style="`color:${(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).enabled?'var(--t-cyan)':'var(--t-muted)'}`"
+                            x-text="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).enabled?'ON':'OFF'"></span>
+                    </label>
+                  </div>
+                  <div class="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <label class="sec-label">Trade Target (pts)</label>
+                      <input type="number" step="10" class="t-input mt-0.5"
+                             :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).single_trade_target_pts||0"
+                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].single_trade_target_pts = +$event.target.value">
+                    </div>
+                    <div>
+                      <label class="sec-label">Trade SL (pts)</label>
+                      <input type="number" step="10" class="t-input mt-0.5"
+                             :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).single_trade_stoploss_pts||0"
+                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].single_trade_stoploss_pts = +$event.target.value">
+                    </div>
+                  </div>
+                  <div class="font-mono text-xs mb-1" style="color:var(--t-muted)">Session P&amp;L override (overrides global guardrail_pnl for this day)</div>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="sec-label">Session Target (pts)</label>
+                      <input type="number" step="10" class="t-input mt-0.5"
+                             :value="((indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).guardrail_pnl||{}).target_pts||0"
+                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].guardrail_pnl.target_pts = +$event.target.value">
+                    </div>
+                    <div>
+                      <label class="sec-label">Session SL (pts)</label>
+                      <input type="number" step="10" class="t-input mt-0.5"
+                             :value="((indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).guardrail_pnl||{}).stoploss_pts||0"
+                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].guardrail_pnl.stoploss_pts = +$event.target.value">
+                    </div>
+                  </div>
+                </div>
+              </template>
             </div>
           </template>
         </template>
@@ -3126,60 +3177,105 @@ document.addEventListener('alpine:init', () => {
       </div><!-- end sell_straddle config -->
 
       <!-- ══ IRON CONDOR config ════════════════════════════════════════════ -->
+      <!-- Entry is TIME-GATED only (no RSI/ADX). P&L targets in ₹. -->
       <div x-show="adminStrategyTab==='iron_condor'" class="p-4 flex flex-col gap-3">
         <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].iron_condor">
           <div class="flex flex-col gap-3">
 
-            <!-- Basic params -->
+            <!-- Timing & Session -->
             <div>
-              <div class="sec-label mb-2">PARAMETERS — <span x-text="adminSelectedIndex"></span></div>
+              <div class="sec-label mb-2">TIMING &amp; SESSION — <span x-text="adminSelectedIndex"></span></div>
               <div class="grid grid-cols-3 gap-2">
                 <div>
-                  <label class="sec-label">RSI Min</label>
-                  <input type="number" step="1" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.rsi_min">
-                </div>
-                <div>
-                  <label class="sec-label">RSI Max</label>
-                  <input type="number" step="1" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.rsi_max">
-                </div>
-                <div>
-                  <label class="sec-label">ADX Max</label>
-                  <input type="number" step="1" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.adx_max">
-                </div>
-                <div>
-                  <label class="sec-label">Profit Target %</label>
-                  <input type="number" step="5" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.profit_pct">
-                </div>
-                <div>
-                  <label class="sec-label">Stop Loss %</label>
-                  <input type="number" step="10" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.sl_pct">
+                  <label class="sec-label">Start Time</label>
+                  <input type="text" placeholder="09:16" class="t-input mt-0.5"
+                         x-model="indexConfig[adminSelectedIndex].iron_condor.start_time">
                 </div>
                 <div>
                   <label class="sec-label">Square-off Time</label>
                   <input type="text" placeholder="15:15" class="t-input mt-0.5"
                          x-model="indexConfig[adminSelectedIndex].iron_condor.squareoff_time">
                 </div>
+                <div>
+                  <label class="sec-label">Entry Day</label>
+                  <select class="t-input mt-0.5" x-model="indexConfig[adminSelectedIndex].iron_condor.entry_day">
+                    <option value="daily">Daily</option>
+                    <option value="monday">Monday only</option>
+                    <option value="monday,thursday">Mon + Thu</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="sec-label">Product Type</label>
+                  <select class="t-input mt-0.5" x-model="indexConfig[adminSelectedIndex].iron_condor.product_type">
+                    <option value="MIS">MIS (Intraday)</option>
+                    <option value="NRML">NRML (Carry)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="sec-label">Lot Size</label>
+                  <input type="number" step="1" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.lot_size">
+                </div>
+                <div>
+                  <label class="sec-label">Strike Step (pts)</label>
+                  <input type="number" step="50" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.strike_step">
+                </div>
               </div>
             </div>
 
             <!-- Strike Distances -->
             <div>
-              <div class="sec-label mb-2">STRIKE DISTANCES — <span x-text="adminSelectedIndex"></span></div>
+              <div class="sec-label mb-1">STRIKE DISTANCES — <span x-text="adminSelectedIndex"></span></div>
+              <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">Both measured from ATM (not from each other)</p>
               <div class="grid grid-cols-2 gap-2">
                 <div>
-                  <label class="sec-label">Short OTM pts</label>
+                  <label class="sec-label">Short Leg OTM (pts)</label>
                   <input type="number" step="50" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.short_otm_pts">
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.short_leg_otm_pts"
+                         title="Distance from ATM to short call/put strikes">
                 </div>
                 <div>
-                  <label class="sec-label">Wing Width pts</label>
+                  <label class="sec-label">Long Leg OTM (pts)</label>
                   <input type="number" step="50" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.wing_width_pts">
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.long_leg_otm_pts"
+                         title="Distance from ATM to long hedge strikes (must be > short OTM)">
+                </div>
+              </div>
+            </div>
+
+            <!-- Exit & Risk -->
+            <div>
+              <div class="sec-label mb-2">EXIT &amp; RISK</div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="sec-label">Profit Target (₹)</label>
+                  <input type="number" step="500" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.profit_target_inr"
+                         title="Close all 4 legs when total P&L reaches this ₹ amount">
+                </div>
+                <div>
+                  <label class="sec-label">Stop Loss (₹)</label>
+                  <input type="number" step="500" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.stoploss_inr"
+                         title="Close all 4 legs when total loss reaches this ₹ amount">
+                </div>
+                <div>
+                  <label class="sec-label">Ratio Exit Threshold</label>
+                  <input type="number" step="0.1" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.ratio_exit_threshold"
+                         title="Roll one side if short_call_ltp / short_put_ltp exceeds this ratio">
+                </div>
+                <div>
+                  <label class="sec-label">Max Adjustments/Side</label>
+                  <input type="number" step="1" min="0" max="10" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.max_adjustments_per_side">
+                </div>
+                <div>
+                  <label class="sec-label">Roll Step (pts)</label>
+                  <input type="number" step="5" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.roll_step_pts"
+                         title="Move short leg closer to ATM by this amount on ratio breach">
                 </div>
               </div>
             </div>

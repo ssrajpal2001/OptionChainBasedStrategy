@@ -53,8 +53,10 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
         "step_profit":  1000,
         "step_lock":    500,
     },
-    "guardrail_roc": {"enabled": True,  "roc_limit_pct": 1.5},
-    "guardrail_pnl": {"enabled": False, "pnl_limit": -5000},
+    # ROC guardrail: exit if ROC-of-combined-premium exceeds bounds (pts)
+    "guardrail_roc": {"enabled": False, "tf": 15, "length": 9, "target": 20.0, "stoploss": -40.0},
+    # Session P&L guardrail (points): optional per-day overrides in per_day section
+    "guardrail_pnl": {"enabled": False, "target_pts": 100.0, "stoploss_pts": -60.0},
     # Ratio exit: exit when max(CE_ltp, PE_ltp) / min(CE_ltp, PE_ltp) >= threshold
     "ratio_exit":    {"enabled": False, "threshold": 3.0},
     # LTP decay: smart-roll or exit when either leg LTP decays below ltp_exit_min
@@ -65,36 +67,44 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "vwap_rise_sl":  {"enabled": False, "tf": 1, "threshold": 1.0},
     "max_trades": 1,
     "per_day": {
-        "monday":    {"enabled": False, "target_pts": 0, "sl_pts": 0},
-        "tuesday":   {"enabled": False, "target_pts": 0, "sl_pts": 0},
-        "wednesday": {"enabled": False, "target_pts": 0, "sl_pts": 0},
-        "thursday":  {"enabled": False, "target_pts": 0, "sl_pts": 0},
-        "friday":    {"enabled": False, "target_pts": 0, "sl_pts": 0},
+        "monday":    {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "tuesday":   {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "wednesday": {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "thursday":  {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "friday":    {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
     },
 }
 
-# ── Per-index iron_condor defaults — no entry rule builder, fixed params only ─
+# ── Per-index iron_condor defaults — matches old repo iron_condor_manager.py ──
+# Entry is purely time-gated; NO RSI/ADX filter.
+# P&L targets are in ₹, not %; roll side on ratio breach instead of full exit.
 _IC_BASE_DEFAULT: Dict[str, Any] = {
-    "squareoff_time":  "15:15",
-    "rsi_min":         40.0,   # range-bound filter (not momentum)
-    "rsi_max":         60.0,
-    "adx_max":         25.0,   # no strong trend gate
-    "profit_pct":      50.0,
-    "sl_pct":          200.0,
+    "enabled":                  True,
+    "start_time":               "09:16",
+    "squareoff_time":           "15:15",
+    "entry_day":                "daily",     # daily | monday | monday,thursday
+    "product_type":             "MIS",
+    "lot_size":                 65,
+    "strike_step":              50,
+    "max_adjustments_per_side": 3,
+    "roll_step_pts":            5,
+    "profit_target_inr":        5000.0,      # ₹ profit to exit all 4 legs
+    "stoploss_inr":             2000.0,      # ₹ loss to exit all 4 legs
+    "ratio_exit_threshold":     3.0,         # short_call_ltp/short_put_ltp ratio to roll
 }
 
 _IC_STRIKE_DEFAULTS: Dict[str, Dict[str, float]] = {
-    "NIFTY":      {"short_otm_pts": 200.0, "wing_width_pts": 200.0},
-    "BANKNIFTY":  {"short_otm_pts": 400.0, "wing_width_pts": 500.0},
-    "FINNIFTY":   {"short_otm_pts": 200.0, "wing_width_pts": 200.0},
-    "SENSEX":     {"short_otm_pts": 500.0, "wing_width_pts": 500.0},
-    "MIDCPNIFTY": {"short_otm_pts": 150.0, "wing_width_pts": 200.0},
+    "NIFTY":      {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0},
+    "BANKNIFTY":  {"short_leg_otm_pts": 400.0, "long_leg_otm_pts": 600.0},
+    "FINNIFTY":   {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0},
+    "SENSEX":     {"short_leg_otm_pts": 500.0, "long_leg_otm_pts": 750.0},
+    "MIDCPNIFTY": {"short_leg_otm_pts": 150.0, "long_leg_otm_pts": 250.0},
 }
 
 _ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"]
 
 def _ic_index_default(index: str) -> Dict[str, Any]:
-    strikes = _IC_STRIKE_DEFAULTS.get(index, {"short_otm_pts": 200.0, "wing_width_pts": 200.0})
+    strikes = _IC_STRIKE_DEFAULTS.get(index, {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0})
     return {**_IC_BASE_DEFAULT, **strikes}
 
 def _build_index_defaults() -> Dict[str, Any]:
@@ -122,21 +132,13 @@ _DEFAULTS: Dict[str, Any] = {
         "htf_minutes":  75,
         "ltf_minutes":  5,
     },
-    # Legacy flat sections kept for backward compat with old strategy code
+    # Legacy flat section — use indices[idx][iron_condor] for per-index config
     "iron_condor": {
-        "squareoff_time": "15:15",
-        "rsi_min":  40.0,
-        "rsi_max":  60.0,
-        "adx_max":  25.0,
-        "profit_pct": 50.0,
-        "sl_pct":     200.0,
-        "per_index": {
-            "NIFTY":      {"short_otm_pts": 200.0, "wing_width_pts": 200.0},
-            "BANKNIFTY":  {"short_otm_pts": 400.0, "wing_width_pts": 500.0},
-            "FINNIFTY":   {"short_otm_pts": 200.0, "wing_width_pts": 200.0},
-            "SENSEX":     {"short_otm_pts": 500.0, "wing_width_pts": 500.0},
-            "MIDCPNIFTY": {"short_otm_pts": 150.0, "wing_width_pts": 200.0},
-        },
+        "enabled": True, "start_time": "09:16", "squareoff_time": "15:15",
+        "entry_day": "daily", "product_type": "MIS", "lot_size": 65, "strike_step": 50,
+        "max_adjustments_per_side": 3, "roll_step_pts": 5,
+        "profit_target_inr": 5000.0, "stoploss_inr": 2000.0,
+        "ratio_exit_threshold": 3.0,
     },
     "sell_straddle": {
         "entry_start":     "09:20",
