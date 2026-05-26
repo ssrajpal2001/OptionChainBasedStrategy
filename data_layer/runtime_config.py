@@ -55,6 +55,14 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     },
     "guardrail_roc": {"enabled": True,  "roc_limit_pct": 1.5},
     "guardrail_pnl": {"enabled": False, "pnl_limit": -5000},
+    # Ratio exit: exit when max(CE_ltp, PE_ltp) / min(CE_ltp, PE_ltp) >= threshold
+    "ratio_exit":    {"enabled": False, "threshold": 3.0},
+    # LTP decay: smart-roll or exit when either leg LTP decays below ltp_exit_min
+    "ltp_decay":     {"enabled": False, "ltp_exit_min": 20.0},
+    # Smart rolling: scan candidate strikes before rolling on ATM shift
+    "smart_rolling_enabled": False,
+    # VWAP rise SL: exit when combined VWAP rises >= threshold% above session-low VWAP
+    "vwap_rise_sl":  {"enabled": False, "tf": 1, "threshold": 1.0},
     "max_trades": 1,
     "per_day": {
         "monday":    {"enabled": False, "target_pts": 0, "sl_pts": 0},
@@ -65,14 +73,12 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     },
 }
 
-# ── Per-index iron_condor defaults (strike distances vary per index) ──────────
+# ── Per-index iron_condor defaults — no entry rule builder, fixed params only ─
 _IC_BASE_DEFAULT: Dict[str, Any] = {
     "squareoff_time":  "15:15",
-    "entry_rules":     [],
-    "exit_rules":      [],
-    "rsi_min":         40.0,
+    "rsi_min":         40.0,   # range-bound filter (not momentum)
     "rsi_max":         60.0,
-    "adx_max":         25.0,
+    "adx_max":         25.0,   # no strong trend gate
     "profit_pct":      50.0,
     "sl_pct":          200.0,
 }

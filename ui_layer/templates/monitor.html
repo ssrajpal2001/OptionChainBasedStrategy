@@ -1332,6 +1332,10 @@ document.addEventListener('alpine:init', () => {
         tsl_scalable: { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: true, roc_limit_pct: 1.5 },
         guardrail_pnl: { enabled: false, pnl_limit: -5000 },
+        ratio_exit:    { enabled: false, threshold: 3.0 },
+        ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
+        smart_rolling_enabled: false,
+        vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
         max_trades: 1,
         per_day: {
           monday:    { enabled: false, target_pts: 0, sl_pts: 0 },
@@ -1345,7 +1349,7 @@ document.addEventListener('alpine:init', () => {
     _icDefaults(idx) {
       const strikes = { NIFTY:{s:200,w:200}, BANKNIFTY:{s:400,w:500}, FINNIFTY:{s:200,w:200}, SENSEX:{s:500,w:500}, MIDCPNIFTY:{s:150,w:200} };
       const d = strikes[idx] || {s:200,w:200};
-      return { squareoff_time: '15:15', entry_rules: [], exit_rules: [],
+      return { squareoff_time: '15:15',
                rsi_min: 40, rsi_max: 60, adx_max: 25, profit_pct: 50, sl_pct: 200,
                short_otm_pts: d.s, wing_width_pts: d.w };
     },
@@ -1363,10 +1367,11 @@ document.addEventListener('alpine:init', () => {
       if (!ss.tsl_scalable) ss.tsl_scalable = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: true, roc_limit_pct: 1.5 };
       if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, pnl_limit: -5000 };
+      if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
+      if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
+      if (ss.smart_rolling_enabled === undefined) ss.smart_rolling_enabled = false;
+      if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
       if (!ss.per_day) ss.per_day = { monday:{enabled:false,target_pts:0,sl_pts:0}, tuesday:{enabled:false,target_pts:0,sl_pts:0}, wednesday:{enabled:false,target_pts:0,sl_pts:0}, thursday:{enabled:false,target_pts:0,sl_pts:0}, friday:{enabled:false,target_pts:0,sl_pts:0} };
-      const ic = this.indexConfig[idx].iron_condor;
-      if (!Array.isArray(ic.entry_rules)) ic.entry_rules = [];
-      if (!Array.isArray(ic.exit_rules))  ic.exit_rules  = [];
     },
     async selectAdminIndex(idx) {
       this.adminSelectedIndex = idx;
@@ -2888,6 +2893,83 @@ document.addEventListener('alpine:init', () => {
                   <span class="font-mono text-xs" style="color:var(--t-muted)">exit if MTM falls below</span>
                 </div>
               </div>
+
+              <!-- Ratio Exit -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">RATIO EXIT</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.ratio_exit.enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.ratio_exit.enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.ratio_exit.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">Threshold</label>
+                  <input type="number" step="0.1" class="t-input" style="width:80px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.ratio_exit.threshold">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">exit when max(CE,PE) / min(CE,PE) ≥ this</span>
+                </div>
+              </div>
+
+              <!-- LTP Decay -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">LTP DECAY EXIT</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.ltp_decay.enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.ltp_decay.enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.ltp_decay.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">Min LTP (₹)</label>
+                  <input type="number" step="1" class="t-input" style="width:80px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.ltp_decay.ltp_exit_min">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">exit/roll when either leg LTP &lt; this</span>
+                </div>
+              </div>
+
+              <!-- Smart Rolling -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">SMART ROLLING</span>
+                    <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">Scan V-slope candidate strikes before rolling on ATM shift</p>
+                  </div>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.smart_rolling_enabled" class="accent-cyan-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.smart_rolling_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.smart_rolling_enabled?'var(--t-cyan)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- VWAP Rise SL -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">VWAP RISE SL</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.vwap_rise_sl.enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.vwap_rise_sl.enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.vwap_rise_sl.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="flex items-center gap-3 flex-wrap">
+                  <div class="flex items-center gap-2">
+                    <label class="sec-label">Timeframe (min)</label>
+                    <input type="number" step="1" class="t-input" style="width:60px"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.vwap_rise_sl.tf">
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <label class="sec-label">Rise Threshold %</label>
+                    <input type="number" step="0.1" class="t-input" style="width:70px"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.vwap_rise_sl.threshold">
+                  </div>
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">exit when combined VWAP rises ≥ threshold% from session low</span>
+                </div>
+              </div>
+
             </div>
           </template>
         </template>
@@ -3060,62 +3142,6 @@ document.addEventListener('alpine:init', () => {
                          x-model.number="indexConfig[adminSelectedIndex].iron_condor.wing_width_pts">
                 </div>
               </div>
-            </div>
-
-            <!-- Entry rules -->
-            <div>
-              <div class="sec-label mb-2">ENTRY CONDITIONS (optional — overrides RSI/ADX simple check)</div>
-              <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].iron_condor.entry_rules||[])" :key="i">
-                <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                  <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
-                  <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
-                    <option value="rsi">RSI</option><option value="adx">ADX</option>
-                    <option value="vwap">VWAP</option><option value="roc">ROC</option>
-                  </select>
-                  <template x-if="rule.indicator!=='vwap'">
-                    <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
-                  </template>
-                  <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
-                  <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
-                    <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
-                  </select>
-                  <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
-                  <button @click="removeIcRule('entry_rules', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
-                </div>
-              </template>
-              <div x-show="!(indexConfig[adminSelectedIndex].iron_condor.entry_rules||[]).length"
-                   class="font-mono text-xs py-2 text-center" style="color:var(--t-muted)">
-                Using simple RSI/ADX bounds above. Add rules to override.
-              </div>
-              <button @click="addIcRule('entry_rules')" class="btn-add mt-2">+ ADD ENTRY CONDITION</button>
-            </div>
-
-            <!-- Exit rules -->
-            <div>
-              <div class="sec-label mb-2">EXIT CONDITIONS (optional)</div>
-              <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].iron_condor.exit_rules||[])" :key="i">
-                <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                  <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
-                  <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
-                    <option value="rsi">RSI</option><option value="adx">ADX</option>
-                    <option value="vwap">VWAP</option><option value="roc">ROC</option>
-                  </select>
-                  <template x-if="rule.indicator!=='vwap'">
-                    <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
-                  </template>
-                  <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
-                  <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
-                    <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
-                  </select>
-                  <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
-                  <button @click="removeIcRule('exit_rules', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
-                </div>
-              </template>
-              <div x-show="!(indexConfig[adminSelectedIndex].iron_condor.exit_rules||[]).length"
-                   class="font-mono text-xs py-2 text-center" style="color:var(--t-muted)">
-                Using profit/SL targets only. Add rules for custom exit signals.
-              </div>
-              <button @click="addIcRule('exit_rules')" class="btn-add mt-2">+ ADD EXIT CONDITION</button>
             </div>
 
           </div>
