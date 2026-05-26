@@ -32,6 +32,7 @@ import logging
 import os
 import sys
 from datetime import date, datetime
+from typing import List
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dependency manifest
@@ -245,19 +246,33 @@ async def _run_live(
     from strategies.strategy_b_trap import StrategyB_Trap
     from strategies.strategy_c_panic import StrategyC_Panic
     from strategies.trap_trading_engine import TrapTradingEngine
+    from strategies.iron_condor import IronCondorStrategy
+    from strategies.sell_straddle import SellStraddleStrategy
     from execution_bridge import ExecutionRouter
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
+    from management.risk_manager import RiskManager
 
     bus = EventBus()
     strategies = [StrategyA_OIZone(cfg), StrategyB_Trap(cfg), StrategyC_Panic(cfg)]
     confluence    = ConfluenceEngine(bus, cfg, strategies)
     trap_engine   = TrapTradingEngine(bus, cfg)
+
+    # Premium-selling strategies — one instance per monitored index
+    _iron_condors: List[IronCondorStrategy] = [
+        IronCondorStrategy(bus, cfg, underlying=idx)
+        for idx in cfg.monitored_indices
+    ]
+    _sell_straddles: List[SellStraddleStrategy] = [
+        SellStraddleStrategy(bus, cfg, underlying=idx)
+        for idx in cfg.monitored_indices
+    ]
     candle_cache  = CandleCache(bus, cfg)
     option_matrix = OptionMatrixEngine(bus, cfg)
     feeder        = GlobalFeeder(bus, cfg)
     router        = ExecutionRouter(bus, registry, cfg)
     client_mgr    = ClientManager(bus, registry)
+    risk_mgr      = RiskManager(bus, registry, router=router)
 
     # ── Data-layer operational modules ────────────────────────────────────────
     rebalancer     = StrikeRebalancer(bus, cfg, feeder)
@@ -283,6 +298,9 @@ async def _run_live(
                 rebalancer=rebalancer,
                 feeder=feeder,
                 trap_engine=trap_engine,
+                risk_manager=risk_mgr,
+                iron_condors=_iron_condors,
+                sell_straddles=_sell_straddles,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -310,6 +328,11 @@ async def _run_live(
     await router.start()
     await feeder.start()
 
+    for _ic in _iron_condors:
+        _ic.start()
+    for _ss in _sell_straddles:
+        _ss.start()
+
     # Admin console runs as a detached background task — its completion or any
     # internal stream error must NOT trigger the engine shutdown.  Only the
     # engine primitives below participate in the FIRST_COMPLETED barrier.
@@ -322,6 +345,7 @@ async def _run_live(
         asyncio.create_task(trap_engine.run(),          name="trap_engine"),
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
+        asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
         asyncio.create_task(strike_cleanup.run(),       name="strike_cleanup"),
         asyncio.create_task(gap_handler.run(),          name="gap_handler"),
@@ -347,6 +371,11 @@ async def _run_live(
     logger.info("Shutting down…")
     confluence.stop()
     trap_engine.stop()
+    for _ic in _iron_condors:
+        _ic.stop()
+    for _ss in _sell_straddles:
+        _ss.stop()
+    risk_mgr.stop()
     rebalancer.stop()
     strike_cleanup.stop()
     gap_handler.stop()

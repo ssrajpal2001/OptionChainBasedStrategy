@@ -54,6 +54,7 @@ import numpy as np
 
 from config.global_config import IST, Topic, GlobalConfig
 from data_layer.base_feeder import CandleEvent, EventBus
+from data_layer.runtime_config import RuntimeConfig
 from matrix_engine.indicators import rsi, vwap, adx, atr, ema
 from strategies.base_strategy import Direction, SignalPackage, StrategyID
 
@@ -268,7 +269,31 @@ class TrapTradingEngine:
         self._running = False
         self._states:         Dict[str, _SymbolState] = {}
         self._signals:        int = 0
-        self._last_indicators: Dict[str, dict] = {}  # cached per-symbol after each LTF bar
+        self._last_indicators: Dict[str, dict] = {}
+
+        # Runtime-configurable signal parameters (read from RuntimeConfig)
+        self._load_thresholds()
+
+    def _load_thresholds(self) -> None:
+        tt = RuntimeConfig.section("trap_trading")
+        self._adx_threshold          = float(tt.get("adx_threshold",          20.0))
+        self._volume_spike_mult      = float(tt.get("volume_spike_multiplier",  1.5))
+        self._swing_lookback         = int(tt.get("swing_lookback",              5))
+        self._zone_tol_pct           = float(tt.get("zone_tolerance_pct",       0.5)) / 100.0
+        self._void_atr_mult          = float(tt.get("void_atr_mult",            2.0))
+        # HTF/LTF timeframe changes require a restart (buffers would be invalid)
+        self._htf_minutes            = int(tt.get("htf_minutes", _HTF_TF))
+        self._ltf_minutes            = int(tt.get("ltf_minutes", _LTF_TF))
+
+    def reconfigure(self) -> None:
+        """Live-reload signal thresholds from RuntimeConfig without restarting."""
+        self._load_thresholds()
+        logger.info(
+            "TrapTradingEngine: reconfigured — adx_thresh=%.1f vol_spike=%.1f "
+            "swing_look=%d zone_tol=%.2f%% void_atr=%.1f",
+            self._adx_threshold, self._volume_spike_mult,
+            self._swing_lookback, self._zone_tol_pct * 100, self._void_atr_mult,
+        )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -342,9 +367,9 @@ class TrapTradingEngine:
     # ── Candle router ─────────────────────────────────────────────────────────
 
     async def _on_candle(self, c: CandleEvent) -> None:
-        if c.timeframe == _HTF_TF:
+        if c.timeframe == self._htf_minutes:
             self._process_htf(c)
-        elif c.timeframe == _LTF_TF:
+        elif c.timeframe == self._ltf_minutes:
             await self._process_ltf(c)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -480,7 +505,7 @@ class TrapTradingEngine:
             if active_zone and active_zone.is_near(spot):
                 # Price is interacting with a supply zone — engage watch mode
                 st.htf_entry_level = active_zone.lower
-                st.trap_high       = buf.swing_high(_SWING_LOOKBACK)
+                st.trap_high       = buf.swing_high(self._swing_lookback)
                 st.phase           = _Phase.ZONE_WATCH
                 logger.debug(
                     "TrapEngine [%s] ZONE_WATCH entered | "
@@ -492,7 +517,7 @@ class TrapTradingEngine:
         # ── ZONE_WATCH — update swing high; detect liquidity sweep ────────────
         elif st.phase == _Phase.ZONE_WATCH:
             # Keep the liquidity pool level current
-            swing = buf.swing_high(_SWING_LOOKBACK)
+            swing = buf.swing_high(self._swing_lookback)
             if swing > st.trap_high:
                 st.trap_high = swing
 
@@ -538,7 +563,7 @@ class TrapTradingEngine:
 
         # ── ARMED — confirm reversal OR declare void ───────────────────────────
         elif st.phase == _Phase.ARMED:
-            void_ceiling = st.trap_high + _VOID_ATR_MULT * atr_val
+            void_ceiling = st.trap_high + self._void_atr_mult * atr_val
 
             # Void: buyers were stronger — price ran past the trap level
             if c.close > void_ceiling:

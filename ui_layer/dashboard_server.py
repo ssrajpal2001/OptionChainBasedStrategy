@@ -46,6 +46,18 @@ from ui_layer.ws_bridge import WsBridge
 
 logger = logging.getLogger(__name__)
 
+
+def _upstox_translate_error(raw: str) -> str:
+    """Map known Upstox error codes to actionable UI messages."""
+    if "UDAPI100060" in raw:
+        return (
+            "Upstox Resource Not Found (UDAPI100060). Please check your settings: "
+            "(1) Confirm your API Key is correct and has no hidden spaces or dashes mixed up, "
+            "(2) Ensure the Redirect URI in your Upstox Developer Console is set EXACTLY to https://www.google.com, "
+            "(3) Confirm the Mobile number field contains your 10-digit registered number (NOT your Client ID)."
+        )
+    return raw
+
 # FastAPI imports at module level so 'from __future__ import annotations' doesn't
 # prevent FastAPI from resolving type hints on route functions (lazy-string annotations
 # are resolved against module globals, so locally-imported types are invisible).
@@ -54,7 +66,7 @@ try:
         FastAPI, WebSocket, WebSocketDisconnect,
         HTTPException, Depends, Query, Body, Request,
     )
-    from fastapi.responses import FileResponse, HTMLResponse
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
     from pydantic import BaseModel as _PydanticBase
     _HAS_FASTAPI = True
@@ -116,6 +128,76 @@ try:
         order_throttle_per_sec: int   = 5
         squareoff_time:         str   = "15:15"
         distance_filter_pct:    float = 5.0
+
+    class _StrategyConfigSchema(_PydanticBase):
+        # Global RMS
+        rms_max_drawdown_pct:       float = 5.0
+        rms_order_throttle:         int   = 5
+        rms_squareoff_time:         str   = "15:15"
+        rms_distance_filter_pct:    float = 5.0
+        # Indicator periods
+        ind_rsi_period:    int   = 14
+        ind_vwap_window:   int   = 500
+        ind_adx_period:    int   = 20
+        ind_ema_fast:      int   = 9
+        ind_ema_slow:      int   = 21
+        ind_htf_minutes:   int   = 75
+        ind_ltf_minutes:   int   = 5
+        # Iron Condor
+        ic_squareoff_time: str   = "15:15"
+        ic_rsi_min:        float = 40.0
+        ic_rsi_max:        float = 60.0
+        ic_adx_max:        float = 25.0
+        ic_profit_pct:     float = 50.0
+        ic_sl_pct:         float = 200.0
+        ic_nifty_otm:      float = 200.0
+        ic_nifty_wing:     float = 200.0
+        ic_banknifty_otm:  float = 400.0
+        ic_banknifty_wing: float = 500.0
+        ic_finnifty_otm:   float = 200.0
+        ic_finnifty_wing:  float = 200.0
+        ic_sensex_otm:     float = 500.0
+        ic_sensex_wing:    float = 500.0
+        ic_midcp_otm:      float = 150.0
+        ic_midcp_wing:     float = 200.0
+        # Sell Straddle
+        ss_entry_start:     str   = "09:20"
+        ss_entry_end:       str   = "12:00"
+        ss_squareoff_time:  str   = "15:15"
+        ss_rsi_min:         float = 35.0
+        ss_rsi_max:         float = 65.0
+        ss_adx_max:         float = 30.0
+        ss_profit_pct:      float = 30.0
+        ss_sl_pct:          float = 200.0
+        ss_trail_lock_pct:  float = 20.0
+        ss_trail_floor_pct: float = 10.0
+        ss_max_trades:      int   = 1
+        ss_roc_limit_pct:   float = 1.5
+        # Trap Trading
+        tt_htf_minutes:          int   = 75
+        tt_ltf_minutes:          int   = 5
+        tt_adx_threshold:        float = 20.0
+        tt_volume_spike_mult:    float = 1.5
+        tt_swing_lookback:       int   = 5
+        tt_zone_tol_pct:         float = 0.5
+        tt_void_atr_mult:        float = 2.0
+
+    class _KillAllConfirmSchema(_PydanticBase):
+        confirm: bool = False   # must be True to proceed
+
+    class _SaveUpstoxCredsSchema(_PydanticBase):
+        client_id:   str = ""
+        api_key:     str = ""
+        secret:      str = ""
+        password:    str = ""
+        totp_secret: str = ""
+
+    class _SaveFyersCredsSchema(_PydanticBase):
+        client_id:   str = ""
+        app_key:     str = ""
+        secret:      str = ""
+        pin:         str = ""
+        totp_secret: str = ""
 
     class _ClientRegisterSchema(_PydanticBase):
         client_id:          str
@@ -188,6 +270,9 @@ class DashboardServer:
         rebalancer=None,  # StrikeRebalancer
         feeder=None,      # GlobalFeeder — optional, for admin feeder management
         trap_engine=None, # TrapTradingEngine — optional, for strategy telemetry
+        risk_manager=None, # RiskManager — optional, for firm risk summary + kill-all
+        iron_condors=None,  # List[IronCondorStrategy]
+        sell_straddles=None, # List[SellStraddleStrategy]
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -196,6 +281,9 @@ class DashboardServer:
         self._rebalancer = rebalancer
         self._feeder = feeder
         self._trap_engine = trap_engine
+        self._risk_manager = risk_manager
+        self._iron_condors: list = iron_condors or []
+        self._sell_straddles: list = sell_straddles or []
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -472,6 +560,7 @@ class DashboardServer:
 
         @app.get("/api/admin/feeder/status", tags=["Admin"])
         async def api_feeder_status(_: dict = Depends(_require_admin)):
+            from broker_auth.headless_auth import _token_is_fresh
             feeder   = _srv._feeder
             provider = (
                 feeder.active_provider
@@ -480,12 +569,35 @@ class DashboardServer:
             )
             connected = feeder.is_running if feeder else False
             dual_lat  = feeder.dual_latency if feeder and hasattr(feeder, "dual_latency") else {}
+
+            # Hydrate credential presence flags from DB.
+            # A provider is "creds_present" if it has API key OR a stored access_token
+            # (Fyers may be auth'd via OAuth only — api_key_enc is empty but token exists).
+            u_row = _srv._client_db.get_feeder_creds_sync("upstox") or {}
+            f_row = _srv._client_db.get_feeder_creds_sync("fyers")  or {}
+            upstox_creds_present = bool(
+                u_row.get("client_id") or u_row.get("api_key") or u_row.get("access_token")
+            )
+            fyers_creds_present  = bool(
+                f_row.get("client_id") or f_row.get("api_key") or f_row.get("access_token")
+            )
+            upstox_token_fresh   = _token_is_fresh(
+                u_row.get("token_generated_at", ""), u_row.get("token_expiry_at", "")
+            ) if upstox_creds_present else False
+            fyers_token_fresh    = _token_is_fresh(
+                f_row.get("token_generated_at", ""), f_row.get("token_expiry_at", "")
+            ) if fyers_creds_present else False
+
             return {
-                "ts":                datetime.now(IST).isoformat(),
-                "provider":          provider,
-                "connected":         connected,
-                "upstox_latency_ms": round(dual_lat.get("upstox", 0.0), 3),
-                "fyers_latency_ms":  round(dual_lat.get("fyers",  0.0), 3),
+                "ts":                   datetime.now(IST).isoformat(),
+                "provider":             provider,
+                "connected":            connected,
+                "upstox_latency_ms":    round(dual_lat.get("upstox", 0.0), 3),
+                "fyers_latency_ms":     round(dual_lat.get("fyers",  0.0), 3),
+                "upstox_creds_present": upstox_creds_present,
+                "fyers_creds_present":  fyers_creds_present,
+                "upstox_token_fresh":   upstox_token_fresh,
+                "fyers_token_fresh":    fyers_token_fresh,
             }
 
         @app.post("/api/admin/feeder/connect", tags=["Admin"])
@@ -888,6 +1000,279 @@ class DashboardServer:
                 logger.warning("Dashboard: strategy telemetry read failed: %s", exc)
                 return {"ts": now_ist, "trap_engine": {}, "active": False, "error": str(exc)}
 
+        # ── ADMIN — premium-selling strategy registry ────────────────────
+
+        @app.get("/api/admin/strategies", tags=["Admin"])
+        async def api_strategies(_: dict = Depends(_require_admin)):
+            now_ist = datetime.now(IST).isoformat()
+            out = []
+            for ic in _srv._iron_condors:
+                pos = ic.position
+                entry = None
+                if pos:
+                    entry = {
+                        "short_ce": pos.short_ce.strike,
+                        "short_pe": pos.short_pe.strike,
+                        "long_ce":  pos.long_ce.strike,
+                        "long_pe":  pos.long_pe.strike,
+                        "net_credit":    round(pos.net_credit, 2),
+                        "profit_target": round(pos.profit_target, 2),
+                        "stop_loss":     round(pos.stop_loss, 2),
+                        "open_time": pos.open_time.isoformat() if pos.open_time else None,
+                    }
+                out.append({
+                    "type":         "iron_condor",
+                    "underlying":   ic._underlying,
+                    "running":      ic._running,
+                    "has_position": ic.has_open_position,
+                    "spot":         round(ic._spot, 2),
+                    "rsi":          round(ic._rsi, 1),
+                    "adx":          round(ic._adx, 1),
+                    "entry_allowed": 40 <= ic._rsi <= 60 and ic._adx < 25,
+                    "position":     entry,
+                })
+            for ss in _srv._sell_straddles:
+                pos = ss.position
+                entry = None
+                if pos:
+                    entry = {
+                        "atm":       pos.atm_at_entry,
+                        "ce_strike": pos.ce_leg.strike,
+                        "pe_strike": pos.pe_leg.strike,
+                        "net_credit":    round(pos.net_credit, 2),
+                        "unrealized_pnl": round(pos.unrealized_pnl, 2),
+                        "profit_target": round(pos.profit_target, 2),
+                        "stop_loss":     round(pos.stop_loss_limit, 2),
+                        "trailing_active": pos.trailing_active,
+                        "open_time": pos.open_time.isoformat() if pos.open_time else None,
+                    }
+                out.append({
+                    "type":         "sell_straddle",
+                    "underlying":   ss._underlying,
+                    "running":      ss._running,
+                    "has_position": ss.has_open_position,
+                    "trades_today": ss.trades_today,
+                    "spot":         round(ss._spot, 2),
+                    "rsi":          round(ss._rsi, 1),
+                    "adx":          round(ss._adx, 1),
+                    "entry_allowed": 35 <= ss._rsi <= 65 and ss._adx < 30,
+                    "position":     entry,
+                })
+            return {"strategies": out, "ts": now_ist}
+
+        # ── ADMIN — runtime strategy configuration ───────────────────────
+
+        @app.get("/api/admin/strategy/config", tags=["Admin"])
+        async def api_strategy_config_get(_: dict = Depends(_require_admin)):
+            from data_layer.runtime_config import RuntimeConfig
+            cfg = RuntimeConfig.get()
+            rms = cfg.get("rms", {})
+            ind = cfg.get("indicators", {})
+            ic  = cfg.get("iron_condor", {})
+            ss  = cfg.get("sell_straddle", {})
+            tt  = cfg.get("trap_trading", {})
+            ic_idx = ic.get("per_index", {})
+            return {
+                "rms_max_drawdown_pct":       rms.get("max_drawdown_pct",       5.0),
+                "rms_order_throttle":         rms.get("order_throttle_per_sec", 5),
+                "rms_squareoff_time":         rms.get("squareoff_time",         "15:15"),
+                "rms_distance_filter_pct":    rms.get("distance_filter_pct",    5.0),
+                "ind_rsi_period":             ind.get("rsi_period",   14),
+                "ind_vwap_window":            ind.get("vwap_window",  500),
+                "ind_adx_period":             ind.get("adx_period",   20),
+                "ind_ema_fast":               ind.get("ema_fast",     9),
+                "ind_ema_slow":               ind.get("ema_slow",     21),
+                "ind_htf_minutes":            ind.get("htf_minutes",  75),
+                "ind_ltf_minutes":            ind.get("ltf_minutes",  5),
+                "ic_squareoff_time":          ic.get("squareoff_time", "15:15"),
+                "ic_rsi_min":                 ic.get("rsi_min",  40.0),
+                "ic_rsi_max":                 ic.get("rsi_max",  60.0),
+                "ic_adx_max":                 ic.get("adx_max",  25.0),
+                "ic_profit_pct":              ic.get("profit_pct", 50.0),
+                "ic_sl_pct":                  ic.get("sl_pct",   200.0),
+                "ic_nifty_otm":              ic_idx.get("NIFTY",      {}).get("short_otm_pts", 200.0),
+                "ic_nifty_wing":             ic_idx.get("NIFTY",      {}).get("wing_width_pts",200.0),
+                "ic_banknifty_otm":          ic_idx.get("BANKNIFTY",  {}).get("short_otm_pts", 400.0),
+                "ic_banknifty_wing":         ic_idx.get("BANKNIFTY",  {}).get("wing_width_pts",500.0),
+                "ic_finnifty_otm":           ic_idx.get("FINNIFTY",   {}).get("short_otm_pts", 200.0),
+                "ic_finnifty_wing":          ic_idx.get("FINNIFTY",   {}).get("wing_width_pts",200.0),
+                "ic_sensex_otm":             ic_idx.get("SENSEX",     {}).get("short_otm_pts", 500.0),
+                "ic_sensex_wing":            ic_idx.get("SENSEX",     {}).get("wing_width_pts",500.0),
+                "ic_midcp_otm":              ic_idx.get("MIDCPNIFTY", {}).get("short_otm_pts", 150.0),
+                "ic_midcp_wing":             ic_idx.get("MIDCPNIFTY", {}).get("wing_width_pts",200.0),
+                "ss_entry_start":            ss.get("entry_start",     "09:20"),
+                "ss_entry_end":              ss.get("entry_end",       "12:00"),
+                "ss_squareoff_time":         ss.get("squareoff_time",  "15:15"),
+                "ss_rsi_min":                ss.get("rsi_min",         35.0),
+                "ss_rsi_max":                ss.get("rsi_max",         65.0),
+                "ss_adx_max":                ss.get("adx_max",         30.0),
+                "ss_profit_pct":             ss.get("profit_pct",      30.0),
+                "ss_sl_pct":                 ss.get("sl_pct",         200.0),
+                "ss_trail_lock_pct":         ss.get("trail_lock_pct",  20.0),
+                "ss_trail_floor_pct":        ss.get("trail_floor_pct", 10.0),
+                "ss_max_trades":             ss.get("max_trades",       1),
+                "ss_roc_limit_pct":          ss.get("roc_limit_pct",   1.5),
+                "tt_htf_minutes":            tt.get("htf_minutes",          75),
+                "tt_ltf_minutes":            tt.get("ltf_minutes",           5),
+                "tt_adx_threshold":          tt.get("adx_threshold",        20.0),
+                "tt_volume_spike_mult":      tt.get("volume_spike_multiplier",1.5),
+                "tt_swing_lookback":         tt.get("swing_lookback",        5),
+                "tt_zone_tol_pct":           tt.get("zone_tolerance_pct",    0.5),
+                "tt_void_atr_mult":          tt.get("void_atr_mult",         2.0),
+            }
+
+        @app.post("/api/admin/strategy/config/update", tags=["Admin"])
+        async def api_strategy_config_update(
+            body: _StrategyConfigSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            from data_layer.runtime_config import RuntimeConfig
+            patch = {
+                "rms": {
+                    "max_drawdown_pct":       body.rms_max_drawdown_pct,
+                    "order_throttle_per_sec": body.rms_order_throttle,
+                    "squareoff_time":         body.rms_squareoff_time,
+                    "distance_filter_pct":    body.rms_distance_filter_pct,
+                },
+                "indicators": {
+                    "rsi_period":   body.ind_rsi_period,
+                    "vwap_window":  body.ind_vwap_window,
+                    "adx_period":   body.ind_adx_period,
+                    "ema_fast":     body.ind_ema_fast,
+                    "ema_slow":     body.ind_ema_slow,
+                    "htf_minutes":  body.ind_htf_minutes,
+                    "ltf_minutes":  body.ind_ltf_minutes,
+                },
+                "iron_condor": {
+                    "squareoff_time": body.ic_squareoff_time,
+                    "rsi_min":  body.ic_rsi_min,
+                    "rsi_max":  body.ic_rsi_max,
+                    "adx_max":  body.ic_adx_max,
+                    "profit_pct": body.ic_profit_pct,
+                    "sl_pct":     body.ic_sl_pct,
+                    "per_index": {
+                        "NIFTY":      {"short_otm_pts": body.ic_nifty_otm,     "wing_width_pts": body.ic_nifty_wing},
+                        "BANKNIFTY":  {"short_otm_pts": body.ic_banknifty_otm, "wing_width_pts": body.ic_banknifty_wing},
+                        "FINNIFTY":   {"short_otm_pts": body.ic_finnifty_otm,  "wing_width_pts": body.ic_finnifty_wing},
+                        "SENSEX":     {"short_otm_pts": body.ic_sensex_otm,    "wing_width_pts": body.ic_sensex_wing},
+                        "MIDCPNIFTY": {"short_otm_pts": body.ic_midcp_otm,     "wing_width_pts": body.ic_midcp_wing},
+                    },
+                },
+                "sell_straddle": {
+                    "entry_start":     body.ss_entry_start,
+                    "entry_end":       body.ss_entry_end,
+                    "squareoff_time":  body.ss_squareoff_time,
+                    "rsi_min":         body.ss_rsi_min,
+                    "rsi_max":         body.ss_rsi_max,
+                    "adx_max":         body.ss_adx_max,
+                    "profit_pct":      body.ss_profit_pct,
+                    "sl_pct":          body.ss_sl_pct,
+                    "trail_lock_pct":  body.ss_trail_lock_pct,
+                    "trail_floor_pct": body.ss_trail_floor_pct,
+                    "max_trades":      body.ss_max_trades,
+                    "roc_limit_pct":   body.ss_roc_limit_pct,
+                },
+                "trap_trading": {
+                    "htf_minutes":             body.tt_htf_minutes,
+                    "ltf_minutes":             body.tt_ltf_minutes,
+                    "adx_threshold":           body.tt_adx_threshold,
+                    "volume_spike_multiplier": body.tt_volume_spike_mult,
+                    "swing_lookback":          body.tt_swing_lookback,
+                    "zone_tolerance_pct":      body.tt_zone_tol_pct,
+                    "void_atr_mult":           body.tt_void_atr_mult,
+                },
+            }
+            RuntimeConfig.update(patch)
+
+            # Live-inject into running strategy instances
+            reconfigure_errors = []
+            for ic in (_srv._iron_condors or []):
+                try:
+                    ic.reconfigure()
+                except Exception as e:
+                    reconfigure_errors.append(f"iron_condor[{ic._underlying}]: {e}")
+            for ss in (_srv._sell_straddles or []):
+                try:
+                    ss.reconfigure()
+                except Exception as e:
+                    reconfigure_errors.append(f"sell_straddle[{ss._underlying}]: {e}")
+            if _srv._trap_engine is not None:
+                try:
+                    _srv._trap_engine.reconfigure()
+                except Exception as e:
+                    reconfigure_errors.append(f"trap_engine: {e}")
+
+            # Sync RMS into GlobalConfig so existing RMS endpoint stays consistent
+            if hasattr(_srv._cfg, "rms") and isinstance(_srv._cfg.rms, dict):
+                _srv._cfg.rms.update(patch["rms"])
+
+            if reconfigure_errors:
+                logger.warning("strategy/config/update: partial reconfigure errors: %s", reconfigure_errors)
+                return {"ok": True, "message": "Config saved. Some live-inject errors.", "errors": reconfigure_errors}
+
+            logger.info("strategy/config/update: all strategies reconfigured live.")
+            return {"ok": True, "message": "Runtime configuration live-deployed to all strategies."}
+
+        # ── ADMIN — portfolio risk command center ────────────────────────────
+
+        @app.get("/api/admin/risk/summary", tags=["Admin"])
+        async def api_risk_summary(_: dict = Depends(_require_admin)):
+            rm = _srv._risk_manager
+            if rm is None:
+                # Fallback: build summary purely from registry state
+                clients = _srv._registry.all_active() if _srv._registry else []
+                total_capital  = sum(c.risk.capital    for c in clients)
+                total_net_mtm  = sum(getattr(c, "_daily_pnl", 0.0) for c in clients)
+                total_open_lots = 0
+                return {
+                    "ts":               datetime.now(IST).isoformat(),
+                    "total_capital":    round(total_capital,  2),
+                    "total_net_mtm":    round(total_net_mtm,  2),
+                    "total_open_lots":  total_open_lots,
+                    "avg_slippage_pts": 0.0,
+                    "client_count":     len(clients),
+                    "clients":          [_build_client_dict(c) for c in clients],
+                    "clients_at_risk":  [],
+                    "risk_manager_active": False,
+                }
+            try:
+                summary = rm.risk_summary()
+                summary["risk_manager_active"] = True
+                return summary
+            except Exception as exc:
+                logger.warning("Dashboard: risk summary read failed: %s", exc)
+                return {
+                    "ts":               datetime.now(IST).isoformat(),
+                    "risk_manager_active": False,
+                    "error":            str(exc),
+                }
+
+        @app.post("/api/admin/risk/kill_all", tags=["Admin"])
+        async def api_risk_kill_all(
+            body: _KillAllConfirmSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            if not body.confirm:
+                raise HTTPException(400, "confirm must be true to execute firm-wide kill-all.")
+            rm = _srv._risk_manager
+            if rm is not None:
+                result = await rm.kill_all()
+            else:
+                # Fallback: halt all via registry
+                if _srv._registry:
+                    _srv._registry.halt_all()
+                actioned = [c.client_id for c in (_srv._registry.all_active() if _srv._registry else [])]
+                await _srv._bus.publish(Topic.SYSTEM_EVENT, {
+                    "event":     "KILL_SWITCH",
+                    "scope":     "FIRM_WIDE",
+                    "clients":   actioned,
+                    "timestamp": datetime.now(IST).isoformat(),
+                })
+                result = {"status": "ok", "halted": actioned, "count": len(actioned),
+                          "ts": datetime.now(IST).isoformat()}
+            logger.warning("Dashboard: FIRM-WIDE KILL-ALL executed by admin. Result: %s", result)
+            return result
+
         # ── ADMIN — approve client + assign strategies ────────────────────────
 
         @app.post("/api/admin/clients/{client_id}/approve", tags=["Admin"])
@@ -964,14 +1349,45 @@ class DashboardServer:
             try:
                 raw = await request.json()
             except Exception:
-                raise HTTPException(400, "Invalid JSON body.")
-            creds = {
-                "client_id":   raw.get("client_id", ""),
-                "api_key":     raw.get("api_key", ""),
-                "secret":      raw.get("secret", ""),
-                "password":    raw.get("password", ""),
-                "totp_secret": raw.get("totp_secret", "") or raw.get("totp", ""),
+                raw = {}
+            # Strip all whitespace — hidden spaces in copy-pasted keys cause UDAPI100060.
+            import re as _re
+            _mobile_raw = str(raw.get("client_id", "") or "").strip()
+            # Keep only digits; if 12-digit with leading 91 (country code) drop the prefix
+            _mobile_digits = _re.sub(r"\D", "", _mobile_raw)
+            if len(_mobile_digits) == 12 and _mobile_digits.startswith("91"):
+                _mobile_digits = _mobile_digits[2:]
+            form = {
+                "client_id":   _mobile_digits,
+                "api_key":     str(raw.get("api_key",     "") or "").strip(),
+                "secret":      str(raw.get("secret",      "") or "").strip(),
+                "password":    str(raw.get("password",    "") or "").strip(),
+                "totp_secret": str(raw.get("totp_secret", "") or raw.get("totp", "") or "").strip(),
             }
+            # Merge from DB if form fields are incomplete
+            db_row = _srv._client_db.get_feeder_creds_sync("upstox") or {}
+            creds = {
+                "client_id":          form["client_id"]   or str(db_row.get("client_id",   "") or "").strip(),
+                "api_key":            form["api_key"]     or str(db_row.get("api_key",     "") or "").strip(),
+                "secret":             form["secret"]      or str(db_row.get("secret",      "") or "").strip(),
+                "password":           form["password"]    or str(db_row.get("password",    "") or "").strip(),
+                "totp_secret":        form["totp_secret"] or str(db_row.get("totp_secret", "") or "").strip(),
+                "access_token":       db_row.get("access_token",       ""),
+                "token_generated_at": db_row.get("token_generated_at", ""),
+                "token_expiry_at":    db_row.get("token_expiry_at",    ""),
+            }
+            if not creds["client_id"] and not creds["api_key"]:
+                raise HTTPException(400, "Upstox credentials are required. Enter them in the form or they must be cached in the database.")
+            # Persist any newly-entered credentials to DB
+            if form["client_id"] or form["api_key"]:
+                await _srv._client_db.upsert_feeder_creds(
+                    "upstox",
+                    client_id=form["client_id"],
+                    api_key=form["api_key"],
+                    secret=form["secret"],
+                    password=form["password"],
+                    totp_secret=form["totp_secret"],
+                )
             # Auto-generate access token via headless TOTP auth
             try:
                 from broker_auth.headless_auth import headless_engine as _he
@@ -979,22 +1395,37 @@ class DashboardServer:
                 if ok and token:
                     creds["access_token"] = token
                     _srv._auth_alerts["feeder"] = ""
+                    from broker_auth.headless_auth import _ist_eod
+                    await _srv._client_db.update_feeder_token(
+                        "upstox", token,
+                        generated_at=datetime.now(IST).isoformat(),
+                        expiry_at=_ist_eod(),
+                    )
                 else:
                     _srv._auth_alerts["feeder"] = f"Upstox auth failed: {msg}"
                     logger.error("Dashboard: Upstox headless auth failed: %s", msg)
-                    raise HTTPException(502, f"Upstox headless auth failed: {msg}")
-            except HTTPException:
-                raise
+                    await _srv._client_db.update_feeder_token(
+                        "upstox", "", generated_at="", expiry_at="",
+                    )
+                    clean_error = _upstox_translate_error(msg)
+                    return JSONResponse(status_code=502, content={"ok": False, "error": clean_error})
             except Exception as exc:
                 _srv._auth_alerts["feeder"] = f"Upstox auth error: {exc}"
                 logger.error("Dashboard: Upstox auth error: %s", exc)
-                raise HTTPException(502, f"Upstox auth error: {exc}")
+                await _srv._client_db.update_feeder_token(
+                    "upstox", "", generated_at="", expiry_at="",
+                )
+                clean_error = _upstox_translate_error(str(exc))
+                return JSONResponse(status_code=502, content={"ok": False, "error": clean_error})
             try:
                 await feeder.start_single("upstox", creds)
             except Exception as exc:
                 logger.error("Dashboard: upstox connect failed: %s", exc)
-                raise HTTPException(502, f"Upstox connect failed: {exc}")
-            return {"ok": True, "message": "Upstox feed stream initialized.", "provider": "upstox"}
+                return JSONResponse(
+                    status_code=502,
+                    content={"ok": False, "error": f"Upstox connect failed: {exc}"},
+                )
+            return {"ok": True, "message": "Upstox feed stream initialized.", "provider": "upstox", "token_fresh": True}
 
         @app.post("/api/admin/feeder/connect/fyers", tags=["Admin"])
         async def api_feeder_connect_fyers(
@@ -1006,14 +1437,39 @@ class DashboardServer:
             try:
                 raw = await request.json()
             except Exception:
-                raise HTTPException(400, "Invalid JSON body.")
-            creds = {
-                "client_id":   raw.get("client_id", ""),
-                "app_key":     raw.get("app_key", ""),
+                raw = {}
+            # Fyers uses app_key / pin but we store as api_key / password internally
+            form = {
+                "client_id":   raw.get("client_id", "") or raw.get("fy_id", ""),
+                "api_key":     raw.get("app_key", ""),
                 "secret":      raw.get("secret", ""),
-                "pin":         raw.get("pin", ""),
+                "password":    raw.get("pin", ""),
                 "totp_secret": raw.get("totp_secret", "") or raw.get("totp", ""),
             }
+            # Merge from DB if form fields are incomplete
+            db_row = _srv._client_db.get_feeder_creds_sync("fyers") or {}
+            creds = {
+                "client_id":         form["client_id"]   or db_row.get("client_id",   ""),
+                "app_key":           form["api_key"]     or db_row.get("api_key",     ""),
+                "secret":            form["secret"]      or db_row.get("secret",      ""),
+                "pin":               form["password"]    or db_row.get("password",    ""),
+                "totp_secret":       form["totp_secret"] or db_row.get("totp_secret", ""),
+                "access_token":      db_row.get("access_token",      ""),
+                "token_generated_at": db_row.get("token_generated_at", ""),
+                "token_expiry_at":   db_row.get("token_expiry_at",   ""),
+            }
+            if not creds["client_id"] and not creds["app_key"]:
+                raise HTTPException(400, "Fyers credentials are required. Enter them in the form or they must be cached in the database.")
+            # Persist any newly-entered credentials to DB (api_key = app_key, password = pin)
+            if form["client_id"] or form["api_key"]:
+                await _srv._client_db.upsert_feeder_creds(
+                    "fyers",
+                    client_id=form["client_id"],
+                    api_key=form["api_key"],
+                    secret=form["secret"],
+                    password=form["password"],
+                    totp_secret=form["totp_secret"],
+                )
             # Auto-generate access token via headless TOTP auth
             try:
                 from broker_auth.headless_auth import headless_engine as _he
@@ -1021,22 +1477,167 @@ class DashboardServer:
                 if ok and token:
                     creds["access_token"] = token
                     _srv._auth_alerts["feeder"] = ""
+                    from broker_auth.headless_auth import _ist_eod
+                    await _srv._client_db.update_feeder_token(
+                        "fyers", token,
+                        generated_at=datetime.now(IST).isoformat(),
+                        expiry_at=_ist_eod(),
+                    )
                 else:
                     _srv._auth_alerts["feeder"] = f"Fyers auth failed: {msg}"
                     logger.error("Dashboard: Fyers headless auth failed: %s", msg)
-                    raise HTTPException(502, f"Fyers headless auth failed: {msg}")
-            except HTTPException:
-                raise
+                    # Invalidate cached token without touching credential fields
+                    await _srv._client_db.update_feeder_token(
+                        "fyers", "", generated_at="", expiry_at="",
+                    )
+                    return JSONResponse(
+                        status_code=502,
+                        content={"ok": False, "error": f"Fyers auth failed: {msg}"},
+                    )
             except Exception as exc:
                 _srv._auth_alerts["feeder"] = f"Fyers auth error: {exc}"
                 logger.error("Dashboard: Fyers auth error: %s", exc)
-                raise HTTPException(502, f"Fyers auth error: {exc}")
+                await _srv._client_db.update_feeder_token(
+                    "fyers", "", generated_at="", expiry_at="",
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content={"ok": False, "error": f"Fyers auth error: {exc}"},
+                )
             try:
                 await feeder.start_single("fyers", creds)
             except Exception as exc:
                 logger.error("Dashboard: fyers connect failed: %s", exc)
-                raise HTTPException(502, f"Fyers connect failed: {exc}")
-            return {"ok": True, "message": "Fyers feed stream initialized.", "provider": "fyers"}
+                return JSONResponse(
+                    status_code=502,
+                    content={"ok": False, "error": f"Fyers connect failed: {exc}"},
+                )
+            return {"ok": True, "message": "Fyers feed stream initialized.", "provider": "fyers", "token_fresh": True}
+
+        # ── ADMIN — Fyers in-dashboard OAuth flow ────────────────────────────
+
+        @app.get("/api/admin/feeder/fyers/auth-url", tags=["Admin"])
+        async def api_fyers_auth_url(
+            _: dict = Depends(_require_admin),
+        ):
+            """Step 1 of the Fyers OAuth flow: generate the browser login URL."""
+            db_row = _srv._client_db.get_feeder_creds_sync("fyers") or {}
+            app_id     = db_row.get("api_key", "")
+            secret_key = db_row.get("secret",  "")
+            if not app_id or not secret_key:
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "Fyers App ID and Secret not found in DB. Save credentials first."},
+                )
+            try:
+                from fyers_apiv3 import fyersModel
+                redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+                session = fyersModel.SessionModel(
+                    client_id=app_id,
+                    secret_key=secret_key,
+                    redirect_uri=redirect_uri,
+                    response_type="code",
+                    grant_type="authorization_code",
+                )
+                url = session.generate_authcode()
+                return {"ok": True, "url": url, "redirect_uri": redirect_uri}
+            except Exception as exc:
+                logger.error("Dashboard: Fyers auth-url generation failed: %s", exc)
+                return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+        @app.post("/api/admin/feeder/fyers/exchange-code", tags=["Admin"])
+        async def api_fyers_exchange_code(
+            request: Request, _: dict = Depends(_require_admin),
+        ):
+            """Step 2 of the Fyers OAuth flow: exchange auth_code for access token."""
+            feeder = _srv._feeder
+            if feeder is None:
+                raise HTTPException(503, "GlobalFeeder not wired to dashboard.")
+            try:
+                raw = await request.json()
+            except Exception:
+                raw = {}
+
+            # Accept either a full redirect URL or just the raw auth_code
+            redirect_url = raw.get("redirect_url", "")
+            auth_code    = raw.get("auth_code", "")
+            if redirect_url and not auth_code:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(redirect_url).query)
+                auth_code = (qs.get("auth_code") or qs.get("code") or [""])[0]
+            if not auth_code:
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "auth_code not found. Paste the full redirect URL or just the auth_code value."},
+                )
+
+            db_row = _srv._client_db.get_feeder_creds_sync("fyers") or {}
+            app_id     = db_row.get("api_key", "")
+            secret_key = db_row.get("secret",  "")
+            if not app_id or not secret_key:
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "Fyers App ID and Secret not in DB. Save credentials first."},
+                )
+
+            try:
+                from fyers_apiv3 import fyersModel
+                import asyncio as _asyncio
+
+                redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+                session = fyersModel.SessionModel(
+                    client_id=app_id,
+                    secret_key=secret_key,
+                    redirect_uri=redirect_uri,
+                    response_type="code",
+                    grant_type="authorization_code",
+                )
+                session.set_token(auth_code)
+                resp = await _asyncio.to_thread(session.generate_token)
+
+                if not resp or resp.get("s") != "ok":
+                    msg = (resp or {}).get("message", "Token exchange failed.")
+                    _srv._auth_alerts["feeder"] = f"Fyers OAuth failed: {msg}"
+                    return JSONResponse(status_code=502, content={"ok": False, "error": f"Fyers: {msg}"})
+
+                access_token = resp.get("access_token", "")
+                if not access_token:
+                    return JSONResponse(
+                        status_code=502,
+                        content={"ok": False, "error": "Fyers: token exchange succeeded but access_token is empty."},
+                    )
+
+                from broker_auth.headless_auth import _ist_eod
+                await _srv._client_db.update_feeder_token(
+                    "fyers", access_token,
+                    generated_at=datetime.now(IST).isoformat(),
+                    expiry_at=_ist_eod(),
+                )
+                _srv._auth_alerts["feeder"] = ""
+                logger.info("Dashboard: Fyers OAuth token saved successfully.")
+
+                # Rebuild creds dict for feeder start
+                creds = {
+                    "client_id":          db_row.get("client_id", ""),
+                    "app_key":            app_id,
+                    "secret":             secret_key,
+                    "pin":                db_row.get("password", ""),
+                    "totp_secret":        db_row.get("totp_secret", ""),
+                    "access_token":       access_token,
+                    "token_generated_at": datetime.now(IST).isoformat(),
+                    "token_expiry_at":    _ist_eod(),
+                }
+                try:
+                    await feeder.start_single("fyers", creds)
+                except Exception as exc:
+                    logger.warning("Dashboard: Fyers feeder start after OAuth: %s", exc)
+                    return {"ok": True, "message": "Token saved. Feeder start failed — restart manually.", "token_fresh": True}
+
+                return {"ok": True, "message": "Fyers connected via OAuth — token refreshed.", "provider": "fyers", "token_fresh": True}
+
+            except Exception as exc:
+                logger.error("Dashboard: Fyers exchange-code error: %s", exc)
+                return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
         # ── ADMIN — dual active-active feeder ────────────────────────────────
 
@@ -1050,51 +1651,162 @@ class DashboardServer:
             try:
                 raw = await request.json()
             except Exception:
-                raise HTTPException(400, "Invalid JSON body.")
+                raw = {}
 
-            upstox_creds = {
+            # Merge form fields with DB fallback for each provider
+            from broker_auth.headless_auth import headless_engine as _he, _ist_eod
+            u_db = _srv._client_db.get_feeder_creds_sync("upstox") or {}
+            f_db = _srv._client_db.get_feeder_creds_sync("fyers")  or {}
+
+            u_form = {
                 "client_id":   raw.get("upstox_client_id", ""),
-                "api_key":     raw.get("upstox_api_key", ""),
-                "secret":      raw.get("upstox_secret", ""),
-                "password":    raw.get("upstox_password", ""),
-                "totp_secret": raw.get("upstox_totp", ""),
+                "api_key":     raw.get("upstox_api_key",   ""),
+                "secret":      raw.get("upstox_secret",    ""),
+                "password":    raw.get("upstox_password",  ""),
+                "totp_secret": raw.get("upstox_totp",      ""),
+            }
+            f_form = {
+                "client_id":   raw.get("fyers_client_id", ""),
+                "api_key":     raw.get("fyers_app_key",   ""),
+                "secret":      raw.get("fyers_secret",    ""),
+                "password":    raw.get("fyers_pin",       ""),
+                "totp_secret": raw.get("fyers_totp",      ""),
+            }
+            upstox_creds = {
+                "client_id":   u_form["client_id"]   or u_db.get("client_id",   ""),
+                "api_key":     u_form["api_key"]     or u_db.get("api_key",     ""),
+                "secret":      u_form["secret"]      or u_db.get("secret",      ""),
+                "password":    u_form["password"]    or u_db.get("password",    ""),
+                "totp_secret": u_form["totp_secret"] or u_db.get("totp_secret", ""),
+                "access_token":       u_db.get("access_token",      ""),
+                "token_generated_at": u_db.get("token_generated_at",""),
+                "token_expiry_at":    u_db.get("token_expiry_at",   ""),
             }
             fyers_creds = {
-                "client_id":   raw.get("fyers_client_id", ""),
-                "app_key":     raw.get("fyers_app_key", ""),
-                "secret":      raw.get("fyers_secret", ""),
-                "pin":         raw.get("fyers_pin", ""),
-                "totp_secret": raw.get("fyers_totp", ""),
+                "client_id":   f_form["client_id"]   or f_db.get("client_id",   ""),
+                "app_key":     f_form["api_key"]     or f_db.get("api_key",     ""),
+                "secret":      f_form["secret"]      or f_db.get("secret",      ""),
+                "pin":         f_form["password"]    or f_db.get("password",    ""),
+                "totp_secret": f_form["totp_secret"] or f_db.get("totp_secret", ""),
+                "access_token":       f_db.get("access_token",      ""),
+                "token_generated_at": f_db.get("token_generated_at",""),
+                "token_expiry_at":    f_db.get("token_expiry_at",   ""),
             }
+            # Persist any newly-entered form credentials to DB
+            if u_form["client_id"] or u_form["api_key"]:
+                await _srv._client_db.upsert_feeder_creds("upstox", **u_form)
+            if f_form["client_id"] or f_form["api_key"]:
+                await _srv._client_db.upsert_feeder_creds("fyers",  **f_form)
 
             # Auto-generate tokens for both providers via headless auth
-            from broker_auth.headless_auth import headless_engine as _he
+            now_ist = datetime.now(IST).isoformat()
+            eod     = _ist_eod()
             failures = []
+
             ok_u, msg_u, tok_u = await _he.validate_feeder_creds("upstox", upstox_creds)
             if ok_u and tok_u:
                 upstox_creds["access_token"] = tok_u
+                await _srv._client_db.update_feeder_token("upstox", tok_u, now_ist, eod)
             else:
                 failures.append(f"Upstox: {msg_u}")
+                upstox_creds = {}   # don't try to connect with a bad/missing token
 
             ok_f, msg_f, tok_f = await _he.validate_feeder_creds("fyers", fyers_creds)
             if ok_f and tok_f:
                 fyers_creds["access_token"] = tok_f
+                await _srv._client_db.update_feeder_token("fyers", tok_f, now_ist, eod)
             else:
                 failures.append(f"Fyers: {msg_f}")
+                fyers_creds = {}    # don't try to connect with a bad/missing token
 
-            if failures:
+            # Abort only if BOTH providers failed — partial success still starts the feeder
+            if not ok_u and not ok_f:
                 alert = "CRITICAL: " + " | ".join(failures)
                 _srv._auth_alerts["feeder"] = alert
-                logger.error("Dashboard: dual feeder auth failed: %s", alert)
-                raise HTTPException(502, f"Headless auth failed: {'; '.join(failures)}")
+                logger.error("Dashboard: dual feeder auth failed (both providers): %s", alert)
+                raise HTTPException(502, f"Both providers failed: {'; '.join(failures)}")
 
-            _srv._auth_alerts["feeder"] = ""
+            if failures:
+                _srv._auth_alerts["feeder"] = "WARNING: " + " | ".join(failures)
+                logger.warning("Dashboard: dual feeder partial auth — %s", failures)
+            else:
+                _srv._auth_alerts["feeder"] = ""
+
             try:
                 await feeder.start_dual(upstox_creds, fyers_creds)
             except Exception as exc:
                 logger.error("Dashboard: start_dual failed: %s", exc)
                 raise HTTPException(502, f"Dual feeder connect failed: {exc}")
-            return {"ok": True, "message": "Dual active-active feed established.", "provider": "dual"}
+
+            active = [p for p, ok in [("upstox", ok_u), ("fyers", ok_f)] if ok]
+            warn   = f" | WARNING: {'; '.join(failures)}" if failures else ""
+            return {
+                "ok": True,
+                "message": f"Dual feed active: {', '.join(active)}.{warn}",
+                "provider": "dual",
+                "active_providers": active,
+            }
+
+        # ── ADMIN — save-only credential endpoints ───────────────────────────
+
+        @app.post("/api/admin/feeder/creds/upstox", tags=["Admin"])
+        async def api_save_upstox_creds(
+            body: _SaveUpstoxCredsSchema, _: dict = Depends(_require_admin),
+        ):
+            db = _srv._client_db
+            if db is None:
+                return JSONResponse(status_code=503, content={"ok": False, "error": "Database not available."})
+            # Sanitise — Pydantic guarantees str but strip whitespace and guard None
+            client_id   = str(body.client_id   or "").strip()
+            api_key     = str(body.api_key     or "").strip()
+            secret      = str(body.secret      or "").strip()
+            password    = str(body.password    or "").strip()
+            totp_secret = str(body.totp_secret or "").strip()
+            if not any([client_id, api_key, secret, password, totp_secret]):
+                return JSONResponse(status_code=400, content={"ok": False, "error": "At least one credential field must be provided."})
+            try:
+                await db.upsert_feeder_creds(
+                    provider="upstox",
+                    client_id=client_id,
+                    api_key=api_key,
+                    secret=secret,
+                    password=password,
+                    totp_secret=totp_secret,
+                )
+            except Exception as exc:
+                logger.error("Dashboard: Upstox credential save failed: %s", exc, exc_info=exc)
+                return JSONResponse(status_code=500, content={"ok": False, "error": f"Database write failed: {exc}"})
+            logger.info("Dashboard: Upstox feeder credentials saved to DB.")
+            return {"ok": True, "message": "Upstox credentials saved."}
+
+        @app.post("/api/admin/feeder/creds/fyers", tags=["Admin"])
+        async def api_save_fyers_creds(
+            body: _SaveFyersCredsSchema, _: dict = Depends(_require_admin),
+        ):
+            db = _srv._client_db
+            if db is None:
+                return JSONResponse(status_code=503, content={"ok": False, "error": "Database not available."})
+            client_id   = str(body.client_id   or "").strip()
+            api_key     = str(body.app_key     or "").strip()
+            secret      = str(body.secret      or "").strip()
+            password    = str(body.pin         or "").strip()
+            totp_secret = str(body.totp_secret or "").strip()
+            if not any([client_id, api_key, secret, password, totp_secret]):
+                return JSONResponse(status_code=400, content={"ok": False, "error": "At least one credential field must be provided."})
+            try:
+                await db.upsert_feeder_creds(
+                    provider="fyers",
+                    client_id=client_id,
+                    api_key=api_key,
+                    secret=secret,
+                    password=password,
+                    totp_secret=totp_secret,
+                )
+            except Exception as exc:
+                logger.error("Dashboard: Fyers credential save failed: %s", exc, exc_info=exc)
+                return JSONResponse(status_code=500, content={"ok": False, "error": f"Database write failed: {exc}"})
+            logger.info("Dashboard: Fyers feeder credentials saved to DB.")
+            return {"ok": True, "message": "Fyers credentials saved."}
 
         # ── ADMIN — RMS config ────────────────────────────────────────────────
 
@@ -1145,6 +1857,36 @@ class DashboardServer:
             })
             logger.critical("Dashboard: FORCE LIQUIDATE — halted %d clients.", n)
             return {"ok": True, "halted": n}
+
+        # ── ADMIN — live broker positions ────────────────────────────────────
+
+        @app.get("/api/admin/positions", tags=["Admin"])
+        async def api_positions(_: dict = Depends(_require_admin)):
+            """Fetch open positions from all authenticated broker bindings."""
+            router = _srv._router
+            if router is None:
+                return {"ok": True, "positions": []}
+            results = []
+            for client_id, bindings in router._brokers.items():
+                for binding_id, broker in bindings.items():
+                    try:
+                        positions = await broker.get_positions()
+                        for pos in positions:
+                            if pos.qty == 0:
+                                continue
+                            results.append({
+                                "client_id":  client_id,
+                                "binding_id": binding_id,
+                                "symbol":     pos.symbol,
+                                "qty":        pos.qty,
+                                "avg_price":  round(pos.avg_price, 2),
+                                "pnl":        round(pos.pnl, 2),
+                                "product":    pos.product,
+                            })
+                    except Exception as exc:
+                        logger.warning("Dashboard: positions fetch failed %s/%s: %s",
+                                       client_id, binding_id, exc)
+            return {"ok": True, "positions": results}
 
         # ── ADMIN — checkpoint ────────────────────────────────────────────────
 
@@ -1408,6 +2150,12 @@ class DashboardServer:
         self._uvicorn_server.install_signal_handlers = lambda: None
 
         logger.info("Dashboard: http://%s:%d  (WebSocket: ws://%s:%d/ws)", host, port, host, port)
+
+        # Kick off background boot-time feeder auto-connect after a short settle delay
+        boot_task = asyncio.create_task(
+            self._boot_feeder_auto_connect(), name="boot_feeder_auto_connect"
+        )
+
         try:
             await asyncio.gather(
                 self._uvicorn_server.serve(),
@@ -1415,6 +2163,103 @@ class DashboardServer:
             )
         except asyncio.CancelledError:
             pass
+        finally:
+            if not boot_task.done():
+                boot_task.cancel()
+
+    async def _boot_feeder_auto_connect(self) -> None:
+        """
+        On server startup, check DB for cached feeder credentials and
+        auto-reconnect if found.  Runs after a 4-second settle delay so the
+        feeder object is fully initialised before we touch it.
+        """
+        await asyncio.sleep(4.0)
+        try:
+            feeder = self._feeder
+            if feeder is None:
+                return
+
+            from broker_auth.headless_auth import headless_engine as _he, _token_is_fresh, _ist_eod
+            u_row = self._client_db.get_feeder_creds_sync("upstox") or {}
+            f_row = self._client_db.get_feeder_creds_sync("fyers")  or {}
+
+            has_upstox = bool(u_row.get("client_id") or u_row.get("api_key"))
+            has_fyers  = bool(f_row.get("client_id") or f_row.get("api_key"))
+
+            if not has_upstox and not has_fyers:
+                logger.info("DashboardServer: No cached feeder credentials — skipping auto-connect.")
+                return
+
+            logger.info(
+                "DashboardServer: Boot-time auto-connect (upstox=%s, fyers=%s).",
+                has_upstox, has_fyers,
+            )
+            now_ist = datetime.now(IST).isoformat()
+            eod     = _ist_eod()
+
+            upstox_creds: dict = {}
+            fyers_creds:  dict = {}
+
+            if has_upstox:
+                upstox_creds = {
+                    "client_id":   u_row["client_id"],
+                    "api_key":     u_row["api_key"],
+                    "secret":      u_row["secret"],
+                    "password":    u_row["password"],
+                    "totp_secret": u_row["totp_secret"],
+                    "access_token":       u_row.get("access_token", ""),
+                    "token_generated_at": u_row.get("token_generated_at", ""),
+                    "token_expiry_at":    u_row.get("token_expiry_at", ""),
+                }
+                # Use cached token if fresh, otherwise re-auth
+                if not _token_is_fresh(u_row.get("token_generated_at",""), u_row.get("token_expiry_at","")):
+                    ok, msg, tok = await _he.validate_feeder_creds("upstox", upstox_creds)
+                    if ok and tok:
+                        upstox_creds["access_token"] = tok
+                        await self._client_db.update_feeder_token("upstox", tok, now_ist, eod)
+                        self._auth_alerts["feeder"] = ""
+                        logger.info("DashboardServer: Upstox boot-auth succeeded.")
+                    else:
+                        self._auth_alerts["feeder"] = f"Upstox boot-auth failed: {msg}"
+                        logger.warning("DashboardServer: Upstox boot-auth failed: %s", msg)
+                        has_upstox = False  # Don't try to connect with a bad token
+
+            if has_fyers:
+                fyers_creds = {
+                    "client_id":   f_row["client_id"],
+                    "app_key":     f_row["api_key"],
+                    "secret":      f_row["secret"],
+                    "pin":         f_row["password"],
+                    "totp_secret": f_row["totp_secret"],
+                    "access_token":       f_row.get("access_token", ""),
+                    "token_generated_at": f_row.get("token_generated_at", ""),
+                    "token_expiry_at":    f_row.get("token_expiry_at", ""),
+                }
+                if not _token_is_fresh(f_row.get("token_generated_at",""), f_row.get("token_expiry_at","")):
+                    ok, msg, tok = await _he.validate_feeder_creds("fyers", fyers_creds)
+                    if ok and tok:
+                        fyers_creds["access_token"] = tok
+                        await self._client_db.update_feeder_token("fyers", tok, now_ist, eod)
+                        logger.info("DashboardServer: Fyers boot-auth succeeded.")
+                    else:
+                        logger.warning("DashboardServer: Fyers boot-auth failed: %s", msg)
+                        has_fyers = False
+
+            # Connect the feeder with whatever credentials are ready
+            try:
+                if has_upstox and has_fyers:
+                    await feeder.start_dual(upstox_creds, fyers_creds)
+                    logger.info("DashboardServer: Boot auto-connect — dual feed active.")
+                elif has_upstox:
+                    await feeder.start_single("upstox", upstox_creds)
+                    logger.info("DashboardServer: Boot auto-connect — Upstox feed active.")
+                elif has_fyers:
+                    await feeder.start_single("fyers", fyers_creds)
+                    logger.info("DashboardServer: Boot auto-connect — Fyers feed active.")
+            except Exception as exc:
+                logger.error("DashboardServer: Boot auto-connect feeder start failed: %s", exc)
+        except Exception as exc:
+            logger.warning("DashboardServer: _boot_feeder_auto_connect error: %s", exc)
 
     def stop(self) -> None:
         self._ws_bridge.stop()

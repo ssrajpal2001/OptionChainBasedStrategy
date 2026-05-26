@@ -133,6 +133,19 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
 
 CREATE INDEX IF NOT EXISTS idx_clients_approved ON clients(is_admin_approved);
 CREATE INDEX IF NOT EXISTS idx_bb_client        ON broker_bindings(client_id);
+
+CREATE TABLE IF NOT EXISTS system_feeder_creds (
+    provider           TEXT PRIMARY KEY,
+    client_id_enc      TEXT DEFAULT '',
+    api_key_enc        TEXT DEFAULT '',
+    secret_enc         TEXT DEFAULT '',
+    password_enc       TEXT DEFAULT '',
+    totp_secret_enc    TEXT DEFAULT '',
+    access_token       TEXT DEFAULT '',
+    token_generated_at TEXT DEFAULT '',
+    token_expiry_at    TEXT DEFAULT '',
+    updated_at         TEXT NOT NULL
+);
 """
 
 
@@ -361,6 +374,91 @@ class ClientDB:
         except Exception as exc:
             logger.error("ClientDB.get_bindings_safe_sync(%s): %s", client_id, exc)
             return []
+
+    # ── System feeder credentials ─────────────────────────────────────────────
+
+    async def upsert_feeder_creds(
+        self,
+        provider:    str,
+        client_id:   str = "",
+        api_key:     str = "",
+        secret:      str = "",
+        password:    str = "",
+        totp_secret: str = "",
+    ) -> None:
+        """Persist admin feeder long-lived credentials (XOR-obfuscated)."""
+        now = datetime.now(IST).isoformat()
+        await asyncio.to_thread(
+            self._exec,
+            """INSERT INTO system_feeder_creds
+               (provider, client_id_enc, api_key_enc, secret_enc,
+                password_enc, totp_secret_enc, updated_at)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(provider) DO UPDATE SET
+                 client_id_enc   = CASE WHEN excluded.client_id_enc   != '' THEN excluded.client_id_enc   ELSE client_id_enc   END,
+                 api_key_enc     = CASE WHEN excluded.api_key_enc     != '' THEN excluded.api_key_enc     ELSE api_key_enc     END,
+                 secret_enc      = CASE WHEN excluded.secret_enc      != '' THEN excluded.secret_enc      ELSE secret_enc      END,
+                 password_enc    = CASE WHEN excluded.password_enc    != '' THEN excluded.password_enc    ELSE password_enc    END,
+                 totp_secret_enc = CASE WHEN excluded.totp_secret_enc != '' THEN excluded.totp_secret_enc ELSE totp_secret_enc END,
+                 updated_at      = excluded.updated_at""",
+            (
+                provider,
+                _encode_cred(client_id),
+                _encode_cred(api_key),
+                _encode_cred(secret),
+                _encode_cred(password),
+                _encode_cred(totp_secret),
+                now,
+            ),
+        )
+
+    def get_feeder_creds_sync(self, provider: str) -> Optional[dict]:
+        """
+        Return system feeder credentials for a provider with fields decoded.
+        Returns None if no record exists.
+        """
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                "SELECT * FROM system_feeder_creds WHERE provider = ?", (provider,)
+            ).fetchone()
+            con.close()
+            if row is None:
+                return None
+            r = dict(row)
+            return {
+                "provider":          r["provider"],
+                "client_id":         _decode_cred(r.get("client_id_enc", "")),
+                "api_key":           _decode_cred(r.get("api_key_enc", "")),
+                "secret":            _decode_cred(r.get("secret_enc", "")),
+                "password":          _decode_cred(r.get("password_enc", "")),
+                "totp_secret":       _decode_cred(r.get("totp_secret_enc", "")),
+                "access_token":      r.get("access_token", ""),
+                "token_generated_at": r.get("token_generated_at", ""),
+                "token_expiry_at":   r.get("token_expiry_at", ""),
+                "updated_at":        r.get("updated_at", ""),
+            }
+        except Exception as exc:
+            logger.error("ClientDB.get_feeder_creds_sync(%s): %s", provider, exc)
+            return None
+
+    async def update_feeder_token(
+        self,
+        provider:     str,
+        token:        str,
+        generated_at: str = "",
+        expiry_at:    str = "",
+    ) -> None:
+        """Persist a freshly-generated feeder access token."""
+        now = datetime.now(IST).isoformat()
+        await asyncio.to_thread(
+            self._exec,
+            """UPDATE system_feeder_creds
+               SET access_token=?, token_generated_at=?, token_expiry_at=?, updated_at=?
+               WHERE provider=?""",
+            (token, generated_at or now, expiry_at, now, provider),
+        )
 
     # ── Boot-time bulk load ───────────────────────────────────────────────────
 
