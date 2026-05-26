@@ -2700,38 +2700,40 @@ document.addEventListener('alpine:init', () => {
                       <option>AND</option><option>OR</option>
                     </select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
-                    <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
+                    <select x-model="rule.indicator" class="t-input" style="width:110px;font-size:11px">
                       <option value="rsi">RSI</option>
                       <option value="vwap">VWAP</option>
-                      <option value="adx">ADX</option>
                       <option value="roc">ROC</option>
-                      <option value="slope">Slope</option>
+                      <option value="slope">VWAP Slope</option>
                       <option value="advanced">Advanced</option>
                     </select>
-                    <template x-if="rule.indicator!=='advanced' && rule.indicator!=='vwap'">
+                    <!-- Period only for rsi/roc -->
+                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc'">
                       <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px" title="Period">
                     </template>
                     <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px" title="TF (min)">
+                    <!-- Advanced: operand1 -->
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand1" class="t-input" style="width:90px;font-size:10px">
-                        <option value="LTP">LTP</option><option value="VWAP">VWAP</option>
-                        <option value="EMA_FAST">EMA Fast</option><option value="EMA_SLOW">EMA Slow</option>
+                      <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
+                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
                       </select>
                     </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
                       <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option><option>=</option>
                     </select>
+                    <!-- Advanced: operand2 -->
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand2" class="t-input" style="width:90px;font-size:10px">
-                        <option value="VWAP">VWAP</option><option value="LTP">LTP</option>
-                        <option value="EMA_FAST">EMA Fast</option><option value="EMA_SLOW">EMA Slow</option>
-                        <option value="value">Fixed Value</option>
+                      <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
+                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="VALUE">Fixed Value</option>
                       </select>
                     </template>
                     <template x-if="rule.indicator!=='advanced'">
                       <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px" title="Threshold">
                     </template>
-                    <template x-if="rule.indicator==='advanced' && rule.operand2==='value'">
+                    <template x-if="rule.indicator==='advanced' && rule.operand2==='VALUE'">
                       <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input" style="width:60px">
                     </template>
                     <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
@@ -2758,18 +2760,37 @@ document.addEventListener('alpine:init', () => {
                   <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
-                    <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
-                      <option value="rsi">RSI</option><option value="vwap">VWAP</option><option value="adx">ADX</option>
-                      <option value="roc">ROC</option><option value="slope">Slope</option><option value="advanced">Advanced</option>
+                    <select x-model="rule.indicator" class="t-input" style="width:110px;font-size:11px">
+                      <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                      <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                      <option value="advanced">Advanced</option>
                     </select>
-                    <template x-if="rule.indicator!=='advanced' && rule.indicator!=='vwap'">
+                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc'">
                       <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
                     </template>
                     <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                    <template x-if="rule.indicator==='advanced'">
+                      <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
+                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                      </select>
+                    </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
-                      <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
+                      <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option><option>=</option>
                     </select>
-                    <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                    <template x-if="rule.indicator==='advanced'">
+                      <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
+                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="VALUE">Fixed Value</option>
+                      </select>
+                    </template>
+                    <template x-if="rule.indicator!=='advanced'">
+                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                    </template>
+                    <template x-if="rule.indicator==='advanced' && rule.operand2==='VALUE'">
+                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input" style="width:60px">
+                    </template>
                     <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
                     <button @click="removeRule('entry_rules_reentry', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
                   </div>
@@ -2792,18 +2813,37 @@ document.addEventListener('alpine:init', () => {
                   <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
-                    <select x-model="rule.indicator" class="t-input" style="width:90px;font-size:11px">
-                      <option value="rsi">RSI</option><option value="vwap">VWAP</option><option value="adx">ADX</option>
-                      <option value="roc">ROC</option><option value="slope">Slope</option><option value="advanced">Advanced</option>
+                    <select x-model="rule.indicator" class="t-input" style="width:110px;font-size:11px">
+                      <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                      <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                      <option value="advanced">Advanced</option>
                     </select>
-                    <template x-if="rule.indicator!=='advanced' && rule.indicator!=='vwap'">
+                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc'">
                       <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
                     </template>
                     <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                    <template x-if="rule.indicator==='advanced'">
+                      <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
+                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                      </select>
+                    </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
-                      <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option>
+                      <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option><option>=</option>
                     </select>
-                    <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                    <template x-if="rule.indicator==='advanced'">
+                      <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
+                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                        <option value="VALUE">Fixed Value</option>
+                      </select>
+                    </template>
+                    <template x-if="rule.indicator!=='advanced'">
+                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                    </template>
+                    <template x-if="rule.indicator==='advanced' && rule.operand2==='VALUE'">
+                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input" style="width:60px">
+                    </template>
                     <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
                     <button @click="removeRule('exit_rules', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
                   </div>
