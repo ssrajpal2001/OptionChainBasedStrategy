@@ -65,13 +65,17 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "smart_rolling_enabled": False,
     # VWAP rise SL: exit when combined VWAP rises >= threshold% above session-low VWAP
     "vwap_rise_sl":  {"enabled": False, "tf": 1, "threshold": 1.0},
+    # SL cooldown: after SL hit, block re-entry for (max_entry_rule_tf × multiplier) minutes
+    "sl_cooldown_tf_multiplier": 1.0,
+    # Capital-based profit target: if > 0, profit_pct is applied to this ₹ amount per day
+    "capital_deployed_inr": 0,
     "max_trades": 1,
     "per_day": {
-        "monday":    {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "tuesday":   {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "wednesday": {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "thursday":  {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "friday":    {"enabled": False, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "monday":    {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "tuesday":   {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "wednesday": {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "thursday":  {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "friday":    {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
     },
 }
 

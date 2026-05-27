@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, date, time as dtime
+from datetime import datetime, date, time as dtime, timedelta
 from typing import Dict, List, Optional
 
 from config.global_config import IST, Topic
@@ -74,9 +74,13 @@ class StraddlePosition:
     _sl_pct:          float = field(default=2.00, repr=False)
     _trail_lock_pct:  float = field(default=0.20, repr=False)
     _trail_floor_pct: float = field(default=0.10, repr=False)
+    # Capital-based profit target in ₹ (0 = fall back to credit-based)
+    _capital_target:  float = field(default=0.0,  repr=False)
 
     @property
     def profit_target(self) -> float:
+        if self._capital_target > 0:
+            return self._capital_target
         return self.net_credit * self._profit_pct
 
     @property
@@ -120,13 +124,15 @@ class SellStraddleStrategy:
         self._trades_today: int = 0
         self._prev_spot: float = 0.0
         self._tasks: list = []
+        self._sl_cooldown_until: Optional[datetime] = None
+        self._pending_capital_target: float = 0.0
 
         # Runtime-configurable thresholds — updated by reconfigure()
         self._load_thresholds()
 
     def _load_thresholds(self) -> None:
         """Pull current thresholds from RuntimeConfig into instance attributes."""
-        ss = RuntimeConfig.section("sell_straddle")
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         self._entry_start    = _parse_time(ss.get("entry_start",    "09:20"))
         self._entry_cutoff   = _parse_time(ss.get("entry_end",      "12:00"))
         self._force_exit     = _parse_time(ss.get("squareoff_time", "15:15"))
@@ -139,6 +145,8 @@ class SellStraddleStrategy:
         self._trail_floor_pct= float(ss.get("trail_floor_pct", 10.0)) / 100.0
         self._max_trades     = int(ss.get("max_trades", 1))
         self._roc_limit_pct  = float(ss.get("roc_limit_pct", 1.5))
+        self._sl_cooldown_tf_mult = float(ss.get("sl_cooldown_tf_multiplier", 1.0))
+        self._capital_deployed_inr = float(ss.get("capital_deployed_inr", 0))
 
     def reconfigure(self) -> None:
         """Live-reload thresholds from RuntimeConfig without restarting."""
@@ -169,6 +177,8 @@ class SellStraddleStrategy:
     def reset_session(self) -> None:
         self._trades_today = 0
         self._position = None
+        self._sl_cooldown_until = None
+        self._pending_capital_target = 0.0
         logger.info("SellStraddleStrategy[%s]: session reset.", self._underlying)
 
     # ── EventBus loops ────────────────────────────────────────────────────────
@@ -242,6 +252,14 @@ class SellStraddleStrategy:
         if self._trades_today >= self._max_trades:
             return
 
+        if self._sl_cooldown_until and now < self._sl_cooldown_until:
+            remaining = int((self._sl_cooldown_until - now).total_seconds() / 60)
+            logger.debug(
+                "SellStraddle[%s]: entry blocked — SL cooldown active, %d min remaining.",
+                self._underlying, remaining,
+            )
+            return
+
         if not (self._rsi_min <= self._rsi <= self._rsi_max):
             logger.debug(
                 "SellStraddle[%s]: entry blocked — RSI=%.1f (need %.0f–%.0f).",
@@ -261,9 +279,10 @@ class SellStraddleStrategy:
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         atm  = round(self._spot / step) * step
 
+        self._pending_capital_target = self._compute_capital_target(now)
         logger.info(
-            "SellStraddle[%s]: entry signal — ATM=%.0f RSI=%.1f ADX=%.1f",
-            self._underlying, atm, self._rsi, self._adx,
+            "SellStraddle[%s]: entry signal — ATM=%.0f RSI=%.1f ADX=%.1f capital_target=₹%.0f",
+            self._underlying, atm, self._rsi, self._adx, self._pending_capital_target,
         )
         logger.info(
             "SellStraddle[%s]: ORDER INTENT — SELL %s%.0fCE + SELL %s%.0fPE (×%d lot)",
@@ -344,6 +363,33 @@ class SellStraddleStrategy:
             self._underlying, reason, pos.realized_pnl,
         )
         self._position = None
+        if reason == "stop_loss":
+            self._apply_sl_cooldown()
+
+    def _apply_sl_cooldown(self) -> None:
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        rules = ss.get("entry_rules_beginning", []) + ss.get("entry_rules_reentry", [])
+        tfs = [int(r.get("tf", 5)) for r in rules if r.get("tf")]
+        max_tf = max(tfs) if tfs else 5
+        cooldown_minutes = max_tf * self._sl_cooldown_tf_mult
+        if cooldown_minutes > 0:
+            self._sl_cooldown_until = datetime.now(IST) + timedelta(minutes=cooldown_minutes)
+            logger.info(
+                "SellStraddle[%s]: SL cooldown set — %d min (max TF=%d × %.1f)",
+                self._underlying, cooldown_minutes, max_tf, self._sl_cooldown_tf_mult,
+            )
+
+    def _compute_capital_target(self, now: datetime) -> float:
+        """Return ₹ profit target based on capital_deployed_inr × per-day or global pct."""
+        if self._capital_deployed_inr <= 0:
+            return 0.0
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        day_name = now.strftime("%A").lower()
+        day_cfg = ss.get("per_day", {}).get(day_name, {})
+        pct = float(day_cfg.get("profit_target_pct", 0))
+        if pct <= 0:
+            pct = float(ss.get("profit_pct", 30.0))
+        return self._capital_deployed_inr * pct / 100.0
 
     # ── Public accessors ─────────────────────────────────────────────────────
 

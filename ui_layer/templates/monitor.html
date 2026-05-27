@@ -1336,13 +1336,15 @@ document.addEventListener('alpine:init', () => {
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         smart_rolling_enabled: false,
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
+        sl_cooldown_tf_multiplier: 1.0,
+        capital_deployed_inr: 0,
         max_trades: 1,
         per_day: {
-          monday:    { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          tuesday:   { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          wednesday: { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          thursday:  { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          friday:    { enabled: false, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          monday:    { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          tuesday:   { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          wednesday: { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          thursday:  { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          friday:    { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
         }
       };
     },
@@ -1377,10 +1379,13 @@ document.addEventListener('alpine:init', () => {
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (ss.smart_rolling_enabled === undefined) ss.smart_rolling_enabled = false;
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
-      const _dayDef = () => ({ enabled:false, single_trade_target_pts:0, single_trade_stoploss_pts:0, guardrail_pnl:{target_pts:0,stoploss_pts:0} });
+      if (ss.sl_cooldown_tf_multiplier === undefined) ss.sl_cooldown_tf_multiplier = 1.0;
+      if (ss.capital_deployed_inr === undefined) ss.capital_deployed_inr = 0;
+      const _dayDef = () => ({ enabled:false, profit_target_pct:0, single_trade_target_pts:0, single_trade_stoploss_pts:0, guardrail_pnl:{target_pts:0,stoploss_pts:0} });
       if (!ss.per_day) ss.per_day = { monday:_dayDef(), tuesday:_dayDef(), wednesday:_dayDef(), thursday:_dayDef(), friday:_dayDef() };
       for (const d of ['monday','tuesday','wednesday','thursday','friday']) {
         if (!ss.per_day[d]) ss.per_day[d] = _dayDef();
+        if (ss.per_day[d].profit_target_pct === undefined) ss.per_day[d].profit_target_pct = 0;
         if (!ss.per_day[d].guardrail_pnl) ss.per_day[d].guardrail_pnl = { target_pts:0, stoploss_pts:0 };
       }
     },
@@ -2706,26 +2711,24 @@ document.addEventListener('alpine:init', () => {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[])" :key="i">
-                  <div x-data="{}" class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                    <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px">
+                  <div x-data="{}" class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                    <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic">
                       <option>AND</option><option>OR</option>
                     </select>
-                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
-                    <select x-model="rule.indicator" class="t-input" style="width:110px;font-size:11px">
+                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
+                    <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
                       <option value="vwap">VWAP</option>
                       <option value="vwap_slope">Slope</option>
                       <option value="rsi">RSI</option>
                       <option value="roc">ROC</option>
                       <option value="advanced">Advanced</option>
                     </select>
-                    <!-- Period only for rsi/roc -->
                     <template x-if="rule.indicator==='rsi' || rule.indicator==='roc' || rule.indicator==='vwap_slope'">
-                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px" title="Period">
+                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input w-14 flex-none" title="Period">
                     </template>
-                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px" title="TF (min)">
-                    <!-- Advanced: operand1 -->
+                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input w-14 flex-none" title="TF (min)">
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand1" class="t-input" style="width:110px;font-size:10px">
+                      <select x-model="rule.operand1" class="t-input flex-1 min-w-[90px]">
                         <option value="LTP">Combined LTP</option>
                         <option value="CLOSE">Combined Close</option>
                         <option value="VWAP">Combined VWAP</option>
@@ -2736,13 +2739,11 @@ document.addEventListener('alpine:init', () => {
                         <option value="SLOPE_PREV">V-Slope Previous</option>
                       </select>
                     </template>
-                    <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                    <select x-model="rule.operator_sym" class="t-input w-14 flex-none text-center">
                       <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option><option>=</option>
                     </select>
-                    <!-- Advanced: operand2 -->
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
-                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                      <select x-model="rule.operand2" class="t-input flex-1 min-w-[90px]">
                         <option value="LTP">Combined LTP</option>
                         <option value="CLOSE">Combined Close</option>
                         <option value="VWAP">Combined VWAP</option>
@@ -2755,13 +2756,13 @@ document.addEventListener('alpine:init', () => {
                       </select>
                     </template>
                     <template x-if="rule.indicator!=='advanced'">
-                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px" title="Threshold">
+                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input w-16 flex-none" title="Threshold">
                     </template>
                     <template x-if="rule.indicator==='advanced' && rule.operand2==='VALUE'">
-                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input" style="width:60px">
+                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input w-16 flex-none" title="Fixed value">
                     </template>
-                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
-                    <button @click="removeRule('entry_rules_beginning', i)" class="btn-halt px-2 py-1 ml-auto" title="Remove">✕</button>
+                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input w-8 flex-none text-center" title="Close bracket">
+                    <button @click="removeRule('entry_rules_beginning', i)" class="btn-halt px-2 py-1 ml-auto flex-none" title="Remove">✕</button>
                   </div>
                 </template>
                 <div x-show="!(indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[]).length"
@@ -2781,20 +2782,22 @@ document.addEventListener('alpine:init', () => {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[])" :key="i">
-                  <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                    <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
-                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
-                    <select x-model="rule.indicator" class="t-input" style="width:110px;font-size:11px">
-                      <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                      <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                  <div class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                    <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
+                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
+                    <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
+                      <option value="vwap">VWAP</option>
+                      <option value="vwap_slope">Slope</option>
+                      <option value="rsi">RSI</option>
+                      <option value="roc">ROC</option>
                       <option value="advanced">Advanced</option>
                     </select>
                     <template x-if="rule.indicator==='rsi' || rule.indicator==='roc' || rule.indicator==='vwap_slope'">
-                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
+                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input w-14 flex-none" title="Period">
                     </template>
-                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input w-14 flex-none" title="TF (min)">
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand1" class="t-input" style="width:110px;font-size:10px">
+                      <select x-model="rule.operand1" class="t-input flex-1 min-w-[90px]">
                         <option value="LTP">Combined LTP</option>
                         <option value="CLOSE">Combined Close</option>
                         <option value="VWAP">Combined VWAP</option>
@@ -2805,12 +2808,11 @@ document.addEventListener('alpine:init', () => {
                         <option value="SLOPE_PREV">V-Slope Previous</option>
                       </select>
                     </template>
-                    <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                    <select x-model="rule.operator_sym" class="t-input w-14 flex-none text-center">
                       <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option><option>=</option>
                     </select>
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
-                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                      <select x-model="rule.operand2" class="t-input flex-1 min-w-[90px]">
                         <option value="LTP">Combined LTP</option>
                         <option value="CLOSE">Combined Close</option>
                         <option value="VWAP">Combined VWAP</option>
@@ -2823,13 +2825,13 @@ document.addEventListener('alpine:init', () => {
                       </select>
                     </template>
                     <template x-if="rule.indicator!=='advanced'">
-                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input w-16 flex-none" title="Threshold">
                     </template>
                     <template x-if="rule.indicator==='advanced' && rule.operand2==='VALUE'">
-                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input" style="width:60px">
+                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input w-16 flex-none" title="Fixed value">
                     </template>
-                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
-                    <button @click="removeRule('entry_rules_reentry', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
+                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input w-8 flex-none text-center" title="Close bracket">
+                    <button @click="removeRule('entry_rules_reentry', i)" class="btn-halt px-2 py-1 ml-auto flex-none">✕</button>
                   </div>
                 </template>
                 <div x-show="!(indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[]).length"
@@ -2847,20 +2849,22 @@ document.addEventListener('alpine:init', () => {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[])" :key="i">
-                  <div class="flex items-center gap-1 mb-1.5 flex-wrap p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                    <select x-model="rule.operator" class="t-input" style="width:60px;font-size:10px"><option>AND</option><option>OR</option></select>
-                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
-                    <select x-model="rule.indicator" class="t-input" style="width:110px;font-size:11px">
-                      <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                      <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
+                  <div class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                    <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
+                    <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
+                    <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
+                      <option value="vwap">VWAP</option>
+                      <option value="vwap_slope">Slope</option>
+                      <option value="rsi">RSI</option>
+                      <option value="roc">ROC</option>
                       <option value="advanced">Advanced</option>
                     </select>
                     <template x-if="rule.indicator==='rsi' || rule.indicator==='roc' || rule.indicator==='vwap_slope'">
-                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
+                      <input type="number" x-model.number="rule.period" placeholder="14" class="t-input w-14 flex-none" title="Period">
                     </template>
-                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
+                    <input type="number" x-model="rule.tf" placeholder="5" class="t-input w-14 flex-none" title="TF (min)">
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand1" class="t-input" style="width:110px;font-size:10px">
+                      <select x-model="rule.operand1" class="t-input flex-1 min-w-[90px]">
                         <option value="LTP">Combined LTP</option>
                         <option value="CLOSE">Combined Close</option>
                         <option value="VWAP">Combined VWAP</option>
@@ -2871,12 +2875,11 @@ document.addEventListener('alpine:init', () => {
                         <option value="SLOPE_PREV">V-Slope Previous</option>
                       </select>
                     </template>
-                    <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
+                    <select x-model="rule.operator_sym" class="t-input w-14 flex-none text-center">
                       <option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option><option>=</option>
                     </select>
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
-                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
+                      <select x-model="rule.operand2" class="t-input flex-1 min-w-[90px]">
                         <option value="LTP">Combined LTP</option>
                         <option value="CLOSE">Combined Close</option>
                         <option value="VWAP">Combined VWAP</option>
@@ -2889,13 +2892,13 @@ document.addEventListener('alpine:init', () => {
                       </select>
                     </template>
                     <template x-if="rule.indicator!=='advanced'">
-                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input" style="width:60px">
+                      <input type="number" x-model.number="rule.threshold" placeholder="50" class="t-input w-16 flex-none" title="Threshold">
                     </template>
                     <template x-if="rule.indicator==='advanced' && rule.operand2==='VALUE'">
-                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input" style="width:60px">
+                      <input type="number" x-model.number="rule.operand2_val" placeholder="0" class="t-input w-16 flex-none" title="Fixed value">
                     </template>
-                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input text-center" style="width:28px">
-                    <button @click="removeRule('exit_rules', i)" class="btn-halt px-2 py-1 ml-auto">✕</button>
+                    <input type="text" x-model="rule.closeBrackets" placeholder=")" class="t-input w-8 flex-none text-center" title="Close bracket">
+                    <button @click="removeRule('exit_rules', i)" class="btn-halt px-2 py-1 ml-auto flex-none">✕</button>
                   </div>
                 </template>
                 <div x-show="!(indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[]).length"
@@ -3082,6 +3085,40 @@ document.addEventListener('alpine:init', () => {
                 </div>
               </div>
 
+              <!-- SL Cooldown -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">SL COOLDOWN BY TF</span>
+                  <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">After SL hit, block re-entry for (max TF in entry rules × multiplier) minutes. E.g., 5-min TF × 1.0 = 5-min cooldown.</p>
+                </div>
+                <div class="flex items-center gap-3 flex-wrap">
+                  <div class="flex items-center gap-2">
+                    <label class="sec-label">TF Multiplier</label>
+                    <input type="number" step="0.5" min="0" class="t-input" style="width:70px"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.sl_cooldown_tf_multiplier"
+                           title="Multiplier applied to max TF from entry rules">
+                  </div>
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">0 = disabled</span>
+                </div>
+              </div>
+
+              <!-- Capital-based Profit Target -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-green)">CAPITAL-BASED PROFIT TARGET</span>
+                  <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">Profit target = profit_pct % of this amount. Overrides premium-based % when &gt; 0. Per-day override via PER DAY tab.</p>
+                </div>
+                <div class="flex items-center gap-3 flex-wrap">
+                  <div class="flex items-center gap-2">
+                    <label class="sec-label">Capital / Margin (₹)</label>
+                    <input type="number" step="10000" min="0" class="t-input" style="width:100px"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.capital_deployed_inr"
+                           title="Deployed capital or margin blocked per session">
+                  </div>
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">0 = use premium-based % (default)</span>
+                </div>
+              </div>
+
             </div>
           </template>
         </template>
@@ -3174,7 +3211,14 @@ document.addEventListener('alpine:init', () => {
                   </div>
                   <div class="grid grid-cols-2 gap-2 mb-2">
                     <div>
-                      <label class="sec-label">Trade Target (pts)</label>
+                      <label class="sec-label">Profit Target % <span style="color:var(--t-muted)">of capital</span></label>
+                      <input type="number" step="0.5" min="0" class="t-input mt-0.5"
+                             :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).profit_target_pct||0"
+                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].profit_target_pct = +$event.target.value"
+                             title="% of capital_deployed_inr. 0 = use global profit_pct.">
+                    </div>
+                    <div>
+                      <label class="sec-label">Trade Target (pts) <span style="color:var(--t-muted)">pts-based</span></label>
                       <input type="number" step="10" class="t-input mt-0.5"
                              :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).single_trade_target_pts||0"
                              @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].single_trade_target_pts = +$event.target.value">
