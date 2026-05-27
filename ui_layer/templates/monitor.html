@@ -1424,7 +1424,7 @@ document.addEventListener('alpine:init', () => {
       this.indexConfigSaving = false;
     },
     _newRule() {
-      return { indicator: 'rsi', operator: 'AND', openBrackets: '', closeBrackets: '', tf: '5', period: 14, operator_sym: '>', threshold: 50 };
+      return { indicator: 'advanced', operator: 'AND', openBrackets: '', closeBrackets: '', tf: '5', operator_sym: '<', operand1: 'CLOSE', operand2: 'VWAP', operand2_val: 0 };
     },
     addRule(ruleKey) {
       const ss = (this.indexConfig[this.adminSelectedIndex] || {}).sell_straddle;
@@ -2712,23 +2712,28 @@ document.addEventListener('alpine:init', () => {
                     </select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input text-center" style="width:28px">
                     <select x-model="rule.indicator" class="t-input" style="width:110px;font-size:11px">
-                      <option value="rsi">RSI</option>
                       <option value="vwap">VWAP</option>
+                      <option value="vwap_slope">Slope</option>
+                      <option value="rsi">RSI</option>
                       <option value="roc">ROC</option>
-                      <option value="slope">VWAP Slope</option>
                       <option value="advanced">Advanced</option>
                     </select>
                     <!-- Period only for rsi/roc -->
-                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc'">
+                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc' || rule.indicator==='vwap_slope'">
                       <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px" title="Period">
                     </template>
                     <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px" title="TF (min)">
                     <!-- Advanced: operand1 -->
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
-                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
-                        <option value="close">Close</option>
+                      <select x-model="rule.operand1" class="t-input" style="width:110px;font-size:10px">
+                        <option value="LTP">Combined LTP</option>
+                        <option value="CLOSE">Combined Close</option>
+                        <option value="VWAP">Combined VWAP</option>
+                        <option value="RSI">Combined RSI</option>
+                        <option value="ROC">Combined ROC</option>
+                        <option value="SLOPE">V-Slope (curr)</option>
+                        <option value="SLOPE_CURR">V-Slope Current</option>
+                        <option value="SLOPE_PREV">V-Slope Previous</option>
                       </select>
                     </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
@@ -2738,8 +2743,14 @@ document.addEventListener('alpine:init', () => {
                     <template x-if="rule.indicator==='advanced'">
                       <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
-                        <option value="close">Close</option>
+                        <option value="LTP">Combined LTP</option>
+                        <option value="CLOSE">Combined Close</option>
+                        <option value="VWAP">Combined VWAP</option>
+                        <option value="RSI">Combined RSI</option>
+                        <option value="ROC">Combined ROC</option>
+                        <option value="SLOPE">V-Slope (curr)</option>
+                        <option value="SLOPE_CURR">V-Slope Current</option>
+                        <option value="SLOPE_PREV">V-Slope Previous</option>
                         <option value="VALUE">Fixed Value</option>
                       </select>
                     </template>
@@ -2778,15 +2789,20 @@ document.addEventListener('alpine:init', () => {
                       <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
                       <option value="advanced">Advanced</option>
                     </select>
-                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc'">
+                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc' || rule.indicator==='vwap_slope'">
                       <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
                     </template>
                     <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
-                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
-                        <option value="close">Close</option>
+                      <select x-model="rule.operand1" class="t-input" style="width:110px;font-size:10px">
+                        <option value="LTP">Combined LTP</option>
+                        <option value="CLOSE">Combined Close</option>
+                        <option value="VWAP">Combined VWAP</option>
+                        <option value="RSI">Combined RSI</option>
+                        <option value="ROC">Combined ROC</option>
+                        <option value="SLOPE">V-Slope (curr)</option>
+                        <option value="SLOPE_CURR">V-Slope Current</option>
+                        <option value="SLOPE_PREV">V-Slope Previous</option>
                       </select>
                     </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
@@ -2795,8 +2811,14 @@ document.addEventListener('alpine:init', () => {
                     <template x-if="rule.indicator==='advanced'">
                       <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
-                        <option value="close">Close</option>
+                        <option value="LTP">Combined LTP</option>
+                        <option value="CLOSE">Combined Close</option>
+                        <option value="VWAP">Combined VWAP</option>
+                        <option value="RSI">Combined RSI</option>
+                        <option value="ROC">Combined ROC</option>
+                        <option value="SLOPE">V-Slope (curr)</option>
+                        <option value="SLOPE_CURR">V-Slope Current</option>
+                        <option value="SLOPE_PREV">V-Slope Previous</option>
                         <option value="VALUE">Fixed Value</option>
                       </select>
                     </template>
@@ -2833,15 +2855,20 @@ document.addEventListener('alpine:init', () => {
                       <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
                       <option value="advanced">Advanced</option>
                     </select>
-                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc'">
+                    <template x-if="rule.indicator==='rsi' || rule.indicator==='roc' || rule.indicator==='vwap_slope'">
                       <input type="number" x-model.number="rule.period" placeholder="14" class="t-input" style="width:44px">
                     </template>
                     <input type="number" x-model="rule.tf" placeholder="5" class="t-input" style="width:36px">
                     <template x-if="rule.indicator==='advanced'">
-                      <select x-model="rule.operand1" class="t-input" style="width:100px;font-size:10px">
-                        <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
-                        <option value="close">Close</option>
+                      <select x-model="rule.operand1" class="t-input" style="width:110px;font-size:10px">
+                        <option value="LTP">Combined LTP</option>
+                        <option value="CLOSE">Combined Close</option>
+                        <option value="VWAP">Combined VWAP</option>
+                        <option value="RSI">Combined RSI</option>
+                        <option value="ROC">Combined ROC</option>
+                        <option value="SLOPE">V-Slope (curr)</option>
+                        <option value="SLOPE_CURR">V-Slope Current</option>
+                        <option value="SLOPE_PREV">V-Slope Previous</option>
                       </select>
                     </template>
                     <select x-model="rule.operator_sym" class="t-input" style="width:46px;font-size:13px">
@@ -2850,8 +2877,14 @@ document.addEventListener('alpine:init', () => {
                     <template x-if="rule.indicator==='advanced'">
                       <select x-model="rule.operand2" class="t-input" style="width:100px;font-size:10px">
                         <option value="rsi">RSI</option><option value="vwap">VWAP</option>
-                        <option value="roc">ROC</option><option value="slope">VWAP Slope</option>
-                        <option value="close">Close</option>
+                        <option value="LTP">Combined LTP</option>
+                        <option value="CLOSE">Combined Close</option>
+                        <option value="VWAP">Combined VWAP</option>
+                        <option value="RSI">Combined RSI</option>
+                        <option value="ROC">Combined ROC</option>
+                        <option value="SLOPE">V-Slope (curr)</option>
+                        <option value="SLOPE_CURR">V-Slope Current</option>
+                        <option value="SLOPE_PREV">V-Slope Previous</option>
                         <option value="VALUE">Fixed Value</option>
                       </select>
                     </template>
