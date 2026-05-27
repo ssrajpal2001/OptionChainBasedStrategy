@@ -412,10 +412,16 @@ class SellStraddleStrategy:
 
     @property
     def entry_allowed(self) -> bool:
-        return (
-            self._rsi_min <= self._rsi <= self._rsi_max
-            and self._adx < self._adx_max
-        )
+        """True when the time window is open and session trade limit not reached."""
+        from datetime import datetime
+        now = datetime.now(IST).time()
+        if not (self._entry_start <= now < self._entry_cutoff):
+            return False
+        if self._trades_today >= self._max_trades:
+            return False
+        if self._sl_cooldown_until and datetime.now(IST) < self._sl_cooldown_until:
+            return False
+        return True
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

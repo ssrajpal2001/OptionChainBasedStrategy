@@ -1051,9 +1051,9 @@ class DashboardServer:
                     "has_position": ss.has_open_position,
                     "trades_today": ss.trades_today,
                     "spot":         round(ss._spot, 2),
-                    "rsi":          round(ss._rsi, 1),
-                    "adx":          round(ss._adx, 1),
-                    "entry_allowed": 35 <= ss._rsi <= 65 and ss._adx < 30,
+                    "rsi":          round(ss._rsi, 1),   # live reference — may be used in entry rules
+                    "adx":          round(ss._adx, 1),   # live reference — may be used in entry rules
+                    "entry_allowed": ss.entry_allowed,
                     "position":     entry,
                 })
             return {"strategies": out, "ts": now_ist}

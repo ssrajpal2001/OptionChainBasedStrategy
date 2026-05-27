@@ -2472,31 +2472,56 @@ document.addEventListener('alpine:init', () => {
                   :style="`color:${s.running?'var(--t-green)':'var(--t-red)'}`"
                   x-text="s.running ? '● RUN' : '○ STOP'"></span>
           </div>
-          <div class="grid grid-cols-4 gap-2 mb-2">
-            <div class="text-center">
-              <div class="font-mono text-xs" style="color:var(--t-muted)">RSI</div>
-              <div class="font-mono text-sm font-bold"
-                   :style="`color:${(s.rsi||0)<35?'var(--t-green)':(s.rsi||0)>65?'var(--t-red)':'var(--t-cyan)'}`"
-                   x-text="(s.rsi||0).toFixed(1)"></div>
+          <!-- Iron Condor: time-gated only — no RSI/ADX -->
+          <template x-if="s.type==='iron_condor'">
+            <div class="grid grid-cols-3 gap-2 mb-2">
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)">TIME GATE</div>
+                <div class="font-mono text-xs font-bold"
+                     :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-muted)'}`"
+                     x-text="s.entry_allowed ? '✓ OPEN' : '✗ CLOSED'"></div>
+              </div>
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)">ENTRY</div>
+                <div class="font-mono text-xs font-bold"
+                     :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-red)'}`"
+                     x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
+              </div>
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)">SPOT</div>
+                <div class="font-mono text-xs" style="color:var(--t-text)"
+                     x-text="s.spot ? fmt(s.spot) : '—'"></div>
+              </div>
             </div>
-            <div class="text-center">
-              <div class="font-mono text-xs" style="color:var(--t-muted)">ADX</div>
-              <div class="font-mono text-sm font-bold"
-                   :style="`color:${(s.adx||0)>=25?'var(--t-amber)':'var(--t-text)'}`"
-                   x-text="(s.adx||0).toFixed(1)"></div>
+          </template>
+          <!-- Sell Straddle V3: entry via rule builder; RSI/ADX shown as live reference only -->
+          <template x-if="s.type==='sell_straddle'">
+            <div class="grid grid-cols-4 gap-2 mb-2">
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)">RSI <span style="color:var(--t-dim);font-size:9px">ref</span></div>
+                <div class="font-mono text-sm font-bold"
+                     :style="`color:${(s.rsi||0)<35?'var(--t-green)':(s.rsi||0)>65?'var(--t-red)':'var(--t-cyan)'}`"
+                     x-text="(s.rsi||0).toFixed(1)"></div>
+              </div>
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)">ADX <span style="color:var(--t-dim);font-size:9px">ref</span></div>
+                <div class="font-mono text-sm font-bold"
+                     :style="`color:${(s.adx||0)>=25?'var(--t-amber)':'var(--t-text)'}`"
+                     x-text="(s.adx||0).toFixed(1)"></div>
+              </div>
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)">ENTRY</div>
+                <div class="font-mono text-xs font-bold"
+                     :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-red)'}`"
+                     x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
+              </div>
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)">SPOT</div>
+                <div class="font-mono text-xs" style="color:var(--t-text)"
+                     x-text="s.spot ? fmt(s.spot) : '—'"></div>
+              </div>
             </div>
-            <div class="text-center">
-              <div class="font-mono text-xs" style="color:var(--t-muted)">ENTRY</div>
-              <div class="font-mono text-xs font-bold"
-                   :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-red)'}`"
-                   x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
-            </div>
-            <div class="text-center">
-              <div class="font-mono text-xs" style="color:var(--t-muted)">SPOT</div>
-              <div class="font-mono text-xs" style="color:var(--t-text)"
-                   x-text="s.spot ? fmt(s.spot) : '—'"></div>
-            </div>
-          </div>
+          </template>
           <div x-show="s.has_position && s.position" class="rounded p-2"
                style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15)">
             <template x-if="s.type === 'iron_condor' && s.position">
