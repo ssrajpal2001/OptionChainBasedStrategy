@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TERMINUS — OptionChain AlgoTrader</title>
 
-  <!-- Fonts: Orbitron (logo), Share Tech Mono (numbers), Rajdhani (UI labels) -->
+  <!-- Fonts: Orbitron (logo), JetBrains Mono (data), Bebas Neue (headers), Barlow Condensed (UI) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;500;600&family=Bebas+Neue&family=Barlow+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
   <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -19,9 +19,9 @@
       theme: {
         extend: {
           fontFamily: {
-            mono:    ['Share Tech Mono', 'monospace'],
-            display: ['Orbitron', 'monospace'],
-            ui:      ['Rajdhani', 'sans-serif'],
+            mono:    ['JetBrains Mono', 'Share Tech Mono', 'monospace'],
+            display: ['Bebas Neue', 'Orbitron', 'monospace'],
+            ui:      ['Barlow Condensed', 'sans-serif'],
           },
           colors: {
             t: {
@@ -45,25 +45,25 @@
   </script>
 
   <style>
-    /* ── CSS custom properties — midnight theme defaults ─────────────── */
+    /* ── CSS custom properties — obsidian/amber theme defaults ──────── */
     :root {
-      --t-bg:       #04060c;
-      --t-surface:  #070d18;
-      --t-card:     #0a1220;
-      --t-border:   #131f30;
-      --t-dim:      #1a2840;
-      --t-cyan:     #00d4ff;
-      --t-green:    #00e87a;
-      --t-red:      #ff3a4a;
-      --t-amber:    #f59e0b;
-      --t-muted:    #3a5470;
-      --t-text:     #7a9ab8;
-      --t-bright:   #c8daf0;
+      --t-bg:       #080706;
+      --t-surface:  #0d0b09;
+      --t-card:     #131009;
+      --t-border:   #201c12;
+      --t-dim:      #2e2818;
+      --t-cyan:     #e8a200;
+      --t-green:    #22c55e;
+      --t-red:      #ef4444;
+      --t-amber:    #e8a200;
+      --t-muted:    #4a4030;
+      --t-text:     #9a8c72;
+      --t-bright:   #e8d8b0;
       /* RGB components for alpha variants */
-      --t-cyan-rgb:  0, 212, 255;
-      --t-green-rgb: 0, 232, 122;
-      --t-red-rgb:   255, 58, 74;
-      --t-amber-rgb: 245, 158, 11;
+      --t-cyan-rgb:  232, 162, 0;
+      --t-green-rgb: 34, 197, 94;
+      --t-red-rgb:   239, 68, 68;
+      --t-amber-rgb: 232, 162, 0;
     }
 
     [x-cloak] { display: none !important; }
@@ -72,28 +72,28 @@
     body {
       background-color: var(--t-bg);
       color: var(--t-text);
-      font-family: 'Rajdhani', sans-serif;
+      font-family: 'Barlow Condensed', sans-serif;
       font-size: 14px;
       overflow-x: hidden;
       transition: background-color 0.3s, color 0.3s;
     }
 
-    /* ── Background grid ──────────────────────────────────────────────── */
+    /* ── Background grid — warm amber micro-grid ──────────────────────── */
     body::before {
       content: '';
       position: fixed; inset: 0; z-index: 0; pointer-events: none;
       background-image:
-        linear-gradient(rgba(var(--t-cyan-rgb),0.025) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(var(--t-cyan-rgb),0.025) 1px, transparent 1px);
-      background-size: 40px 40px;
+        linear-gradient(rgba(232,162,0,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(232,162,0,0.03) 1px, transparent 1px);
+      background-size: 32px 32px;
     }
-    /* ── Scanlines ────────────────────────────────────────────────────── */
+    /* ── Scanlines — CRT phosphor overlay ────────────────────────────── */
     body::after {
       content: '';
       position: fixed; inset: 0; z-index: 1000; pointer-events: none;
       background: repeating-linear-gradient(
-        0deg, transparent, transparent 2px,
-        rgba(0,0,0,0.07) 2px, rgba(0,0,0,0.07) 4px
+        0deg, transparent, transparent 3px,
+        rgba(0,0,0,0.06) 3px, rgba(0,0,0,0.06) 4px
       );
     }
 
@@ -101,96 +101,108 @@
     .t-card {
       background: var(--t-card);
       border: 1px solid var(--t-border);
+      border-left: 3px solid rgba(var(--t-cyan-rgb),0.4);
       position: relative;
       transition: background 0.3s, border-color 0.3s;
     }
     .t-card::before {
       content: '';
-      position: absolute; top: 0; left: 0; right: 0; height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(var(--t-cyan-rgb),0.4), transparent);
+      position: absolute; top: 0; left: -3px; bottom: 0; width: 3px;
+      background: linear-gradient(180deg,
+        transparent 0%,
+        rgba(var(--t-cyan-rgb),0.7) 30%,
+        rgba(var(--t-cyan-rgb),0.7) 70%,
+        transparent 100%);
+      pointer-events: none;
     }
 
     /* ── Section label ────────────────────────────────────────────────── */
     .sec-label {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700;
-      font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+      font-family: 'Bebas Neue', 'Orbitron', monospace;
+      font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
       color: var(--t-muted);
     }
 
     /* ── Input ────────────────────────────────────────────────────────── */
     .t-input {
-      font-family: 'Share Tech Mono', monospace; font-size: 12px;
+      font-family: 'JetBrains Mono', 'Share Tech Mono', monospace; font-size: 12px;
       background: var(--t-surface); border: 1px solid var(--t-dim);
-      color: var(--t-bright); padding: 5px 8px; border-radius: 2px; width: 100%;
+      color: var(--t-bright); padding: 6px 8px; border-radius: 0; width: 100%;
       outline: none; transition: border-color 0.15s;
+      min-height: 32px;
     }
-    .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.5); box-shadow: 0 0 6px rgba(var(--t-cyan-rgb),0.15); }
+    .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.6); box-shadow: 0 0 0 1px rgba(var(--t-cyan-rgb),0.12); }
     .t-input option { background: var(--t-card); color: var(--t-bright); }
 
     /* ── Buttons ──────────────────────────────────────────────────────── */
     .btn-primary {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700;
-      font-size: 13px; letter-spacing: 0.1em;
-      padding: 8px 20px; border-radius: 2px;
-      background: rgba(var(--t-cyan-rgb),0.12); border: 1px solid rgba(var(--t-cyan-rgb),0.35);
+      font-family: 'Bebas Neue', monospace;
+      font-size: 15px; letter-spacing: 0.12em;
+      padding: 9px 20px; border-radius: 0;
+      background: rgba(var(--t-cyan-rgb),0.10); border: 1px solid rgba(var(--t-cyan-rgb),0.4);
       color: var(--t-cyan); cursor: pointer; transition: all 0.15s; width: 100%;
+      box-shadow: inset 0 0 20px rgba(var(--t-cyan-rgb),0.04);
     }
-    .btn-primary:hover { background: rgba(var(--t-cyan-rgb),0.22); }
+    .btn-primary:hover { background: rgba(var(--t-cyan-rgb),0.18); box-shadow: 0 0 12px rgba(var(--t-cyan-rgb),0.2), inset 0 0 20px rgba(var(--t-cyan-rgb),0.08); }
     .btn-action {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700;
-      font-size: 12px; letter-spacing: 0.08em;
-      padding: 6px 16px; border-radius: 2px;
-      background: rgba(var(--t-cyan-rgb),0.08); border: 1px solid rgba(var(--t-cyan-rgb),0.25);
+      font-family: 'Bebas Neue', monospace;
+      font-size: 14px; letter-spacing: 0.1em;
+      padding: 6px 16px; border-radius: 0;
+      background: rgba(var(--t-cyan-rgb),0.07); border: 1px solid rgba(var(--t-cyan-rgb),0.25);
       color: var(--t-cyan); cursor: pointer; transition: all 0.15s; width: 100%;
     }
-    .btn-action:hover { background: rgba(var(--t-cyan-rgb),0.18); }
+    .btn-action:hover { background: rgba(var(--t-cyan-rgb),0.15); }
     .btn-halt {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 11px; letter-spacing: 0.1em;
-      padding: 3px 10px; border-radius: 2px;
-      background: rgba(var(--t-red-rgb),0.1); border: 1px solid rgba(var(--t-red-rgb),0.3);
+      font-family: 'Bebas Neue', monospace; font-size: 13px; letter-spacing: 0.1em;
+      padding: 4px 12px; border-radius: 0;
+      background: rgba(var(--t-red-rgb),0.08); border: 1px solid rgba(var(--t-red-rgb),0.3);
       color: var(--t-red); cursor: pointer; transition: all 0.15s;
     }
-    .btn-halt:hover { background: rgba(var(--t-red-rgb),0.2); }
+    .btn-halt:hover { background: rgba(var(--t-red-rgb),0.18); }
     .btn-resume {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 11px; letter-spacing: 0.1em;
-      padding: 3px 10px; border-radius: 2px;
-      background: rgba(var(--t-green-rgb),0.1); border: 1px solid rgba(var(--t-green-rgb),0.3);
+      font-family: 'Bebas Neue', monospace; font-size: 13px; letter-spacing: 0.1em;
+      padding: 4px 12px; border-radius: 0;
+      background: rgba(var(--t-green-rgb),0.08); border: 1px solid rgba(var(--t-green-rgb),0.3);
       color: var(--t-green); cursor: pointer; transition: all 0.15s;
     }
-    .btn-resume:hover { background: rgba(var(--t-green-rgb),0.2); }
+    .btn-resume:hover { background: rgba(var(--t-green-rgb),0.18); }
     .btn-kill {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 13px; letter-spacing: 0.1em;
-      padding: 8px 16px; border-radius: 2px;
-      background: rgba(var(--t-red-rgb),0.12); border: 1px solid rgba(var(--t-red-rgb),0.4);
+      font-family: 'Bebas Neue', monospace; font-size: 15px; letter-spacing: 0.12em;
+      padding: 9px 16px; border-radius: 0;
+      background: rgba(var(--t-red-rgb),0.10); border: 1px solid rgba(var(--t-red-rgb),0.45);
       color: var(--t-red); cursor: pointer; transition: all 0.15s;
       width: 100%; position: relative;
     }
-    .btn-kill:hover { background: rgba(var(--t-red-rgb),0.22); }
+    .btn-kill:hover { background: rgba(var(--t-red-rgb),0.20); box-shadow: 0 0 16px rgba(var(--t-red-rgb),0.2); }
     .btn-kill.armed { background: rgba(var(--t-red-rgb),0.22); color: var(--t-bright); }
     .btn-add {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.08em;
-      padding: 8px 16px; border-radius: 2px;
-      background: rgba(var(--t-green-rgb),0.08); border: 1px solid rgba(var(--t-green-rgb),0.3);
+      font-family: 'Bebas Neue', monospace; font-size: 13px; letter-spacing: 0.1em;
+      padding: 8px 16px; border-radius: 0;
+      background: rgba(var(--t-green-rgb),0.06); border: 1px solid rgba(var(--t-green-rgb),0.3);
       color: var(--t-green); cursor: pointer; transition: all 0.15s; width: 100%;
     }
-    .btn-add:hover { background: rgba(var(--t-green-rgb),0.18); }
+    .btn-add:hover { background: rgba(var(--t-green-rgb),0.14); }
 
     /* ── Badges ───────────────────────────────────────────────────────── */
     .badge-live {
-      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 6px; border-radius: 1px;
-      background: rgba(var(--t-green-rgb),0.12); border: 1px solid rgba(var(--t-green-rgb),0.3); color: var(--t-green);
+      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
+      padding: 1px 7px; border-radius: 0;
+      background: rgba(var(--t-green-rgb),0.10); border: 1px solid rgba(var(--t-green-rgb),0.35); color: var(--t-green);
     }
     .badge-halted {
-      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 6px; border-radius: 1px;
-      background: rgba(var(--t-red-rgb),0.12); border: 1px solid rgba(var(--t-red-rgb),0.3); color: var(--t-red);
+      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
+      padding: 1px 7px; border-radius: 0;
+      background: rgba(var(--t-red-rgb),0.10); border: 1px solid rgba(var(--t-red-rgb),0.35); color: var(--t-red);
     }
     .badge-role-admin {
-      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 8px; border-radius: 1px;
-      background: rgba(var(--t-amber-rgb),0.12); border: 1px solid rgba(var(--t-amber-rgb),0.35); color: var(--t-amber);
+      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
+      padding: 1px 9px; border-radius: 0;
+      background: rgba(var(--t-amber-rgb),0.12); border: 1px solid rgba(var(--t-amber-rgb),0.4); color: var(--t-amber);
     }
     .badge-role-client {
-      font-size: 9px; letter-spacing: 0.12em; font-weight: 700; padding: 1px 8px; border-radius: 1px;
-      background: rgba(var(--t-cyan-rgb),0.12); border: 1px solid rgba(var(--t-cyan-rgb),0.3); color: var(--t-cyan);
+      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
+      padding: 1px 9px; border-radius: 0;
+      background: rgba(var(--t-cyan-rgb),0.10); border: 1px solid rgba(var(--t-cyan-rgb),0.35); color: var(--t-cyan);
     }
 
     /* ── Gauges ───────────────────────────────────────────────────────── */
@@ -199,29 +211,28 @@
 
     /* ── Index tab ────────────────────────────────────────────────────── */
     .idx-tab {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.06em;
-      padding: 4px 12px; border-radius: 2px; border: 1px solid transparent;
+      font-family: 'Bebas Neue', monospace; font-size: 14px; letter-spacing: 0.1em;
+      padding: 4px 14px; border-radius: 0; border: 1px solid transparent;
       cursor: pointer; transition: all 0.15s; color: var(--t-muted);
     }
     .idx-tab:hover { color: var(--t-text); border-color: var(--t-dim); }
-    .idx-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.07); border-color: rgba(var(--t-cyan-rgb),0.3); }
+    .idx-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.35); box-shadow: 0 0 8px rgba(var(--t-cyan-rgb),0.15); }
 
     /* ── Theme tab ────────────────────────────────────────────────────── */
     .theme-tab {
-      font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 10px; letter-spacing: 0.1em;
-      padding: 3px 10px; border-radius: 2px; border: 1px solid transparent;
+      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.1em;
+      padding: 3px 10px; border-radius: 0; border: 1px solid transparent;
       cursor: pointer; transition: all 0.15s; color: var(--t-muted); text-transform: uppercase;
     }
     .theme-tab:hover { color: var(--t-text); border-color: var(--t-dim); }
-    .theme-tab.active { color: var(--t-cyan); border-color: rgba(var(--t-cyan-rgb),0.3); background: rgba(var(--t-cyan-rgb),0.05); }
+    .theme-tab.active { color: var(--t-cyan); border-color: rgba(var(--t-cyan-rgb),0.35); background: rgba(var(--t-cyan-rgb),0.06); }
 
-    /* ── Login tab ────────────────────────────────────────────────────── */
     /* ── Admin sub-nav tabs ───────────────────────────────────────────── */
     .admin-tab {
-      font-family: 'Rajdhani', sans-serif;
-      font-size: 11px; font-weight: 700;
+      font-family: 'Bebas Neue', monospace;
+      font-size: 13px;
       letter-spacing: 0.14em; text-transform: uppercase;
-      padding: 12px 22px; border: none;
+      padding: 13px 24px; border: none;
       border-bottom: 2px solid transparent;
       background: transparent; color: var(--t-muted);
       cursor: pointer;
@@ -231,13 +242,13 @@
     .admin-tab.active { color: var(--t-cyan); border-bottom-color: var(--t-cyan); }
 
     .login-tab {
-      flex: 1; font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.1em;
-      padding: 8px; text-transform: uppercase; text-align: center;
+      flex: 1; font-family: 'Bebas Neue', monospace; font-size: 14px; letter-spacing: 0.1em;
+      padding: 9px; text-transform: uppercase; text-align: center;
       border: 1px solid var(--t-border); color: var(--t-muted); cursor: pointer; transition: all 0.2s;
+      border-radius: 0;
     }
-    .login-tab:first-child { border-radius: 2px 0 0 2px; }
-    .login-tab:last-child  { border-radius: 0 2px 2px 0; border-left: none; }
-    .login-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.35); }
+    .login-tab:last-child { border-left: none; }
+    .login-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.4); }
 
     /* ── Kill ring countdown ──────────────────────────────────────────── */
     .kill-ring {
@@ -251,15 +262,20 @@
 
     /* ── Animations ───────────────────────────────────────────────────── */
     @keyframes val-flash {
-      0%   { color: var(--t-cyan); }
-      100% { color: inherit; }
+      0%   { color: var(--t-bright); text-shadow: 0 0 12px rgba(var(--t-cyan-rgb),0.9); }
+      100% { color: inherit; text-shadow: none; }
     }
-    .val-flash { animation: val-flash 0.8s ease-out forwards; }
+    .val-flash { animation: val-flash 1s ease-out forwards; }
+    @keyframes price-glow {
+      0%,100% { text-shadow: 0 0 20px rgba(var(--t-cyan-rgb),0.35); }
+      50%      { text-shadow: 0 0 40px rgba(var(--t-cyan-rgb),0.55), 0 0 80px rgba(var(--t-cyan-rgb),0.15); }
+    }
+    .price-live { animation: price-glow 3s ease-in-out infinite; }
     @keyframes conn-pulse {
       0%, 100% { opacity: 1; }
-      50%       { opacity: 0.5; }
+      50%       { opacity: 0.4; }
     }
-    .conn-live { animation: conn-pulse 2s ease-in-out infinite; }
+    .conn-live { animation: conn-pulse 1.8s ease-in-out infinite; }
     @keyframes fade-up {
       from { opacity: 0; transform: translateY(10px); }
       to   { opacity: 1; transform: translateY(0); }
@@ -276,17 +292,25 @@
 
     /* ── Feed row ─────────────────────────────────────────────────────── */
     .feed-row {
-      font-family: 'Share Tech Mono', monospace; font-size: 11px;
-      padding: 4px 8px; border-bottom: 1px solid rgba(var(--t-border, #131f30),0.6);
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+      padding: 4px 10px; border-bottom: 1px solid rgba(32,28,18,0.8);
       display: flex; gap: 8px; align-items: baseline;
     }
-    .feed-row:hover { background: rgba(var(--t-cyan-rgb),0.02); }
+    .feed-row:hover { background: rgba(var(--t-cyan-rgb),0.03); }
 
     /* ── Worker row ───────────────────────────────────────────────────── */
     .worker-row {
       display: flex; justify-content: space-between; align-items: center;
-      padding: 5px 8px; border-bottom: 1px solid var(--t-border); font-size: 12px;
+      padding: 5px 10px; border-bottom: 1px solid var(--t-border); font-size: 12px;
     }
+
+    /* ── Data row — tight terminal table rows ─────────────────────────── */
+    .data-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 3px 0; border-bottom: 1px solid rgba(32,28,18,0.6);
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    }
+    .data-row:last-child { border-bottom: none; }
 
     /* ── Diagonal accent ──────────────────────────────────────────────── */
     .diag-accent {
@@ -329,11 +353,12 @@
     .modal-panel {
       background: var(--t-card);
       border: 1px solid var(--t-dim);
-      border-radius: 6px;
+      border-left: 3px solid rgba(var(--t-cyan-rgb),0.5);
+      border-radius: 0;
       width: 580px; max-width: 96vw; max-height: 92vh;
       overflow-y: auto;
       position: relative;
-      box-shadow: 0 24px 80px rgba(0,0,0,0.7), 0 0 0 1px rgba(var(--t-cyan-rgb),0.06);
+      box-shadow: 0 24px 80px rgba(0,0,0,0.8), 0 0 40px rgba(var(--t-cyan-rgb),0.06);
     }
     .modal-header {
       display: flex; align-items: center; justify-content: space-between;
@@ -451,10 +476,10 @@ document.addEventListener('alpine:init', () => {
 
     _themes: {
       midnight: {
-        bg:'#04060c', surface:'#070d18', card:'#0a1220', border:'#131f30', dim:'#1a2840',
-        cyan:'#00d4ff', green:'#00e87a', red:'#ff3a4a', amber:'#f59e0b',
-        muted:'#3a5470', text:'#7a9ab8', bright:'#c8daf0',
-        cyanRgb:'0,212,255', greenRgb:'0,232,122', redRgb:'255,58,74', amberRgb:'245,158,11',
+        bg:'#080706', surface:'#0d0b09', card:'#131009', border:'#201c12', dim:'#2e2818',
+        cyan:'#e8a200', green:'#22c55e', red:'#ef4444', amber:'#e8a200',
+        muted:'#4a4030', text:'#9a8c72', bright:'#e8d8b0',
+        cyanRgb:'232,162,0', greenRgb:'34,197,94', redRgb:'239,68,68', amberRgb:'232,162,0',
       },
       matrix: {
         bg:'#000000', surface:'#060f06', card:'#0a170a', border:'#0f2a0f', dim:'#153a15',
@@ -1683,12 +1708,16 @@ document.addEventListener('alpine:init', () => {
   <div class="w-full max-w-sm slide-in">
     <!-- Logo -->
     <div class="text-center mb-8">
-      <div class="font-display text-3xl font-black tracking-widest" style="color:var(--t-cyan); text-shadow:0 0 20px rgba(var(--t-cyan-rgb),0.7)">TERMINUS</div>
-      <div class="font-mono text-xs mt-1" style="color:var(--t-muted)">OptionChain AlgoTrader · NSE Options</div>
+      <div class="flex items-center justify-center gap-3 mb-2">
+        <div style="width:4px; height:40px; background:var(--t-cyan); box-shadow:0 0 16px rgba(var(--t-cyan-rgb),0.7);"></div>
+        <div class="font-display tracking-widest" style="font-size:2.5rem; color:var(--t-cyan); text-shadow:0 0 24px rgba(var(--t-cyan-rgb),0.5); line-height:1">TERMINUS</div>
+        <div style="width:4px; height:40px; background:var(--t-cyan); box-shadow:0 0 16px rgba(var(--t-cyan-rgb),0.7);"></div>
+      </div>
+      <div class="font-mono text-xs tracking-widest" style="color:var(--t-muted)">OPTIONCHAIN ALGOTRADER · NSE</div>
     </div>
 
     <!-- Login card -->
-    <div class="t-card rounded p-6">
+    <div class="t-card p-6" style="border-radius:0">
       <!-- Role tabs -->
       <div class="flex mb-5">
         <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'" style="border-radius:2px 0 0 2px;border-right:none">ADMIN</button>
@@ -1808,18 +1837,20 @@ document.addEventListener('alpine:init', () => {
 <div x-show="screen !== 'login'" class="flex flex-col min-h-screen">
 
 <!-- ── NAVBAR ──────────────────────────────────────────────────────────────── -->
-<header class="navbar-h sticky top-0 z-50 flex items-center justify-between px-5 border-b shrink-0"
-        style="background: rgba(var(--t-bg-val, 4, 6, 12), 0.95); border-color: var(--t-border); backdrop-filter: blur(8px);"
-        x-init="$el.style.setProperty('background', `color-mix(in srgb, var(--t-bg) 95%, transparent)`)">
+<header class="navbar-h sticky top-0 z-50 flex items-center justify-between px-4 border-b shrink-0"
+        style="background:var(--t-bg); border-color:var(--t-border); border-bottom:1px solid var(--t-border); box-shadow: 0 1px 0 rgba(var(--t-cyan-rgb),0.12);">
 
-  <!-- Left: Logo + index tabs (admin only) -->
-  <div class="flex items-center gap-3">
-    <div class="flex items-center gap-1.5">
-      <span class="font-display text-lg font-black tracking-widest" style="color:var(--t-cyan); text-shadow:0 0 14px rgba(var(--t-cyan-rgb),0.6)">TERMINUS</span>
-      <span class="font-display text-xs font-normal tracking-widest mt-0.5" style="color:var(--t-muted)">v6</span>
+  <!-- Left: Logo + index tabs -->
+  <div class="flex items-center gap-4">
+    <div class="flex items-center gap-2">
+      <div style="width:3px; height:28px; background:var(--t-cyan); box-shadow:0 0 10px rgba(var(--t-cyan-rgb),0.6); flex-shrink:0;"></div>
+      <div>
+        <span class="font-display text-xl tracking-widest" style="color:var(--t-cyan); text-shadow:0 0 18px rgba(var(--t-cyan-rgb),0.5); line-height:1">TERMINUS</span>
+        <span class="font-display text-xs tracking-widest ml-1" style="color:var(--t-muted)">v6</span>
+      </div>
     </div>
-    <div class="w-px h-5 mx-1" style="background:var(--t-border)"></div>
-    <!-- Index tabs shown to all authenticated users -->
+    <div class="w-px h-6" style="background:var(--t-border)"></div>
+    <!-- Index tabs -->
     <div class="flex gap-1">
       <template x-for="idx in indices" :key="idx">
         <button class="idx-tab" :class="{ active: activeIndex===idx }" @click="activeIndex=idx" x-text="idx"></button>
@@ -1827,7 +1858,7 @@ document.addEventListener('alpine:init', () => {
     </div>
   </div>
 
-  <!-- Right: theme switcher + role badge + IST + WS status + logout -->
+  <!-- Right: theme + role + IST + WS + logout -->
   <div class="flex items-center gap-3">
     <!-- Theme switcher -->
     <div class="relative">
@@ -1854,26 +1885,31 @@ document.addEventListener('alpine:init', () => {
     <div :class="authRole==='admin' ? 'badge-role-admin' : 'badge-role-client'"
          x-text="authRole==='admin' ? 'ADMIN' : authClientName || authClientId"></div>
 
-    <!-- IST Clock -->
-    <div class="font-mono text-xl tracking-widest" style="color:var(--t-bright)" x-text="istTime"></div>
+    <!-- IST Clock — large mono display -->
+    <div class="flex flex-col items-end">
+      <div class="font-mono text-xl font-medium tracking-widest leading-none"
+           style="color:var(--t-bright); text-shadow:0 0 16px rgba(var(--t-cyan-rgb),0.3)"
+           x-text="istTime"></div>
+      <div class="font-mono text-xs tracking-wider" style="color:var(--t-muted)">IST</div>
+    </div>
 
-    <div class="w-px h-4" style="background:var(--t-border)"></div>
+    <div class="w-px h-6" style="background:var(--t-border)"></div>
 
     <!-- WS badge -->
     <div class="flex items-center gap-1.5">
       <div class="w-2 h-2 rounded-full" :class="wsConnected ? 'conn-live' : ''"
            :style="`background:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"></div>
-      <span class="font-ui font-bold text-xs tracking-widest uppercase"
+      <span class="font-display text-sm tracking-widest"
             :style="`color:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"
             x-text="wsConnected ? 'LIVE' : 'OFFLINE'"></span>
     </div>
 
-    <div class="w-px h-4" style="background:var(--t-border)"></div>
+    <div class="w-px h-6" style="background:var(--t-border)"></div>
 
     <!-- Logout -->
     <button @click="logout()"
-            class="font-mono text-xs px-2 py-1 rounded border"
-            style="color:var(--t-muted); border-color:var(--t-border); background:var(--t-surface)">
+            class="font-display text-sm tracking-widest px-3 py-1 border"
+            style="color:var(--t-muted); border-color:var(--t-border); background:transparent; border-radius:0;">
       LOGOUT
     </button>
   </div>
@@ -1955,8 +1991,10 @@ document.addEventListener('alpine:init', () => {
       <div class="sec-label mb-3">Market Overview · <span x-text="activeIndex"></span></div>
       <div class="mb-3">
         <div class="sec-label mb-1">SPOT PRICE</div>
-        <div class="font-mono text-4xl leading-none" style="color:var(--t-bright)" x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
-        <div class="font-ui text-xs mt-1" style="color:var(--t-muted)" x-text="spot.ts || 'Waiting…'"></div>
+        <div class="font-mono font-medium leading-none price-live"
+             style="font-size:2.6rem; color:var(--t-bright);"
+             x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
+        <div class="font-mono text-xs mt-1 tracking-wider" style="color:var(--t-muted)" x-text="spot.ts || 'Waiting…'"></div>
       </div>
       <div class="h-px my-3" style="background:var(--t-border)"></div>
       <div>
