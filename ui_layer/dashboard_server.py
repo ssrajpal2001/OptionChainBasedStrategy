@@ -1026,9 +1026,7 @@ class DashboardServer:
                     "running":      ic._running,
                     "has_position": ic.has_open_position,
                     "spot":         round(ic._spot, 2),
-                    "rsi":          round(ic._rsi, 1),
-                    "adx":          round(ic._adx, 1),
-                    "entry_allowed": 40 <= ic._rsi <= 60 and ic._adx < 25,
+                    "entry_allowed": ic.entry_allowed,
                     "position":     entry,
                 })
             for ss in _srv._sell_straddles:
