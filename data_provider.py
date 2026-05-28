@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Normalized Data Structures
 # ---------------------------------------------------------------------------
 
-@dataclass(slots=True)
+@dataclass()
 class IndexTick:
     """Normalized spot/futures price tick."""
     symbol: str
@@ -52,7 +52,7 @@ class IndexTick:
     is_index: bool = True          # True = spot index, False = futures contract
 
 
-@dataclass(slots=True)
+@dataclass()
 class OptionTick:
     """Normalized option quote tick."""
     symbol: str                    # e.g., "NIFTY24JAN23000CE"

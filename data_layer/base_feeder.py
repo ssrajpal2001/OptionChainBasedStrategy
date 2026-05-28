@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # Normalized Tick Structs  (immutable, slot-optimized)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@dataclass(slots=True, frozen=True)
+@dataclass(frozen=True)
 class IndexTick:
     symbol: str
     ltp: float
@@ -47,7 +47,7 @@ class IndexTick:
     timestamp: datetime          # Always IST-aware
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(frozen=True)
 class OptionTick:
     symbol: str                  # Broker-specific; use InternalSymbol for logic
     underlying: str
@@ -65,7 +65,7 @@ class OptionTick:
     timestamp: datetime          # Always IST-aware
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(frozen=True)
 class CandleEvent:
     """Emitted when a candle closes (bucket timestamp changes)."""
     symbol: str
@@ -94,7 +94,7 @@ class CandleEvent:
         return (self.high - max(self.open, self.close)) / rng if rng > 0 else 0.0
 
 
-@dataclass(slots=True)
+@dataclass()
 class SystemEvent:
     code: str                    # SysEvent constant
     message: str = ""

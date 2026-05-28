@@ -189,7 +189,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
-@dataclass(slots=True)
+@dataclass()
 class TechSnapshot:
     """All computed indicators for one symbol x timeframe at one moment."""
     symbol: str
