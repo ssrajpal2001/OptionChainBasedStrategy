@@ -23,6 +23,8 @@ Endpoints:
     GET  /api/client/me               — own portfolio snapshot
     GET  /api/client/brokers          — own broker binding status
     POST /api/client/register_broker  — provision + authenticate a new broker on-the-fly
+    GET  /api/client/broker/{id}/fyers-auth-url — Fyers OAuth login URL
+    POST /api/client/broker/{id}/fyers-exchange — exchange Fyers auth_code for token
 
   COMMON (any valid JWT)
     WS   /ws?token=<jwt>              — live event stream
@@ -224,17 +226,43 @@ try:
         strategy_assignments: Dict[str, str] = {}  # binding_id -> "A"/"B"/"C"
 
     class _AddPortalBrokerSchema(_PydanticBase):
-        binding_id:     str
-        provider:       str
-        label:          str   = ""
-        user_id:        str   = ""
-        api_key:        str   = ""
-        api_secret:     str   = ""
-        totp_secret:    str   = ""
-        lot_multiplier: float = 1.0
+        binding_id:          str
+        provider:            str
+        label:               str   = ""
+        user_id:             str   = ""
+        password:            str   = ""
+        api_key:             str   = ""
+        api_secret:          str   = ""
+        totp_secret:         str   = ""
+        lot_multiplier:      float = 1.0
+        trading_mode:        str   = "paper"
+        assigned_strategy:   str   = ""
+        assigned_instrument: str   = "NIFTY"
+
+    class _BrokerModeSchema(_PydanticBase):
+        mode: str  # "paper" | "live"
+
+    class _FyersAuthCodeSchema(_PydanticBase):
+        auth_code: str
 
     class _SetIndexSchema(_PydanticBase):
         index: str  # NIFTY / BANKNIFTY / FINNIFTY
+
+    class _StrategySelectionItem(_PydanticBase):
+        strategy: str   # sell_straddle | iron_condor | trap_trading
+        instrument: str # NIFTY | BANKNIFTY | FINNIFTY | SENSEX | MIDCPNIFTY
+
+    class _StrategySelectionsSchema(_PydanticBase):
+        selections: list  # List[_StrategySelectionItem]
+
+    class _DeploymentSchema(_PydanticBase):
+        binding_id:     str
+        strategy_name:  str
+        underlying:     str   = "NIFTY"
+        lot_multiplier: float = 1.0
+        max_profit_rs:  float = 0.0
+        max_sl_rs:      float = 0.0
+        squareoff_time: str   = "15:15"
 
 except ImportError:
     _HAS_FASTAPI = False
@@ -255,7 +283,7 @@ class DashboardServer:
         dashboard = DashboardServer(bus, cfg, registry,
                                     router=router, rebalancer=rebalancer,
                                     feeder=feeder)
-        task = asyncio.create_task(dashboard.serve(host="0.0.0.0", port=8080))
+        task = asyncio.create_task(dashboard.serve(host="0.0.0.0", port=5000))
         ...
         dashboard.stop()
         await task
@@ -839,6 +867,25 @@ class DashboardServer:
             cid = user.get("client_id", "")
             if not body.binding_id.strip():
                 raise HTTPException(400, "binding_id is required.")
+
+            # Guard: binding_id already taken by a *different* provider → reject
+            existing_bindings = await asyncio.to_thread(
+                _srv._client_db.get_bindings_safe_sync, cid
+            )
+            clash = next(
+                (b for b in existing_bindings
+                 if b["binding_id"] == body.binding_id
+                 and b["provider"] != body.provider),
+                None,
+            )
+            if clash:
+                raise HTTPException(
+                    400,
+                    f"Binding ID '{body.binding_id}' is already used by "
+                    f"{clash['provider'].upper()}. Choose a different Binding ID "
+                    f"(e.g. '{body.provider}_main').",
+                )
+
             try:
                 await _srv._client_db.upsert_binding(
                     client_id=cid,
@@ -846,19 +893,43 @@ class DashboardServer:
                     provider=body.provider,
                     label=body.label,
                     user_id=body.user_id,
+                    password=body.password,
                     api_key=body.api_key,
                     api_secret=body.api_secret,
                     totp_secret=body.totp_secret,
                     access_token="",
                     lot_multiplier=body.lot_multiplier,
+                    trading_mode=body.trading_mode,
+                    assigned_strategy=body.assigned_strategy,
+                    assigned_instrument=body.assigned_instrument,
                 )
             except HTTPException:
                 raise
             except Exception as exc:
                 logger.error("Dashboard: add_broker DB error for %s: %s", cid, exc)
                 raise HTTPException(500, f"Failed to save broker credentials: {exc}")
-            logger.info("Dashboard: client %s added broker binding %s.", cid, body.binding_id)
-            return {"ok": True, "message": f"Broker '{body.binding_id}' saved. Awaiting admin strategy assignment."}
+
+            # Auto-generate token via headless auth if TOTP secret was provided
+            token_msg = ""
+            if body.totp_secret.strip():
+                try:
+                    from broker_auth.headless_auth import headless_engine as _he
+                    b_row = {
+                        "binding_id": body.binding_id,
+                        "provider": body.provider,
+                        "user_id": body.user_id,
+                        "password": body.password,
+                        "api_key": body.api_key,
+                        "api_secret": body.api_secret,
+                        "totp_secret": body.totp_secret,
+                    }
+                    ok, msg, token = await _he.authenticate_binding(b_row, cid, _srv._client_db)
+                    token_msg = f" Token {'generated' if ok else 'failed'}: {msg}"
+                except Exception as auth_exc:
+                    token_msg = f" Token generation skipped: {auth_exc}"
+
+            logger.info("Dashboard: client %s added broker binding %s.%s", cid, body.binding_id, token_msg)
+            return {"ok": True, "message": f"Broker '{body.binding_id}' saved.{token_msg}"}
 
         # ── CLIENT — start bot (pre-flight validation) ────────────────────────
 
@@ -970,6 +1041,504 @@ class DashboardServer:
             if reg_client is not None:
                 reg_client.target_index = idx
             return {"ok": True, "target_index": idx}
+
+        # ── CLIENT — strategy selections ─────────────────────────────────────
+
+        @app.get("/api/client/strategy_selections", tags=["Client"])
+        async def api_client_get_selections(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            db_client = _srv._client_db.get_client_sync(cid)
+            if db_client is None:
+                raise HTTPException(404, "Client not found.")
+            import json as _json
+            raw = db_client.get("strategy_selections", "[]") or "[]"
+            try:
+                selections = _json.loads(raw)
+            except Exception:
+                selections = []
+            return {"ok": True, "selections": selections}
+
+        @app.post("/api/client/strategy_selections", tags=["Client"])
+        async def api_client_save_selections(
+            body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            allowed_strategies = {"sell_straddle", "iron_condor", "trap_trading"}
+            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            import json as _json
+            validated = []
+            for item in (body.selections or []):
+                s = item.get("strategy", "") if isinstance(item, dict) else getattr(item, "strategy", "")
+                ins = item.get("instrument", "") if isinstance(item, dict) else getattr(item, "instrument", "")
+                if s in allowed_strategies and ins.upper() in allowed_instruments:
+                    validated.append({"strategy": s, "instrument": ins.upper()})
+            await _srv._client_db.upsert_client(cid, strategy_selections=_json.dumps(validated))
+            return {"ok": True, "saved": len(validated)}
+
+        # ── CLIENT — positions (live open legs) ───────────────────────────────
+
+        @app.get("/api/client/positions", tags=["Client"])
+        async def api_client_positions(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            by_broker: dict = {}
+            if reg_client is not None:
+                for binding_id, worker in getattr(reg_client, "workers", {}).items():
+                    by_broker[binding_id] = {}
+                    for strat_name, strat in getattr(worker, "strategies", {}).items():
+                        legs = []
+                        pos = getattr(strat, "_position", None) or getattr(strat, "position", None)
+                        if pos:
+                            for attr in ("ce_symbol", "pe_symbol"):
+                                sym = getattr(pos, attr, None)
+                                if sym:
+                                    qty  = getattr(pos, attr.replace("symbol","qty"), 0)
+                                    ep   = getattr(pos, attr.replace("symbol","entry_price"), 0)
+                                    ltp  = getattr(pos, attr.replace("symbol","ltp"), ep)
+                                    pnl  = round((ep - ltp) * abs(qty or 0), 2)
+                                    legs.append({"symbol": sym, "qty": qty, "entry_price": round(ep,2), "ltp": round(ltp,2), "pnl": pnl})
+                        pnl_total = sum(l["pnl"] for l in legs)
+                        by_broker[binding_id][strat_name] = {"legs": legs, "pnl": pnl_total}
+            return {"ok": True, "by_broker": by_broker}
+
+        # ── CLIENT — history ──────────────────────────────────────────────────
+
+        @app.get("/api/client/history", tags=["Client"])
+        async def api_client_history(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            # Pull from event bus log — filter fills + exits for this client
+            trades = []
+            for evt in list(reversed(_srv._event_log[-200:] if hasattr(_srv, "_event_log") else [])):
+                if evt.get("client_id") == cid and evt.get("type") in ("fill", "exit", "trade"):
+                    trades.append({
+                        "date":        evt.get("ts", ""),
+                        "strategy":    evt.get("strategy", "—"),
+                        "instrument":  evt.get("instrument", evt.get("index", "—")),
+                        "entry_price": evt.get("entry_price", "—"),
+                        "exit_price":  evt.get("exit_price", evt.get("avg_price", "—")),
+                        "exit_reason": evt.get("reason", evt.get("code", "—")),
+                        "pnl":         float(evt.get("pnl", 0)),
+                    })
+            return {"ok": True, "trades": trades}
+
+        # ── CLIENT — kill broker ──────────────────────────────────────────────
+
+        @app.post("/api/client/kill_broker/{binding_id}", tags=["Client"])
+        async def api_client_kill_broker(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            if reg_client is None:
+                raise HTTPException(404, "Client worker not running.")
+            worker = getattr(reg_client, "workers", {}).get(binding_id)
+            if worker is None:
+                raise HTTPException(404, f"Binding '{binding_id}' not found.")
+            if hasattr(worker, "halt"):
+                await worker.halt()
+            elif hasattr(worker, "stop"):
+                await worker.stop()
+            await _srv._client_db.upsert_client(cid, **{f"trade_enabled_{binding_id}": False})
+            return {"ok": True, "message": f"Broker '{binding_id}' halted."}
+
+        # ── CLIENT — delete broker binding ───────────────────────────────────
+
+        @app.delete("/api/client/broker/{binding_id}", tags=["Client"])
+        async def api_client_delete_broker(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            bindings = await asyncio.to_thread(
+                _srv._client_db.get_bindings_safe_sync, cid
+            )
+            match = next((b for b in bindings if b["binding_id"] == binding_id), None)
+            if match is None:
+                raise HTTPException(404, f"Binding '{binding_id}' not found.")
+            if match.get("is_trade_enabled"):
+                raise HTTPException(
+                    400,
+                    f"Cannot delete '{binding_id}' while trading is ON. "
+                    "Disable trading first.",
+                )
+            await _srv._client_db.delete_binding(cid, binding_id)
+            logger.info("Dashboard: deleted binding %s for client %s", binding_id, cid)
+            return {"ok": True, "message": f"Broker '{binding_id}' deleted."}
+
+        # ── CLIENT — Fyers manual auth-code exchange ─────────────────────────
+
+        @app.get("/api/client/broker/{binding_id}/fyers-auth-url", tags=["Client"])
+        async def api_client_fyers_auth_url(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """Return the Fyers OAuth login URL for the given broker binding."""
+            cid = user.get("client_id", "")
+            # Use full decode to get api_key (App ID) — safe_sync omits credentials
+            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_sync, cid)
+            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+            if b is None:
+                return {"ok": False, "error": f"Broker '{binding_id}' not found."}
+            if (b.get("provider") or "").lower() != "fyers":
+                return {"ok": False, "error": "This endpoint is only for Fyers brokers."}
+            app_id = b.get("api_key", "").strip()
+            if not app_id:
+                return {"ok": False, "error": "App ID not set. Edit this broker and enter the Fyers App ID (e.g. XXXXX-100) in the APP ID field."}
+            if app_id.startswith("eyJ") and len(app_id) > 50:
+                return {"ok": False, "error": "The APP ID field contains an access token, not the App ID. Enter your Fyers App ID (e.g. XXXXX-100) in the APP ID field."}
+            if "-" not in app_id:
+                app_id = f"{app_id}-100"
+            redirect = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+            url = (
+                f"https://api-t1.fyers.in/api/v3/generate-authcode"
+                f"?client_id={app_id}"
+                f"&redirect_uri={redirect}"
+                f"&response_type=code&state=terminus"
+            )
+            return {"ok": True, "url": url, "redirect_uri": redirect}
+
+        @app.post("/api/client/broker/{binding_id}/fyers-exchange", tags=["Client"])
+        async def api_client_fyers_exchange(
+            binding_id: str,
+            body: _FyersAuthCodeSchema,
+            user: dict = Depends(_require_client),
+        ):
+            """
+            Exchange a Fyers auth_code for an access token and store it.
+            User gets auth_code from the redirect URL after logging in at the Fyers OAuth URL.
+            """
+            cid = user.get("client_id", "")
+            # Use full decode to get api_key + api_secret
+            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_sync, cid)
+            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+            if b is None:
+                return {"ok": False, "error": f"Broker '{binding_id}' not found."}
+            if (b.get("provider") or "").lower() != "fyers":
+                return {"ok": False, "error": "This endpoint is only for Fyers brokers."}
+
+            app_id     = b.get("api_key", "").strip()
+            secret_key = b.get("api_secret", "").strip()
+            auth_code  = (body.auth_code or "").strip()
+
+            if not app_id:
+                return {"ok": False, "error": "App ID not set — edit this broker and enter the Fyers App ID."}
+            if not secret_key:
+                return {"ok": False, "error": "Secret ID not set — edit this broker and enter the Fyers Secret ID."}
+            if not auth_code:
+                return {"ok": False, "error": "auth_code is required."}
+            if "-" not in app_id:
+                app_id = f"{app_id}-100"
+
+            def _exchange() -> tuple:
+                import hashlib, requests as _rq
+                app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+                try:
+                    r = _rq.post(
+                        "https://api-t1.fyers.in/api/v3/validate-authcode",
+                        json={
+                            "grant_type": "authorization_code",
+                            "appIdHash":  app_id_hash,
+                            "code":       auth_code,
+                        },
+                        headers={"Content-Type": "application/json", "Accept": "application/json"},
+                        timeout=15,
+                    )
+                    d = r.json() if r.ok else {}
+                    token = d.get("access_token") or (d.get("data") or {}).get("access_token")
+                    if token:
+                        return True, "Fyers token generated successfully.", token
+                    msg = d.get("message") or str(d)
+                    return False, f"Token exchange failed: {msg}", ""
+                except Exception as exc:
+                    return False, f"Token exchange error: {exc}", ""
+
+            ok, msg, token = await asyncio.to_thread(_exchange)
+            if not ok:
+                return {"ok": False, "error": msg}
+
+            from datetime import datetime as _dt
+            now = _dt.now(IST).isoformat()
+            expiry = _dt.now(IST).replace(hour=23, minute=59, second=59).isoformat()
+            await _srv._client_db.update_access_token(cid, binding_id, token, now, expiry)
+            logger.info("Dashboard: Fyers token exchanged and stored for %s/%s", cid, binding_id)
+            return {"ok": True, "message": msg}
+
+        # ── CLIENT — per-broker start / stop / mode ──────────────────────────
+
+        @app.post("/api/client/broker/{binding_id}/start", tags=["Client"])
+        async def api_client_broker_start(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """
+            Enable trading for a specific broker binding.
+            Automatically checks token validity; runs headless auth if token
+            is missing or expired before enabling trading.
+            """
+            from broker_auth.headless_auth import headless_engine as _he
+            cid = user.get("client_id", "")
+            bindings_db = _srv._client_db.get_bindings_sync(cid)
+            b_row = next((b for b in bindings_db if b["binding_id"] == binding_id), None)
+            if b_row is None:
+                raise HTTPException(404, f"Binding '{binding_id}' not found.")
+
+            provider = (b_row.get("provider") or "mock").lower()
+            try:
+                ok, auth_msg, token = await _he.authenticate_binding(b_row, cid, _srv._client_db)
+            except Exception as exc:
+                return {"ok": False, "message": f"Auth error: {exc}", "token_ok": False, "trading_enabled": False}
+
+            if not ok:
+                # Auth failed — do NOT enable trading
+                return {
+                    "ok": False,
+                    "message": f"Could not connect {provider.title()}: {auth_msg}",
+                    "token_ok": False,
+                    "trading_enabled": False,
+                }
+
+            # Auth succeeded — enable trading for this binding
+            await _srv._client_db.set_trade_enabled(cid, binding_id, True)
+            logger.info("Dashboard: broker %s/%s started (token_ok=%s).", cid, binding_id, bool(token))
+            return {
+                "ok": True,
+                "message": f"Connected & trading enabled. {auth_msg}",
+                "token_ok": True,
+                "trading_enabled": True,
+            }
+
+        @app.post("/api/client/broker/{binding_id}/stop", tags=["Client"])
+        async def api_client_broker_stop(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            await _srv._client_db.set_trade_enabled(cid, binding_id, False)
+            logger.info("Dashboard: broker %s/%s stopped.", cid, binding_id)
+            return {"ok": True, "message": f"Broker '{binding_id}' stopped — trading disabled."}
+
+        @app.post("/api/client/broker/{binding_id}/mode", tags=["Client"])
+        async def api_client_broker_mode(
+            binding_id: str, body: _BrokerModeSchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            if body.mode not in ("paper", "live"):
+                raise HTTPException(400, "mode must be 'paper' or 'live'.")
+            await _srv._client_db.set_trading_mode(cid, binding_id, body.mode)
+            return {"ok": True, "mode": body.mode, "message": f"Mode set to {body.mode.upper()}."}
+
+        # ── CLIENT — Terminal toggle (Step 1: connect / validate token) ─────────
+
+        @app.post("/api/client/broker/{binding_id}/connect", tags=["Client"])
+        async def api_client_broker_connect(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """
+            Terminal toggle ON — 3-step handshake:
+              1. Query DB for cached token
+              2. Validate token via lightweight API ping
+              3. If invalid/missing → trigger headless auto-auth
+            Sets terminal_connected=1 on success. Does NOT enable trading yet.
+            """
+            cid = user.get("client_id", "")
+            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_sync, cid)
+            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+            if b is None:
+                return {"ok": False, "error": f"Broker '{binding_id}' not found."}
+
+            provider = (b.get("provider") or "mock").lower()
+            logger.info(
+                "Terminal connect: [%s/%s] provider=%s — Step 1: checking cached token",
+                cid, binding_id, provider,
+            )
+
+            # Step 1 + 2: authenticate_binding checks cached token first, only re-auths if needed
+            ok, msg, token = await _he.authenticate_binding(b, cid, _srv._client_db)
+
+            if ok:
+                await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                logger.info(
+                    "Terminal connect: [%s/%s] CONNECTED — token valid/refreshed.",
+                    cid, binding_id,
+                )
+                return {
+                    "ok": True,
+                    "connected": True,
+                    "message": f"Terminal connected — {msg}",
+                    "provider": provider,
+                }
+            else:
+                await _srv._client_db.set_terminal_connected(cid, binding_id, False)
+                logger.warning(
+                    "Terminal connect: [%s/%s] FAILED — %s", cid, binding_id, msg,
+                )
+                return {"ok": False, "connected": False, "error": msg}
+
+        @app.post("/api/client/broker/{binding_id}/disconnect", tags=["Client"])
+        async def api_client_broker_disconnect(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """Terminal toggle OFF — also stops engine if running."""
+            cid = user.get("client_id", "")
+            await _srv._client_db.set_terminal_connected(cid, binding_id, False)
+            await _srv._client_db.set_engine_active(cid, binding_id, False)
+            logger.info("Terminal disconnect: [%s/%s] disconnected.", cid, binding_id)
+            return {"ok": True, "message": "Terminal disconnected. Engine stopped."}
+
+        # ── CLIENT — Engine toggle (Step 2: hot-reload strategy execution) ─────
+
+        @app.post("/api/client/broker/{binding_id}/engine-start", tags=["Client"])
+        async def api_client_engine_start(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """
+            Trading Engine toggle ON.
+            Requires terminal_connected=1 first.
+            Scans strategy assignments and hot-attaches broker to the running engine.
+            """
+            cid = user.get("client_id", "")
+            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_safe_sync, cid)
+            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+            if b is None:
+                return {"ok": False, "error": f"Broker '{binding_id}' not found."}
+            if not b.get("terminal_connected"):
+                return {
+                    "ok": False,
+                    "error": "Terminal not connected. Switch Terminal ON first.",
+                }
+
+            strategy  = b.get("assigned_strategy", "") or ""
+            underlying = b.get("assigned_instrument", "NIFTY") or "NIFTY"
+
+            await _srv._client_db.set_engine_active(cid, binding_id, True)
+
+            # Apply any saved deployment config to RuntimeConfig immediately
+            deploy_id = f"{cid}_{binding_id}_{strategy}"
+            try:
+                from data_layer.deployment_store import load_deployment_json, apply_deployment_to_runtime_config
+                deploy = load_deployment_json(deploy_id)
+                if deploy:
+                    apply_deployment_to_runtime_config(deploy)
+                    logger.info(
+                        "Engine start: [%s/%s] applied deployment config %s",
+                        cid, binding_id, deploy_id,
+                    )
+            except Exception as exc:
+                logger.warning("Engine start: deployment config apply failed: %s", exc)
+
+            logger.info(
+                "Engine start: [%s/%s] ACTIVE — strategy=%s underlying=%s mode=%s",
+                cid, binding_id, strategy or "(none)", underlying,
+                b.get("trading_mode", "paper"),
+            )
+            return {
+                "ok": True,
+                "engine_active": True,
+                "strategy": strategy,
+                "underlying": underlying,
+                "message": (
+                    f"Trading Engine active — {strategy or 'no strategy'} "
+                    f"on {underlying} [{b.get('trading_mode','paper').upper()}]"
+                ),
+            }
+
+        @app.post("/api/client/broker/{binding_id}/engine-stop", tags=["Client"])
+        async def api_client_engine_stop(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """Trading Engine toggle OFF — stops execution routing for this broker."""
+            cid = user.get("client_id", "")
+            await _srv._client_db.set_engine_active(cid, binding_id, False)
+            logger.info("Engine stop: [%s/%s] engine deactivated.", cid, binding_id)
+            return {"ok": True, "engine_active": False, "message": "Trading Engine stopped."}
+
+        # ── CLIENT — Strategy deployment ──────────────────────────────────────
+
+        @app.post("/api/client/strategy/deploy", tags=["Client"])
+        async def api_client_strategy_deploy(
+            body: _DeploymentSchema, user: dict = Depends(_require_client),
+        ):
+            """
+            Save a strategy deployment config.
+            Persists to SQLite + JSON file at data/deployments/{deploy_id}.json
+            Immediately applies to RuntimeConfig if engine is active.
+            """
+            cid = user.get("client_id", "")
+
+            # Validate squareoff time
+            sq = (body.squareoff_time or "15:15").strip()
+            try:
+                h, m = sq.split(":")
+                assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+            except Exception:
+                return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
+
+            allowed_strategies = {"sell_straddle", "iron_condor", "trap_trading"}
+            if body.strategy_name not in allowed_strategies:
+                return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
+
+            deploy_id = await _srv._client_db.save_deployment(
+                client_id      = cid,
+                binding_id     = body.binding_id,
+                strategy_name  = body.strategy_name,
+                underlying     = body.underlying,
+                lot_multiplier = body.lot_multiplier,
+                max_profit_rs  = body.max_profit_rs,
+                max_sl_rs      = body.max_sl_rs,
+                squareoff_time = sq,
+            )
+
+            from data_layer.deployment_store import save_deployment_json, apply_deployment_to_runtime_config
+            save_deployment_json(
+                deploy_id      = deploy_id,
+                client_id      = cid,
+                binding_id     = body.binding_id,
+                strategy_name  = body.strategy_name,
+                underlying     = body.underlying,
+                lot_multiplier = body.lot_multiplier,
+                max_profit_rs  = body.max_profit_rs,
+                max_sl_rs      = body.max_sl_rs,
+                squareoff_time = sq,
+            )
+
+            # If engine is already active for this broker, hot-apply immediately
+            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_safe_sync, cid)
+            b = next((x for x in bindings if x["binding_id"] == body.binding_id), None)
+            hot_applied = False
+            if b and b.get("engine_active"):
+                try:
+                    apply_deployment_to_runtime_config({
+                        "strategy_name": body.strategy_name, "underlying": body.underlying,
+                        "lot_multiplier": body.lot_multiplier, "max_profit_rs": body.max_profit_rs,
+                        "max_sl_rs": body.max_sl_rs, "squareoff_time": sq,
+                    })
+                    hot_applied = True
+                except Exception as exc:
+                    logger.warning("Deploy hot-apply failed: %s", exc)
+
+            logger.info(
+                "Deploy saved: %s [lots=%.1f profit=%.0f sl=%.0f sq=%s hot=%s]",
+                deploy_id, body.lot_multiplier, body.max_profit_rs,
+                body.max_sl_rs, sq, hot_applied,
+            )
+            return {
+                "ok": True,
+                "deploy_id": deploy_id,
+                "hot_applied": hot_applied,
+                "message": f"Deployment saved{' and hot-applied' if hot_applied else ''}.",
+            }
+
+        @app.get("/api/client/strategy/deployments", tags=["Client"])
+        async def api_client_get_deployments(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            rows = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+            return {"ok": True, "deployments": rows}
+
+        @app.delete("/api/client/strategy/deploy/{deploy_id}", tags=["Client"])
+        async def api_client_delete_deployment(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            await _srv._client_db.delete_deployment(deploy_id, cid)
+            from data_layer.deployment_store import delete_deployment_json
+            delete_deployment_json(deploy_id)
+            return {"ok": True, "message": "Deployment removed."}
 
         # ── ADMIN — pending clients ───────────────────────────────────────────
 
@@ -1266,6 +1835,38 @@ class DashboardServer:
         async def api_all_indices_config(_: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             return RuntimeConfig.get_all_indices()
+
+        @app.get("/api/admin/strategy/trap-config", tags=["Admin"])
+        async def api_trap_config_get(_: dict = Depends(_require_admin)):
+            from data_layer.runtime_config import RuntimeConfig
+            cfg = RuntimeConfig.get("trap_trading") or {}
+            return {"ok": True, "config": cfg}
+
+        @app.post("/api/admin/strategy/trap-config", tags=["Admin"])
+        async def api_trap_config_save(
+            request: Request, _: dict = Depends(_require_admin),
+        ):
+            from data_layer.runtime_config import RuntimeConfig
+            try:
+                body = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON body."}
+            allowed = {"htf_minutes", "ltf_minutes", "adx_threshold",
+                       "volume_spike_multiplier", "swing_lookback",
+                       "zone_tolerance_pct", "void_atr_mult"}
+            patch = {k: v for k, v in body.items() if k in allowed}
+            if not patch:
+                return {"ok": False, "error": "No valid fields provided."}
+            RuntimeConfig.update({"trap_trading": patch})
+            # Live-inject into running TrapTradingEngine instances
+            te = getattr(_srv, "_trap_engine", None)
+            if te and hasattr(te, "reconfigure"):
+                try:
+                    te.reconfigure(RuntimeConfig.get("trap_trading"))
+                except Exception as exc:
+                    logger.warning("Trap config live-inject failed: %s", exc)
+            logger.info("Trap Trading config saved: %s", patch)
+            return {"ok": True, "message": "Trap Trading config saved."}
 
         # ── ADMIN — portfolio risk command center ────────────────────────────
 
@@ -1583,21 +2184,16 @@ class DashboardServer:
                     status_code=400,
                     content={"ok": False, "error": "Fyers App ID and Secret not found in DB. Save credentials first."},
                 )
-            try:
-                from fyers_apiv3 import fyersModel
-                redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
-                session = fyersModel.SessionModel(
-                    client_id=app_id,
-                    secret_key=secret_key,
-                    redirect_uri=redirect_uri,
-                    response_type="code",
-                    grant_type="authorization_code",
-                )
-                url = session.generate_authcode()
-                return {"ok": True, "url": url, "redirect_uri": redirect_uri}
-            except Exception as exc:
-                logger.error("Dashboard: Fyers auth-url generation failed: %s", exc)
-                return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+            if "-" not in app_id:
+                app_id = f"{app_id}-100"
+            redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+            url = (
+                f"https://api-t1.fyers.in/api/v3/generate-authcode"
+                f"?client_id={app_id}"
+                f"&redirect_uri={redirect_uri}"
+                f"&response_type=code&state=terminus"
+            )
+            return {"ok": True, "url": url, "redirect_uri": redirect_uri}
 
         @app.post("/api/admin/feeder/fyers/exchange-code", tags=["Admin"])
         async def api_fyers_exchange_code(
@@ -1635,31 +2231,26 @@ class DashboardServer:
                 )
 
             try:
-                from fyers_apiv3 import fyersModel
-                import asyncio as _asyncio
-
-                redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
-                session = fyersModel.SessionModel(
-                    client_id=app_id,
-                    secret_key=secret_key,
-                    redirect_uri=redirect_uri,
-                    response_type="code",
-                    grant_type="authorization_code",
+                import hashlib, requests as _rq
+                app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
+                resp = await asyncio.to_thread(
+                    lambda: _rq.post(
+                        "https://api-t1.fyers.in/api/v3/validate-authcode",
+                        json={
+                            "grant_type": "authorization_code",
+                            "appIdHash":  app_id_hash,
+                            "code":       auth_code,
+                        },
+                        headers={"Content-Type": "application/json", "Accept": "application/json"},
+                        timeout=15,
+                    ).json()
                 )
-                session.set_token(auth_code)
-                resp = await _asyncio.to_thread(session.generate_token)
 
-                if not resp or resp.get("s") != "ok":
-                    msg = (resp or {}).get("message", "Token exchange failed.")
+                access_token = resp.get("access_token") or (resp.get("data") or {}).get("access_token")
+                if not access_token:
+                    msg = resp.get("message") or str(resp)
                     _srv._auth_alerts["feeder"] = f"Fyers OAuth failed: {msg}"
                     return JSONResponse(status_code=502, content={"ok": False, "error": f"Fyers: {msg}"})
-
-                access_token = resp.get("access_token", "")
-                if not access_token:
-                    return JSONResponse(
-                        status_code=502,
-                        content={"ok": False, "error": "Fyers: token exchange succeeded but access_token is empty."},
-                    )
 
                 from broker_auth.headless_auth import _ist_eod
                 await _srv._client_db.update_feeder_token(
@@ -1972,6 +2563,7 @@ class DashboardServer:
         async def api_clients_list(_: dict = Depends(_require_admin)):
             if _srv._registry is None:
                 return {"clients": [], "ts": datetime.now(IST).isoformat()}
+            import json as _json
             clients = []
             for c in _srv._registry._clients.values():
                 d = _build_client_dict(c)
@@ -1981,6 +2573,13 @@ class DashboardServer:
                     {"binding_id": b.binding_id, "provider": b.provider, "enabled": b.enabled}
                     for b in c.broker_bindings
                 ]
+                # Include client's own strategy selections (set from client side)
+                db_row = _srv._client_db.get_client_sync(c.client_id) or {}
+                raw_sel = db_row.get("strategy_selections", "[]") or "[]"
+                try:
+                    d["strategy_selections"] = _json.loads(raw_sel)
+                except Exception:
+                    d["strategy_selections"] = []
                 clients.append(d)
             return {"clients": clients, "ts": datetime.now(IST).isoformat()}
 
@@ -2165,7 +2764,7 @@ class DashboardServer:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    async def serve(self, host: str = "0.0.0.0", port: int = 8080) -> None:
+    async def serve(self, host: str = "0.0.0.0", port: int = 5000) -> None:
         try:
             import uvicorn
         except ImportError:

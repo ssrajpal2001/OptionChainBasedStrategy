@@ -92,6 +92,21 @@ def verify_password(password: str, stored: str) -> bool:
 # ── DDL ───────────────────────────────────────────────────────────────────────
 
 _DDL = """
+CREATE TABLE IF NOT EXISTS strategy_deployments (
+    deploy_id          TEXT PRIMARY KEY,
+    client_id          TEXT NOT NULL,
+    binding_id         TEXT NOT NULL,
+    strategy_name      TEXT NOT NULL,
+    underlying         TEXT NOT NULL DEFAULT 'NIFTY',
+    lot_multiplier     REAL NOT NULL DEFAULT 1.0,
+    max_profit_rs      REAL NOT NULL DEFAULT 0.0,
+    max_sl_rs          REAL NOT NULL DEFAULT 0.0,
+    squareoff_time     TEXT NOT NULL DEFAULT '15:15',
+    is_active          INTEGER DEFAULT 1,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS clients (
     client_id               TEXT    PRIMARY KEY,
     name                    TEXT    DEFAULT '',
@@ -101,7 +116,8 @@ CREATE TABLE IF NOT EXISTS clients (
     max_risk_pct            REAL    DEFAULT 1.0,
     max_daily_loss_pct      REAL    DEFAULT 3.0,
     lot_multiplier          REAL    DEFAULT 1.0,
-    enabled_strategies      TEXT    DEFAULT 'A,B,C',
+    enabled_strategies      TEXT    DEFAULT '',
+    strategy_selections     TEXT    DEFAULT '[]',
     is_admin_approved       INTEGER DEFAULT 0,
     is_client_bot_active    INTEGER DEFAULT 0,
     target_index            TEXT    DEFAULT 'NIFTY',
@@ -117,6 +133,7 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
     provider            TEXT    NOT NULL,
     label               TEXT    DEFAULT '',
     user_id_enc         TEXT    DEFAULT '',
+    password_enc        TEXT    DEFAULT '',
     api_key_enc         TEXT    DEFAULT '',
     api_secret_enc      TEXT    DEFAULT '',
     totp_secret_enc     TEXT    DEFAULT '',
@@ -124,6 +141,8 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
     token_generated_at  TEXT    DEFAULT '',
     token_expiry_at     TEXT    DEFAULT '',
     assigned_strategy   TEXT    DEFAULT '',
+    assigned_instrument TEXT    DEFAULT 'NIFTY',
+    trading_mode        TEXT    DEFAULT 'paper',
     is_trade_enabled    INTEGER DEFAULT 1,
     lot_multiplier      REAL    DEFAULT 1.0,
     enabled             INTEGER DEFAULT 1,
@@ -261,11 +280,15 @@ class ClientDB:
         provider: str,
         label: str = "",
         user_id: str = "",
+        password: str = "",
         api_key: str = "",
         api_secret: str = "",
         totp_secret: str = "",
         access_token: str = "",
         lot_multiplier: float = 1.0,
+        trading_mode: str = "paper",
+        assigned_strategy: str = "",
+        assigned_instrument: str = "NIFTY",
     ) -> None:
         """Insert or update a broker binding, encrypting credentials."""
         now = datetime.now(IST).isoformat()
@@ -273,26 +296,35 @@ class ClientDB:
             self._exec,
             """INSERT INTO broker_bindings
                (client_id, binding_id, provider, label,
-                user_id_enc, api_key_enc, api_secret_enc, totp_secret_enc,
-                access_token, lot_multiplier, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                user_id_enc, password_enc, api_key_enc, api_secret_enc, totp_secret_enc,
+                access_token, lot_multiplier, trading_mode,
+                assigned_strategy, assigned_instrument, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(client_id, binding_id) DO UPDATE SET
-                 provider        = excluded.provider,
-                 label           = excluded.label,
-                 user_id_enc     = excluded.user_id_enc,
-                 api_key_enc     = excluded.api_key_enc,
-                 api_secret_enc  = excluded.api_secret_enc,
-                 totp_secret_enc = excluded.totp_secret_enc,
-                 access_token    = excluded.access_token,
-                 lot_multiplier  = excluded.lot_multiplier""",
+                 provider            = excluded.provider,
+                 label               = excluded.label,
+                 user_id_enc         = CASE WHEN excluded.user_id_enc     != '' THEN excluded.user_id_enc     ELSE user_id_enc     END,
+                 password_enc        = CASE WHEN excluded.password_enc    != '' THEN excluded.password_enc    ELSE password_enc    END,
+                 api_key_enc         = CASE WHEN excluded.api_key_enc     != '' THEN excluded.api_key_enc     ELSE api_key_enc     END,
+                 api_secret_enc      = CASE WHEN excluded.api_secret_enc  != '' THEN excluded.api_secret_enc  ELSE api_secret_enc  END,
+                 totp_secret_enc     = CASE WHEN excluded.totp_secret_enc != '' THEN excluded.totp_secret_enc ELSE totp_secret_enc END,
+                 access_token        = CASE WHEN excluded.access_token    != '' THEN excluded.access_token    ELSE access_token    END,
+                 lot_multiplier      = excluded.lot_multiplier,
+                 trading_mode        = excluded.trading_mode,
+                 assigned_strategy   = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_strategy ELSE assigned_strategy END,
+                 assigned_instrument = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_instrument ELSE assigned_instrument END""",
             (
                 client_id, binding_id, provider, label,
                 _encode_cred(user_id),
+                _encode_cred(password),
                 _encode_cred(api_key),
                 _encode_cred(api_secret),
                 _encode_cred(totp_secret),
                 access_token,
                 lot_multiplier,
+                trading_mode,
+                assigned_strategy,
+                assigned_instrument,
                 now,
             ),
         )
@@ -334,6 +366,110 @@ class ClientDB:
             (1 if enabled else 0, client_id, binding_id),
         )
 
+    async def set_trading_mode(
+        self, client_id: str, binding_id: str, mode: str
+    ) -> None:
+        """Set 'paper' or 'live' trading mode for a specific broker binding."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET trading_mode=? "
+            "WHERE client_id=? AND binding_id=?",
+            (mode, client_id, binding_id),
+        )
+
+    async def set_terminal_connected(
+        self, client_id: str, binding_id: str, connected: bool
+    ) -> None:
+        """Mark terminal as connected/disconnected (token validated)."""
+        now = datetime.now(IST).isoformat() if connected else ""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET terminal_connected=?, terminal_connected_at=? "
+            "WHERE client_id=? AND binding_id=?",
+            (1 if connected else 0, now, client_id, binding_id),
+        )
+
+    async def set_engine_active(
+        self, client_id: str, binding_id: str, active: bool
+    ) -> None:
+        """Mark trading engine as active/inactive for this broker."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET engine_active=?, is_trade_enabled=? "
+            "WHERE client_id=? AND binding_id=?",
+            (1 if active else 0, 1 if active else 0, client_id, binding_id),
+        )
+
+    # ── Strategy Deployments ──────────────────────────────────────────────────
+
+    async def save_deployment(
+        self,
+        client_id:      str,
+        binding_id:     str,
+        strategy_name:  str,
+        underlying:     str,
+        lot_multiplier: float,
+        max_profit_rs:  float,
+        max_sl_rs:      float,
+        squareoff_time: str,
+    ) -> str:
+        """Upsert a strategy deployment config. Returns the deploy_id."""
+        deploy_id = f"{client_id}_{binding_id}_{strategy_name}"
+        now = datetime.now(IST).isoformat()
+        await asyncio.to_thread(
+            self._exec,
+            """INSERT INTO strategy_deployments
+               (deploy_id, client_id, binding_id, strategy_name, underlying,
+                lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time,
+                is_active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
+               ON CONFLICT(deploy_id) DO UPDATE SET
+                 underlying=excluded.underlying,
+                 lot_multiplier=excluded.lot_multiplier,
+                 max_profit_rs=excluded.max_profit_rs,
+                 max_sl_rs=excluded.max_sl_rs,
+                 squareoff_time=excluded.squareoff_time,
+                 is_active=1,
+                 updated_at=excluded.updated_at""",
+            (deploy_id, client_id, binding_id, strategy_name, underlying,
+             lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, now, now),
+        )
+        logger.info(
+            "ClientDB: deployment saved — %s [%s/%s %s %s lots=%.1f]",
+            deploy_id, client_id, binding_id, strategy_name, underlying, lot_multiplier,
+        )
+        return deploy_id
+
+    def get_deployments_sync(self, client_id: str) -> List[dict]:
+        """Return all active deployments for a client."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            rows = [dict(r) for r in con.execute(
+                "SELECT * FROM strategy_deployments WHERE client_id=? AND is_active=1 ORDER BY created_at",
+                (client_id,),
+            ).fetchall()]
+            con.close()
+            return rows
+        except Exception as exc:
+            logger.error("ClientDB.get_deployments_sync(%s): %s", client_id, exc)
+            return []
+
+    async def delete_deployment(self, deploy_id: str, client_id: str) -> None:
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET is_active=0 WHERE deploy_id=? AND client_id=?",
+            (deploy_id, client_id),
+        )
+
+    async def delete_binding(self, client_id: str, binding_id: str) -> None:
+        """Permanently remove a broker binding (credentials + config) from the DB."""
+        await asyncio.to_thread(
+            self._exec,
+            "DELETE FROM broker_bindings WHERE client_id=? AND binding_id=?",
+            (client_id, binding_id),
+        )
+
     def get_bindings_sync(self, client_id: str) -> List[dict]:
         """Return bindings with credentials decoded — for internal execution use."""
         try:
@@ -347,6 +483,7 @@ class ClientDB:
             con.close()
             for r in rows:
                 r["user_id"]     = _decode_cred(r.pop("user_id_enc", ""))
+                r["password"]    = _decode_cred(r.pop("password_enc", ""))
                 r["api_key"]     = _decode_cred(r.pop("api_key_enc", ""))
                 r["api_secret"]  = _decode_cred(r.pop("api_secret_enc", ""))
                 r["totp_secret"] = _decode_cred(r.pop("totp_secret_enc", ""))
@@ -364,8 +501,9 @@ class ClientDB:
                     con.execute(
                         """SELECT binding_id, provider, label, access_token,
                                   token_generated_at, token_expiry_at,
-                                  assigned_strategy, is_trade_enabled,
-                                  lot_multiplier, enabled
+                                  assigned_strategy, assigned_instrument, trading_mode,
+                                  is_trade_enabled, lot_multiplier, enabled,
+                                  terminal_connected, terminal_connected_at, engine_active
                            FROM broker_bindings WHERE client_id=? ORDER BY created_at""",
                         (client_id,),
                     ).fetchall()]
@@ -525,7 +663,21 @@ class ClientDB:
     def _create_tables(self) -> None:
         con = sqlite3.connect(self._db_path)
         con.executescript(_DDL)
-        con.commit()
+        # Migrations: add columns that may not exist in older DBs
+        for migration in (
+            "ALTER TABLE clients ADD COLUMN strategy_selections TEXT DEFAULT '[]'",
+            "ALTER TABLE broker_bindings ADD COLUMN password_enc TEXT DEFAULT ''",
+            "ALTER TABLE broker_bindings ADD COLUMN trading_mode TEXT DEFAULT 'paper'",
+            "ALTER TABLE broker_bindings ADD COLUMN assigned_instrument TEXT DEFAULT 'NIFTY'",
+            "ALTER TABLE broker_bindings ADD COLUMN terminal_connected INTEGER DEFAULT 0",
+            "ALTER TABLE broker_bindings ADD COLUMN terminal_connected_at TEXT DEFAULT ''",
+            "ALTER TABLE broker_bindings ADD COLUMN engine_active INTEGER DEFAULT 0",
+        ):
+            try:
+                con.execute(migration)
+                con.commit()
+            except Exception:
+                pass  # column already exists
         con.close()
 
     def _exec(self, sql: str, params=()) -> None:

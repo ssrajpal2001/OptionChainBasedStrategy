@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TERMINUS — OptionChain AlgoTrader</title>
 
-  <!-- Fonts: Orbitron (logo), JetBrains Mono (data), Bebas Neue (headers), Barlow Condensed (UI) -->
+  <!-- Fonts: Plus Jakarta Sans (UI), JetBrains Mono (data values) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;500;600&family=Bebas+Neue&family=Barlow+Condensed:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 
   <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -19,9 +19,9 @@
       theme: {
         extend: {
           fontFamily: {
-            mono:    ['JetBrains Mono', 'Share Tech Mono', 'monospace'],
-            display: ['Bebas Neue', 'Orbitron', 'monospace'],
-            ui:      ['Barlow Condensed', 'sans-serif'],
+            mono:    ['JetBrains Mono', 'monospace'],
+            display: ['Plus Jakarta Sans', 'sans-serif'],
+            ui:      ['Plus Jakarta Sans', 'sans-serif'],
           },
           colors: {
             t: {
@@ -45,25 +45,25 @@
   </script>
 
   <style>
-    /* ── CSS custom properties — obsidian/amber theme defaults ──────── */
+    /* ── CSS custom properties — light professional defaults ──────── */
     :root {
-      --t-bg:       #080706;
-      --t-surface:  #0d0b09;
-      --t-card:     #131009;
-      --t-border:   #201c12;
-      --t-dim:      #2e2818;
-      --t-cyan:     #e8a200;
-      --t-green:    #22c55e;
-      --t-red:      #ef4444;
-      --t-amber:    #e8a200;
-      --t-muted:    #4a4030;
-      --t-text:     #9a8c72;
-      --t-bright:   #e8d8b0;
+      --t-bg:       #f1f5f9;
+      --t-surface:  #e8edf3;
+      --t-card:     #ffffff;
+      --t-border:   #dde3ec;
+      --t-dim:      #cbd5e1;
+      --t-cyan:     #2563eb;
+      --t-green:    #16a34a;
+      --t-red:      #dc2626;
+      --t-amber:    #d97706;
+      --t-muted:    #94a3b8;
+      --t-text:     #334155;
+      --t-bright:   #0f172a;
       /* RGB components for alpha variants */
-      --t-cyan-rgb:  232, 162, 0;
-      --t-green-rgb: 34, 197, 94;
-      --t-red-rgb:   239, 68, 68;
-      --t-amber-rgb: 232, 162, 0;
+      --t-cyan-rgb:  37, 99, 235;
+      --t-green-rgb: 22, 163, 74;
+      --t-red-rgb:   220, 38, 38;
+      --t-amber-rgb: 217, 119, 6;
     }
 
     [x-cloak] { display: none !important; }
@@ -72,167 +72,139 @@
     body {
       background-color: var(--t-bg);
       color: var(--t-text);
-      font-family: 'Barlow Condensed', sans-serif;
+      font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 14px;
       overflow-x: hidden;
       transition: background-color 0.3s, color 0.3s;
-    }
-
-    /* ── Background grid — warm amber micro-grid ──────────────────────── */
-    body::before {
-      content: '';
-      position: fixed; inset: 0; z-index: 0; pointer-events: none;
-      background-image:
-        linear-gradient(rgba(232,162,0,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(232,162,0,0.03) 1px, transparent 1px);
-      background-size: 32px 32px;
-    }
-    /* ── Scanlines — CRT phosphor overlay ────────────────────────────── */
-    body::after {
-      content: '';
-      position: fixed; inset: 0; z-index: 1000; pointer-events: none;
-      background: repeating-linear-gradient(
-        0deg, transparent, transparent 3px,
-        rgba(0,0,0,0.06) 3px, rgba(0,0,0,0.06) 4px
-      );
     }
 
     /* ── Card ─────────────────────────────────────────────────────────── */
     .t-card {
       background: var(--t-card);
       border: 1px solid var(--t-border);
-      border-left: 3px solid rgba(var(--t-cyan-rgb),0.4);
+      border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06), 0 0 0 0 transparent;
       position: relative;
-      transition: background 0.3s, border-color 0.3s;
+      transition: background 0.3s, border-color 0.3s, box-shadow 0.2s;
     }
-    .t-card::before {
-      content: '';
-      position: absolute; top: 0; left: -3px; bottom: 0; width: 3px;
-      background: linear-gradient(180deg,
-        transparent 0%,
-        rgba(var(--t-cyan-rgb),0.7) 30%,
-        rgba(var(--t-cyan-rgb),0.7) 70%,
-        transparent 100%);
-      pointer-events: none;
-    }
+    .t-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.09); }
 
     /* ── Section label ────────────────────────────────────────────────── */
     .sec-label {
-      font-family: 'Bebas Neue', 'Orbitron', monospace;
-      font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
       color: var(--t-muted);
     }
 
     /* ── Input ────────────────────────────────────────────────────────── */
     .t-input {
-      font-family: 'JetBrains Mono', 'Share Tech Mono', monospace; font-size: 12px;
-      background: var(--t-surface); border: 1px solid var(--t-dim);
-      color: var(--t-bright); padding: 6px 8px; border-radius: 0; width: 100%;
-      outline: none; transition: border-color 0.15s;
-      min-height: 32px;
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px;
+      background: var(--t-card); border: 1px solid var(--t-border);
+      color: var(--t-bright); padding: 6px 10px; border-radius: 6px; width: 100%;
+      outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+      min-height: 34px;
     }
-    .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.6); box-shadow: 0 0 0 1px rgba(var(--t-cyan-rgb),0.12); }
+    .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.6); box-shadow: 0 0 0 3px rgba(var(--t-cyan-rgb),0.12); }
     .t-input option { background: var(--t-card); color: var(--t-bright); }
 
     /* ── Buttons ──────────────────────────────────────────────────────── */
     .btn-primary {
-      font-family: 'Bebas Neue', monospace;
-      font-size: 15px; letter-spacing: 0.12em;
-      padding: 9px 20px; border-radius: 0;
-      background: rgba(var(--t-cyan-rgb),0.10); border: 1px solid rgba(var(--t-cyan-rgb),0.4);
-      color: var(--t-cyan); cursor: pointer; transition: all 0.15s; width: 100%;
-      box-shadow: inset 0 0 20px rgba(var(--t-cyan-rgb),0.04);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+      padding: 9px 20px; border-radius: 6px;
+      background: var(--t-cyan); border: 1px solid var(--t-cyan);
+      color: #ffffff; cursor: pointer; transition: all 0.15s; width: 100%;
     }
-    .btn-primary:hover { background: rgba(var(--t-cyan-rgb),0.18); box-shadow: 0 0 12px rgba(var(--t-cyan-rgb),0.2), inset 0 0 20px rgba(var(--t-cyan-rgb),0.08); }
+    .btn-primary:hover { background: rgba(var(--t-cyan-rgb),0.85); box-shadow: 0 2px 8px rgba(var(--t-cyan-rgb),0.25); }
     .btn-action {
-      font-family: 'Bebas Neue', monospace;
-      font-size: 14px; letter-spacing: 0.1em;
-      padding: 6px 16px; border-radius: 0;
-      background: rgba(var(--t-cyan-rgb),0.07); border: 1px solid rgba(var(--t-cyan-rgb),0.25);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 13px; font-weight: 500;
+      padding: 6px 16px; border-radius: 6px;
+      background: rgba(var(--t-cyan-rgb),0.08); border: 1px solid rgba(var(--t-cyan-rgb),0.3);
       color: var(--t-cyan); cursor: pointer; transition: all 0.15s; width: 100%;
     }
     .btn-action:hover { background: rgba(var(--t-cyan-rgb),0.15); }
     .btn-halt {
-      font-family: 'Bebas Neue', monospace; font-size: 13px; letter-spacing: 0.1em;
-      padding: 4px 12px; border-radius: 0;
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12px; font-weight: 600;
+      padding: 4px 12px; border-radius: 6px;
       background: rgba(var(--t-red-rgb),0.08); border: 1px solid rgba(var(--t-red-rgb),0.3);
       color: var(--t-red); cursor: pointer; transition: all 0.15s;
     }
-    .btn-halt:hover { background: rgba(var(--t-red-rgb),0.18); }
+    .btn-halt:hover { background: rgba(var(--t-red-rgb),0.15); }
     .btn-resume {
-      font-family: 'Bebas Neue', monospace; font-size: 13px; letter-spacing: 0.1em;
-      padding: 4px 12px; border-radius: 0;
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12px; font-weight: 600;
+      padding: 4px 12px; border-radius: 6px;
       background: rgba(var(--t-green-rgb),0.08); border: 1px solid rgba(var(--t-green-rgb),0.3);
       color: var(--t-green); cursor: pointer; transition: all 0.15s;
     }
-    .btn-resume:hover { background: rgba(var(--t-green-rgb),0.18); }
+    .btn-resume:hover { background: rgba(var(--t-green-rgb),0.15); }
     .btn-kill {
-      font-family: 'Bebas Neue', monospace; font-size: 15px; letter-spacing: 0.12em;
-      padding: 9px 16px; border-radius: 0;
-      background: rgba(var(--t-red-rgb),0.10); border: 1px solid rgba(var(--t-red-rgb),0.45);
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; font-weight: 700;
+      padding: 9px 16px; border-radius: 6px;
+      background: rgba(var(--t-red-rgb),0.08); border: 1px solid rgba(var(--t-red-rgb),0.4);
       color: var(--t-red); cursor: pointer; transition: all 0.15s;
       width: 100%; position: relative;
     }
-    .btn-kill:hover { background: rgba(var(--t-red-rgb),0.20); box-shadow: 0 0 16px rgba(var(--t-red-rgb),0.2); }
-    .btn-kill.armed { background: rgba(var(--t-red-rgb),0.22); color: var(--t-bright); }
+    .btn-kill:hover { background: rgba(var(--t-red-rgb),0.16); box-shadow: 0 2px 8px rgba(var(--t-red-rgb),0.18); }
+    .btn-kill.armed { background: var(--t-red); color: #fff; }
     .btn-add {
-      font-family: 'Bebas Neue', monospace; font-size: 13px; letter-spacing: 0.1em;
-      padding: 8px 16px; border-radius: 0;
-      background: rgba(var(--t-green-rgb),0.06); border: 1px solid rgba(var(--t-green-rgb),0.3);
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12px; font-weight: 600;
+      padding: 8px 16px; border-radius: 6px;
+      background: rgba(var(--t-green-rgb),0.07); border: 1px solid rgba(var(--t-green-rgb),0.3);
       color: var(--t-green); cursor: pointer; transition: all 0.15s; width: 100%;
     }
     .btn-add:hover { background: rgba(var(--t-green-rgb),0.14); }
 
     /* ── Badges ───────────────────────────────────────────────────────── */
     .badge-live {
-      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
-      padding: 1px 7px; border-radius: 0;
-      background: rgba(var(--t-green-rgb),0.10); border: 1px solid rgba(var(--t-green-rgb),0.35); color: var(--t-green);
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      padding: 2px 8px; border-radius: 20px;
+      background: rgba(var(--t-green-rgb),0.10); border: 1px solid rgba(var(--t-green-rgb),0.3); color: var(--t-green);
     }
     .badge-halted {
-      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
-      padding: 1px 7px; border-radius: 0;
-      background: rgba(var(--t-red-rgb),0.10); border: 1px solid rgba(var(--t-red-rgb),0.35); color: var(--t-red);
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      padding: 2px 8px; border-radius: 20px;
+      background: rgba(var(--t-red-rgb),0.10); border: 1px solid rgba(var(--t-red-rgb),0.3); color: var(--t-red);
     }
     .badge-role-admin {
-      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
-      padding: 1px 9px; border-radius: 0;
-      background: rgba(var(--t-amber-rgb),0.12); border: 1px solid rgba(var(--t-amber-rgb),0.4); color: var(--t-amber);
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      padding: 2px 10px; border-radius: 20px;
+      background: rgba(var(--t-amber-rgb),0.10); border: 1px solid rgba(var(--t-amber-rgb),0.3); color: var(--t-amber);
     }
     .badge-role-client {
-      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.12em;
-      padding: 1px 9px; border-radius: 0;
-      background: rgba(var(--t-cyan-rgb),0.10); border: 1px solid rgba(var(--t-cyan-rgb),0.35); color: var(--t-cyan);
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      padding: 2px 10px; border-radius: 20px;
+      background: rgba(var(--t-cyan-rgb),0.10); border: 1px solid rgba(var(--t-cyan-rgb),0.3); color: var(--t-cyan);
     }
 
     /* ── Gauges ───────────────────────────────────────────────────────── */
-    .gauge-track { background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 2px; overflow: hidden; }
-    .gauge-fill { transition: width 0.5s ease; border-radius: 2px; }
+    .gauge-track { background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 4px; overflow: hidden; }
+    .gauge-fill { transition: width 0.5s ease; border-radius: 4px; }
 
     /* ── Index tab ────────────────────────────────────────────────────── */
     .idx-tab {
-      font-family: 'Bebas Neue', monospace; font-size: 14px; letter-spacing: 0.1em;
-      padding: 4px 14px; border-radius: 0; border: 1px solid transparent;
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
+      padding: 5px 14px; border-radius: 6px; border: 1px solid transparent;
       cursor: pointer; transition: all 0.15s; color: var(--t-muted);
     }
-    .idx-tab:hover { color: var(--t-text); border-color: var(--t-dim); }
-    .idx-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.35); box-shadow: 0 0 8px rgba(var(--t-cyan-rgb),0.15); }
+    .idx-tab:hover { color: var(--t-text); background: var(--t-surface); }
+    .idx-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.25); }
 
     /* ── Theme tab ────────────────────────────────────────────────────── */
     .theme-tab {
-      font-family: 'Bebas Neue', monospace; font-size: 11px; letter-spacing: 0.1em;
-      padding: 3px 10px; border-radius: 0; border: 1px solid transparent;
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+      padding: 4px 10px; border-radius: 6px; border: 1px solid transparent;
       cursor: pointer; transition: all 0.15s; color: var(--t-muted); text-transform: uppercase;
     }
-    .theme-tab:hover { color: var(--t-text); border-color: var(--t-dim); }
-    .theme-tab.active { color: var(--t-cyan); border-color: rgba(var(--t-cyan-rgb),0.35); background: rgba(var(--t-cyan-rgb),0.06); }
+    .theme-tab:hover { color: var(--t-text); background: var(--t-surface); }
+    .theme-tab.active { color: var(--t-cyan); border-color: rgba(var(--t-cyan-rgb),0.3); background: rgba(var(--t-cyan-rgb),0.07); }
 
     /* ── Admin sub-nav tabs ───────────────────────────────────────────── */
     .admin-tab {
-      font-family: 'Bebas Neue', monospace;
-      font-size: 13px;
-      letter-spacing: 0.14em; text-transform: uppercase;
-      padding: 13px 24px; border: none;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 13px; font-weight: 600;
+      letter-spacing: 0.03em; text-transform: uppercase;
+      padding: 12px 20px; border: none;
       border-bottom: 2px solid transparent;
       background: transparent; color: var(--t-muted);
       cursor: pointer;
@@ -242,13 +214,13 @@
     .admin-tab.active { color: var(--t-cyan); border-bottom-color: var(--t-cyan); }
 
     .login-tab {
-      flex: 1; font-family: 'Bebas Neue', monospace; font-size: 14px; letter-spacing: 0.1em;
+      flex: 1; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.03em;
       padding: 9px; text-transform: uppercase; text-align: center;
       border: 1px solid var(--t-border); color: var(--t-muted); cursor: pointer; transition: all 0.2s;
-      border-radius: 0;
+      border-radius: 6px;
     }
     .login-tab:last-child { border-left: none; }
-    .login-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.4); }
+    .login-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.35); }
 
     /* ── Kill ring countdown ──────────────────────────────────────────── */
     .kill-ring {
@@ -261,16 +233,19 @@
     }
 
     /* ── Animations ───────────────────────────────────────────────────── */
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
     @keyframes val-flash {
-      0%   { color: var(--t-bright); text-shadow: 0 0 12px rgba(var(--t-cyan-rgb),0.9); }
-      100% { color: inherit; text-shadow: none; }
+      0%   { color: var(--t-cyan); font-weight: 700; }
+      100% { color: inherit; font-weight: inherit; }
     }
-    .val-flash { animation: val-flash 1s ease-out forwards; }
+    .val-flash { animation: val-flash 0.8s ease-out forwards; }
     @keyframes price-glow {
-      0%,100% { text-shadow: 0 0 20px rgba(var(--t-cyan-rgb),0.35); }
-      50%      { text-shadow: 0 0 40px rgba(var(--t-cyan-rgb),0.55), 0 0 80px rgba(var(--t-cyan-rgb),0.15); }
+      0%,100% { opacity: 1; }
+      50%      { opacity: 0.85; }
     }
-    .price-live { animation: price-glow 3s ease-in-out infinite; }
+    .price-live { animation: price-glow 2.5s ease-in-out infinite; }
     @keyframes conn-pulse {
       0%, 100% { opacity: 1; }
       50%       { opacity: 0.4; }
@@ -293,10 +268,10 @@
     /* ── Feed row ─────────────────────────────────────────────────────── */
     .feed-row {
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
-      padding: 4px 10px; border-bottom: 1px solid rgba(32,28,18,0.8);
+      padding: 4px 10px; border-bottom: 1px solid var(--t-border);
       display: flex; gap: 8px; align-items: baseline;
     }
-    .feed-row:hover { background: rgba(var(--t-cyan-rgb),0.03); }
+    .feed-row:hover { background: rgba(var(--t-cyan-rgb),0.04); }
 
     /* ── Worker row ───────────────────────────────────────────────────── */
     .worker-row {
@@ -304,19 +279,19 @@
       padding: 5px 10px; border-bottom: 1px solid var(--t-border); font-size: 12px;
     }
 
-    /* ── Data row — tight terminal table rows ─────────────────────────── */
+    /* ── Data row — clean table rows ─────────────────────────────────── */
     .data-row {
       display: flex; justify-content: space-between; align-items: baseline;
-      padding: 3px 0; border-bottom: 1px solid rgba(32,28,18,0.6);
+      padding: 4px 0; border-bottom: 1px solid var(--t-border);
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
     }
     .data-row:last-child { border-bottom: none; }
 
-    /* ── Diagonal accent ──────────────────────────────────────────────── */
+    /* ── Diagonal accent — subtle, light-mode friendly ───────────────── */
     .diag-accent {
       position: absolute; top: 0; right: 0; width: 0; height: 0; border-style: solid;
-      border-width: 0 16px 16px 0;
-      border-color: transparent rgba(var(--t-cyan-rgb),0.25) transparent transparent;
+      border-width: 0 14px 14px 0;
+      border-color: transparent rgba(var(--t-cyan-rgb),0.15) transparent transparent;
     }
 
     /* ── EMA signals ──────────────────────────────────────────────────── */
@@ -325,40 +300,39 @@
     .ema-neutral { color: var(--t-muted); }
 
     /* ── RSI zone ─────────────────────────────────────────────────────── */
-    .rsi-ob { color: var(--t-red); }
-    .rsi-os { color: var(--t-green); }
-    .rsi-n  { color: var(--t-cyan); }
+    .rsi-ob { color: var(--t-red);   font-weight: 600; }
+    .rsi-os { color: var(--t-green); font-weight: 600; }
+    .rsi-n  { color: var(--t-cyan);  }
 
     /* ── Drawdown bar ─────────────────────────────────────────────────── */
     .drawdown-bar { transition: width 0.6s ease; }
 
     /* ── Zone approach blink ─────────────────────────────────────────── */
     @keyframes zone-approach {
-      0%, 100% { opacity: 1; box-shadow: 0 0 6px rgba(var(--t-amber-rgb),0.6); }
-      50%       { opacity: 0.55; box-shadow: none; }
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.5; }
     }
     .zone-approach-blink { animation: zone-approach 0.7s ease-in-out infinite; }
 
     /* ── IV wide-spread row highlight ────────────────────────────────── */
-    .iv-wide-spread td { background: rgba(var(--t-amber-rgb),0.05); }
+    .iv-wide-spread td { background: rgba(var(--t-amber-rgb),0.06); }
 
     /* ── Broker config modals ────────────────────────────────────────── */
     .modal-overlay {
       position: fixed; inset: 0; z-index: 200;
-      background: rgba(2,4,10,0.88);
-      backdrop-filter: blur(5px);
+      background: rgba(15,23,42,0.55);
+      backdrop-filter: blur(4px);
       display: flex; align-items: center; justify-content: center;
       padding: 16px;
     }
     .modal-panel {
       background: var(--t-card);
-      border: 1px solid var(--t-dim);
-      border-left: 3px solid rgba(var(--t-cyan-rgb),0.5);
-      border-radius: 0;
+      border: 1px solid var(--t-border);
+      border-radius: 10px;
       width: 580px; max-width: 96vw; max-height: 92vh;
       overflow-y: auto;
       position: relative;
-      box-shadow: 0 24px 80px rgba(0,0,0,0.8), 0 0 40px rgba(var(--t-cyan-rgb),0.06);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.18), 0 4px 16px rgba(0,0,0,0.08);
     }
     .modal-header {
       display: flex; align-items: center; justify-content: space-between;
@@ -368,14 +342,14 @@
     .modal-body { padding: 16px 18px; }
     .modal-zone {
       border: 1px solid var(--t-border);
-      border-radius: 4px;
+      border-radius: 8px;
       padding: 13px 14px 10px;
       background: var(--t-surface);
       margin-bottom: 12px;
     }
     .modal-zone-label {
-      font-family: 'Rajdhani', sans-serif;
-      font-size: 9px; font-weight: 700; letter-spacing: 0.14em;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
       color: var(--t-muted); text-transform: uppercase; margin-bottom: 10px;
     }
     .bg-connect-strip {
@@ -390,28 +364,28 @@
       border-top: 1px solid var(--t-border);
     }
     .btn-modal-cancel {
-      font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 12px;
-      letter-spacing: 0.08em; padding: 7px 18px; border-radius: 3px; cursor: pointer;
+      font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 600; font-size: 12px;
+      letter-spacing: 0.02em; padding: 7px 18px; border-radius: 6px; cursor: pointer;
       border: 1px solid var(--t-border); color: var(--t-muted);
       background: transparent; transition: all 0.15s;
     }
     .btn-modal-cancel:hover { border-color: var(--t-text); color: var(--t-text); }
     .btn-modal-save {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 12px;
-      letter-spacing: 0.1em; padding: 7px 22px; border-radius: 3px; cursor: pointer;
-      border: 1px solid rgba(var(--t-cyan-rgb),0.5);
-      color: var(--t-bg); background: var(--t-cyan); transition: all 0.15s;
+      font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 12px;
+      letter-spacing: 0.02em; padding: 7px 22px; border-radius: 6px; cursor: pointer;
+      border: 1px solid var(--t-cyan);
+      color: #fff; background: var(--t-cyan); transition: all 0.15s;
     }
-    .btn-modal-save:hover { background: rgba(var(--t-cyan-rgb),0.8); }
+    .btn-modal-save:hover { background: rgba(var(--t-cyan-rgb),0.85); }
     .btn-modal-save:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-connect-now {
-      font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 11px;
-      letter-spacing: 0.1em; padding: 5px 16px; border-radius: 3px; cursor: pointer;
-      border: 1px solid rgba(var(--t-green-rgb),0.5);
+      font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11px;
+      letter-spacing: 0.02em; padding: 5px 16px; border-radius: 6px; cursor: pointer;
+      border: 1px solid rgba(var(--t-green-rgb),0.4);
       color: var(--t-green); background: rgba(var(--t-green-rgb),0.08);
       transition: all 0.15s; white-space: nowrap; flex-shrink: 0;
     }
-    .btn-connect-now:hover { background: rgba(var(--t-green-rgb),0.18); }
+    .btn-connect-now:hover { background: rgba(var(--t-green-rgb),0.15); }
     .btn-connect-now:disabled { opacity: 0.5; cursor: not-allowed; }
     .vis-toggle {
       font-size: 13px; cursor: pointer; padding: 0 6px;
@@ -430,19 +404,11 @@
     .navbar-h { height: 52px; }
 
     /* ── Modal overlay ────────────────────────────────────────────────── */
-    .modal-overlay {
-      position: fixed; inset: 0; z-index: 200;
-      background: rgba(0,0,0,0.75); backdrop-filter: blur(4px);
-      display: flex; align-items: center; justify-content: center;
-    }
     .modal-box {
       background: var(--t-card); border: 1px solid var(--t-border);
-      border-radius: 4px; width: 100%; max-width: 480px; max-height: 90vh;
+      border-radius: 10px; width: 100%; max-width: 480px; max-height: 90vh;
       overflow-y: auto; padding: 24px; position: relative;
-    }
-    .modal-box::before {
-      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, transparent, rgba(var(--t-cyan-rgb),0.6), transparent);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.07);
     }
   </style>
 </head>
@@ -471,15 +437,21 @@ document.addEventListener('alpine:init', () => {
     loginLoading: false,
 
     /* ── Theme ──────────────────────────────────────────────────────── */
-    currentTheme: 'midnight',
+    currentTheme: 'light_pro',
     showThemeMenu: false,
 
     _themes: {
+      light_pro: {
+        bg:'#f1f5f9', surface:'#e8edf3', card:'#ffffff', border:'#dde3ec', dim:'#cbd5e1',
+        cyan:'#2563eb', green:'#16a34a', red:'#dc2626', amber:'#d97706',
+        muted:'#94a3b8', text:'#334155', bright:'#0f172a',
+        cyanRgb:'37,99,235', greenRgb:'22,163,74', redRgb:'220,38,38', amberRgb:'217,119,6',
+      },
       midnight: {
-        bg:'#080706', surface:'#0d0b09', card:'#131009', border:'#201c12', dim:'#2e2818',
-        cyan:'#e8a200', green:'#22c55e', red:'#ef4444', amber:'#e8a200',
-        muted:'#4a4030', text:'#9a8c72', bright:'#e8d8b0',
-        cyanRgb:'232,162,0', greenRgb:'34,197,94', redRgb:'239,68,68', amberRgb:'232,162,0',
+        bg:'#0d1117', surface:'#161b22', card:'#1c2130', border:'#2a3244', dim:'#374159',
+        cyan:'#3b82f6', green:'#22c55e', red:'#ef4444', amber:'#f59e0b',
+        muted:'#4b5675', text:'#94a3b8', bright:'#e2e8f0',
+        cyanRgb:'59,130,246', greenRgb:'34,197,94', redRgb:'239,68,68', amberRgb:'245,158,11',
       },
       matrix: {
         bg:'#000000', surface:'#060f06', card:'#0a170a', border:'#0f2a0f', dim:'#153a15',
@@ -492,12 +464,6 @@ document.addEventListener('alpine:init', () => {
         cyan:'#ffe040', green:'#00ffcc', red:'#ff0090', amber:'#ff7700',
         muted:'#4a2880', text:'#b060f0', bright:'#fff0a0',
         cyanRgb:'255,224,64', greenRgb:'0,255,204', redRgb:'255,0,144', amberRgb:'255,119,0',
-      },
-      light_pro: {
-        bg:'#f0f2f5', surface:'#e8ecf0', card:'#ffffff', border:'#d1d9e2', dim:'#aab8c6',
-        cyan:'#0c5fa8', green:'#15803d', red:'#b91c1c', amber:'#92400e',
-        muted:'#64748b', text:'#334155', bright:'#0f172a',
-        cyanRgb:'12,95,168', greenRgb:'21,128,61', redRgb:'185,28,28', amberRgb:'146,64,14',
       },
     },
 
@@ -578,11 +544,28 @@ document.addEventListener('alpine:init', () => {
     /* ── Phase 7 — client lifecycle ─────────────────────────────────── */
     clientStatus:  null,    // full /api/client/status response
     clientPhase:   'onboarding', // 'onboarding' | 'pending' | 'active'
+    clientMenu:    'strategies', // 'strategies' | 'brokers' | 'positions' | 'history'
     botLoading:    false, botMsg: '', botOk: null,
     setIndexMsg:   '', setIndexOk: null,
-    portalBroker:  { binding_id:'', provider:'mock', label:'', user_id:'', api_key:'', api_secret:'', totp_secret:'', lot_multiplier:1.0 },
-    portalBrokerMsg: '', portalBrokerOk: null, portalBrokerLoading: false,
-    showPortalBrokerForm: false,
+
+    /* ── Client strategy selections ─────────────────────────────────── */
+    availableStrategies: [
+      { id: 'sell_straddle', name: 'Sell Straddle',  desc: 'ATM straddle — premium decay (theta)' },
+      { id: 'iron_condor',   name: 'Iron Condor',    desc: 'OTM 4-leg credit spread (range-bound)' },
+      { id: 'trap_trading',  name: 'Trap Trading',   desc: 'Institutional trap detection (directional)' },
+    ],
+    availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY'],
+    csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
+    csSaving: false, csSaveMsg: '', csSaveOk: null,
+    csSelectionsLoaded: false,
+
+    /* ── Client positions / history ─────────────────────────────────── */
+    csActiveBrokerTab: '',   // binding_id of the selected broker in positions view
+    csPositions: {},         // keyed by binding_id → [{strategy, instrument, legs, pnl}]
+    csHistory: [],           // trade history rows
+    csHistoryLoading: false,
+    csKillBroker: {},        // {binding_id: {armed:false, countdown:5, timer:null}}
+    csPosBrokerLoading: false,
 
     /* ── Phase 7 — admin pending approvals ──────────────────────────── */
     pendingClients: [],
@@ -625,9 +608,10 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Per-index strategy config (rule builder) ────────────────────── */
     adminSelectedIndex: 'NIFTY',
-    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor'
+    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor' | 'trap_trading'
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
-    indexConfig: {},    // keyed by index name; each has { sell_straddle: {}, iron_condor: {} }
+    indexConfig: { _trap: { htf_minutes:75, ltf_minutes:5, adx_threshold:20.0, volume_spike_multiplier:1.5, swing_lookback:5, zone_tolerance_pct:0.5, void_atr_mult:2.0 } },
+    trapSaveMsg: '', trapSaveOk: null,
     indexConfigLoading: false,
     indexConfigSaving:  false,
     indexConfigMsg:     '',
@@ -660,10 +644,39 @@ document.addEventListener('alpine:init', () => {
       totp_secret:'', vendor_code:'', imei:'', client_code:'',
       lot_multiplier: 1.0,
     },
-    brokerProviders: ['mock','shoonya','dhan','fyers','angelone'],
+    brokerProviders: ['zerodha','dhan','upstox','angelone','fyers','mock'],
     brokerAddMsg:    '',
     brokerAddOk:     null,
     brokerAddLoading: false,
+    // Per-provider field definitions: which credential fields are required/shown
+    brokerFieldConfig: {
+      zerodha:  { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Zerodha Kite' },
+      dhan:     { user_id:true, password:true, api_key:true, api_secret:false, totp_secret:true,  label:'Dhan' },
+      upstox:   { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Upstox' },
+      angelone: { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Angel One' },
+      fyers:    { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Fyers' },
+      mock:     { user_id:false, password:false, api_key:false, api_secret:false, totp_secret:false, label:'Paper/Mock' },
+    },
+    // Per-provider human-readable field label overrides
+    brokerFieldHints: {
+      zerodha:  { user_id:'USER ID',         password:'PASSWORD',    api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
+      dhan:     { user_id:'CLIENT ID',        password:'LOGIN PIN',   api_key:'ACCESS TOKEN (eyJ… optional)', api_secret:'(not used)', totp_secret:'TOTP SECRET' },
+      upstox:   { user_id:'MOBILE NUMBER',    password:'6-DIGIT PIN', api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
+      angelone: { user_id:'CLIENT ID',        password:'MPIN',        api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
+      fyers:    { user_id:'CLIENT ID (FY ID)',password:'4-DIGIT PIN', api_key:'APP ID',   api_secret:'SECRET ID',  totp_secret:'TOTP SECRET' },
+      mock:     { user_id:'USER ID',          password:'PASSWORD',    api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
+    },
+    // Per-broker start/stop state
+    csBrokerOp: {},  // binding_id -> {loading, termLoading, engLoading, termStep, msg, ok}
+    // Strategy deployment modal
+    showDeployModal: false,
+    deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:15' },
+    deployMsg: '', deployOk: null, deployLoading: false,
+    // Portal broker add form state
+    showPortalBrokerForm: false,
+    portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', password:'', api_key:'', api_secret:'', totp_secret:'', lot_multiplier:1.0, trading_mode:'paper', assigned_strategy:'', assigned_instrument:'NIFTY' },
+    portalBrokerMsg: '', portalBrokerOk: null, portalBrokerLoading: false,
+    portalBrokerIsEdit: false,
 
     /* ── Computed ────────────────────────────────────────────────────── */
     get spot()   { return this.spots[this.activeIndex] || {}; },
@@ -719,7 +732,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Init ────────────────────────────────────────────────────────── */
     init() {
       this._startClock();
-      const saved = localStorage.getItem('terminus_theme') || 'midnight';
+      const saved = localStorage.getItem('terminus_theme') || 'light_pro';
       this.applyTheme(saved, false);
       // Restore session from localStorage so page reload doesn't force re-login
       const savedToken = localStorage.getItem('terminus_token');
@@ -749,9 +762,17 @@ document.addEventListener('alpine:init', () => {
       this.loadFeederStatus();
       this.loadAuthAlerts();
       this.loadRms();
+      this.loadTrapConfig();
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); }, 800);
       setTimeout(() => { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); }, 1200);
       setTimeout(() => { this.loadIndexConfig(this.adminSelectedIndex); }, 1500);
+    },
+
+    async loadTrapConfig() {
+      const r = await this._fetch('/api/admin/strategy/trap-config');
+      if (!r) return;
+      const d = await r.json();
+      if (d.ok && d.config) this.indexConfig._trap = { ...this.indexConfig._trap, ...d.config };
     },
 
     _startClock() {
@@ -1017,7 +1038,7 @@ document.addEventListener('alpine:init', () => {
       if (evt.code === 'CONNECTED')                      return 'var(--t-cyan)';
       return 'var(--t-muted)';
     },
-    themeLabel(k) { return { midnight:'MIDNIGHT', matrix:'MATRIX', cyberpunk:'CYBERPUNK', light_pro:'LIGHT PRO' }[k] || k; },
+    themeLabel(k) { return { light_pro:'LIGHT', midnight:'DARK', matrix:'MATRIX', cyberpunk:'CYBER' }[k] || k; },
 
     /* ── Auth alerts ─────────────────────────────────────────────────────── */
     async loadAuthAlerts() {
@@ -1453,6 +1474,22 @@ document.addEventListener('alpine:init', () => {
       }
       this.indexConfigSaving = false;
     },
+    async saveTrapConfig() {
+      this.trapSaveMsg = 'Saving…'; this.trapSaveOk = null;
+      try {
+        const r = await this._fetch('/api/admin/strategy/trap-config', {
+          json: this.indexConfig._trap
+        });
+        if (!r) throw new Error('No response');
+        const d = await r.json();
+        this.trapSaveOk  = d.ok !== false;
+        this.trapSaveMsg = d.message || (d.ok ? 'Trap Trading config saved.' : (d.error || 'Save failed.'));
+      } catch (e) {
+        this.trapSaveOk = false;
+        this.trapSaveMsg = 'Network error: ' + (e.message || String(e));
+      }
+    },
+
     _newRule() {
       return { indicator: 'advanced', operator: 'AND', openBrackets: '', closeBrackets: '', tf: '5', operator_sym: '<', operand1: 'CLOSE', operand2: 'VWAP', operand2_val: 0 };
     },
@@ -1597,7 +1634,17 @@ document.addEventListener('alpine:init', () => {
         if (r && r.ok) {
           const d = await r.json();
           this.clientStatus = d;
-          this.clientPhase  = d.phase || 'onboarding';
+          const newPhase = d.phase || 'onboarding';
+          if (newPhase === 'active' && this.clientPhase !== 'active') {
+            this.csSelectionsLoaded = false; // re-load selections on transition to active
+          }
+          this.clientPhase = newPhase;
+          if (newPhase === 'active') {
+            await this.loadStrategySelections();
+            if (!this.csActiveBrokerTab && this.csBindings.length > 0) {
+              this.csActiveBrokerTab = this.csBindings[0].binding_id;
+            }
+          }
         }
       } catch {}
     },
@@ -1650,17 +1697,352 @@ document.addEventListener('alpine:init', () => {
     async addPortalBroker() {
       this.portalBrokerMsg = ''; this.portalBrokerOk = null; this.portalBrokerLoading = true;
       try {
-        const r = await this._fetch('/api/client/add_broker', { json: { ...this.portalBroker } });
+        const payload = { ...this.portalBroker };
+        // Clear fields hidden for this provider so they don't accidentally carry over
+        const cfg = this.brokerFieldConfig[payload.provider] || {};
+        if (!cfg.password)    payload.password    = '';
+        if (!cfg.api_key)     payload.api_key     = '';
+        if (!cfg.api_secret)  payload.api_secret  = '';
+        if (!cfg.totp_secret) payload.totp_secret = '';
+        const r = await this._fetch('/api/client/add_broker', { json: payload });
         if (!r) return;
         const d = await r.json();
         this.portalBrokerOk  = r.ok;
         this.portalBrokerMsg = d.message || d.detail || (r.ok ? 'Broker saved.' : 'Failed.');
         if (r.ok) {
+          this.portalBrokerIsEdit = false;
           await this.loadClientStatus();
-          setTimeout(() => { this.showPortalBrokerForm = false; this.portalBrokerMsg = ''; }, 2200);
+          setTimeout(() => { this.showPortalBrokerForm = false; this.portalBrokerMsg = ''; }, 2500);
         }
       } catch { this.portalBrokerOk = false; this.portalBrokerMsg = 'Request failed.'; }
       finally   { this.portalBrokerLoading = false; }
+    },
+
+    editBroker(b) {
+      this.portalBroker = {
+        provider:            b.provider || 'zerodha',
+        binding_id:          b.binding_id,
+        label:               b.label || '',
+        user_id:             '',
+        password:            '',
+        api_key:             '',
+        api_secret:          '',
+        totp_secret:         '',
+        lot_multiplier:      b.lot_multiplier || 1.0,
+        trading_mode:        b.trading_mode || 'paper',
+        assigned_strategy:   b.assigned_strategy || '',
+        assigned_instrument: b.assigned_instrument || 'NIFTY',
+      };
+      this.portalBrokerIsEdit = true;
+      this.portalBrokerMsg = '';
+      this.portalBrokerOk  = null;
+      this.showPortalBrokerForm = true;
+      this.$nextTick(() => {
+        document.querySelector('[x-model="portalBroker.user_id"]')?.scrollIntoView({ behavior:'smooth', block:'center' });
+      });
+    },
+
+    async deleteBroker(b) {
+      if (!confirm(`Delete broker "${b.binding_id}" (${(b.provider||'').toUpperCase()})?\n\nThis removes all saved credentials and cannot be undone.`)) return;
+      this._initBrokerOp(b.binding_id);
+      const op = this.csBrokerOp[b.binding_id];
+      op.loading = true; op.msg = 'Deleting…'; op.ok = null;
+      try {
+        const r = await this._fetch(`/api/client/broker/${encodeURIComponent(b.binding_id)}`, { method: 'DELETE' });
+        if (!r) return;
+        const d = await r.json();
+        op.ok  = d.ok;
+        op.msg = d.ok ? 'Deleted.' : (d.detail || d.error || 'Delete failed.');
+        if (d.ok) {
+          await new Promise(res => setTimeout(res, 600));
+          await this.loadClientData();
+        }
+      } catch { op.ok = false; op.msg = 'Request failed.'; }
+      finally   { op.loading = false; }
+    },
+
+    /* ── Fyers manual auth-code exchange ────────────────────────────────── */
+    fyersCodePanel: {},   // binding_id -> { url, msg, ok } | null
+    fyersCodeInput: {},   // binding_id -> string
+
+    async openFyersCodePanel(b) {
+      const r = await this._fetch(`/api/client/broker/${encodeURIComponent(b.binding_id)}/fyers-auth-url`);
+      if (!r) return;
+      const d = await r.json();
+      if (!d.ok) { alert(d.error || 'Failed to get Fyers login URL'); return; }
+      this.fyersCodePanel[b.binding_id] = { url: d.url, msg: '', ok: null };
+      this.fyersCodeInput[b.binding_id] = '';
+    },
+
+    async exchangeFyersCodeForBroker(b) {
+      const raw = (this.fyersCodeInput[b.binding_id] || '').trim();
+      if (!raw) return;
+      const panel = this.fyersCodePanel[b.binding_id];
+
+      // Accept full redirect URL or bare auth_code
+      let auth_code = raw;
+      if (raw.includes('auth_code=')) {
+        try { auth_code = new URL(raw).searchParams.get('auth_code') || raw; } catch(_) {
+          const m = raw.match(/auth_code=([^&]+)/);
+          if (m) auth_code = m[1];
+        }
+      } else if (raw.includes('code=')) {
+        try { auth_code = new URL(raw).searchParams.get('code') || raw; } catch(_) {
+          const m = raw.match(/[?&]code=([^&]+)/);
+          if (m) auth_code = m[1];
+        }
+      }
+
+      if (panel) { panel.msg = 'Exchanging…'; panel.ok = null; }
+      const r = await this._fetch(
+        `/api/client/broker/${encodeURIComponent(b.binding_id)}/fyers-exchange`,
+        { json: { auth_code } }
+      );
+      if (!r) return;
+      const d = await r.json();
+      if (this.fyersCodePanel[b.binding_id]) {
+        this.fyersCodePanel[b.binding_id].ok  = d.ok;
+        this.fyersCodePanel[b.binding_id].msg = d.ok ? 'Token stored. Click Connect Now.' : (d.error || 'Exchange failed.');
+      }
+      if (d.ok) await this.loadClientData();
+    },
+
+    /* ── Terminal toggle ────────────────────────────────────────────────── */
+    _initBrokerOp(bid) {
+      if (!this.csBrokerOp[bid]) this.csBrokerOp[bid] = {
+        loading: false, termLoading: false, engLoading: false,
+        termStep: '', msg: '', ok: null, step: '',
+      };
+    },
+
+    async toggleTerminal(b) {
+      const bid = b.binding_id;
+      this._initBrokerOp(bid);
+      const op = this.csBrokerOp[bid];
+      if (b.terminal_connected) {
+        // Disconnect
+        op.termLoading = true; op.msg = ''; op.ok = null;
+        try {
+          const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/disconnect`, { method:'POST' });
+          if (!r) return;
+          const d = await r.json();
+          op.ok = d.ok; op.msg = d.ok ? 'Terminal disconnected.' : (d.error || 'Disconnect failed.');
+          if (d.ok) await this.loadClientData();
+        } catch { op.ok = false; op.msg = 'Request failed.'; }
+        finally { op.termLoading = false; }
+      } else {
+        // Connect — Step 1: check cached token, Step 2: validate, Step 3: auth if needed
+        op.termLoading = true; op.msg = ''; op.ok = null;
+        op.termStep = 'Step 1: Checking cached token…';
+        try {
+          op.termStep = 'Step 2: Validating token…';
+          const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/connect`, { method:'POST' });
+          if (!r) return;
+          const d = await r.json();
+          op.ok = d.ok;
+          op.msg = d.ok ? `✓ ${d.message || 'Terminal connected.'}` : (d.error || 'Connection failed.');
+          if (d.ok) {
+            op.termStep = 'Connected.';
+            await this.loadClientData();
+          }
+        } catch (e) { op.ok = false; op.msg = 'Request failed: ' + (e.message || e); }
+        finally { op.termLoading = false; op.termStep = ''; }
+      }
+    },
+
+    /* ── Engine toggle (hot-reload) ─────────────────────────────────────── */
+    async toggleEngine(b) {
+      const bid = b.binding_id;
+      this._initBrokerOp(bid);
+      const op = this.csBrokerOp[bid];
+      op.engLoading = true; op.msg = ''; op.ok = null;
+      try {
+        const endpoint = b.engine_active
+          ? `/api/client/broker/${encodeURIComponent(bid)}/engine-stop`
+          : `/api/client/broker/${encodeURIComponent(bid)}/engine-start`;
+        const r = await this._fetch(endpoint, { method:'POST' });
+        if (!r) return;
+        const d = await r.json();
+        op.ok = d.ok;
+        op.msg = d.ok ? (d.message || (b.engine_active ? 'Engine stopped.' : 'Engine active.'))
+                      : (d.error || 'Failed.');
+        if (d.ok) await this.loadClientData();
+      } catch (e) { op.ok = false; op.msg = 'Request failed.'; }
+      finally { op.engLoading = false; }
+    },
+
+    /* ── Strategy deployment modal ──────────────────────────────────────── */
+    openDeployModal(b) {
+      this.deployForm = {
+        binding_id:     b.binding_id,
+        strategy_name:  b.assigned_strategy || 'sell_straddle',
+        underlying:     b.assigned_instrument || 'NIFTY',
+        lot_multiplier: b.lot_multiplier || 1,
+        max_profit_rs:  0,
+        max_sl_rs:      0,
+        squareoff_time: '15:15',
+      };
+      this.deployMsg = ''; this.deployOk = null;
+      this.showDeployModal = true;
+    },
+
+    async saveDeploy() {
+      this.deployLoading = true; this.deployMsg = ''; this.deployOk = null;
+      try {
+        const r = await this._fetch('/api/client/strategy/deploy', { json: this.deployForm });
+        if (!r) { this.deployLoading = false; return; }
+        const d = await r.json();
+        this.deployOk = d.ok;
+        this.deployMsg = d.ok
+          ? `✓ ${d.message || 'Saved.'} ID: ${d.deploy_id || ''}`
+          : (d.error || 'Save failed.');
+        if (d.ok && d.hot_applied) this.deployMsg += ' (hot-applied to running strategy)';
+        if (d.ok) await this.loadClientData();
+      } catch (e) { this.deployOk = false; this.deployMsg = 'Request failed.'; }
+      finally { this.deployLoading = false; }
+    },
+
+    /* ── Per-broker start / stop / mode ─────────────────────────────────── */
+    // Single toggle: ON = headless auth + enable trading, OFF = disable trading
+    async toggleBroker(bid, currentlyEnabled) {
+      this._initBrokerOp(bid);
+      const op = this.csBrokerOp[bid];
+      op.loading = true; op.msg = ''; op.ok = null;
+      try {
+        if (!currentlyEnabled) {
+          // Turning ON: check/refresh token then enable trading
+          op.step = 'Checking token…';
+          const r = await this._fetch(`/api/client/broker/${bid}/start`, { json: {} });
+          if (!r) return;
+          const d = await r.json();
+          op.ok  = d.ok;
+          op.msg = d.message || (d.ok ? 'Connected & trading enabled.' : 'Failed to connect.');
+          op.step = '';
+          if (d.ok) await this.loadClientStatus();
+        } else {
+          // Turning OFF: just stop, no auth needed
+          op.step = 'Stopping…';
+          const r = await this._fetch(`/api/client/broker/${bid}/stop`, { json: {} });
+          if (!r) return;
+          const d = await r.json();
+          op.ok  = d.ok;
+          op.msg = d.message || 'Stopped.';
+          op.step = '';
+          if (d.ok) await this.loadClientStatus();
+        }
+      } catch {
+        op.ok = false; op.msg = 'Request failed.';
+      } finally {
+        op.loading = false; op.step = '';
+      }
+    },
+    async setBrokerMode(bid, mode) {
+      try {
+        const r = await this._fetch(`/api/client/broker/${bid}/mode`, { json: { mode } });
+        if (r && r.ok) {
+          // Optimistic local update — no full reload needed for mode switch
+          const b = this.csBindings.find(x => x.binding_id === bid);
+          if (b) b.trading_mode = mode;
+          // Persist via full status refresh
+          await this.loadClientStatus();
+        }
+      } catch {}
+    },
+    // Legacy aliases (kept for backward compat with other call sites)
+    async startBroker(bid) { return this.toggleBroker(bid, false); },
+    async stopBroker(bid)  { return this.toggleBroker(bid, true);  },
+
+    /* ── Client strategy selection ─────────────────────────────────────── */
+    csHasStrategy(id) {
+      return this.csStrategySelections.some(s => s.strategy === id);
+    },
+    csInstrumentFor(id) {
+      const s = this.csStrategySelections.find(s => s.strategy === id);
+      return s ? s.instrument : 'NIFTY';
+    },
+    csToggleStrategy(id) {
+      if (this.csHasStrategy(id)) {
+        this.csStrategySelections = this.csStrategySelections.filter(s => s.strategy !== id);
+      } else {
+        this.csStrategySelections.push({ strategy: id, instrument: 'NIFTY' });
+      }
+    },
+    csSetInstrument(id, instrument) {
+      const s = this.csStrategySelections.find(s => s.strategy === id);
+      if (s) s.instrument = instrument;
+    },
+    async loadStrategySelections() {
+      if (this.csSelectionsLoaded) return;
+      try {
+        const r = await this._fetch('/api/client/strategy_selections');
+        if (r && r.ok) {
+          const d = await r.json();
+          this.csStrategySelections = d.selections || [];
+          this.csSelectionsLoaded = true;
+        }
+      } catch {}
+    },
+    async saveStrategySelections() {
+      this.csSaving = true; this.csSaveMsg = ''; this.csSaveOk = null;
+      try {
+        const r = await this._fetch('/api/client/strategy_selections', { json: { selections: this.csStrategySelections } });
+        if (!r) return;
+        const d = await r.json();
+        this.csSaveOk  = r.ok;
+        this.csSaveMsg = r.ok ? 'Strategy selections saved.' : (d.detail || 'Save failed.');
+        setTimeout(() => { this.csSaveMsg = ''; }, 3000);
+      } catch { this.csSaveOk = false; this.csSaveMsg = 'Request failed.'; }
+      finally   { this.csSaving = false; }
+    },
+
+    /* ── Client positions ───────────────────────────────────────────────── */
+    async loadClientPositions() {
+      this.csPosBrokerLoading = true;
+      try {
+        const r = await this._fetch('/api/client/positions');
+        if (r && r.ok) {
+          const d = await r.json();
+          this.csPositions = d.by_broker || {};
+        }
+      } catch {} finally { this.csPosBrokerLoading = false; }
+    },
+
+    /* ── Client history ─────────────────────────────────────────────────── */
+    async loadClientHistory() {
+      this.csHistoryLoading = true;
+      try {
+        const r = await this._fetch('/api/client/history');
+        if (r && r.ok) {
+          const d = await r.json();
+          this.csHistory = d.trades || [];
+        }
+      } catch {} finally { this.csHistoryLoading = false; }
+    },
+
+    /* ── Per-broker kill switch ─────────────────────────────────────────── */
+    initKillBroker(bindingId) {
+      if (!this.csKillBroker[bindingId]) {
+        this.csKillBroker[bindingId] = { armed: false, countdown: 5, timer: null };
+      }
+    },
+    armKillBroker(bindingId) {
+      this.initKillBroker(bindingId);
+      const kb = this.csKillBroker[bindingId];
+      if (kb.armed) return;
+      kb.armed = true; kb.countdown = 5;
+      kb.timer = setInterval(() => {
+        kb.countdown--;
+        if (kb.countdown <= 0) { clearInterval(kb.timer); kb.armed = false; kb.countdown = 5; }
+      }, 1000);
+    },
+    async confirmKillBroker(bindingId) {
+      const kb = this.csKillBroker[bindingId];
+      if (!kb || !kb.armed) return;
+      clearInterval(kb.timer); kb.armed = false; kb.countdown = 5;
+      try {
+        await this._fetch(`/api/client/kill_broker/${bindingId}`, { method: 'POST' });
+        await this.loadClientStatus();
+      } catch {}
     },
 
     /* ── Phase 7 — admin pending approvals ──────────────────────────────── */
@@ -1709,20 +2091,18 @@ document.addEventListener('alpine:init', () => {
     <!-- Logo -->
     <div class="text-center mb-8">
       <div class="flex items-center justify-center gap-3 mb-2">
-        <div style="width:4px; height:40px; background:var(--t-cyan); box-shadow:0 0 16px rgba(var(--t-cyan-rgb),0.7);"></div>
-        <div class="font-display tracking-widest" style="font-size:2.5rem; color:var(--t-cyan); text-shadow:0 0 24px rgba(var(--t-cyan-rgb),0.5); line-height:1">TERMINUS</div>
-        <div style="width:4px; height:40px; background:var(--t-cyan); box-shadow:0 0 16px rgba(var(--t-cyan-rgb),0.7);"></div>
+        <div class="font-display font-extrabold tracking-tight" style="font-size:2.5rem; color:var(--t-cyan); line-height:1">TERMINUS</div>
       </div>
       <div class="font-mono text-xs tracking-widest" style="color:var(--t-muted)">OPTIONCHAIN ALGOTRADER · NSE</div>
     </div>
 
     <!-- Login card -->
-    <div class="t-card p-6" style="border-radius:0">
+    <div class="t-card p-6">
       <!-- Role tabs -->
-      <div class="flex mb-5">
-        <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'" style="border-radius:2px 0 0 2px;border-right:none">ADMIN</button>
-        <button class="login-tab" :class="{ active: loginTab==='client' }" @click="loginTab='client'" style="border-right:none">CLIENT</button>
-        <button class="login-tab" :class="{ active: loginTab==='register' }" @click="loginTab='register'" style="border-radius:0 2px 2px 0">REGISTER</button>
+      <div class="flex gap-1 mb-5">
+        <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'">ADMIN</button>
+        <button class="login-tab" :class="{ active: loginTab==='client' }" @click="loginTab='client'">CLIENT</button>
+        <button class="login-tab" :class="{ active: loginTab==='register' }" @click="loginTab='register'">REGISTER</button>
       </div>
 
       <!-- Admin form -->
@@ -1779,20 +2159,6 @@ document.addEventListener('alpine:init', () => {
             <input class="t-input" type="password" placeholder="repeat" x-model="regForm.confirm_password" autocomplete="new-password"/>
           </div>
         </div>
-        <div class="grid grid-cols-3 gap-2">
-          <div>
-            <div class="sec-label mb-1">CAPITAL (INR)</div>
-            <input class="t-input" type="number" step="50000" x-model.number="regForm.capital"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">RISK %</div>
-            <input class="t-input" type="number" step="0.1" min="0.1" max="5" x-model.number="regForm.max_risk_pct"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">LOSS LIMIT %</div>
-            <input class="t-input" type="number" step="0.5" min="1" max="10" x-model.number="regForm.max_daily_loss_pct"/>
-          </div>
-        </div>
         <div x-show="regMsg" class="font-mono text-xs px-2 py-1.5 rounded"
              :style="regOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
                            : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
@@ -1819,7 +2185,7 @@ document.addEventListener('alpine:init', () => {
 
     <!-- Theme switcher on login screen -->
     <div class="flex justify-center gap-2 mt-4">
-      <template x-for="k in ['midnight','matrix','cyberpunk','light_pro']" :key="k">
+      <template x-for="k in ['light_pro','midnight','matrix','cyberpunk']" :key="k">
         <button class="theme-tab" :class="{ active: currentTheme===k }" @click="applyTheme(k)" x-text="themeLabel(k)"></button>
       </template>
     </div>
@@ -1843,9 +2209,9 @@ document.addEventListener('alpine:init', () => {
   <!-- Left: Logo + index tabs -->
   <div class="flex items-center gap-4">
     <div class="flex items-center gap-2">
-      <div style="width:3px; height:28px; background:var(--t-cyan); box-shadow:0 0 10px rgba(var(--t-cyan-rgb),0.6); flex-shrink:0;"></div>
+      <div style="width:3px; height:22px; background:var(--t-cyan); border-radius:2px; flex-shrink:0;"></div>
       <div>
-        <span class="font-display text-xl tracking-widest" style="color:var(--t-cyan); text-shadow:0 0 18px rgba(var(--t-cyan-rgb),0.5); line-height:1">TERMINUS</span>
+        <span class="font-display text-xl font-extrabold tracking-tight" style="color:var(--t-cyan); line-height:1">TERMINUS</span>
         <span class="font-display text-xs tracking-widest ml-1" style="color:var(--t-muted)">v6</span>
       </div>
     </div>
@@ -1870,7 +2236,7 @@ document.addEventListener('alpine:init', () => {
       <div x-show="showThemeMenu" @click.outside="showThemeMenu=false"
            class="absolute right-0 top-8 z-50 rounded border p-1 space-y-0.5 min-w-[120px]"
            style="background:var(--t-card); border-color:var(--t-border)">
-        <template x-for="k in ['midnight','matrix','cyberpunk','light_pro']" :key="k">
+        <template x-for="k in ['light_pro','midnight','matrix','cyberpunk']" :key="k">
           <button @click="applyTheme(k)"
                   class="block w-full text-left font-mono text-xs px-3 py-1.5 rounded"
                   :style="currentTheme===k ? 'color:var(--t-cyan); background:rgba(var(--t-cyan-rgb),0.08)' : 'color:var(--t-muted)'"
@@ -1888,7 +2254,7 @@ document.addEventListener('alpine:init', () => {
     <!-- IST Clock — large mono display -->
     <div class="flex flex-col items-end">
       <div class="font-mono text-xl font-medium tracking-widest leading-none"
-           style="color:var(--t-bright); text-shadow:0 0 16px rgba(var(--t-cyan-rgb),0.3)"
+           style="color:var(--t-bright)"
            x-text="istTime"></div>
       <div class="font-mono text-xs tracking-wider" style="color:var(--t-muted)">IST</div>
     </div>
@@ -1899,7 +2265,7 @@ document.addEventListener('alpine:init', () => {
     <div class="flex items-center gap-1.5">
       <div class="w-2 h-2 rounded-full" :class="wsConnected ? 'conn-live' : ''"
            :style="`background:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"></div>
-      <span class="font-display text-sm tracking-widest"
+      <span class="font-ui text-xs font-semibold"
             :style="`color:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"
             x-text="wsConnected ? 'LIVE' : 'OFFLINE'"></span>
     </div>
@@ -1908,8 +2274,8 @@ document.addEventListener('alpine:init', () => {
 
     <!-- Logout -->
     <button @click="logout()"
-            class="font-display text-sm tracking-widest px-3 py-1 border"
-            style="color:var(--t-muted); border-color:var(--t-border); background:transparent; border-radius:0;">
+            class="font-ui text-xs font-semibold px-3 py-1.5 border rounded-md"
+            style="color:var(--t-muted); border-color:var(--t-border); background:transparent;">
       LOGOUT
     </button>
   </div>
@@ -2277,7 +2643,21 @@ document.addEventListener('alpine:init', () => {
               </div>
             </div>
             <div class="flex gap-4 text-xs">
-              <div><span class="sec-label">STRATS </span><span class="font-mono" style="color:var(--t-muted)" x-text="(c.strategies||[]).join(', ')||'—'"></span></div>
+              <div>
+                <span class="sec-label">STRATEGIES </span>
+                <template x-if="c.strategy_selections && c.strategy_selections.length > 0">
+                  <span>
+                    <template x-for="(sel,si) in c.strategy_selections" :key="si">
+                      <span class="font-mono text-xs px-1.5 py-0.5 rounded mr-1"
+                            style="background:rgba(var(--t-cyan-rgb),0.08);color:var(--t-cyan)"
+                            x-text="sel.strategy.replace('_',' ').replace(/\b\w/g,l=>l.toUpperCase()) + ' · ' + sel.instrument"></span>
+                    </template>
+                  </span>
+                </template>
+                <template x-if="!c.strategy_selections || c.strategy_selections.length === 0">
+                  <span class="font-mono" style="color:var(--t-muted)">None selected</span>
+                </template>
+              </div>
               <div><span class="sec-label">BROKER </span><span class="font-mono" style="color:var(--t-cyan)" x-text="(c.brokers||[]).join(', ')||'—'"></span></div>
             </div>
           </div>
@@ -2693,7 +3073,7 @@ document.addEventListener('alpine:init', () => {
          :style="`background:${indexConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${indexConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${indexConfigOk?'var(--t-green)':'var(--t-red)'}`"
          x-text="indexConfigMsg"></div>
 
-    <!-- ── Strategy tabs: SELL STRADDLE | IRON CONDOR ──────────────────── -->
+    <!-- ── Strategy tabs: SELL STRADDLE | IRON CONDOR | TRAP TRADING ──── -->
     <div class="t-card rounded" style="overflow:hidden">
       <div class="flex border-b" style="border-color:var(--t-border)">
         <button @click="adminStrategyTab='sell_straddle'"
@@ -2709,6 +3089,13 @@ document.addEventListener('alpine:init', () => {
                   ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           IRON CONDOR
+        </button>
+        <button @click="adminStrategyTab='trap_trading'"
+                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
+                :style="adminStrategyTab==='trap_trading'
+                  ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border-bottom:2px solid var(--t-green)'
+                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
+          TRAP TRADING
         </button>
         <div class="ml-auto flex items-center px-3">
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
@@ -3258,7 +3645,32 @@ document.addEventListener('alpine:init', () => {
         <template x-if="adminSubTab==='per_day'">
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
             <div class="flex flex-col gap-3">
-              <div class="sec-label mb-1">PER-DAY OVERRIDES <span style="color:var(--t-muted);font-weight:400">— leave 0 to use global defaults</span></div>
+              <!-- Global day-level % guardrails -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid rgba(var(--t-cyan-rgb),0.2)">
+                <div class="sec-label mb-2">GLOBAL DAY-LEVEL % GUARDRAILS
+                  <span style="color:var(--t-muted);font-weight:400"> — based on % of initial trade credit. 0 = disabled.</span>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="sec-label">Day Profit Target %</label>
+                    <input type="number" step="0.5" min="0" max="100" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.profit_target_pct"
+                           placeholder="0 = disabled"/>
+                    <div class="text-xs mt-0.5" style="color:var(--t-muted)">Stop trading today when total session P&amp;L ≥ this % of initial credit</div>
+                  </div>
+                  <div>
+                    <label class="sec-label">Day Loss SL %</label>
+                    <input type="number" step="0.5" min="0" max="100" class="t-input mt-0.5"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.loss_sl_pct"
+                           placeholder="0 = disabled"/>
+                    <div class="text-xs mt-0.5" style="color:var(--t-muted)">Stop trading today when total session loss ≥ this % of initial credit</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="sec-label mb-1">PER-DAY OVERRIDES
+                <span style="color:var(--t-muted);font-weight:400"> — 0 falls back to global values above</span>
+              </div>
               <template x-for="day in ['monday','tuesday','wednesday','thursday','friday']" :key="day">
                 <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                   <div class="flex items-center justify-between mb-2">
@@ -3269,43 +3681,23 @@ document.addEventListener('alpine:init', () => {
                              @change="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].enabled = $event.target.checked">
                       <span class="font-mono text-xs"
                             :style="`color:${(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).enabled?'var(--t-cyan)':'var(--t-muted)'}`"
-                            x-text="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).enabled?'ON':'OFF'"></span>
+                            x-text="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).enabled?'OVERRIDE ON':'OFF'"></span>
                     </label>
                   </div>
-                  <div class="grid grid-cols-2 gap-2 mb-2">
+                  <div class="grid grid-cols-2 gap-2">
                     <div>
-                      <label class="sec-label">Profit Target % <span style="color:var(--t-muted)">of capital</span></label>
+                      <label class="sec-label">Profit Target % <span style="color:var(--t-muted)">of initial credit</span></label>
                       <input type="number" step="0.5" min="0" class="t-input mt-0.5"
                              :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).profit_target_pct||0"
                              @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].profit_target_pct = +$event.target.value"
-                             title="% of capital_deployed_inr. 0 = use global profit_pct.">
+                             title="0 = use global profit_target_pct">
                     </div>
                     <div>
-                      <label class="sec-label">Trade Target (pts) <span style="color:var(--t-muted)">pts-based</span></label>
-                      <input type="number" step="10" class="t-input mt-0.5"
-                             :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).single_trade_target_pts||0"
-                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].single_trade_target_pts = +$event.target.value">
-                    </div>
-                    <div>
-                      <label class="sec-label">Trade SL (pts)</label>
-                      <input type="number" step="10" class="t-input mt-0.5"
-                             :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).single_trade_stoploss_pts||0"
-                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].single_trade_stoploss_pts = +$event.target.value">
-                    </div>
-                  </div>
-                  <div class="font-mono text-xs mb-1" style="color:var(--t-muted)">Session P&amp;L override (overrides global guardrail_pnl for this day)</div>
-                  <div class="grid grid-cols-2 gap-2">
-                    <div>
-                      <label class="sec-label">Session Target (pts)</label>
-                      <input type="number" step="10" class="t-input mt-0.5"
-                             :value="((indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).guardrail_pnl||{}).target_pts||0"
-                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].guardrail_pnl.target_pts = +$event.target.value">
-                    </div>
-                    <div>
-                      <label class="sec-label">Session SL (pts)</label>
-                      <input type="number" step="10" class="t-input mt-0.5"
-                             :value="((indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).guardrail_pnl||{}).stoploss_pts||0"
-                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].guardrail_pnl.stoploss_pts = +$event.target.value">
+                      <label class="sec-label">Loss SL % <span style="color:var(--t-muted)">of initial credit</span></label>
+                      <input type="number" step="0.5" min="0" class="t-input mt-0.5"
+                             :value="(indexConfig[adminSelectedIndex].sell_straddle.per_day[day]||{}).loss_sl_pct||0"
+                             @input="indexConfig[adminSelectedIndex].sell_straddle.per_day[day].loss_sl_pct = +$event.target.value"
+                             title="0 = use global loss_sl_pct">
                     </div>
                   </div>
                 </div>
@@ -3427,6 +3819,71 @@ document.addEventListener('alpine:init', () => {
           Loading Iron Condor config for <span x-text="adminSelectedIndex"></span>…
         </div>
       </div><!-- end iron_condor config -->
+
+      <!-- ══ TRAP TRADING config ════════════════════════════════════════════ -->
+      <div x-show="adminStrategyTab==='trap_trading'" class="p-4 flex flex-col gap-3">
+        <div class="text-xs font-mono mb-1" style="color:var(--t-muted)">
+          Dual-timeframe institutional trap detection. Settings apply globally (not per-index).
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="sec-label">HTF MINUTES (slow TF)</label>
+            <input type="number" class="t-input"
+                   x-model.number="indexConfig._trap.htf_minutes"
+                   placeholder="75" min="15" max="240" step="5"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Higher timeframe for trend context (default: 75)</div>
+          </div>
+          <div>
+            <label class="sec-label">LTF MINUTES (fast TF)</label>
+            <input type="number" class="t-input"
+                   x-model.number="indexConfig._trap.ltf_minutes"
+                   placeholder="5" min="1" max="30" step="1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Lower timeframe for entry timing (default: 5)</div>
+          </div>
+          <div>
+            <label class="sec-label">ADX THRESHOLD</label>
+            <input type="number" class="t-input"
+                   x-model.number="indexConfig._trap.adx_threshold"
+                   placeholder="20" min="10" max="50" step="0.5"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Min ADX to confirm trend strength (default: 20)</div>
+          </div>
+          <div>
+            <label class="sec-label">VOLUME SPIKE MULTIPLIER</label>
+            <input type="number" class="t-input"
+                   x-model.number="indexConfig._trap.volume_spike_multiplier"
+                   placeholder="1.5" min="1.0" max="5.0" step="0.1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Volume vs avg to confirm trap (default: 1.5×)</div>
+          </div>
+          <div>
+            <label class="sec-label">SWING LOOKBACK (candles)</label>
+            <input type="number" class="t-input"
+                   x-model.number="indexConfig._trap.swing_lookback"
+                   placeholder="5" min="3" max="20" step="1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Candles to scan for swing high/low (default: 5)</div>
+          </div>
+          <div>
+            <label class="sec-label">ZONE TOLERANCE (%)</label>
+            <input type="number" class="t-input"
+                   x-model.number="indexConfig._trap.zone_tolerance_pct"
+                   placeholder="0.5" min="0.1" max="2.0" step="0.1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% buffer around zone for false-breakout detection (default: 0.5)</div>
+          </div>
+          <div>
+            <label class="sec-label">VOID ATR MULTIPLIER</label>
+            <input type="number" class="t-input"
+                   x-model.number="indexConfig._trap.void_atr_mult"
+                   placeholder="2.0" min="0.5" max="5.0" step="0.1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">ATR multiple to define price void (default: 2.0)</div>
+          </div>
+        </div>
+        <button @click="saveTrapConfig()"
+                class="btn-save-cfg self-start mt-1">
+          <span>&#x1F4BE; Save Trap Trading Config</span>
+        </button>
+        <div x-show="trapSaveMsg" class="font-mono text-xs px-2 py-1 rounded"
+             :style="trapSaveOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08)' : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08)'"
+             x-text="trapSaveMsg"></div>
+      </div><!-- end trap_trading config -->
 
     </div><!-- end strategy tabs card -->
 
@@ -4150,22 +4607,8 @@ document.addEventListener('alpine:init', () => {
             <input class="t-input" type="text" placeholder="e.g. main_shoonya" x-model="newClient.binding_id" autocomplete="off"/>
           </div>
         </div>
-        <div>
-          <div class="sec-label mb-1">ENABLED STRATEGIES</div>
-          <div class="flex gap-2">
-            <template x-for="s in ['A','B','C']" :key="s">
-              <label class="flex items-center gap-1.5 cursor-pointer">
-                <input type="checkbox" :value="s"
-                       :checked="newClient.strategies.includes(s)"
-                       @change="e => { if(e.target.checked) { if(!newClient.strategies.includes(s)) newClient.strategies.push(s); } else { newClient.strategies = newClient.strategies.filter(x=>x!==s); } }"
-                       class="rounded"/>
-                <span class="font-mono text-xs" style="color:var(--t-text)" x-text="'Strategy '+s"></span>
-              </label>
-            </template>
-          </div>
-          <div class="font-mono text-xs mt-1.5" style="color:var(--t-muted)">
-            A = OI Zone Breakout &nbsp;|&nbsp; B = Liquidity Trap &nbsp;|&nbsp; C = Panic Scanner
-          </div>
+        <div class="px-3 py-2.5 rounded text-xs" style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.18);color:var(--t-muted)">
+          Strategy selection is done by the client after login. Available strategies: <span style="color:var(--t-text);font-weight:600">Sell Straddle · Iron Condor · Trap Trading</span>
         </div>
         <div class="flex items-center gap-3 pt-1">
           <button class="btn-add" style="min-width:220px" @click="registerClient()" :disabled="clientRegLoading || !newClient.client_id">
@@ -4287,53 +4730,87 @@ document.addEventListener('alpine:init', () => {
       <div class="font-ui text-base mb-1" style="color:var(--t-bright)" x-text="(clientStatus&&clientStatus.name)||authClientId"></div>
       <div class="font-mono text-xs mb-6" style="color:var(--t-muted)">Account registered. Add your broker credentials to continue.</div>
 
-      <!-- Add broker form -->
+      <!-- Add broker form (onboarding) -->
       <div class="text-left space-y-3">
         <div class="font-ui font-bold text-sm tracking-wider mb-1" style="color:var(--t-text)">ADD BROKER CHANNEL</div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <div class="sec-label mb-1">BINDING ID</div>
-            <input class="t-input" type="text" placeholder="e.g. main_broker" x-model="portalBroker.binding_id" autocomplete="off"/>
+            <div class="sec-label mb-1">ACCOUNT ID <span style="color:var(--t-red)">*</span></div>
+            <input class="t-input" type="text" :placeholder="`e.g. ${portalBroker.provider}_main`" x-model="portalBroker.binding_id" autocomplete="off"/>
           </div>
           <div>
-            <div class="sec-label mb-1">PROVIDER</div>
+            <div class="sec-label mb-1">BROKER</div>
             <select class="t-input" x-model="portalBroker.provider">
               <template x-for="p in brokerProviders" :key="p">
-                <option :value="p" x-text="p.toUpperCase()"></option>
+                <option :value="p" x-text="(brokerFieldConfig[p]||{label:p.toUpperCase()}).label"></option>
               </template>
             </select>
           </div>
         </div>
-        <div>
-          <div class="sec-label mb-1">LABEL (optional)</div>
-          <input class="t-input" type="text" placeholder="e.g. Main Trading Account" x-model="portalBroker.label" autocomplete="off"/>
-        </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <div class="sec-label mb-1">USER ID</div>
-            <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
+            <div class="sec-label mb-1">LABEL (optional)</div>
+            <input class="t-input" type="text" placeholder="e.g. Main Account" x-model="portalBroker.label" autocomplete="off"/>
           </div>
           <div>
-            <div class="sec-label mb-1">API KEY</div>
-            <input class="t-input" type="password" x-model="portalBroker.api_key" autocomplete="new-password"/>
+            <div class="sec-label mb-1">TRADING MODE</div>
+            <div class="flex gap-2 h-[38px]">
+              <button class="flex-1 text-xs font-mono rounded border transition-all"
+                      :style="portalBroker.trading_mode==='paper'
+                        ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.trading_mode='paper'">Paper</button>
+              <button class="flex-1 text-xs font-mono rounded border transition-all"
+                      :style="portalBroker.trading_mode==='live'
+                        ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.trading_mode='live'">Live</button>
+            </div>
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <div class="sec-label mb-1">API SECRET</div>
-            <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
+        <!-- Dynamic credential fields -->
+        <template x-if="brokerFieldConfig[portalBroker.provider]">
+          <div class="space-y-3">
+            <div class="grid gap-3"
+                 :class="(brokerFieldConfig[portalBroker.provider].user_id && brokerFieldConfig[portalBroker.provider].password) ? 'grid-cols-2' : 'grid-cols-1'">
+              <div x-show="brokerFieldConfig[portalBroker.provider].user_id">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
+                <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
+              </div>
+              <div x-show="brokerFieldConfig[portalBroker.provider].password">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password"/>
+              </div>
+            </div>
+            <div class="grid gap-3"
+                 :class="(brokerFieldConfig[portalBroker.provider].api_key && brokerFieldConfig[portalBroker.provider].api_secret) ? 'grid-cols-2' : 'grid-cols-1'">
+              <div x-show="brokerFieldConfig[portalBroker.provider].api_key">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).api_key||'API KEY'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.api_key" autocomplete="new-password"/>
+              </div>
+              <div x-show="brokerFieldConfig[portalBroker.provider].api_secret">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).api_secret||'API SECRET'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
+              </div>
+            </div>
+            <div x-show="brokerFieldConfig[portalBroker.provider].totp_secret">
+              <div class="sec-label mb-1" x-text="((brokerFieldHints[portalBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA seed — enables auto daily token)'"></div>
+              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
+            </div>
+            <div x-show="portalBroker.provider==='mock'" class="text-xs px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.06);color:var(--t-muted)">
+              Paper/Mock mode — no real credentials needed.
+            </div>
+            <div x-show="portalBroker.provider==='dhan'" class="text-xs px-3 py-2 rounded leading-relaxed" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.18);color:var(--t-amber)">
+              <strong>Headless auto-auth:</strong> Enter your <strong>CLIENT ID</strong>, <strong>LOGIN PIN</strong>, and <strong>TOTP SECRET</strong> — the system generates a fresh token automatically via <em>auth.dhan.co</em>. Tokens are valid 24 hours and renewed daily. Optionally paste an existing JWT in the ACCESS TOKEN field to skip generation.
+            </div>
           </div>
-          <div>
-            <div class="sec-label mb-1">TOTP SECRET (2FA)</div>
-            <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
-          </div>
-        </div>
+        </template>
         <div x-show="portalBrokerMsg" class="font-mono text-xs px-2 py-1.5 rounded"
              :style="portalBrokerOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
                                     : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
              x-text="portalBrokerMsg"></div>
         <button class="btn-add" @click="addPortalBroker()" :disabled="portalBrokerLoading || !portalBroker.binding_id">
-          <span x-show="!portalBrokerLoading">[+] SAVE BROKER CREDENTIALS</span>
+          <span x-show="!portalBrokerLoading" x-text="portalBrokerIsEdit ? '[✎] UPDATE BROKER' : '[+] SAVE BROKER CREDENTIALS'"></span>
           <span x-show="portalBrokerLoading">SAVING…</span>
         </button>
       </div>
@@ -4364,34 +4841,58 @@ document.addEventListener('alpine:init', () => {
         </template>
       </div>
       <!-- Add more brokers while pending -->
-      <button class="btn-action mb-3" @click="showPortalBrokerForm=!showPortalBrokerForm" x-text="showPortalBrokerForm?'CANCEL':'[+] ADD ANOTHER BROKER'"></button>
-      <div x-show="showPortalBrokerForm" class="text-left space-y-2.5 mt-3">
+      <button class="btn-action mb-3" @click="showPortalBrokerForm=!showPortalBrokerForm;portalBrokerMsg=''"
+              x-text="showPortalBrokerForm?'CANCEL':'[+] ADD ANOTHER BROKER'"></button>
+      <div x-show="showPortalBrokerForm" class="text-left space-y-3 mt-3">
         <div class="grid grid-cols-2 gap-2">
           <div>
-            <div class="sec-label mb-1">BINDING ID</div>
-            <input class="t-input" type="text" x-model="portalBroker.binding_id" autocomplete="off"/>
+            <div class="sec-label mb-1">ACCOUNT ID <span style="color:var(--t-red)">*</span></div>
+            <input class="t-input" type="text" :placeholder="`e.g. ${portalBroker.provider}_main`" x-model="portalBroker.binding_id" autocomplete="off"/>
           </div>
           <div>
-            <div class="sec-label mb-1">PROVIDER</div>
+            <div class="sec-label mb-1">BROKER</div>
             <select class="t-input" x-model="portalBroker.provider">
-              <template x-for="p in brokerProviders" :key="p"><option :value="p" x-text="p.toUpperCase()"></option></template>
+              <template x-for="p in brokerProviders" :key="p">
+                <option :value="p" x-text="(brokerFieldConfig[p]||{label:p.toUpperCase()}).label"></option>
+              </template>
             </select>
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-2">
-          <div><div class="sec-label mb-1">USER ID</div><input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/></div>
-          <div><div class="sec-label mb-1">API KEY</div><input class="t-input" type="password" x-model="portalBroker.api_key" autocomplete="new-password"/></div>
-        </div>
-        <div class="grid grid-cols-2 gap-2">
-          <div><div class="sec-label mb-1">API SECRET</div><input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/></div>
-          <div><div class="sec-label mb-1">TOTP SECRET</div><input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/></div>
-        </div>
+        <template x-if="brokerFieldConfig[portalBroker.provider]">
+          <div class="space-y-2">
+            <div class="grid grid-cols-2 gap-2">
+              <div x-show="brokerFieldConfig[portalBroker.provider].user_id">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
+                <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
+              </div>
+              <div x-show="brokerFieldConfig[portalBroker.provider].password">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password"/>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div x-show="brokerFieldConfig[portalBroker.provider].api_key">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).api_key||'API KEY'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.api_key" autocomplete="new-password"/>
+              </div>
+              <div x-show="brokerFieldConfig[portalBroker.provider].api_secret">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).api_secret||'API SECRET'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
+              </div>
+            </div>
+            <div x-show="brokerFieldConfig[portalBroker.provider].totp_secret">
+              <div class="sec-label mb-1" x-text="((brokerFieldHints[portalBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA seed)'"></div>
+              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
+            </div>
+          </div>
+        </template>
         <div x-show="portalBrokerMsg" class="font-mono text-xs px-2 py-1.5 rounded"
              :style="portalBrokerOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
                                     : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
              x-text="portalBrokerMsg"></div>
         <button class="btn-add" @click="addPortalBroker()" :disabled="portalBrokerLoading||!portalBroker.binding_id">
-          <span x-show="!portalBrokerLoading">SAVE BROKER</span><span x-show="portalBrokerLoading">SAVING…</span>
+          <span x-show="!portalBrokerLoading" x-text="portalBrokerIsEdit ? 'UPDATE BROKER' : 'SAVE BROKER'"></span>
+          <span x-show="portalBrokerLoading">SAVING…</span>
         </button>
       </div>
       <div class="mt-5">
@@ -4401,104 +4902,785 @@ document.addEventListener('alpine:init', () => {
   </div>
 
   <!-- ══ PHASE: ACTIVE TRADING ════════════════════════════════════════════════ -->
-  <div x-show="clientPhase === 'active'" class="grid grid-cols-1 xl:grid-cols-[1fr_300px] gap-3 slide-in">
+  <div x-show="clientPhase === 'active'" class="slide-in">
 
-    <!-- LEFT -->
-    <div class="flex flex-col gap-3">
-
-      <!-- Auth failure alert -->
-      <div x-show="botOk === false && botMsg" x-cloak
-           class="flex items-start gap-3 px-4 py-3 rounded font-mono text-xs"
-           style="background:rgba(var(--t-red-rgb),0.12);border:1px solid rgba(var(--t-red-rgb),0.4);color:var(--t-red)">
-        <span style="font-size:1.1rem;line-height:1">&#9888;</span>
-        <div>
-          <div class="font-bold mb-0.5">Authentication Failed: Automated daily token generation failed in the background. Please notify the administrator or verify your saved API credentials.</div>
-          <div style="color:var(--t-muted)" x-text="botMsg"></div>
-        </div>
-        <button @click="botOk=null;botMsg=''" class="ml-auto text-lg leading-none" style="color:var(--t-muted)">&times;</button>
+    <!-- ── Client top bar: name + status + bot toggle ── -->
+    <div class="t-card rounded mb-4 px-5 py-3 flex flex-wrap items-center gap-4">
+      <div class="flex-1 min-w-0">
+        <div class="font-ui font-bold text-lg leading-tight" style="color:var(--t-bright)" x-text="(clientStatus&&clientStatus.name)||authClientId"></div>
+        <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="authClientId + ' · ' + (wsConnected ? 'Feed LIVE' : 'Feed OFFLINE')"></div>
       </div>
+      <!-- Daily P&L -->
+      <div class="text-right">
+        <div class="sec-label mb-0.5">TODAY'S P&amp;L</div>
+        <div class="font-mono text-xl font-bold" :class="pnlClass(clientStatus&&clientStatus.daily_pnl||0)"
+             x-text="clientStatus ? (clientStatus.daily_pnl>=0?'+':'')+'₹'+fmt(clientStatus.daily_pnl) : '—'"></div>
+      </div>
+      <!-- Live status -->
+      <div class="flex items-center gap-2">
+        <div class="w-2.5 h-2.5 rounded-full" :class="csBotActive?'conn-live':''"
+             :style="`background:${csBotActive?'var(--t-green)':'var(--t-red)'}`"></div>
+        <span :class="csBotActive ? 'badge-live' : 'badge-halted'" x-text="csBotActive ? 'BOT ACTIVE' : 'BOT STOPPED'"></span>
+      </div>
+      <!-- Start / Stop -->
+      <div class="flex gap-2">
+        <button class="btn-resume px-5" @click="startBot()" :disabled="botLoading||csBotActive">
+          <span x-show="!botLoading">▶ START</span><span x-show="botLoading">…</span>
+        </button>
+        <button class="btn-halt px-5" @click="stopBot()" :disabled="botLoading||!csBotActive">■ STOP</button>
+      </div>
+      <!-- Auth failure inline -->
+      <div x-show="botOk === false && botMsg" x-cloak class="w-full font-mono text-xs px-3 py-1.5 rounded"
+           style="background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.3);color:var(--t-red)"
+           x-text="botMsg"></div>
+    </div>
 
-      <!-- Portfolio header -->
-      <div class="t-card rounded p-5 fade-up-1 relative overflow-hidden">
-        <div class="diag-accent"></div>
+    <!-- ── Client sub-nav ── -->
+    <div class="flex border-b mb-4" style="border-color:var(--t-border)">
+      <template x-for="m in [{id:'strategies',label:'Strategies'},{id:'brokers',label:'Brokers'},{id:'positions',label:'Positions'},{id:'history',label:'History'}]" :key="m.id">
+        <button class="admin-tab" :class="{active: clientMenu===m.id}"
+                @click="clientMenu=m.id; m.id==='positions'&&loadClientPositions(); m.id==='history'&&loadClientHistory()"
+                x-text="m.label"></button>
+      </template>
+    </div>
+
+    <!-- ════ MENU: STRATEGIES ══════════════════════════════════════════════════ -->
+    <div x-show="clientMenu === 'strategies'" class="space-y-4">
+      <div class="t-card rounded p-5">
         <div class="flex items-center justify-between mb-4">
           <div>
-            <div class="font-ui font-bold text-xl" style="color:var(--t-bright)" x-text="(clientStatus&&clientStatus.name)||authClientId"></div>
-            <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="authClientId"></div>
-          </div>
-          <span :class="clientStatus&&clientStatus.tradeable ? 'badge-live' : 'badge-halted'"
-                x-text="clientStatus&&clientStatus.tradeable ? 'LIVE' : 'HALTED'"></span>
-        </div>
-        <div class="grid grid-cols-3 gap-4 mb-4">
-          <div>
-            <div class="sec-label mb-1">CAPITAL</div>
-            <div class="font-mono text-lg" style="color:var(--t-text)" x-text="clientStatus ? 'INR ' + fmt(clientStatus.capital,0) : '—'"></div>
-          </div>
-          <div>
-            <div class="sec-label mb-1">DAILY P&L</div>
-            <div class="font-mono text-xl font-bold" :class="pnlClass(clientStatus&&clientStatus.daily_pnl||0)"
-                 x-text="clientStatus ? (clientStatus.daily_pnl>=0?'+':'')+'INR '+fmt(clientStatus.daily_pnl) : '—'"></div>
-          </div>
-          <div>
-            <div class="sec-label mb-1">TARGET INDEX</div>
-            <div class="font-mono text-lg" style="color:var(--t-cyan)" x-text="csTargetIndex"></div>
+            <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Select Strategies to Run</div>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Choose which strategies to activate. Conditions &amp; rules are configured by the admin — you only select which ones to run and on which index.</div>
           </div>
         </div>
-        <!-- Drawdown bar -->
-        <div>
-          <div class="flex justify-between mb-1">
-            <span class="sec-label">DRAWDOWN EXPOSURE</span>
-            <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="clientStatus?clientStatus.daily_loss_pct+'% limit':''"></span>
-          </div>
-          <div class="gauge-track h-2">
-            <div class="drawdown-bar gauge-fill h-full"
-                 :style="`width:${capPct(clientStatus&&clientStatus.daily_pnl||0,clientStatus&&clientStatus.capital||500000)}%; background:${(clientStatus&&clientStatus.daily_pnl||0)<0?'var(--t-red)':'var(--t-green)'}`"></div>
-          </div>
+
+        <div class="space-y-3">
+          <template x-for="st in availableStrategies" :key="st.id">
+            <div class="rounded-lg border p-4 transition-all"
+                 :style="csHasStrategy(st.id)
+                   ? 'border-color:rgba(var(--t-cyan-rgb),0.4);background:rgba(var(--t-cyan-rgb),0.04)'
+                   : 'border-color:var(--t-border);background:transparent'">
+              <div class="flex items-start gap-3">
+                <input type="checkbox" class="mt-1 rounded cursor-pointer"
+                       :checked="csHasStrategy(st.id)"
+                       @change="csToggleStrategy(st.id)"
+                       style="accent-color:var(--t-cyan);width:16px;height:16px;flex-shrink:0"/>
+                <div class="flex-1 min-w-0">
+                  <div class="flex flex-wrap items-center gap-3">
+                    <span class="font-ui font-bold text-sm" style="color:var(--t-bright)" x-text="st.name"></span>
+                    <span class="text-xs" style="color:var(--t-muted)" x-text="st.desc"></span>
+                  </div>
+                  <!-- Instrument selector — only shown when strategy is selected -->
+                  <div x-show="csHasStrategy(st.id)" class="mt-3 flex flex-wrap items-center gap-2">
+                    <span class="sec-label">Run on:</span>
+                    <template x-for="ins in availableInstruments" :key="ins">
+                      <button class="text-xs px-3 py-1 rounded border transition-all font-mono"
+                              :style="csInstrumentFor(st.id)===ins
+                                ? 'color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.4);background:rgba(var(--t-cyan-rgb),0.08);font-weight:600'
+                                : 'color:var(--t-muted);border-color:var(--t-border);background:transparent'"
+                              @click="csSetInstrument(st.id, ins)"
+                              x-text="ins"></button>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <div class="flex items-center gap-3 mt-5 pt-4 border-t" style="border-color:var(--t-border)">
+          <button class="btn-primary" style="max-width:200px" @click="saveStrategySelections()" :disabled="csSaving">
+            <span x-show="!csSaving">Save Selections</span>
+            <span x-show="csSaving">Saving…</span>
+          </button>
+          <span x-show="csSaveMsg" class="text-xs font-mono"
+                :style="csSaveOk ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                x-text="csSaveMsg"></span>
         </div>
       </div>
 
-      <!-- Market overview -->
-      <div class="t-card rounded p-4 fade-up-2">
-        <div class="flex items-center justify-between mb-3">
-          <div class="sec-label">Market · <span x-text="activeIndex"></span></div>
-          <!-- Index selector -->
+      <!-- Selected summary -->
+      <div x-show="csStrategySelections.length > 0" class="t-card rounded p-4">
+        <div class="sec-label mb-3">Current Selection</div>
+        <div class="flex flex-wrap gap-2">
+          <template x-for="sel in csStrategySelections" :key="sel.strategy">
+            <div class="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono"
+                 style="background:rgba(var(--t-cyan-rgb),0.08);border:1px solid rgba(var(--t-cyan-rgb),0.25);color:var(--t-cyan)">
+              <span x-text="(availableStrategies.find(s=>s.id===sel.strategy)||{name:sel.strategy}).name"></span>
+              <span style="color:var(--t-muted)">·</span>
+              <span x-text="sel.instrument"></span>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════ MENU: BROKERS ════════════════════════════════════════════════════ -->
+    <div x-show="clientMenu === 'brokers'" class="space-y-4">
+
+      <!-- Existing broker bindings -->
+      <div class="t-card rounded">
+        <div class="flex items-center justify-between px-5 py-3 border-b" style="border-color:var(--t-border)">
+          <div>
+            <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Your Broker Accounts</div>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)" x-text="csBindings.length + ' account' + (csBindings.length!==1?'s':'') + ' connected'"></div>
+          </div>
+          <button class="btn-action" style="width:auto;padding:6px 16px"
+                  @click="if(showPortalBrokerForm){showPortalBrokerForm=false;portalBrokerIsEdit=false;portalBrokerMsg=''}else{showPortalBrokerForm=true;portalBrokerIsEdit=false;portalBroker={provider:'zerodha',binding_id:'',label:'',user_id:'',password:'',api_key:'',api_secret:'',totp_secret:'',lot_multiplier:1.0,trading_mode:'paper',assigned_strategy:'',assigned_instrument:'NIFTY'}}"
+                  x-text="showPortalBrokerForm ? 'Cancel' : '+ Add Broker'"></button>
+        </div>
+
+        <div x-show="csBindings.length===0 && !showPortalBrokerForm" class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
+          No brokers added yet. Click "+ Add Broker" to connect your first account.
+        </div>
+
+        <template x-for="b in csBindings" :key="b.binding_id">
+          <div class="px-5 py-4 border-b last:border-b-0" style="border-color:var(--t-border)"
+               x-init="_initBrokerOp(b.binding_id)">
+
+            <!-- Row 1: identity + controls -->
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <!-- Left: identity -->
+              <div class="flex items-center gap-3">
+                <!-- Status dot: green=engine active, amber=terminal only, grey=off -->
+                <div class="w-2.5 h-2.5 rounded-full shrink-0 mt-1"
+                     :style="b.engine_active ? 'background:var(--t-green);box-shadow:0 0 6px var(--t-green)'
+                           : b.terminal_connected ? 'background:var(--t-amber);box-shadow:0 0 4px var(--t-amber)'
+                           : 'background:var(--t-muted)'"></div>
+                <div>
+                  <div class="font-mono text-sm font-bold" style="color:var(--t-bright)" x-text="b.binding_id"></div>
+                  <div class="text-xs mt-0.5 flex flex-wrap items-center gap-2" style="color:var(--t-muted)">
+                    <span x-text="(b.provider||'').toUpperCase() + (b.label?' — '+b.label:'')"></span>
+                    <!-- Trading mode badge -->
+                    <span class="px-1.5 py-0.5 rounded font-mono font-bold"
+                          :style="(b.trading_mode||'paper')==='live'
+                            ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)'
+                            : 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.25)'"
+                          x-text="(b.trading_mode||'paper').toUpperCase()"></span>
+                    <!-- Token status badge -->
+                    <span class="px-1.5 py-0.5 rounded font-mono"
+                          :style="b.access_token
+                            ? 'background:rgba(var(--t-green-rgb),0.08);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                            : 'background:rgba(var(--t-red-rgb),0.08);color:var(--t-red);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+                          x-text="b.access_token ? '● Token OK' : '○ No Token'"></span>
+                  </div>
+                  <!-- Token timestamp -->
+                  <div x-show="b.token_generated_at" class="text-xs mt-0.5" style="color:var(--t-muted)"
+                       x-text="'Token generated: ' + (b.token_generated_at||'').slice(11,16) + ' IST on ' + (b.token_generated_at||'').slice(0,10)"></div>
+                  <!-- Per-broker assigned strategy -->
+                  <div class="mt-1.5">
+                    <span x-show="b.assigned_strategy"
+                          class="text-xs px-2 py-0.5 rounded-full font-mono"
+                          style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                          x-text="(availableStrategies.find(s=>s.id===b.assigned_strategy)||{name:b.assigned_strategy}).name + ' · ' + (b.assigned_instrument||'NIFTY')"></span>
+                    <span x-show="!b.assigned_strategy" class="text-xs" style="color:var(--t-muted)">No strategy assigned</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Right: controls -->
+              <div class="flex flex-col items-end gap-2 shrink-0">
+
+                <!-- Paper / Live mode pill — disabled when engine is active -->
+                <div class="flex rounded overflow-hidden text-xs font-mono"
+                     style="border:1px solid var(--t-border)"
+                     :title="b.engine_active ? 'Stop Engine first to change mode' : ''">
+                  <button class="px-3 py-1.5 transition-all"
+                          :disabled="b.engine_active || (csBrokerOp[b.binding_id]||{}).loading"
+                          :style="(b.trading_mode||'paper')==='paper'
+                            ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);font-weight:600'
+                            : 'background:transparent;color:var(--t-muted);opacity:0.7'"
+                          @click="setBrokerMode(b.binding_id,'paper')">Paper</button>
+                  <button class="px-3 py-1.5 transition-all"
+                          :disabled="b.engine_active || (csBrokerOp[b.binding_id]||{}).loading"
+                          :style="(b.trading_mode||'paper')==='live'
+                            ? 'background:rgba(var(--t-green-rgb),0.15);color:var(--t-green);font-weight:600'
+                            : 'background:transparent;color:var(--t-muted);opacity:0.7'"
+                          @click="setBrokerMode(b.binding_id,'live')">Live</button>
+                </div>
+
+                <!-- ── TERMINAL TOGGLE ──────────────────────────────────────────
+                     Step 1: Validate cached token → headless auth if needed.
+                     Shows 3 states: OFF (grey) | Connecting (spinner) | ON (amber) -->
+                <button @click="toggleTerminal(b)"
+                        :disabled="(csBrokerOp[b.binding_id]||{}).termLoading"
+                        class="flex items-center gap-2 px-4 py-2 rounded-lg border font-mono text-sm font-bold transition-all"
+                        :style="(csBrokerOp[b.binding_id]||{}).termLoading
+                          ? 'border-color:var(--t-border);color:var(--t-muted);cursor:wait'
+                          : b.terminal_connected
+                            ? 'background:rgba(var(--t-amber-rgb),0.1);color:var(--t-amber);border-color:rgba(var(--t-amber-rgb),0.4)'
+                            : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
+                  <template x-if="(csBrokerOp[b.binding_id]||{}).termLoading">
+                    <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--t-muted);border-top-color:var(--t-amber);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+                  </template>
+                  <template x-if="!(csBrokerOp[b.binding_id]||{}).termLoading">
+                    <span class="w-8 h-4 rounded-full relative transition-all"
+                          :style="b.terminal_connected ? 'background:var(--t-amber)' : 'background:var(--t-dim)'">
+                      <span class="absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all"
+                            :style="b.terminal_connected ? 'left:18px' : 'left:2px'"></span>
+                    </span>
+                  </template>
+                  <span x-text="
+                    (csBrokerOp[b.binding_id]||{}).termLoading
+                      ? ((csBrokerOp[b.binding_id]||{}).termStep || 'Connecting…')
+                      : (b.terminal_connected ? 'Terminal ON' : 'Terminal OFF')
+                  "></span>
+                </button>
+
+                <!-- ── ENGINE TOGGLE ────────────────────────────────────────────
+                     Step 2: Hot-attach broker to running strategy engine.
+                     Only enabled after Terminal is ON. -->
+                <button @click="toggleEngine(b)"
+                        :disabled="!b.terminal_connected || (csBrokerOp[b.binding_id]||{}).engLoading"
+                        class="flex items-center gap-2 px-4 py-2 rounded-lg border font-mono text-sm font-bold transition-all"
+                        :title="!b.terminal_connected ? 'Switch Terminal ON first' : ''"
+                        :style="!b.terminal_connected
+                          ? 'opacity:0.4;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
+                          : (csBrokerOp[b.binding_id]||{}).engLoading
+                            ? 'border-color:var(--t-border);color:var(--t-muted);cursor:wait'
+                            : b.engine_active
+                              ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
+                              : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
+                  <template x-if="(csBrokerOp[b.binding_id]||{}).engLoading">
+                    <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--t-muted);border-top-color:var(--t-green);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+                  </template>
+                  <template x-if="!(csBrokerOp[b.binding_id]||{}).engLoading">
+                    <span class="w-8 h-4 rounded-full relative transition-all"
+                          :style="b.engine_active ? 'background:var(--t-green)' : 'background:var(--t-dim)'">
+                      <span class="absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all"
+                            :style="b.engine_active ? 'left:18px' : 'left:2px'"></span>
+                    </span>
+                  </template>
+                  <span x-text="
+                    (csBrokerOp[b.binding_id]||{}).engLoading
+                      ? 'Activating…'
+                      : (b.engine_active ? 'Engine ON' : 'Engine OFF')
+                  "></span>
+                </button>
+
+                <!-- Status / error message -->
+                <div x-show="(csBrokerOp[b.binding_id]||{}).msg" class="text-xs font-mono text-right max-w-[240px]"
+                     :style="(csBrokerOp[b.binding_id]||{}).ok===false ? 'color:var(--t-red)' : 'color:var(--t-green)'"
+                     x-text="(csBrokerOp[b.binding_id]||{}).msg"></div>
+
+                <!-- ── Action buttons row ──────────────────────────────────── -->
+                <div class="flex items-center gap-1.5 mt-0.5">
+                  <!-- Deploy strategy button -->
+                  <button @click="openDeployModal(b)"
+                          :disabled="!b.terminal_connected"
+                          class="text-xs px-3 py-1 rounded border font-mono transition-all"
+                          :title="!b.terminal_connected ? 'Connect Terminal first' : 'Configure strategy deployment'"
+                          :style="!b.terminal_connected
+                            ? 'opacity:0.4;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
+                            : 'border-color:rgba(var(--t-cyan-rgb),0.35);color:var(--t-cyan)'">
+                    ⚡ Deploy
+                  </button>
+                  <!-- Edit credentials -->
+                  <button @click="editBroker(b)"
+                          :disabled="b.engine_active || (csBrokerOp[b.binding_id]||{}).loading"
+                          class="text-xs px-3 py-1 rounded border font-mono transition-all"
+                          :title="b.engine_active ? 'Stop Engine first to edit' : 'Edit broker credentials'"
+                          style="border-color:var(--t-border);color:var(--t-muted)"
+                          :style="b.engine_active ? 'opacity:0.4;cursor:not-allowed' : 'opacity:1'"
+                          onmouseover="if(!this.disabled)this.style.color='var(--t-text)'"
+                          onmouseout="this.style.color='var(--t-muted)'">
+                    ✎ Edit
+                  </button>
+                  <!-- Delete -->
+                  <button @click="deleteBroker(b)"
+                          :disabled="b.engine_active || (csBrokerOp[b.binding_id]||{}).loading"
+                          class="text-xs px-3 py-1 rounded border font-mono transition-all"
+                          :title="b.engine_active ? 'Stop Engine first to delete' : 'Delete this broker'"
+                          style="border-color:rgba(var(--t-red-rgb),0.3);color:var(--t-muted)"
+                          :style="b.engine_active ? 'opacity:0.4;cursor:not-allowed' : 'opacity:1'"
+                          onmouseover="if(!this.disabled)this.style.color='var(--t-red)'"
+                          onmouseout="this.style.color='var(--t-muted)'">
+                    ✕ Delete
+                  </button>
+                </div>
+              </div>
+
+              <!-- Fyers manual auth-code exchange panel -->
+              <div x-show="b.provider==='fyers'" class="mt-3 pt-3" style="border-top:1px solid rgba(var(--t-amber-rgb),0.15)">
+                <div x-show="!fyersCodePanel[b.binding_id]" class="flex items-center gap-2">
+                  <span class="text-xs font-mono" style="color:var(--t-muted)">Headless failed?</span>
+                  <button @click="openFyersCodePanel(b)"
+                          class="text-xs px-3 py-1 rounded border font-mono transition-all"
+                          style="border-color:rgba(var(--t-amber-rgb),0.4);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.06)">
+                    Get Token Manually
+                  </button>
+                </div>
+                <div x-show="fyersCodePanel[b.binding_id]" class="space-y-2">
+                  <div class="text-xs space-y-1" style="color:var(--t-muted)">
+                    <div><span style="color:var(--t-amber);font-weight:600">Step 1</span> —
+                      <a :href="(fyersCodePanel[b.binding_id]||{}).url" target="_blank"
+                         style="color:var(--t-cyan);text-decoration:underline;font-weight:600">
+                        Open Fyers Login Page &#x2197;
+                      </a>
+                    </div>
+                    <div><span style="color:var(--t-amber);font-weight:600">Step 2</span> — Login. Fyers redirects to a URL like <span class="font-mono" style="color:var(--t-bright)">trade.fyers.in/…?auth_code=…</span></div>
+                    <div><span style="color:var(--t-amber);font-weight:600">Step 3</span> — Copy the <strong style="color:var(--t-bright)">entire redirect URL</strong>, paste below and click Generate Token.</div>
+                  </div>
+                  <div class="flex gap-2">
+                    <input x-model="fyersCodeInput[b.binding_id]"
+                           type="text" placeholder="Paste full redirect URL here…"
+                           class="flex-1 font-mono text-xs px-2 py-1 rounded border bg-transparent"
+                           style="border-color:rgba(var(--t-amber-rgb),0.3);color:var(--t-bright)">
+                    <button @click="exchangeFyersCodeForBroker(b)"
+                            :disabled="!(fyersCodeInput[b.binding_id]||'').trim()"
+                            class="text-xs px-3 py-1 rounded border font-mono transition-all whitespace-nowrap"
+                            style="border-color:rgba(var(--t-green-rgb),0.4);color:var(--t-green);background:rgba(var(--t-green-rgb),0.06)">
+                      Generate Token
+                    </button>
+                    <button @click="fyersCodePanel[b.binding_id]=null"
+                            class="text-xs px-2 py-1 rounded font-mono" style="color:var(--t-muted)">✕</button>
+                  </div>
+                  <div x-show="(fyersCodePanel[b.binding_id]||{}).msg"
+                       class="text-xs font-mono px-2 py-1 rounded"
+                       :style="(fyersCodePanel[b.binding_id]||{}).ok===false
+                         ? 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.06)'
+                         : 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.06)'"
+                       x-text="(fyersCodePanel[b.binding_id]||{}).msg"></div>
+                </div>
+              </div>
+
+            </div>
+
+          </div>
+        </template>
+      </div>
+
+      <!-- ── Strategy Deployment Modal ───────────────────────────────────── -->
+      <div x-show="showDeployModal" class="t-card rounded p-5 space-y-4"
+           style="border:1px solid rgba(var(--t-cyan-rgb),0.25)">
+        <div class="flex items-center justify-between">
+          <div class="font-ui font-bold text-sm" style="color:var(--t-cyan)">
+            ⚡ Deploy Strategy — <span x-text="deployForm.binding_id" class="font-mono" style="color:var(--t-bright)"></span>
+          </div>
+          <button @click="showDeployModal=false; deployMsg=''; deployOk=null"
+                  class="font-mono text-xs" style="color:var(--t-muted)">✕ Cancel</button>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <!-- Strategy selector -->
+          <div class="col-span-2">
+            <label class="sec-label">STRATEGY</label>
+            <select x-model="deployForm.strategy_name" class="t-input">
+              <option value="sell_straddle">Sell Straddle (SS)</option>
+              <option value="iron_condor">Iron Condor (IC)</option>
+              <option value="trap_trading">Trap Trading (TT)</option>
+            </select>
+          </div>
+
+          <!-- Underlying / Instrument -->
+          <div>
+            <label class="sec-label">INSTRUMENT</label>
+            <select x-model="deployForm.underlying" class="t-input">
+              <template x-for="idx in availableInstruments" :key="idx">
+                <option :value="idx" x-text="idx"></option>
+              </template>
+            </select>
+          </div>
+
+          <!-- Lot Size Multiplier -->
+          <div>
+            <label class="sec-label">LOT MULTIPLIER</label>
+            <input type="number" class="t-input" x-model.number="deployForm.lot_multiplier"
+                   min="1" max="50" step="1" placeholder="1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Number of lots per trade</div>
+          </div>
+
+          <!-- Max Profit Target -->
+          <div>
+            <label class="sec-label">MAX PROFIT TARGET (₹)</label>
+            <input type="number" class="t-input" x-model.number="deployForm.max_profit_rs"
+                   min="0" step="500" placeholder="0 = use strategy %"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">0 = use strategy profit_pct</div>
+          </div>
+
+          <!-- Max Stop Loss -->
+          <div>
+            <label class="sec-label">MAX STOP LOSS (₹)</label>
+            <input type="number" class="t-input" x-model.number="deployForm.max_sl_rs"
+                   min="0" step="500" placeholder="0 = use strategy %"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">0 = use strategy sl_pct</div>
+          </div>
+
+          <!-- Auto Square-Off Time -->
+          <div>
+            <label class="sec-label">AUTO SQUARE-OFF TIME</label>
+            <input type="text" class="t-input font-mono" x-model="deployForm.squareoff_time"
+                   placeholder="15:15" pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">HH:MM IST (e.g. 15:15)</div>
+          </div>
+        </div>
+
+        <!-- Deployment ID preview -->
+        <div class="text-xs font-mono px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.05);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-muted)">
+          File: <span style="color:var(--t-cyan)"
+                      x-text="'data/deployments/' + (csMe?.client_id||'C001') + '_' + deployForm.binding_id + '_' + deployForm.strategy_name + '.json'"></span>
+        </div>
+
+        <!-- Save button + feedback -->
+        <div class="flex items-center gap-3">
+          <button @click="saveDeploy()" :disabled="deployLoading"
+                  class="btn-save-cfg flex items-center gap-2">
+            <template x-if="deployLoading">
+              <span style="display:inline-block;width:12px;height:12px;border:2px solid var(--t-muted);border-top-color:var(--t-cyan);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+            </template>
+            <span x-text="deployLoading ? 'Saving…' : '💾 Save & Deploy'"></span>
+          </button>
+          <div x-show="deployMsg" class="text-xs font-mono"
+               :style="deployOk ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+               x-text="deployMsg"></div>
+        </div>
+      </div>
+
+      <!-- Add / Edit broker form (dynamic fields per provider) -->
+      <div x-show="showPortalBrokerForm" class="t-card rounded p-5 space-y-4">
+        <div class="flex items-center justify-between">
+          <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
+               x-text="portalBrokerIsEdit ? 'Edit Broker: ' + portalBroker.binding_id : 'Add Broker Account'"></div>
+          <button @click="showPortalBrokerForm=false; portalBrokerIsEdit=false; portalBrokerMsg=''"
+                  class="font-mono text-xs" style="color:var(--t-muted)">✕ Cancel</button>
+        </div>
+
+        <!-- Edit mode notice -->
+        <div x-show="portalBrokerIsEdit" class="text-xs px-3 py-2 rounded font-mono"
+             style="background:rgba(var(--t-amber-rgb),0.08);border:1px solid rgba(var(--t-amber-rgb),0.2);color:var(--t-amber)">
+          ✎ Editing credentials — leave any field blank to keep the existing saved value.
+        </div>
+
+        <!-- Row 1: Binding ID + Provider -->
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">ACCOUNT ID <span x-show="!portalBrokerIsEdit" style="color:var(--t-red)">*</span></div>
+            <input class="t-input" type="text"
+                   :placeholder="`e.g. ${portalBroker.provider}_main`"
+                   x-model="portalBroker.binding_id"
+                   :readonly="portalBrokerIsEdit"
+                   :style="portalBrokerIsEdit ? 'opacity:0.6;cursor:not-allowed' : ''"
+                   autocomplete="off"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">BROKER</div>
+            <select class="t-input" x-model="portalBroker.provider" :disabled="portalBrokerIsEdit"
+                    :style="portalBrokerIsEdit ? 'opacity:0.6;cursor:not-allowed' : ''">
+              <template x-for="p in brokerProviders" :key="p">
+                <option :value="p" x-text="(brokerFieldConfig[p]||{label:p.toUpperCase()}).label"></option>
+              </template>
+            </select>
+          </div>
+        </div>
+
+        <!-- Row 2: Label + Trading Mode -->
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <div class="sec-label mb-1">LABEL (optional)</div>
+            <input class="t-input" type="text" placeholder="e.g. Main Trading Account" x-model="portalBroker.label" autocomplete="off"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">TRADING MODE</div>
+            <div class="flex gap-2">
+              <button class="flex-1 py-1.5 text-xs font-mono rounded border transition-all"
+                      :style="portalBroker.trading_mode==='paper'
+                        ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.trading_mode='paper'">Paper</button>
+              <button class="flex-1 py-1.5 text-xs font-mono rounded border transition-all"
+                      :style="portalBroker.trading_mode==='live'
+                        ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.trading_mode='live'">Live</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dynamic credential fields based on selected provider -->
+        <template x-if="brokerFieldConfig[portalBroker.provider]">
+          <div class="space-y-3">
+            <!-- User ID + Password row -->
+            <div class="grid gap-3"
+                 :class="(brokerFieldConfig[portalBroker.provider].user_id && brokerFieldConfig[portalBroker.provider].password) ? 'grid-cols-2' : 'grid-cols-1'">
+              <div x-show="brokerFieldConfig[portalBroker.provider].user_id">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
+                <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
+              </div>
+              <div x-show="brokerFieldConfig[portalBroker.provider].password">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password"/>
+              </div>
+            </div>
+            <!-- API Key + API Secret row -->
+            <div class="grid gap-3"
+                 :class="(brokerFieldConfig[portalBroker.provider].api_key && brokerFieldConfig[portalBroker.provider].api_secret) ? 'grid-cols-2' : 'grid-cols-1'">
+              <div x-show="brokerFieldConfig[portalBroker.provider].api_key">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).api_key||'API KEY'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.api_key" autocomplete="new-password"/>
+              </div>
+              <div x-show="brokerFieldConfig[portalBroker.provider].api_secret">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).api_secret||'API SECRET'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
+              </div>
+            </div>
+            <!-- TOTP Secret -->
+            <div x-show="brokerFieldConfig[portalBroker.provider].totp_secret">
+              <div class="sec-label mb-1" x-text="((brokerFieldHints[portalBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA seed — for auto daily token)'"></div>
+              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
+            </div>
+            <!-- Mock / Dhan info notes -->
+            <div x-show="portalBroker.provider==='mock'" class="text-xs px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.06);color:var(--t-muted)">
+              Mock/Paper mode — no real broker credentials needed. Orders will be simulated.
+            </div>
+            <div x-show="portalBroker.provider==='dhan'" class="text-xs px-3 py-2 rounded leading-relaxed" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.18);color:var(--t-amber)">
+              <strong>Headless auto-auth:</strong> Enter your <strong>CLIENT ID</strong>, <strong>LOGIN PIN</strong>, and <strong>TOTP SECRET</strong> — the system generates a fresh token automatically via <em>auth.dhan.co</em>. Tokens are valid 24 hours and renewed daily. Optionally paste an existing JWT in the ACCESS TOKEN field to skip generation.
+            </div>
+          </div>
+        </template>
+
+        <!-- Strategy assignment -->
+        <div class="pt-1 border-t" style="border-color:var(--t-border)">
+          <div class="sec-label mb-2">ASSIGN STRATEGY TO THIS BROKER</div>
+          <div class="space-y-2">
+            <!-- Strategy radio buttons -->
+            <div class="flex flex-wrap gap-2">
+              <button class="text-xs px-3 py-1.5 rounded border font-mono transition-all"
+                      :style="portalBroker.assigned_strategy===''
+                        ? 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.assigned_strategy=''"
+                      style="display:none">none</button>
+              <template x-for="st in availableStrategies" :key="st.id">
+                <button class="text-xs px-3 py-1.5 rounded border font-mono transition-all"
+                        :style="portalBroker.assigned_strategy===st.id
+                          ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.4);font-weight:600'
+                          : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                        @click="portalBroker.assigned_strategy = (portalBroker.assigned_strategy===st.id ? '' : st.id)"
+                        x-text="st.name"></button>
+              </template>
+            </div>
+            <!-- Instrument selector — shown only when strategy is selected -->
+            <div x-show="portalBroker.assigned_strategy" class="flex flex-wrap items-center gap-2">
+              <span class="sec-label">Index:</span>
+              <template x-for="ins in availableInstruments" :key="ins">
+                <button class="text-xs px-3 py-1 rounded border font-mono transition-all"
+                        :style="portalBroker.assigned_instrument===ins
+                          ? 'color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.4);background:rgba(var(--t-cyan-rgb),0.08);font-weight:600'
+                          : 'color:var(--t-muted);border-color:var(--t-border);background:transparent'"
+                        @click="portalBroker.assigned_instrument=ins"
+                        x-text="ins"></button>
+              </template>
+            </div>
+            <div x-show="!portalBroker.assigned_strategy" class="text-xs" style="color:var(--t-muted)">
+              Select a strategy to assign to this broker. You can change this later.
+            </div>
+          </div>
+        </div>
+
+        <!-- Status message -->
+        <div x-show="portalBrokerMsg" class="text-xs font-mono px-3 py-1.5 rounded"
+             :style="portalBrokerOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                                    : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="portalBrokerMsg"></div>
+
+        <div class="flex gap-3 pt-1">
+          <button class="btn-primary" style="max-width:200px" @click="addPortalBroker()" :disabled="portalBrokerLoading || !portalBroker.binding_id">
+            <span x-show="!portalBrokerLoading" x-text="portalBrokerIsEdit ? 'Update Broker' : 'Save Broker'"></span>
+            <span x-show="portalBrokerLoading">Saving…</span>
+          </button>
+          <button class="btn-action" style="width:auto;padding:8px 16px" @click="showPortalBrokerForm=false;portalBrokerIsEdit=false;portalBrokerMsg=''">Cancel</button>
+        </div>
+        <div class="text-xs" style="color:var(--t-muted)">
+          Credentials are encrypted at rest and used only for automated daily token generation. They are never displayed after saving.
+        </div>
+      </div>
+    </div>
+
+    <!-- ════ MENU: POSITIONS ══════════════════════════════════════════════════ -->
+    <div x-show="clientMenu === 'positions'" class="space-y-4" x-init="if(clientMenu==='positions') loadClientPositions()">
+
+      <!-- Market strip -->
+      <div class="t-card rounded p-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-6">
+            <div>
+              <div class="sec-label mb-0.5">SPOT · <span x-text="activeIndex"></span></div>
+              <div class="font-mono text-2xl font-bold price-live" style="color:var(--t-bright)" x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
+            </div>
+            <div>
+              <div class="sec-label mb-0.5">ATM</div>
+              <div class="font-mono text-2xl" style="color:var(--t-cyan)" x-text="spot.atm ? fmt(spot.atm,0) : '—'"></div>
+            </div>
+            <div>
+              <div class="sec-label mb-0.5">RSI-14</div>
+              <div class="font-mono text-base font-bold" :class="rsiClass" x-text="rsiVal ? fmt(rsiVal,1) : '—'"></div>
+            </div>
+            <div>
+              <div class="sec-label mb-0.5">ADX-20</div>
+              <div class="font-mono text-base" :style="`color:${adxVal>=25?'var(--t-amber)':'var(--t-muted)'}`" x-text="adxVal ? fmt(adxVal,1) : '—'"></div>
+            </div>
+          </div>
           <div class="flex gap-1">
-            <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY']" :key="idx">
-              <button class="idx-tab" :class="{active: activeIndex===idx}"
-                      @click="setClientIndex(idx)" x-text="idx"></button>
+            <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY']" :key="idx">
+              <button class="idx-tab" :class="{active:activeIndex===idx}" @click="setClientIndex(idx)" x-text="idx"></button>
             </template>
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-4 mb-3">
-          <div>
-            <div class="sec-label mb-1">SPOT</div>
-            <div class="font-mono text-3xl leading-none" style="color:var(--t-bright)" x-text="spot.ltp ? fmt(spot.ltp) : '—'"></div>
-          </div>
-          <div>
-            <div class="sec-label mb-1">ATM</div>
-            <div class="font-mono text-3xl leading-none" style="color:var(--t-cyan)" x-text="spot.atm ? fmt(spot.atm,0) : '—'"></div>
-          </div>
+      </div>
+
+      <!-- No brokers -->
+      <div x-show="csBindings.length === 0" class="t-card rounded p-8 text-center text-sm" style="color:var(--t-muted)">
+        No broker accounts added yet. Go to <strong>Brokers</strong> tab to add one.
+      </div>
+
+      <!-- Broker tabs -->
+      <div x-show="csBindings.length > 0">
+        <div class="flex gap-1 mb-3 flex-wrap">
+          <template x-for="b in csBindings" :key="b.binding_id">
+            <button class="idx-tab" :class="{active: csActiveBrokerTab===b.binding_id}"
+                    @click="csActiveBrokerTab=b.binding_id" x-text="b.binding_id"></button>
+          </template>
         </div>
-        <div class="grid grid-cols-3 gap-2 text-xs">
-          <div class="t-card rounded p-2">
-            <div class="sec-label">RSI-14</div>
-            <div class="font-mono text-sm font-bold mt-0.5" :class="rsiClass" x-text="rsiVal ? fmt(rsiVal,1) : '—'"></div>
+
+        <!-- Per-broker position frames -->
+        <template x-for="b in csBindings" :key="b.binding_id">
+          <div x-show="csActiveBrokerTab === b.binding_id" class="space-y-3">
+
+            <!-- Broker header -->
+            <div class="t-card rounded px-5 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-3">
+                <div class="w-2.5 h-2.5 rounded-full" :style="`background:${b.is_trade_enabled?'var(--t-green)':'var(--t-muted)'}`"></div>
+                <div>
+                  <span class="font-mono font-bold text-sm" style="color:var(--t-bright)" x-text="b.binding_id"></span>
+                  <span class="text-xs ml-2" style="color:var(--t-muted)" x-text="(b.provider||'').toUpperCase()+(b.label?' — '+b.label:'')"></span>
+                </div>
+              </div>
+              <!-- Per-broker kill switch -->
+              <div x-init="initKillBroker(b.binding_id)" class="flex items-center gap-2">
+                <button x-show="!csKillBroker[b.binding_id]?.armed"
+                        class="btn-halt" style="width:auto;padding:5px 14px"
+                        @click="armKillBroker(b.binding_id)">
+                  Kill Broker
+                </button>
+                <div x-show="csKillBroker[b.binding_id]?.armed" class="flex items-center gap-2">
+                  <span class="text-xs font-mono" style="color:var(--t-red)"
+                        x-text="'Confirm? ' + (csKillBroker[b.binding_id]?.countdown||5) + 's'"></span>
+                  <button class="btn-kill armed" style="width:auto;padding:5px 14px"
+                          @click="confirmKillBroker(b.binding_id)">
+                    CONFIRM KILL
+                  </button>
+                  <button class="btn-resume" style="width:auto;padding:5px 12px"
+                          @click="csKillBroker[b.binding_id].armed=false">Cancel</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Strategy position frames — filtered to this broker's assigned_strategy -->
+            <div x-show="csStrategySelections.filter(s => !b.assigned_strategy || s.strategy === b.assigned_strategy).length === 0"
+                 class="text-sm text-center py-5" style="color:var(--t-muted)">
+              No strategy assigned to this broker. Edit the broker and set <strong>Assigned Strategy</strong>.
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <template x-for="sel in csStrategySelections.filter(s => !b.assigned_strategy || s.strategy === b.assigned_strategy)" :key="sel.strategy">
+                <div class="t-card rounded p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <div>
+                      <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
+                           x-text="(availableStrategies.find(s=>s.id===sel.strategy)||{name:sel.strategy}).name"></div>
+                      <div class="text-xs font-mono mt-0.5" style="color:var(--t-cyan)" x-text="b.assigned_instrument || sel.instrument"></div>
+                    </div>
+                    <span class="badge-live text-xs" style="font-size:10px">ACTIVE</span>
+                  </div>
+                  <!-- Live legs from csPositions -->
+                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][sel.strategy]">
+                    <div class="space-y-1.5">
+                      <template x-for="(leg,li) in csPositions[b.binding_id][sel.strategy].legs||[]" :key="li">
+                        <div class="data-row">
+                          <span class="font-mono text-xs" style="color:var(--t-text)" x-text="leg.symbol"></span>
+                          <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="leg.qty+'@'+leg.entry_price"></span>
+                          <span class="font-mono text-xs font-bold"
+                                :class="leg.pnl>=0?'':''" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
+                                x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
+                        </div>
+                      </template>
+                      <div class="flex justify-between pt-2 border-t" style="border-color:var(--t-border)">
+                        <span class="sec-label">NET P&amp;L</span>
+                        <span class="font-mono text-sm font-bold"
+                              :style="`color:${(csPositions[b.binding_id][sel.strategy].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                              x-text="((csPositions[b.binding_id][sel.strategy].pnl||0)>=0?'+':'')+'₹'+(csPositions[b.binding_id][sel.strategy].pnl||0).toFixed(0)"></span>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="!csPositions[b.binding_id]||!csPositions[b.binding_id][sel.strategy]">
+                    <div class="text-xs text-center py-4" style="color:var(--t-muted)">No open position</div>
+                  </template>
+                </div>
+              </template>
+            </div>
+
           </div>
-          <div class="t-card rounded p-2">
-            <div class="sec-label">ADX-20</div>
-            <div class="font-mono text-sm font-bold mt-0.5" :style="`color:${adxVal>=25?'var(--t-amber)':'var(--t-muted)'}`" x-text="adxVal ? fmt(adxVal,1) : '—'"></div>
-          </div>
-          <div class="t-card rounded p-2">
-            <div class="sec-label">EMA</div>
-            <div class="font-mono text-sm font-bold mt-0.5" :class="{'ema-bull':emaSignal==='BULL','ema-bear':emaSignal==='BEAR','ema-neutral':emaSignal==='NEUTRAL'}" x-text="emaSignal"></div>
-          </div>
+        </template>
+      </div>
+
+      <!-- Refresh -->
+      <div class="flex justify-end">
+        <button class="btn-action" style="width:auto;padding:6px 16px" @click="loadClientPositions()" :disabled="csPosBrokerLoading">
+          <span x-show="!csPosBrokerLoading">↻ Refresh</span><span x-show="csPosBrokerLoading">Loading…</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ════ MENU: HISTORY ════════════════════════════════════════════════════ -->
+    <div x-show="clientMenu === 'history'" class="space-y-4">
+
+      <div class="t-card rounded">
+        <div class="flex items-center justify-between px-5 py-3 border-b" style="border-color:var(--t-border)">
+          <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Trade History</div>
+          <button class="btn-action" style="width:auto;padding:5px 14px" @click="loadClientHistory()" :disabled="csHistoryLoading">
+            <span x-show="!csHistoryLoading">↻ Refresh</span><span x-show="csHistoryLoading">Loading…</span>
+          </button>
+        </div>
+
+        <div x-show="csHistory.length === 0 && !csHistoryLoading" class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
+          No trade history yet.
+        </div>
+
+        <div x-show="csHistory.length > 0" class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="border-b" style="border-color:var(--t-border);background:var(--t-surface)">
+                <th class="px-4 py-2 text-left sec-label">DATE</th>
+                <th class="px-4 py-2 text-left sec-label">STRATEGY</th>
+                <th class="px-4 py-2 text-left sec-label">INSTRUMENT</th>
+                <th class="px-4 py-2 text-left sec-label">ENTRY</th>
+                <th class="px-4 py-2 text-left sec-label">EXIT</th>
+                <th class="px-4 py-2 text-left sec-label">REASON</th>
+                <th class="px-4 py-2 text-right sec-label">P&amp;L</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(tr,i) in csHistory" :key="i">
+                <tr class="border-b last:border-b-0 hover:bg-[var(--t-surface)] transition-colors" style="border-color:var(--t-border)">
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="tr.date||tr.ts||'—'"></td>
+                  <td class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="tr.strategy||'—'"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="tr.instrument||'—'"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="tr.entry_price||'—'"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="tr.exit_price||'—'"></td>
+                  <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="tr.exit_reason||'—'"></td>
+                  <td class="px-4 py-2 font-mono font-bold text-right"
+                      :style="`color:${(tr.pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                      x-text="((tr.pnl||0)>=0?'+':'')+'₹'+(tr.pnl||0).toFixed(0)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
         </div>
       </div>
 
-      <!-- Event feed -->
-      <div class="t-card rounded fade-up-3 flex flex-col" style="min-height:200px;max-height:300px">
+      <!-- Activity feed -->
+      <div class="t-card rounded flex flex-col" style="max-height:300px">
         <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
-          <div class="sec-label">Activity Feed</div>
+          <div class="sec-label">Live Activity Feed</div>
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="myEvents.length + ' events'"></span>
         </div>
         <div class="flex-1 overflow-y-auto">
@@ -4513,81 +5695,9 @@ document.addEventListener('alpine:init', () => {
           </template>
         </div>
       </div>
+    </div>
 
-    </div><!-- end active left -->
-
-    <!-- RIGHT -->
-    <div class="flex flex-col gap-3">
-
-      <!-- Master bot toggle -->
-      <div class="t-card rounded p-4 fade-up-1">
-        <div class="sec-label mb-3">BOT CONTROL</div>
-        <div class="flex items-center justify-between mb-3">
-          <div>
-            <div class="font-ui font-bold tracking-wider" :style="`color:${csBotActive?'var(--t-green)':'var(--t-muted)'}`"
-                 x-text="csBotActive ? 'BOT ACTIVE' : 'BOT INACTIVE'"></div>
-            <div class="font-mono text-xs" style="color:var(--t-muted)">Master trading switch</div>
-          </div>
-          <div class="w-3 h-3 rounded-full" :class="csBotActive?'conn-live':''"
-               :style="`background:${csBotActive?'var(--t-green)':'var(--t-red)'}`"></div>
-        </div>
-        <div class="flex gap-2">
-          <button class="btn-resume" style="flex:1" @click="startBot()" :disabled="botLoading||csBotActive">
-            <span x-show="!botLoading">START</span><span x-show="botLoading">…</span>
-          </button>
-          <button class="btn-halt" style="flex:1" @click="stopBot()" :disabled="botLoading||!csBotActive">STOP</button>
-        </div>
-        <div x-show="botMsg" class="mt-2 font-mono text-xs px-2 py-1.5 rounded"
-             :style="botOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
-                           : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
-             x-text="botMsg"></div>
-      </div>
-
-      <!-- Broker bindings + per-broker trade toggle -->
-      <div class="t-card rounded fade-up-2">
-        <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
-          <div>
-            <div class="sec-label">BROKER CHANNELS</div>
-            <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)" x-text="csBindings.length+' binding'+(csBindings.length!==1?'s':'')"></div>
-          </div>
-        </div>
-        <div x-show="csBindings.length===0" class="px-4 py-5 font-mono text-xs text-center" style="color:var(--t-muted)">No broker bindings yet.</div>
-        <template x-for="b in csBindings" :key="b.binding_id">
-          <div class="px-4 py-3 border-b last:border-b-0" style="border-color:var(--t-border)">
-            <div class="flex items-center justify-between mb-1">
-              <div class="flex items-center gap-2">
-                <div class="w-2 h-2 rounded-full shrink-0" :style="`background:${b.is_trade_enabled?'var(--t-green)':'var(--t-muted)'}`"></div>
-                <span class="font-mono text-xs" style="color:var(--t-bright)" x-text="b.binding_id"></span>
-              </div>
-              <!-- Trade enable toggle -->
-              <button @click="toggleTrade(b.binding_id)"
-                      class="font-mono text-xs px-2 py-0.5 rounded border transition-all"
-                      :style="b.is_trade_enabled ? 'color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.3);background:rgba(var(--t-green-rgb),0.08)'
-                                                 : 'color:var(--t-muted);border-color:var(--t-border);background:transparent'"
-                      x-text="b.is_trade_enabled ? 'TRADE ON' : 'TRADE OFF'"></button>
-            </div>
-            <div class="flex justify-between text-xs mt-0.5">
-              <span class="font-ui" style="color:var(--t-muted)" x-text="(b.provider||'').toUpperCase()+(b.label?' — '+b.label:'')"></span>
-              <span class="font-mono" style="color:var(--t-muted)" x-text="b.assigned_strategy?'Strategy '+b.assigned_strategy:''"></span>
-            </div>
-          </div>
-        </template>
-      </div>
-
-      <!-- Session info -->
-      <div class="t-card rounded p-4 fade-up-3">
-        <div class="sec-label mb-3">Session</div>
-        <div class="space-y-1.5 text-xs">
-          <div class="flex justify-between"><span class="sec-label">CLIENT ID</span><span class="font-mono" style="color:var(--t-cyan)" x-text="authClientId"></span></div>
-          <div class="flex justify-between"><span class="sec-label">TARGET INDEX</span><span class="font-mono" style="color:var(--t-text)" x-text="csTargetIndex"></span></div>
-          <div class="flex justify-between"><span class="sec-label">FEED</span>
-            <span class="font-mono" :style="`color:${wsConnected?'var(--t-green)':'var(--t-red)'}`" x-text="wsConnected?'LIVE':'OFFLINE'"></span>
-          </div>
-        </div>
-      </div>
-
-    </div><!-- end active right -->
-  </div><!-- end active grid -->
+  </div><!-- end active -->
 
 </main><!-- end client layout -->
 
@@ -4639,27 +5749,27 @@ document.addEventListener('alpine:init', () => {
 
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <div class="sec-label mb-1">USER ID / CLIENT CODE</div>
+          <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).user_id||'USER ID'"></div>
           <input class="t-input" type="text" placeholder="broker user id" x-model="newBroker.user_id" autocomplete="off"/>
         </div>
         <div>
-          <div class="sec-label mb-1">PASSWORD</div>
+          <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).password||'PASSWORD'"></div>
           <input class="t-input" type="password" placeholder="broker password" x-model="newBroker.password" autocomplete="new-password"/>
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <div class="sec-label mb-1">API KEY</div>
+          <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).api_key||'API KEY'"></div>
           <input class="t-input" type="password" placeholder="api key" x-model="newBroker.api_key" autocomplete="new-password"/>
         </div>
         <div>
-          <div class="sec-label mb-1">API SECRET</div>
+          <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).api_secret||'API SECRET'"></div>
           <input class="t-input" type="password" placeholder="api secret" x-model="newBroker.api_secret" autocomplete="new-password"/>
         </div>
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <div class="sec-label mb-1">TOTP SECRET (2FA)</div>
+          <div class="sec-label mb-1" x-text="((brokerFieldHints[newBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA)'"></div>
           <input class="t-input" type="password" placeholder="base32 TOTP seed" x-model="newBroker.totp_secret" autocomplete="new-password"/>
         </div>
       </div>
@@ -4827,9 +5937,9 @@ document.addEventListener('alpine:init', () => {
      x-transition:leave-end="opacity-0"
      style="display:none">
   <div class="modal-panel" @click.stop
-       style="box-shadow:0 24px 80px rgba(0,0,0,0.7),0 0 0 1px rgba(var(--t-amber-rgb),0.08)">
+       >
     <!-- Header -->
-    <div class="modal-header" style="border-bottom-color:rgba(var(--t-amber-rgb),0.18)">
+    <div class="modal-header">
       <div>
         <div class="font-display text-xs font-bold tracking-widest" style="color:var(--t-amber)">FYERS API v3 CONFIGURATION</div>
         <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Credentials are XOR-encrypted at rest · Never logged</div>

@@ -22,7 +22,7 @@ _SECRET: bytes = os.getenv(
     "TERMINUS_JWT_SECRET", "terminus-dev-secret-CHANGE-IN-PRODUCTION"
 ).encode()
 _ALGO = "HS256"
-_TTL  = 8 * 3600   # 8 hours — one full trading session
+_TTL  = 30 * 24 * 3600   # 30 days — persist across browser restarts
 
 
 # ── Internal base64url helpers ────────────────────────────────────────────────

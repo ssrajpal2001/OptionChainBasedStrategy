@@ -21,10 +21,10 @@ NSE/BSE options algorithmic trading system with:
 
 ```bash
 # Strategy bot + dashboard (live mode)
-python run_system.py --mode live --ui --port 8080 --index NIFTY
+python run_system.py --mode live --ui --port 5000 --index NIFTY
 
 # Paper trading
-python run_system.py --mode paper --ui --port 8080
+python run_system.py --mode paper --ui --port 5000
 
 # Demo mode (synthetic ticks, no broker)
 python run_system.py --mode demo

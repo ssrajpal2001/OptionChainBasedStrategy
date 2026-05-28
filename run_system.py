@@ -8,10 +8,10 @@ Replaces direct invocations of main.py by adding:
 
 Usage:
   # Live trading with web dashboard
-  python run_system.py --mode live  --ui --port 8080 --index NIFTY
+  python run_system.py --mode live  --ui --port 5000 --index NIFTY
 
   # Paper trading with local web UI
-  python run_system.py --mode paper --ui --port 8080
+  python run_system.py --mode paper --ui --port 5000
 
   # Demo mode (synthetic data, no broker needed)
   python run_system.py --mode demo
@@ -101,7 +101,7 @@ def _parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
     p.add_argument("--ui",        action="store_true", help="Start web dashboard alongside system")
-    p.add_argument("--port",      type=int, default=8080, help="Web dashboard port (default: 8080)")
+    p.add_argument("--port",      type=int, default=5000, help="Web dashboard port (default: 5000)")
     p.add_argument("--host",      default="0.0.0.0",    help="Web dashboard bind host")
     p.add_argument(
         "--no-preflight",
@@ -117,8 +117,10 @@ def _parse_args() -> argparse.Namespace:
 
 def _setup_logging(log_dir: str, level: str) -> None:
     os.makedirs(log_dir, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"algo_{ts}.log")
+    os.makedirs(os.path.join(log_dir, "trades"), exist_ok=True)
+    # System log: logs/system-YYYYMMDD.log  (one per day, appended)
+    date_str = datetime.now().strftime("%Y%m%d")
+    log_file = os.path.join(log_dir, f"system-{date_str}.log")
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
@@ -226,7 +228,7 @@ async def _run_live(
     underlying: str,
     ui: bool = False,
     ui_host: str = "0.0.0.0",
-    ui_port: int = 8080,
+    ui_port: int = 5000,
 ) -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting %s mode for %s%s", mode.upper(), underlying,
@@ -249,6 +251,7 @@ async def _run_live(
     from strategies.iron_condor import IronCondorStrategy
     from strategies.sell_straddle import SellStraddleStrategy
     from execution_bridge import ExecutionRouter
+    from execution_bridge.straddle_bridge import StraddleExecutionBridge
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
     from management.risk_manager import RiskManager
@@ -271,6 +274,15 @@ async def _run_live(
     option_matrix = OptionMatrixEngine(bus, cfg)
     feeder        = GlobalFeeder(bus, cfg)
     router        = ExecutionRouter(bus, registry, cfg)
+    from data_layer.client_db import ClientDB as _ClientDB
+    _shared_client_db = _ClientDB()
+    await _shared_client_db.initialise()
+    # Share the same DB instance across bridge + dashboard so engine_active state is consistent
+    router._client_db = _shared_client_db
+    straddle_bridge = StraddleExecutionBridge(
+        bus, registry, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -344,6 +356,7 @@ async def _run_live(
         asyncio.create_task(confluence.run(),           name="confluence"),
         asyncio.create_task(trap_engine.run(),          name="trap_engine"),
         asyncio.create_task(router.run(),               name="router"),
+        asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -379,6 +392,7 @@ async def _run_live(
     rebalancer.stop()
     strike_cleanup.stop()
     gap_handler.stop()
+    straddle_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task

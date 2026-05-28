@@ -9,9 +9,9 @@ Auth strategy per provider:
   mock      -- always succeeds
   shoonya   -- direct NorenAPI login with user_id + password + TOTP.now()
   angelone  -- SmartConnect.generateSession with client_code + password + TOTP.now()
-  fyers     -- authCodeModel.generate_authcode(fy_id, TOTP, pin) + generate_token()
+  fyers     -- Vagator v2 API: send_login_otp → verify_otp → verify_pin_v2 → auth_code → token
   upstox    -- aiohttp headless OAuth2 using Upstox internal auth endpoints
-  dhan      -- validates existing access_token; no auto-generation
+  dhan      -- auth.dhan.co/app/generateAccessToken with Client ID + PIN + TOTP
 
 All network I/O uses asyncio.to_thread() or aiohttp async sessions.
 All timestamps are Asia/Kolkata (IST).
@@ -127,11 +127,13 @@ class HeadlessAuthEngine:
         # 2. Generate fresh token via provider-specific flow
         dispatch = {
             "mock":     self._mock_auth,
+            "zerodha":  self._zerodha_auth,
             "shoonya":  self._shoonya_auth,
             "angelone": self._angel_auth,
             "fyers":    self._fyers_auth,
             "upstox":   self._upstox_auth,
             "dhan":     self._dhan_auth,
+            "groww":    self._groww_auth,
         }
         handler = dispatch.get(provider)
         if handler is None:
@@ -389,104 +391,535 @@ class HeadlessAuthEngine:
 
     async def _fyers_auth(self, binding: dict) -> Tuple[bool, str, str]:
         """
-        Fyers v3 headless TOTP auth via authCodeModel.
+        Fyers headless TOTP auth via Vagator v2 API.
+
+        Flow:
+          1. POST /vagator/v2/send_login_otp_v2  → request_key
+          2. POST /vagator/v2/verify_otp (TOTP)  → request_key
+          3. POST /vagator/v2/verify_pin_v2       → vagator access_token
+          4. POST /api/v3/token (with Bearer)     → auth_code URL
+          5. Exchange auth_code via SessionModel  → final access_token
+
         Required fields:
-          api_key     = Fyers App ID (e.g. "XXXXX-100")
+          api_key     = Fyers App ID  (e.g. "XXXXX-100")
           api_secret  = App secret key
-          user_id     = Fyers user ID (e.g. "XJ12345")
+          user_id     = Fyers client/user ID  (e.g. "XJ12345")
           password    = 4-digit Fyers PIN
           totp_secret = base32 TOTP seed
         """
-        try:
-            import pyotp
-        except ImportError:
-            return False, "pyotp not installed. pip install pyotp", ""
+        app_id      = binding.get("api_key", "")
+        secret_key  = binding.get("api_secret", "")
+        fy_id       = binding.get("user_id", "")
+        pin         = binding.get("password", "")
+        totp_secret = binding.get("totp_secret", "")
 
-        # Two-stage import probe: distinguish missing package from broken sub-module.
-        try:
-            import fyers_apiv3 as _fyers_pkg  # noqa: F401
-        except ImportError:
-            return False, "Fyers: fyers-apiv3 not installed. pip install fyers-apiv3", ""
+        if not app_id or not fy_id:
+            return False, "Fyers: api_key (App ID) and user_id (FY ID) are required.", ""
 
-        try:
-            from fyers_apiv3.FyersAuthCode import authCodeModel  # type: ignore
-        except ImportError as exc:
-            # Package present but FyersAuthCode sub-module missing — version too old.
-            # authCodeModel (headless TOTP) was added in fyers-apiv3 3.1.x.
+        # Fyers vagator API is Cloudflare-protected — skip immediately and
+        # instruct the user to use the manual OAuth flow in the UI.
+        return False, (
+            "Fyers: use the 'Get Token Manually' button on your broker card "
+            "(or the OAuth Login section in the Fyers data feeder panel) to connect."
+        ), ""
+
+        def _run_sync() -> Tuple[bool, str, str]:  # noqa: unreachable (kept for reference)
+            import hashlib
+            import time
+            from urllib.parse import urlparse, parse_qs
+
             try:
-                import importlib.metadata as _imeta
-                _fyers_ver = _imeta.version("fyers-apiv3")
-            except Exception:
-                _fyers_ver = "unknown"
-            logger.error("HeadlessAuth: fyers_apiv3 import path error (installed=%s): %s", _fyers_ver, exc)
-            return False, (
-                f"Fyers: FyersAuthCode not found in fyers-apiv3=={_fyers_ver} — "
-                "headless TOTP auth requires >= 3.1.0. "
-                "Run: pip install --upgrade fyers-apiv3"
-            ), ""
-
-        try:
-            app_id      = binding.get("api_key", "")
-            secret_key  = binding.get("api_secret", "")
-            fy_id       = binding.get("user_id", "")
-            pin         = binding.get("password", "")
-            totp_secret = binding.get("totp_secret", "")
-
-            if not app_id or not fy_id:
-                return False, "Fyers: api_key (App ID) and user_id (FY ID) are required.", ""
-            if not totp_secret:
-                return False, "Fyers: totp_secret is required for headless auth.", ""
-            if not pin:
-                return False, "Fyers: password (4-digit PIN) is required.", ""
-
-            totp_secret_clean = totp_secret.upper().replace(" ", "").replace("-", "")
+                import pyotp  # type: ignore
+            except ImportError:
+                return False, "pyotp not installed. pip install pyotp", ""
             try:
-                totp_code = pyotp.TOTP(totp_secret_clean).now()
+                import requests as _req
+            except ImportError:
+                return False, "requests not installed. pip install requests", ""
+            try:
+                from fyers_apiv3 import fyersModel  # type: ignore
+            except ImportError:
+                return False, "fyers-apiv3 not installed. pip install fyers-apiv3", ""
+
+            _VAGATOR   = "https://api-t2.fyers.in/vagator/v2"
+            _VAGATOR_T1 = "https://api-t1.fyers.in/vagator/v2"
+            _API_V3    = "https://api-t2.fyers.in/api/v3"
+            _REDIRECT  = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+            # strip -100 suffix for vagator app_id field
+            _app_id_short = app_id.rsplit("-", 1)[0] if "-" in app_id else app_id
+            # ensure full format for SessionModel
+            _app_id_full  = app_id if "-" in app_id else f"{app_id}-100"
+
+            totp_clean = totp_secret.upper().replace(" ", "").replace("-", "")
+            try:
+                totp_code = pyotp.TOTP(totp_clean).now()
             except Exception as exc:
                 return False, (
                     f"Fyers: invalid TOTP secret — {exc}. "
-                    "Use the raw base32 key from your authenticator app (no spaces or dashes)."
+                    "Use the raw base32 key from your authenticator app."
                 ), ""
 
-            # Use Fyers-standard redirect URI
-            redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
-            session = authCodeModel(
-                client_id=app_id,
-                secret_key=secret_key,
-                redirect_uri=redirect_uri,
-                response_type="code",
-                grant_type="authorization_code",
+            def _mask(s: str) -> str:
+                return (s[:4] + "****") if len(s) > 4 else "****"
+
+            sess = _req.Session()
+            sess.headers.update({
+                "Content-Type": "application/json",
+                "Accept":       "application/json",
+                "Origin":       "https://trade.fyers.in",
+                "Referer":      "https://trade.fyers.in/",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            })
+
+            # ── Step 1: send_login_otp — try all known endpoint/payload variants ─
+            # Fyers vagator has changed over time; we try every known combination.
+            # app_id 2/"2" = login type constant used by Fyers web app.
+            _FULL  = {"imei": "", "recaptcha_token": ""}
+            _BARE  = {}
+            _CANDIDATES = [
+                (_VAGATOR,    "send_login_otp_v2", 2,    _FULL),
+                (_VAGATOR,    "send_login_otp_v2", "2",  _FULL),
+                (_VAGATOR_T1, "send_login_otp_v2", 2,    _FULL),
+                (_VAGATOR_T1, "send_login_otp_v2", "2",  _FULL),
+                (_VAGATOR,    "send_login_otp_v2", 2,    _BARE),
+                (_VAGATOR_T1, "send_login_otp_v2", 2,    _BARE),
+                (_VAGATOR,    "send_login_otp",    2,    _FULL),
+                (_VAGATOR_T1, "send_login_otp",    2,    _FULL),
+                (_VAGATOR,    "send_login_otp",    2,    _BARE),
+                (_VAGATOR_T1, "send_login_otp",    2,    _BARE),
+            ]
+            request_key = None
+            d1 = {}
+            for _base, _ep, _aid, _extra in _CANDIDATES:
+                payload = {"fy_id": fy_id, "app_id": _aid, **_extra}
+                r = sess.post(f"{_base}/{_ep}", json=payload, timeout=15)
+                try:
+                    d1 = r.json()
+                except Exception:
+                    d1 = {}
+                logger.info(
+                    "HeadlessAuth Fyers %s host=%s app_id=%r extra=%s HTTP %s -> %s",
+                    _ep, "t1" if "t1" in _base else "t2", _aid, bool(_extra),
+                    r.status_code, r.text[:100],
+                )
+                if d1.get("s") == "ok":
+                    request_key = d1.get("request_key")
+                    logger.info("HeadlessAuth Fyers Step1: OK (%s/%s)", _base, _ep)
+                    break
+
+            if not request_key:
+                msg = d1.get("message") or str(d1)
+                return False, f"Fyers Step 1 (send_login_otp): {msg}", ""
+
+            # ── Step 2: verify TOTP ──────────────────────────────────────────────
+            r2 = sess.post(
+                f"{_VAGATOR}/verify_otp",
+                json={"request_key": request_key, "otp": totp_code},
+                timeout=15,
             )
+            d2 = r2.json() if r2.ok else {}
+            if d2.get("s") != "ok":
+                # TOTP window may have ticked — wait one period and retry
+                time.sleep(31)
+                totp_code = pyotp.TOTP(totp_clean).now()
+                r2 = sess.post(
+                    f"{_VAGATOR}/verify_otp",
+                    json={"request_key": request_key, "otp": totp_code},
+                    timeout=15,
+                )
+                d2 = r2.json() if r2.ok else {}
+            if d2.get("s") != "ok":
+                msg = d2.get("message") or str(d2)
+                return False, f"Fyers Step 2 (verify_otp): {msg}", ""
+            request_key = d2["request_key"]
+            logger.info("HeadlessAuth Fyers Step2: TOTP verified for %s", _mask(fy_id))
 
-            auth_resp = await asyncio.to_thread(
-                session.generate_authcode,
-                fy_id=fy_id,
-                totp=totp_code,
-                pin=pin,
+            # ── Step 3: verify PIN ───────────────────────────────────────────────
+            pin_hash = hashlib.sha256(pin.encode()).hexdigest()
+            r3 = sess.post(
+                f"{_VAGATOR}/verify_pin_v2",
+                json={"request_key": request_key, "identity_type": "pin", "identifier": pin_hash},
+                timeout=15,
             )
+            d3 = r3.json() if r3.ok else {}
+            if d3.get("s") != "ok":
+                # Retry with plain PIN (some accounts use plain PIN)
+                r3 = sess.post(
+                    f"{_VAGATOR}/verify_pin_v2",
+                    json={"request_key": request_key, "identity_type": "pin", "identifier": pin},
+                    timeout=15,
+                )
+                d3 = r3.json() if r3.ok else {}
+            if d3.get("s") != "ok":
+                msg = d3.get("message") or str(d3)
+                return False, f"Fyers Step 3 (verify_pin_v2): {msg}", ""
+            vagator_token = (d3.get("data") or {}).get("access_token")
+            if not vagator_token:
+                return False, f"Fyers Step 3: access_token missing — {d3}", ""
+            logger.info("HeadlessAuth Fyers Step3: PIN verified, vagator token obtained")
 
-            if not auth_resp or auth_resp.get("s") != "ok":
-                msg = (auth_resp or {}).get("message", "Auth code generation failed.")
-                return False, f"Fyers: {msg}", ""
+            # ── Step 4: get auth_code ────────────────────────────────────────────
+            sess.headers.update({"authorization": f"Bearer {vagator_token}"})
+            r4 = sess.post(
+                f"{_API_V3}/token",
+                json={
+                    "fyers_id":       fy_id,
+                    "app_id":         _app_id_short,
+                    "redirect_uri":   _REDIRECT,
+                    "appType":        "100",
+                    "code_challenge": "",
+                    "state":          "terminus",
+                    "nonce":          "",
+                    "response_type":  "code",
+                    "create_cookie":  True,
+                },
+                timeout=15,
+            )
+            d4 = r4.json() if r4.ok else {}
+            url = d4.get("Url") or d4.get("url") or ""
+            auth_code = None
+            if url:
+                for part in url.split("?", 1)[-1].split("&"):
+                    if part.startswith("auth_code="):
+                        auth_code = part.split("=", 1)[1]
+                        break
+            if not auth_code:
+                msg = d4.get("message") or d4.get("error") or str(d4)
+                return False, f"Fyers Step 4 (get auth_code): {msg}", ""
+            logger.info("HeadlessAuth Fyers Step4: auth_code obtained")
 
-            # Extract auth code from redirect URL
-            redirect_url = auth_resp.get("Url", "")
-            if "auth_code=" not in redirect_url:
-                return False, "Fyers: Could not extract auth_code from redirect URL.", ""
-            auth_code = redirect_url.split("auth_code=")[1].split("&")[0]
+            # ── Step 5: exchange auth_code → access_token ────────────────────────
+            import hashlib as _hs
+            app_id_hash = _hs.sha256(f"{_app_id_full}:{secret_key}".encode()).hexdigest()
+            try:
+                r5 = _req.post(
+                    "https://api-t1.fyers.in/api/v3/validate-authcode",
+                    json={
+                        "grant_type": "authorization_code",
+                        "appIdHash":  app_id_hash,
+                        "code":       auth_code,
+                    },
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    timeout=15,
+                )
+                d5 = r5.json() if r5.ok else {}
+            except Exception as exc:
+                return False, f"Fyers Step 5 (token exchange): {exc}", ""
 
-            # Exchange auth code for access token
-            token_resp = await asyncio.to_thread(session.generate_token, auth_code)
-            access_token = (token_resp or {}).get("access_token", "")
+            access_token = d5.get("access_token") or (d5.get("data") or {}).get("access_token")
             if not access_token:
-                msg = (token_resp or {}).get("message", "Token exchange failed.")
-                return False, f"Fyers: {msg}", ""
+                msg = d5.get("message") or str(d5)
+                return False, f"Fyers Step 5 (token exchange): {msg}", ""
 
-            logger.info("HeadlessAuth: Fyers auth succeeded for %s.", fy_id)
+            logger.info("HeadlessAuth Fyers: auth SUCCESS for %s", _mask(fy_id))
             return True, "Fyers: authenticated and token generated.", access_token
 
+        try:
+            ok, msg, token = await asyncio.to_thread(_run_sync)
         except Exception as exc:
-            return False, f"Fyers: unexpected error — {exc}", ""
+            msg = str(exc)
+            if "timed out" in msg.lower() or "ConnectTimeout" in msg or "Max retries" in msg:
+                return False, (
+                    "Fyers: api-t2.fyers.in is unreachable (connection timeout). "
+                    "Check: outbound port 443 to api-t2.fyers.in is allowed in your firewall."
+                ), ""
+            ok, msg, token = False, f"Fyers: unexpected error — {exc}", ""
+
+        if ok:
+            return ok, msg, token
+
+        # Vagator API is Cloudflare-protected — direct API calls are blocked.
+        # Use the manual flow: broker card → "Get Token Manually" → open login URL
+        # → paste full redirect URL → Generate Token.
+        return False, (
+            "Fyers: headless API unavailable (Cloudflare protected). "
+            "Use the 'Get Token Manually' button on your Fyers broker card: "
+            "click 'Open Fyers Login Page', log in, copy the redirect URL, paste it, click Generate Token."
+        ), ""
+
+    async def _fyers_auth_browser(self, binding: dict) -> Tuple[bool, str, str]:
+        """
+        Fyers headless login via undetected-chromedriver (bypasses Cloudflare).
+        Requires: pip install undetected-chromedriver selenium
+        Chrome browser must be installed.
+        """
+        app_id      = binding.get("api_key", "")
+        secret_key  = binding.get("api_secret", "")
+        fy_id       = binding.get("user_id", "")
+        pin         = binding.get("password", "")
+        totp_secret = binding.get("totp_secret", "")
+
+        def _run_browser() -> Tuple[bool, str, str]:
+            import time as _time
+            try:
+                import pyotp  # type: ignore
+            except ImportError:
+                return False, "pyotp not installed. pip install pyotp", ""
+            try:
+                import fyers_apiv3  # type: ignore  # noqa: F401
+                from fyers_apiv3 import fyersModel  # type: ignore
+            except ImportError:
+                return False, "fyers-apiv3 not installed.", ""
+
+            try:
+                import undetected_chromedriver as uc  # type: ignore
+                _has_uc = True
+            except ImportError:
+                _has_uc = False
+
+            try:
+                from selenium.webdriver.common.by import By
+                from selenium.webdriver.support.ui import WebDriverWait
+                from selenium.webdriver.support import expected_conditions as EC
+            except ImportError:
+                return (
+                    False,
+                    "Selenium not installed. Run: pip install selenium undetected-chromedriver",
+                    "",
+                )
+
+            if not _has_uc:
+                return (
+                    False,
+                    "undetected-chromedriver not installed. "
+                    "Run: pip install undetected-chromedriver\n"
+                    "Then retry Connect — browser automation will handle the login automatically.",
+                    "",
+                )
+
+            _app_id_full = app_id if "-" in app_id else f"{app_id}-100"
+            _redirect    = "https://trade.fyers.in/api-login/redirect-uri/index.html"
+            auth_url = (
+                f"https://api-t1.fyers.in/api/v3/generate-authcode"
+                f"?client_id={_app_id_full}"
+                f"&redirect_uri={_redirect}"
+                f"&response_type=code&state=terminus"
+            )
+
+            totp_clean = totp_secret.upper().replace(" ", "").replace("-", "")
+
+            def _exchange_auth_code(code: str, prefix: str = "") -> Tuple[bool, str, str]:
+                """Exchange Fyers auth_code for access_token via direct REST endpoint."""
+                import hashlib as _hs, requests as _rq
+                app_id_hash = _hs.sha256(f"{_app_id_full}:{secret_key}".encode()).hexdigest()
+                try:
+                    r = _rq.post(
+                        "https://api-t1.fyers.in/api/v3/validate-authcode",
+                        json={
+                            "grant_type": "authorization_code",
+                            "appIdHash":  app_id_hash,
+                            "code":       code,
+                        },
+                        headers={"Content-Type": "application/json", "Accept": "application/json"},
+                        timeout=15,
+                    )
+                    d = r.json() if r.ok else {}
+                    token = d.get("access_token") or (d.get("data") or {}).get("access_token")
+                    if token:
+                        logger.info("HeadlessAuth Fyers: token exchange SUCCESS")
+                        return True, "Fyers: authenticated.", token
+                    msg = d.get("message") or str(d)
+                    return False, f"{prefix}token exchange failed: {msg}", ""
+                except Exception as exc:
+                    return False, f"{prefix}token exchange error: {exc}", ""
+
+            def _fill_digits(driver, value: str, n: int):
+                ids = ["first", "second", "third", "fourth", "fifth", "sixth"][:n]
+                for i, fid in enumerate(ids):
+                    els = driver.find_elements(By.ID, fid)
+                    el = next((e for e in els if e.is_displayed()), None)
+                    if el is None:
+                        _time.sleep(0.3)
+                        els = driver.find_elements(By.ID, fid)
+                        el = next((e for e in els if e.is_displayed()), None)
+                    if el:
+                        el.clear()
+                        el.send_keys(value[i])
+                        _time.sleep(0.06)
+
+            def _get_auth_code(driver, timeout: int = 25) -> str:
+                from urllib.parse import urlparse, parse_qs
+                deadline = _time.monotonic() + timeout
+                while _time.monotonic() < deadline:
+                    try:
+                        url = driver.current_url
+                    except Exception:
+                        break
+                    qs = parse_qs(urlparse(url).query)
+                    code = (qs.get("auth_code") or qs.get("code") or [""])[0]
+                    if code:
+                        return code
+                    _time.sleep(0.4)
+                return ""
+
+            driver = None
+            try:
+                # Detect installed Chrome major version to avoid driver mismatch
+                _chrome_ver = None
+                import re as _re
+                def _detect_chrome_ver():
+                    # Method 1: winreg (most reliable on Windows)
+                    try:
+                        import winreg
+                        for _hive, _path in [
+                            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Google\Chrome\BLBeacon"),
+                            (winreg.HKEY_CURRENT_USER,  r"SOFTWARE\Google\Chrome\BLBeacon"),
+                            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Google\Chrome\BLBeacon"),
+                        ]:
+                            try:
+                                k = winreg.OpenKey(_hive, _path)
+                                v, _ = winreg.QueryValueEx(k, "version")
+                                winreg.CloseKey(k)
+                                m = _re.match(r"(\d+)", str(v))
+                                if m:
+                                    return int(m.group(1))
+                            except Exception:
+                                continue
+                    except ImportError:
+                        pass
+                    # Method 2: reg query subprocess
+                    try:
+                        import subprocess as _sp
+                        for _rpath in [
+                            r'HKLM\SOFTWARE\Google\Chrome\BLBeacon',
+                            r'HKCU\SOFTWARE\Google\Chrome\BLBeacon',
+                            r'HKLM\SOFTWARE\WOW6432Node\Google\Chrome\BLBeacon',
+                        ]:
+                            try:
+                                out = _sp.check_output(
+                                    f'reg query "{_rpath}" /v version',
+                                    shell=True, stderr=_sp.DEVNULL
+                                ).decode(errors="ignore")
+                                m = _re.search(r'version\s+REG_SZ\s+(\d+)', out, _re.IGNORECASE)
+                                if m:
+                                    return int(m.group(1))
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    # Method 3: find chrome.exe and get its file version
+                    try:
+                        import subprocess as _sp
+                        for _chrome_path in [
+                            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                        ]:
+                            try:
+                                out = _sp.check_output(
+                                    f'powershell -command "(Get-Item \'{_chrome_path}\').VersionInfo.ProductVersion"',
+                                    shell=True, stderr=_sp.DEVNULL
+                                ).decode(errors="ignore").strip()
+                                m = _re.match(r"(\d+)", out)
+                                if m:
+                                    return int(m.group(1))
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    return None
+                _chrome_ver = _detect_chrome_ver()
+                logger.info("HeadlessAuth Fyers Browser: detected Chrome version %s", _chrome_ver)
+
+                opts = uc.ChromeOptions()
+                opts.add_argument("--no-sandbox")
+                opts.add_argument("--disable-dev-shm-usage")
+                opts.add_argument("--window-size=1280,900")
+                _uc_kwargs = {"options": opts, "headless": True}
+                if _chrome_ver:
+                    _uc_kwargs["version_main"] = _chrome_ver
+                driver = uc.Chrome(**_uc_kwargs)
+                wait   = WebDriverWait(driver, 15)
+
+                logger.info("HeadlessAuth Fyers Browser: navigating to auth URL")
+                driver.get(auth_url)
+                _time.sleep(2)
+
+                # Switch to Client ID mode
+                try:
+                    rb = wait.until(EC.presence_of_element_located((By.ID, "clientId_rb")))
+                    driver.execute_script("arguments[0].click();", rb)
+                    _time.sleep(0.5)
+                except Exception:
+                    pass  # already in client ID mode
+
+                # Fill Client ID
+                els = driver.find_elements(By.ID, "fy_client_id")
+                id_el = next((e for e in els if e.is_displayed()), None)
+                if not id_el:
+                    return False, "Fyers browser: #fy_client_id not found", ""
+                id_el.clear()
+                id_el.send_keys(fy_id)
+
+                # Submit
+                submit_els = driver.find_elements(By.ID, "clientIdSubmit")
+                submit_el  = next((e for e in submit_els if e.is_displayed()), None)
+                if submit_el:
+                    driver.execute_script("arguments[0].click();", submit_el)
+                _time.sleep(3)
+
+                # TOTP — 6 digit inputs
+                totp_code = pyotp.TOTP(totp_clean).now()
+                try:
+                    wait.until(EC.visibility_of_element_located((By.ID, "first")))
+                    _fill_digits(driver, totp_code, 6)
+                    logger.info("HeadlessAuth Fyers Browser: TOTP filled")
+                    _time.sleep(3)
+                except Exception:
+                    _time.sleep(31)
+                    totp_code = pyotp.TOTP(totp_clean).now()
+                    _fill_digits(driver, totp_code, 6)
+                    _time.sleep(3)
+
+                # Check for error page
+                src = driver.page_source.lower()
+                if "your account has been blocked" in src or "account is blocked" in src:
+                    return False, "Fyers account is blocked. Unblock at trade.fyers.in.", ""
+                if "invalid otp" in src or "incorrect otp" in src:
+                    return False, "Fyers: TOTP rejected — check your TOTP secret.", ""
+
+                # PIN — 4 digit inputs
+                _pin_ready = False
+                for _ in range(25):
+                    if any(b.is_displayed() for b in driver.find_elements(By.ID, "verifyPinSubmit")):
+                        _pin_ready = True
+                        break
+                    _time.sleep(0.4)
+                if not _pin_ready:
+                    return False, "Fyers browser: PIN form never appeared", ""
+
+                _fill_digits(driver, pin, 4)
+                driver.execute_script(
+                    "arguments[0].click();",
+                    driver.find_element(By.ID, "verifyPinSubmit"),
+                )
+                _time.sleep(2)
+
+                # Capture auth_code
+                auth_code = _get_auth_code(driver)
+                if not auth_code:
+                    return False, f"Fyers browser: auth_code not found in redirect URL", ""
+                logger.info("HeadlessAuth Fyers Browser: auth_code captured")
+
+            except Exception as exc:
+                return False, f"Fyers browser automation error: {exc}", ""
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+
+            # Exchange auth_code -> access_token via direct REST (no SDK dependency)
+            return _exchange_auth_code(auth_code, "Fyers browser: ")
+
+        try:
+            return await asyncio.to_thread(_run_browser)
+        except Exception as exc:
+            return False, f"Fyers browser: unexpected error — {exc}", ""
 
     async def _upstox_auth(self, binding: dict) -> Tuple[bool, str, str]:
         """
@@ -754,33 +1187,337 @@ class HeadlessAuthEngine:
             logger.error("HeadlessAuth: Upstox thread error: %s", exc)
             return False, f"Upstox: unexpected error — {exc}", ""
 
-    async def _dhan_auth(self, binding: dict) -> Tuple[bool, str, str]:
+    async def _zerodha_auth(self, binding: dict) -> Tuple[bool, str, str]:
         """
-        Dhan: validates the existing access_token via fund limits API.
-        Dhan does not support TOTP-based headless token generation;
-        tokens are generated from their web portal and are long-lived.
-        """
-        token = binding.get("access_token", "")
-        client_code = binding.get("client_code", "") or binding.get("user_id", "")
+        Zerodha Kite Connect headless TOTP auth.
+        Required: api_key, api_secret, user_id (Zerodha client ID), password, totp_secret
 
-        if not token or not client_code:
+        Flow:
+          1. POST kite.zerodha.com/api/login  → request_id
+          2. POST kite.zerodha.com/api/twofa  → redirect with request_token
+          3. POST api.kite.trade/session/token (checksum = sha256(api_key+request_token+api_secret))
+        """
+        api_key     = binding.get("api_key", "")
+        api_secret  = binding.get("api_secret", "")
+        user_id     = binding.get("user_id", "")
+        password    = binding.get("password", "")
+        totp_secret = binding.get("totp_secret", "")
+
+        if not all([api_key, api_secret, user_id, password]):
             return (
                 False,
-                "Dhan: access_token and client_code are required. "
-                "Generate token from Dhan web portal.",
+                "Zerodha: api_key, api_secret, user_id, and password are required.",
+                "",
+            )
+        if not totp_secret:
+            return (
+                False,
+                "Zerodha: totp_secret is required for headless authentication. "
+                "Enter the base32 TOTP seed from your authenticator app.",
                 "",
             )
 
+        def _run_sync() -> Tuple[bool, str, str]:
+            import hashlib
+            import time
+            from urllib.parse import parse_qs, urlparse
+
+            try:
+                import pyotp
+            except ImportError:
+                return False, "pyotp not installed. pip install pyotp", ""
+            try:
+                import requests as _req
+            except ImportError:
+                return False, "requests not installed. pip install requests", ""
+
+            s = _req.Session()
+            s.headers.update({
+                "X-Kite-Version": "3",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            })
+
+            # Step 0: Initiate OAuth session — MUST visit connect/login first so
+            # Zerodha knows which app (api_key) to redirect to after 2FA.
+            # Without this the twofa response has no redirect context.
+            r0 = s.get(
+                "https://kite.zerodha.com/connect/login",
+                params={"v": "3", "api_key": api_key},
+                allow_redirects=True,
+                timeout=15,
+            )
+            if r0.status_code not in (200, 302):
+                return (
+                    False,
+                    f"Zerodha Step 0 (init): unexpected HTTP {r0.status_code}. "
+                    "Check that your api_key is correct and the Kite Connect app is active.",
+                    "",
+                )
+            logger.info("HeadlessAuth Zerodha Step0: OAuth session initialised.")
+            time.sleep(0.5)
+
+            # Step 1: Password login
+            r1 = s.post("https://kite.zerodha.com/api/login", data={
+                "user_id": user_id,
+                "password": password,
+            }, timeout=15)
+            d1 = r1.json()
+            if d1.get("status") != "success":
+                msg = d1.get("message", "Login failed.")
+                return False, f"Zerodha Step 1 (login): {msg}", ""
+            request_id = d1["data"]["request_id"]
+            logger.info("HeadlessAuth Zerodha Step1: login OK, request_id obtained.")
+            time.sleep(0.5)
+
+            # Step 2: TOTP 2FA
+            totp_clean = totp_secret.upper().replace(" ", "").replace("-", "")
+            try:
+                totp_code = pyotp.TOTP(totp_clean).now()
+            except Exception as exc:
+                return False, f"Zerodha: invalid TOTP secret — {exc}", ""
+
+            r2 = s.post("https://kite.zerodha.com/api/twofa", data={
+                "user_id": user_id,
+                "request_id": request_id,
+                "twofa_value": totp_code,
+                "twofa_type": "totp",
+            }, allow_redirects=False, timeout=15)
+
+            # /api/twofa is a pure JSON endpoint — the browser redirect to the
+            # registered callback URL is driven by JavaScript, not an HTTP 3xx.
+            # requests never follows it. Verify 2FA succeeded via JSON status.
+            try:
+                d2 = r2.json()
+            except Exception:
+                return False, f"Zerodha Step 2 (2FA): non-JSON response (HTTP {r2.status_code})", ""
+
+            if d2.get("status") != "success":
+                msg = d2.get("message", "2FA failed.")
+                return False, f"Zerodha Step 2 (2FA): {msg}", ""
+
+            logger.info("HeadlessAuth Zerodha Step2: TOTP verified.")
+            time.sleep(0.5)
+
+            # Step 2b: Now re-GET connect/login with the authenticated session.
+            # Zerodha will redirect this to the registered redirect URL with
+            # ?request_token=XXX&action=login&status=success in the query string.
+            r3 = s.get(
+                "https://kite.zerodha.com/connect/login",
+                params={"v": "3", "api_key": api_key},
+                allow_redirects=True,
+                timeout=15,
+            )
+            final_url = r3.url
+            qs = parse_qs(urlparse(final_url).query)
+            request_token = (qs.get("request_token") or [""])[0]
+
+            if not request_token:
+                return (
+                    False,
+                    f"Zerodha Step 2b (redirect): request_token not in final URL. "
+                    f"final_url={final_url!r}. "
+                    f"If your registered redirect URL is an external site "
+                    f"(e.g. https://kite.zerodha.com/connect/login), requests may not "
+                    f"follow through — try setting it to https://127.0.0.1 in the "
+                    f"Kite Connect developer console.",
+                    "",
+                )
+            logger.info("HeadlessAuth Zerodha Step2b: request_token obtained from redirect.")
+
+            # Step 3: Exchange request_token → access_token
+            checksum = hashlib.sha256(
+                f"{api_key}{request_token}{api_secret}".encode()
+            ).hexdigest()
+            r4 = s.post("https://api.kite.trade/session/token", data={
+                "api_key": api_key,
+                "request_token": request_token,
+                "checksum": checksum,
+            }, headers={"X-Kite-Version": "3"}, timeout=15)
+            d4 = r4.json()
+            if d4.get("status") != "success":
+                msg = d4.get("message", "Token exchange failed.")
+                return False, f"Zerodha Step 3 (token exchange): {msg}", ""
+
+            access_token = (d4.get("data") or {}).get("access_token", "")
+            if not access_token:
+                return False, f"Zerodha Step 3: access_token missing in response: {d4}", ""
+
+            logger.info(
+                "HeadlessAuth Zerodha: auth SUCCESS for user_id=%s.", user_id[:4] + "****"
+            )
+            return True, "Zerodha: authenticated and token generated.", access_token
+
         try:
-            from dhanhq import dhanhq  # type: ignore
-            dhan = dhanhq(client_code, token)
-            funds = await asyncio.to_thread(dhan.get_fund_limits)
-            if funds and funds.get("status") == "success":
-                return True, "Dhan: existing token validated.", token
-            return False, f"Dhan: token validation failed: {funds}", ""
-        except ImportError:
-            return False, "Dhan: dhanhq not installed. pip install dhanhq", ""
+            return await asyncio.to_thread(_run_sync)
         except Exception as exc:
+            logger.error("HeadlessAuth: Zerodha thread error: %s", exc)
+            return False, f"Zerodha: unexpected error — {exc}", ""
+
+    async def _groww_auth(self, binding: dict) -> Tuple[bool, str, str]:
+        """Groww does not expose a public API for automated trading."""
+        return (
+            False,
+            "Groww: automated headless auth is not supported — Groww does not provide a "
+            "public trading API. Use paper mode or switch to a supported broker.",
+            "",
+        )
+
+    async def _dhan_auth(self, binding: dict) -> Tuple[bool, str, str]:
+        """
+        Dhan headless auth via official token-generation endpoint.
+
+        Flow:
+          1. Validate saved JWT (fast path — no network if token is fresh)
+          2. If api_key is a JWT (manual paste), validate it directly
+          3. Headless: POST https://auth.dhan.co/app/generateAccessToken
+             with dhanClientId + pin + TOTP → accessToken (24-hour validity)
+
+        Field mapping:
+          user_id      = Dhan Client ID  (e.g. "1000557682")
+          password     = Dhan login PIN  (4–6 digits)
+          totp_secret  = TOTP seed (base32) — required for headless generation
+          api_key      = ACCESS TOKEN (eyJ…) — optional, paste here for manual-token mode
+        """
+        client_id   = binding.get("user_id", "") or binding.get("client_code", "")
+        api_key     = binding.get("api_key", "")   # optional: manual JWT paste
+        pin         = binding.get("password", "")
+        totp_secret = binding.get("totp_secret", "")
+        saved_token = binding.get("access_token", "")
+
+        if not client_id:
+            return False, "Dhan: Client ID is required.", ""
+
+        def _is_jwt(t: str) -> bool:
+            return bool(t and len(t) >= 50 and t.startswith("eyJ"))
+
+        def _validate_token(token: str) -> Tuple[bool, str, str]:
+            try:
+                import requests as _req
+                r = _req.get(
+                    "https://api.dhan.co/v2/fundlimit",
+                    headers={
+                        "access-token": token,
+                        "client-id": client_id,
+                        "Content-Type": "application/json",
+                    },
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    return True, "Dhan: access token validated.", token
+                return False, f"Dhan: token rejected (HTTP {r.status_code})", ""
+            except Exception as e:
+                return False, f"Dhan: validation error — {e}", ""
+
+        # ── Fast path 1: saved JWT still valid ───────────────────────────────
+        if _is_jwt(saved_token):
+            ok, msg, tok = await asyncio.to_thread(_validate_token, saved_token)
+            if ok:
+                logger.info("HeadlessAuth Dhan: saved token valid for %s****", client_id[:4])
+                return True, "Dhan: access token validated.", tok
+
+        # ── Fast path 2: api_key contains JWT (manual-paste mode) ────────────
+        if _is_jwt(api_key):
+            ok, msg, tok = await asyncio.to_thread(_validate_token, api_key)
+            if ok:
+                return True, "Dhan: access token (api_key field) validated.", api_key
+            return False, f"Dhan: manual token expired — {msg}", ""
+
+        # ── Headless path: generate fresh token via auth.dhan.co ─────────────
+        if not pin:
+            return (
+                False,
+                "Dhan: PIN (password) is required for headless token generation. "
+                "Enter your Dhan login PIN in the Password field.",
+                "",
+            )
+        if not totp_secret:
+            return (
+                False,
+                "Dhan: TOTP secret is required for headless token generation. "
+                "Enter your base32 TOTP seed in the TOTP SECRET field.",
+                "",
+            )
+
+        def _run_sync() -> Tuple[bool, str, str]:
+            import time
+
+            try:
+                import pyotp  # type: ignore
+            except ImportError:
+                return False, "pyotp not installed. pip install pyotp", ""
+            try:
+                import requests as _req
+            except ImportError:
+                return False, "requests not installed. pip install requests", ""
+
+            totp_clean = totp_secret.upper().replace(" ", "").replace("-", "")
+            try:
+                totp_code = pyotp.TOTP(totp_clean).now()
+            except Exception as exc:
+                return False, f"Dhan: invalid TOTP secret — {exc}", ""
+
+            def _mask(s: str) -> str:
+                return (s[:4] + "****") if len(s) > 4 else "****"
+
+            def _attempt(code: str) -> Tuple[bool, str, str]:
+                try:
+                    r = _req.post(
+                        "https://auth.dhan.co/app/generateAccessToken",
+                        data={
+                            "dhanClientId": client_id,
+                            "pin":          pin,
+                            "totp":         code,
+                        },
+                        headers={"Content-Type": "application/x-www-form-urlencoded"},
+                        timeout=15,
+                    )
+                    try:
+                        data = r.json()
+                    except Exception:
+                        return False, f"Dhan: non-JSON response (HTTP {r.status_code}): {r.text[:200]}", ""
+
+                    if r.status_code == 200:
+                        token = data.get("accessToken") or data.get("access_token")
+                        if token:
+                            logger.info("HeadlessAuth Dhan: token generated for %s", _mask(client_id))
+                            return True, "Dhan: access token generated.", token
+                        msg = data.get("message") or data.get("errorMessage") or str(data)
+                        return False, f"Dhan: token missing in response — {msg}", ""
+                    msg = data.get("message") or data.get("errorMessage") or r.text[:200]
+                    return False, f"Dhan (HTTP {r.status_code}): {msg}", ""
+                except Exception as e:
+                    return False, f"Dhan: request error — {e}", ""
+
+            ok, msg, token = _attempt(totp_code)
+            if ok:
+                return ok, msg, token
+
+            # If TOTP was rejected, wait for next window and retry once
+            if "totp" in msg.lower() or "otp" in msg.lower():
+                logger.warning("HeadlessAuth Dhan: TOTP rejected — waiting 31s for next window")
+                time.sleep(31)
+                totp_code2 = pyotp.TOTP(totp_clean).now()
+                ok2, msg2, token2 = _attempt(totp_code2)
+                if ok2:
+                    return ok2, msg2, token2
+
+            # Dhan rate-limits: once every 2 minutes
+            if "once every 2 minutes" in msg.lower():
+                logger.warning("HeadlessAuth Dhan: rate limit hit — waiting 125s")
+                time.sleep(125)
+                totp_code3 = pyotp.TOTP(totp_clean).now()
+                return _attempt(totp_code3)
+
+            return ok, msg, token
+
+        try:
+            return await asyncio.to_thread(_run_sync)
+        except Exception as exc:
+            logger.error("HeadlessAuth Dhan: thread error: %s", exc)
             return False, f"Dhan: unexpected error — {exc}", ""
 
 

@@ -40,9 +40,12 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "entry_rules_reentry":   [],
     "exit_rules":            [],
     "profit_target_enabled": True,
-    "profit_pct":            30.0,
+    "profit_pct":            30.0,   # per-trade target as % of credit
     "sl_enabled":            True,
     "sl_pct":                200.0,
+    # Day-level % guardrails (% of initial net credit). 0 = disabled.
+    "profit_target_pct":     0.0,    # stop for day when session P&L ≥ X% of credit
+    "loss_sl_pct":           0.0,    # stop for day when session loss ≥ X% of credit
     "tsl_enabled":           False,
     "trail_lock_pct":        20.0,
     "trail_floor_pct":       10.0,
@@ -71,11 +74,11 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "capital_deployed_inr": 0,
     "max_trades": 1,
     "per_day": {
-        "monday":    {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "tuesday":   {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "wednesday": {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "thursday":  {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
-        "friday":    {"enabled": False, "profit_target_pct": 0, "single_trade_target_pts": 0, "single_trade_stoploss_pts": 0, "guardrail_pnl": {"target_pts": 0, "stoploss_pts": 0}},
+        "monday":    {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+        "tuesday":   {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+        "wednesday": {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+        "thursday":  {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+        "friday":    {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
     },
 }
 
@@ -145,18 +148,43 @@ _DEFAULTS: Dict[str, Any] = {
         "ratio_exit_threshold": 3.0,
     },
     "sell_straddle": {
-        "entry_start":     "09:20",
-        "entry_end":       "12:00",
-        "squareoff_time":  "15:15",
-        "rsi_min":         35.0,
-        "rsi_max":         65.0,
-        "adx_max":         30.0,
-        "profit_pct":      30.0,
-        "sl_pct":          200.0,
-        "trail_lock_pct":  20.0,
-        "trail_floor_pct": 10.0,
-        "max_trades":      1,
-        "roc_limit_pct":   1.5,
+        "entry_start":              "09:20",
+        "entry_end":                "12:00",
+        "squareoff_time":           "15:15",
+        # Per-TRADE exit thresholds (% of credit collected on this trade)
+        "profit_pct":               30.0,   # exit this trade when it reaches 30% of its credit
+        "sl_pct":                   200.0,  # hard SL: exit when loss = 2× credit
+        "trail_lock_pct":           20.0,
+        "trail_floor_pct":          10.0,
+        # DAY-LEVEL % guardrails (% of initial net credit — fires stop_for_day)
+        # 0 = disabled. Resolution: per_day[today] → global → 0 (off)
+        "profit_target_pct":        0.0,    # e.g. 12.5 → stop when total day P&L ≥ 12.5% of credit
+        "loss_sl_pct":              0.0,    # e.g. 8.0  → stop when total day loss ≥ 8% of credit
+        "max_trades":               1,
+        "roc_limit_pct":            1.5,
+        "ratio_exit_threshold":     3.0,
+        "sl_cooldown_tf_multiplier": 1.0,
+        "capital_deployed_inr":     0,
+        "lot_size":                 50,
+        "smart_rolling_enabled":    True,
+        "vwap_rise_sl_enabled":     False,
+        "vwap_rise_sl_threshold_pct": 1.0,
+        "tsl_scalable_enabled":     False,
+        "tsl_base_profit_rs":       1000.0,
+        "tsl_base_lock_rs":         250.0,
+        "tsl_step_profit_rs":       250.0,
+        "tsl_step_lock_rs":         250.0,
+        "entry_rules_beginning":    [],
+        "entry_rules_reentry":      [],
+        # Per-day overrides: profit_target_pct and loss_sl_pct for each weekday
+        # 0 in either field → fall back to global value above
+        "per_day": {
+            "monday":    {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+            "tuesday":   {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+            "wednesday": {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+            "thursday":  {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+            "friday":    {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
+        },
     },
     "trap_trading": {
         "htf_minutes":            75,
