@@ -133,10 +133,8 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
     provider            TEXT    NOT NULL,
     label               TEXT    DEFAULT '',
     user_id_enc         TEXT    DEFAULT '',
-    password_enc        TEXT    DEFAULT '',
     api_key_enc         TEXT    DEFAULT '',
     api_secret_enc      TEXT    DEFAULT '',
-    totp_secret_enc     TEXT    DEFAULT '',
     access_token        TEXT    DEFAULT '',
     token_generated_at  TEXT    DEFAULT '',
     token_expiry_at     TEXT    DEFAULT '',
@@ -158,8 +156,6 @@ CREATE TABLE IF NOT EXISTS system_feeder_creds (
     client_id_enc      TEXT DEFAULT '',
     api_key_enc        TEXT DEFAULT '',
     secret_enc         TEXT DEFAULT '',
-    password_enc       TEXT DEFAULT '',
-    totp_secret_enc    TEXT DEFAULT '',
     access_token       TEXT DEFAULT '',
     token_generated_at TEXT DEFAULT '',
     token_expiry_at    TEXT DEFAULT '',
@@ -280,35 +276,40 @@ class ClientDB:
         provider: str,
         label: str = "",
         user_id: str = "",
-        password: str = "",
         api_key: str = "",
         api_secret: str = "",
-        totp_secret: str = "",
         access_token: str = "",
         lot_multiplier: float = 1.0,
         trading_mode: str = "paper",
         assigned_strategy: str = "",
         assigned_instrument: str = "NIFTY",
+        # Deprecated — accepted for backward compat but NOT stored
+        password: str = "",
+        totp_secret: str = "",
     ) -> None:
-        """Insert or update a broker binding, encrypting credentials."""
+        """
+        Insert or update a broker binding.
+
+        Only stored: client_id, app_key (api_key), app_secret (api_secret).
+        Passwords, PINs, and TOTP secrets are NOT stored — authentication
+        is handled entirely via the broker's Interactive OAuth portal.
+        """
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,
             """INSERT INTO broker_bindings
                (client_id, binding_id, provider, label,
-                user_id_enc, password_enc, api_key_enc, api_secret_enc, totp_secret_enc,
+                user_id_enc, api_key_enc, api_secret_enc,
                 access_token, lot_multiplier, trading_mode,
                 assigned_strategy, assigned_instrument, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(client_id, binding_id) DO UPDATE SET
                  provider            = excluded.provider,
                  label               = excluded.label,
-                 user_id_enc         = CASE WHEN excluded.user_id_enc     != '' THEN excluded.user_id_enc     ELSE user_id_enc     END,
-                 password_enc        = CASE WHEN excluded.password_enc    != '' THEN excluded.password_enc    ELSE password_enc    END,
-                 api_key_enc         = CASE WHEN excluded.api_key_enc     != '' THEN excluded.api_key_enc     ELSE api_key_enc     END,
-                 api_secret_enc      = CASE WHEN excluded.api_secret_enc  != '' THEN excluded.api_secret_enc  ELSE api_secret_enc  END,
-                 totp_secret_enc     = CASE WHEN excluded.totp_secret_enc != '' THEN excluded.totp_secret_enc ELSE totp_secret_enc END,
-                 access_token        = CASE WHEN excluded.access_token    != '' THEN excluded.access_token    ELSE access_token    END,
+                 user_id_enc         = CASE WHEN excluded.user_id_enc  != '' THEN excluded.user_id_enc  ELSE user_id_enc  END,
+                 api_key_enc         = CASE WHEN excluded.api_key_enc  != '' THEN excluded.api_key_enc  ELSE api_key_enc  END,
+                 api_secret_enc      = CASE WHEN excluded.api_secret_enc != '' THEN excluded.api_secret_enc ELSE api_secret_enc END,
+                 access_token        = CASE WHEN excluded.access_token  != '' THEN excluded.access_token  ELSE access_token  END,
                  lot_multiplier      = excluded.lot_multiplier,
                  trading_mode        = excluded.trading_mode,
                  assigned_strategy   = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_strategy ELSE assigned_strategy END,
@@ -316,10 +317,8 @@ class ClientDB:
             (
                 client_id, binding_id, provider, label,
                 _encode_cred(user_id),
-                _encode_cred(password),
                 _encode_cred(api_key),
                 _encode_cred(api_secret),
-                _encode_cred(totp_secret),
                 access_token,
                 lot_multiplier,
                 trading_mode,
@@ -482,11 +481,12 @@ class ClientDB:
                     ).fetchall()]
             con.close()
             for r in rows:
-                r["user_id"]     = _decode_cred(r.pop("user_id_enc", ""))
-                r["password"]    = _decode_cred(r.pop("password_enc", ""))
-                r["api_key"]     = _decode_cred(r.pop("api_key_enc", ""))
-                r["api_secret"]  = _decode_cred(r.pop("api_secret_enc", ""))
-                r["totp_secret"] = _decode_cred(r.pop("totp_secret_enc", ""))
+                r["user_id"]   = _decode_cred(r.pop("user_id_enc", ""))
+                r["api_key"]   = _decode_cred(r.pop("api_key_enc", ""))
+                r["api_secret"] = _decode_cred(r.pop("api_secret_enc", ""))
+                # password_enc / totp_secret_enc may exist in older DBs — pop and discard
+                r.pop("password_enc", None)
+                r.pop("totp_secret_enc", None)
             return rows
         except Exception as exc:
             logger.error("ClientDB.get_bindings_sync(%s): %s", client_id, exc)
@@ -517,35 +517,32 @@ class ClientDB:
 
     async def upsert_feeder_creds(
         self,
-        provider:    str,
-        client_id:   str = "",
-        api_key:     str = "",
-        secret:      str = "",
-        password:    str = "",
-        totp_secret: str = "",
+        provider:  str,
+        client_id: str = "",
+        api_key:   str = "",
+        secret:    str = "",
     ) -> None:
-        """Persist admin feeder long-lived credentials (XOR-obfuscated)."""
+        """
+        Persist admin feeder credentials (XOR-obfuscated).
+        Only client_id (broker user ID), api_key, and secret are stored.
+        Passwords, PINs, and TOTP secrets are NOT accepted.
+        """
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,
             """INSERT INTO system_feeder_creds
-               (provider, client_id_enc, api_key_enc, secret_enc,
-                password_enc, totp_secret_enc, updated_at)
-               VALUES (?,?,?,?,?,?,?)
+               (provider, client_id_enc, api_key_enc, secret_enc, updated_at)
+               VALUES (?,?,?,?,?)
                ON CONFLICT(provider) DO UPDATE SET
-                 client_id_enc   = CASE WHEN excluded.client_id_enc   != '' THEN excluded.client_id_enc   ELSE client_id_enc   END,
-                 api_key_enc     = CASE WHEN excluded.api_key_enc     != '' THEN excluded.api_key_enc     ELSE api_key_enc     END,
-                 secret_enc      = CASE WHEN excluded.secret_enc      != '' THEN excluded.secret_enc      ELSE secret_enc      END,
-                 password_enc    = CASE WHEN excluded.password_enc    != '' THEN excluded.password_enc    ELSE password_enc    END,
-                 totp_secret_enc = CASE WHEN excluded.totp_secret_enc != '' THEN excluded.totp_secret_enc ELSE totp_secret_enc END,
-                 updated_at      = excluded.updated_at""",
+                 client_id_enc = CASE WHEN excluded.client_id_enc != '' THEN excluded.client_id_enc ELSE client_id_enc END,
+                 api_key_enc   = CASE WHEN excluded.api_key_enc   != '' THEN excluded.api_key_enc   ELSE api_key_enc   END,
+                 secret_enc    = CASE WHEN excluded.secret_enc    != '' THEN excluded.secret_enc    ELSE secret_enc    END,
+                 updated_at    = excluded.updated_at""",
             (
                 provider,
                 _encode_cred(client_id),
                 _encode_cred(api_key),
                 _encode_cred(secret),
-                _encode_cred(password),
-                _encode_cred(totp_secret),
                 now,
             ),
         )
@@ -554,6 +551,7 @@ class ClientDB:
         """
         Return system feeder credentials for a provider with fields decoded.
         Returns None if no record exists.
+        Only client_id, api_key, secret, and token fields are returned.
         """
         try:
             con = sqlite3.connect(self._db_path)
@@ -566,20 +564,112 @@ class ClientDB:
                 return None
             r = dict(row)
             return {
-                "provider":          r["provider"],
-                "client_id":         _decode_cred(r.get("client_id_enc", "")),
-                "api_key":           _decode_cred(r.get("api_key_enc", "")),
-                "secret":            _decode_cred(r.get("secret_enc", "")),
-                "password":          _decode_cred(r.get("password_enc", "")),
-                "totp_secret":       _decode_cred(r.get("totp_secret_enc", "")),
-                "access_token":      r.get("access_token", ""),
+                "provider":           r["provider"],
+                "client_id":          _decode_cred(r.get("client_id_enc", "")),
+                "api_key":            _decode_cred(r.get("api_key_enc", "")),
+                "secret":             _decode_cred(r.get("secret_enc", "")),
+                "access_token":       r.get("access_token", ""),
                 "token_generated_at": r.get("token_generated_at", ""),
-                "token_expiry_at":   r.get("token_expiry_at", ""),
-                "updated_at":        r.get("updated_at", ""),
+                "token_expiry_at":    r.get("token_expiry_at", ""),
+                "updated_at":         r.get("updated_at", ""),
             }
         except Exception as exc:
             logger.error("ClientDB.get_feeder_creds_sync(%s): %s", provider, exc)
             return None
+
+    def find_by_broker_user_id_sync(
+        self, provider: str, broker_user_id: str
+    ) -> Optional[dict]:
+        """
+        Find a broker binding or feeder creds row by the broker-assigned user ID.
+        Used by Dhan and AliceBlue callbacks to route the incoming token
+        to the correct client binding without needing a state param.
+
+        Returns dict with:
+          scope      — 'feeder' | 'binding'
+          client_id  — our internal client_id (or 'feeder' for admin feeder)
+          binding_id — binding_id (or provider name for feeder)
+          api_key    — decoded app key
+          api_secret — decoded app secret
+        Returns None if not found.
+        """
+        p = provider.lower()
+        # Check admin feeder first
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                "SELECT * FROM system_feeder_creds WHERE provider = ?", (p,)
+            ).fetchone()
+            con.close()
+            if row:
+                r = dict(row)
+                stored_cid = _decode_cred(r.get("client_id_enc", ""))
+                if stored_cid and stored_cid == broker_user_id:
+                    return {
+                        "scope":      "feeder",
+                        "client_id":  "feeder",
+                        "binding_id": p,
+                        "api_key":    _decode_cred(r.get("api_key_enc", "")),
+                        "api_secret": _decode_cred(r.get("secret_enc", "")),
+                    }
+        except Exception as exc:
+            logger.error("ClientDB.find_by_broker_user_id_sync feeder check: %s", exc)
+
+        # Check client broker bindings
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                "SELECT * FROM broker_bindings WHERE provider = ?", (p,)
+            ).fetchall()
+            con.close()
+            for row in rows:
+                r = dict(row)
+                stored_uid = _decode_cred(r.get("user_id_enc", ""))
+                if stored_uid and stored_uid == broker_user_id:
+                    return {
+                        "scope":      "binding",
+                        "client_id":  r["client_id"],
+                        "binding_id": r["binding_id"],
+                        "api_key":    _decode_cred(r.get("api_key_enc", "")),
+                        "api_secret": _decode_cred(r.get("api_secret_enc", "")),
+                    }
+        except Exception as exc:
+            logger.error("ClientDB.find_by_broker_user_id_sync binding check: %s", exc)
+
+        return None
+
+    def get_platform_credentials_sync(self, provider: str) -> Optional[dict]:
+        """
+        Get platform-level app credentials for a provider (api_key + secret).
+        For Dhan: needed to call consumeApp-consent.
+        Checks feeder_creds first, then falls back to first matching binding.
+        Returns {"api_key": ..., "api_secret": ...} or None.
+        """
+        p = provider.lower()
+        # Try feeder creds first
+        feeder = self.get_feeder_creds_sync(p)
+        if feeder and feeder.get("api_key"):
+            return {"api_key": feeder["api_key"], "api_secret": feeder.get("secret", "")}
+        # Fallback: first binding with credentials for this provider
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                "SELECT api_key_enc, api_secret_enc FROM broker_bindings "
+                "WHERE provider = ? AND api_key_enc != '' LIMIT 1",
+                (p,),
+            ).fetchone()
+            con.close()
+            if row:
+                return {
+                    "api_key":    _decode_cred(row["api_key_enc"]),
+                    "api_secret": _decode_cred(row["api_secret_enc"]),
+                }
+        except Exception as exc:
+            logger.error("ClientDB.get_platform_credentials_sync(%s): %s", p, exc)
+        return None
 
     async def update_feeder_token(
         self,
@@ -663,10 +753,9 @@ class ClientDB:
     def _create_tables(self) -> None:
         con = sqlite3.connect(self._db_path)
         con.executescript(_DDL)
-        # Migrations: add columns that may not exist in older DBs
+        # Additive migrations: add columns that may not exist in older DBs
         for migration in (
             "ALTER TABLE clients ADD COLUMN strategy_selections TEXT DEFAULT '[]'",
-            "ALTER TABLE broker_bindings ADD COLUMN password_enc TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN trading_mode TEXT DEFAULT 'paper'",
             "ALTER TABLE broker_bindings ADD COLUMN assigned_instrument TEXT DEFAULT 'NIFTY'",
             "ALTER TABLE broker_bindings ADD COLUMN terminal_connected INTEGER DEFAULT 0",
@@ -678,6 +767,94 @@ class ClientDB:
                 con.commit()
             except Exception:
                 pass  # column already exists
+
+        # Security migration: drop password_enc / totp_secret_enc from broker_bindings
+        existing_bb_cols = {row[1] for row in con.execute("PRAGMA table_info(broker_bindings)").fetchall()}
+        if "password_enc" in existing_bb_cols or "totp_secret_enc" in existing_bb_cols:
+            logger.info("ClientDB: migrating broker_bindings — dropping password/totp columns")
+            try:
+                con.executescript("""
+                    BEGIN;
+                    ALTER TABLE broker_bindings RENAME TO broker_bindings_old;
+                    CREATE TABLE broker_bindings (
+                        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                        client_id           TEXT    NOT NULL,
+                        binding_id          TEXT    NOT NULL,
+                        provider            TEXT    NOT NULL,
+                        label               TEXT    DEFAULT '',
+                        user_id_enc         TEXT    DEFAULT '',
+                        api_key_enc         TEXT    DEFAULT '',
+                        api_secret_enc      TEXT    DEFAULT '',
+                        access_token        TEXT    DEFAULT '',
+                        token_generated_at  TEXT    DEFAULT '',
+                        token_expiry_at     TEXT    DEFAULT '',
+                        assigned_strategy   TEXT    DEFAULT '',
+                        assigned_instrument TEXT    DEFAULT 'NIFTY',
+                        trading_mode        TEXT    DEFAULT 'paper',
+                        is_trade_enabled    INTEGER DEFAULT 1,
+                        lot_multiplier      REAL    DEFAULT 1.0,
+                        enabled             INTEGER DEFAULT 1,
+                        terminal_connected  INTEGER DEFAULT 0,
+                        terminal_connected_at TEXT  DEFAULT '',
+                        engine_active       INTEGER DEFAULT 0,
+                        created_at          TEXT    NOT NULL,
+                        UNIQUE(client_id, binding_id)
+                    );
+                    INSERT INTO broker_bindings
+                        (id, client_id, binding_id, provider, label,
+                         user_id_enc, api_key_enc, api_secret_enc,
+                         access_token, token_generated_at, token_expiry_at,
+                         assigned_strategy, assigned_instrument, trading_mode,
+                         is_trade_enabled, lot_multiplier, enabled, created_at)
+                    SELECT
+                        id, client_id, binding_id, provider, label,
+                        user_id_enc, api_key_enc, api_secret_enc,
+                        access_token, token_generated_at, token_expiry_at,
+                        assigned_strategy,
+                        COALESCE(assigned_instrument, 'NIFTY'),
+                        COALESCE(trading_mode, 'paper'),
+                        is_trade_enabled, lot_multiplier, enabled, created_at
+                    FROM broker_bindings_old;
+                    DROP TABLE broker_bindings_old;
+                    CREATE INDEX IF NOT EXISTS idx_bb_client ON broker_bindings(client_id);
+                    COMMIT;
+                """)
+                logger.info("ClientDB: broker_bindings migration complete.")
+            except Exception as exc:
+                logger.error("ClientDB: broker_bindings migration FAILED: %s", exc)
+
+        # Security migration: drop password_enc / totp_secret_enc from system_feeder_creds
+        existing_fc_cols = {row[1] for row in con.execute("PRAGMA table_info(system_feeder_creds)").fetchall()}
+        if "password_enc" in existing_fc_cols or "totp_secret_enc" in existing_fc_cols:
+            logger.info("ClientDB: migrating system_feeder_creds — dropping password/totp columns")
+            try:
+                con.executescript("""
+                    BEGIN;
+                    ALTER TABLE system_feeder_creds RENAME TO system_feeder_creds_old;
+                    CREATE TABLE system_feeder_creds (
+                        provider           TEXT PRIMARY KEY,
+                        client_id_enc      TEXT DEFAULT '',
+                        api_key_enc        TEXT DEFAULT '',
+                        secret_enc         TEXT DEFAULT '',
+                        access_token       TEXT DEFAULT '',
+                        token_generated_at TEXT DEFAULT '',
+                        token_expiry_at    TEXT DEFAULT '',
+                        updated_at         TEXT NOT NULL
+                    );
+                    INSERT INTO system_feeder_creds
+                        (provider, client_id_enc, api_key_enc, secret_enc,
+                         access_token, token_generated_at, token_expiry_at, updated_at)
+                    SELECT
+                        provider, client_id_enc, api_key_enc, secret_enc,
+                        access_token, token_generated_at, token_expiry_at, updated_at
+                    FROM system_feeder_creds_old;
+                    DROP TABLE system_feeder_creds_old;
+                    COMMIT;
+                """)
+                logger.info("ClientDB: system_feeder_creds migration complete.")
+            except Exception as exc:
+                logger.error("ClientDB: system_feeder_creds migration FAILED: %s", exc)
+
         con.close()
 
     def _exec(self, sql: str, params=()) -> None:

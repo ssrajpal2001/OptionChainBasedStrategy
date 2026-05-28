@@ -23,8 +23,8 @@ Endpoints:
     GET  /api/client/me               — own portfolio snapshot
     GET  /api/client/brokers          — own broker binding status
     POST /api/client/register_broker  — provision + authenticate a new broker on-the-fly
-    GET  /api/client/broker/{id}/fyers-auth-url — Fyers OAuth login URL
-    POST /api/client/broker/{id}/fyers-exchange — exchange Fyers auth_code for token
+    GET  /api/admin/feeder/auth-url?provider={p} — generate feeder OAuth login URL
+    POST /api/admin/feeder/save-creds           — save feeder api_key + secret (no password/totp)
 
   COMMON (any valid JWT)
     WS   /ws?token=<jwt>              — live event stream
@@ -47,6 +47,36 @@ from ui_layer.auth import create_token, verify_token
 from ui_layer.ws_bridge import WsBridge
 
 logger = logging.getLogger(__name__)
+
+from broker_auth.headless_auth import _ist_eod
+
+
+def _callback_page(status: str, provider: str, message: str) -> str:
+    """Return a minimal HTML page shown after broker OAuth redirect."""
+    color   = "#22c55e" if status == "success" else "#ef4444"
+    icon    = "✓" if status == "success" else "✗"
+    title   = "Connected!" if status == "success" else "Authentication Failed"
+    script  = "setTimeout(()=>window.close(),3000);" if status == "success" else ""
+    return f"""<!DOCTYPE html><html><head><title>TERMINUS — {provider.upper()}</title>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:monospace;background:#0a0a0f;color:#e2e8f0;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}
+.box{{text-align:center;padding:40px;border:1px solid {color}33;border-radius:12px;
+background:{color}0a;max-width:400px}}
+.icon{{font-size:48px;color:{color};margin-bottom:16px}}
+h2{{color:{color};margin:0 0 12px}}
+p{{color:#94a3b8;margin:8px 0}}
+small{{color:#475569}}
+</style></head><body>
+<div class="box">
+<div class="icon">{icon}</div>
+<h2>{title}</h2>
+<p>{provider.upper()} broker</p>
+<p style="color:{color}">{message}</p>
+<small>{"This tab will close automatically in 3 seconds." if status == "success" else "Please close this tab and try again."}</small>
+</div>
+<script>{script}</script>
+</body></html>"""
 
 
 def _upstox_translate_error(raw: str) -> str:
@@ -87,43 +117,27 @@ try:
         api_key:      Optional[str] = None
         api_secret:   Optional[str] = None
         user_id:      Optional[str] = None
-        password:     Optional[str] = None
-        totp_secret:  Optional[str] = None
 
     class _FeederConnectSchema(_PydanticBase):
-        provider:    str
-        user_id:     Optional[str] = None
-        password:    Optional[str] = None
-        api_key:     Optional[str] = None
-        api_secret:  Optional[str] = None
-        totp_secret: Optional[str] = None
+        provider: str
+
+    class _SaveFeederCredsSchema(_PydanticBase):
+        provider:  str
+        client_id: str = ""
+        api_key:   str = ""
+        secret:    str = ""
 
     class _BrokerProvisionSchema(_PydanticBase):
         binding_id:     str
         provider:       str
         label:          str = ""
         user_id:        str = ""
-        password:       str = ""
         api_key:        str = ""
         api_secret:     str = ""
-        totp_secret:    str = ""
-        vendor_code:    str = ""
-        imei:           str = ""
-        client_code:    str = ""
         access_token:   str = ""
         lot_multiplier: float = 1.0
 
-    class _DualFeederSchema(_PydanticBase):
-        upstox_client_id: str = ""
-        upstox_api_key:   str = ""
-        upstox_secret:    str = ""
-        upstox_password:  str = ""
-        upstox_totp:      str = ""  # base32 TOTP seed
-        fyers_client_id:  str = ""
-        fyers_app_key:    str = ""
-        fyers_secret:     str = ""
-        fyers_pin:        str = ""  # 4-digit Fyers PIN
-        fyers_totp:       str = ""  # base32 TOTP seed
+    # _DualFeederSchema removed — replaced by _SaveFeederCredsSchema per-provider
 
     class _RmsConfigSchema(_PydanticBase):
         max_drawdown_pct:       float = 5.0
@@ -188,18 +202,14 @@ try:
         confirm: bool = False   # must be True to proceed
 
     class _SaveUpstoxCredsSchema(_PydanticBase):
-        client_id:   str = ""
-        api_key:     str = ""
-        secret:      str = ""
-        password:    str = ""
-        totp_secret: str = ""
+        client_id: str = ""
+        api_key:   str = ""
+        secret:    str = ""
 
     class _SaveFyersCredsSchema(_PydanticBase):
-        client_id:   str = ""
-        app_key:     str = ""
-        secret:      str = ""
-        pin:         str = ""
-        totp_secret: str = ""
+        client_id: str = ""
+        app_key:   str = ""
+        secret:    str = ""
 
     class _ClientRegisterSchema(_PydanticBase):
         client_id:          str
@@ -230,10 +240,8 @@ try:
         provider:            str
         label:               str   = ""
         user_id:             str   = ""
-        password:            str   = ""
         api_key:             str   = ""
         api_secret:          str   = ""
-        totp_secret:         str   = ""
         lot_multiplier:      float = 1.0
         trading_mode:        str   = "paper"
         assigned_strategy:   str   = ""
@@ -628,6 +636,81 @@ class DashboardServer:
                 "fyers_token_fresh":    fyers_token_fresh,
             }
 
+        @app.get("/api/admin/feeder/auth-url", tags=["Admin"])
+        async def api_feeder_auth_url(
+            provider: str,
+            request:  Request,
+            _: dict = Depends(_require_admin),
+        ):
+            """
+            Generate the broker OAuth login URL for the admin data feeder.
+            Admin clicks this, browser opens broker login page.
+            After login, broker redirects to /callback/{provider} and token is stored automatically.
+            Requires feeder credentials (api_key + secret) to be saved first via /save-creds.
+            """
+            import time as _time
+            from broker_auth.oauth_manager import generate_auth_url, build_state
+            t0 = _time.monotonic()
+
+            db_row   = _srv._client_db.get_feeder_creds_sync(provider) or {}
+            api_key  = db_row.get("api_key", "")
+            secret   = db_row.get("secret", "")
+            user_id  = db_row.get("client_id", "")
+
+            if not api_key:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"No API key saved for '{provider}' feeder. "
+                        "Save credentials via /api/admin/feeder/save-creds first."
+                    ),
+                }
+
+            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            callback_url = f"{base_url}/callback/{provider}"
+            state        = build_state("admin", "feeder", provider)
+
+            auth_ok, auth_url = await asyncio.to_thread(
+                generate_auth_url, provider, api_key, secret, callback_url, state, user_id
+            )
+            elapsed = (_time.monotonic() - t0) * 1000
+
+            if not auth_ok:
+                logger.error("[Feeder] Auth URL generation failed for %s in %.1fms: %s",
+                             provider, elapsed, auth_url)
+                return {"ok": False, "error": auth_url}
+
+            logger.info("[Feeder] %s auth URL ready in %.1fms", provider.upper(), elapsed)
+            return {"ok": True, "provider": provider, "auth_url": auth_url}
+
+        @app.post("/api/admin/feeder/save-creds", tags=["Admin"])
+        async def api_feeder_save_creds(
+            body: _SaveFeederCredsSchema, _: dict = Depends(_require_admin),
+        ):
+            """
+            Save admin feeder credentials (client_id, api_key, secret only).
+            No passwords, PINs, or TOTP secrets — authentication happens via broker portal.
+            """
+            import time as _time
+            t0 = _time.monotonic()
+            if not body.provider:
+                raise HTTPException(400, "provider is required.")
+            await _srv._client_db.upsert_feeder_creds(
+                provider=body.provider,
+                client_id=body.client_id,
+                api_key=body.api_key,
+                secret=body.secret,
+            )
+            elapsed = (_time.monotonic() - t0) * 1000
+            logger.info("[Feeder] Credentials saved for %s in %.1fms", body.provider.upper(), elapsed)
+            return {
+                "ok": True,
+                "message": (
+                    f"Credentials saved for {body.provider.upper()} feeder. "
+                    "Use the auth-url endpoint to complete OAuth login."
+                ),
+            }
+
         @app.post("/api/admin/feeder/connect", tags=["Admin"])
         async def api_feeder_connect(
             body: FeederConnectSchema, _: dict = Depends(_require_admin),
@@ -893,10 +976,8 @@ class DashboardServer:
                     provider=body.provider,
                     label=body.label,
                     user_id=body.user_id,
-                    password=body.password,
                     api_key=body.api_key,
                     api_secret=body.api_secret,
-                    totp_secret=body.totp_secret,
                     access_token="",
                     lot_multiplier=body.lot_multiplier,
                     trading_mode=body.trading_mode,
@@ -909,27 +990,14 @@ class DashboardServer:
                 logger.error("Dashboard: add_broker DB error for %s: %s", cid, exc)
                 raise HTTPException(500, f"Failed to save broker credentials: {exc}")
 
-            # Auto-generate token via headless auth if TOTP secret was provided
-            token_msg = ""
-            if body.totp_secret.strip():
-                try:
-                    from broker_auth.headless_auth import headless_engine as _he
-                    b_row = {
-                        "binding_id": body.binding_id,
-                        "provider": body.provider,
-                        "user_id": body.user_id,
-                        "password": body.password,
-                        "api_key": body.api_key,
-                        "api_secret": body.api_secret,
-                        "totp_secret": body.totp_secret,
-                    }
-                    ok, msg, token = await _he.authenticate_binding(b_row, cid, _srv._client_db)
-                    token_msg = f" Token {'generated' if ok else 'failed'}: {msg}"
-                except Exception as auth_exc:
-                    token_msg = f" Token generation skipped: {auth_exc}"
-
-            logger.info("Dashboard: client %s added broker binding %s.%s", cid, body.binding_id, token_msg)
-            return {"ok": True, "message": f"Broker '{body.binding_id}' saved.{token_msg}"}
+            logger.info("Dashboard: client %s added broker binding %s (%s).", cid, body.binding_id, body.provider)
+            return {
+                "ok": True,
+                "message": (
+                    f"Broker '{body.binding_id}' saved. "
+                    "Click the Terminal toggle to authenticate via your broker's login page."
+                ),
+            }
 
         # ── CLIENT — start bot (pre-flight validation) ────────────────────────
 
@@ -1164,102 +1232,7 @@ class DashboardServer:
             logger.info("Dashboard: deleted binding %s for client %s", binding_id, cid)
             return {"ok": True, "message": f"Broker '{binding_id}' deleted."}
 
-        # ── CLIENT — Fyers manual auth-code exchange ─────────────────────────
-
-        @app.get("/api/client/broker/{binding_id}/fyers-auth-url", tags=["Client"])
-        async def api_client_fyers_auth_url(
-            binding_id: str, user: dict = Depends(_require_client),
-        ):
-            """Return the Fyers OAuth login URL for the given broker binding."""
-            cid = user.get("client_id", "")
-            # Use full decode to get api_key (App ID) — safe_sync omits credentials
-            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_sync, cid)
-            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
-            if b is None:
-                return {"ok": False, "error": f"Broker '{binding_id}' not found."}
-            if (b.get("provider") or "").lower() != "fyers":
-                return {"ok": False, "error": "This endpoint is only for Fyers brokers."}
-            app_id = b.get("api_key", "").strip()
-            if not app_id:
-                return {"ok": False, "error": "App ID not set. Edit this broker and enter the Fyers App ID (e.g. XXXXX-100) in the APP ID field."}
-            if app_id.startswith("eyJ") and len(app_id) > 50:
-                return {"ok": False, "error": "The APP ID field contains an access token, not the App ID. Enter your Fyers App ID (e.g. XXXXX-100) in the APP ID field."}
-            if "-" not in app_id:
-                app_id = f"{app_id}-100"
-            redirect = "https://trade.fyers.in/api-login/redirect-uri/index.html"
-            url = (
-                f"https://api-t1.fyers.in/api/v3/generate-authcode"
-                f"?client_id={app_id}"
-                f"&redirect_uri={redirect}"
-                f"&response_type=code&state=terminus"
-            )
-            return {"ok": True, "url": url, "redirect_uri": redirect}
-
-        @app.post("/api/client/broker/{binding_id}/fyers-exchange", tags=["Client"])
-        async def api_client_fyers_exchange(
-            binding_id: str,
-            body: _FyersAuthCodeSchema,
-            user: dict = Depends(_require_client),
-        ):
-            """
-            Exchange a Fyers auth_code for an access token and store it.
-            User gets auth_code from the redirect URL after logging in at the Fyers OAuth URL.
-            """
-            cid = user.get("client_id", "")
-            # Use full decode to get api_key + api_secret
-            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_sync, cid)
-            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
-            if b is None:
-                return {"ok": False, "error": f"Broker '{binding_id}' not found."}
-            if (b.get("provider") or "").lower() != "fyers":
-                return {"ok": False, "error": "This endpoint is only for Fyers brokers."}
-
-            app_id     = b.get("api_key", "").strip()
-            secret_key = b.get("api_secret", "").strip()
-            auth_code  = (body.auth_code or "").strip()
-
-            if not app_id:
-                return {"ok": False, "error": "App ID not set — edit this broker and enter the Fyers App ID."}
-            if not secret_key:
-                return {"ok": False, "error": "Secret ID not set — edit this broker and enter the Fyers Secret ID."}
-            if not auth_code:
-                return {"ok": False, "error": "auth_code is required."}
-            if "-" not in app_id:
-                app_id = f"{app_id}-100"
-
-            def _exchange() -> tuple:
-                import hashlib, requests as _rq
-                app_id_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
-                try:
-                    r = _rq.post(
-                        "https://api-t1.fyers.in/api/v3/validate-authcode",
-                        json={
-                            "grant_type": "authorization_code",
-                            "appIdHash":  app_id_hash,
-                            "code":       auth_code,
-                        },
-                        headers={"Content-Type": "application/json", "Accept": "application/json"},
-                        timeout=15,
-                    )
-                    d = r.json() if r.ok else {}
-                    token = d.get("access_token") or (d.get("data") or {}).get("access_token")
-                    if token:
-                        return True, "Fyers token generated successfully.", token
-                    msg = d.get("message") or str(d)
-                    return False, f"Token exchange failed: {msg}", ""
-                except Exception as exc:
-                    return False, f"Token exchange error: {exc}", ""
-
-            ok, msg, token = await asyncio.to_thread(_exchange)
-            if not ok:
-                return {"ok": False, "error": msg}
-
-            from datetime import datetime as _dt
-            now = _dt.now(IST).isoformat()
-            expiry = _dt.now(IST).replace(hour=23, minute=59, second=59).isoformat()
-            await _srv._client_db.update_access_token(cid, binding_id, token, now, expiry)
-            logger.info("Dashboard: Fyers token exchanged and stored for %s/%s", cid, binding_id)
-            return {"ok": True, "message": msg}
+        # Fyers manual auth endpoints removed — use unified /connect → /callback/fyers flow
 
         # ── CLIENT — per-broker start / stop / mode ──────────────────────────
 
@@ -1323,52 +1296,84 @@ class DashboardServer:
             await _srv._client_db.set_trading_mode(cid, binding_id, body.mode)
             return {"ok": True, "mode": body.mode, "message": f"Mode set to {body.mode.upper()}."}
 
-        # ── CLIENT — Terminal toggle (Step 1: connect / validate token) ─────────
+        # ── CLIENT — Terminal toggle: Interactive OAuth Flow ─────────────────────
 
         @app.post("/api/client/broker/{binding_id}/connect", tags=["Client"])
         async def api_client_broker_connect(
-            binding_id: str, user: dict = Depends(_require_client),
+            binding_id: str,
+            request:    Request,
+            user:       dict = Depends(_require_client),
         ):
             """
-            Terminal toggle ON — 3-step handshake:
-              1. Query DB for cached token
-              2. Validate token via lightweight API ping
-              3. If invalid/missing → trigger headless auto-auth
-            Sets terminal_connected=1 on success. Does NOT enable trading yet.
+            Terminal toggle ON — Interactive OAuth handshake for all 6 providers:
+              1. Check DB for cached access_token generated today → API ping
+              2a. Token valid  → connect instantly (terminal_connected=1)
+              2b. Token missing/expired → return broker OAuth login URL
+                  Fyers/Upstox/Zerodha : standard OAuth2 redirect
+                  Dhan                 : 3-step consent (server pre-generates consentAppId)
+                  AngelOne             : implicit redirect (state in callback path)
+                  AliceBlue            : OAuth2 + SHA256 exchange
             """
+            import time as _time
+            from broker_auth.headless_auth import headless_engine as _he
+            from broker_auth.oauth_manager import generate_auth_url, build_state
+
+            t0 = _time.monotonic()
             cid = user.get("client_id", "")
             bindings = await asyncio.to_thread(_srv._client_db.get_bindings_sync, cid)
             b = next((x for x in bindings if x["binding_id"] == binding_id), None)
             if b is None:
                 return {"ok": False, "error": f"Broker '{binding_id}' not found."}
 
-            provider = (b.get("provider") or "mock").lower()
+            provider   = (b.get("provider") or "mock").lower()
+            api_key    = b.get("api_key", "")
+            api_secret = b.get("api_secret", "")
+            user_id    = b.get("user_id", "")
+
             logger.info(
-                "Terminal connect: [%s/%s] provider=%s — Step 1: checking cached token",
-                cid, binding_id, provider,
+                "[Terminal] [%s/%s] %s — Step 1: checking cached token (%.1fms)",
+                cid, binding_id, provider.upper(), (_time.monotonic()-t0)*1000,
             )
 
-            # Step 1 + 2: authenticate_binding checks cached token first, only re-auths if needed
             ok, msg, token = await _he.authenticate_binding(b, cid, _srv._client_db)
 
             if ok:
                 await _srv._client_db.set_terminal_connected(cid, binding_id, True)
                 logger.info(
-                    "Terminal connect: [%s/%s] CONNECTED — token valid/refreshed.",
-                    cid, binding_id,
+                    "[Terminal] [%s/%s] CONNECTED instantly — cached token valid (%.1fms)",
+                    cid, binding_id, (_time.monotonic()-t0)*1000,
                 )
-                return {
-                    "ok": True,
-                    "connected": True,
-                    "message": f"Terminal connected — {msg}",
-                    "provider": provider,
-                }
-            else:
-                await _srv._client_db.set_terminal_connected(cid, binding_id, False)
+                return {"ok": True, "connected": True, "message": msg, "flow": "cached"}
+
+            # Token missing/expired — generate broker OAuth login URL
+            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            callback_url = f"{base_url}/callback/{provider}"
+            state        = build_state("client", cid, binding_id)
+
+            # generate_auth_url may make an HTTP call (Dhan), so run in thread
+            auth_ok, auth_url = await asyncio.to_thread(
+                generate_auth_url, provider, api_key, api_secret, callback_url, state, user_id
+            )
+            elapsed = (_time.monotonic() - t0) * 1000
+
+            if not auth_ok:
                 logger.warning(
-                    "Terminal connect: [%s/%s] FAILED — %s", cid, binding_id, msg,
+                    "[Terminal] [%s/%s] auth URL generation failed (%.1fms): %s",
+                    cid, binding_id, elapsed, auth_url,
                 )
-                return {"ok": False, "connected": False, "error": msg}
+                return {"ok": False, "connected": False, "flow": "error", "error": auth_url}
+
+            logger.info(
+                "[Terminal] [%s/%s] OAuth URL generated — awaiting user login (%.1fms)",
+                cid, binding_id, elapsed,
+            )
+            return {
+                "ok":       False,
+                "connected": False,
+                "flow":     "oauth",
+                "auth_url": auth_url,
+                "message":  f"Open the broker login page to authenticate {provider.upper()}.",
+            }
 
         @app.post("/api/client/broker/{binding_id}/disconnect", tags=["Client"])
         async def api_client_broker_disconnect(
@@ -1539,6 +1544,200 @@ class DashboardServer:
             from data_layer.deployment_store import delete_deployment_json
             delete_deployment_json(deploy_id)
             return {"ok": True, "message": "Deployment removed."}
+
+        # ── UNIFIED OAuth Callback Handler ────────────────────────────────────
+        # Receives redirects from ALL 6 broker login portals.
+        # Routing strategy:
+        #   Fyers/Upstox/Zerodha/AliceBlue: state in ?state= query param
+        #   AngelOne: state in URL path (/callback/angelone/{state})
+        #   Dhan: no state; consume-consent returns dhanClientId → DB lookup
+
+        async def _handle_oauth_callback(
+            broker_name: str,
+            request:     Request,
+            path_state:  str = "",   # AngelOne: state from URL path
+        ):
+            import time as _t
+            from broker_auth.oauth_manager import parse_state, exchange_code, consume_dhan_consent
+            t0       = _t.monotonic()
+            provider = broker_name.lower()
+
+            error = request.query_params.get("error", "")
+            if error:
+                return HTMLResponse(_callback_page("error", provider, f"Login failed: {error}"))
+
+            # ── Extract the auth code from broker-specific query param ────────
+            actual_code = ""
+            extra: dict = {}
+
+            if provider == "dhan":
+                actual_code = request.query_params.get("tokenId", "")
+            elif provider == "angelone":
+                actual_code = request.query_params.get("auth_token", "") or request.query_params.get("authToken", "")
+            elif provider == "aliceblue":
+                actual_code = request.query_params.get("authCode", "")
+                extra["user_id"] = request.query_params.get("userId", "")
+            elif provider == "fyers":
+                actual_code = request.query_params.get("auth_code", "") or request.query_params.get("code", "")
+            elif provider == "zerodha":
+                actual_code = request.query_params.get("request_token", "") or request.query_params.get("code", "")
+            else:
+                actual_code = request.query_params.get("code", "") or request.query_params.get("auth_code", "")
+
+            logger.info(
+                "[Callback] %s received — code=%s path_state=%s error=%s",
+                provider.upper(), bool(actual_code), bool(path_state), error or "none",
+            )
+
+            if not actual_code:
+                return HTMLResponse(_callback_page("error", provider, "No auth code received from broker."))
+
+            # ── Identify admin vs client (routing) ────────────────────────────
+
+            if provider == "dhan":
+                # Dhan: call consume-consent → get dhanClientId → DB lookup
+                platform_creds = await asyncio.to_thread(
+                    _srv._client_db.get_platform_credentials_sync, "dhan"
+                )
+                if not platform_creds:
+                    return HTMLResponse(_callback_page("error", provider, "Dhan app credentials not configured."))
+
+                dhan_ok, dhan_msg, access_token, dhan_client_id = await asyncio.to_thread(
+                    consume_dhan_consent,
+                    platform_creds["api_key"],
+                    platform_creds["api_secret"],
+                    actual_code,
+                )
+                elapsed = (_t.monotonic() - t0) * 1000
+                if not dhan_ok:
+                    logger.error("[Callback] Dhan consume-consent failed in %.1fms: %s", elapsed, dhan_msg)
+                    return HTMLResponse(_callback_page("error", provider, dhan_msg))
+
+                # Look up which binding/feeder this dhanClientId belongs to
+                match = await asyncio.to_thread(
+                    _srv._client_db.find_by_broker_user_id_sync, "dhan", dhan_client_id
+                )
+                if not match:
+                    return HTMLResponse(_callback_page("error", provider,
+                        f"No binding found for Dhan client {dhan_client_id}. "
+                        "Ensure the Client ID is saved in your broker binding."))
+
+                if match["scope"] == "feeder":
+                    await _srv._client_db.update_feeder_token(
+                        provider, access_token,
+                        generated_at=datetime.now(IST).isoformat(), expiry_at=_ist_eod(),
+                    )
+                    _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                    logger.info("[Callback] Dhan feeder token stored in %.1fms", elapsed)
+                    return HTMLResponse(_callback_page("success", provider, "Dhan data feeder connected!"))
+                else:
+                    cid = match["client_id"]
+                    bid = match["binding_id"]
+                    await _srv._client_db.update_access_token(cid, bid, access_token, datetime.now(IST).isoformat(), _ist_eod())
+                    await _srv._client_db.set_terminal_connected(cid, bid, True)
+                    _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
+                    logger.info("[Callback] Dhan [%s/%s] token stored, terminal=ON in %.1fms", cid, bid, elapsed)
+                    return HTMLResponse(_callback_page("success", provider, f"Dhan broker connected!"))
+
+            elif provider == "aliceblue":
+                # AliceBlue: userId in callback → DB lookup, then exchange
+                alice_user_id = extra.get("user_id", "")
+                if not alice_user_id:
+                    return HTMLResponse(_callback_page("error", provider, "AliceBlue userId missing from callback."))
+
+                match = await asyncio.to_thread(
+                    _srv._client_db.find_by_broker_user_id_sync, "aliceblue", alice_user_id
+                )
+                if not match:
+                    return HTMLResponse(_callback_page("error", provider,
+                        f"No binding found for AliceBlue userId {alice_user_id}. "
+                        "Ensure the Client ID (userId) is saved in your broker binding."))
+
+                api_key    = match["api_key"]
+                api_secret = match["api_secret"]
+                base_url   = f"{request.url.scheme}://{request.url.netloc}"
+                callback_url = f"{base_url}/callback/{provider}"
+
+                ok, msg, token = await asyncio.to_thread(
+                    exchange_code, provider, api_key, api_secret, actual_code, callback_url, extra
+                )
+                elapsed = (_t.monotonic() - t0) * 1000
+
+                if not ok:
+                    return HTMLResponse(_callback_page("error", provider, msg))
+
+                if match["scope"] == "feeder":
+                    await _srv._client_db.update_feeder_token(provider, token, datetime.now(IST).isoformat(), _ist_eod())
+                    _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                    return HTMLResponse(_callback_page("success", provider, "AliceBlue feeder connected!"))
+                else:
+                    cid, bid = match["client_id"], match["binding_id"]
+                    await _srv._client_db.update_access_token(cid, bid, token, datetime.now(IST).isoformat(), _ist_eod())
+                    await _srv._client_db.set_terminal_connected(cid, bid, True)
+                    _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
+                    logger.info("[Callback] AliceBlue [%s/%s] token stored in %.1fms", cid, bid, elapsed)
+                    return HTMLResponse(_callback_page("success", provider, "AliceBlue broker connected!"))
+
+            else:
+                # Standard state-based routing: Fyers, Upstox, Zerodha, AngelOne
+                state_str = path_state or request.query_params.get("state", "")
+                parsed    = parse_state(state_str) if state_str else {}
+                role       = parsed.get("role", "")
+                client_id  = parsed.get("client_id", "")
+                binding_id = parsed.get("binding_id", "")
+                base_url   = f"{request.url.scheme}://{request.url.netloc}"
+                callback_url = f"{base_url}/callback/{provider}"
+
+                if role == "admin":
+                    db_row     = _srv._client_db.get_feeder_creds_sync(provider) or {}
+                    api_key    = db_row.get("api_key", "")
+                    api_secret = db_row.get("secret", "")
+                    ok, msg, token = await asyncio.to_thread(
+                        exchange_code, provider, api_key, api_secret, actual_code, callback_url, extra
+                    )
+                    elapsed = (_t.monotonic() - t0) * 1000
+                    if ok and token:
+                        await _srv._client_db.update_feeder_token(provider, token, datetime.now(IST).isoformat(), _ist_eod())
+                        _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                        logger.info("[Callback] Admin %s token stored in %.1fms", provider.upper(), elapsed)
+                        return HTMLResponse(_callback_page("success", provider, "Data feeder connected!"))
+                    logger.error("[Callback] Admin %s exchange failed: %s", provider, msg)
+                    return HTMLResponse(_callback_page("error", provider, msg))
+
+                elif role == "client" and client_id and binding_id:
+                    bindings = await asyncio.to_thread(_srv._client_db.get_bindings_sync, client_id)
+                    b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+                    if b is None:
+                        return HTMLResponse(_callback_page("error", provider, "Binding not found."))
+                    api_key    = b.get("api_key", "")
+                    api_secret = b.get("api_secret", "")
+                    ok, msg, token = await asyncio.to_thread(
+                        exchange_code, provider, api_key, api_secret, actual_code, callback_url, extra
+                    )
+                    elapsed = (_t.monotonic() - t0) * 1000
+                    if ok and token:
+                        now = datetime.now(IST).isoformat()
+                        await _srv._client_db.update_access_token(client_id, binding_id, token, now, _ist_eod())
+                        await _srv._client_db.set_terminal_connected(client_id, binding_id, True)
+                        _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": client_id, "binding_id": binding_id, "provider": provider, "ok": True})
+                        logger.info("[Callback] Client [%s/%s] %s token stored, terminal=ON in %.1fms",
+                                    client_id, binding_id, provider.upper(), elapsed)
+                        return HTMLResponse(_callback_page("success", provider,
+                            f"Broker {provider.upper()} connected! You can close this tab."))
+                    logger.error("[Callback] Client [%s/%s] %s exchange failed: %s",
+                                 client_id, binding_id, provider, msg)
+                    return HTMLResponse(_callback_page("error", provider, msg))
+                else:
+                    return HTMLResponse(_callback_page("error", provider, "Invalid or missing state parameter."))
+
+        @app.get("/callback/{broker_name}", tags=["Auth"], include_in_schema=False)
+        async def oauth_callback(broker_name: str, request: Request):
+            return await _handle_oauth_callback(broker_name, request, path_state="")
+
+        @app.get("/callback/{broker_name}/{path_state}", tags=["Auth"], include_in_schema=False)
+        async def oauth_callback_with_state(broker_name: str, path_state: str, request: Request):
+            """AngelOne embeds our state token in the redirect_url path."""
+            return await _handle_oauth_callback(broker_name, request, path_state=path_state)
 
         # ── ADMIN — pending clients ───────────────────────────────────────────
 
@@ -2169,31 +2368,47 @@ class DashboardServer:
                 )
             return {"ok": True, "message": "Fyers feed stream initialized.", "provider": "fyers", "token_fresh": True}
 
-        # ── ADMIN — Fyers in-dashboard OAuth flow ────────────────────────────
+        # ── ADMIN — Universal feeder OAuth flow (all providers) ──────────────
 
-        @app.get("/api/admin/feeder/fyers/auth-url", tags=["Admin"])
-        async def api_fyers_auth_url(
+        @app.get("/api/admin/feeder/{provider_name}/auth-url", tags=["Admin"])
+        async def api_admin_feeder_auth_url(
+            provider_name: str,
+            request: Request,
             _: dict = Depends(_require_admin),
         ):
-            """Step 1 of the Fyers OAuth flow: generate the browser login URL."""
+            """Generate OAuth authorization URL for the admin data feeder."""
+            from broker_auth.oauth_manager import generate_auth_url, build_state
+            provider = provider_name.lower()
+            db_row = _srv._client_db.get_feeder_creds_sync(provider) or {}
+            api_key    = db_row.get("api_key", "")
+            api_secret = db_row.get("secret", "")
+            if not api_key:
+                return {"ok": False, "error": f"{provider.upper()} App ID/Key not saved. Configure credentials first."}
+
+            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            callback_url = f"{base_url}/callback/{provider}"
+            state        = build_state("admin", "admin", provider)
+
+            ok, url = generate_auth_url(provider, api_key, api_secret, callback_url, state)
+            if ok:
+                logger.info("[Admin] %s feeder OAuth URL generated → %s", provider.upper(), callback_url)
+                return {"ok": True, "url": url, "callback_url": callback_url}
+            return {"ok": False, "error": url}  # url contains instructions for manual providers
+
+        # Keep legacy Fyers-specific URL for backward compat
+        @app.get("/api/admin/feeder/fyers/auth-url", tags=["Admin"])
+        async def api_fyers_auth_url(request: Request, _: dict = Depends(_require_admin)):
+            from broker_auth.oauth_manager import generate_auth_url, build_state
             db_row = _srv._client_db.get_feeder_creds_sync("fyers") or {}
-            app_id     = db_row.get("api_key", "")
-            secret_key = db_row.get("secret",  "")
-            if not app_id or not secret_key:
-                return JSONResponse(
-                    status_code=400,
-                    content={"ok": False, "error": "Fyers App ID and Secret not found in DB. Save credentials first."},
-                )
-            if "-" not in app_id:
-                app_id = f"{app_id}-100"
-            redirect_uri = "https://trade.fyers.in/api-login/redirect-uri/index.html"
-            url = (
-                f"https://api-t1.fyers.in/api/v3/generate-authcode"
-                f"?client_id={app_id}"
-                f"&redirect_uri={redirect_uri}"
-                f"&response_type=code&state=terminus"
-            )
-            return {"ok": True, "url": url, "redirect_uri": redirect_uri}
+            api_key    = db_row.get("api_key", "")
+            api_secret = db_row.get("secret", "")
+            if not api_key:
+                return {"ok": False, "error": "Fyers App ID not saved."}
+            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            callback_url = f"{base_url}/callback/fyers"
+            state        = build_state("admin", "admin", "fyers")
+            ok, url = generate_auth_url("fyers", api_key, api_secret, callback_url, state)
+            return {"ok": ok, "url": url}
 
         @app.post("/api/admin/feeder/fyers/exchange-code", tags=["Admin"])
         async def api_fyers_exchange_code(
