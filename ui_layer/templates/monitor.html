@@ -503,9 +503,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Dual feeder ────────────────────────────────────────────────── */
     dualCreds: {
       upstox_client_id:'', upstox_api_key:'', upstox_secret:'',
-      upstox_password:'', upstox_totp:'',
       fyers_client_id:'', fyers_app_key:'', fyers_secret:'',
-      fyers_pin:'', fyers_totp:'',
     },
     dualMsg: '', dualOk: null, dualConnecting: false,
     showUpstoxCreds: false, showFyersCreds: false,
@@ -630,41 +628,44 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Admin feeder panel ─────────────────────────────────────────── */
     feederProvider:  'mock',
-    feederCreds:     { user_id:'', password:'', api_key:'', totp_secret:'' },
+    feederCreds:     { user_id:'', api_key:'', totp_secret:'' },
     feederMsg:       '',
     feederOk:        null,
     feederConnecting: false,
-    supportedFeeders: ['mock','shoonya','dhan','fyers','angelone'],
+    supportedFeeders: ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue'],
 
     /* ── Client broker modal ────────────────────────────────────────── */
     showBrokerModal: false,
     newBroker: {
       provider:'mock', binding_id:'', label:'',
-      user_id:'', password:'', api_key:'', api_secret:'',
-      totp_secret:'', vendor_code:'', imei:'', client_code:'',
+      user_id:'', api_key:'', api_secret:'',
       lot_multiplier: 1.0,
     },
-    brokerProviders: ['zerodha','dhan','upstox','angelone','fyers','mock'],
+    brokerProviders: ['fyers','upstox','zerodha','dhan','angelone','aliceblue','mock'],
     brokerAddMsg:    '',
     brokerAddOk:     null,
     brokerAddLoading: false,
-    // Per-provider field definitions: which credential fields are required/shown
+    // Per-provider field definitions: which credential fields are required/shown.
+    // Only Client ID (where needed), App Key, and App Secret are stored.
+    // NO passwords, PINs, or TOTP secrets — all authentication via broker's official login page.
     brokerFieldConfig: {
-      zerodha:  { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Zerodha Kite' },
-      dhan:     { user_id:true, password:true, api_key:true, api_secret:false, totp_secret:true,  label:'Dhan' },
-      upstox:   { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Upstox' },
-      angelone: { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Angel One' },
-      fyers:    { user_id:true, password:true, api_key:true, api_secret:true, totp_secret:true,  label:'Fyers' },
-      mock:     { user_id:false, password:false, api_key:false, api_secret:false, totp_secret:false, label:'Paper/Mock' },
+      zerodha:   { user_id:false, api_key:true,  api_secret:true,  label:'Zerodha Kite', oauth:true  },
+      upstox:    { user_id:false, api_key:true,  api_secret:true,  label:'Upstox',       oauth:true  },
+      fyers:     { user_id:false, api_key:true,  api_secret:true,  label:'Fyers',        oauth:true  },
+      dhan:      { user_id:true,  api_key:true,  api_secret:true,  label:'Dhan',         oauth:true  },
+      angelone:  { user_id:false, api_key:true,  api_secret:false, label:'Angel One',    oauth:true  },
+      aliceblue: { user_id:true,  api_key:true,  api_secret:true,  label:'AliceBlue',    oauth:true  },
+      mock:      { user_id:false, api_key:false, api_secret:false, label:'Paper/Mock',   oauth:false },
     },
     // Per-provider human-readable field label overrides
     brokerFieldHints: {
-      zerodha:  { user_id:'USER ID',         password:'PASSWORD',    api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
-      dhan:     { user_id:'CLIENT ID',        password:'LOGIN PIN',   api_key:'ACCESS TOKEN (eyJ… optional)', api_secret:'(not used)', totp_secret:'TOTP SECRET' },
-      upstox:   { user_id:'MOBILE NUMBER',    password:'6-DIGIT PIN', api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
-      angelone: { user_id:'CLIENT ID',        password:'MPIN',        api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
-      fyers:    { user_id:'CLIENT ID (FY ID)',password:'4-DIGIT PIN', api_key:'APP ID',   api_secret:'SECRET ID',  totp_secret:'TOTP SECRET' },
-      mock:     { user_id:'USER ID',          password:'PASSWORD',    api_key:'API KEY',  api_secret:'API SECRET', totp_secret:'TOTP SECRET' },
+      zerodha:   { user_id:'USER ID (optional)', api_key:'API KEY',          api_secret:'API SECRET'   },
+      upstox:    { user_id:'MOBILE (optional)',   api_key:'API KEY',          api_secret:'API SECRET'   },
+      fyers:     { user_id:'FY ID (optional)',    api_key:'APP ID (XXXXX-100)',api_secret:'SECRET ID'   },
+      dhan:      { user_id:'CLIENT ID',           api_key:'APP ID',           api_secret:'APP SECRET'   },
+      angelone:  { user_id:'CLIENT ID (optional)',api_key:'API KEY',          api_secret:'(not needed)' },
+      aliceblue: { user_id:'USER ID (AliceBlue)', api_key:'APP CODE',         api_secret:'API SECRET'   },
+      mock:      { user_id:'USER ID',             api_key:'API KEY',          api_secret:'API SECRET'   },
     },
     // Per-broker start/stop state
     csBrokerOp: {},  // binding_id -> {loading, termLoading, engLoading, termStep, msg, ok}
@@ -674,7 +675,7 @@ document.addEventListener('alpine:init', () => {
     deployMsg: '', deployOk: null, deployLoading: false,
     // Portal broker add form state
     showPortalBrokerForm: false,
-    portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', password:'', api_key:'', api_secret:'', totp_secret:'', lot_multiplier:1.0, trading_mode:'paper', assigned_strategy:'', assigned_instrument:'NIFTY' },
+    portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', api_key:'', api_secret:'', lot_multiplier:1.0, trading_mode:'paper', assigned_strategy:'', assigned_instrument:'NIFTY' },
     portalBrokerMsg: '', portalBrokerOk: null, portalBrokerLoading: false,
     portalBrokerIsEdit: false,
 
@@ -1054,31 +1055,18 @@ document.addEventListener('alpine:init', () => {
     async connectUpstox() {
       this.upstoxMsg = ''; this.upstoxOk = null; this.upstoxConnecting = true;
       try {
-        // If form fields are blank but DB has cached creds, send empty body
-        // so the backend loads from DB.  If form has values, send them (and
-        // the backend will persist them to DB before authenticating).
-        const hasFormCreds = !!(this.dualCreds.upstox_client_id || this.dualCreds.upstox_api_key);
-        const payload = hasFormCreds ? {
-          client_id:   this.dualCreds.upstox_client_id,
-          api_key:     this.dualCreds.upstox_api_key,
-          secret:      this.dualCreds.upstox_secret,
-          password:    this.dualCreds.upstox_password,
-          totp_secret: this.dualCreds.upstox_totp,
-        } : {};
-        const r = await this._fetch('/api/admin/feeder/connect/upstox', { json: payload });
+        const r = await this._fetch('/api/admin/feeder/auth-url?provider=upstox', { method: 'GET' });
         if (!r) return;
         const d = await r.json();
-        if (r.ok && d.ok !== false) {
-          this.upstoxOk  = true;
-          this.upstoxMsg = d.token_fresh ? 'Connected — token refreshed' : 'Connected';
-          this.upstoxConnecting = false;
-          await this.loadFeederStatus();
+        if (d.ok && d.auth_url) {
+          window.open(d.auth_url, '_blank');
+          this.upstoxOk  = null;
+          this.upstoxMsg = '🔗 Browser login page opened. Complete authentication there — this page will update automatically.';
         } else {
           this.upstoxOk  = false;
-          this.upstoxMsg = d.error || d.detail || d.message || 'Connect failed.';
-          // Refresh status so "RECONNECT (USE CACHED CREDS)" badge stays accurate
-          await this.loadFeederStatus();
+          this.upstoxMsg = d.error || 'Failed to generate auth URL. Save credentials first.';
         }
+        await this.loadFeederStatus();
       } catch { this.upstoxOk = false; this.upstoxMsg = 'Request failed.'; }
       finally   { this.upstoxConnecting = false; }
     },
@@ -1086,28 +1074,18 @@ document.addEventListener('alpine:init', () => {
     async connectFyers() {
       this.fyersMsg = ''; this.fyersOk = null; this.fyersConnecting = true;
       try {
-        const hasFormCreds = !!(this.dualCreds.fyers_client_id || this.dualCreds.fyers_app_key);
-        const payload = hasFormCreds ? {
-          client_id:   this.dualCreds.fyers_client_id,
-          app_key:     this.dualCreds.fyers_app_key,
-          secret:      this.dualCreds.fyers_secret,
-          pin:         this.dualCreds.fyers_pin,
-          totp_secret: this.dualCreds.fyers_totp,
-        } : {};
-        const r = await this._fetch('/api/admin/feeder/connect/fyers', { json: payload });
+        const r = await this._fetch('/api/admin/feeder/auth-url?provider=fyers', { method: 'GET' });
         if (!r) return;
         const d = await r.json();
-        if (r.ok && d.ok !== false) {
-          this.fyersOk  = true;
-          this.fyersMsg = d.token_fresh ? 'Connected — token refreshed' : 'Connected';
-          this.fyersConnecting = false;
-          await this.loadFeederStatus();
+        if (d.ok && d.auth_url) {
+          window.open(d.auth_url, '_blank');
+          this.fyersOk  = null;
+          this.fyersMsg = '🔗 Browser login page opened. Complete authentication there — this page will update automatically.';
         } else {
           this.fyersOk  = false;
-          this.fyersMsg = d.error || d.detail || d.message || 'Connect failed.';
-          // Refresh status so "RECONNECT (USE CACHED CREDS)" badge stays accurate
-          await this.loadFeederStatus();
+          this.fyersMsg = d.error || 'Failed to generate auth URL. Save credentials first.';
         }
+        await this.loadFeederStatus();
       } catch { this.fyersOk = false; this.fyersMsg = 'Request failed.'; }
       finally   { this.fyersConnecting = false; }
     },
@@ -1115,11 +1093,7 @@ document.addEventListener('alpine:init', () => {
     async connectDual() {
       this.dualMsg = ''; this.dualOk = null; this.dualConnecting = true;
       try {
-        // Send form fields if any are filled; otherwise send empty body so backend uses DB
-        const hasUpstoxForm = !!(this.dualCreds.upstox_client_id || this.dualCreds.upstox_api_key);
-        const hasFyersForm  = !!(this.dualCreds.fyers_client_id  || this.dualCreds.fyers_app_key);
-        const payload = (hasUpstoxForm || hasFyersForm) ? this.dualCreds : {};
-        const r = await this._fetch('/api/admin/feeder/connect_dual', { json: payload });
+        const r = await this._fetch('/api/admin/feeder/connect', { json: { provider: 'dual' } });
         if (!r) return;
         const d = await r.json();
         this.dualOk  = r.ok;
@@ -1184,23 +1158,23 @@ document.addEventListener('alpine:init', () => {
       finally { this.fyersExchanging = false; }
     },
 
-    /* ── Save credentials (DB only — no connect) ───────────────────────── */
+    /* ── Save credentials (DB only — no connect, no password/TOTP) ────── */
     async saveUpstoxCreds() {
       this.saveUpstoxMsg = ''; this.saveUpstoxOk = null; this.saveUpstoxLoading = true;
       try {
-        const payload = {
-          client_id:   this.dualCreds.upstox_client_id,
-          api_key:     this.dualCreds.upstox_api_key,
-          secret:      this.dualCreds.upstox_secret,
-          password:    this.dualCreds.upstox_password,
-          totp_secret: this.dualCreds.upstox_totp,
-        };
-        const r = await this._fetch('/api/admin/feeder/creds/upstox', { json: payload });
-        if (!r) { this.saveUpstoxOk = false; this.saveUpstoxMsg = 'Network error — request did not reach server.'; return; }
+        const r = await this._fetch('/api/admin/feeder/save-creds', {
+          json: {
+            provider:  'upstox',
+            client_id: this.dualCreds.upstox_client_id,
+            api_key:   this.dualCreds.upstox_api_key,
+            secret:    this.dualCreds.upstox_secret,
+          }
+        });
+        if (!r) { this.saveUpstoxOk = false; this.saveUpstoxMsg = 'Network error.'; return; }
         const d = await r.json();
         this.saveUpstoxOk  = d.ok !== false && r.ok;
         this.saveUpstoxMsg = this.saveUpstoxOk
-          ? 'Credentials saved to DB.'
+          ? '✓ Credentials saved. Click Connect Now to open the Upstox login page.'
           : (d.error || d.detail || 'Save failed.');
         if (this.saveUpstoxOk) await this.loadFeederStatus();
       } catch (err) { this.saveUpstoxOk = false; this.saveUpstoxMsg = `Save error: ${err.message || err}`; }
@@ -1209,19 +1183,19 @@ document.addEventListener('alpine:init', () => {
     async saveFyersCreds() {
       this.saveFyersMsg = ''; this.saveFyersOk = null; this.saveFyersLoading = true;
       try {
-        const payload = {
-          client_id:   this.dualCreds.fyers_client_id,
-          app_key:     this.dualCreds.fyers_app_key,
-          secret:      this.dualCreds.fyers_secret,
-          pin:         this.dualCreds.fyers_pin,
-          totp_secret: this.dualCreds.fyers_totp,
-        };
-        const r = await this._fetch('/api/admin/feeder/creds/fyers', { json: payload });
-        if (!r) { this.saveFyersOk = false; this.saveFyersMsg = 'Network error — request did not reach server.'; return; }
+        const r = await this._fetch('/api/admin/feeder/save-creds', {
+          json: {
+            provider:  'fyers',
+            client_id: this.dualCreds.fyers_client_id,
+            api_key:   this.dualCreds.fyers_app_key,
+            secret:    this.dualCreds.fyers_secret,
+          }
+        });
+        if (!r) { this.saveFyersOk = false; this.saveFyersMsg = 'Network error.'; return; }
         const d = await r.json();
         this.saveFyersOk  = d.ok !== false && r.ok;
         this.saveFyersMsg = this.saveFyersOk
-          ? 'Credentials saved to DB.'
+          ? '✓ Credentials saved. Click Connect Now to open the Fyers login page.'
           : (d.error || d.detail || 'Save failed.');
         if (this.saveFyersOk) await this.loadFeederStatus();
       } catch (err) { this.saveFyersOk = false; this.saveFyersMsg = `Save error: ${err.message || err}`; }
@@ -1700,10 +1674,8 @@ document.addEventListener('alpine:init', () => {
         const payload = { ...this.portalBroker };
         // Clear fields hidden for this provider so they don't accidentally carry over
         const cfg = this.brokerFieldConfig[payload.provider] || {};
-        if (!cfg.password)    payload.password    = '';
-        if (!cfg.api_key)     payload.api_key     = '';
-        if (!cfg.api_secret)  payload.api_secret  = '';
-        if (!cfg.totp_secret) payload.totp_secret = '';
+        if (!cfg.api_key)    payload.api_key    = '';
+        if (!cfg.api_secret) payload.api_secret = '';
         const r = await this._fetch('/api/client/add_broker', { json: payload });
         if (!r) return;
         const d = await r.json();
@@ -1724,10 +1696,8 @@ document.addEventListener('alpine:init', () => {
         binding_id:          b.binding_id,
         label:               b.label || '',
         user_id:             '',
-        password:            '',
         api_key:             '',
         api_secret:          '',
-        totp_secret:         '',
         lot_multiplier:      b.lot_multiplier || 1.0,
         trading_mode:        b.trading_mode || 'paper',
         assigned_strategy:   b.assigned_strategy || '',
@@ -1819,6 +1789,7 @@ document.addEventListener('alpine:init', () => {
       const bid = b.binding_id;
       this._initBrokerOp(bid);
       const op = this.csBrokerOp[bid];
+
       if (b.terminal_connected) {
         // Disconnect
         op.termLoading = true; op.msg = ''; op.ok = null;
@@ -1830,24 +1801,70 @@ document.addEventListener('alpine:init', () => {
           if (d.ok) await this.loadClientData();
         } catch { op.ok = false; op.msg = 'Request failed.'; }
         finally { op.termLoading = false; }
-      } else {
-        // Connect — Step 1: check cached token, Step 2: validate, Step 3: auth if needed
-        op.termLoading = true; op.msg = ''; op.ok = null;
-        op.termStep = 'Step 1: Checking cached token…';
-        try {
-          op.termStep = 'Step 2: Validating token…';
-          const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/connect`, { method:'POST' });
-          if (!r) return;
-          const d = await r.json();
-          op.ok = d.ok;
-          op.msg = d.ok ? `✓ ${d.message || 'Terminal connected.'}` : (d.error || 'Connection failed.');
-          if (d.ok) {
-            op.termStep = 'Connected.';
-            await this.loadClientData();
-          }
-        } catch (e) { op.ok = false; op.msg = 'Request failed: ' + (e.message || e); }
-        finally { op.termLoading = false; op.termStep = ''; }
+        return;
       }
+
+      // Connect — Step 1: check cached token, Step 2: validate
+      op.termLoading = true; op.msg = ''; op.ok = null;
+      op.termStep = 'Checking token…';
+      try {
+        const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/connect`, { method:'POST' });
+        if (!r) return;
+        const d = await r.json();
+
+        if (d.ok && d.connected) {
+          // Cached token valid — instant connect
+          op.ok = true; op.msg = '✓ Connected (cached token valid).';
+          await this.loadClientData();
+          return;
+        }
+
+        if (d.flow === 'oauth' && d.auth_url) {
+          // Open broker login in new tab — callback will auto-flip toggle
+          op.ok = null;
+          op.msg = `Opening ${(b.provider||'').toUpperCase()} login page… Complete login in the browser tab. Toggle will flip automatically on success.`;
+          window.open(d.auth_url, '_blank', 'width=900,height=700,menubar=no,toolbar=no');
+          // Poll for token every 3 seconds (up to 3 minutes)
+          this._pollForToken(bid, 60);
+          return;
+        }
+
+        if (d.flow === 'manual_token') {
+          // Show manual token panel
+          op.ok = null;
+          op.msg = d.instructions || 'Generate token manually on broker portal and paste it here.';
+          // Trigger manual token input panel
+          if (!this.fyersCodePanel) this.fyersCodePanel = {};
+          this.fyersCodePanel[bid] = { url: '', msg: d.instructions || '', ok: null };
+          if (!this.fyersCodeInput) this.fyersCodeInput = {};
+          this.fyersCodeInput[bid] = '';
+          return;
+        }
+
+        op.ok = false; op.msg = d.error || 'Authentication required.';
+      } catch (e) { op.ok = false; op.msg = 'Request failed: ' + (e.message || e); }
+      finally { op.termLoading = false; op.termStep = ''; }
+    },
+
+    // Poll for token after OAuth redirect (callback auto-flips in DB, we just refresh)
+    _pollForToken(bid, maxTries) {
+      let tries = 0;
+      const interval = setInterval(async () => {
+        tries++;
+        await this.loadClientData();
+        const b = (this.csBindings || []).find(x => x.binding_id === bid);
+        if (b && b.terminal_connected) {
+          clearInterval(interval);
+          const op = this.csBrokerOp[bid] || {};
+          op.ok = true; op.msg = '✓ Broker connected via OAuth!';
+          return;
+        }
+        if (tries >= maxTries) {
+          clearInterval(interval);
+          const op = this.csBrokerOp[bid] || {};
+          op.ok = false; op.msg = 'Login timeout. Please try again.';
+        }
+      }, 3000);
     },
 
     /* ── Engine toggle (hot-reload) ─────────────────────────────────────── */
@@ -4066,12 +4083,12 @@ document.addEventListener('alpine:init', () => {
         <!-- Quick-connect strip -->
         <div class="bg-connect-strip">
           <div class="font-mono text-xs" style="color:var(--t-green)">
-            <span style="opacity:0.6">Background Connect:</span>
-            Automated login using Mobile, PIN and TOTP.
+            <span style="opacity:0.6">Interactive OAuth:</span>
+            Opens Upstox login page · Token auto-stored on redirect
           </div>
           <button class="btn-connect-now"
                   @click="connectUpstox()" :disabled="upstoxConnecting">
-            <span x-show="!upstoxConnecting">Connect Now</span>
+            <span x-show="!upstoxConnecting">&#x1F517; Connect Now</span>
             <span x-show="upstoxConnecting">&#x23F3;</span>
           </button>
         </div>
@@ -4105,12 +4122,12 @@ document.addEventListener('alpine:init', () => {
         <!-- Quick-connect strip -->
         <div class="bg-connect-strip" style="border-color:rgba(var(--t-amber-rgb),0.22);background:rgba(var(--t-amber-rgb),0.03)">
           <div class="font-mono text-xs" style="color:var(--t-amber)">
-            <span style="opacity:0.6">Background Connect:</span>
-            Automated login using Mobile, PIN and TOTP.
+            <span style="opacity:0.6">Interactive OAuth:</span>
+            Opens Fyers login page · Token auto-stored on redirect
           </div>
           <button class="btn-connect-now" style="border-color:rgba(var(--t-amber-rgb),0.5);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.08)"
                   @click="connectFyers()" :disabled="fyersConnecting">
-            <span x-show="!fyersConnecting">Connect Now</span>
+            <span x-show="!fyersConnecting">&#x1F517; Connect Now</span>
             <span x-show="fyersConnecting">&#x23F3;</span>
           </button>
         </div>
@@ -4777,10 +4794,7 @@ document.addEventListener('alpine:init', () => {
                 <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
                 <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
               </div>
-              <div x-show="brokerFieldConfig[portalBroker.provider].password">
-                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD'"></div>
-                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password"/>
-              </div>
+              <!-- Password/PIN not stored — auth via broker OAuth portal -->
             </div>
             <div class="grid gap-3"
                  :class="(brokerFieldConfig[portalBroker.provider].api_key && brokerFieldConfig[portalBroker.provider].api_secret) ? 'grid-cols-2' : 'grid-cols-1'">
@@ -4793,9 +4807,20 @@ document.addEventListener('alpine:init', () => {
                 <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
               </div>
             </div>
-            <div x-show="brokerFieldConfig[portalBroker.provider].totp_secret">
-              <div class="sec-label mb-1" x-text="((brokerFieldHints[portalBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA seed — enables auto daily token)'"></div>
-              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
+            <!-- TOTP secret not stored — 2FA handled on broker's secure portal -->
+            <!-- OAuth info banner for OAuth-capable providers -->
+            <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).oauth"
+                 class="text-xs px-3 py-2 rounded leading-relaxed"
+                 style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.2);color:var(--t-cyan)">
+              <strong>Interactive OAuth:</strong> Save your <strong>App Key</strong> + <strong>App Secret</strong> here.
+              When you click <strong>Terminal ON</strong>, the system opens the broker's official login page in a new tab.
+              You enter your credentials there — nothing is stored here. After login, this tab auto-connects.
+            </div>
+            <div x-show="!(brokerFieldConfig[portalBroker.provider]||{}).oauth && portalBroker.provider!=='mock'"
+                 class="text-xs px-3 py-2 rounded leading-relaxed"
+                 style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.2);color:var(--t-amber)">
+              <strong>Manual Token:</strong> This broker does not support OAuth redirect.
+              Generate your daily access token from the broker portal and paste it in the <strong>Access Token</strong> field.
             </div>
             <div x-show="portalBroker.provider==='mock'" class="text-xs px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.06);color:var(--t-muted)">
               Paper/Mock mode — no real credentials needed.
@@ -4865,10 +4890,7 @@ document.addEventListener('alpine:init', () => {
                 <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
                 <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
               </div>
-              <div x-show="brokerFieldConfig[portalBroker.provider].password">
-                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD'"></div>
-                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password"/>
-              </div>
+              <!-- Password/PIN not stored — auth via broker OAuth portal -->
             </div>
             <div class="grid grid-cols-2 gap-2">
               <div x-show="brokerFieldConfig[portalBroker.provider].api_key">
@@ -4880,10 +4902,7 @@ document.addEventListener('alpine:init', () => {
                 <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
               </div>
             </div>
-            <div x-show="brokerFieldConfig[portalBroker.provider].totp_secret">
-              <div class="sec-label mb-1" x-text="((brokerFieldHints[portalBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA seed)'"></div>
-              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
-            </div>
+            <!-- TOTP/PIN not stored — 2FA handled on broker's secure login portal -->
           </div>
         </template>
         <div x-show="portalBrokerMsg" class="font-mono text-xs px-2 py-1.5 rounded"
@@ -5026,7 +5045,7 @@ document.addEventListener('alpine:init', () => {
             <div class="text-xs mt-0.5" style="color:var(--t-muted)" x-text="csBindings.length + ' account' + (csBindings.length!==1?'s':'') + ' connected'"></div>
           </div>
           <button class="btn-action" style="width:auto;padding:6px 16px"
-                  @click="if(showPortalBrokerForm){showPortalBrokerForm=false;portalBrokerIsEdit=false;portalBrokerMsg=''}else{showPortalBrokerForm=true;portalBrokerIsEdit=false;portalBroker={provider:'zerodha',binding_id:'',label:'',user_id:'',password:'',api_key:'',api_secret:'',totp_secret:'',lot_multiplier:1.0,trading_mode:'paper',assigned_strategy:'',assigned_instrument:'NIFTY'}}"
+                  @click="if(showPortalBrokerForm){showPortalBrokerForm=false;portalBrokerIsEdit=false;portalBrokerMsg=''}else{showPortalBrokerForm=true;portalBrokerIsEdit=false;portalBroker={provider:'zerodha',binding_id:'',label:'',user_id:'',api_key:'',api_secret:'',lot_multiplier:1.0,trading_mode:'paper',assigned_strategy:'',assigned_instrument:'NIFTY'}}"
                   x-text="showPortalBrokerForm ? 'Cancel' : '+ Add Broker'"></button>
         </div>
 
@@ -5406,10 +5425,7 @@ document.addEventListener('alpine:init', () => {
                 <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
                 <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
               </div>
-              <div x-show="brokerFieldConfig[portalBroker.provider].password">
-                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD'"></div>
-                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password"/>
-              </div>
+              <!-- Password/PIN not stored — auth via broker OAuth portal -->
             </div>
             <!-- API Key + API Secret row -->
             <div class="grid gap-3"
@@ -5424,10 +5440,7 @@ document.addEventListener('alpine:init', () => {
               </div>
             </div>
             <!-- TOTP Secret -->
-            <div x-show="brokerFieldConfig[portalBroker.provider].totp_secret">
-              <div class="sec-label mb-1" x-text="((brokerFieldHints[portalBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA seed — for auto daily token)'"></div>
-              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password"/>
-            </div>
+            <!-- TOTP/PIN not stored — 2FA handled on broker's secure login portal -->
             <!-- Mock / Dhan info notes -->
             <div x-show="portalBroker.provider==='mock'" class="text-xs px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.06);color:var(--t-muted)">
               Mock/Paper mode — no real broker credentials needed. Orders will be simulated.
@@ -5752,39 +5765,18 @@ document.addEventListener('alpine:init', () => {
           <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).user_id||'USER ID'"></div>
           <input class="t-input" type="text" placeholder="broker user id" x-model="newBroker.user_id" autocomplete="off"/>
         </div>
-        <div>
-          <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).password||'PASSWORD'"></div>
-          <input class="t-input" type="password" placeholder="broker password" x-model="newBroker.password" autocomplete="new-password"/>
-        </div>
       </div>
       <div class="grid grid-cols-2 gap-3">
         <div>
           <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).api_key||'API KEY'"></div>
-          <input class="t-input" type="password" placeholder="api key" x-model="newBroker.api_key" autocomplete="new-password"/>
+          <input class="t-input" type="text" placeholder="api key" x-model="newBroker.api_key" autocomplete="off"/>
         </div>
         <div>
           <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).api_secret||'API SECRET'"></div>
           <input class="t-input" type="password" placeholder="api secret" x-model="newBroker.api_secret" autocomplete="new-password"/>
         </div>
       </div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <div class="sec-label mb-1" x-text="((brokerFieldHints[newBroker.provider]||{}).totp_secret||'TOTP SECRET')+' (2FA)'"></div>
-          <input class="t-input" type="password" placeholder="base32 TOTP seed" x-model="newBroker.totp_secret" autocomplete="new-password"/>
-        </div>
-      </div>
-
-      <!-- Shoonya-specific fields -->
-      <div x-show="newBroker.provider === 'shoonya'" class="grid grid-cols-2 gap-3">
-        <div>
-          <div class="sec-label mb-1">VENDOR CODE</div>
-          <input class="t-input" type="text" x-model="newBroker.vendor_code" autocomplete="off"/>
-        </div>
-        <div>
-          <div class="sec-label mb-1">IMEI</div>
-          <input class="t-input" type="text" x-model="newBroker.imei" autocomplete="off"/>
-        </div>
-      </div>
+      <!-- No password, PIN, or TOTP stored — authentication via broker's official login page -->
 
       <div>
         <div class="sec-label mb-1">LOT MULTIPLIER</div>
@@ -5858,39 +5850,14 @@ document.addEventListener('alpine:init', () => {
         </div>
       </div>
 
-      <!-- Zone 2: Automation Credentials -->
-      <div class="modal-zone">
-        <div class="modal-zone-label">&#x1F916; Automation Credentials</div>
-        <div class="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <div class="sec-label mb-1">MOBILE NUMBER</div>
-            <input class="t-input" type="text" x-model="dualCreds.upstox_client_id"
-                   :placeholder="systemStatus.upstox_creds_present ? '[stored in DB]' : 'Registered mobile'"
-                   autocomplete="off"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">PIN</div>
-            <input class="t-input" type="password" x-model="dualCreds.upstox_password"
-                   :placeholder="systemStatus.upstox_creds_present ? '[stored in DB]' : 'Trading PIN'"
-                   autocomplete="new-password"/>
-          </div>
-        </div>
-        <div>
-          <div class="sec-label mb-1">TOTP SECRET KEY</div>
-          <input class="t-input" type="password" x-model="dualCreds.upstox_totp"
-                 :placeholder="systemStatus.upstox_creds_present ? '[stored in DB]' : 'Base32 TOTP seed (from Upstox setup)'"
-                 autocomplete="new-password" spellcheck="false"/>
-        </div>
-      </div>
-
-      <!-- Background Connect strip (inside modal) -->
+      <!-- OAuth Connect strip (inside modal) -->
       <div class="bg-connect-strip">
         <div class="font-mono text-xs" style="color:var(--t-green)">
-          <span style="opacity:0.6">Background Connect:</span>
-          Headless TOTP login · Token cached to DB on success
+          <span style="opacity:0.6">Step 2 — Interactive OAuth:</span>
+          Opens Upstox login page · Token stored automatically on redirect
         </div>
         <button class="btn-connect-now" @click="connectUpstox()" :disabled="upstoxConnecting">
-          <span x-show="!upstoxConnecting">Connect Now</span>
+          <span x-show="!upstoxConnecting">&#x1F517; Connect Now</span>
           <span x-show="upstoxConnecting">&#x23F3;</span>
         </button>
       </div>
@@ -5976,29 +5943,17 @@ document.addEventListener('alpine:init', () => {
         </div>
       </div>
 
-      <!-- Zone 2: Automation Credentials -->
-      <div class="modal-zone" style="border-color:rgba(var(--t-amber-rgb),0.18)">
-        <div class="modal-zone-label" style="color:var(--t-amber);opacity:0.7">&#x1F916; Automation Credentials</div>
-        <div class="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <div class="sec-label mb-1">USER ID</div>
-            <input class="t-input" type="text" x-model="dualCreds.fyers_client_id"
-                   :placeholder="systemStatus.fyers_creds_present ? '[stored in DB]' : 'Fyers User ID (e.g. XY12345)'"
-                   autocomplete="off"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">PASSWORD</div>
-            <input class="t-input" type="password" x-model="dualCreds.fyers_pin"
-                   :placeholder="systemStatus.fyers_creds_present ? '[stored in DB]' : 'Login password'"
-                   autocomplete="new-password"/>
-          </div>
+      <!-- OAuth connect strip (Fyers modal) -->
+      <div class="bg-connect-strip" style="border-color:rgba(var(--t-amber-rgb),0.22);background:rgba(var(--t-amber-rgb),0.03)">
+        <div class="font-mono text-xs" style="color:var(--t-amber)">
+          <span style="opacity:0.6">Step 2 — Interactive OAuth:</span>
+          Opens Fyers login page · Token stored automatically on redirect
         </div>
-        <div>
-          <div class="sec-label mb-1">TOTP SECRET KEY</div>
-          <input class="t-input" type="password" x-model="dualCreds.fyers_totp"
-                 :placeholder="systemStatus.fyers_creds_present ? '[stored in DB]' : 'Base32 TOTP seed (from Fyers 2FA setup)'"
-                 autocomplete="new-password" spellcheck="false"/>
-        </div>
+        <button class="btn-connect-now" style="border-color:rgba(var(--t-amber-rgb),0.5);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.08)"
+                @click="connectFyers()" :disabled="fyersConnecting">
+          <span x-show="!fyersConnecting">&#x1F517; Connect Now</span>
+          <span x-show="fyersConnecting">&#x23F3;</span>
+        </button>
       </div>
 
       <!-- OAuth Connect — 2-step flow (Fyers has no headless TOTP in SDK v3.1.x) -->
