@@ -51,6 +51,14 @@ logger = logging.getLogger(__name__)
 from broker_auth.headless_auth import _ist_eod
 
 
+def _base_url(request) -> str:
+    """Return the public base URL, respecting X-Forwarded-Proto from nginx."""
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host   = request.headers.get("x-forwarded-host") or request.url.netloc
+    host   = host.split(":")[0] if request.headers.get("x-forwarded-proto") else host
+    return f"{scheme}://{host}"
+
+
 def _callback_page(status: str, provider: str, message: str) -> str:
     """Return a minimal HTML page shown after broker OAuth redirect."""
     color   = "#22c55e" if status == "success" else "#ef4444"
@@ -666,7 +674,7 @@ class DashboardServer:
                     ),
                 }
 
-            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            base_url     = _base_url(request)
             callback_url = f"{base_url}/callback/{provider}"
             state        = build_state("admin", "feeder", provider)
 
@@ -1346,7 +1354,7 @@ class DashboardServer:
                 return {"ok": True, "connected": True, "message": msg, "flow": "cached"}
 
             # Token missing/expired — generate broker OAuth login URL
-            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            base_url     = _base_url(request)
             callback_url = f"{base_url}/callback/{provider}"
             state        = build_state("client", cid, binding_id)
 
@@ -1655,7 +1663,7 @@ class DashboardServer:
 
                 api_key    = match["api_key"]
                 api_secret = match["api_secret"]
-                base_url   = f"{request.url.scheme}://{request.url.netloc}"
+                base_url   = _base_url(request)
                 callback_url = f"{base_url}/callback/{provider}"
 
                 ok, msg, token = await asyncio.to_thread(
@@ -1685,7 +1693,7 @@ class DashboardServer:
                 role       = parsed.get("role", "")
                 client_id  = parsed.get("client_id", "")
                 binding_id = parsed.get("binding_id", "")
-                base_url   = f"{request.url.scheme}://{request.url.netloc}"
+                base_url   = _base_url(request)
                 callback_url = f"{base_url}/callback/{provider}"
 
                 if role == "admin":
@@ -2385,7 +2393,7 @@ class DashboardServer:
             if not api_key:
                 return {"ok": False, "error": f"{provider.upper()} App ID/Key not saved. Configure credentials first."}
 
-            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            base_url     = _base_url(request)
             callback_url = f"{base_url}/callback/{provider}"
             state        = build_state("admin", "admin", provider)
 
@@ -2404,7 +2412,7 @@ class DashboardServer:
             api_secret = db_row.get("secret", "")
             if not api_key:
                 return {"ok": False, "error": "Fyers App ID not saved."}
-            base_url     = f"{request.url.scheme}://{request.url.netloc}"
+            base_url     = _base_url(request)
             callback_url = f"{base_url}/callback/fyers"
             state        = build_state("admin", "admin", "fyers")
             ok, url = generate_auth_url("fyers", api_key, api_secret, callback_url, state)
