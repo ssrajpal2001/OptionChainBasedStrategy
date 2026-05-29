@@ -32,6 +32,7 @@ from data_layer.base_feeder import EventBus, IndexTick, OptionTick
 logger = logging.getLogger(__name__)
 
 _HEARTBEAT_INTERVAL = 2.0   # seconds
+_AUTH_PUSH_TYPES = {"terminal_connected", "feeder_token_updated"}
 
 
 def _round_to_step(price: float, step: float) -> float:
@@ -199,21 +200,28 @@ class WsBridge:
             except asyncio.TimeoutError:
                 continue
             try:
-                code = (
-                    getattr(evt, "code", None)
-                    or (evt.get("event") if isinstance(evt, dict) else None)
-                    or ""
-                )
-                msg = (
-                    getattr(evt, "message", "")
-                    or (evt.get("message", "") if isinstance(evt, dict) else "")
-                )
-                await self.broadcast({
-                    "type": "sys",
-                    "code": str(code),
-                    "msg":  str(msg),
-                    "ts":   datetime.now(IST).strftime("%H:%M:%S IST"),
-                })
+                # Auth events forwarded verbatim so frontend auto-flips toggles instantly
+                if isinstance(evt, dict) and evt.get("type") in _AUTH_PUSH_TYPES:
+                    await self.broadcast({
+                        **evt,
+                        "ts": datetime.now(IST).strftime("%H:%M:%S IST"),
+                    })
+                else:
+                    code = (
+                        getattr(evt, "code", None)
+                        or (evt.get("event") if isinstance(evt, dict) else None)
+                        or ""
+                    )
+                    msg = (
+                        getattr(evt, "message", "")
+                        or (evt.get("message", "") if isinstance(evt, dict) else "")
+                    )
+                    await self.broadcast({
+                        "type": "sys",
+                        "code": str(code),
+                        "msg":  str(msg),
+                        "ts":   datetime.now(IST).strftime("%H:%M:%S IST"),
+                    })
             except Exception as exc:
                 logger.debug("WsBridge._sys_loop: %s", exc)
 
