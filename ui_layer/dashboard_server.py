@@ -399,11 +399,6 @@ class DashboardServer:
                 raise HTTPException(status_code=403, detail="Client portal access required.")
             return user
 
-        # Use module-level schemas (defined at module scope so annotations resolve)
-        TokenUpdateSchema    = _TokenUpdateSchema
-        FeederConnectSchema  = _FeederConnectSchema
-        BrokerProvisionSchema = _BrokerProvisionSchema
-
         # ── Serve dashboard HTML ──────────────────────────────────────────────
 
         @app.get("/", include_in_schema=False)
@@ -568,7 +563,7 @@ class DashboardServer:
 
         @app.post("/api/client/update_token", tags=["Admin"])
         async def api_update_token(
-            body: TokenUpdateSchema, _: dict = Depends(_require_admin),
+            body: _TokenUpdateSchema, _: dict = Depends(_require_admin),
         ):
             client = _srv._registry.get(body.client_id) if _srv._registry else None
             if client is None:
@@ -720,7 +715,7 @@ class DashboardServer:
 
         @app.post("/api/admin/feeder/connect", tags=["Admin"])
         async def api_feeder_connect(
-            body: FeederConnectSchema, _: dict = Depends(_require_admin),
+            body: _FeederConnectSchema, _: dict = Depends(_require_admin),
         ):
             feeder = _srv._feeder
             if feeder is None:
@@ -796,7 +791,7 @@ class DashboardServer:
 
         @app.post("/api/client/register_broker", tags=["Client"])
         async def client_register_broker(
-            payload: BrokerProvisionSchema,
+            payload: _BrokerProvisionSchema,
             user: dict = Depends(_require_client),
         ):
             from config.client_profiles import BrokerBinding
