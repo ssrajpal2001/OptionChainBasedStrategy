@@ -494,22 +494,17 @@ document.addEventListener('alpine:init', () => {
     tokenMsg:      '',
     tokenOk:       null,
 
-    /* ── Credential config modals ───────────────────────────────────── */
-    showUpstoxModal: false, showFyersModal: false,
-    upstoxSecretVisible: false, fyersSecretVisible: false,
-    saveUpstoxMsg: '', saveUpstoxOk: null, saveUpstoxLoading: false,
-    saveFyersMsg:  '', saveFyersOk:  null, saveFyersLoading:  false,
-
-    /* ── Dual feeder ────────────────────────────────────────────────── */
-    dualCreds: {
-      upstox_client_id:'', upstox_api_key:'', upstox_secret:'',
-      fyers_client_id:'', fyers_app_key:'', fyers_secret:'',
+    /* ── Admin feeder toggles ───────────────────────────────────────── */
+    feederToggle:        { upstox: false, fyers: false },
+    feederToggleLoading: { upstox: false, fyers: false },
+    feederEditOpen:      { upstox: false, fyers: false },
+    feederEditCreds:     {
+      upstox: { client_id:'', api_key:'', secret:'' },
+      fyers:  { client_id:'', api_key:'', secret:'' },
     },
-    dualMsg: '', dualOk: null, dualConnecting: false,
-    showUpstoxCreds: false, showFyersCreds: false,
-    upstoxMsg: '', upstoxOk: null, upstoxConnecting: false,
-    fyersMsg:  '', fyersOk:  null, fyersConnecting:  false,
-    fyersAuthUrl: '', fyersRedirectUrl: '', fyersOauthStep: 0, fyersExchanging: false,
+    feederEditSaving:    { upstox: false, fyers: false },
+    feederEditMsg:       { upstox: '', fyers: '' },
+    feederMsg:           { upstox: '', fyers: '' },
     positions: [], posLoading: false, posTs: '',
 
     /* ── RMS ─────────────────────────────────────────────────────────── */
@@ -626,12 +621,6 @@ document.addEventListener('alpine:init', () => {
                     upstox_creds_present: false, fyers_creds_present: false,
                     upstox_token_fresh: false,   fyers_token_fresh: false },
 
-    /* ── Admin feeder panel ─────────────────────────────────────────── */
-    feederProvider:  'mock',
-    feederCreds:     { user_id:'', api_key:'', totp_secret:'' },
-    feederMsg:       '',
-    feederOk:        null,
-    feederConnecting: false,
     supportedFeeders: ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue'],
 
     /* ── Client broker modal ────────────────────────────────────────── */
@@ -991,22 +980,6 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async connectFeeder() {
-      this.feederMsg = ''; this.feederOk = null; this.feederConnecting = true;
-      try {
-        const body = { provider: this.feederProvider, ...this.feederCreds };
-        const r = await this._fetch('/api/admin/feeder/connect', { json: body });
-        if (!r) return;
-        const d = await r.json();
-        this.feederOk  = r.ok;
-        this.feederMsg = d.message || d.detail || (r.ok ? 'Connected.' : 'Failed.');
-      } catch {
-        this.feederOk = false; this.feederMsg = 'Request failed.';
-      } finally {
-        this.feederConnecting = false;
-      }
-    },
-
     /* ── Client actions ──────────────────────────────────────────────── */
     async addBroker() {
       this.brokerAddMsg = ''; this.brokerAddOk = null; this.brokerAddLoading = true;
@@ -1051,160 +1024,87 @@ document.addEventListener('alpine:init', () => {
       } catch { /* silent */ }
     },
 
-    /* ── Dual feeder ─────────────────────────────────────────────────────── */
-    async connectUpstox() {
-      this.upstoxMsg = ''; this.upstoxOk = null; this.upstoxConnecting = true;
-      try {
-        const r = await this._fetch('/api/admin/feeder/auth-url?provider=upstox', { method: 'GET' });
-        if (!r) return;
-        const d = await r.json();
-        if (d.ok && d.auth_url) {
-          window.open(d.auth_url, '_blank');
-          this.upstoxOk  = null;
-          this.upstoxMsg = '🔗 Browser login page opened. Complete authentication there — this page will update automatically.';
-        } else {
-          this.upstoxOk  = false;
-          this.upstoxMsg = d.error || 'Failed to generate auth URL. Save credentials first.';
-        }
-        await this.loadFeederStatus();
-      } catch { this.upstoxOk = false; this.upstoxMsg = 'Request failed.'; }
-      finally   { this.upstoxConnecting = false; }
-    },
-
-    async connectFyers() {
-      this.fyersMsg = ''; this.fyersOk = null; this.fyersConnecting = true;
-      try {
-        const r = await this._fetch('/api/admin/feeder/auth-url?provider=fyers', { method: 'GET' });
-        if (!r) return;
-        const d = await r.json();
-        if (d.ok && d.auth_url) {
-          window.open(d.auth_url, '_blank');
-          this.fyersOk  = null;
-          this.fyersMsg = '🔗 Browser login page opened. Complete authentication there — this page will update automatically.';
-        } else {
-          this.fyersOk  = false;
-          this.fyersMsg = d.error || 'Failed to generate auth URL. Save credentials first.';
-        }
-        await this.loadFeederStatus();
-      } catch { this.fyersOk = false; this.fyersMsg = 'Request failed.'; }
-      finally   { this.fyersConnecting = false; }
-    },
-
-    async connectDual() {
-      this.dualMsg = ''; this.dualOk = null; this.dualConnecting = true;
-      try {
-        // Pick the provider with a fresh token; prefer fyers then upstox
-        const provider = (this.systemStatus.fyers_token_fresh)  ? 'fyers'
-                       : (this.systemStatus.upstox_token_fresh) ? 'upstox'
-                       : 'fyers';
-        const r = await this._fetch('/api/admin/feeder/connect', { json: { provider } });
-        if (!r) return;
-        const d = await r.json();
-        this.dualOk  = r.ok;
-        const msg = d.message || d.detail || d.error || '';
-        this.dualMsg = typeof msg === 'string' ? msg : JSON.stringify(msg) || (r.ok ? 'Feed active.' : 'Failed.');
-        if (r.ok) await this.loadFeederStatus();
-      } catch (e) { this.dualOk = false; this.dualMsg = e.message || 'Request failed.'; }
-      finally   { this.dualConnecting = false; }
-    },
-
-    /* ── Modal open / close ────────────────────────────────────────────── */
-    openUpstoxModal() {
-      this.showUpstoxModal = true;
-      if (this.upstoxOk !== false) this.upstoxMsg = '';
-      this.saveUpstoxMsg = ''; this.saveUpstoxOk = null;
-      this.loadFeederStatus(); // ensure [stored in DB] placeholders reflect current DB state
-    },
-    closeUpstoxModal() { this.showUpstoxModal = false; this.upstoxSecretVisible = false; },
-    openFyersModal() {
-      this.showFyersModal = true;
-      if (this.fyersOk !== false) this.fyersMsg = '';
-      this.saveFyersMsg = ''; this.saveFyersOk = null;
-      this.fyersAuthUrl = ''; this.fyersRedirectUrl = ''; this.fyersOauthStep = 0;
-      this.loadFeederStatus(); // ensure [stored in DB] placeholders reflect current DB state
-    },
-    closeFyersModal() { this.showFyersModal = false; this.fyersSecretVisible = false; this.fyersOauthStep = 0; },
-    async getFyersAuthUrl() {
-      this.fyersMsg = ''; this.fyersOk = null; this.fyersConnecting = true;
-      try {
-        const r = await this._fetch('/api/admin/feeder/fyers/auth-url', { method: 'GET' });
-        if (!r) { this.fyersOk = false; this.fyersMsg = 'Network error.'; return; }
-        const d = await r.json();
-        if (d.ok && d.url) {
-          this.fyersAuthUrl = d.url;
-          this.fyersOauthStep = 1;
-          window.open(d.url, '_blank');
-        } else {
-          this.fyersOk = false;
-          this.fyersMsg = d.error || 'Failed to generate auth URL.';
-        }
-      } catch (e) { this.fyersOk = false; this.fyersMsg = 'Request failed: ' + (e.message || e); }
-      finally { this.fyersConnecting = false; }
-    },
-    async exchangeFyersCode() {
-      if (!this.fyersRedirectUrl.trim()) { this.fyersMsg = 'Paste the redirect URL first.'; this.fyersOk = false; return; }
-      this.fyersMsg = ''; this.fyersOk = null; this.fyersExchanging = true;
-      try {
-        const r = await this._fetch('/api/admin/feeder/fyers/exchange-code', {
-          json: { redirect_url: this.fyersRedirectUrl.trim() }
-        });
-        if (!r) { this.fyersOk = false; this.fyersMsg = 'Network error.'; return; }
-        const d = await r.json();
-        if (d.ok) {
-          this.fyersOk = true;
-          this.fyersMsg = d.message || 'Connected.';
-          this.fyersOauthStep = 2;
+    /* ── Admin feeder toggles ───────────────────────────────────────────── */
+    async toggleFeeder(p) {
+      if (this.feederToggleLoading[p]) return;
+      if (this.feederToggle[p]) {
+        // Toggle OFF
+        this.feederToggleLoading[p] = true;
+        this.feederMsg[p] = '';
+        try {
+          const r = await this._fetch(`/api/admin/feeder/${p}/disconnect`, { method: 'POST' });
+          if (!r) return;
+          const d = await r.json();
+          this.feederToggle[p] = false;
+          this.feederMsg[p] = d.message || 'Disconnected.';
           await this.loadFeederStatus();
-        } else {
-          this.fyersOk = false;
-          this.fyersMsg = d.error || 'Exchange failed.';
+        } catch { this.feederMsg[p] = 'Request failed.'; }
+        finally { this.feederToggleLoading[p] = false; }
+        return;
+      }
+      // Toggle ON
+      this.feederToggleLoading[p] = true;
+      this.feederMsg[p] = '';
+      try {
+        const r = await this._fetch(`/api/admin/feeder/${p}/connect`, { method: 'POST' });
+        if (!r) return;
+        const d = await r.json();
+        if (d.ok && d.connected) {
+          this.feederToggle[p] = true;
+          this.feederMsg[p] = `✓ ${p.toUpperCase()} connected (cached token).`;
+          await this.loadFeederStatus();
+          return;
         }
-      } catch (e) { this.fyersOk = false; this.fyersMsg = 'Request failed: ' + (e.message || e); }
-      finally { this.fyersExchanging = false; }
+        if (d.flow === 'oauth' && d.auth_url) {
+          this.feederMsg[p] = `Opening ${p.toUpperCase()} login… Toggle flips automatically on success.`;
+          window.open(d.auth_url, '_blank', 'width=900,height=700,menubar=no,toolbar=no');
+          this._pollForFeederToken(p, 60);
+          return;
+        }
+        this.feederMsg[p] = d.error || 'Authentication required. Save credentials first.';
+      } catch (e) { this.feederMsg[p] = 'Request failed: ' + (e.message || e); }
+      finally { this.feederToggleLoading[p] = false; }
     },
 
-    /* ── Save credentials (DB only — no connect, no password/TOTP) ────── */
-    async saveUpstoxCreds() {
-      this.saveUpstoxMsg = ''; this.saveUpstoxOk = null; this.saveUpstoxLoading = true;
-      try {
-        const r = await this._fetch('/api/admin/feeder/save-creds', {
-          json: {
-            provider:  'upstox',
-            client_id: this.dualCreds.upstox_client_id,
-            api_key:   this.dualCreds.upstox_api_key,
-            secret:    this.dualCreds.upstox_secret,
-          }
-        });
-        if (!r) { this.saveUpstoxOk = false; this.saveUpstoxMsg = 'Network error.'; return; }
-        const d = await r.json();
-        this.saveUpstoxOk  = d.ok !== false && r.ok;
-        this.saveUpstoxMsg = this.saveUpstoxOk
-          ? '✓ Credentials saved. Click Connect Now to open the Upstox login page.'
-          : (d.error || d.detail || 'Save failed.');
-        if (this.saveUpstoxOk) await this.loadFeederStatus();
-      } catch (err) { this.saveUpstoxOk = false; this.saveUpstoxMsg = `Save error: ${err.message || err}`; }
-      finally   { this.saveUpstoxLoading = false; }
+    _pollForFeederToken(p, maxTries) {
+      let tries = 0;
+      const iv = setInterval(async () => {
+        tries++;
+        await this.loadFeederStatus();
+        if ((this.systemStatus.providers || {})[p]?.token_fresh) {
+          clearInterval(iv);
+          this.feederToggle[p] = true;
+          this.feederMsg[p] = `✓ ${p.toUpperCase()} connected via OAuth!`;
+        }
+        if (tries >= maxTries) {
+          clearInterval(iv);
+          if (!this.feederToggle[p]) this.feederMsg[p] = 'Login timeout. Please try again.';
+        }
+      }, 3000);
     },
-    async saveFyersCreds() {
-      this.saveFyersMsg = ''; this.saveFyersOk = null; this.saveFyersLoading = true;
+
+    async saveFeederCreds(p) {
+      this.feederEditSaving[p] = true;
+      this.feederEditMsg[p]    = '';
       try {
         const r = await this._fetch('/api/admin/feeder/save-creds', {
           json: {
-            provider:  'fyers',
-            client_id: this.dualCreds.fyers_client_id,
-            api_key:   this.dualCreds.fyers_app_key,
-            secret:    this.dualCreds.fyers_secret,
+            provider:  p,
+            client_id: this.feederEditCreds[p].client_id,
+            api_key:   this.feederEditCreds[p].api_key,
+            secret:    this.feederEditCreds[p].secret,
           }
         });
-        if (!r) { this.saveFyersOk = false; this.saveFyersMsg = 'Network error.'; return; }
+        if (!r) return;
         const d = await r.json();
-        this.saveFyersOk  = d.ok !== false && r.ok;
-        this.saveFyersMsg = this.saveFyersOk
-          ? '✓ Credentials saved. Click Connect Now to open the Fyers login page.'
-          : (d.error || d.detail || 'Save failed.');
-        if (this.saveFyersOk) await this.loadFeederStatus();
-      } catch (err) { this.saveFyersOk = false; this.saveFyersMsg = `Save error: ${err.message || err}`; }
-      finally   { this.saveFyersLoading = false; }
+        this.feederEditMsg[p] = d.ok ? '✓ Credentials saved.' : (d.error || 'Save failed.');
+        if (d.ok) {
+          this.feederEditCreds[p] = { client_id:'', api_key:'', secret:'' };
+          this.feederEditOpen[p]  = false;
+          await this.loadFeederStatus();
+        }
+      } catch { this.feederEditMsg[p] = 'Request failed.'; }
+      finally { this.feederEditSaving[p] = false; }
     },
 
     /* ── RMS ─────────────────────────────────────────────────────────────── */
@@ -1261,7 +1161,15 @@ document.addEventListener('alpine:init', () => {
     async loadFeederStatus() {
       try {
         const r = await this._fetch('/api/admin/feeder/status');
-        if (r && r.ok) { const d = await r.json(); this.systemStatus = d; }
+        if (r && r.ok) {
+          const d = await r.json();
+          this.systemStatus = d;
+          // Sync feeder toggle state from DB token freshness on every status load
+          for (const p of ['upstox', 'fyers']) {
+            const prov = (d.providers || {})[p] || {};
+            if (prov.token_fresh) this.feederToggle[p] = true;
+          }
+        }
       } catch {}
     },
 
@@ -4016,103 +3924,103 @@ document.addEventListener('alpine:init', () => {
       </div>
     </div>
 
-    <!-- Upstox + Fyers trigger cards — click to open config modal -->
-    <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+    <!-- Feeder toggle rows — Upstox + Fyers -->
+    <div class="space-y-3">
+      <template x-for="p in ['upstox','fyers']" :key="p">
+        <div class="rounded p-3 flex flex-col gap-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
 
-      <!-- Upstox trigger card -->
-      <div class="rounded p-3 flex flex-col gap-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-        <div class="flex items-center justify-between">
-          <div>
-            <div class="font-ui font-bold text-sm tracking-widest" style="color:var(--t-cyan)">UPSTOX API v2</div>
-            <div class="font-mono text-xs mt-0.5">
-              <span x-show="systemStatus.upstox_creds_present && systemStatus.upstox_token_fresh"
-                    style="color:var(--t-green)">&#x2705; CACHED — TOKEN FRESH</span>
-              <span x-show="systemStatus.upstox_creds_present && !systemStatus.upstox_token_fresh"
-                    style="color:var(--t-amber)">&#x26A0; CACHED — TOKEN NEEDS REFRESH</span>
-              <span x-show="!systemStatus.upstox_creds_present"
-                    style="color:var(--t-muted)">&#x25CB; No credentials on file</span>
+          <!-- Row: name + status + gear + toggle -->
+          <div class="flex items-center gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="font-ui font-bold text-sm tracking-widest"
+                   :style="p==='upstox'?'color:var(--t-cyan)':'color:var(--t-amber)'"
+                   x-text="p==='upstox'?'UPSTOX API v2':'FYERS API v3'"></div>
+              <div class="font-mono text-xs mt-0.5">
+                <span x-show="(systemStatus.providers||{})[p]?.token_fresh"
+                      style="color:var(--t-green)">&#x25CF; TOKEN FRESH</span>
+                <span x-show="(systemStatus.providers||{})[p]?.creds_present && !(systemStatus.providers||{})[p]?.token_fresh"
+                      style="color:var(--t-amber)">&#x26A0; TOKEN EXPIRED</span>
+                <span x-show="!(systemStatus.providers||{})[p]?.creds_present"
+                      style="color:var(--t-muted)">&#x25CB; No credentials</span>
+              </div>
+            </div>
+
+            <!-- Gear: open/close inline credential form -->
+            <button @click="feederEditOpen[p]=!feederEditOpen[p]"
+                    class="text-sm px-2 py-1 rounded border font-mono transition-all"
+                    style="border-color:var(--t-border);color:var(--t-muted)"
+                    title="Edit credentials">&#x2699;</button>
+
+            <!-- ON/OFF toggle -->
+            <button @click="toggleFeeder(p)"
+                    :disabled="feederToggleLoading[p]"
+                    class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-sm font-bold transition-all"
+                    :style="feederToggleLoading[p]
+                      ? 'border-color:var(--t-border);color:var(--t-muted);cursor:wait'
+                      : feederToggle[p]
+                        ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
+              <template x-if="feederToggleLoading[p]">
+                <span style="display:inline-block;width:12px;height:12px;border:2px solid var(--t-muted);border-top-color:var(--t-green);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+              </template>
+              <template x-if="!feederToggleLoading[p]">
+                <span class="w-8 h-4 rounded-full relative transition-all"
+                      :style="feederToggle[p]?'background:var(--t-green)':'background:var(--t-dim)'">
+                  <span class="absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all"
+                        :style="feederToggle[p]?'left:18px':'left:2px'"></span>
+                </span>
+              </template>
+              <span x-text="feederToggleLoading[p]?'Connecting…':(feederToggle[p]?'ON':'OFF')"></span>
+            </button>
+          </div>
+
+          <!-- Status message -->
+          <div x-show="feederMsg[p]" class="font-mono text-xs px-2 py-1 rounded"
+               x-text="feederMsg[p]"
+               :style="feederToggle[p]
+                 ?'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                 :'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.07);border:1px solid rgba(var(--t-amber-rgb),0.2)'"></div>
+
+          <!-- Inline credential edit form -->
+          <div x-show="feederEditOpen[p]" class="pt-2 space-y-2 border-t" style="border-color:var(--t-border)">
+            <div class="font-mono text-xs" style="color:var(--t-muted)">Credentials encrypted at rest · Never logged</div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <div class="sec-label mb-1">CLIENT ID</div>
+                <input class="t-input" type="text" x-model="feederEditCreds[p].client_id"
+                       :placeholder="(systemStatus.providers||{})[p]?.creds_present?'[stored ✓]':'Broker client ID'"
+                       autocomplete="off" spellcheck="false"/>
+              </div>
+              <div>
+                <div class="sec-label mb-1">API KEY</div>
+                <input class="t-input" type="text" x-model="feederEditCreds[p].api_key"
+                       :placeholder="(systemStatus.providers||{})[p]?.creds_present?'[stored ✓]':'API key'"
+                       autocomplete="off" spellcheck="false"/>
+              </div>
+              <div>
+                <div class="sec-label mb-1">SECRET</div>
+                <input class="t-input" type="password" x-model="feederEditCreds[p].secret"
+                       :placeholder="(systemStatus.providers||{})[p]?.creds_present?'[stored ✓]':'App secret'"
+                       autocomplete="off" spellcheck="false"/>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <button @click="saveFeederCreds(p)" :disabled="feederEditSaving[p]"
+                      class="font-ui font-bold text-xs px-4 py-1.5 rounded border"
+                      :style="p==='upstox'
+                        ?'border-color:rgba(var(--t-cyan-rgb),0.4);color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06)'
+                        :'border-color:rgba(var(--t-amber-rgb),0.4);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.06)'">
+                <span x-show="!feederEditSaving[p]">&#x1F4BE; SAVE</span>
+                <span x-show="feederEditSaving[p]">Saving…</span>
+              </button>
+              <div x-show="feederEditMsg[p]" class="font-mono text-xs"
+                   :style="feederEditMsg[p].startsWith('✓')?'color:var(--t-green)':'color:var(--t-red)'"
+                   x-text="feederEditMsg[p]"></div>
             </div>
           </div>
-          <button @click="openUpstoxModal()"
-                  class="font-ui font-bold text-xs px-3 py-1.5 rounded border shrink-0"
-                  style="border-color:rgba(var(--t-cyan-rgb),0.4);color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06);letter-spacing:.1em">
-            &#x2699; CONFIGURE
-          </button>
-        </div>
-        <!-- Quick-connect strip -->
-        <div class="bg-connect-strip">
-          <div class="font-mono text-xs" style="color:var(--t-green)">
-            <span style="opacity:0.6">Interactive OAuth:</span>
-            Opens Upstox login page · Token auto-stored on redirect
-          </div>
-          <button class="btn-connect-now"
-                  @click="connectUpstox()" :disabled="upstoxConnecting">
-            <span x-show="!upstoxConnecting">&#x1F517; Connect Now</span>
-            <span x-show="upstoxConnecting">&#x23F3;</span>
-          </button>
-        </div>
-        <!-- Status feedback -->
-        <div x-show="upstoxMsg" class="font-mono text-xs px-2 py-2 rounded leading-relaxed"
-             style="word-break:break-word;white-space:normal"
-             :style="upstoxOk?'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)':'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
-             x-text="upstoxMsg"></div>
-      </div>
 
-      <!-- Fyers trigger card -->
-      <div class="rounded p-3 flex flex-col gap-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-        <div class="flex items-center justify-between">
-          <div>
-            <div class="font-ui font-bold text-sm tracking-widest" style="color:var(--t-amber)">FYERS API v3</div>
-            <div class="font-mono text-xs mt-0.5">
-              <span x-show="systemStatus.fyers_creds_present && systemStatus.fyers_token_fresh"
-                    style="color:var(--t-green)">&#x2705; CACHED — TOKEN FRESH</span>
-              <span x-show="systemStatus.fyers_creds_present && !systemStatus.fyers_token_fresh"
-                    style="color:var(--t-amber)">&#x26A0; CACHED — TOKEN NEEDS REFRESH</span>
-              <span x-show="!systemStatus.fyers_creds_present"
-                    style="color:var(--t-muted)">&#x25CB; No credentials on file</span>
-            </div>
-          </div>
-          <button @click="openFyersModal()"
-                  class="font-ui font-bold text-xs px-3 py-1.5 rounded border shrink-0"
-                  style="border-color:rgba(var(--t-amber-rgb),0.4);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.06);letter-spacing:.1em">
-            &#x2699; CONFIGURE
-          </button>
         </div>
-        <!-- Quick-connect strip -->
-        <div class="bg-connect-strip" style="border-color:rgba(var(--t-amber-rgb),0.22);background:rgba(var(--t-amber-rgb),0.03)">
-          <div class="font-mono text-xs" style="color:var(--t-amber)">
-            <span style="opacity:0.6">Interactive OAuth:</span>
-            Opens Fyers login page · Token auto-stored on redirect
-          </div>
-          <button class="btn-connect-now" style="border-color:rgba(var(--t-amber-rgb),0.5);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.08)"
-                  @click="connectFyers()" :disabled="fyersConnecting">
-            <span x-show="!fyersConnecting">&#x1F517; Connect Now</span>
-            <span x-show="fyersConnecting">&#x23F3;</span>
-          </button>
-        </div>
-        <!-- Status feedback -->
-        <div x-show="fyersMsg" class="font-mono text-xs px-2 py-2 rounded leading-relaxed"
-             style="word-break:break-word;white-space:normal"
-             :style="fyersOk?'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)':'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
-             x-text="fyersMsg"></div>
-      </div>
-
-    </div>
-
-    <div class="flex items-center gap-3 mt-4">
-      <button class="btn-primary" style="width:auto;min-width:300px;padding:9px 28px"
-              @click="connectDual()" :disabled="dualConnecting">
-        <span x-show="!dualConnecting"
-              x-text="(systemStatus.upstox_creds_present && systemStatus.fyers_creds_present
-                       && !(dualCreds.upstox_client_id||dualCreds.fyers_client_id))
-                       ? '&#x27F3; RECONNECT DUAL ENGINE (USE CACHED CREDS)'
-                       : '&#x27F3; INITIALIZE COMPLETE DUAL ENGINE'"></span>
-        <span x-show="dualConnecting">ESTABLISHING DUAL STREAM…</span>
-      </button>
-      <div x-show="dualMsg" class="font-mono text-xs px-3 py-2 rounded"
-           :style="dualOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.25)'
-                          : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.25)'"
-           x-text="dualMsg"></div>
+      </template>
     </div>
   </div>
 
@@ -5713,193 +5621,6 @@ document.addEventListener('alpine:init', () => {
   </div>
 </div>
 
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     UPSTOX API v2 CONFIGURATION MODAL
-════════════════════════════════════════════════════════════════════════════ -->
-<div x-show="showUpstoxModal"
-     class="modal-overlay"
-     @keydown.escape.window="closeUpstoxModal()"
-     x-transition:enter="transition ease-out duration-150"
-     x-transition:enter-start="opacity-0"
-     x-transition:enter-end="opacity-100"
-     x-transition:leave="transition ease-in duration-100"
-     x-transition:leave-start="opacity-100"
-     x-transition:leave-end="opacity-0"
-     style="display:none">
-  <div class="modal-panel" @click.stop>
-    <!-- Header -->
-    <div class="modal-header">
-      <div>
-        <div class="font-display text-xs font-bold tracking-widest" style="color:var(--t-cyan)">UPSTOX API v2 CONFIGURATION</div>
-        <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Credentials are XOR-encrypted at rest · Never logged</div>
-      </div>
-      <button @click="closeUpstoxModal()" class="font-mono text-lg leading-none" style="color:var(--t-muted)">✕</button>
-    </div>
-
-    <!-- Body -->
-    <div class="modal-body space-y-3">
-
-      <!-- Zone 1: Core API Identifiers -->
-      <div class="modal-zone">
-        <div class="modal-zone-label">&#x1F511; Core API Identifiers</div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <div class="sec-label mb-1">API KEY</div>
-            <input class="t-input" type="text" x-model="dualCreds.upstox_api_key"
-                   :placeholder="systemStatus.upstox_creds_present ? '[stored in DB — leave blank to reuse]' : 'API key from dev portal'"
-                   autocomplete="off" spellcheck="false"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">API SECRET</div>
-            <div class="flex items-center gap-1">
-              <input class="t-input flex-1 min-w-0" :type="upstoxSecretVisible ? 'text' : 'password'"
-                     x-model="dualCreds.upstox_secret"
-                     :placeholder="systemStatus.upstox_creds_present ? '[stored in DB]' : 'API secret'"
-                     autocomplete="off" spellcheck="false"/>
-              <button class="vis-toggle" @click="upstoxSecretVisible = !upstoxSecretVisible"
-                      :title="upstoxSecretVisible ? 'Hide' : 'Reveal'">
-                <span x-text="upstoxSecretVisible ? '🙈' : '👁'"></span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- OAuth Connect strip (inside modal) -->
-      <div class="bg-connect-strip">
-        <div class="font-mono text-xs" style="color:var(--t-green)">
-          <span style="opacity:0.6">Step 2 — Interactive OAuth:</span>
-          Opens Upstox login page · Token stored automatically on redirect
-        </div>
-        <button class="btn-connect-now" @click="connectUpstox()" :disabled="upstoxConnecting">
-          <span x-show="!upstoxConnecting">&#x1F517; Connect Now</span>
-          <span x-show="upstoxConnecting">&#x23F3;</span>
-        </button>
-      </div>
-
-      <!-- Connect result feedback -->
-      <div x-show="upstoxMsg" class="font-mono text-xs px-2 py-2 rounded leading-relaxed"
-           style="word-break:break-word;white-space:normal"
-           :style="upstoxOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)'
-                            : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
-           x-text="upstoxMsg"></div>
-
-      <!-- Save result feedback -->
-      <div x-show="saveUpstoxMsg" class="font-mono text-xs px-2 py-2 rounded leading-relaxed"
-           style="word-break:break-word;white-space:normal"
-           :style="saveUpstoxOk ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.07);border:1px solid rgba(var(--t-cyan-rgb),0.2)'
-                                : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
-           x-text="saveUpstoxMsg"></div>
-
-    </div><!-- end modal-body -->
-
-    <!-- Footer -->
-    <div class="modal-footer">
-      <button class="btn-modal-cancel" @click="closeUpstoxModal()">Cancel</button>
-      <button class="btn-modal-save" @click="saveUpstoxCreds()" :disabled="saveUpstoxLoading">
-        <span x-show="!saveUpstoxLoading">&#x1F4BE; Save Credentials</span>
-        <span x-show="saveUpstoxLoading">Saving…</span>
-      </button>
-    </div>
-  </div>
-</div>
-
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     FYERS API v3 CONFIGURATION MODAL
-════════════════════════════════════════════════════════════════════════════ -->
-<div x-show="showFyersModal"
-     class="modal-overlay"
-     @keydown.escape.window="closeFyersModal()"
-     x-transition:enter="transition ease-out duration-150"
-     x-transition:enter-start="opacity-0"
-     x-transition:enter-end="opacity-100"
-     x-transition:leave="transition ease-in duration-100"
-     x-transition:leave-start="opacity-100"
-     x-transition:leave-end="opacity-0"
-     style="display:none">
-  <div class="modal-panel" @click.stop
-       >
-    <!-- Header -->
-    <div class="modal-header">
-      <div>
-        <div class="font-display text-xs font-bold tracking-widest" style="color:var(--t-amber)">FYERS API v3 CONFIGURATION</div>
-        <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Credentials are XOR-encrypted at rest · Never logged</div>
-      </div>
-      <button @click="closeFyersModal()" class="font-mono text-lg leading-none" style="color:var(--t-muted)">✕</button>
-    </div>
-
-    <!-- Body -->
-    <div class="modal-body space-y-3">
-
-      <!-- Zone 1: Core API Identifiers -->
-      <div class="modal-zone" style="border-color:rgba(var(--t-amber-rgb),0.18)">
-        <div class="modal-zone-label" style="color:var(--t-amber);opacity:0.7">&#x1F511; Core API Identifiers</div>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <div class="sec-label mb-1">APP KEY</div>
-            <input class="t-input" type="text" x-model="dualCreds.fyers_app_key"
-                   :placeholder="systemStatus.fyers_creds_present ? '[stored in DB — leave blank to reuse]' : 'app_id from Fyers dev portal'"
-                   autocomplete="off" spellcheck="false"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">APP SECRET</div>
-            <div class="flex items-center gap-1">
-              <input class="t-input flex-1 min-w-0" :type="fyersSecretVisible ? 'text' : 'password'"
-                     x-model="dualCreds.fyers_secret"
-                     :placeholder="systemStatus.fyers_creds_present ? '[stored in DB]' : 'App secret'"
-                     autocomplete="off" spellcheck="false"/>
-              <button class="vis-toggle" @click="fyersSecretVisible = !fyersSecretVisible"
-                      :title="fyersSecretVisible ? 'Hide' : 'Reveal'">
-                <span x-text="fyersSecretVisible ? '🙈' : '👁'"></span>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- OAuth connect strip (Fyers modal) -->
-      <div class="bg-connect-strip" style="border-color:rgba(var(--t-amber-rgb),0.22);background:rgba(var(--t-amber-rgb),0.03)">
-        <div class="font-mono text-xs" style="color:var(--t-amber)">
-          <span style="opacity:0.6">Step 2 — Interactive OAuth:</span>
-          Opens Fyers login page · Token stored automatically on redirect
-        </div>
-        <button class="btn-connect-now" style="border-color:rgba(var(--t-amber-rgb),0.5);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.08)"
-                @click="connectFyers()" :disabled="fyersConnecting">
-          <span x-show="!fyersConnecting">&#x1F517; Connect Now</span>
-          <span x-show="fyersConnecting">&#x23F3;</span>
-        </button>
-      </div>
-
-
-      <!-- Connect result feedback -->
-      <div x-show="fyersMsg" class="font-mono text-xs px-2 py-2 rounded leading-relaxed"
-           style="word-break:break-word;white-space:normal"
-           :style="fyersOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.07);border:1px solid rgba(var(--t-green-rgb),0.2)'
-                           : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
-           x-text="fyersMsg"></div>
-
-      <!-- Save result feedback -->
-      <div x-show="saveFyersMsg" class="font-mono text-xs px-2 py-2 rounded leading-relaxed" style="word-break:break-word;white-space:normal"
-           :style="saveFyersOk ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.07);border:1px solid rgba(var(--t-amber-rgb),0.2)'
-                               : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.07);border:1px solid rgba(var(--t-red-rgb),0.2)'"
-           x-text="saveFyersMsg"></div>
-
-    </div><!-- end modal-body -->
-
-    <!-- Footer -->
-    <div class="modal-footer" style="border-top-color:rgba(var(--t-amber-rgb),0.18)">
-      <button class="btn-modal-cancel" @click="closeFyersModal()">Cancel</button>
-      <button class="btn-modal-save"
-              style="border-color:rgba(var(--t-amber-rgb),0.5);color:var(--t-bg);background:var(--t-amber)"
-              @click="saveFyersCreds()" :disabled="saveFyersLoading">
-        <span x-show="!saveFyersLoading">&#x1F4BE; Save Credentials</span>
-        <span x-show="saveFyersLoading">Saving…</span>
-      </button>
-    </div>
-  </div>
-</div>
 
 
 </body>
