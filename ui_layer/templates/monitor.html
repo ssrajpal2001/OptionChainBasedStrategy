@@ -917,6 +917,22 @@ document.addEventListener('alpine:init', () => {
         if (msg.name === 'clients') this.clients = msg.data || [];
         if (msg.name === 'workers') this.workers = msg.data || [];
         if (msg.name === 'brokers') this.brokers = msg.data || [];
+      } else if (msg.type === 'terminal_connected') {
+        // OAuth callback fired — instantly refresh bindings and flip toggle message
+        this.loadClientStatus();
+        if (msg.binding_id && this.csBrokerOp[msg.binding_id]) {
+          this.csBrokerOp[msg.binding_id].ok  = true;
+          this.csBrokerOp[msg.binding_id].msg =
+            `✓ ${(msg.provider||'').toUpperCase()} connected via OAuth`;
+        }
+      } else if (msg.type === 'feeder_token_updated') {
+        // OAuth callback fired for admin feeder — flip toggle and reload status
+        this.loadFeederStatus();
+        if (msg.provider && this.feederToggle[msg.provider] !== undefined) {
+          this.feederToggle[msg.provider] = true;
+          this.feederMsg[msg.provider]    =
+            `✓ ${(msg.provider||'').toUpperCase()} connected via OAuth`;
+        }
       }
     },
 
@@ -1562,11 +1578,23 @@ document.addEventListener('alpine:init', () => {
       finally   { this.botLoading = false; }
     },
 
-    async toggleTrade(bindingId) {
+    async toggleTrade(b) {
+      if (!b.terminal_connected) return;
+      const bid = b.binding_id;
+      this._initBrokerOp(bid);
+      const op = this.csBrokerOp[bid];
+      op.tradeLoading = true;
       try {
-        const r = await this._fetch(`/api/client/set_trade/${bindingId}`, { method: 'POST' });
-        if (r && r.ok) await this.loadClientStatus();
-      } catch {}
+        const r = await this._fetch(`/api/client/set_trade/${encodeURIComponent(bid)}`, { method: 'POST' });
+        if (!r) return;
+        const d = await r.json();
+        op.ok  = d.ok;
+        op.msg = d.ok
+          ? (d.is_trade_enabled ? '✓ Trade enabled — orders will route here.' : '✓ Trade disabled.')
+          : (d.error || 'Failed.');
+        if (d.ok) await this.loadClientStatus();
+      } catch (e) { op.ok = false; op.msg = 'Request failed.'; }
+      finally { op.tradeLoading = false; }
     },
 
     async setClientIndex(idx) {
@@ -1647,7 +1675,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Terminal toggle ────────────────────────────────────────────────── */
     _initBrokerOp(bid) {
       if (!this.csBrokerOp[bid]) this.csBrokerOp[bid] = {
-        loading: false, termLoading: false, engLoading: false,
+        loading: false, termLoading: false, engLoading: false, tradeLoading: false,
         termStep: '', msg: '', ok: null, step: '',
       };
     },
@@ -5010,6 +5038,36 @@ document.addEventListener('alpine:init', () => {
                     (csBrokerOp[b.binding_id]||{}).termLoading
                       ? ((csBrokerOp[b.binding_id]||{}).termStep || 'Connecting…')
                       : (b.terminal_connected ? 'Terminal ON' : 'Terminal OFF')
+                  "></span>
+                </button>
+
+                <!-- ── TRADE TOGGLE ────────────────────────────────────────────
+                     ON = orders route to this broker. Only enabled when Terminal is ON.
+                     Terminal OFF auto-clears this toggle via disconnect endpoint. -->
+                <button @click="toggleTrade(b)"
+                        :disabled="!b.terminal_connected || (csBrokerOp[b.binding_id]||{}).tradeLoading"
+                        class="flex items-center gap-2 px-4 py-2 rounded-lg border font-mono text-sm font-bold transition-all"
+                        :title="!b.terminal_connected ? 'Connect Terminal first' : (b.is_trade_enabled ? 'Disable order routing' : 'Enable order routing')"
+                        :style="!b.terminal_connected
+                          ? 'opacity:0.35;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
+                          : (csBrokerOp[b.binding_id]||{}).tradeLoading
+                            ? 'border-color:var(--t-border);color:var(--t-muted);cursor:wait'
+                            : b.is_trade_enabled
+                              ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
+                              : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
+                  <template x-if="(csBrokerOp[b.binding_id]||{}).tradeLoading">
+                    <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--t-muted);border-top-color:var(--t-green);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+                  </template>
+                  <template x-if="!(csBrokerOp[b.binding_id]||{}).tradeLoading">
+                    <span class="w-8 h-4 rounded-full relative transition-all"
+                          :style="b.is_trade_enabled && b.terminal_connected?'background:var(--t-green)':'background:var(--t-dim)'">
+                      <span class="absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all"
+                            :style="b.is_trade_enabled && b.terminal_connected?'left:18px':'left:2px'"></span>
+                    </span>
+                  </template>
+                  <span x-text="
+                    (csBrokerOp[b.binding_id]||{}).tradeLoading ? 'Updating…'
+                    : (b.is_trade_enabled && b.terminal_connected ? 'Trade ON' : 'Trade OFF')
                   "></span>
                 </button>
 
