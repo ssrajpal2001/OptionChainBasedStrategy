@@ -1058,27 +1058,35 @@ document.addEventListener('alpine:init', () => {
         finally { this.feederToggleLoading[p] = false; }
         return;
       }
-      // Toggle ON
+      // Toggle ON — pre-open blank tab synchronously (user gesture active here)
+      // so the browser does not block the popup after the async fetch resolves.
+      const _authWin = window.open('', '_blank');
       this.feederToggleLoading[p] = true;
       this.feederMsg[p] = '';
       try {
         const r = await this._fetch(`/api/admin/feeder/${p}/connect`, { method: 'POST' });
-        if (!r) return;
+        if (!r) { if (_authWin) _authWin.close(); return; }
         const d = await r.json();
         if (d.ok && d.connected) {
+          if (_authWin) _authWin.close();
           this.feederToggle[p] = true;
           this.feederMsg[p] = `✓ ${p.toUpperCase()} connected (cached token).`;
           await this.loadFeederStatus();
           return;
         }
         if (d.flow === 'oauth' && d.auth_url) {
+          if (_authWin) { _authWin.location.href = d.auth_url; }
+          else { window.open(d.auth_url, '_blank'); }
           this.feederMsg[p] = `Opening ${p.toUpperCase()} login… Toggle flips automatically on success.`;
-          window.open(d.auth_url, '_blank', 'width=900,height=700,menubar=no,toolbar=no');
           this._pollForFeederToken(p, 60);
           return;
         }
+        if (_authWin) _authWin.close();
         this.feederMsg[p] = d.error || 'Authentication required. Save credentials first.';
-      } catch (e) { this.feederMsg[p] = 'Request failed: ' + (e.message || e); }
+      } catch (e) {
+        if (_authWin) _authWin.close();
+        this.feederMsg[p] = 'Request failed: ' + (e.message || e);
+      }
       finally { this.feederToggleLoading[p] = false; }
     },
 
@@ -1700,25 +1708,29 @@ document.addEventListener('alpine:init', () => {
       }
 
       // Connect — Step 1: check cached token, Step 2: validate
+      // Pre-open blank tab synchronously so browser doesn't block popup after await.
+      const _termWin = window.open('', '_blank');
       op.termLoading = true; op.msg = ''; op.ok = null;
       op.termStep = 'Checking token…';
       try {
         const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/connect`, { method:'POST' });
-        if (!r) return;
+        if (!r) { if (_termWin) _termWin.close(); return; }
         const d = await r.json();
 
         if (d.ok && d.connected) {
-          // Cached token valid — instant connect
+          // Cached token valid — instant connect (close the pre-opened blank tab)
+          if (_termWin) _termWin.close();
           op.ok = true; op.msg = '✓ Connected (cached token valid).';
           await this.loadClientStatus();
           return;
         }
 
         if (d.flow === 'oauth' && d.auth_url) {
-          // Open broker login in new tab — callback will auto-flip toggle
+          // Navigate the pre-opened tab to the broker login page
+          if (_termWin) { _termWin.location.href = d.auth_url; }
+          else { window.open(d.auth_url, '_blank'); }
           op.ok = null;
-          op.msg = `Opening ${(b.provider||'').toUpperCase()} login page… Complete login in the browser tab. Toggle will flip automatically on success.`;
-          window.open(d.auth_url, '_blank', 'width=900,height=700,menubar=no,toolbar=no');
+          op.msg = `Opening ${(b.provider||'').toUpperCase()} login page… Toggle will flip automatically on success.`;
           // Poll for token every 3 seconds (up to 3 minutes)
           this._pollForToken(bid, 60);
           return;
@@ -1736,8 +1748,12 @@ document.addEventListener('alpine:init', () => {
           return;
         }
 
+        if (_termWin) _termWin.close();
         op.ok = false; op.msg = d.error || 'Authentication required.';
-      } catch (e) { op.ok = false; op.msg = 'Request failed: ' + (e.message || e); }
+      } catch (e) {
+        if (_termWin) _termWin.close();
+        op.ok = false; op.msg = 'Request failed: ' + (e.message || e);
+      }
       finally { op.termLoading = false; op.termStep = ''; }
     },
 
