@@ -713,6 +713,119 @@ class DashboardServer:
                 ),
             }
 
+        @app.post("/api/admin/feeder/{provider}/connect", tags=["Admin"])
+        async def api_feeder_provider_connect(
+            provider: str,
+            request:  Request,
+            _: dict = Depends(_require_admin),
+        ):
+            """
+            Toggle ON for admin feeder (Upstox or Fyers).
+            Step 1: check cached token in DB → validate via API ping.
+            Step 2: if invalid/missing → generate OAuth URL for browser redirect.
+            """
+            import time as _time
+            from broker_auth.headless_auth import _token_is_fresh
+            from broker_auth.oauth_manager import generate_auth_url, build_state, validate_token
+
+            t0 = _time.monotonic()
+            p  = provider.lower()
+            if p not in {"upstox", "fyers"}:
+                return {
+                    "ok":    False,
+                    "error": f"Unsupported feeder provider '{provider}'. Allowed: upstox, fyers.",
+                }
+
+            db_row  = _srv._client_db.get_feeder_creds_sync(p) or {}
+            api_key = db_row.get("api_key", "")
+            secret  = db_row.get("secret", "")
+            user_id = db_row.get("client_id", "")
+            token   = db_row.get("access_token", "")
+            gen_at  = db_row.get("token_generated_at", "")
+            exp_at  = db_row.get("token_expiry_at", "")
+
+            if not api_key:
+                return {
+                    "ok":    False,
+                    "error": (
+                        f"No API key saved for '{p}'. "
+                        "Click ⚙ to enter credentials first."
+                    ),
+                }
+
+            logger.info(
+                "[Feeder/Toggle] [%s] connect — api_key_present=%s token_present=%s",
+                p, bool(api_key), bool(token),
+            )
+
+            # Step 1: cached token check
+            if token and _token_is_fresh(gen_at, exp_at):
+                valid = await asyncio.to_thread(validate_token, p, api_key, token)
+                elapsed = (_time.monotonic() - t0) * 1000
+                if valid:
+                    logger.info(
+                        "[Feeder/Toggle] [%s] cached token valid → instant ON in %.1fms", p, elapsed,
+                    )
+                    return {
+                        "ok":        True,
+                        "connected": True,
+                        "flow":      "cached",
+                        "message":   f"{p.upper()} feeder connected (cached token).",
+                    }
+                logger.info(
+                    "[Feeder/Toggle] [%s] cached token rejected in %.1fms", p, elapsed,
+                )
+
+            # Step 2: generate OAuth URL
+            base_url     = _base_url(request)
+            callback_url = f"{base_url}/callback/{p}"
+            state        = build_state("admin", "feeder", p)
+
+            auth_ok, auth_url = await asyncio.to_thread(
+                generate_auth_url, p, api_key, secret, callback_url, state, user_id
+            )
+            elapsed = (_time.monotonic() - t0) * 1000
+
+            if not auth_ok:
+                logger.error(
+                    "[Feeder/Toggle] [%s] auth URL failed in %.1fms: %s", p, elapsed, auth_url,
+                )
+                return {"ok": False, "error": auth_url}
+
+            logger.info(
+                "[Feeder/Toggle] [%s] OAuth URL ready in %.1fms → awaiting login", p, elapsed,
+            )
+            return {
+                "ok":        False,
+                "connected": False,
+                "flow":      "oauth",
+                "auth_url":  auth_url,
+                "message":   f"Open the {p.upper()} login page to authenticate.",
+            }
+
+        @app.post("/api/admin/feeder/{provider}/disconnect", tags=["Admin"])
+        async def api_feeder_provider_disconnect(
+            provider: str,
+            _: dict = Depends(_require_admin),
+        ):
+            """Toggle OFF for admin feeder — stops the active feeder for this provider."""
+            p = provider.lower()
+            if p not in {"upstox", "fyers"}:
+                return {"ok": False, "error": f"Unsupported feeder provider '{p}'."}
+
+            feeder = _srv._feeder
+            if feeder is not None:
+                try:
+                    active = getattr(feeder, "active_provider", None)
+                    if active == p or active is None:
+                        await feeder.stop()
+                        logger.info("[Feeder/Toggle] [%s] feeder stopped.", p)
+                except Exception as exc:
+                    logger.warning("[Feeder/Toggle] [%s] feeder stop raised: %s", p, exc)
+
+            logger.info("[Feeder/Toggle] [%s] disconnect complete.", p)
+            return {"ok": True, "message": f"{p.upper()} feeder disconnected."}
+
         @app.post("/api/admin/feeder/connect", tags=["Admin"])
         async def api_feeder_connect(
             body: _FeederConnectSchema, _: dict = Depends(_require_admin),
@@ -1386,12 +1499,16 @@ class DashboardServer:
         async def api_client_broker_disconnect(
             binding_id: str, user: dict = Depends(_require_client),
         ):
-            """Terminal toggle OFF — also stops engine if running."""
+            """Terminal toggle OFF — stops engine and clears trade toggle atomically."""
             cid = user.get("client_id", "")
             await _srv._client_db.set_terminal_connected(cid, binding_id, False)
             await _srv._client_db.set_engine_active(cid, binding_id, False)
-            logger.info("Terminal disconnect: [%s/%s] disconnected.", cid, binding_id)
-            return {"ok": True, "message": "Terminal disconnected. Engine stopped."}
+            await _srv._client_db.set_trade_enabled(cid, binding_id, False)
+            logger.info(
+                "Terminal disconnect: [%s/%s] disconnected — terminal + engine + trade cleared.",
+                cid, binding_id,
+            )
+            return {"ok": True, "message": "Terminal disconnected. Engine and Trade stopped."}
 
         # ── CLIENT — Engine toggle (Step 2: hot-reload strategy execution) ─────
 
