@@ -287,6 +287,10 @@ class ClientDB:
         password: str = "",
         totp_secret: str = "",
     ) -> None:
+        logger.info(
+            "[DB] upsert_binding [%s/%s] provider=%s mode=%s strategy=%s instrument=%s",
+            client_id, binding_id, provider, trading_mode, assigned_strategy or "(none)", assigned_instrument,
+        )
         """
         Insert or update a broker binding.
 
@@ -346,6 +350,10 @@ class ClientDB:
         generated_at: str = "",
         expiry_at: str = "",
     ) -> None:
+        logger.info(
+            "[DB] update_access_token [%s/%s] token_len=%d generated_at=%s expiry_at=%s",
+            client_id, binding_id, len(token), generated_at[:19] if generated_at else "now", expiry_at[:19] if expiry_at else "(none)",
+        )
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,
@@ -380,6 +388,7 @@ class ClientDB:
         self, client_id: str, binding_id: str, connected: bool
     ) -> None:
         """Mark terminal as connected/disconnected (token validated)."""
+        logger.info("[DB] set_terminal_connected [%s/%s] → %s", client_id, binding_id, connected)
         now = datetime.now(IST).isoformat() if connected else ""
         await asyncio.to_thread(
             self._exec,
@@ -392,6 +401,7 @@ class ClientDB:
         self, client_id: str, binding_id: str, active: bool
     ) -> None:
         """Mark trading engine as active/inactive for this broker."""
+        logger.info("[DB] set_engine_active [%s/%s] → %s", client_id, binding_id, active)
         await asyncio.to_thread(
             self._exec,
             "UPDATE broker_bindings SET engine_active=?, is_trade_enabled=? "
@@ -527,6 +537,10 @@ class ClientDB:
         Only client_id (broker user ID), api_key, and secret are stored.
         Passwords, PINs, and TOTP secrets are NOT accepted.
         """
+        logger.info(
+            "[DB] upsert_feeder_creds provider=%s client_id_present=%s api_key_present=%s secret_present=%s",
+            provider, bool(client_id), bool(api_key), bool(secret),
+        )
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,
@@ -679,6 +693,10 @@ class ClientDB:
         expiry_at:    str = "",
     ) -> None:
         """Persist a freshly-generated feeder access token."""
+        logger.info(
+            "[DB] update_feeder_token provider=%s token_len=%d generated_at=%s",
+            provider, len(token), generated_at[:19] if generated_at else "now",
+        )
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,

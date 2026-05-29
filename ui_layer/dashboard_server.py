@@ -1338,8 +1338,8 @@ class DashboardServer:
             user_id    = b.get("user_id", "")
 
             logger.info(
-                "[Terminal] [%s/%s] %s — Step 1: checking cached token (%.1fms)",
-                cid, binding_id, provider.upper(), (_time.monotonic()-t0)*1000,
+                "[Terminal] [%s/%s] %s — CONNECT request (api_key_present=%s user_id_present=%s) (%.1fms)",
+                cid, binding_id, provider.upper(), bool(api_key), bool(user_id), (_time.monotonic()-t0)*1000,
             )
 
             ok, msg, token = await _he.authenticate_binding(b, cid, _srv._client_db)
@@ -1353,9 +1353,14 @@ class DashboardServer:
                 return {"ok": True, "connected": True, "message": msg, "flow": "cached"}
 
             # Token missing/expired — generate broker OAuth login URL
+            logger.info(
+                "[Terminal] [%s/%s] no valid token (reason=%s) — generating OAuth URL (%.1fms)",
+                cid, binding_id, msg, (_time.monotonic()-t0)*1000,
+            )
             base_url     = _base_url(request)
             callback_url = f"{base_url}/callback/{provider}"
             state        = build_state("client", cid, binding_id)
+            logger.debug("[Terminal] [%s/%s] callback_url=%s state=%s", cid, binding_id, callback_url, state[:20])
 
             # generate_auth_url may make an HTTP call (Dhan), so run in thread
             auth_ok, auth_url = await asyncio.to_thread(
@@ -1371,8 +1376,8 @@ class DashboardServer:
                 return {"ok": False, "connected": False, "flow": "error", "error": auth_url}
 
             logger.info(
-                "[Terminal] [%s/%s] OAuth URL generated — awaiting user login (%.1fms)",
-                cid, binding_id, elapsed,
+                "[Terminal] [%s/%s] OAuth URL generated in %.1fms — provider=%s callback=%s",
+                cid, binding_id, elapsed, provider.upper(), callback_url,
             )
             return {
                 "ok":       False,
@@ -1569,8 +1574,17 @@ class DashboardServer:
             t0       = _t.monotonic()
             provider = broker_name.lower()
 
+            # Log every callback entry — full query param keys (not values, for security)
+            qp_keys = list(request.query_params.keys())
+            logger.info(
+                "[Callback] ENTRY provider=%s path_state=%s query_keys=%s client_ip=%s",
+                provider, bool(path_state), qp_keys,
+                request.headers.get("x-forwarded-for") or request.client.host if request.client else "unknown",
+            )
+
             error = request.query_params.get("error", "")
             if error:
+                logger.warning("[Callback] %s — broker returned error: %s", provider.upper(), error)
                 return HTMLResponse(_callback_page("error", provider, f"Login failed: {error}"))
 
             # ── Extract the auth code from broker-specific query param ────────
@@ -1597,6 +1611,7 @@ class DashboardServer:
             )
 
             if not actual_code:
+                logger.error("[Callback] %s — no auth code in callback. query_keys=%s", provider.upper(), qp_keys)
                 return HTMLResponse(_callback_page("error", provider, "No auth code received from broker."))
 
             # ── Identify admin vs client (routing) ────────────────────────────
@@ -1607,6 +1622,7 @@ class DashboardServer:
                     _srv._client_db.get_platform_credentials_sync, "dhan"
                 )
                 if not platform_creds:
+                    logger.error("[Callback] Dhan — no platform credentials found in DB (feeder_creds + bindings both empty)")
                     return HTMLResponse(_callback_page("error", provider, "Dhan app credentials not configured."))
 
                 dhan_ok, dhan_msg, access_token, dhan_client_id = await asyncio.to_thread(
@@ -1625,6 +1641,7 @@ class DashboardServer:
                     _srv._client_db.find_by_broker_user_id_sync, "dhan", dhan_client_id
                 )
                 if not match:
+                    logger.error("[Callback] Dhan — no binding found for dhanClientId=%s", dhan_client_id)
                     return HTMLResponse(_callback_page("error", provider,
                         f"No binding found for Dhan client {dhan_client_id}. "
                         "Ensure the Client ID is saved in your broker binding."))
@@ -1650,12 +1667,14 @@ class DashboardServer:
                 # AliceBlue: userId in callback → DB lookup, then exchange
                 alice_user_id = extra.get("user_id", "")
                 if not alice_user_id:
+                    logger.error("[Callback] AliceBlue — userId missing from callback. query_keys=%s", qp_keys)
                     return HTMLResponse(_callback_page("error", provider, "AliceBlue userId missing from callback."))
 
                 match = await asyncio.to_thread(
                     _srv._client_db.find_by_broker_user_id_sync, "aliceblue", alice_user_id
                 )
                 if not match:
+                    logger.error("[Callback] AliceBlue — no binding found for userId=%s", alice_user_id)
                     return HTMLResponse(_callback_page("error", provider,
                         f"No binding found for AliceBlue userId {alice_user_id}. "
                         "Ensure the Client ID (userId) is saved in your broker binding."))
@@ -1735,6 +1754,10 @@ class DashboardServer:
                                  client_id, binding_id, provider, msg)
                     return HTMLResponse(_callback_page("error", provider, msg))
                 else:
+                    logger.error(
+                        "[Callback] %s — invalid/missing state. state_str=%s parsed=%s",
+                        provider.upper(), state_str[:40] if state_str else "(empty)", parsed,
+                    )
                     return HTMLResponse(_callback_page("error", provider, "Invalid or missing state parameter."))
 
         @app.get("/callback/{broker_name}", tags=["Auth"], include_in_schema=False)
