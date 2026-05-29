@@ -1093,13 +1093,18 @@ document.addEventListener('alpine:init', () => {
     async connectDual() {
       this.dualMsg = ''; this.dualOk = null; this.dualConnecting = true;
       try {
-        const r = await this._fetch('/api/admin/feeder/connect', { json: { provider: 'dual' } });
+        // Pick the provider with a fresh token; prefer fyers then upstox
+        const provider = (this.systemStatus.fyers_token_fresh)  ? 'fyers'
+                       : (this.systemStatus.upstox_token_fresh) ? 'upstox'
+                       : 'fyers';
+        const r = await this._fetch('/api/admin/feeder/connect', { json: { provider } });
         if (!r) return;
         const d = await r.json();
         this.dualOk  = r.ok;
-        this.dualMsg = d.message || d.detail || (r.ok ? 'Dual feed active.' : 'Failed.');
+        const msg = d.message || d.detail || d.error || '';
+        this.dualMsg = typeof msg === 'string' ? msg : JSON.stringify(msg) || (r.ok ? 'Feed active.' : 'Failed.');
         if (r.ok) await this.loadFeederStatus();
-      } catch { this.dualOk = false; this.dualMsg = 'Request failed.'; }
+      } catch (e) { this.dualOk = false; this.dualMsg = e.message || 'Request failed.'; }
       finally   { this.dualConnecting = false; }
     },
 
@@ -1725,56 +1730,10 @@ document.addEventListener('alpine:init', () => {
         op.msg = d.ok ? 'Deleted.' : (d.detail || d.error || 'Delete failed.');
         if (d.ok) {
           await new Promise(res => setTimeout(res, 600));
-          await this.loadClientData();
+          await this.loadClientStatus();
         }
       } catch { op.ok = false; op.msg = 'Request failed.'; }
       finally   { op.loading = false; }
-    },
-
-    /* ── Fyers manual auth-code exchange ────────────────────────────────── */
-    fyersCodePanel: {},   // binding_id -> { url, msg, ok } | null
-    fyersCodeInput: {},   // binding_id -> string
-
-    async openFyersCodePanel(b) {
-      const r = await this._fetch(`/api/client/broker/${encodeURIComponent(b.binding_id)}/fyers-auth-url`);
-      if (!r) return;
-      const d = await r.json();
-      if (!d.ok) { alert(d.error || 'Failed to get Fyers login URL'); return; }
-      this.fyersCodePanel[b.binding_id] = { url: d.url, msg: '', ok: null };
-      this.fyersCodeInput[b.binding_id] = '';
-    },
-
-    async exchangeFyersCodeForBroker(b) {
-      const raw = (this.fyersCodeInput[b.binding_id] || '').trim();
-      if (!raw) return;
-      const panel = this.fyersCodePanel[b.binding_id];
-
-      // Accept full redirect URL or bare auth_code
-      let auth_code = raw;
-      if (raw.includes('auth_code=')) {
-        try { auth_code = new URL(raw).searchParams.get('auth_code') || raw; } catch(_) {
-          const m = raw.match(/auth_code=([^&]+)/);
-          if (m) auth_code = m[1];
-        }
-      } else if (raw.includes('code=')) {
-        try { auth_code = new URL(raw).searchParams.get('code') || raw; } catch(_) {
-          const m = raw.match(/[?&]code=([^&]+)/);
-          if (m) auth_code = m[1];
-        }
-      }
-
-      if (panel) { panel.msg = 'Exchanging…'; panel.ok = null; }
-      const r = await this._fetch(
-        `/api/client/broker/${encodeURIComponent(b.binding_id)}/fyers-exchange`,
-        { json: { auth_code } }
-      );
-      if (!r) return;
-      const d = await r.json();
-      if (this.fyersCodePanel[b.binding_id]) {
-        this.fyersCodePanel[b.binding_id].ok  = d.ok;
-        this.fyersCodePanel[b.binding_id].msg = d.ok ? 'Token stored. Click Connect Now.' : (d.error || 'Exchange failed.');
-      }
-      if (d.ok) await this.loadClientData();
     },
 
     /* ── Terminal toggle ────────────────────────────────────────────────── */
@@ -1798,7 +1757,7 @@ document.addEventListener('alpine:init', () => {
           if (!r) return;
           const d = await r.json();
           op.ok = d.ok; op.msg = d.ok ? 'Terminal disconnected.' : (d.error || 'Disconnect failed.');
-          if (d.ok) await this.loadClientData();
+          if (d.ok) await this.loadClientStatus();
         } catch { op.ok = false; op.msg = 'Request failed.'; }
         finally { op.termLoading = false; }
         return;
@@ -1815,7 +1774,7 @@ document.addEventListener('alpine:init', () => {
         if (d.ok && d.connected) {
           // Cached token valid — instant connect
           op.ok = true; op.msg = '✓ Connected (cached token valid).';
-          await this.loadClientData();
+          await this.loadClientStatus();
           return;
         }
 
@@ -1851,7 +1810,7 @@ document.addEventListener('alpine:init', () => {
       let tries = 0;
       const interval = setInterval(async () => {
         tries++;
-        await this.loadClientData();
+        await this.loadClientStatus();
         const b = (this.csBindings || []).find(x => x.binding_id === bid);
         if (b && b.terminal_connected) {
           clearInterval(interval);
@@ -1883,7 +1842,7 @@ document.addEventListener('alpine:init', () => {
         op.ok = d.ok;
         op.msg = d.ok ? (d.message || (b.engine_active ? 'Engine stopped.' : 'Engine active.'))
                       : (d.error || 'Failed.');
-        if (d.ok) await this.loadClientData();
+        if (d.ok) await this.loadClientStatus();
       } catch (e) { op.ok = false; op.msg = 'Request failed.'; }
       finally { op.engLoading = false; }
     },
@@ -1914,7 +1873,7 @@ document.addEventListener('alpine:init', () => {
           ? `✓ ${d.message || 'Saved.'} ID: ${d.deploy_id || ''}`
           : (d.error || 'Save failed.');
         if (d.ok && d.hot_applied) this.deployMsg += ' (hot-applied to running strategy)';
-        if (d.ok) await this.loadClientData();
+        if (d.ok) await this.loadClientStatus();
       } catch (e) { this.deployOk = false; this.deployMsg = 'Request failed.'; }
       finally { this.deployLoading = false; }
     },
@@ -4614,7 +4573,7 @@ document.addEventListener('alpine:init', () => {
           <div>
             <div class="sec-label mb-1">INITIAL BROKER PROVIDER</div>
             <select class="t-input" x-model="newClient.provider">
-              <template x-for="p in ['mock','shoonya','dhan','fyers','angelone','upstox']" :key="p">
+              <template x-for="p in ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue']" :key="p">
                 <option :value="p" x-text="p.toUpperCase()"></option>
               </template>
             </select>
@@ -4826,7 +4785,7 @@ document.addEventListener('alpine:init', () => {
               Paper/Mock mode — no real credentials needed.
             </div>
             <div x-show="portalBroker.provider==='dhan'" class="text-xs px-3 py-2 rounded leading-relaxed" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.18);color:var(--t-amber)">
-              <strong>Headless auto-auth:</strong> Enter your <strong>CLIENT ID</strong>, <strong>LOGIN PIN</strong>, and <strong>TOTP SECRET</strong> — the system generates a fresh token automatically via <em>auth.dhan.co</em>. Tokens are valid 24 hours and renewed daily. Optionally paste an existing JWT in the ACCESS TOKEN field to skip generation.
+              <strong>Interactive OAuth:</strong> Enter your <strong>CLIENT ID</strong>, <strong>APP ID</strong>, and <strong>APP SECRET</strong> — click the Terminal toggle to open the Dhan login page. After login, your token is stored automatically. Tokens are valid for the trading day.
             </div>
           </div>
         </template>
@@ -5219,49 +5178,6 @@ document.addEventListener('alpine:init', () => {
                 </div>
               </div>
 
-              <!-- Fyers manual auth-code exchange panel -->
-              <div x-show="b.provider==='fyers'" class="mt-3 pt-3" style="border-top:1px solid rgba(var(--t-amber-rgb),0.15)">
-                <div x-show="!fyersCodePanel[b.binding_id]" class="flex items-center gap-2">
-                  <span class="text-xs font-mono" style="color:var(--t-muted)">Headless failed?</span>
-                  <button @click="openFyersCodePanel(b)"
-                          class="text-xs px-3 py-1 rounded border font-mono transition-all"
-                          style="border-color:rgba(var(--t-amber-rgb),0.4);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.06)">
-                    Get Token Manually
-                  </button>
-                </div>
-                <div x-show="fyersCodePanel[b.binding_id]" class="space-y-2">
-                  <div class="text-xs space-y-1" style="color:var(--t-muted)">
-                    <div><span style="color:var(--t-amber);font-weight:600">Step 1</span> —
-                      <a :href="(fyersCodePanel[b.binding_id]||{}).url" target="_blank"
-                         style="color:var(--t-cyan);text-decoration:underline;font-weight:600">
-                        Open Fyers Login Page &#x2197;
-                      </a>
-                    </div>
-                    <div><span style="color:var(--t-amber);font-weight:600">Step 2</span> — Login. Fyers redirects to a URL like <span class="font-mono" style="color:var(--t-bright)">trade.fyers.in/…?auth_code=…</span></div>
-                    <div><span style="color:var(--t-amber);font-weight:600">Step 3</span> — Copy the <strong style="color:var(--t-bright)">entire redirect URL</strong>, paste below and click Generate Token.</div>
-                  </div>
-                  <div class="flex gap-2">
-                    <input x-model="fyersCodeInput[b.binding_id]"
-                           type="text" placeholder="Paste full redirect URL here…"
-                           class="flex-1 font-mono text-xs px-2 py-1 rounded border bg-transparent"
-                           style="border-color:rgba(var(--t-amber-rgb),0.3);color:var(--t-bright)">
-                    <button @click="exchangeFyersCodeForBroker(b)"
-                            :disabled="!(fyersCodeInput[b.binding_id]||'').trim()"
-                            class="text-xs px-3 py-1 rounded border font-mono transition-all whitespace-nowrap"
-                            style="border-color:rgba(var(--t-green-rgb),0.4);color:var(--t-green);background:rgba(var(--t-green-rgb),0.06)">
-                      Generate Token
-                    </button>
-                    <button @click="fyersCodePanel[b.binding_id]=null"
-                            class="text-xs px-2 py-1 rounded font-mono" style="color:var(--t-muted)">✕</button>
-                  </div>
-                  <div x-show="(fyersCodePanel[b.binding_id]||{}).msg"
-                       class="text-xs font-mono px-2 py-1 rounded"
-                       :style="(fyersCodePanel[b.binding_id]||{}).ok===false
-                         ? 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.06)'
-                         : 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.06)'"
-                       x-text="(fyersCodePanel[b.binding_id]||{}).msg"></div>
-                </div>
-              </div>
 
             </div>
 
@@ -5446,7 +5362,7 @@ document.addEventListener('alpine:init', () => {
               Mock/Paper mode — no real broker credentials needed. Orders will be simulated.
             </div>
             <div x-show="portalBroker.provider==='dhan'" class="text-xs px-3 py-2 rounded leading-relaxed" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.18);color:var(--t-amber)">
-              <strong>Headless auto-auth:</strong> Enter your <strong>CLIENT ID</strong>, <strong>LOGIN PIN</strong>, and <strong>TOTP SECRET</strong> — the system generates a fresh token automatically via <em>auth.dhan.co</em>. Tokens are valid 24 hours and renewed daily. Optionally paste an existing JWT in the ACCESS TOKEN field to skip generation.
+              <strong>Interactive OAuth:</strong> Enter your <strong>CLIENT ID</strong>, <strong>APP ID</strong>, and <strong>APP SECRET</strong> — click the Terminal toggle to open the Dhan login page. After login, your token is stored automatically. Tokens are valid for the trading day.
             </div>
           </div>
         </template>
@@ -5956,47 +5872,6 @@ document.addEventListener('alpine:init', () => {
         </button>
       </div>
 
-      <!-- OAuth Connect — 2-step flow (Fyers has no headless TOTP in SDK v3.1.x) -->
-      <div class="modal-zone" style="border-color:rgba(var(--t-amber-rgb),0.22);background:rgba(var(--t-amber-rgb),0.03)">
-        <div class="modal-zone-label" style="color:var(--t-amber);opacity:0.7">&#x1F517; OAuth Login (browser-based)</div>
-
-        <!-- Step 1 -->
-        <div class="mb-2">
-          <div class="font-mono text-xs mb-1" style="color:var(--t-muted)">
-            STEP 1 — Generate a login URL and open it in your browser
-          </div>
-          <div class="flex items-center gap-2">
-            <button class="btn-connect-now"
-                    style="border-color:rgba(var(--t-amber-rgb),0.5);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.08)"
-                    @click="getFyersAuthUrl()" :disabled="fyersConnecting || fyersOauthStep===2">
-              <span x-show="!fyersConnecting">&#x1F517; Get Auth URL</span>
-              <span x-show="fyersConnecting">&#x23F3;</span>
-            </button>
-            <div x-show="fyersAuthUrl" class="font-mono text-xs truncate" style="color:var(--t-amber);opacity:0.8;max-width:260px">
-              <a :href="fyersAuthUrl" target="_blank" style="color:var(--t-amber)">&#x1F517; Open link again</a>
-            </div>
-          </div>
-        </div>
-
-        <!-- Step 2 -->
-        <div x-show="fyersOauthStep >= 1">
-          <div class="font-mono text-xs mb-1" style="color:var(--t-muted)">
-            STEP 2 — After login, paste the full redirect URL from your browser's address bar
-          </div>
-          <div class="flex items-center gap-2">
-            <input class="t-input flex-1 min-w-0" type="text"
-                   x-model="fyersRedirectUrl"
-                   placeholder="https://trade.fyers.in/api-login/redirect-uri/index.html?auth_code=...&s=ok&..."
-                   autocomplete="off" spellcheck="false"/>
-            <button class="btn-connect-now"
-                    style="border-color:rgba(var(--t-amber-rgb),0.5);color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.08)"
-                    @click="exchangeFyersCode()" :disabled="fyersExchanging || fyersOauthStep===2">
-              <span x-show="!fyersExchanging">&#x26A1; Connect</span>
-              <span x-show="fyersExchanging">&#x23F3;</span>
-            </button>
-          </div>
-        </div>
-      </div>
 
       <!-- Connect result feedback -->
       <div x-show="fyersMsg" class="font-mono text-xs px-2 py-2 rounded leading-relaxed"

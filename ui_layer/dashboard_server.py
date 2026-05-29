@@ -614,34 +614,33 @@ class DashboardServer:
             connected = feeder.is_running if feeder else False
             dual_lat  = feeder.dual_latency if feeder and hasattr(feeder, "dual_latency") else {}
 
-            # Hydrate credential presence flags from DB.
-            # A provider is "creds_present" if it has API key OR a stored access_token
-            # (Fyers may be auth'd via OAuth only — api_key_enc is empty but token exists).
-            u_row = _srv._client_db.get_feeder_creds_sync("upstox") or {}
-            f_row = _srv._client_db.get_feeder_creds_sync("fyers")  or {}
-            upstox_creds_present = bool(
-                u_row.get("client_id") or u_row.get("api_key") or u_row.get("access_token")
-            )
-            fyers_creds_present  = bool(
-                f_row.get("client_id") or f_row.get("api_key") or f_row.get("access_token")
-            )
-            upstox_token_fresh   = _token_is_fresh(
-                u_row.get("token_generated_at", ""), u_row.get("token_expiry_at", "")
-            ) if upstox_creds_present else False
-            fyers_token_fresh    = _token_is_fresh(
-                f_row.get("token_generated_at", ""), f_row.get("token_expiry_at", "")
-            ) if fyers_creds_present else False
+            _ALL_PROVIDERS = ["upstox", "fyers", "zerodha", "dhan", "angelone", "aliceblue"]
+            providers_status: dict = {}
+            for p in _ALL_PROVIDERS:
+                row = _srv._client_db.get_feeder_creds_sync(p) or {}
+                creds_present = bool(row.get("client_id") or row.get("api_key") or row.get("access_token"))
+                token_fresh   = _token_is_fresh(
+                    row.get("token_generated_at", ""), row.get("token_expiry_at", "")
+                ) if creds_present else False
+                providers_status[p] = {
+                    "creds_present": creds_present,
+                    "token_fresh":   token_fresh,
+                    "latency_ms":    round(dual_lat.get(p, 0.0), 3),
+                }
 
             return {
-                "ts":                   datetime.now(IST).isoformat(),
-                "provider":             provider,
-                "connected":            connected,
-                "upstox_latency_ms":    round(dual_lat.get("upstox", 0.0), 3),
-                "fyers_latency_ms":     round(dual_lat.get("fyers",  0.0), 3),
-                "upstox_creds_present": upstox_creds_present,
-                "fyers_creds_present":  fyers_creds_present,
-                "upstox_token_fresh":   upstox_token_fresh,
-                "fyers_token_fresh":    fyers_token_fresh,
+                "ts":        datetime.now(IST).isoformat(),
+                "provider":  provider,
+                "connected": connected,
+                # flat legacy keys for Upstox/Fyers (UI still reads these)
+                "upstox_latency_ms":    providers_status["upstox"]["latency_ms"],
+                "fyers_latency_ms":     providers_status["fyers"]["latency_ms"],
+                "upstox_creds_present": providers_status["upstox"]["creds_present"],
+                "fyers_creds_present":  providers_status["fyers"]["creds_present"],
+                "upstox_token_fresh":   providers_status["upstox"]["token_fresh"],
+                "fyers_token_fresh":    providers_status["fyers"]["token_fresh"],
+                # full per-provider map
+                "providers": providers_status,
             }
 
         @app.get("/api/admin/feeder/auth-url", tags=["Admin"])
