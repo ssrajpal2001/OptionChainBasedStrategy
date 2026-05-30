@@ -802,26 +802,30 @@ class GlobalFeeder:
         from data_layer.base_feeder import CandleEvent
         from config.global_config import Topic
         q = self._bus.subscribe(Topic.CANDLE_CLOSE)
-        while self._running:
+        try:
+            while self._running:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if not isinstance(ev, CandleEvent):
+                    continue
+                if ev.timeframe != 1:
+                    continue
+                try:
+                    await self._client_db.upsert_1m_bar(
+                        symbol    = ev.symbol,
+                        timestamp = ev.timestamp,
+                        open_     = ev.open,
+                        high      = ev.high,
+                        low       = ev.low,
+                        close     = ev.close,
+                        volume    = float(ev.volume) if ev.volume else 0.0,
+                    )
+                except Exception as exc:
+                    logger.warning("1m bar persist failed [%s]: %s", ev.symbol, exc)
+        finally:
             try:
-                ev = await asyncio.wait_for(q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            if not isinstance(ev, CandleEvent):
-                continue
-            if ev.timeframe != 1:
-                continue
-            if self._client_db is None:
-                continue
-            try:
-                await self._client_db.upsert_1m_bar(
-                    symbol    = ev.symbol,
-                    timestamp = ev.timestamp,
-                    open_     = ev.open,
-                    high      = ev.high,
-                    low       = ev.low,
-                    close     = ev.close,
-                    volume    = float(ev.volume) if ev.volume else 0.0,
-                )
-            except Exception as exc:
-                logger.warning("1m bar persist failed [%s]: %s", ev.symbol, exc)
+                self._bus._subs[Topic.CANDLE_CLOSE].remove(q)
+            except (ValueError, KeyError, AttributeError):
+                pass

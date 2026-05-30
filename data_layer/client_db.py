@@ -198,7 +198,6 @@ class ClientDB:
     def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
         self._db_path = db_path
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._create_tables()
 
     async def initialise(self) -> None:
         """Create tables and indexes. Safe to call on every boot."""
@@ -874,10 +873,8 @@ class ClientDB:
         Return list of row dicts for `symbol` in [since, until], ordered by timestamp ASC.
         Called via asyncio.to_thread() from the strategy engine.
         """
-        from config.global_config import IST
-        from datetime import datetime as _dt
         since_str = since.strftime("%Y-%m-%dT%H:%M:%S")
-        until_str = (until or _dt.now(IST)).strftime("%Y-%m-%dT%H:%M:%S")
+        until_str = (until or datetime.now(IST)).strftime("%Y-%m-%dT%H:%M:%S")
         con = sqlite3.connect(self._db_path)
         try:
             cur = con.execute(
