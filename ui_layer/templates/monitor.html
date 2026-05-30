@@ -742,8 +742,12 @@ document.addEventListener('alpine:init', () => {
         this.authClientName = savedName  || '';
         this.screen         = savedRole === 'admin' ? 'admin' : 'client';
         this._connect();
-        // Hydrate immediately — no delay since we already have auth
-        this._hydrateAdminOnLogin();
+        // Hydrate for the correct role — admin calls must NOT be made with client JWT
+        if (savedRole === 'admin') {
+          this._hydrateAdminOnLogin();
+        } else {
+          this.loadClientStatus();
+        }
       }
       setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);

@@ -3327,47 +3327,28 @@ class DashboardServer:
 
             if has_upstox:
                 upstox_creds = {
-                    "client_id":   u_row["client_id"],
-                    "api_key":     u_row["api_key"],
-                    "secret":      u_row["secret"],
-                    "password":    u_row["password"],
-                    "totp_secret": u_row["totp_secret"],
+                    "client_id":          u_row.get("client_id", ""),
+                    "api_key":            u_row.get("api_key", ""),
                     "access_token":       u_row.get("access_token", ""),
                     "token_generated_at": u_row.get("token_generated_at", ""),
                     "token_expiry_at":    u_row.get("token_expiry_at", ""),
                 }
-                # Use cached token if fresh, otherwise re-auth
                 if not _token_is_fresh(u_row.get("token_generated_at",""), u_row.get("token_expiry_at","")):
-                    ok, msg, tok = await _he.validate_feeder_creds("upstox", upstox_creds)
-                    if ok and tok:
-                        upstox_creds["access_token"] = tok
-                        await self._client_db.update_feeder_token("upstox", tok, now_ist, eod)
-                        self._auth_alerts["feeder"] = ""
-                        logger.info("DashboardServer: Upstox boot-auth succeeded.")
-                    else:
-                        self._auth_alerts["feeder"] = f"Upstox boot-auth failed: {msg}"
-                        logger.warning("DashboardServer: Upstox boot-auth failed: %s", msg)
-                        has_upstox = False  # Don't try to connect with a bad token
+                    logger.info("DashboardServer: Upstox token stale — will attempt stream without fresh token.")
+                    if not upstox_creds["access_token"]:
+                        has_upstox = False
 
             if has_fyers:
                 fyers_creds = {
-                    "client_id":   f_row["client_id"],
-                    "app_key":     f_row["api_key"],
-                    "secret":      f_row["secret"],
-                    "pin":         f_row["password"],
-                    "totp_secret": f_row["totp_secret"],
+                    "client_id":          f_row.get("client_id", ""),
+                    "api_key":            f_row.get("api_key", ""),
                     "access_token":       f_row.get("access_token", ""),
                     "token_generated_at": f_row.get("token_generated_at", ""),
                     "token_expiry_at":    f_row.get("token_expiry_at", ""),
                 }
                 if not _token_is_fresh(f_row.get("token_generated_at",""), f_row.get("token_expiry_at","")):
-                    ok, msg, tok = await _he.validate_feeder_creds("fyers", fyers_creds)
-                    if ok and tok:
-                        fyers_creds["access_token"] = tok
-                        await self._client_db.update_feeder_token("fyers", tok, now_ist, eod)
-                        logger.info("DashboardServer: Fyers boot-auth succeeded.")
-                    else:
-                        logger.warning("DashboardServer: Fyers boot-auth failed: %s", msg)
+                    logger.info("DashboardServer: Fyers token stale — will attempt stream without fresh token.")
+                    if not fyers_creds["access_token"]:
                         has_fyers = False
 
             # Connect the feeder with whatever credentials are ready
