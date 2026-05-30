@@ -579,19 +579,13 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Strategy runtime config ─────────────────────────────────────── */
     strategyConfig: {
-      rms_max_drawdown_pct: 5.0, rms_order_throttle: 5,
-      rms_squareoff_time: '15:15', rms_distance_filter_pct: 5.0,
-      ind_rsi_period: 14, ind_vwap_window: 500, ind_adx_period: 20,
-      ind_ema_fast: 9, ind_ema_slow: 21, ind_htf_minutes: 75, ind_ltf_minutes: 5,
       ic_squareoff_time: '15:15', ic_rsi_min: 40, ic_rsi_max: 60, ic_adx_max: 25,
       ic_profit_pct: 50, ic_sl_pct: 200,
       ic_nifty_otm: 200, ic_nifty_wing: 200, ic_banknifty_otm: 400, ic_banknifty_wing: 500,
       ic_finnifty_otm: 200, ic_finnifty_wing: 200, ic_sensex_otm: 500, ic_sensex_wing: 500,
       ic_midcp_otm: 150, ic_midcp_wing: 200,
       ss_entry_start: '09:20', ss_entry_end: '12:00', ss_squareoff_time: '15:15',
-      ss_rsi_min: 35, ss_rsi_max: 65, ss_adx_max: 30,
-      ss_profit_pct: 30, ss_sl_pct: 200, ss_trail_lock_pct: 20, ss_trail_floor_pct: 10,
-      ss_max_trades: 1, ss_roc_limit_pct: 1.5,
+      ss_max_trades: 1,
       tt_htf_minutes: 75, tt_ltf_minutes: 5, tt_adx_threshold: 20,
       tt_volume_spike_mult: 1.5, tt_swing_lookback: 5, tt_zone_tol_pct: 0.5, tt_void_atr_mult: 2.0,
     },
@@ -3161,18 +3155,18 @@ function clientTrapInstruments() {
       <!-- Live indicators -->
       <div class="grid grid-cols-4 gap-2">
         <div class="rounded p-2 text-center" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">RSI-<span x-text="strategyConfig.ind_rsi_period||14"></span></div>
+          <div class="sec-label mb-0.5">RSI-14</div>
           <div class="font-mono text-sm font-bold"
                :style="(trapState.current_rsi_14||0)>=70?'color:var(--t-red)':(trapState.current_rsi_14||0)<=30?'color:var(--t-green)':'color:var(--t-cyan)'"
                x-text="trapState.current_rsi_14!=null?trapState.current_rsi_14.toFixed(1):'—'"></div>
         </div>
         <div class="rounded p-2 text-center" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">VWAP-<span x-text="strategyConfig.ind_vwap_window||500"></span></div>
+          <div class="sec-label mb-0.5">VWAP-500</div>
           <div class="font-mono text-sm" style="color:var(--t-cyan)"
                x-text="trapState.current_vwap_500!=null?fmt(trapState.current_vwap_500):'—'"></div>
         </div>
         <div class="rounded p-2 text-center" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">ADX-<span x-text="strategyConfig.ind_adx_period||20"></span></div>
+          <div class="sec-label mb-0.5">ADX-20</div>
           <div class="font-mono text-sm font-bold"
                :style="(trapState.current_adx_20||0)>=20?'color:var(--t-amber)':'color:var(--t-muted)'"
                x-text="trapState.current_adx_20!=null?trapState.current_adx_20.toFixed(1):'—'"></div>
@@ -4025,64 +4019,6 @@ function clientTrapInstruments() {
       </div><!-- end trap_trading config -->
 
     </div><!-- end strategy tabs card -->
-
-    <!-- ── Global RMS (applies to all indices) ─────────────────────────── -->
-    <div class="t-card rounded p-4">
-      <div class="sec-label mb-3">GLOBAL RISK MANAGEMENT SYSTEM</div>
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <label class="sec-label">Max Daily Drawdown (%)</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.rms_max_drawdown_pct" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">Order Throttle (orders/sec)</label>
-          <input type="number" step="1" x-model.number="strategyConfig.rms_order_throttle" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">Auto Square-off Time (HH:MM)</label>
-          <input type="text" x-model="strategyConfig.rms_squareoff_time" placeholder="15:15" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">ATM Distance Filter (%)</label>
-          <input type="number" step="0.1" x-model.number="strategyConfig.rms_distance_filter_pct" class="t-input mt-0.5">
-        </div>
-      </div>
-    </div>
-
-    <!-- ── Indicator Periods ────────────────────────────────────────────── -->
-    <div class="t-card rounded p-4">
-      <div class="sec-label mb-3">DYNAMIC INDICATOR PERIODS</div>
-      <div class="grid grid-cols-3 gap-3 mb-3">
-        <div>
-          <label class="sec-label">RSI Period</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_rsi_period" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">VWAP Window (bars)</label>
-          <input type="number" step="10" x-model.number="strategyConfig.ind_vwap_window" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">ADX Lookback</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_adx_period" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">EMA Fast</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_ema_fast" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">EMA Slow</label>
-          <input type="number" step="1" x-model.number="strategyConfig.ind_ema_slow" class="t-input mt-0.5">
-        </div>
-        <div>
-          <label class="sec-label">HTF (minutes)</label>
-          <input type="number" step="5" x-model.number="strategyConfig.ind_htf_minutes" class="t-input mt-0.5">
-        </div>
-      </div>
-      <div class="flex items-center gap-2 p-2 rounded font-mono text-xs"
-           style="background:rgba(var(--t-amber-rgb),0.05);border:1px solid rgba(var(--t-amber-rgb),0.2);color:var(--t-amber)">
-        ⚠ HTF/LTF timeframe changes take effect on next system restart.
-      </div>
-    </div>
 
     <!-- ── Control strip ───────────────────────────────────────────────── -->
     <div class="t-card rounded p-4" style="border:1px solid var(--t-border)">

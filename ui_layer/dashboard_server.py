@@ -218,20 +218,7 @@ try:
         distance_filter_pct:    float = 5.0
 
     class _StrategyConfigSchema(_PydanticBase):
-        # Global RMS
-        rms_max_drawdown_pct:       float = 5.0
-        rms_order_throttle:         int   = 5
-        rms_squareoff_time:         str   = "15:15"
-        rms_distance_filter_pct:    float = 5.0
-        # Indicator periods
-        ind_rsi_period:    int   = 14
-        ind_vwap_window:   int   = 500
-        ind_adx_period:    int   = 20
-        ind_ema_fast:      int   = 9
-        ind_ema_slow:      int   = 21
-        ind_htf_minutes:   int   = 75
-        ind_ltf_minutes:   int   = 5
-        # Iron Condor
+        # Iron Condor (global fallback — per-index config preferred)
         ic_squareoff_time: str   = "15:15"
         ic_rsi_min:        float = 40.0
         ic_rsi_max:        float = 60.0
@@ -248,20 +235,12 @@ try:
         ic_sensex_wing:    float = 500.0
         ic_midcp_otm:      float = 150.0
         ic_midcp_wing:     float = 200.0
-        # Sell Straddle
-        ss_entry_start:     str   = "09:20"
-        ss_entry_end:       str   = "12:00"
-        ss_squareoff_time:  str   = "15:15"
-        ss_rsi_min:         float = 35.0
-        ss_rsi_max:         float = 65.0
-        ss_adx_max:         float = 30.0
-        ss_profit_pct:      float = 30.0
-        ss_sl_pct:          float = 200.0
-        ss_trail_lock_pct:  float = 20.0
-        ss_trail_floor_pct: float = 10.0
-        ss_max_trades:      int   = 1
-        ss_roc_limit_pct:   float = 1.5
-        # Trap Trading
+        # Sell Straddle (global fallback — per-index config preferred)
+        ss_entry_start:    str   = "09:20"
+        ss_entry_end:      str   = "12:00"
+        ss_squareoff_time: str   = "15:15"
+        ss_max_trades:     int   = 1
+        # Trap Trading RuntimeConfig overrides
         tt_htf_minutes:          int   = 75
         tt_ltf_minutes:          int   = 5
         tt_adx_threshold:        float = 20.0
@@ -2135,59 +2114,38 @@ class DashboardServer:
         async def api_strategy_config_get(_: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             cfg = RuntimeConfig.get()
-            rms = cfg.get("rms", {})
-            ind = cfg.get("indicators", {})
             ic  = cfg.get("iron_condor", {})
             ss  = cfg.get("sell_straddle", {})
             tt  = cfg.get("trap_trading", {})
             ic_idx = ic.get("per_index", {})
             return {
-                "rms_max_drawdown_pct":       rms.get("max_drawdown_pct",       5.0),
-                "rms_order_throttle":         rms.get("order_throttle_per_sec", 5),
-                "rms_squareoff_time":         rms.get("squareoff_time",         "15:15"),
-                "rms_distance_filter_pct":    rms.get("distance_filter_pct",    5.0),
-                "ind_rsi_period":             ind.get("rsi_period",   14),
-                "ind_vwap_window":            ind.get("vwap_window",  500),
-                "ind_adx_period":             ind.get("adx_period",   20),
-                "ind_ema_fast":               ind.get("ema_fast",     9),
-                "ind_ema_slow":               ind.get("ema_slow",     21),
-                "ind_htf_minutes":            ind.get("htf_minutes",  75),
-                "ind_ltf_minutes":            ind.get("ltf_minutes",  5),
-                "ic_squareoff_time":          ic.get("squareoff_time", "15:15"),
-                "ic_rsi_min":                 ic.get("rsi_min",  40.0),
-                "ic_rsi_max":                 ic.get("rsi_max",  60.0),
-                "ic_adx_max":                 ic.get("adx_max",  25.0),
-                "ic_profit_pct":              ic.get("profit_pct", 50.0),
-                "ic_sl_pct":                  ic.get("sl_pct",   200.0),
-                "ic_nifty_otm":              ic_idx.get("NIFTY",      {}).get("short_otm_pts", 200.0),
-                "ic_nifty_wing":             ic_idx.get("NIFTY",      {}).get("wing_width_pts",200.0),
-                "ic_banknifty_otm":          ic_idx.get("BANKNIFTY",  {}).get("short_otm_pts", 400.0),
-                "ic_banknifty_wing":         ic_idx.get("BANKNIFTY",  {}).get("wing_width_pts",500.0),
-                "ic_finnifty_otm":           ic_idx.get("FINNIFTY",   {}).get("short_otm_pts", 200.0),
-                "ic_finnifty_wing":          ic_idx.get("FINNIFTY",   {}).get("wing_width_pts",200.0),
-                "ic_sensex_otm":             ic_idx.get("SENSEX",     {}).get("short_otm_pts", 500.0),
-                "ic_sensex_wing":            ic_idx.get("SENSEX",     {}).get("wing_width_pts",500.0),
-                "ic_midcp_otm":              ic_idx.get("MIDCPNIFTY", {}).get("short_otm_pts", 150.0),
-                "ic_midcp_wing":             ic_idx.get("MIDCPNIFTY", {}).get("wing_width_pts",200.0),
-                "ss_entry_start":            ss.get("entry_start",     "09:20"),
-                "ss_entry_end":              ss.get("entry_end",       "12:00"),
-                "ss_squareoff_time":         ss.get("squareoff_time",  "15:15"),
-                "ss_rsi_min":                ss.get("rsi_min",         35.0),
-                "ss_rsi_max":                ss.get("rsi_max",         65.0),
-                "ss_adx_max":                ss.get("adx_max",         30.0),
-                "ss_profit_pct":             ss.get("profit_pct",      30.0),
-                "ss_sl_pct":                 ss.get("sl_pct",         200.0),
-                "ss_trail_lock_pct":         ss.get("trail_lock_pct",  20.0),
-                "ss_trail_floor_pct":        ss.get("trail_floor_pct", 10.0),
-                "ss_max_trades":             ss.get("max_trades",       1),
-                "ss_roc_limit_pct":          ss.get("roc_limit_pct",   1.5),
-                "tt_htf_minutes":            tt.get("htf_minutes",          75),
-                "tt_ltf_minutes":            tt.get("ltf_minutes",           5),
-                "tt_adx_threshold":          tt.get("adx_threshold",        20.0),
-                "tt_volume_spike_mult":      tt.get("volume_spike_multiplier",1.5),
-                "tt_swing_lookback":         tt.get("swing_lookback",        5),
-                "tt_zone_tol_pct":           tt.get("zone_tolerance_pct",    0.5),
-                "tt_void_atr_mult":          tt.get("void_atr_mult",         2.0),
+                "ic_squareoff_time":  ic.get("squareoff_time", "15:15"),
+                "ic_rsi_min":         ic.get("rsi_min",  40.0),
+                "ic_rsi_max":         ic.get("rsi_max",  60.0),
+                "ic_adx_max":         ic.get("adx_max",  25.0),
+                "ic_profit_pct":      ic.get("profit_pct", 50.0),
+                "ic_sl_pct":          ic.get("sl_pct",   200.0),
+                "ic_nifty_otm":       ic_idx.get("NIFTY",      {}).get("short_otm_pts", 200.0),
+                "ic_nifty_wing":      ic_idx.get("NIFTY",      {}).get("wing_width_pts",200.0),
+                "ic_banknifty_otm":   ic_idx.get("BANKNIFTY",  {}).get("short_otm_pts", 400.0),
+                "ic_banknifty_wing":  ic_idx.get("BANKNIFTY",  {}).get("wing_width_pts",500.0),
+                "ic_finnifty_otm":    ic_idx.get("FINNIFTY",   {}).get("short_otm_pts", 200.0),
+                "ic_finnifty_wing":   ic_idx.get("FINNIFTY",   {}).get("wing_width_pts",200.0),
+                "ic_sensex_otm":      ic_idx.get("SENSEX",     {}).get("short_otm_pts", 500.0),
+                "ic_sensex_wing":     ic_idx.get("SENSEX",     {}).get("wing_width_pts",500.0),
+                "ic_midcp_otm":       ic_idx.get("MIDCPNIFTY", {}).get("short_otm_pts", 150.0),
+                "ic_midcp_wing":      ic_idx.get("MIDCPNIFTY", {}).get("wing_width_pts",200.0),
+                "ss_entry_start":     ss.get("entry_start",    "09:20"),
+                "ss_entry_end":       ss.get("entry_end",      "12:00"),
+                "ss_squareoff_time":  ss.get("squareoff_time", "15:15"),
+                "ss_max_trades":      ss.get("max_trades",      1),
+                "tt_htf_minutes":     tt.get("htf_minutes",         75),
+                "tt_ltf_minutes":     tt.get("ltf_minutes",          5),
+                "tt_adx_threshold":   tt.get("adx_threshold",       20.0),
+                "tt_volume_spike_mult": tt.get("volume_spike_multiplier", 1.5),
+                "tt_swing_lookback":  tt.get("swing_lookback",       5),
+                "tt_zone_tol_pct":    tt.get("zone_tolerance_pct",   0.5),
+                "tt_void_atr_mult":   tt.get("void_atr_mult",        2.0),
             }
 
         @app.post("/api/admin/strategy/config/update", tags=["Admin"])
@@ -2197,28 +2155,13 @@ class DashboardServer:
         ):
             from data_layer.runtime_config import RuntimeConfig
             patch = {
-                "rms": {
-                    "max_drawdown_pct":       body.rms_max_drawdown_pct,
-                    "order_throttle_per_sec": body.rms_order_throttle,
-                    "squareoff_time":         body.rms_squareoff_time,
-                    "distance_filter_pct":    body.rms_distance_filter_pct,
-                },
-                "indicators": {
-                    "rsi_period":   body.ind_rsi_period,
-                    "vwap_window":  body.ind_vwap_window,
-                    "adx_period":   body.ind_adx_period,
-                    "ema_fast":     body.ind_ema_fast,
-                    "ema_slow":     body.ind_ema_slow,
-                    "htf_minutes":  body.ind_htf_minutes,
-                    "ltf_minutes":  body.ind_ltf_minutes,
-                },
                 "iron_condor": {
                     "squareoff_time": body.ic_squareoff_time,
-                    "rsi_min":  body.ic_rsi_min,
-                    "rsi_max":  body.ic_rsi_max,
-                    "adx_max":  body.ic_adx_max,
-                    "profit_pct": body.ic_profit_pct,
-                    "sl_pct":     body.ic_sl_pct,
+                    "rsi_min":        body.ic_rsi_min,
+                    "rsi_max":        body.ic_rsi_max,
+                    "adx_max":        body.ic_adx_max,
+                    "profit_pct":     body.ic_profit_pct,
+                    "sl_pct":         body.ic_sl_pct,
                     "per_index": {
                         "NIFTY":      {"short_otm_pts": body.ic_nifty_otm,     "wing_width_pts": body.ic_nifty_wing},
                         "BANKNIFTY":  {"short_otm_pts": body.ic_banknifty_otm, "wing_width_pts": body.ic_banknifty_wing},
@@ -2228,18 +2171,10 @@ class DashboardServer:
                     },
                 },
                 "sell_straddle": {
-                    "entry_start":     body.ss_entry_start,
-                    "entry_end":       body.ss_entry_end,
-                    "squareoff_time":  body.ss_squareoff_time,
-                    "rsi_min":         body.ss_rsi_min,
-                    "rsi_max":         body.ss_rsi_max,
-                    "adx_max":         body.ss_adx_max,
-                    "profit_pct":      body.ss_profit_pct,
-                    "sl_pct":          body.ss_sl_pct,
-                    "trail_lock_pct":  body.ss_trail_lock_pct,
-                    "trail_floor_pct": body.ss_trail_floor_pct,
-                    "max_trades":      body.ss_max_trades,
-                    "roc_limit_pct":   body.ss_roc_limit_pct,
+                    "entry_start":    body.ss_entry_start,
+                    "entry_end":      body.ss_entry_end,
+                    "squareoff_time": body.ss_squareoff_time,
+                    "max_trades":     body.ss_max_trades,
                 },
                 "trap_trading": {
                     "htf_minutes":             body.tt_htf_minutes,
@@ -2270,10 +2205,6 @@ class DashboardServer:
                     _srv._trap_engine.reconfigure()
                 except Exception as e:
                     reconfigure_errors.append(f"trap_engine: {e}")
-
-            # Sync RMS into GlobalConfig so existing RMS endpoint stays consistent
-            if hasattr(_srv._cfg, "rms") and isinstance(_srv._cfg.rms, dict):
-                _srv._cfg.rms.update(patch["rms"])
 
             if reconfigure_errors:
                 logger.warning("strategy/config/update: partial reconfigure errors: %s", reconfigure_errors)
