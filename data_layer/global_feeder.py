@@ -517,6 +517,11 @@ class DualFeeder:
     def latency(self) -> Dict[str, float]:
         return dict(self._latency)
 
+    @property
+    def provider_connected(self) -> Dict[str, bool]:
+        """Returns per-provider connected state based on active feeder tasks."""
+        return {p: f.is_connected for p, f in self._feeders.items()}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feeder Registry — maps provider string → feeder class

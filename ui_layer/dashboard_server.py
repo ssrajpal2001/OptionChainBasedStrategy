@@ -59,17 +59,47 @@ def _base_url(request) -> str:
     return f"{scheme}://{host}"
 
 
-async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str) -> None:
-    """Switch GlobalFeeder to the given live provider using the stored token."""
+async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, client_db=None) -> None:
+    """
+    Switch GlobalFeeder to the given live provider.
+
+    If the OTHER provider also has a fresh token in DB, starts DualFeeder (active-active).
+    Otherwise starts single-provider stream.
+    Upstox is primary; Fyers is backup. Both run in parallel when available.
+    """
     if feeder is None:
         logger.warning("[Feeder/Toggle] GlobalFeeder not wired — cannot start stream.")
         return
-    creds = {"api_key": api_key, "access_token": token}
+
+    from broker_auth.headless_auth import _token_is_fresh
+
+    current_creds = {"api_key": api_key, "access_token": token}
+    other = "fyers" if provider == "upstox" else "upstox"
+
+    # Check if the other provider also has a valid token
+    other_creds: dict = {}
+    if client_db is not None:
+        other_row = client_db.get_feeder_creds_sync(other) or {}
+        other_token = other_row.get("access_token", "")
+        other_api_key = other_row.get("api_key", "")
+        other_gen_at = other_row.get("token_generated_at", "")
+        other_exp_at = other_row.get("token_expiry_at", "")
+        if other_token and _token_is_fresh(other_gen_at, other_exp_at):
+            other_creds = {"api_key": other_api_key, "access_token": other_token}
+
     try:
-        await feeder.start_single(provider, creds)
-        logger.info("[Feeder/Toggle] [%s] live stream started.", provider)
+        if other_creds:
+            # Both providers have valid tokens → active-active DualFeeder
+            upstox_creds = current_creds if provider == "upstox" else other_creds
+            fyers_creds  = current_creds if provider == "fyers"  else other_creds
+            await feeder.start_dual(upstox_creds, fyers_creds)
+            logger.info("[Feeder/Toggle] DUAL stream started (upstox primary + fyers backup).")
+        else:
+            # Only this provider available → single stream
+            await feeder.start_single(provider, current_creds)
+            logger.info("[Feeder/Toggle] [%s] single stream started.", provider)
     except Exception as exc:
-        logger.error("[Feeder/Toggle] [%s] start_single failed: %s", provider, exc)
+        logger.error("[Feeder/Toggle] [%s] stream start failed: %s", provider, exc)
 
 
 def _redirect_base(request, client_db) -> str:
@@ -645,6 +675,8 @@ class DashboardServer:
             )
             connected = feeder.is_running if feeder else False
             dual_lat  = feeder.dual_latency if feeder and hasattr(feeder, "dual_latency") else {}
+            dual_conn = (feeder._dual_feeder.provider_connected
+                         if feeder and getattr(feeder, "_dual_feeder", None) else {})
 
             _ALL_PROVIDERS = ["upstox", "fyers", "zerodha", "dhan", "angelone", "aliceblue"]
             providers_status: dict = {}
@@ -655,9 +687,10 @@ class DashboardServer:
                     row.get("token_generated_at", ""), row.get("token_expiry_at", "")
                 ) if creds_present else False
                 providers_status[p] = {
-                    "creds_present": creds_present,
-                    "token_fresh":   token_fresh,
-                    "latency_ms":    round(dual_lat.get(p, 0.0), 3),
+                    "creds_present":   creds_present,
+                    "token_fresh":     token_fresh,
+                    "latency_ms":      round(dual_lat.get(p, 0.0), 3),
+                    "feed_connected":  dual_conn.get(p, False),
                 }
 
             return {
@@ -671,6 +704,8 @@ class DashboardServer:
                 "fyers_creds_present":  providers_status["fyers"]["creds_present"],
                 "upstox_token_fresh":   providers_status["upstox"]["token_fresh"],
                 "fyers_token_fresh":    providers_status["fyers"]["token_fresh"],
+                "upstox_connected":     providers_status["upstox"]["feed_connected"],
+                "fyers_connected":      providers_status["fyers"]["feed_connected"],
                 # full per-provider map
                 "providers": providers_status,
             }
@@ -832,7 +867,7 @@ class DashboardServer:
                 elapsed = (_time.monotonic() - t0) * 1000
                 if valid:
                     # Token valid — start the live feeder stream
-                    await _start_feeder_stream(_srv._feeder, p, api_key, token)
+                    await _start_feeder_stream(_srv._feeder, p, api_key, token, _srv._client_db)
                     logger.info(
                         "[Feeder/Toggle] [%s] cached token valid → feeder started in %.1fms", p, elapsed,
                     )
@@ -892,9 +927,9 @@ class DashboardServer:
             if feeder is not None:
                 try:
                     active = getattr(feeder, "active_provider", None)
-                    if active == p or active is None:
+                    if active in (p, "dual", None):
                         await feeder.stop()
-                        logger.info("[Feeder/Toggle] [%s] feeder stopped.", p)
+                        logger.info("[Feeder/Toggle] [%s] feeder stopped (was: %s).", p, active)
                 except Exception as exc:
                     logger.warning("[Feeder/Toggle] [%s] feeder stop raised: %s", p, exc)
 

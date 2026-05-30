@@ -620,7 +620,8 @@ document.addEventListener('alpine:init', () => {
     /* ── Feeder system status ────────────────────────────────────────── */
     systemStatus: { provider: 'mock', connected: false, upstox_latency_ms: 0, fyers_latency_ms: 0,
                     upstox_creds_present: false, fyers_creds_present: false,
-                    upstox_token_fresh: false,   fyers_token_fresh: false },
+                    upstox_token_fresh: false,   fyers_token_fresh: false,
+                    upstox_connected: false,      fyers_connected: false },
 
     supportedFeeders: ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue'],
     redirectBase: '', redirectBaseMsg: '', redirectBaseSaving: false,
@@ -2320,17 +2321,17 @@ document.addEventListener('alpine:init', () => {
     <div class="w-px h-4" style="background:var(--t-border)"></div>
     <div class="flex items-center gap-1.5">
       <div class="w-1.5 h-1.5 rounded-full"
-           :style="`background:${systemStatus.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"></div>
+           :style="`background:${systemStatus.upstox_connected?'var(--t-green)':'var(--t-muted)'}`"></div>
       <span class="font-mono text-xs"
-            :style="`color:${systemStatus.upstox_latency_ms>0?'var(--t-green)':'var(--t-muted)'}`"
-            x-text="systemStatus.upstox_latency_ms>0 ? 'UPSTOX '+systemStatus.upstox_latency_ms.toFixed(0)+'ms' : 'UPSTOX IDLE'"></span>
+            :style="`color:${systemStatus.upstox_connected?'var(--t-green)':'var(--t-muted)'}`"
+            x-text="systemStatus.upstox_connected ? (systemStatus.upstox_latency_ms>0 ? 'UPSTOX '+systemStatus.upstox_latency_ms.toFixed(0)+'ms' : 'UPSTOX ACTIVE') : 'UPSTOX IDLE'"></span>
     </div>
     <div class="flex items-center gap-1.5">
       <div class="w-1.5 h-1.5 rounded-full"
-           :style="`background:${systemStatus.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"></div>
+           :style="`background:${systemStatus.fyers_connected?'var(--t-amber)':'var(--t-muted)'}`"></div>
       <span class="font-mono text-xs"
-            :style="`color:${systemStatus.fyers_latency_ms>0?'var(--t-amber)':'var(--t-muted)'}`"
-            x-text="systemStatus.fyers_latency_ms>0 ? 'FYERS '+systemStatus.fyers_latency_ms.toFixed(0)+'ms' : 'FYERS IDLE'"></span>
+            :style="`color:${systemStatus.fyers_connected?'var(--t-amber)':'var(--t-muted)'}`"
+            x-text="systemStatus.fyers_connected ? (systemStatus.fyers_latency_ms>0 ? 'FYERS '+systemStatus.fyers_latency_ms.toFixed(0)+'ms' : 'FYERS ACTIVE') : 'FYERS IDLE'"></span>
     </div>
   </div>
 </div>
