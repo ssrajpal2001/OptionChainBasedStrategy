@@ -1879,15 +1879,19 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteDeploy(deploy_id) {
-      this.deployDeleteLoading[deploy_id] = true;
+      // Spread to new object so Alpine.js tracks the new key reactively
+      this.deployDeleteLoading = { ...this.deployDeleteLoading, [deploy_id]: true };
       try {
         const r = await this._fetch(`/api/client/strategy/deploy/${encodeURIComponent(deploy_id)}`, { method: 'DELETE' });
-        if (r && r.ok) {
+        const d = r ? await r.json() : null;
+        if (r && r.ok && d?.ok) {
           await this._loadBrokerDeployments(this.deployBindingId);
           await this.loadClientStatus();
+        } else {
+          this.deployMsg = (d?.detail || d?.error || 'Delete failed.'); this.deployOk = false;
         }
-      } catch {}
-      finally { this.deployDeleteLoading[deploy_id] = false; }
+      } catch (e) { this.deployMsg = 'Delete error: ' + (e.message || e); this.deployOk = false; }
+      finally { this.deployDeleteLoading = { ...this.deployDeleteLoading, [deploy_id]: false }; }
     },
 
     /* ── Per-broker start / stop / mode ─────────────────────────────────── */
@@ -1987,11 +1991,12 @@ document.addEventListener('alpine:init', () => {
     async loadClientPositions() {
       this.csPosBrokerLoading = true;
       try {
-        const r = await this._fetch('/api/client/positions');
-        if (r && r.ok) {
-          const d = await r.json();
-          this.csPositions = d.by_broker || {};
-        }
+        const [rp, rd] = await Promise.all([
+          this._fetch('/api/client/positions'),
+          this._fetch('/api/client/strategy/deployments'),
+        ]);
+        if (rp && rp.ok) { const d = await rp.json(); this.csPositions = d.by_broker || {}; }
+        if (rd && rd.ok) { const d = await rd.json(); this.clientDeployments = d.deployments || []; }
       } catch {} finally { this.csPosBrokerLoading = false; }
     },
 
@@ -5538,44 +5543,70 @@ document.addEventListener('alpine:init', () => {
               </div>
             </div>
 
-            <!-- Strategy position frames — filtered to this broker's assigned_strategy -->
-            <div x-show="csStrategySelections.filter(s => !b.assigned_strategy || s.strategy === b.assigned_strategy).length === 0"
-                 class="text-sm text-center py-5" style="color:var(--t-muted)">
-              No strategy assigned to this broker. Edit the broker and set <strong>Assigned Strategy</strong>.
+            <!-- Strategy position frames — one card per deployed strategy on this broker -->
+            <div x-show="(clientDeployments||[]).filter(d=>d.binding_id===b.binding_id).length===0"
+                 class="text-sm text-center py-5 font-mono" style="color:var(--t-muted)">
+              No strategies deployed to this broker. Use ⚡ Deploy on the Brokers tab.
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <template x-for="sel in csStrategySelections.filter(s => !b.assigned_strategy || s.strategy === b.assigned_strategy)" :key="sel.strategy">
+              <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                 <div class="t-card rounded p-4">
+                  <!-- Header: strategy name + instrument + SQ time -->
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="(availableStrategies.find(s=>s.id===sel.strategy)||{name:sel.strategy}).name"></div>
-                      <div class="text-xs font-mono mt-0.5" style="color:var(--t-cyan)" x-text="b.assigned_instrument || sel.instrument"></div>
+                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap Trading'"></div>
+                      <div class="flex items-center gap-2 mt-0.5">
+                        <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
+                        <span class="font-mono text-xs" style="color:var(--t-muted)"
+                              x-text="dep.lot_multiplier+'L · SQ '+dep.squareoff_time"></span>
+                      </div>
                     </div>
-                    <span class="badge-live text-xs" style="font-size:10px">ACTIVE</span>
+                    <div class="text-right">
+                      <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.strategy_name]">
+                        <span class="badge-live text-xs" style="font-size:10px">LIVE</span>
+                      </template>
+                      <template x-if="!csPositions[b.binding_id]||!csPositions[b.binding_id][dep.strategy_name]">
+                        <span class="font-mono text-xs px-2 py-0.5 rounded" style="color:var(--t-muted);border:1px solid var(--t-border)">IDLE</span>
+                      </template>
+                    </div>
                   </div>
-                  <!-- Live legs from csPositions -->
-                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][sel.strategy]">
+
+                  <!-- Live legs -->
+                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.strategy_name]&&(csPositions[b.binding_id][dep.strategy_name].legs||[]).length>0">
                     <div class="space-y-1.5">
-                      <template x-for="(leg,li) in csPositions[b.binding_id][sel.strategy].legs||[]" :key="li">
-                        <div class="data-row">
-                          <span class="font-mono text-xs" style="color:var(--t-text)" x-text="leg.symbol"></span>
-                          <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="leg.qty+'@'+leg.entry_price"></span>
-                          <span class="font-mono text-xs font-bold"
-                                :class="leg.pnl>=0?'':''" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
-                                x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
+                      <!-- Column headers -->
+                      <div class="flex items-center justify-between text-xs font-mono" style="color:var(--t-muted)">
+                        <span>SYMBOL</span>
+                        <div class="flex gap-4">
+                          <span>QTY</span><span>ENTRY</span><span>LTP</span><span>P&amp;L</span>
+                        </div>
+                      </div>
+                      <template x-for="(leg,li) in csPositions[b.binding_id][dep.strategy_name].legs||[]" :key="li">
+                        <div class="flex items-center justify-between py-1 border-t text-xs font-mono" style="border-color:var(--t-border)">
+                          <span style="color:var(--t-text)" x-text="leg.symbol"></span>
+                          <div class="flex gap-4 text-right">
+                            <span style="color:var(--t-muted)" x-text="leg.qty"></span>
+                            <span style="color:var(--t-muted)" x-text="leg.entry_price"></span>
+                            <span class="price-live" style="color:var(--t-bright)" x-text="leg.ltp||leg.entry_price"></span>
+                            <span class="font-bold" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
+                                  x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
+                          </div>
                         </div>
                       </template>
-                      <div class="flex justify-between pt-2 border-t" style="border-color:var(--t-border)">
+                      <!-- Net PnL -->
+                      <div class="flex justify-between pt-2 border-t font-mono" style="border-color:var(--t-border)">
                         <span class="sec-label">NET P&amp;L</span>
-                        <span class="font-mono text-sm font-bold"
-                              :style="`color:${(csPositions[b.binding_id][sel.strategy].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                              x-text="((csPositions[b.binding_id][sel.strategy].pnl||0)>=0?'+':'')+'₹'+(csPositions[b.binding_id][sel.strategy].pnl||0).toFixed(0)"></span>
+                        <span class="text-sm font-bold"
+                              :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+'₹'+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
                       </div>
                     </div>
                   </template>
-                  <template x-if="!csPositions[b.binding_id]||!csPositions[b.binding_id][sel.strategy]">
-                    <div class="text-xs text-center py-4" style="color:var(--t-muted)">No open position</div>
+                  <template x-if="!csPositions[b.binding_id]||!csPositions[b.binding_id][dep.strategy_name]||(csPositions[b.binding_id][dep.strategy_name].legs||[]).length===0">
+                    <div class="text-xs text-center py-4 font-mono" style="color:var(--t-muted)">
+                      No open position — waiting for entry signal
+                    </div>
                   </template>
                 </div>
               </template>
