@@ -74,8 +74,6 @@ class StraddlePosition:
     pe_leg: StraddleLeg = field(default_factory=lambda: StraddleLeg("PE", 0, 0))
 
     net_credit: float = 0.0       # CE_entry + PE_entry at open
-    peak_profit: float = 0.0
-    trailing_active: bool = False
     tsl_high_lock_rs: float = 0.0  # Highest TSL lock reached in ₹
 
     open_time: Optional[datetime] = None
@@ -88,21 +86,6 @@ class StraddlePosition:
 
     # Session VWAP tracking for VWAP Rise SL
     session_min_vwap: float = float("inf")
-
-    # Thresholds frozen at entry
-    _profit_pct:      float = field(default=0.30, repr=False)
-    _sl_pct:          float = field(default=2.00, repr=False)
-    _trail_lock_pct:  float = field(default=0.20, repr=False)
-    _trail_floor_pct: float = field(default=0.10, repr=False)
-    _capital_target:  float = field(default=0.0,  repr=False)
-
-    @property
-    def profit_target(self) -> float:
-        return self._capital_target if self._capital_target > 0 else self.net_credit * self._profit_pct
-
-    @property
-    def stop_loss_limit(self) -> float:
-        return self.net_credit * self._sl_pct
 
     @property
     def current_value(self) -> float:
@@ -134,7 +117,6 @@ class SellStraddleStrategy:
         self._trades_today: int = 0
 
         self._spot: float      = 0.0
-        self._prev_spot: float = 0.0
         self._ce_ltp: float    = 0.0
         self._pe_ltp: float    = 0.0
         self._ltp_target: float = 0.0
@@ -213,16 +195,9 @@ class SellStraddleStrategy:
         self._entry_start     = _parse_time(ss.get("entry_start",    "09:20"))
         self._entry_cutoff    = _parse_time(ss.get("entry_end",      "12:00"))
         self._force_exit      = _parse_time(ss.get("squareoff_time", "15:15"))
-        self._profit_pct      = float(ss.get("profit_pct",      30.0)) / 100.0
-        self._sl_pct          = float(ss.get("sl_pct",         200.0)) / 100.0
-        self._trail_lock_pct  = float(ss.get("trail_lock_pct",  20.0)) / 100.0
-        self._trail_floor_pct = float(ss.get("trail_floor_pct", 10.0)) / 100.0
         self._max_trades      = int(ss.get("max_trades", 1))
-        self._roc_limit_pct   = float(ss.get("roc_limit_pct", 1.5))
         self._sl_cooldown_tf_mult = float(ss.get("sl_cooldown_tf_multiplier", 1.0))
-        self._capital_deployed_inr = float(ss.get("capital_deployed_inr", 0))
         self._lot_size        = int(ss.get("lot_size", 50))
-        self._smart_roll_enabled = bool(ss.get("smart_rolling_enabled", True))
 
         # VWAP Rise SL — UI saves as nested {"enabled": bool, "threshold": float}
         _vwap_sl = ss.get("vwap_rise_sl", {})
@@ -485,10 +460,9 @@ class SellStraddleStrategy:
         max_tf = max(tfs) if tfs else 1
         slope_names = {"slope", "vwap_slope", "slope_curr", "slope_prev"}
         has_slope = any(
-            r.get("indicator", "").lower() in slope_names or
-            r.get("operand1", "").lower() in slope_names or
-            r.get("operand2", "").lower() in slope_names
+            r.get("indicator", "").lower() in slope_names   # direct slope rule (non-advanced)
             for r in rules
+            if r.get("indicator", "").lower() != "advanced"  # exclude advanced rule type
         )
         return max_tf * (2 if has_slope else 1)
 
@@ -562,7 +536,6 @@ class SellStraddleStrategy:
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         atm  = round(self._spot / step) * step
-        capital_target = self._compute_capital_target(now)
 
         self._event_counter += 1
         event_id = f"{self._underlying}_ENTRY_{self._event_counter}"
@@ -579,25 +552,17 @@ class SellStraddleStrategy:
             status            = "open",
             session_min_vwap  = self._ind.get("vwap", float("inf")),
             entry_indicators  = dict(self._ind),
-            _profit_pct       = self._profit_pct,
-            _sl_pct           = self._sl_pct,
-            _trail_lock_pct   = self._trail_lock_pct,
-            _trail_floor_pct  = self._trail_floor_pct,
-            _capital_target   = capital_target,
         )
         self._trades_today  += 1
-        self._prev_spot      = self._spot
         self._order_pending  = True
         # Lock initial credit as the denominator for all day-% calculations
         if self._initial_net_credit <= 0:
             self._initial_net_credit = self._ce_ltp + self._pe_ltp
 
         logger.info(
-            "SellStraddle[%s]: ENTERED — ATM=%.0f CE=%.2f PE=%.2f credit=%.2f "
-            "target=%.2f sl=%.2f | %s=PASS [%s]",
+            "SellStraddle[%s]: ENTERED — ATM=%.0f CE=%.2f PE=%.2f credit=%.2f | %s=PASS [%s]",
             self._underlying, atm,
             self._ce_ltp, self._pe_ltp, self._position.net_credit,
-            self._position.profit_target, self._position.stop_loss_limit,
             rule_key, reason,
         )
 
@@ -626,6 +591,14 @@ class SellStraddleStrategy:
             return
         now = datetime.now(IST)
         pnl = pos.unrealized_pnl
+
+        # ── EOD FORCE SQUARE-OFF — highest priority, checked before all else ──────
+        if now.time() >= self._force_exit:
+            if self._position and self._position.status == "open":
+                logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
+                await self._close_position("eod_squareoff")
+                self._stop_for_day = True
+            return
 
         # ── DAY-LEVEL % GUARDRAILS (highest priority, stops trading for the day) ──
         # total_day_pct = (all closed trades + running P&L) / initial credit × 100
@@ -676,11 +649,6 @@ class SellStraddleStrategy:
                 await self._close_position("guardrail_pnl_sl")
                 return
 
-        # 1. Time exit
-        if now.time() >= self._force_exit:
-            await self._close_position("time_exit")
-            return
-
         # LTP Decay — close decayed leg; try smart roll first
         if self._ltp_decay_enabled:
             decayed = (
@@ -700,18 +668,6 @@ class SellStraddleStrategy:
                     await self._close_position(f"ltp_decay_{decayed_side}")
                 return
 
-        # 2. Update trailing SL (basic % of credit)
-        if pnl > pos.peak_profit:
-            pos.peak_profit = pnl
-            if pnl >= pos.net_credit * pos._trail_lock_pct:
-                pos.trailing_active = True
-        if pos.trailing_active:
-            trail_floor = pos.peak_profit - pos.net_credit * pos._trail_floor_pct
-            if pnl < trail_floor:
-                logger.info("SellStraddle[%s]: TRAILING SL — pnl=%.2f floor=%.2f", self._underlying, pnl, trail_floor)
-                await self._close_position("trailing_sl")
-                return
-
         # 3. Scalable TSL → smart roll first, then full exit
         if self._tsl_enabled:
             if self._check_scalable_tsl(pos, pnl):
@@ -720,20 +676,6 @@ class SellStraddleStrategy:
                 if not rolled:
                     await self._close_position("scalable_tsl")
                 return
-
-        # 4. Profit target → smart roll first
-        if pnl >= pos.profit_target:
-            logger.info("SellStraddle[%s]: PROFIT TARGET — pnl=%.2f target=%.2f", self._underlying, pnl, pos.profit_target)
-            rolled = await self._try_smart_roll(now, "profit_target")
-            if not rolled:
-                await self._close_position("profit_target")
-            return
-
-        # 5. Stop loss — direct exit, no roll (need to get out immediately)
-        if -pnl >= pos.stop_loss_limit:
-            logger.info("SellStraddle[%s]: STOP LOSS — loss=%.2f limit=%.2f", self._underlying, -pnl, pos.stop_loss_limit)
-            await self._close_position("stop_loss")
-            return
 
         # 6. Ratio exit → smart roll first
         if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
@@ -811,18 +753,6 @@ class SellStraddleStrategy:
                         await self._close_position("exit_rules")
                     return
 
-        # 8. ROC spot-move guardrail → smart roll first (last resort, tick-level)
-        if self._prev_spot > 0:
-            roc_pct = abs(self._spot - self._prev_spot) / self._prev_spot * 100
-            if roc_pct > self._roc_limit_pct:
-                logger.warning("SellStraddle[%s]: ROC GUARDRAIL — %.2f%%", self._underlying, roc_pct)
-                rolled = await self._try_smart_roll(now, "roc_guardrail")
-                if not rolled:
-                    await self._close_position("roc_guardrail")
-                return
-
-        self._prev_spot = self._spot
-
     def _pnl_rs(self, pnl_pts: float) -> float:
         """Convert P&L in premium points to rupees."""
         qty = self._lot_size * self._lot_multiplier
@@ -874,8 +804,6 @@ class SellStraddleStrategy:
 
         Returns True if rolled (no further action needed), False if caller should close.
         """
-        if not self._smart_roll_enabled:
-            return False
         if self._trades_today >= self._max_trades:
             return False
         if not self._is_in_entry_window(now):
@@ -906,14 +834,9 @@ class SellStraddleStrategy:
             pos.ce_leg.entry_price = self._ce_ltp
             pos.pe_leg.entry_price = self._pe_ltp
             pos.net_credit         = self._ce_ltp + self._pe_ltp
-            pos.peak_profit        = 0.0
-            pos.trailing_active    = False
             pos.tsl_high_lock_rs   = 0.0
             pos.open_time          = now
             pos.session_min_vwap   = self._ind.get("vwap", float("inf"))
-            # Frozen thresholds stay the same — new position on same strikes
-            # COUNT as a new trade for max_trades tracking
-            self._trades_today += 1
         else:
             # ── PHYSICAL ROLL: new ATM, close old and open new ────────────────
             logger.info(
@@ -936,7 +859,6 @@ class SellStraddleStrategy:
                 self._underlying, pos.atm_at_entry,
             )
             # Open new position immediately (no cooldown for rolls)
-            capital_target = self._compute_capital_target(now)
             self._position = StraddlePosition(
                 underlying        = self._underlying,
                 atm_at_entry      = new_atm,
@@ -948,13 +870,7 @@ class SellStraddleStrategy:
                 status            = "open",
                 session_min_vwap  = self._ind.get("vwap", float("inf")),
                 entry_indicators  = dict(self._ind),
-                _profit_pct       = self._profit_pct,
-                _sl_pct           = self._sl_pct,
-                _trail_lock_pct   = self._trail_lock_pct,
-                _trail_floor_pct  = self._trail_floor_pct,
-                _capital_target   = capital_target,
             )
-            self._trades_today += 1
             logger.info(
                 "SellStraddle[%s]: ORDER INTENT — SELL %s%.0fCE + SELL %s%.0fPE (roll re-entry)",
                 self._underlying,
@@ -1026,17 +942,6 @@ class SellStraddleStrategy:
         if cooldown_min > 0:
             self._sl_cooldown_until = datetime.now(IST) + timedelta(minutes=cooldown_min)
             logger.info("SellStraddle[%s]: SL cooldown %d min.", self._underlying, cooldown_min)
-
-    def _compute_capital_target(self, now: datetime) -> float:
-        if self._capital_deployed_inr <= 0:
-            return 0.0
-        ss       = RuntimeConfig.index_section(self._underlying, "sell_straddle")
-        day_name = now.strftime("%A").lower()
-        day_cfg  = ss.get("per_day", {}).get(day_name, {})
-        pct = float(day_cfg.get("profit_target_pct", 0))
-        if pct <= 0:
-            pct = float(ss.get("profit_pct", 30.0))
-        return self._capital_deployed_inr * pct / 100.0
 
     def _is_in_entry_window(self, now: datetime) -> bool:
         return self._entry_start <= now.time() < self._entry_cutoff
