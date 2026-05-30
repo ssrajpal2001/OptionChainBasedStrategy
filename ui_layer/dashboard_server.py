@@ -295,6 +295,7 @@ try:
         api_secret:          str   = ""
         lot_multiplier:      float = 1.0
         trading_mode:        str   = "paper"
+        product_type:        str   = "MIS"    # "MIS" intraday | "NRML" carry-forward
         assigned_strategy:   str   = ""
         assigned_instrument: str   = "NIFTY"
 
@@ -1196,6 +1197,7 @@ class DashboardServer:
                     access_token="",
                     lot_multiplier=body.lot_multiplier,
                     trading_mode=body.trading_mode,
+                    product_type=body.product_type,
                     assigned_strategy=body.assigned_strategy,
                     assigned_instrument=body.assigned_instrument,
                 )

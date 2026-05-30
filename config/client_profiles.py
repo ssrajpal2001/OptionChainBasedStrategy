@@ -51,6 +51,8 @@ class BrokerBinding:
 
     # Execution params per binding
     lot_multiplier: float = 1.0         # Scale signal lots (e.g. 0.5 = half size)
+    product_type: str = "MIS"           # "MIS" = intraday auto-sqoff | "NRML" = carry-forward
+    trading_mode: str = "paper"         # "paper" | "live"
     enabled: bool = True
 
     @classmethod

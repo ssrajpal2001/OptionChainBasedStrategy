@@ -102,9 +102,15 @@ class ZerodhaBroker(BaseBroker):
         self._kite = KiteConnect(api_key=self._api_key)
         self._kite.set_access_token(self._token)
 
-        # Determine product type from broker binding trading_mode
-        mode = getattr(creds, "trading_mode", "intraday").lower()
-        self._product = "NRML" if mode in ("carryforward", "normal", "nrml") else "MIS"
+        # Determine product type:
+        # 1. Explicit product_type field on binding ("MIS" or "NRML") — highest priority
+        # 2. Infer from trading_mode ("carryforward"/"normal" → NRML, else MIS)
+        pt = getattr(creds, "product_type", "").strip().upper()
+        if pt in ("MIS", "NRML"):
+            self._product = pt
+        else:
+            mode = getattr(creds, "trading_mode", "intraday").lower()
+            self._product = "NRML" if mode in ("carryforward", "normal", "nrml") else "MIS"
         logger.info(
             "ZerodhaBroker[%s]: authenticated — product=%s mode=%s",
             self.client_id, self._product, mode,

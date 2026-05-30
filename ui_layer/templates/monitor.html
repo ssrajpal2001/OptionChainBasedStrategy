@@ -665,7 +665,7 @@ document.addEventListener('alpine:init', () => {
     deployDeleteId: '',            // set before calling deleteDeploy to avoid x-for scope issues
     // Portal broker add form state
     showPortalBrokerForm: false,
-    portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', api_key:'', api_secret:'', lot_multiplier:1.0, trading_mode:'paper', assigned_strategy:'', assigned_instrument:'NIFTY' },
+    portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', api_key:'', api_secret:'', lot_multiplier:1.0, trading_mode:'paper', product_type:'MIS', assigned_strategy:'', assigned_instrument:'NIFTY' },
     portalBrokerMsg: '', portalBrokerOk: null, portalBrokerLoading: false,
     portalBrokerIsEdit: false,
 
@@ -4867,6 +4867,24 @@ function clientTrapInstruments() {
                       @click="portalBroker.trading_mode='live'">Live</button>
             </div>
           </div>
+          <div>
+            <div class="sec-label mb-1">PRODUCT TYPE</div>
+            <div class="flex gap-2 h-[38px]">
+              <button class="flex-1 text-xs font-mono rounded border transition-all"
+                      :style="(portalBroker.product_type||'MIS')==='MIS'
+                        ? 'background:rgba(var(--t-amber-rgb),0.1);color:var(--t-amber);border-color:rgba(var(--t-amber-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.product_type='MIS'"
+                      title="Auto square-off at 3:20 PM (intraday)">MIS</button>
+              <button class="flex-1 text-xs font-mono rounded border transition-all"
+                      :style="(portalBroker.product_type||'MIS')==='NRML'
+                        ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.product_type='NRML'"
+                      title="Carry forward overnight (positional)">NRML</button>
+            </div>
+            <p class="text-[10px] mt-1" style="color:var(--t-muted)">MIS = intraday auto-sqoff &nbsp;|&nbsp; NRML = carry forward</p>
+          </div>
         </div>
         <!-- Dynamic credential fields -->
         <template x-if="brokerFieldConfig[portalBroker.provider]">
@@ -5128,7 +5146,7 @@ function clientTrapInstruments() {
             <div class="text-xs mt-0.5" style="color:var(--t-muted)" x-text="csBindings.length + ' account' + (csBindings.length!==1?'s':'') + ' connected'"></div>
           </div>
           <button class="btn-action" style="width:auto;padding:6px 16px"
-                  @click="if(showPortalBrokerForm){showPortalBrokerForm=false;portalBrokerIsEdit=false;portalBrokerMsg=''}else{showPortalBrokerForm=true;portalBrokerIsEdit=false;portalBroker={provider:'zerodha',binding_id:'',label:'',user_id:'',api_key:'',api_secret:'',lot_multiplier:1.0,trading_mode:'paper',assigned_strategy:'',assigned_instrument:'NIFTY'}}"
+                  @click="if(showPortalBrokerForm){showPortalBrokerForm=false;portalBrokerIsEdit=false;portalBrokerMsg=''}else{showPortalBrokerForm=true;portalBrokerIsEdit=false;portalBroker={provider:'zerodha',binding_id:'',label:'',user_id:'',api_key:'',api_secret:'',lot_multiplier:1.0,trading_mode:'paper',product_type:'MIS',assigned_strategy:'',assigned_instrument:'NIFTY'}}"
                   x-text="showPortalBrokerForm ? 'Cancel' : '+ Add Broker'"></button>
         </div>
 
@@ -5159,6 +5177,13 @@ function clientTrapInstruments() {
                             ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)'
                             : 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.25)'"
                           x-text="(b.trading_mode||'paper').toUpperCase()"></span>
+                    <!-- Product type badge -->
+                    <span class="px-1.5 py-0.5 rounded font-mono"
+                          :style="(b.product_type||'MIS')==='NRML'
+                            ? 'background:rgba(var(--t-cyan-rgb),0.08);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.25)'
+                            : 'background:rgba(var(--t-amber-rgb),0.08);color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.25)'"
+                          x-text="(b.product_type||'MIS')"
+                          title="MIS = intraday auto-sqoff | NRML = carry forward"></span>
                     <!-- Token status badge -->
                     <span class="px-1.5 py-0.5 rounded font-mono"
                           :style="b.access_token
@@ -5456,8 +5481,8 @@ function clientTrapInstruments() {
           </div>
         </div>
 
-        <!-- Row 2: Label + Trading Mode -->
-        <div class="grid grid-cols-2 gap-3">
+        <!-- Row 2: Label + Trading Mode + Product Type -->
+        <div class="grid grid-cols-3 gap-3">
           <div>
             <div class="sec-label mb-1">LABEL (optional)</div>
             <input class="t-input" type="text" placeholder="e.g. Main Trading Account" x-model="portalBroker.label" autocomplete="off"/>
@@ -5475,6 +5500,23 @@ function clientTrapInstruments() {
                         ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.35)'
                         : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
                       @click="portalBroker.trading_mode='live'">Live</button>
+            </div>
+          </div>
+          <div>
+            <div class="sec-label mb-1">PRODUCT TYPE</div>
+            <div class="flex gap-2">
+              <button class="flex-1 py-1.5 text-xs font-mono rounded border transition-all"
+                      :style="(portalBroker.product_type||'MIS')==='MIS'
+                        ? 'background:rgba(var(--t-amber-rgb),0.1);color:var(--t-amber);border-color:rgba(var(--t-amber-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.product_type='MIS'"
+                      title="Intraday — auto square-off at 3:20 PM">MIS</button>
+              <button class="flex-1 py-1.5 text-xs font-mono rounded border transition-all"
+                      :style="(portalBroker.product_type||'MIS')==='NRML'
+                        ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.product_type='NRML'"
+                      title="Carry forward overnight">NRML</button>
             </div>
           </div>
         </div>

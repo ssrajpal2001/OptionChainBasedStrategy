@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
     assigned_strategy   TEXT    DEFAULT '',
     assigned_instrument TEXT    DEFAULT 'NIFTY',
     trading_mode        TEXT    DEFAULT 'paper',
+    product_type        TEXT    DEFAULT 'MIS',
     is_trade_enabled    INTEGER DEFAULT 1,
     lot_multiplier      REAL    DEFAULT 1.0,
     enabled             INTEGER DEFAULT 1,
@@ -342,6 +343,7 @@ class ClientDB:
         access_token: str = "",
         lot_multiplier: float = 1.0,
         trading_mode: str = "paper",
+        product_type: str = "MIS",
         assigned_strategy: str = "",
         assigned_instrument: str = "NIFTY",
         # Deprecated — accepted for backward compat but NOT stored
@@ -365,9 +367,9 @@ class ClientDB:
             """INSERT INTO broker_bindings
                (client_id, binding_id, provider, label,
                 user_id_enc, api_key_enc, api_secret_enc,
-                access_token, lot_multiplier, trading_mode,
+                access_token, lot_multiplier, trading_mode, product_type,
                 assigned_strategy, assigned_instrument, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(client_id, binding_id) DO UPDATE SET
                  provider            = excluded.provider,
                  label               = excluded.label,
@@ -377,6 +379,7 @@ class ClientDB:
                  access_token        = CASE WHEN excluded.access_token  != '' THEN excluded.access_token  ELSE access_token  END,
                  lot_multiplier      = excluded.lot_multiplier,
                  trading_mode        = excluded.trading_mode,
+                 product_type        = excluded.product_type,
                  assigned_strategy   = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_strategy ELSE assigned_strategy END,
                  assigned_instrument = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_instrument ELSE assigned_instrument END""",
             (
@@ -387,6 +390,7 @@ class ClientDB:
                 access_token,
                 lot_multiplier,
                 trading_mode,
+                product_type,
                 assigned_strategy,
                 assigned_instrument,
                 now,
@@ -572,7 +576,8 @@ class ClientDB:
                     con.execute(
                         """SELECT binding_id, provider, label, access_token,
                                   token_generated_at, token_expiry_at,
-                                  assigned_strategy, assigned_instrument, trading_mode,
+                                  assigned_strategy, assigned_instrument,
+                                  trading_mode, product_type,
                                   is_trade_enabled, lot_multiplier, enabled,
                                   terminal_connected, terminal_connected_at, engine_active
                            FROM broker_bindings WHERE client_id=? ORDER BY created_at""",
@@ -958,6 +963,7 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN terminal_connected_at TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN engine_active INTEGER DEFAULT 0",
             "ALTER TABLE clients ADD COLUMN trap_instruments TEXT DEFAULT '[]'",
+            "ALTER TABLE broker_bindings ADD COLUMN product_type TEXT DEFAULT 'MIS'",
         ):
             try:
                 con.execute(migration)
