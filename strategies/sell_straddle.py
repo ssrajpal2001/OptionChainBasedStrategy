@@ -123,10 +123,10 @@ class SellStraddleStrategy:
         self._pe_ltp: float    = 0.0
         self._ltp_target: float = 0.0
 
-        # Trailing SL — activates once profit >= net_credit * trail_lock_pct;
-        # exits if profit drops to (peak - net_credit * trail_floor_pct)
-        self._trail_lock_pct:  float = 0.20   # default 20% of credit
-        self._trail_floor_pct: float = 0.10   # default 10% below peak
+        # Trailing SL — enable toggle + thresholds
+        self._trail_sl_enabled: bool  = True
+        self._trail_lock_pct:   float = 0.20   # default 20% of credit
+        self._trail_floor_pct:  float = 0.10   # default 10% below peak
 
         self._ltp_decay_enabled: bool  = False
         self._ltp_exit_min:      float = 20.0
@@ -206,10 +206,10 @@ class SellStraddleStrategy:
         self._sl_cooldown_tf_mult = float(ss.get("sl_cooldown_tf_multiplier", 1.0))
         self._lot_size        = int(ss.get("lot_size", 50))
 
-        # Trailing SL — activates at trail_lock_pct% profit, floor = trail_floor_pct% below peak
-        # Set trail_lock_pct=0 to disable. Values stored as % in config, divided by 100 here.
-        self._trail_lock_pct  = float(ss.get("trail_lock_pct",  20.0)) / 100.0
-        self._trail_floor_pct = float(ss.get("trail_floor_pct", 10.0)) / 100.0
+        # Trailing SL — enable/disable toggle + thresholds
+        self._trail_sl_enabled = bool(ss.get("tsl_enabled", True))
+        self._trail_lock_pct   = float(ss.get("trail_lock_pct",  20.0)) / 100.0
+        self._trail_floor_pct  = float(ss.get("trail_floor_pct", 10.0)) / 100.0
 
         # VWAP Rise SL — UI saves as nested {"enabled": bool, "threshold": float}
         _vwap_sl = ss.get("vwap_rise_sl", {})
@@ -406,7 +406,16 @@ class SellStraddleStrategy:
         now = datetime.now(IST)
         self._load_thresholds()
 
-        # Record market-open once per session (first candle of the day)
+        # New trading day — wipe all intraday state (sell_straddle is intraday only)
+        if self._market_open_dt is not None and self._market_open_dt.date() != now.date():
+            logger.info(
+                "SellStraddle[%s]: new day detected (%s→%s) — resetting session state.",
+                self._underlying,
+                self._market_open_dt.date(), now.date(),
+            )
+            self.reset_session()
+
+        # Record market-open for this session (first candle of the day)
         if self._market_open_dt is None or self._market_open_dt.date() != now.date():
             self._market_open_dt = now.replace(
                 hour=_MARKET_OPEN.hour, minute=_MARKET_OPEN.minute,
@@ -685,8 +694,8 @@ class SellStraddleStrategy:
 
         # Trailing SL — activates once profit >= net_credit * trail_lock_pct;
         # once active, exit if profit drops to (peak - net_credit * trail_floor_pct).
-        # Disabled when trail_lock_pct == 0. Closes directly (no smart roll — locked profit).
-        if self._trail_lock_pct > 0:
+        # Disabled via admin toggle or when trail_lock_pct == 0.
+        if self._trail_sl_enabled and self._trail_lock_pct > 0:
             if pnl > pos.peak_profit:
                 pos.peak_profit = pnl
                 if pnl >= pos.net_credit * self._trail_lock_pct:
