@@ -137,6 +137,24 @@ class SellStraddleStrategy:
         self._prev_spot: float = 0.0
         self._ce_ltp: float    = 0.0
         self._pe_ltp: float    = 0.0
+        self._ltp_target: float = 0.0
+
+        self._ltp_decay_enabled: bool  = False
+        self._ltp_exit_min:      float = 20.0
+
+        self._exit_rules:            list = []
+        self._last_exit_rules_bucket: str  = ""
+
+        self._guardrail_pnl_enabled:    bool  = False
+        self._guardrail_pnl_target_pts: float = 0.0
+        self._guardrail_pnl_sl_pts:     float = 0.0
+
+        self._guardrail_roc_enabled:  bool  = False
+        self._guardrail_roc_tf:       int   = 15
+        self._guardrail_roc_length:   int   = 9
+        self._guardrail_roc_target:   float = -20.0
+        self._guardrail_roc_stoploss: float = 10.0
+        self._last_roc_guard_bucket:  str   = ""
 
         # Market-open timestamp for this session (set on first candle of the day)
         self._market_open_dt: Optional[datetime] = None
@@ -232,6 +250,34 @@ class SellStraddleStrategy:
         _ls     = float(_day.get("loss_sl_pct", 0)) if _day_on else 0.0
         self._day_loss_sl_pct       = _ls if _ls > 0 else float(ss.get("loss_sl_pct", 0))
 
+        # min_ltp / ltp_target — minimum combined premium floor for entry
+        # Config saves as "ltp_target" or "min_ltp" or "ltp_min" — try all three
+        self._ltp_target = float(
+            ss.get("ltp_target") or ss.get("min_ltp") or ss.get("ltp_min") or 0.0
+        )
+
+        # LTP Decay — fires when either CE or PE LTP falls below threshold
+        _ltp_d = ss.get("ltp_decay", {})
+        self._ltp_decay_enabled = bool(_ltp_d.get("enabled", ss.get("ltp_decay_enabled", False)))
+        self._ltp_exit_min      = float(_ltp_d.get("ltp_exit_min", ss.get("ltp_exit_min", 20.0)))
+
+        # Dynamic exit rules (same format as entry_rules_beginning)
+        self._exit_rules: list = ss.get("exit_rules", [])
+
+        # Global PnL guardrail — cumulative session premium points
+        _pnl_g = ss.get("guardrail_pnl", {})
+        self._guardrail_pnl_enabled    = bool(_pnl_g.get("enabled", False))
+        self._guardrail_pnl_target_pts = float(_pnl_g.get("target_pts", 0.0))
+        self._guardrail_pnl_sl_pts     = float(_pnl_g.get("stoploss_pts", 0.0))
+
+        # Global ROC guardrail — TF-boundary ROC monitoring
+        _roc_g = ss.get("guardrail_roc", {})
+        self._guardrail_roc_enabled  = bool(_roc_g.get("enabled", False))
+        self._guardrail_roc_tf       = int(_roc_g.get("tf", 15))
+        self._guardrail_roc_length   = int(_roc_g.get("length", 9))
+        self._guardrail_roc_target   = float(_roc_g.get("target", -20.0))
+        self._guardrail_roc_stoploss = float(_roc_g.get("stoploss", 10.0))
+
     def reconfigure(self) -> None:
         self._load_thresholds()
         logger.info("SellStraddle[%s]: reconfigured.", self._underlying)
@@ -268,6 +314,8 @@ class SellStraddleStrategy:
         self._idx_highs.clear()
         self._idx_lows.clear()
         self._idx_closes.clear()
+        self._last_exit_rules_bucket = ""
+        self._last_roc_guard_bucket  = ""
         logger.info("SellStraddleStrategy[%s]: session reset.", self._underlying)
 
     # ── EventBus loops ────────────────────────────────────────────────────────
@@ -483,6 +531,16 @@ class SellStraddleStrategy:
         if self._spot <= 0 or self._ce_ltp <= 0 or self._pe_ltp <= 0:
             return
 
+        # min_ltp filter — block entry if combined premium is below floor
+        if self._ltp_target > 0.0:
+            combined = self._ce_ltp + self._pe_ltp
+            if combined < self._ltp_target:
+                logger.debug(
+                    "SellStraddle[%s]: entry blocked — combined LTP %.2f < ltp_target %.2f",
+                    self._underlying, combined, self._ltp_target,
+                )
+                return
+
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         is_beginning = (self._trades_today == 0)
         rule_key = "entry_rules_beginning" if is_beginning else "entry_rules_reentry"
@@ -599,10 +657,48 @@ class SellStraddleStrategy:
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 
+        # guardrail_pnl — cumulative session premium points target / SL
+        if self._guardrail_pnl_enabled:
+            _session_pts = self._session_realized_pnl_pts + pnl
+            if self._guardrail_pnl_target_pts > 0 and _session_pts >= self._guardrail_pnl_target_pts:
+                logger.info(
+                    "SellStraddle[%s]: GUARDRAIL_PNL TARGET — session=%.2f pts >= %.2f",
+                    self._underlying, _session_pts, self._guardrail_pnl_target_pts,
+                )
+                await self._close_position("guardrail_pnl_target")
+                self._stop_for_day = True
+                return
+            if self._guardrail_pnl_sl_pts != 0 and _session_pts <= self._guardrail_pnl_sl_pts:
+                logger.info(
+                    "SellStraddle[%s]: GUARDRAIL_PNL SL — session=%.2f pts <= %.2f",
+                    self._underlying, _session_pts, self._guardrail_pnl_sl_pts,
+                )
+                await self._close_position("guardrail_pnl_sl")
+                return
+
         # 1. Time exit
         if now.time() >= self._force_exit:
             await self._close_position("time_exit")
             return
+
+        # LTP Decay — close decayed leg; try smart roll first
+        if self._ltp_decay_enabled:
+            decayed = (
+                (pos.ce_leg.ltp > 0 and pos.ce_leg.ltp < self._ltp_exit_min) or
+                (pos.pe_leg.ltp > 0 and pos.pe_leg.ltp < self._ltp_exit_min)
+            )
+            if decayed:
+                decayed_side = "CE" if pos.ce_leg.ltp < self._ltp_exit_min else "PE"
+                logger.info(
+                    "SellStraddle[%s]: LTP DECAY — %s ltp=%.2f < min=%.2f",
+                    self._underlying, decayed_side,
+                    pos.ce_leg.ltp if decayed_side == "CE" else pos.pe_leg.ltp,
+                    self._ltp_exit_min,
+                )
+                rolled = await self._try_smart_roll(now, f"ltp_decay_{decayed_side}")
+                if not rolled:
+                    await self._close_position(f"ltp_decay_{decayed_side}")
+                return
 
         # 2. Update trailing SL (basic % of credit)
         if pnl > pos.peak_profit:
@@ -668,6 +764,36 @@ class SellStraddleStrategy:
                             await self._close_position("vwap_rise_sl")
                         return
 
+        # guardrail_roc — TF-boundary ROC of combined premium
+        if self._guardrail_roc_enabled and len(self._prem_closes) >= self._guardrail_roc_length + 1:
+            _rg_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // self._guardrail_roc_tf) * self._guardrail_roc_tf:02d}"
+            if _rg_bucket != self._last_roc_guard_bucket:
+                self._last_roc_guard_bucket = _rg_bucket
+                _closes = list(self._prem_closes)
+                _roc_val = (
+                    (_closes[-1] - _closes[-(self._guardrail_roc_length + 1)])
+                    / _closes[-(self._guardrail_roc_length + 1)]
+                    * 100
+                )
+                if self._guardrail_roc_target < 0 and _roc_val <= self._guardrail_roc_target:
+                    logger.info(
+                        "SellStraddle[%s]: ROC GUARDRAIL TARGET — roc=%.2f <= target=%.2f",
+                        self._underlying, _roc_val, self._guardrail_roc_target,
+                    )
+                    rolled = await self._try_smart_roll(now, "guardrail_roc_target")
+                    if not rolled:
+                        await self._close_position("guardrail_roc_target")
+                    return
+                if self._guardrail_roc_stoploss >= 0 and _roc_val >= self._guardrail_roc_stoploss:
+                    logger.info(
+                        "SellStraddle[%s]: ROC GUARDRAIL SL — roc=%.2f >= sl=%.2f",
+                        self._underlying, _roc_val, self._guardrail_roc_stoploss,
+                    )
+                    rolled = await self._try_smart_roll(now, "guardrail_roc_sl")
+                    if not rolled:
+                        await self._close_position("guardrail_roc_sl")
+                    return
+
         # 8. ROC guardrail → smart roll first
         if self._prev_spot > 0:
             roc_pct = abs(self._spot - self._prev_spot) / self._prev_spot * 100
@@ -677,6 +803,23 @@ class SellStraddleStrategy:
                 if not rolled:
                     await self._close_position("roc_guardrail")
                 return
+
+        # exit_rules — dynamic technical exit conditions from admin config
+        if self._exit_rules:
+            _max_tf = max((int(r.get("tf", 1)) for r in self._exit_rules), default=1)
+            _er_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _max_tf) * _max_tf:02d}"
+            if _er_bucket != self._last_exit_rules_bucket:
+                self._last_exit_rules_bucket = _er_bucket
+                _passed, _reason = _eval_rules(self._exit_rules, self._ind)
+                if _passed:
+                    logger.info(
+                        "SellStraddle[%s]: EXIT_RULES triggered — %s",
+                        self._underlying, _reason,
+                    )
+                    rolled = await self._try_smart_roll(now, "exit_rules")
+                    if not rolled:
+                        await self._close_position("exit_rules")
+                    return
 
         self._prev_spot = self._spot
 
