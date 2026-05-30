@@ -175,6 +175,23 @@ class SellStraddleStrategy:
 
     def _load_thresholds(self) -> None:
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+
+        def _cfg(key: str, default):
+            """
+            Dot-notation config reader — matches Option_Selling_May_2026 sell_v3 convention.
+            'tsl_scalable.enabled' resolves ss['tsl_scalable']['enabled'].
+            Falls back to flat key lookup for backward compatibility, then to default.
+            """
+            parts = key.split(".")
+            node = ss
+            for part in parts:
+                if not isinstance(node, dict):
+                    return default
+                node = node.get(part)
+                if node is None:
+                    return default
+            return node if node is not None else default
+
         self._entry_start     = _parse_time(ss.get("entry_start",    "09:20"))
         self._entry_cutoff    = _parse_time(ss.get("entry_end",      "12:00"))
         self._force_exit      = _parse_time(ss.get("squareoff_time", "15:15"))
@@ -184,27 +201,35 @@ class SellStraddleStrategy:
         self._trail_floor_pct = float(ss.get("trail_floor_pct", 10.0)) / 100.0
         self._max_trades      = int(ss.get("max_trades", 1))
         self._roc_limit_pct   = float(ss.get("roc_limit_pct", 1.5))
-        self._ratio_threshold = float(ss.get("ratio_exit_threshold", 3.0))
         self._sl_cooldown_tf_mult = float(ss.get("sl_cooldown_tf_multiplier", 1.0))
         self._capital_deployed_inr = float(ss.get("capital_deployed_inr", 0))
         self._lot_size        = int(ss.get("lot_size", 50))
         self._smart_roll_enabled = bool(ss.get("smart_rolling_enabled", True))
-        # VWAP Rise SL
-        self._vwap_rise_enabled   = bool(ss.get("vwap_rise_sl_enabled", False))
-        self._vwap_rise_threshold = float(ss.get("vwap_rise_sl_threshold_pct", 1.0))
-        # Scalable TSL (rupee per lot)
-        self._tsl_enabled        = bool(ss.get("tsl_scalable_enabled", False))
-        self._tsl_base_profit_rs = float(ss.get("tsl_base_profit_rs", 1000.0))
-        self._tsl_base_lock_rs   = float(ss.get("tsl_base_lock_rs", 250.0))
-        self._tsl_step_profit_rs = float(ss.get("tsl_step_profit_rs", 250.0))
-        self._tsl_step_lock_rs   = float(ss.get("tsl_step_lock_rs", 250.0))
-        # Day-level % guardrails (mirrors old sell_v3 session-guardrail logic)
-        # Resolution: per_day[today].profit_target_pct → global profit_target_pct → 0 (disabled)
+
+        # VWAP Rise SL — UI saves as nested {"enabled": bool, "threshold": float}
+        _vwap_sl = ss.get("vwap_rise_sl", {})
+        self._vwap_rise_enabled   = bool(_vwap_sl.get("enabled", ss.get("vwap_rise_sl_enabled", False)))
+        self._vwap_rise_threshold = float(_vwap_sl.get("threshold", ss.get("vwap_rise_sl_threshold_pct", 1.0)))
+
+        # Ratio exit — UI saves as nested {"enabled": bool, "threshold": float}
+        _ratio = ss.get("ratio_exit", {})
+        self._ratio_threshold = float(_ratio.get("threshold", ss.get("ratio_exit_threshold", 3.0)))
+
+        # Scalable TSL — UI saves as nested {"enabled": bool, "base_profit": int, ...}
+        _tsl = ss.get("tsl_scalable", {})
+        self._tsl_enabled        = bool(_tsl.get("enabled", ss.get("tsl_scalable_enabled", False)))
+        self._tsl_base_profit_rs = float(_tsl.get("base_profit", ss.get("tsl_base_profit_rs", 1000.0)))
+        self._tsl_base_lock_rs   = float(_tsl.get("base_lock",   ss.get("tsl_base_lock_rs",   250.0)))
+        self._tsl_step_profit_rs = float(_tsl.get("step_profit", ss.get("tsl_step_profit_rs",  250.0)))
+        self._tsl_step_lock_rs   = float(_tsl.get("step_lock",   ss.get("tsl_step_lock_rs",    250.0)))
+
+        # Day-level % guardrails — per_day[today] overrides global; enabled flag respected
         now_day = datetime.now(IST).strftime("%A").lower()
         _day    = ss.get("per_day", {}).get(now_day, {})
-        _pt     = float(_day.get("profit_target_pct", 0))
+        _day_on = bool(_day.get("enabled", True))   # default True for backward compat
+        _pt     = float(_day.get("profit_target_pct", 0)) if _day_on else 0.0
         self._day_profit_target_pct = _pt if _pt > 0 else float(ss.get("profit_target_pct", 0))
-        _ls     = float(_day.get("loss_sl_pct", 0))
+        _ls     = float(_day.get("loss_sl_pct", 0)) if _day_on else 0.0
         self._day_loss_sl_pct       = _ls if _ls > 0 else float(ss.get("loss_sl_pct", 0))
 
     def reconfigure(self) -> None:
