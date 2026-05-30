@@ -1159,6 +1159,8 @@ class DashboardServer:
                     assigned_strategy=body.assigned_strategy,
                     assigned_instrument=body.assigned_instrument,
                 )
+                # New broker starts with trade OFF — user must explicitly enable it
+                await _srv._client_db.set_trade_enabled(cid, body.binding_id, False)
             except HTTPException:
                 raise
             except Exception as exc:
@@ -1603,7 +1605,7 @@ class DashboardServer:
             await _srv._client_db.set_engine_active(cid, binding_id, True)
 
             # Apply any saved deployment config to RuntimeConfig immediately
-            deploy_id = f"{cid}_{binding_id}_{strategy}"
+            deploy_id = f"{cid}_{binding_id}_{strategy}_{underlying}"
             try:
                 from data_layer.deployment_store import load_deployment_json, apply_deployment_to_runtime_config
                 deploy = load_deployment_json(deploy_id)

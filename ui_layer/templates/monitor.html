@@ -5435,43 +5435,9 @@ document.addEventListener('alpine:init', () => {
           </div>
         </template>
 
-        <!-- Strategy assignment -->
-        <div class="pt-1 border-t" style="border-color:var(--t-border)">
-          <div class="sec-label mb-2">ASSIGN STRATEGY TO THIS BROKER</div>
-          <div class="space-y-2">
-            <!-- Strategy radio buttons -->
-            <div class="flex flex-wrap gap-2">
-              <button class="text-xs px-3 py-1.5 rounded border font-mono transition-all"
-                      :style="portalBroker.assigned_strategy===''
-                        ? 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'
-                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
-                      @click="portalBroker.assigned_strategy=''"
-                      style="display:none">none</button>
-              <template x-for="st in availableStrategies" :key="st.id">
-                <button class="text-xs px-3 py-1.5 rounded border font-mono transition-all"
-                        :style="portalBroker.assigned_strategy===st.id
-                          ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.4);font-weight:600'
-                          : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
-                        @click="portalBroker.assigned_strategy = (portalBroker.assigned_strategy===st.id ? '' : st.id)"
-                        x-text="st.name"></button>
-              </template>
-            </div>
-            <!-- Instrument selector — shown only when strategy is selected -->
-            <div x-show="portalBroker.assigned_strategy" class="flex flex-wrap items-center gap-2">
-              <span class="sec-label">Index:</span>
-              <template x-for="ins in availableInstruments" :key="ins">
-                <button class="text-xs px-3 py-1 rounded border font-mono transition-all"
-                        :style="portalBroker.assigned_instrument===ins
-                          ? 'color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.4);background:rgba(var(--t-cyan-rgb),0.08);font-weight:600'
-                          : 'color:var(--t-muted);border-color:var(--t-border);background:transparent'"
-                        @click="portalBroker.assigned_instrument=ins"
-                        x-text="ins"></button>
-              </template>
-            </div>
-            <div x-show="!portalBroker.assigned_strategy" class="text-xs" style="color:var(--t-muted)">
-              Select a strategy to assign to this broker. You can change this later.
-            </div>
-          </div>
+        <!-- Strategy note -->
+        <div class="pt-1 border-t text-xs font-mono px-1" style="border-color:var(--t-border);color:var(--t-muted)">
+          ⚡ After saving, use the <strong style="color:var(--t-cyan)">Deploy</strong> button on the broker card to assign one or more strategies.
         </div>
 
         <!-- Status message -->

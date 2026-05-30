@@ -405,13 +405,13 @@ class ClientDB:
     async def set_engine_active(
         self, client_id: str, binding_id: str, active: bool
     ) -> None:
-        """Mark trading engine as active/inactive for this broker."""
+        """Mark trading engine as active/inactive. Does NOT touch is_trade_enabled."""
         logger.info("[DB] set_engine_active [%s/%s] → %s", client_id, binding_id, active)
         await asyncio.to_thread(
             self._exec,
-            "UPDATE broker_bindings SET engine_active=?, is_trade_enabled=? "
+            "UPDATE broker_bindings SET engine_active=? "
             "WHERE client_id=? AND binding_id=?",
-            (1 if active else 0, 1 if active else 0, client_id, binding_id),
+            (1 if active else 0, client_id, binding_id),
         )
 
     # ── Strategy Deployments ──────────────────────────────────────────────────
@@ -428,7 +428,7 @@ class ClientDB:
         squareoff_time: str,
     ) -> str:
         """Upsert a strategy deployment config. Returns the deploy_id."""
-        deploy_id = f"{client_id}_{binding_id}_{strategy_name}"
+        deploy_id = f"{client_id}_{binding_id}_{strategy_name}_{underlying}"
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,
