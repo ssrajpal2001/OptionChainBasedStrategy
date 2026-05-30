@@ -536,6 +536,7 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Phase 7 — client lifecycle ─────────────────────────────────── */
     clientStatus:  null,    // full /api/client/status response
+    clientDeployments: [],  // all active deployments for this client
     clientPhase:   'onboarding', // 'onboarding' | 'pending' | 'active'
     clientMenu:    'strategies', // 'strategies' | 'brokers' | 'positions' | 'history'
     botLoading:    false, botMsg: '', botOk: null,
@@ -661,8 +662,11 @@ document.addEventListener('alpine:init', () => {
     csBrokerOp: {},  // binding_id -> {loading, termLoading, engLoading, termStep, msg, ok}
     // Strategy deployment modal
     showDeployModal: false,
+    deployBindingId: '',           // which broker the modal is open for
+    deployExisting:  [],           // active deployments for that broker (loaded on open)
     deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:15' },
     deployMsg: '', deployOk: null, deployLoading: false,
+    deployDeleteLoading: {},       // deploy_id -> bool
     // Portal broker add form state
     showPortalBrokerForm: false,
     portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', api_key:'', api_secret:'', lot_multiplier:1.0, trading_mode:'paper', assigned_strategy:'', assigned_instrument:'NIFTY' },
@@ -1577,6 +1581,7 @@ document.addEventListener('alpine:init', () => {
           this.clientPhase = newPhase;
           if (newPhase === 'active') {
             await this.loadStrategySelections();
+            await this._loadAllDeployments();
             if (!this.csActiveBrokerTab && this.csBindings.length > 0) {
               this.csActiveBrokerTab = this.csBindings[0].binding_id;
             }
@@ -1825,18 +1830,34 @@ document.addEventListener('alpine:init', () => {
     },
 
     /* ── Strategy deployment modal ──────────────────────────────────────── */
-    openDeployModal(b) {
+    async openDeployModal(b) {
+      this.deployBindingId = b.binding_id;
       this.deployForm = {
         binding_id:     b.binding_id,
-        strategy_name:  b.assigned_strategy || 'sell_straddle',
-        underlying:     b.assigned_instrument || 'NIFTY',
+        strategy_name:  'sell_straddle',
+        underlying:     'NIFTY',
         lot_multiplier: b.lot_multiplier || 1,
         max_profit_rs:  0,
         max_sl_rs:      0,
         squareoff_time: '15:15',
       };
       this.deployMsg = ''; this.deployOk = null;
+      this.deployDeleteLoading = {};
+      // Load existing deployments for this broker
+      await this._loadBrokerDeployments(b.binding_id);
       this.showDeployModal = true;
+    },
+
+    async _loadAllDeployments() {
+      try {
+        const r = await this._fetch('/api/client/strategy/deployments');
+        if (r && r.ok) { const d = await r.json(); this.clientDeployments = d.deployments || []; }
+      } catch {}
+    },
+
+    async _loadBrokerDeployments(binding_id) {
+      await this._loadAllDeployments();
+      this.deployExisting = (this.clientDeployments || []).filter(x => x.binding_id === binding_id);
     },
 
     async saveDeploy() {
@@ -1847,12 +1868,26 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         this.deployOk = d.ok;
         this.deployMsg = d.ok
-          ? `✓ ${d.message || 'Saved.'} ID: ${d.deploy_id || ''}`
+          ? `✓ ${d.strategy_name || this.deployForm.strategy_name} · ${d.underlying || this.deployForm.underlying} saved.`
           : (d.error || 'Save failed.');
-        if (d.ok && d.hot_applied) this.deployMsg += ' (hot-applied to running strategy)';
-        if (d.ok) await this.loadClientStatus();
+        if (d.ok) {
+          await this._loadBrokerDeployments(this.deployForm.binding_id);
+          await this.loadClientStatus();
+        }
       } catch (e) { this.deployOk = false; this.deployMsg = 'Request failed.'; }
       finally { this.deployLoading = false; }
+    },
+
+    async deleteDeploy(deploy_id) {
+      this.deployDeleteLoading[deploy_id] = true;
+      try {
+        const r = await this._fetch(`/api/client/strategy/deploy/${encodeURIComponent(deploy_id)}`, { method: 'DELETE' });
+        if (r && r.ok) {
+          await this._loadBrokerDeployments(this.deployBindingId);
+          await this.loadClientStatus();
+        }
+      } catch {}
+      finally { this.deployDeleteLoading[deploy_id] = false; }
     },
 
     /* ── Per-broker start / stop / mode ─────────────────────────────────── */
@@ -5049,13 +5084,15 @@ document.addEventListener('alpine:init', () => {
                   <!-- Token timestamp -->
                   <div x-show="b.token_generated_at" class="text-xs mt-0.5" style="color:var(--t-muted)"
                        x-text="'Token generated: ' + (b.token_generated_at||'').slice(11,16) + ' IST on ' + (b.token_generated_at||'').slice(0,10)"></div>
-                  <!-- Per-broker assigned strategy -->
-                  <div class="mt-1.5">
-                    <span x-show="b.assigned_strategy"
-                          class="text-xs px-2 py-0.5 rounded-full font-mono"
-                          style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                          x-text="(availableStrategies.find(s=>s.id===b.assigned_strategy)||{name:b.assigned_strategy}).name + ' · ' + (b.assigned_instrument||'NIFTY')"></span>
-                    <span x-show="!b.assigned_strategy" class="text-xs" style="color:var(--t-muted)">No strategy assigned</span>
+                  <!-- Per-broker deployed strategies (from deployments table) -->
+                  <div class="mt-1.5 flex flex-wrap gap-1">
+                    <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
+                      <span class="text-xs px-2 py-0.5 rounded font-mono"
+                            style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                            x-text="(dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT')+' · '+dep.underlying"></span>
+                    </template>
+                    <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
+                          class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
                   </div>
                 </div>
               </div>
@@ -5139,36 +5176,7 @@ document.addEventListener('alpine:init', () => {
                   "></span>
                 </button>
 
-                <!-- ── ENGINE TOGGLE ────────────────────────────────────────────
-                     Step 2: Hot-attach broker to running strategy engine.
-                     Only enabled after Terminal is ON. -->
-                <button @click="toggleEngine(b)"
-                        :disabled="!b.terminal_connected || (csBrokerOp[b.binding_id]||{}).engLoading"
-                        class="flex items-center gap-2 px-4 py-2 rounded-lg border font-mono text-sm font-bold transition-all"
-                        :title="!b.terminal_connected ? 'Switch Terminal ON first' : ''"
-                        :style="!b.terminal_connected
-                          ? 'opacity:0.4;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
-                          : (csBrokerOp[b.binding_id]||{}).engLoading
-                            ? 'border-color:var(--t-border);color:var(--t-muted);cursor:wait'
-                            : b.engine_active
-                              ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
-                              : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
-                  <template x-if="(csBrokerOp[b.binding_id]||{}).engLoading">
-                    <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--t-muted);border-top-color:var(--t-green);border-radius:50%;animation:spin 0.7s linear infinite"></span>
-                  </template>
-                  <template x-if="!(csBrokerOp[b.binding_id]||{}).engLoading">
-                    <span class="w-8 h-4 rounded-full relative transition-all"
-                          :style="b.engine_active ? 'background:var(--t-green)' : 'background:var(--t-dim)'">
-                      <span class="absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all"
-                            :style="b.engine_active ? 'left:18px' : 'left:2px'"></span>
-                    </span>
-                  </template>
-                  <span x-text="
-                    (csBrokerOp[b.binding_id]||{}).engLoading
-                      ? 'Activating…'
-                      : (b.engine_active ? 'Engine ON' : 'Engine OFF')
-                  "></span>
-                </button>
+                <!-- Engine toggle removed — execution engine is auto-managed by Trade toggle -->
 
                 <!-- Status / error message -->
                 <div x-show="(csBrokerOp[b.binding_id]||{}).msg" class="text-xs font-mono text-right max-w-[240px]"
@@ -5219,89 +5227,115 @@ document.addEventListener('alpine:init', () => {
         </template>
       </div>
 
-      <!-- ── Strategy Deployment Modal ───────────────────────────────────── -->
+      <!-- ── Strategy Deployment Manager ─────────────────────────────────── -->
       <div x-show="showDeployModal" class="t-card rounded p-5 space-y-4"
            style="border:1px solid rgba(var(--t-cyan-rgb),0.25)">
         <div class="flex items-center justify-between">
-          <div class="font-ui font-bold text-sm" style="color:var(--t-cyan)">
-            ⚡ Deploy Strategy — <span x-text="deployForm.binding_id" class="font-mono" style="color:var(--t-bright)"></span>
+          <div>
+            <div class="font-ui font-bold text-sm" style="color:var(--t-cyan)">
+              ⚡ Strategy Deployments — <span x-text="deployBindingId" class="font-mono" style="color:var(--t-bright)"></span>
+            </div>
+            <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">
+              One broker can run multiple strategies simultaneously
+            </div>
           </div>
           <button @click="showDeployModal=false; deployMsg=''; deployOk=null"
-                  class="font-mono text-xs" style="color:var(--t-muted)">✕ Cancel</button>
+                  class="font-mono text-xs" style="color:var(--t-muted)">✕ Close</button>
         </div>
 
-        <div class="grid grid-cols-2 gap-3">
-          <!-- Strategy selector -->
-          <div class="col-span-2">
-            <label class="sec-label">STRATEGY</label>
-            <select x-model="deployForm.strategy_name" class="t-input">
-              <option value="sell_straddle">Sell Straddle (SS)</option>
-              <option value="iron_condor">Iron Condor (IC)</option>
-              <option value="trap_trading">Trap Trading (TT)</option>
-            </select>
+        <!-- Active deployments list -->
+        <div>
+          <div class="sec-label mb-2">ACTIVE DEPLOYMENTS</div>
+          <div x-show="deployExisting.length === 0" class="font-mono text-xs py-3 text-center" style="color:var(--t-muted)">
+            No strategies deployed yet — add one below.
           </div>
-
-          <!-- Underlying / Instrument -->
-          <div>
-            <label class="sec-label">INSTRUMENT</label>
-            <select x-model="deployForm.underlying" class="t-input">
-              <template x-for="idx in availableInstruments" :key="idx">
-                <option :value="idx" x-text="idx"></option>
-              </template>
-            </select>
-          </div>
-
-          <!-- Lot Size Multiplier -->
-          <div>
-            <label class="sec-label">LOT MULTIPLIER</label>
-            <input type="number" class="t-input" x-model.number="deployForm.lot_multiplier"
-                   min="1" max="50" step="1" placeholder="1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Number of lots per trade</div>
-          </div>
-
-          <!-- Max Profit Target -->
-          <div>
-            <label class="sec-label">MAX PROFIT TARGET (₹)</label>
-            <input type="number" class="t-input" x-model.number="deployForm.max_profit_rs"
-                   min="0" step="500" placeholder="0 = use strategy %"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">0 = use strategy profit_pct</div>
-          </div>
-
-          <!-- Max Stop Loss -->
-          <div>
-            <label class="sec-label">MAX STOP LOSS (₹)</label>
-            <input type="number" class="t-input" x-model.number="deployForm.max_sl_rs"
-                   min="0" step="500" placeholder="0 = use strategy %"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">0 = use strategy sl_pct</div>
-          </div>
-
-          <!-- Auto Square-Off Time -->
-          <div>
-            <label class="sec-label">AUTO SQUARE-OFF TIME</label>
-            <input type="text" class="t-input font-mono" x-model="deployForm.squareoff_time"
-                   placeholder="15:15" pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">HH:MM IST (e.g. 15:15)</div>
-          </div>
-        </div>
-
-        <!-- Deployment ID preview -->
-        <div class="text-xs font-mono px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.05);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-muted)">
-          File: <span style="color:var(--t-cyan)"
-                      x-text="'data/deployments/' + (csMe?.client_id||'C001') + '_' + deployForm.binding_id + '_' + deployForm.strategy_name + '.json'"></span>
-        </div>
-
-        <!-- Save button + feedback -->
-        <div class="flex items-center gap-3">
-          <button @click="saveDeploy()" :disabled="deployLoading"
-                  class="btn-save-cfg flex items-center gap-2">
-            <template x-if="deployLoading">
-              <span style="display:inline-block;width:12px;height:12px;border:2px solid var(--t-muted);border-top-color:var(--t-cyan);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+          <div class="space-y-2">
+            <template x-for="dep in deployExisting" :key="dep.deploy_id">
+              <div class="flex items-center justify-between px-3 py-2 rounded"
+                   style="background:rgba(var(--t-cyan-rgb),0.05);border:1px solid rgba(var(--t-cyan-rgb),0.15)">
+                <div class="flex items-center gap-3">
+                  <!-- Strategy pill -->
+                  <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
+                        style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
+                        x-text="dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT'"></span>
+                  <div>
+                    <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
+                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap Trading') + ' · ' + dep.underlying"></div>
+                    <div class="font-mono text-xs" style="color:var(--t-muted)"
+                         x-text="'Lots: '+dep.lot_multiplier + (dep.max_profit_rs?' · TP: ₹'+dep.max_profit_rs:'') + (dep.max_sl_rs?' · SL: ₹'+dep.max_sl_rs:'') + ' · SQ: '+dep.squareoff_time"></div>
+                  </div>
+                </div>
+                <button @click="deleteDeploy(dep.deploy_id)"
+                        :disabled="deployDeleteLoading[dep.deploy_id]"
+                        class="text-xs px-2 py-1 rounded font-mono transition-all"
+                        style="border:1px solid rgba(var(--t-red-rgb),0.3);color:var(--t-muted)"
+                        onmouseover="if(!this.disabled)this.style.color='var(--t-red)'"
+                        onmouseout="this.style.color='var(--t-muted)'">
+                  <span x-show="!deployDeleteLoading[dep.deploy_id]">✕</span>
+                  <span x-show="deployDeleteLoading[dep.deploy_id]">…</span>
+                </button>
+              </div>
             </template>
-            <span x-text="deployLoading ? 'Saving…' : '💾 Save & Deploy'"></span>
-          </button>
-          <div x-show="deployMsg" class="text-xs font-mono"
-               :style="deployOk ? 'color:var(--t-green)' : 'color:var(--t-red)'"
-               x-text="deployMsg"></div>
+          </div>
+        </div>
+
+        <!-- Divider -->
+        <div class="border-t" style="border-color:var(--t-border)"></div>
+
+        <!-- Add new deployment form -->
+        <div>
+          <div class="sec-label mb-3">ADD STRATEGY</div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="sec-label mb-1">STRATEGY</label>
+              <select x-model="deployForm.strategy_name" class="t-input">
+                <option value="sell_straddle">Sell Straddle (SS)</option>
+                <option value="iron_condor">Iron Condor (IC)</option>
+                <option value="trap_trading">Trap Trading (TT)</option>
+              </select>
+            </div>
+            <div>
+              <label class="sec-label mb-1">INSTRUMENT</label>
+              <select x-model="deployForm.underlying" class="t-input">
+                <template x-for="idx in availableInstruments" :key="idx">
+                  <option :value="idx" x-text="idx"></option>
+                </template>
+              </select>
+            </div>
+            <div>
+              <label class="sec-label mb-1">LOT MULTIPLIER</label>
+              <input type="number" class="t-input" x-model.number="deployForm.lot_multiplier"
+                     min="1" max="50" step="1" placeholder="1"/>
+            </div>
+            <div>
+              <label class="sec-label mb-1">SQUARE-OFF TIME</label>
+              <input type="text" class="t-input font-mono" x-model="deployForm.squareoff_time"
+                     placeholder="15:15"/>
+            </div>
+            <div>
+              <label class="sec-label mb-1">MAX PROFIT TARGET (₹)</label>
+              <input type="number" class="t-input" x-model.number="deployForm.max_profit_rs"
+                     min="0" step="500" placeholder="0 = strategy %"/>
+            </div>
+            <div>
+              <label class="sec-label mb-1">MAX STOP LOSS (₹)</label>
+              <input type="number" class="t-input" x-model.number="deployForm.max_sl_rs"
+                     min="0" step="500" placeholder="0 = strategy %"/>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3 mt-3">
+            <button @click="saveDeploy()" :disabled="deployLoading"
+                    class="btn-save-cfg flex items-center gap-2">
+              <template x-if="deployLoading">
+                <span style="display:inline-block;width:12px;height:12px;border:2px solid var(--t-muted);border-top-color:var(--t-cyan);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+              </template>
+              <span x-text="deployLoading ? 'Saving…' : '+ Add Strategy'"></span>
+            </button>
+            <div x-show="deployMsg" class="text-xs font-mono"
+                 :style="deployOk ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                 x-text="deployMsg"></div>
+          </div>
         </div>
       </div>
 

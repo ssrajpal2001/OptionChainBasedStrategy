@@ -355,6 +355,9 @@ class DashboardServer:
         from data_layer.client_db import ClientDB
         self._client_db = ClientDB()
         self._auth_alerts: dict = {"feeder": ""}
+        # Tracks the most recent pending OAuth request per provider.
+        # Used for brokers that don't return a state param (Zerodha).
+        self._pending_auth: dict = {}
 
         # Register heartbeat providers
         self._ws_bridge.register_stats_provider("clients", self._client_summary)
@@ -729,6 +732,11 @@ class DashboardServer:
                              provider, elapsed, auth_url)
                 return {"ok": False, "error": auth_url}
 
+            # Store pending auth for providers that don't return state (e.g. Zerodha)
+            _srv._pending_auth[provider] = {
+                "role": "admin", "client_id": "feeder", "binding_id": provider,
+                "api_key": api_key, "api_secret": secret,
+            }
             logger.info("[Feeder] %s auth URL ready in %.1fms", provider.upper(), elapsed)
             return {"ok": True, "provider": provider, "auth_url": auth_url}
 
@@ -839,6 +847,11 @@ class DashboardServer:
                 )
                 return {"ok": False, "error": auth_url}
 
+            # Store pending auth for Zerodha (doesn't return state param)
+            _srv._pending_auth[p] = {
+                "role": "admin", "client_id": "feeder", "binding_id": p,
+                "api_key": api_key, "api_secret": secret,
+            }
             logger.info(
                 "[Feeder/Toggle] [%s] OAuth URL ready in %.1fms → awaiting login", p, elapsed,
             )
@@ -1530,6 +1543,11 @@ class DashboardServer:
                 )
                 return {"ok": False, "connected": False, "flow": "error", "error": auth_url}
 
+            # Store pending auth for providers that don't return state (e.g. Zerodha)
+            _srv._pending_auth[provider] = {
+                "role": "client", "client_id": cid, "binding_id": binding_id,
+                "api_key": api_key, "api_secret": api_secret,
+            }
             logger.info(
                 "[Terminal] [%s/%s] OAuth URL generated in %.1fms — provider=%s callback=%s",
                 cid, binding_id, elapsed, provider.upper(), callback_url,
@@ -1870,6 +1888,23 @@ class DashboardServer:
                 role       = parsed.get("role", "")
                 client_id  = parsed.get("client_id", "")
                 binding_id = parsed.get("binding_id", "")
+
+                # Zerodha does NOT return the state param — fall back to pending auth store
+                if not role and provider == "zerodha":
+                    pending = _srv._pending_auth.pop("zerodha", None)
+                    if pending:
+                        role       = pending["role"]
+                        client_id  = pending["client_id"]
+                        binding_id = pending["binding_id"]
+                        logger.info(
+                            "[Callback] Zerodha — no state param, using pending auth: role=%s client=%s binding=%s",
+                            role, client_id, binding_id,
+                        )
+                    else:
+                        logger.error("[Callback] Zerodha — no state param and no pending auth found")
+                        return HTMLResponse(_callback_page("error", provider,
+                            "Zerodha callback received but no pending auth found. "
+                            "Please try clicking the toggle again."))
                 base_url   = _redirect_base(request, _srv._client_db)
                 callback_url = f"{base_url}/callback/{provider}"
 
