@@ -166,6 +166,21 @@ CREATE TABLE IF NOT EXISTS system_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS option_1m_bar_repository (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol    TEXT    NOT NULL,
+    timestamp TEXT    NOT NULL,
+    open      REAL    NOT NULL DEFAULT 0.0,
+    high      REAL    NOT NULL DEFAULT 0.0,
+    low       REAL    NOT NULL DEFAULT 0.0,
+    close     REAL    NOT NULL DEFAULT 0.0,
+    volume    REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE(symbol, timestamp)
+);
+
+CREATE INDEX IF NOT EXISTS ix_option1m_symbol_timestamp
+    ON option_1m_bar_repository(symbol, timestamp);
 """
 
 
@@ -182,10 +197,11 @@ class ClientDB:
 
     def __init__(self, db_path: str = _DEFAULT_DB_PATH) -> None:
         self._db_path = db_path
+        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._create_tables()
 
     async def initialise(self) -> None:
         """Create tables and indexes. Safe to call on every boot."""
-        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._create_tables)
         logger.info("ClientDB: ready at %s", self._db_path)
 
@@ -796,6 +812,88 @@ class ClientDB:
             )
         return profiles
 
+    # ── 1-minute option bar repository ───────────────────────────────────────
+
+    def upsert_1m_bar_sync(
+        self,
+        symbol: str,
+        timestamp,          # datetime object
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> None:
+        """
+        INSERT OR REPLACE a 1-minute option premium candle.
+        Called only via asyncio.to_thread() — never directly from async code.
+        """
+        ts_str = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
+        con = sqlite3.connect(self._db_path)
+        try:
+            con.execute(
+                """
+                INSERT INTO option_1m_bar_repository
+                    (symbol, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol, timestamp) DO UPDATE SET
+                    open   = excluded.open,
+                    high   = excluded.high,
+                    low    = excluded.low,
+                    close  = excluded.close,
+                    volume = excluded.volume
+                """,
+                (symbol, ts_str, open_, high, low, close, volume),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    async def upsert_1m_bar(
+        self,
+        symbol: str,
+        timestamp,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: float,
+    ) -> None:
+        await asyncio.to_thread(
+            self.upsert_1m_bar_sync,
+            symbol, timestamp, open_, high, low, close, volume,
+        )
+
+    def get_1m_bars_sync(
+        self,
+        symbol: str,
+        since,                      # datetime
+        until=None,                 # datetime or None → now
+    ) -> list:
+        """
+        Return list of row dicts for `symbol` in [since, until], ordered by timestamp ASC.
+        Called via asyncio.to_thread() from the strategy engine.
+        """
+        from config.global_config import IST
+        from datetime import datetime as _dt
+        since_str = since.strftime("%Y-%m-%dT%H:%M:%S")
+        until_str = (until or _dt.now(IST)).strftime("%Y-%m-%dT%H:%M:%S")
+        con = sqlite3.connect(self._db_path)
+        try:
+            cur = con.execute(
+                """
+                SELECT symbol, timestamp, open, high, low, close, volume
+                FROM option_1m_bar_repository
+                WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
+                ORDER BY timestamp ASC
+                """,
+                (symbol, since_str, until_str),
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        finally:
+            con.close()
+
     # ── SQLite helpers — only called from asyncio.to_thread() ─────────────────
 
     def _create_tables(self) -> None:
@@ -813,8 +911,11 @@ class ClientDB:
             try:
                 con.execute(migration)
                 con.commit()
-            except Exception:
-                pass  # column already exists
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" in str(e).lower():
+                    pass   # idempotent migration — column already exists
+                else:
+                    raise
 
         # Security migration: drop password_enc / totp_secret_enc from broker_bindings
         existing_bb_cols = {row[1] for row in con.execute("PRAGMA table_info(broker_bindings)").fetchall()}

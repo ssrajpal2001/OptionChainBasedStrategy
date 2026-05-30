@@ -575,13 +575,15 @@ class GlobalFeeder:
     HEARTBEAT_INTERVAL = 30         # seconds
     MAX_RECONNECT_DELAY = 60        # seconds cap for exponential backoff
 
-    def __init__(self, bus: EventBus, cfg: GlobalConfig) -> None:
+    def __init__(self, bus: EventBus, cfg: GlobalConfig, client_db=None) -> None:
         self._bus = bus
         self._cfg = cfg
+        self._client_db = client_db   # Optional[ClientDB]; None in demo/paper mode
         self._feeder: Optional[BaseFeeder] = None
         self._feeder_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._tick_listener_task: Optional[asyncio.Task] = None
+        self._candle_persist_task: Optional[asyncio.Task] = None
         self._last_tick_ts: float = 0.0
         self._reconnect_delay: float = 2.0
         self._running = False
@@ -609,6 +611,10 @@ class GlobalFeeder:
         self._feeder_task = asyncio.create_task(self._run_feeder(), name="global_feeder_run")
         self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="global_feeder_hb")
         self._tick_listener_task = asyncio.create_task(self._tick_listener(), name="global_feeder_tick_listener")
+        if self._client_db is not None:
+            self._candle_persist_task = asyncio.create_task(
+                self._candle_persist_loop(), name="candle_persist_1m"
+            )
 
         self._active_provider = provider
         await self._bus.publish(Topic.SYSTEM_EVENT, SystemEvent(SysEvent.FEEDER_RESTORED, provider))
@@ -629,6 +635,12 @@ class GlobalFeeder:
         if self._dual_feeder is not None:
             await self._dual_feeder.stop()
             self._dual_feeder = None
+        if self._candle_persist_task and not self._candle_persist_task.done():
+            self._candle_persist_task.cancel()
+            try:
+                await self._candle_persist_task
+            except asyncio.CancelledError:
+                pass
         logger.info("GlobalFeeder: Stopped.")
 
     async def subscribe_tokens(self, tokens: list) -> None:
@@ -784,3 +796,32 @@ class GlobalFeeder:
         primary_ok = self._running and (self._feeder is not None and self._feeder.is_connected)
         dual_ok = self._dual_feeder is not None and self._dual_feeder.is_running
         return primary_ok or dual_ok
+
+    async def _candle_persist_loop(self) -> None:
+        """Persist every 1-minute CandleEvent to option_1m_bar_repository."""
+        from data_layer.base_feeder import CandleEvent
+        from config.global_config import Topic
+        q = self._bus.subscribe(Topic.CANDLE_CLOSE)
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(ev, CandleEvent):
+                continue
+            if ev.timeframe != 1:
+                continue
+            if self._client_db is None:
+                continue
+            try:
+                await self._client_db.upsert_1m_bar(
+                    symbol    = ev.symbol,
+                    timestamp = ev.timestamp,
+                    open_     = ev.open,
+                    high      = ev.high,
+                    low       = ev.low,
+                    close     = ev.close,
+                    volume    = float(ev.volume) if ev.volume else 0.0,
+                )
+            except Exception as exc:
+                logger.warning("1m bar persist failed [%s]: %s", ev.symbol, exc)
