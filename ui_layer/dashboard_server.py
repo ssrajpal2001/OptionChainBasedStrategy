@@ -59,6 +59,19 @@ def _base_url(request) -> str:
     return f"{scheme}://{host}"
 
 
+async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str) -> None:
+    """Switch GlobalFeeder to the given live provider using the stored token."""
+    if feeder is None:
+        logger.warning("[Feeder/Toggle] GlobalFeeder not wired — cannot start stream.")
+        return
+    creds = {"api_key": api_key, "access_token": token}
+    try:
+        await feeder.start_single(provider, creds)
+        logger.info("[Feeder/Toggle] [%s] live stream started.", provider)
+    except Exception as exc:
+        logger.error("[Feeder/Toggle] [%s] start_single failed: %s", provider, exc)
+
+
 def _redirect_base(request, client_db) -> str:
     """
     Return the base URL used as redirect_uri root for all broker OAuth flows.
@@ -818,14 +831,16 @@ class DashboardServer:
                 valid = await asyncio.to_thread(validate_token, p, api_key, token)
                 elapsed = (_time.monotonic() - t0) * 1000
                 if valid:
+                    # Token valid — start the live feeder stream
+                    await _start_feeder_stream(_srv._feeder, p, api_key, token)
                     logger.info(
-                        "[Feeder/Toggle] [%s] cached token valid → instant ON in %.1fms", p, elapsed,
+                        "[Feeder/Toggle] [%s] cached token valid → feeder started in %.1fms", p, elapsed,
                     )
                     return {
                         "ok":        True,
                         "connected": True,
                         "flow":      "cached",
-                        "message":   f"{p.upper()} feeder connected (cached token).",
+                        "message":   f"{p.upper()} feeder connected and streaming.",
                     }
                 logger.info(
                     "[Feeder/Toggle] [%s] cached token rejected in %.1fms", p, elapsed,
@@ -1933,9 +1948,12 @@ class DashboardServer:
                     elapsed = (_t.monotonic() - t0) * 1000
                     if ok and token:
                         await _srv._client_db.update_feeder_token(provider, token, datetime.now(IST).isoformat(), _ist_eod())
+                        # Start the live feed stream immediately after token is stored
+                        api_key = db_row.get("api_key", "")
+                        await _start_feeder_stream(_srv._feeder, provider, api_key, token)
                         _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
-                        logger.info("[Callback] Admin %s token stored in %.1fms", provider.upper(), elapsed)
-                        return HTMLResponse(_callback_page("success", provider, "Data feeder connected!"))
+                        logger.info("[Callback] Admin %s token stored + stream started in %.1fms", provider.upper(), elapsed)
+                        return HTMLResponse(_callback_page("success", provider, "Data feeder connected and streaming!"))
                     logger.error("[Callback] Admin %s exchange failed: %s", provider, msg)
                     return HTMLResponse(_callback_page("error", provider, msg))
 

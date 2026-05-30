@@ -667,6 +667,7 @@ document.addEventListener('alpine:init', () => {
     deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:15' },
     deployMsg: '', deployOk: null, deployLoading: false,
     deployDeleteLoading: {},       // deploy_id -> bool
+    deployDeleteId: '',            // set before calling deleteDeploy to avoid x-for scope issues
     // Portal broker add form state
     showPortalBrokerForm: false,
     portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', api_key:'', api_secret:'', lot_multiplier:1.0, trading_mode:'paper', assigned_strategy:'', assigned_instrument:'NIFTY' },
@@ -1879,7 +1880,9 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteDeploy(deploy_id) {
-      if (!deploy_id) { this.deployMsg = 'Error: missing deploy_id'; this.deployOk = false; return; }
+      // Fall back to deployDeleteId if called without arg (from x-for button)
+      if (!deploy_id) deploy_id = this.deployDeleteId;
+      if (!deploy_id) { this.deployMsg = 'Error: deploy_id not set'; this.deployOk = false; return; }
       this.deployDeleteLoading = { ...this.deployDeleteLoading, [deploy_id]: true };
       this.deployMsg = ''; this.deployOk = null;
       try {
@@ -5266,29 +5269,24 @@ document.addEventListener('alpine:init', () => {
             No strategies deployed yet — add one below.
           </div>
           <div class="space-y-2">
-            <template x-for="dep in deployExisting" :key="dep.deploy_id">
+            <template x-for="(dep, depIdx) in deployExisting" :key="depIdx">
               <div class="flex items-center justify-between px-3 py-2 rounded"
                    style="background:rgba(var(--t-cyan-rgb),0.05);border:1px solid rgba(var(--t-cyan-rgb),0.15)">
                 <div class="flex items-center gap-3">
-                  <!-- Strategy pill -->
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
                         x-text="dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap Trading') + ' · ' + dep.underlying"></div>
+                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap Trading')+' · '+dep.underlying"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
-                         x-text="'Lots: '+dep.lot_multiplier + (dep.max_profit_rs?' · TP: ₹'+dep.max_profit_rs:'') + (dep.max_sl_rs?' · SL: ₹'+dep.max_sl_rs:'') + ' · SQ: '+dep.squareoff_time"></div>
+                         x-text="'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
                   </div>
                 </div>
-                <button @click="deleteDeploy(dep.deploy_id)"
-                        :disabled="deployDeleteLoading[dep.deploy_id]"
-                        class="text-xs px-2 py-1 rounded font-mono transition-all"
-                        style="border:1px solid rgba(var(--t-red-rgb),0.3);color:var(--t-muted)"
-                        onmouseover="if(!this.disabled)this.style.color='var(--t-red)'"
-                        onmouseout="this.style.color='var(--t-muted)'">
-                  <span x-show="!deployDeleteLoading[dep.deploy_id]">✕</span>
-                  <span x-show="deployDeleteLoading[dep.deploy_id]">…</span>
+                <button class="text-xs px-3 py-1 rounded font-mono"
+                        style="border:1px solid rgba(var(--t-red-rgb),0.4);color:var(--t-red);background:rgba(var(--t-red-rgb),0.06)"
+                        @click="deployDeleteId = deployExisting[depIdx].deploy_id; deleteDeploy(deployDeleteId)">
+                  ✕ Remove
                 </button>
               </div>
             </template>
