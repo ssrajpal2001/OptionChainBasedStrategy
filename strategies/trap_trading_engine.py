@@ -1,89 +1,61 @@
 """
-strategies/trap_trading_engine.py — TrapTrading Strategy Engine.
+strategies/trap_trading_engine.py — NewTrap MTF Institutional Liquidity Sweep Engine.
 
-Dual-timeframe institutional footprint tracker:
+5-stage sequential protocol:
+  Stage 1 (HTF 75-min): Bearish candle recorded → HTF_BEARISH
+  Stage 2 (HTF 75-min): Next bar sweeps Stage 1 high → TRAP_LOCKED
+  Stage 3 (live tick):  Premium retraces to entry_origin ±RETEST_ZONE_PERCENT → RETEST_ALERT
+  Stage 4 (MTF 5-min):  4a: bearish 5-min candle → MTF_BEARISH
+                        4b: next 5-min bar sweeps mtf_bearish_high → ARMED
+  Stage 5 (live tick):  premium <= ltf_entry_line + SLIPPAGE_BUFFER → fire BUY orders
 
-  HTF (75-min): Continuously aggregates OHLC bars to map structural
-                Supply Zones (institutional selling / resistance blocks) and
-                Demand Zones (institutional buying / support blocks).
-                GUARD: LTF signals are gated — they only fire when the 5-min
-                price action is inside or immediately adjacent to these macro
-                boundaries.
+Exit guard (1-min candle close):
+  - 1m_close < ltf_sl_line → VOID (SL)
+  - current_premium >= target_high → MITIGATE (profit)
+  - time >= 15:30 IST → EOD force-exit
 
-  LTF (5-min):  Dynamic Rolling Base tracking + bearish liquidity-sweep
-                detection.  Every 5-min bar is processed for:
-                  • Rolling Base update (spec-exact rule)
-                  • Bearish trap trigger (liquidity pool sweep)
-                  • Void state management and lift
+Rolling Base: any HTF or MTF candle closing below previous candle's close → update
+rolling_base = candle.low.
 
-Indicator invariants — HARD-PINNED, no parameterisation at call sites:
-  RSI  = 14 candles (Wilder's smoothing)
-  VWAP = 500 candles rolling
-  ADX  = 20 candles (+DI / -DI included)
-
-State machine per underlying symbol:
-  IDLE
-    → (price enters/near HTF supply zone) → ZONE_WATCH
-  ZONE_WATCH
-    → (5-min candle sweeps liquidity pool: high > trap_high AND close < trap_high)
-      → ARMED
-    → (price leaves zone without sweep) → IDLE
-  ARMED
-    → (reversal confirmed: next 5-min candle bearish + -DI > +DI) → CONFIRMED
-    → (price runs away: close > trap_high + VOID_ATR_MULT * ATR) → VOID
-  VOID
-    → (spec-exact lift: candle.low <= htf_entry_level) → CONFIRMED
-  CONFIRMED → emit SignalPackage(SHORT, PE) → IDLE
-
-All timestamps use Asia/Kolkata (IST).
-All state is in-memory — no I/O on hot path.
-Subscribes to Topic.CANDLE_CLOSE; publishes to Topic.SIGNAL.
+All timestamps in Asia/Kolkata (IST).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 from enum import Enum, auto
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from config.global_config import IST, Topic, GlobalConfig
-from data_layer.base_feeder import CandleEvent, EventBus
-from data_layer.runtime_config import RuntimeConfig
-from matrix_engine.indicators import rsi, vwap, adx, atr, ema
-from strategies.base_strategy import Direction, SignalPackage, StrategyID
+from data_layer.base_feeder import CandleEvent, OptionTick, EventBus
 
 logger = logging.getLogger(__name__)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Module-level constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_LTF_TF = 5            # 5-minute candle timeframe
-_HTF_TF = 75           # 75-minute candle timeframe
+_MARKET_CLOSE = time(15, 30, 0)  # IST — force-exit all positions at this time
 
-_LTF_CAPACITY = 600    # Covers VWAP-500 + 100 bars headroom (~7 trading days)
-_HTF_CAPACITY = 50     # ~8 trading days of 75-min structure
-
-_MIN_LTF_BARS = 45     # Minimum LTF bars before enabling signal detection
-                       # (ensures ADX-20 has 2×20+2=42 bars of input)
-
-_SWING_LOOKBACK = 5    # LTF bars to survey for the swing-high (liquidity pool)
-_MAX_ZONES = 3         # Keep the N most recent supply / demand zones per symbol
-
-_ZONE_TOL_PCT = 0.0050          # 0.50% proximity tolerance around zone boundaries
-_VOID_ATR_MULT = 2.0            # Enter VOID if price closes > N×ATR past trap level
-_ZONE_INVALIDATE_BUFFER = 0.002 # 0.2% buffer — zone invalid only after clean close-through
+_DOW_OFFSET: Dict[int, int] = {
+    0: 200,  # Monday
+    1: 100,  # Tuesday
+    2: 500,  # Wednesday
+    3: 400,  # Thursday
+    4: 300,  # Friday
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OHLCV Ring Buffer
+# OHLCV Ring Buffer  (kept from existing — O(1) push, O(n) array conversion)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class OHLCVBuffer:
@@ -127,7 +99,7 @@ class OHLCVBuffer:
     def __len__(self) -> int:
         return len(self._c)
 
-    # ── Scalar accessors (avoid full array conversion for single values) ───────
+    # ── Scalar accessors ──────────────────────────────────────────────────────
 
     def last_close(self) -> float:
         return self._c[-1] if self._c else 0.0
@@ -152,14 +124,12 @@ class OHLCVBuffer:
         return max(list(self._h)[-n:])
 
     def recent_high_pct(self, window: int = 20) -> float:
-        """Highest close in last `window` bars — for zone placement context."""
         if not self._c:
             return 0.0
         n = min(window, len(self._c))
         return max(list(self._c)[-n:])
 
     def recent_low_pct(self, window: int = 20) -> float:
-        """Lowest close in last `window` bars."""
         if not self._c:
             return 0.0
         n = min(window, len(self._c))
@@ -167,142 +137,205 @@ class OHLCVBuffer:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HTF Zone
-# ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class HTFZone:
-    """
-    An institutional Supply or Demand zone identified from a single 75-min bar.
-
-    Supply zone: bearish rejection bar — upper boundary = bar.high,
-                 lower boundary = min(bar.open, bar.close).
-    Demand zone: bullish support bar — upper boundary = max(bar.open, bar.close),
-                 lower boundary = bar.low.
-
-    The zone's lower boundary is the `htf_entry_level` used for void-lift checks.
-    """
-    zone_type:  str       # "supply" | "demand"
-    upper:      float     # Zone ceiling
-    lower:      float     # Zone floor  ← htf_entry_level reference
-    origin_ts:  datetime
-    origin_bar_high: float = 0.0
-    origin_bar_low:  float = 0.0
-
-    def contains(self, price: float) -> bool:
-        return self.lower <= price <= self.upper
-
-    def is_near(self, price: float, tol_pct: float = _ZONE_TOL_PCT) -> bool:
-        """True if price is inside the zone OR within tol_pct of its boundaries."""
-        span = (self.upper - self.lower)
-        tol  = max(span * tol_pct, self.upper * tol_pct)
-        return (self.lower - tol) <= price <= (self.upper + tol)
-
-    def invalidated_by(self, close: float) -> bool:
-        """
-        Zone is consumed / invalidated once price closes cleanly through it.
-        Supply zone: invalidated when price closes above the zone ceiling.
-        Demand zone: invalidated when price closes below the zone floor.
-        """
-        buf = _ZONE_INVALIDATE_BUFFER
-        if self.zone_type == "supply":
-            return close > self.upper * (1.0 + buf)
-        return close < self.lower * (1.0 - buf)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Per-Symbol State Machine
+# State machine phases
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _Phase(Enum):
-    IDLE       = auto()   # No active setup
-    ZONE_WATCH = auto()   # Price near/inside HTF supply zone, watching for sweep
-    ARMED      = auto()   # Liquidity sweep detected — awaiting reversal confirmation
-    VOID       = auto()   # Setup invalidated — waiting for HTF level retest
-    CONFIRMED  = auto()   # Signal ready to publish
-
-
-@dataclass
-class _SymbolState:
-    phase:             _Phase   = _Phase.IDLE
-    # Rolling Base (LTF dynamic support reference)
-    rolling_base:      float    = 0.0
-    # Active trap geometry
-    trap_high:         float    = 0.0   # Liquidity pool / stop-loss cluster level
-    sweep_candle_high: float    = 0.0   # High of the sweep candle (SL calculation ref)
-    trap_ts:           Optional[datetime] = None
-    # HTF structural reference — used for void-lift condition check
-    htf_entry_level:   float    = 0.0   # Lower boundary of triggering supply zone
-    # Void tracking
-    void_since:        Optional[datetime] = None
-    # OHLCV buffers — initialised lazily inside _get_state()
-    ltf_buf:           OHLCVBuffer = field(default_factory=lambda: OHLCVBuffer(_LTF_CAPACITY))
-    htf_buf:           OHLCVBuffer = field(default_factory=lambda: OHLCVBuffer(_HTF_CAPACITY))
-    # Zone registries
-    supply_zones:      List[HTFZone] = field(default_factory=list)
-    demand_zones:      List[HTFZone] = field(default_factory=list)
+    IDLE         = auto()  # No active setup
+    HTF_BEARISH  = auto()  # Stage 1 complete — bearish HTF candle recorded
+    TRAP_LOCKED  = auto()  # Stage 2 complete — HTF sweep confirmed
+    RETEST_ALERT = auto()  # Stage 3 complete — premium retested entry_origin
+    MTF_BEARISH  = auto()  # Stage 4a complete — 5-min bearish candle found
+    MTF_LOCKED   = auto()  # Stage 4b complete — nested 5-min sweep (→ ARMED immediately)
+    ARMED        = auto()  # Stage 5 — waiting for premium touch trigger
+    LIVE         = auto()  # Position open
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TrapTrading Engine
+# Per-symbol trap state
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class _TrapState:
+    phase: _Phase = _Phase.IDLE
+
+    # Stage 1+2 — HTF structural levels
+    htf_bearish_open:  float = 0.0
+    htf_bearish_high:  float = 0.0
+    htf_bearish_ts:    Optional[datetime] = None
+    entry_origin:      float = 0.0   # htf_bearish.open → premium sell level
+    target_high:       float = 0.0   # sweep bar high → profit target
+
+    # Stage 4 — MTF nested trap
+    mtf_bearish_open:  float = 0.0
+    mtf_bearish_high:  float = 0.0
+    mtf_bearish_low:   float = 0.0
+    mtf_bearish_ts:    Optional[datetime] = None
+    ltf_entry_line:    float = 0.0   # 5-min bearish.open → touch trigger
+    ltf_sl_line:       float = 0.0   # 5-min bearish.low  → stop-loss
+
+    # Rolling base (survives across trades)
+    rolling_base:      float = 0.0
+
+    # Live position
+    trade_id:          Optional[str] = None
+    entry_price:       float = 0.0
+    quantity:          int = 0
+
+    # Backtest mode flag
+    is_backtest:       bool = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TrapTradingEngine
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TrapTradingEngine:
     """
-    Standalone async dual-timeframe engine.
+    Standalone async multi-timeframe engine implementing the NewTrap 5-stage
+    institutional liquidity sweep detection protocol.
 
-    Subscribes to Topic.CANDLE_CLOSE on the EventBus for both 5-min and
-    75-min CandleEvent objects.  Maintains per-symbol OHLCV buffers,
-    computes RSI-14 / VWAP-500 / ADX-20 from the LTF buffer, and publishes
-    a SignalPackage to Topic.SIGNAL when a bearish institutional trap is
-    confirmed.
+    Subscribes to:
+      • Topic.CANDLE_CLOSE  — routed by timeframe (HTF / MTF / LTF)
+      • Topic.OPTION_TICK   — premium cache updates, stage 3 retest, stage 5 touch
+
+    Publishes to:
+      • Topic.SIGNAL  — BUY / exit signals (per-client capital allocation)
 
     Wire-up (run_system.py):
-        trap_engine = TrapTradingEngine(bus, cfg)
+        trap_engine = TrapTradingEngine(bus, cfg, client_db)
         asyncio.create_task(trap_engine.run(), name="trap_engine")
     """
 
-    def __init__(self, bus: EventBus, cfg: GlobalConfig) -> None:
-        self._bus     = bus
-        self._cfg     = cfg
-        self._queue   = bus.subscribe(Topic.CANDLE_CLOSE)
-        self._running = False
-        self._states:         Dict[str, _SymbolState] = {}
-        self._signals:        int = 0
-        self._last_indicators: Dict[str, dict] = {}
+    def __init__(
+        self,
+        bus: EventBus,
+        cfg: GlobalConfig,
+        client_db=None,
+    ) -> None:
+        self._bus        = bus
+        self._cfg        = cfg
+        self._client_db  = client_db
+        self._running    = False
 
-        # Runtime-configurable signal parameters (read from RuntimeConfig)
-        self._load_thresholds()
+        # Queues — subscribed in run() so the event loop is already running
+        self._candle_q: Optional[asyncio.Queue] = None
+        self._opt_q:    Optional[asyncio.Queue] = None
 
-    def _load_thresholds(self) -> None:
-        tt = RuntimeConfig.section("trap_trading")
-        self._adx_threshold          = float(tt.get("adx_threshold",          20.0))
-        self._volume_spike_mult      = float(tt.get("volume_spike_multiplier",  1.5))
-        self._swing_lookback         = int(tt.get("swing_lookback",              5))
-        self._zone_tol_pct           = float(tt.get("zone_tolerance_pct",       0.5)) / 100.0
-        self._void_atr_mult          = float(tt.get("void_atr_mult",            2.0))
-        # HTF/LTF timeframe changes require a restart (buffers would be invalid)
-        self._htf_minutes            = int(tt.get("htf_minutes", _HTF_TF))
-        self._ltf_minutes            = int(tt.get("ltf_minutes", _LTF_TF))
+        # Per-symbol state
+        self._states: Dict[str, _TrapState] = {}
 
-    def reconfigure(self) -> None:
-        """Live-reload signal thresholds from RuntimeConfig without restarting."""
-        self._load_thresholds()
-        logger.info(
-            "TrapTradingEngine: reconfigured — adx_thresh=%.1f vol_spike=%.1f "
-            "swing_look=%d zone_tol=%.2f%% void_atr=%.1f",
-            self._adx_threshold, self._volume_spike_mult,
-            self._swing_lookback, self._zone_tol_pct * 100, self._void_atr_mult,
-        )
+        # Per-symbol MTF (5-min) OHLCV buffers — instance variable, NOT class variable
+        self._mtf_bufs: Dict[str, OHLCVBuffer] = {}
+
+        # Premium cache: option_symbol → last ltp
+        self._prem_cache:  Dict[str, float] = {}
+        # Spot cache: underlying → last spot
+        self._spot_cache:  Dict[str, float] = {}
+
+        # Open positions: trade_id → (trade_id, option_symbol, entry_price, quantity)
+        self._open_positions: Dict[str, Tuple[str, str, float, int]] = {}
+
+        # Telemetry / stats
+        self._signals:      int = 0
+        self._backtest_log: List[dict] = []
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        self._running = True
-        logger.info("TrapTradingEngine: running — listening on CANDLE_CLOSE.")
+        """Main async entry — starts candle and option tick loops concurrently."""
+        self._candle_q = self._bus.subscribe(Topic.CANDLE_CLOSE)
+        self._opt_q    = self._bus.subscribe(Topic.OPTION_TICK)
+        self._running  = True
+        logger.info("TrapTradingEngine: starting NewTrap MTF engine.")
+        await asyncio.gather(
+            self._candle_loop(),
+            self._option_tick_loop(),
+        )
+
+    def stop(self) -> None:
+        self._running = False
+        logger.info("TrapTradingEngine: stop requested.")
+
+    # ── Warm start ────────────────────────────────────────────────────────────
+
+    async def warm_start(self, symbols: List[str]) -> None:
+        """
+        Replay historical 1-min bars from DB to restore HTF/MTF state
+        without waiting for live bars to build up.
+        """
+        if self._client_db is None:
+            logger.warning("TrapTradingEngine.warm_start: no client_db — skipping.")
+            return
+
+        tc   = self._cfg.trap_engine
+        now  = datetime.now(IST)
+        from datetime import timedelta
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+            days=tc.bars_lookback_days
+        )
+
+        import pandas as pd
+
+        for sym in symbols:
+            try:
+                rows = await asyncio.to_thread(
+                    self._client_db.get_1m_bars_sync, sym, since, now
+                )
+                if not rows:
+                    logger.debug("TrapTradingEngine warm_start [%s]: no bars.", sym)
+                    continue
+
+                df = pd.DataFrame(rows)
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df = df.set_index("timestamp").sort_index()
+
+                agg = {"open": "first", "high": "max", "low": "min",
+                       "close": "last", "volume": "sum"}
+
+                # Replay HTF bars
+                htf_df = df.resample(
+                    f"{tc.HTF_MINUTES}min", closed="left", label="left"
+                ).agg(agg).dropna()
+                for ts, row in htf_df.iterrows():
+                    fake = CandleEvent(
+                        symbol=sym, timeframe=tc.HTF_MINUTES,
+                        timestamp=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
+                        open=float(row["open"]), high=float(row["high"]),
+                        low=float(row["low"]), close=float(row["close"]),
+                        volume=int(row["volume"]),
+                    )
+                    self._process_htf(fake)
+
+                # Replay MTF bars
+                mtf_df = df.resample(
+                    f"{tc.MTF_MINUTES}min", closed="left", label="left"
+                ).agg(agg).dropna()
+                for ts, row in mtf_df.iterrows():
+                    fake = CandleEvent(
+                        symbol=sym, timeframe=tc.MTF_MINUTES,
+                        timestamp=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
+                        open=float(row["open"]), high=float(row["high"]),
+                        low=float(row["low"]), close=float(row["close"]),
+                        volume=int(row["volume"]),
+                    )
+                    self._process_mtf(fake)
+
+                st = self._get_state(sym)
+                logger.info(
+                    "TrapTradingEngine warm_start [%s]: restored phase=%s "
+                    "entry_origin=%.2f rolling_base=%.2f",
+                    sym, st.phase.name, st.entry_origin, st.rolling_base,
+                )
+            except Exception as exc:
+                logger.exception("TrapTradingEngine warm_start [%s]: %s", sym, exc)
+
+    # ── Event loops ───────────────────────────────────────────────────────────
+
+    async def _candle_loop(self) -> None:
         while self._running:
             try:
-                event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
+                event = await asyncio.wait_for(self._candle_q.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
             if not isinstance(event, CandleEvent):
@@ -311,12 +344,501 @@ class TrapTradingEngine:
                 await self._on_candle(event)
             except Exception as exc:
                 logger.exception(
-                    "TrapTradingEngine: unhandled error on %s TF%dmin: %s",
+                    "TrapTradingEngine: candle error [%s] TF%d: %s",
                     event.symbol, event.timeframe, exc,
                 )
 
-    def stop(self) -> None:
-        self._running = False
+    async def _option_tick_loop(self) -> None:
+        while self._running:
+            try:
+                event = await asyncio.wait_for(self._opt_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(event, OptionTick):
+                continue
+            try:
+                # Update premium and spot caches
+                self._prem_cache[event.symbol] = event.ltp
+                self._spot_cache[event.underlying] = event.ltp  # underlying proxy via option
+
+                await self._check_touch_trigger(event)
+            except Exception as exc:
+                logger.exception(
+                    "TrapTradingEngine: option tick error [%s]: %s",
+                    event.symbol, exc,
+                )
+
+    # ── Candle router ─────────────────────────────────────────────────────────
+
+    async def _on_candle(self, c: CandleEvent) -> None:
+        tc = self._cfg.trap_engine
+
+        # EOD guard — force-exit all if market has closed
+        if datetime.now(IST).time() >= _MARKET_CLOSE:
+            await self._force_exit_all("EOD")
+            return
+
+        if c.timeframe == tc.HTF_MINUTES:
+            self._process_htf(c)
+        elif c.timeframe == tc.MTF_MINUTES:
+            self._process_mtf(c)
+        elif c.timeframe == tc.LTF_MINUTES:
+            await self._process_ltf_exit_guard(c)
+
+    # ── Stage 1+2: HTF processing ─────────────────────────────────────────────
+
+    def _process_htf(self, c: CandleEvent) -> None:
+        """
+        Process a 75-min candle through stages 1 and 2.
+        Synchronous — no await.
+        """
+        st = self._get_state(c.symbol)
+
+        # Rolling base: any candle closing below previous bar's close
+        htf_buf = self._get_mtf_buf(c.symbol + "__htf__", 100)
+        if len(htf_buf) >= 1 and c.close < htf_buf.last_close():
+            st.rolling_base = c.low
+            logger.debug(
+                "TrapEngine [%s] HTF rolling_base -> %.2f @ %s",
+                c.symbol, st.rolling_base, c.timestamp.strftime("%H:%M"),
+            )
+        htf_buf.push(c)
+
+        is_bearish = c.close < c.open
+
+        if st.phase == _Phase.IDLE:
+            if is_bearish:
+                st.htf_bearish_open = c.open
+                st.htf_bearish_high = c.high
+                st.htf_bearish_ts   = c.timestamp
+                st.phase            = _Phase.HTF_BEARISH
+                logger.debug(
+                    "TrapEngine [%s] Stage 1 HTF_BEARISH open=%.2f high=%.2f @ %s",
+                    c.symbol, c.open, c.high, c.timestamp.strftime("%H:%M"),
+                )
+
+        elif st.phase == _Phase.HTF_BEARISH:
+            # Stage 2: does this bar sweep the Stage 1 high?
+            if c.high > st.htf_bearish_high:
+                # Sweep confirmed — lock trap
+                st.entry_origin = st.htf_bearish_open
+                st.target_high  = c.high
+                st.phase        = _Phase.TRAP_LOCKED
+                logger.info(
+                    "TrapEngine [%s] Stage 2 TRAP_LOCKED "
+                    "entry_origin=%.2f target_high=%.2f @ %s",
+                    c.symbol, st.entry_origin, st.target_high,
+                    c.timestamp.strftime("%H:%M"),
+                )
+            elif is_bearish:
+                # Update candidate to this new bearish bar
+                st.htf_bearish_open = c.open
+                st.htf_bearish_high = c.high
+                st.htf_bearish_ts   = c.timestamp
+                logger.debug(
+                    "TrapEngine [%s] HTF_BEARISH updated open=%.2f high=%.2f",
+                    c.symbol, c.open, c.high,
+                )
+            else:
+                # Bullish bar, no sweep — reset
+                logger.debug(
+                    "TrapEngine [%s] HTF bullish without sweep — reset to IDLE",
+                    c.symbol,
+                )
+                self._reset_state(c.symbol)
+
+        # Beyond TRAP_LOCKED: HTF bars don't reset later phases
+        # but rolling_base is already updated above
+
+    # ── Stage 4: MTF processing ───────────────────────────────────────────────
+
+    def _process_mtf(self, c: CandleEvent) -> None:
+        """
+        Process a 5-min candle through stage 4a and 4b.
+        Synchronous — no await.
+        """
+        st = self._get_state(c.symbol)
+
+        # Rolling base: any MTF candle closing below previous
+        buf = self._get_mtf_buf(c.symbol, 200)
+        if len(buf) >= 1 and c.close < buf.last_close():
+            st.rolling_base = c.low
+            logger.debug(
+                "TrapEngine [%s] MTF rolling_base -> %.2f @ %s",
+                c.symbol, st.rolling_base, c.timestamp.strftime("%H:%M"),
+            )
+        buf.push(c)
+
+        is_bearish = c.close < c.open
+
+        if st.phase == _Phase.RETEST_ALERT:
+            # Stage 4a: find a 5-min bearish candle
+            if is_bearish:
+                st.mtf_bearish_open = c.open
+                st.mtf_bearish_high = c.high
+                st.mtf_bearish_low  = c.low
+                st.mtf_bearish_ts   = c.timestamp
+                st.phase            = _Phase.MTF_BEARISH
+                logger.debug(
+                    "TrapEngine [%s] Stage 4a MTF_BEARISH open=%.2f high=%.2f low=%.2f @ %s",
+                    c.symbol, c.open, c.high, c.low, c.timestamp.strftime("%H:%M"),
+                )
+
+        elif st.phase == _Phase.MTF_BEARISH:
+            # Stage 4b: next 5-min bar's high sweeps mtf_bearish_high?
+            if c.high > st.mtf_bearish_high:
+                st.ltf_entry_line = st.mtf_bearish_open
+                st.ltf_sl_line    = st.mtf_bearish_low
+                # MTF_LOCKED → ARMED immediately
+                st.phase = _Phase.ARMED
+                logger.info(
+                    "TrapEngine [%s] Stage 4b MTF sweep confirmed → ARMED "
+                    "ltf_entry=%.2f ltf_sl=%.2f @ %s",
+                    c.symbol, st.ltf_entry_line, st.ltf_sl_line,
+                    c.timestamp.strftime("%H:%M"),
+                )
+            elif is_bearish:
+                # Update MTF candidate
+                st.mtf_bearish_open = c.open
+                st.mtf_bearish_high = c.high
+                st.mtf_bearish_low  = c.low
+                st.mtf_bearish_ts   = c.timestamp
+                logger.debug(
+                    "TrapEngine [%s] MTF_BEARISH candidate updated open=%.2f",
+                    c.symbol, c.open,
+                )
+            else:
+                # Bullish bar without sweep — back to RETEST_ALERT
+                st.phase = _Phase.RETEST_ALERT
+                logger.debug(
+                    "TrapEngine [%s] MTF bullish without sweep — back to RETEST_ALERT",
+                    c.symbol,
+                )
+
+    # ── Stage 3 + Stage 5: option tick handler ────────────────────────────────
+
+    async def _check_touch_trigger(self, tick: OptionTick) -> None:
+        """
+        Stage 3: Check if premium has retested entry_origin (TRAP_LOCKED → RETEST_ALERT).
+        Stage 5: Check if premium has touched ltf_entry_line (ARMED → fire entry).
+        Also updates the spot cache from index tick.
+        Async — fires orders.
+        """
+        # EOD guard
+        if datetime.now(IST).time() >= _MARKET_CLOSE:
+            await self._force_exit_all("EOD")
+            return
+
+        underlying = tick.underlying
+        st = self._get_state(underlying)
+        prem = tick.ltp
+
+        # Stage 3 — TRAP_LOCKED → RETEST_ALERT
+        if st.phase == _Phase.TRAP_LOCKED and st.entry_origin > 0.0:
+            tc = self._cfg.trap_engine
+            retest_pct = tc.RETEST_ZONE_PERCENT / 100.0
+            low_band   = st.entry_origin * (1.0 - retest_pct)
+            high_band  = st.entry_origin * (1.0 + retest_pct)
+            if low_band <= prem <= high_band:
+                st.phase = _Phase.RETEST_ALERT
+                logger.info(
+                    "TrapEngine [%s] Stage 3 RETEST_ALERT prem=%.2f "
+                    "entry_origin=%.2f ±%.1f%%",
+                    underlying, prem, st.entry_origin,
+                    tc.RETEST_ZONE_PERCENT,
+                )
+
+        # Stage 5 — ARMED → fire entry
+        elif st.phase == _Phase.ARMED and st.ltf_entry_line > 0.0:
+            tc = self._cfg.trap_engine
+            if prem <= st.ltf_entry_line + tc.SLIPPAGE_BUFFER:
+                logger.info(
+                    "TrapEngine [%s] Stage 5 TOUCH TRIGGER prem=%.2f "
+                    "ltf_entry=%.2f slippage=%.2f",
+                    underlying, prem, st.ltf_entry_line, tc.SLIPPAGE_BUFFER,
+                )
+                await self._fire_entry(underlying, tick.symbol, prem, st)
+
+    # ── LTF (1-min) exit guard ────────────────────────────────────────────────
+
+    async def _process_ltf_exit_guard(self, c: CandleEvent) -> None:
+        """
+        On every 1-min candle close for LIVE positions:
+          - close < ltf_sl_line → VOID (SL)
+          - prem >= target_high  → MITIGATE (profit)
+          - time >= 15:30        → EOD force-exit
+        Async — fires exit orders.
+        """
+        st = self._get_state(c.symbol)
+        if st.phase != _Phase.LIVE:
+            return
+
+        # EOD
+        if datetime.now(IST).time() >= _MARKET_CLOSE:
+            await self._force_exit_all("EOD")
+            return
+
+        # Retrieve current premium from cache using trade_id → option_symbol
+        if st.trade_id and st.trade_id in self._open_positions:
+            _, opt_sym, _, _ = self._open_positions[st.trade_id]
+            current_prem = self._prem_cache.get(opt_sym, 0.0)
+        else:
+            current_prem = 0.0
+
+        # SL check
+        if st.ltf_sl_line > 0.0 and c.close < st.ltf_sl_line:
+            logger.info(
+                "TrapEngine [%s] EXIT SL — 1m_close=%.2f < ltf_sl=%.2f",
+                c.symbol, c.close, st.ltf_sl_line,
+            )
+            await self._fire_exit(st.trade_id, current_prem, "SL")
+            return
+
+        # Profit target
+        if st.target_high > 0.0 and current_prem >= st.target_high:
+            logger.info(
+                "TrapEngine [%s] EXIT PROFIT — prem=%.2f >= target_high=%.2f",
+                c.symbol, current_prem, st.target_high,
+            )
+            await self._fire_exit(st.trade_id, current_prem, "MITIGATE")
+
+    # ── Entry / Exit ──────────────────────────────────────────────────────────
+
+    async def _fire_entry(
+        self,
+        underlying: str,
+        option_symbol: str,
+        entry_price: float,
+        st: _TrapState,
+    ) -> None:
+        """Stage 5 execution — allocate quantity per client and fire orders."""
+        if st.is_backtest:
+            self._record_backtest_entry(underlying, option_symbol, entry_price, st)
+            return
+
+        tc  = self._cfg.trap_engine
+        lot = tc.LOT_SIZE
+
+        # Get active clients
+        active_clients: List[dict] = []
+        if self._client_db is not None:
+            try:
+                active_clients = await asyncio.to_thread(
+                    self._client_db.get_all_clients_sync
+                )
+                active_clients = [c for c in active_clients
+                                  if c.get("is_admin_approved") and c.get("is_active")]
+            except Exception as exc:
+                logger.error("TrapTradingEngine _fire_entry: client fetch error: %s", exc)
+
+        trade_id = str(uuid.uuid4())[:8]
+        total_qty = 0
+
+        for client in active_clients:
+            capital = float(client.get("capital", 0.0))
+            if capital <= 0 or entry_price <= 0:
+                continue
+            raw_qty = math.floor(capital / (entry_price * lot)) * lot
+            qty = max(raw_qty, lot)  # minimum 1 lot
+            total_qty += qty
+
+        # Even if no clients, record the position internally (paper/demo)
+        if total_qty == 0:
+            total_qty = lot  # default 1 lot for demo
+
+        st.trade_id    = trade_id
+        st.entry_price = entry_price
+        st.quantity    = total_qty
+        st.phase       = _Phase.LIVE
+
+        self._open_positions[trade_id] = (
+            trade_id, option_symbol, entry_price, total_qty
+        )
+
+        self._signals += 1
+        logger.info(
+            "TrapTradingEngine ENTRY #%d | trade_id=%s | %s | %s "
+            "entry=%.2f qty=%d",
+            self._signals, trade_id, underlying, option_symbol,
+            entry_price, total_qty,
+        )
+
+        # Publish to SIGNAL topic
+        from strategies.base_strategy import Direction, SignalPackage, StrategyID
+        signal = SignalPackage(
+            source        = StrategyID.TRAP_ENGINE,
+            direction     = Direction.LONG,
+            underlying    = underlying,
+            option_type   = "CE",
+            target_strike = self._select_itm_strike(underlying),
+            entry_spot    = self._spot_cache.get(underlying, entry_price),
+            stop_spot     = st.ltf_sl_line,
+            target_spot   = st.target_high,
+            confidence    = self._confidence(st),
+            timestamp     = datetime.now(IST),
+            notes         = (
+                f"NewTrap ENTRY | trade_id={trade_id} "
+                f"entry_origin={st.entry_origin:.2f} "
+                f"ltf_entry={st.ltf_entry_line:.2f} "
+                f"ltf_sl={st.ltf_sl_line:.2f} "
+                f"target={st.target_high:.2f} "
+                f"rolling_base={st.rolling_base:.2f}"
+            ),
+        )
+        await self._bus.publish(Topic.SIGNAL, signal)
+
+    async def _fire_exit(
+        self,
+        trade_id: Optional[str],
+        exit_price: float,
+        reason: str,
+    ) -> None:
+        """Fire exit for a specific trade_id."""
+        if trade_id is None or trade_id not in self._open_positions:
+            logger.warning("TrapEngine _fire_exit: unknown trade_id=%s", trade_id)
+            return
+
+        pos = self._open_positions.pop(trade_id)
+        _, opt_sym, entry_price, qty = pos
+
+        pnl = (exit_price - entry_price) * qty
+
+        # Find symbol for state reset
+        underlying = None
+        for sym, st in self._states.items():
+            if st.trade_id == trade_id:
+                underlying = sym
+                break
+
+        if underlying:
+            st = self._states[underlying]
+            rb = st.rolling_base  # preserve rolling base
+            self._reset_state(underlying)
+            self._states[underlying].rolling_base = rb
+
+        logger.info(
+            "TrapTradingEngine EXIT | trade_id=%s | %s | reason=%s "
+            "entry=%.2f exit=%.2f qty=%d pnl=%.2f",
+            trade_id, opt_sym, reason,
+            entry_price, exit_price, qty, pnl,
+        )
+
+    async def _force_exit_all(self, reason: str) -> None:
+        """Force-exit all LIVE positions (EOD or kill switch)."""
+        live_ids = [
+            st.trade_id
+            for st in self._states.values()
+            if st.phase == _Phase.LIVE and st.trade_id is not None
+        ]
+        for trade_id in live_ids:
+            if trade_id in self._open_positions:
+                _, opt_sym, _, _ = self._open_positions[trade_id]
+                exit_price = self._prem_cache.get(opt_sym, 0.0)
+                await self._fire_exit(trade_id, exit_price, reason)
+
+    # ── Backtest recording ────────────────────────────────────────────────────
+
+    def _record_backtest_entry(
+        self,
+        underlying: str,
+        option_symbol: str,
+        entry_price: float,
+        st: _TrapState,
+    ) -> None:
+        tc  = self._cfg.trap_engine
+        qty = tc.LOT_SIZE
+
+        trade_id = str(uuid.uuid4())[:8]
+        st.trade_id    = trade_id
+        st.entry_price = entry_price
+        st.quantity    = qty
+        st.phase       = _Phase.LIVE
+
+        self._open_positions[trade_id] = (
+            trade_id, option_symbol, entry_price, qty
+        )
+        self._backtest_log.append({
+            "trade_id":     trade_id,
+            "underlying":   underlying,
+            "option_symbol": option_symbol,
+            "entry_price":  entry_price,
+            "quantity":     qty,
+            "entry_origin": st.entry_origin,
+            "target_high":  st.target_high,
+            "ltf_entry":    st.ltf_entry_line,
+            "ltf_sl":       st.ltf_sl_line,
+            "rolling_base": st.rolling_base,
+            "timestamp":    datetime.now(IST).isoformat(),
+        })
+        self._signals += 1
+        logger.debug(
+            "TrapEngine [backtest] ENTRY trade_id=%s underlying=%s prem=%.2f",
+            trade_id, underlying, entry_price,
+        )
+
+    # ── State helpers ─────────────────────────────────────────────────────────
+
+    def _get_state(self, symbol: str) -> _TrapState:
+        if symbol not in self._states:
+            self._states[symbol] = _TrapState()
+        return self._states[symbol]
+
+    def _reset_state(self, symbol: str) -> None:
+        """Reset state to IDLE, preserving rolling_base."""
+        rb = self._states.get(symbol, _TrapState()).rolling_base
+        self._states[symbol] = _TrapState()
+        self._states[symbol].rolling_base = rb
+
+    def _get_mtf_buf(self, key: str, capacity: int = 200) -> OHLCVBuffer:
+        """Get (or create) the OHLCVBuffer for a given key (symbol or symbol+suffix)."""
+        if key not in self._mtf_bufs:
+            self._mtf_bufs[key] = OHLCVBuffer(capacity)
+        return self._mtf_bufs[key]
+
+    # ── Strike helpers ────────────────────────────────────────────────────────
+
+    def _atm_strike(self, underlying: str) -> float:
+        spot = self._spot_cache.get(underlying, 0.0)
+        step = self._cfg.exchange.strike_steps.get(underlying, 50.0)
+        if spot <= 0.0:
+            return 0.0
+        return round(spot / step) * step
+
+    def _select_itm_strike(
+        self, underlying: str, direction: str = "bearish"
+    ) -> float:
+        """Day-of-week ITM strike selection."""
+        spot = self._spot_cache.get(underlying, 0.0)
+        if spot <= 0.0:
+            return self._atm_strike(underlying)
+        step   = self._cfg.exchange.strike_steps.get(underlying, 50.0)
+        offset = _DOW_OFFSET.get(datetime.now(IST).weekday(), 200)
+        raw    = spot - offset if direction == "bearish" else spot + offset
+        return round(raw / step) * step
+
+    # ── Confidence score ──────────────────────────────────────────────────────
+
+    def _confidence(self, st: _TrapState) -> float:
+        """
+        Simple confidence heuristic based on how many stages completed cleanly.
+        Returns a score in [0.5, 1.0].
+        """
+        score = 0.50
+        if st.entry_origin > 0.0:
+            score += 0.10  # stage 1+2 confirmed
+        if st.ltf_entry_line > 0.0:
+            score += 0.20  # stage 4 nested trap confirmed
+        if st.rolling_base > 0.0:
+            score += 0.10  # rolling base active
+        if st.target_high > 0.0 and st.ltf_sl_line > 0.0:
+            # Simple RR estimate
+            risk   = abs(st.ltf_entry_line - st.ltf_sl_line)
+            reward = abs(st.target_high - st.ltf_entry_line)
+            if risk > 0 and reward / risk >= 2.0:
+                score += 0.10
+        return min(score, 1.0)
+
+    # ── Public telemetry / stats ──────────────────────────────────────────────
 
     def signal_count(self) -> int:
         return self._signals
@@ -324,423 +846,36 @@ class TrapTradingEngine:
     def state_snapshot(self) -> Dict[str, str]:
         return {sym: st.phase.name for sym, st in self._states.items()}
 
+    def backtest_log(self) -> List[dict]:
+        return list(self._backtest_log)
+
     def telemetry_snapshot(self) -> dict:
-        """Return a per-symbol telemetry dict for the admin dashboard endpoint."""
+        """Return per-symbol telemetry dict for the admin dashboard endpoint."""
         out: dict = {}
         for sym, st in self._states.items():
-            ind  = self._last_indicators.get(sym, {})
-            sup  = st.supply_zones[-1] if st.supply_zones else None
-            dem  = st.demand_zones[-1] if st.demand_zones else None
+            # Get current premium from cache if LIVE
+            current_prem = 0.0
+            if st.phase == _Phase.LIVE and st.trade_id in self._open_positions:
+                _, opt_sym, _, _ = self._open_positions[st.trade_id]
+                current_prem = self._prem_cache.get(opt_sym, 0.0)
+
+            unrealized = (
+                (current_prem - st.entry_price) * st.quantity
+                if st.phase == _Phase.LIVE
+                else 0.0
+            )
             out[sym] = {
-                "phase":                 st.phase.name,
-                "is_void_state":         st.phase == _Phase.VOID,
-                "rolling_base":          round(st.rolling_base,      2),
-                "trap_high":             round(st.trap_high,         2),
-                "htf_entry_level":       round(st.htf_entry_level,   2),
-                "htf_supply_zone_high":  round(sup.upper, 2) if sup else None,
-                "htf_supply_zone_low":   round(sup.lower, 2) if sup else None,
-                "htf_demand_zone_high":  round(dem.upper, 2) if dem else None,
-                "htf_demand_zone_low":   round(dem.lower, 2) if dem else None,
-                "supply_zones": [
-                    {"upper": round(z.upper, 2), "lower": round(z.lower, 2),
-                     "ts": z.origin_ts.isoformat()}
-                    for z in st.supply_zones
-                ],
-                "demand_zones": [
-                    {"upper": round(z.upper, 2), "lower": round(z.lower, 2),
-                     "ts": z.origin_ts.isoformat()}
-                    for z in st.demand_zones
-                ],
-                "current_rsi_14":  ind.get("rsi"),
-                "current_vwap_500": ind.get("vwap"),
-                "current_adx_20":  ind.get("adx"),
-                "current_pdi":     ind.get("pdi"),
-                "current_mdi":     ind.get("mdi"),
-                "void_since":      st.void_since.isoformat() if st.void_since else None,
-                "ltf_bar_count":   len(st.ltf_buf),
-                "htf_bar_count":   len(st.htf_buf),
-                "signal_count":    self._signals,
-                "ind_ts":          ind.get("ts"),
+                "phase":          st.phase.name,
+                "entry_origin":   round(st.entry_origin,    2),
+                "target_high":    round(st.target_high,     2),
+                "ltf_entry_line": round(st.ltf_entry_line,  2),
+                "ltf_sl_line":    round(st.ltf_sl_line,     2),
+                "rolling_base":   round(st.rolling_base,    2),
+                "trade_id":       st.trade_id,
+                "entry_price":    round(st.entry_price,     2),
+                "quantity":       st.quantity,
+                "current_prem":   round(current_prem,       2),
+                "unrealized_pnl": round(unrealized,         2),
+                "signal_count":   self._signals,
             }
         return out
-
-    # ── Candle router ─────────────────────────────────────────────────────────
-
-    async def _on_candle(self, c: CandleEvent) -> None:
-        if c.timeframe == self._htf_minutes:
-            self._process_htf(c)
-        elif c.timeframe == self._ltf_minutes:
-            await self._process_ltf(c)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # HTF (75-min) — institutional zone mapping
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _process_htf(self, c: CandleEvent) -> None:
-        """
-        Ingest a 75-min bar, classify it as supply/demand zone origin, and
-        prune zones that price has closed through.
-        """
-        st = self._get_state(c.symbol)
-        st.htf_buf.push(c)
-
-        o, h, l, cl = c.open, c.high, c.low, c.close
-        bar_range = h - l
-        if bar_range == 0.0:
-            return
-
-        upper_wick_ratio = (h - max(o, cl)) / bar_range
-        lower_wick_ratio = (min(o, cl) - l)  / bar_range
-        is_bearish = cl < o
-        is_bullish = cl > o
-
-        # ── Supply zone: bearish rejection bar at relative highs ──────────────
-        # Criteria: bearish body AND meaningful upper wick (rejection at resistance)
-        # Zone boundaries: ceiling = bar.high, floor = min(open, close)
-        if is_bearish and upper_wick_ratio >= 0.15:
-            zone = HTFZone(
-                zone_type       = "supply",
-                upper           = h,
-                lower           = min(o, cl),
-                origin_ts       = c.timestamp,
-                origin_bar_high = h,
-                origin_bar_low  = l,
-            )
-            st.supply_zones.append(zone)
-            if len(st.supply_zones) > _MAX_ZONES:
-                st.supply_zones.pop(0)
-            logger.debug(
-                "TrapEngine [%s] HTF supply zone: %.0f-%.0f @ %s",
-                c.symbol, zone.lower, zone.upper,
-                c.timestamp.strftime("%H:%M"),
-            )
-
-        # ── Demand zone: bullish support bar at relative lows ─────────────────
-        elif is_bullish and lower_wick_ratio >= 0.15:
-            zone = HTFZone(
-                zone_type       = "demand",
-                upper           = max(o, cl),
-                lower           = l,
-                origin_ts       = c.timestamp,
-                origin_bar_high = h,
-                origin_bar_low  = l,
-            )
-            st.demand_zones.append(zone)
-            if len(st.demand_zones) > _MAX_ZONES:
-                st.demand_zones.pop(0)
-
-        # Invalidate zones consumed by price
-        st.supply_zones = [z for z in st.supply_zones if not z.invalidated_by(cl)]
-        st.demand_zones = [z for z in st.demand_zones if not z.invalidated_by(cl)]
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # LTF (5-min) — indicators + state machine
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def _process_ltf(self, c: CandleEvent) -> None:
-        st = self._get_state(c.symbol)
-        buf = st.ltf_buf
-        buf.push(c)
-
-        # ── Rolling Base update (spec-exact) ──────────────────────────────────
-        # "Any 5-minute candle that closes below its immediately preceding
-        # candle's close dynamically becomes the new, active Rolling Base."
-        if len(buf) >= 2 and c.close < buf.prev_close():
-            st.rolling_base = c.low
-            logger.debug(
-                "TrapEngine [%s] Rolling Base -> %.2f @ %s",
-                c.symbol, st.rolling_base,
-                c.timestamp.strftime("%H:%M"),
-            )
-
-        # Guard: require minimum bars for stable ADX computation
-        if len(buf) < _MIN_LTF_BARS:
-            return
-
-        # ── Compute hard-pinned indicators ────────────────────────────────────
-        o_arr, h_arr, l_arr, cl_arr, v_arr = buf.arrays()
-        rsi_val           = rsi(cl_arr)
-        vwap_val          = vwap(h_arr, l_arr, cl_arr, v_arr)
-        adx_val, pdi, mdi = adx(h_arr, l_arr, cl_arr)
-        atr_val           = atr(h_arr, l_arr, cl_arr)
-        ema_fast_val      = ema(cl_arr, 9)
-        ema_slow_val      = ema(cl_arr, 21)
-
-        # Cache latest computed indicators so the telemetry endpoint can read them
-        self._last_indicators[c.symbol] = {
-            "rsi":  round(float(rsi_val),  2),
-            "vwap": round(float(vwap_val), 2),
-            "adx":  round(float(adx_val),  2),
-            "pdi":  round(float(pdi),      2),
-            "mdi":  round(float(mdi),      2),
-            "atr":  round(float(atr_val),  4),
-            "ts":   datetime.now(IST).isoformat(),
-        }
-
-        spot = c.close
-
-        # ── VOID state — check spec-exact lift condition (highest priority) ───
-        if st.phase == _Phase.VOID:
-            # "The void state restriction must be lifted cleanly the moment a
-            # 5-minute candle retests back down to the exact entry level,
-            # evaluated precisely as: candle.low <= htf_entry_level"
-            if st.htf_entry_level > 0.0 and c.low <= st.htf_entry_level:
-                logger.info(
-                    "TrapEngine [%s] VOID LIFTED — "
-                    "candle.low=%.2f <= htf_entry_level=%.2f @ %s",
-                    c.symbol, c.low, st.htf_entry_level,
-                    datetime.now(IST).strftime("%H:%M:%S"),
-                )
-                st.phase = _Phase.CONFIRMED
-                await self._emit_signal(c, st, atr_val, rsi_val, adx_val,
-                                        pdi, mdi, void_lift=True)
-                st.phase = _Phase.IDLE
-            return
-
-        # ── Identify nearest active supply zone for HTF guard ─────────────────
-        active_zone = self._nearest_supply_zone(st, spot)
-
-        # ── IDLE — scan for zone entry ────────────────────────────────────────
-        if st.phase == _Phase.IDLE:
-            if active_zone and active_zone.is_near(spot):
-                # Price is interacting with a supply zone — engage watch mode
-                st.htf_entry_level = active_zone.lower
-                st.trap_high       = buf.swing_high(self._swing_lookback)
-                st.phase           = _Phase.ZONE_WATCH
-                logger.debug(
-                    "TrapEngine [%s] ZONE_WATCH entered | "
-                    "supply=%.0f-%.0f trap_high=%.2f RSI=%.1f ADX=%.1f",
-                    c.symbol, active_zone.lower, active_zone.upper,
-                    st.trap_high, rsi_val, adx_val,
-                )
-
-        # ── ZONE_WATCH — update swing high; detect liquidity sweep ────────────
-        elif st.phase == _Phase.ZONE_WATCH:
-            # Keep the liquidity pool level current
-            swing = buf.swing_high(self._swing_lookback)
-            if swing > st.trap_high:
-                st.trap_high = swing
-
-            # Guard: if price has drifted below the zone without a sweep, reset
-            if active_zone is None and spot < st.htf_entry_level * 0.995:
-                st.phase = _Phase.IDLE
-                logger.debug(
-                    "TrapEngine [%s] zone watch cancelled — price %.2f left zone.",
-                    c.symbol, spot,
-                )
-                return
-
-            # ── Bearish Trap Trigger ──────────────────────────────────────────
-            # "A bearish trade signal must confirm the exact millisecond a 5-minute
-            # candle spikes upward to breach the psychological stop-loss level
-            # (liquidity pool) of a previous bearish execution, trapping early retail
-            # breakout traders right before a sharp institutional reversal."
-            #
-            # Trigger conditions:
-            #   1. candle.high sweeps the stop-loss pool (high > trap_high)
-            #   2. candle.close fails to hold above the pool (close < trap_high)
-            #      → wick-up / failed breakout pattern
-            #   3. Candle body is bearish (close < open)
-            #   4. RSI not yet in oversold territory (setup still has downside momentum)
-            if (
-                st.trap_high > 0.0
-                and st.rolling_base > 0.0
-                and c.high  > st.trap_high   # sweep
-                and c.close < st.trap_high   # rejection / close below pool
-                and c.close < c.open         # bearish candle body
-                and rsi_val > 38.0           # not oversold
-            ):
-                st.sweep_candle_high = c.high
-                st.trap_ts           = datetime.now(IST)
-                st.phase             = _Phase.ARMED
-                logger.info(
-                    "TrapEngine [%s] ARMED — liquidity sweep %.2f → close %.2f "
-                    "(RSI=%.1f ADX=%.1f +DI=%.1f -DI=%.1f) @ %s",
-                    c.symbol, st.trap_high, c.close,
-                    rsi_val, adx_val, pdi, mdi,
-                    c.timestamp.strftime("%H:%M"),
-                )
-
-        # ── ARMED — confirm reversal OR declare void ───────────────────────────
-        elif st.phase == _Phase.ARMED:
-            void_ceiling = st.trap_high + self._void_atr_mult * atr_val
-
-            # Void: buyers were stronger — price ran past the trap level
-            if c.close > void_ceiling:
-                st.phase      = _Phase.VOID
-                st.void_since = datetime.now(IST)
-                logger.info(
-                    "TrapEngine [%s] VOID — close=%.2f exceeded threshold=%.2f",
-                    c.symbol, c.close, void_ceiling,
-                )
-                return
-
-            # Reversal confirmation: next candle is bearish AND -DI dominates
-            # (directional pressure flipped to sellers)
-            reversal_confirmed = (
-                c.close < c.open          # Bearish candle body
-                and c.close < buf.prev_close()   # Making a lower close
-                and mdi > pdi                    # Bearish directional dominance
-            )
-            if reversal_confirmed:
-                st.phase = _Phase.CONFIRMED
-                await self._emit_signal(c, st, atr_val, rsi_val, adx_val,
-                                        pdi, mdi, void_lift=False)
-                st.phase = _Phase.IDLE
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Signal emission
-    # ─────────────────────────────────────────────────────────────────────────
-
-    async def _emit_signal(
-        self,
-        c:         CandleEvent,
-        st:        _SymbolState,
-        atr_val:   float,
-        rsi_val:   float,
-        adx_val:   float,
-        pdi:       float,
-        mdi:       float,
-        void_lift: bool,
-    ) -> None:
-        """
-        Construct and publish a SignalPackage for a confirmed bearish institutional
-        trap.  Stop-loss is placed above the sweep candle high.  Target is derived
-        from the minimum risk-reward ratio in GlobalConfig.strategy.
-        """
-        spot = c.close
-        sl   = st.sweep_candle_high + atr_val * 0.30   # SL above wick high
-
-        risk   = sl - spot
-        if risk <= 0.0:
-            logger.warning(
-                "TrapEngine [%s] signal aborted — invalid risk geometry "
-                "(spot=%.2f sl=%.2f). Resetting to IDLE.",
-                c.symbol, spot, sl,
-            )
-            st.phase = _Phase.IDLE
-            return
-
-        target = spot - risk * self._cfg.strategy.min_risk_reward
-
-        # Approximate ATM strike from spot + index strike step
-        step   = self._cfg.exchange.strike_steps.get(c.symbol, 50.0)
-        strike = round(spot / step) * step   # ATM PE strike
-
-        conf = self._confidence(rsi_val, adx_val, mdi, pdi, st, void_lift)
-
-        signal = SignalPackage(
-            source        = StrategyID.TRAP_ENGINE,
-            direction     = Direction.SHORT,
-            underlying    = c.symbol,
-            option_type   = "PE",
-            target_strike = strike,
-            entry_spot    = spot,
-            stop_spot     = sl,
-            target_spot   = target,
-            confidence    = conf,
-            timestamp     = datetime.now(IST),
-            notes         = (
-                f"TrapEngine {'VoidLift' if void_lift else 'Sweep'} | "
-                f"trap_high={st.trap_high:.0f} "
-                f"htf_entry={st.htf_entry_level:.0f} "
-                f"roll_base={st.rolling_base:.0f} "
-                f"RSI={rsi_val:.1f} ADX={adx_val:.1f} "
-                f"+DI={pdi:.1f} -DI={mdi:.1f}"
-            ),
-        )
-
-        if not signal.is_valid(
-            self._cfg.strategy.min_risk_reward,
-            self._cfg.strategy.min_confidence,
-        ):
-            logger.debug(
-                "TrapEngine [%s] signal filtered (conf=%.2f RR=%.1f min_rr=%.1f).",
-                c.symbol, conf, signal.rr_ratio,
-                self._cfg.strategy.min_risk_reward,
-            )
-            return
-
-        await self._bus.publish(Topic.SIGNAL, signal)
-        self._signals += 1
-        logger.info(
-            "TrapEngine SIGNAL #%d | %s SHORT PE@%.0f | "
-            "entry=%.2f sl=%.2f tgt=%.2f conf=%.2f RR=%.1f | %s",
-            self._signals, c.symbol, strike,
-            spot, sl, target, conf, signal.rr_ratio,
-            datetime.now(IST).strftime("%H:%M:%S IST"),
-        )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Helpers
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _get_state(self, symbol: str) -> _SymbolState:
-        if symbol not in self._states:
-            self._states[symbol] = _SymbolState()
-        return self._states[symbol]
-
-    def _nearest_supply_zone(
-        self, st: _SymbolState, spot: float,
-    ) -> Optional[HTFZone]:
-        """
-        Return the most proximal active supply zone around the current spot,
-        or None if price is not near any supply zone.
-        """
-        candidates = [z for z in st.supply_zones if z.is_near(spot)]
-        if not candidates:
-            return None
-        # Prefer zone whose lower boundary is closest to current spot
-        return min(candidates, key=lambda z: abs(z.lower - spot))
-
-    def _confidence(
-        self,
-        rsi_val:   float,
-        adx_val:   float,
-        mdi:       float,
-        pdi:       float,
-        st:        _SymbolState,
-        void_lift: bool,
-    ) -> float:
-        """
-        Build a confidence score [0, 1] for the signal.
-
-        Base score starts at 0.45 and is boosted by corroborating factors:
-          RSI overbought range  → stronger resistance rejection
-          ADX trending          → institutional momentum present
-          -DI > +DI             → directional bearish dominance confirmed
-          Rolling Base active   → prior downtrend structure intact
-          HTF supply zone hit   → macro-level confluence
-          Void-lift scenario    → double-confirmed structural retest
-        """
-        score = 0.45
-
-        # RSI momentum context
-        if rsi_val >= 65.0:
-            score += 0.15    # Overbought — strong rejection probability
-        elif rsi_val >= 55.0:
-            score += 0.08    # Elevated — moderate resistance
-
-        # ADX trend strength
-        if adx_val >= 25.0:
-            score += 0.12
-        elif adx_val >= 20.0:
-            score += 0.07
-
-        # Directional dominance (-DI > +DI = bearish)
-        if mdi > pdi and (mdi - pdi) >= 5.0:
-            score += 0.08
-
-        # Rolling Base confirms ongoing downtrend structure
-        if st.rolling_base > 0.0:
-            score += 0.08
-
-        # HTF supply zone — primary macro confluence
-        if st.htf_entry_level > 0.0:
-            score += 0.10
-
-        # Void-lift: setup re-confirmed after structural retest
-        if void_lift:
-            score += 0.07
-
-        return min(score, 1.0)
