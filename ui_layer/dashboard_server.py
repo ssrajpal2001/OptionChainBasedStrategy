@@ -2348,6 +2348,12 @@ class DashboardServer:
         async def api_trap_config_save(
             request: Request, _: dict = Depends(_require_admin),
         ):
+            # Note: TrapEngineConfig (HTF_MINUTES, MTF_MINUTES, LTF_MINUTES,
+            # RETEST_ZONE_PERCENT, SLIPPAGE_BUFFER, bars_lookback_days) is now
+            # managed at POST /api/admin/trap/config. This endpoint manages
+            # RuntimeConfig overrides only (adx_threshold, volume_spike_multiplier,
+            # swing_lookback, zone_tolerance_pct, void_atr_mult). Callers should
+            # migrate timeframe parameters to /api/admin/trap/config.
             from data_layer.runtime_config import RuntimeConfig
             try:
                 body = await request.json()
@@ -2419,6 +2425,21 @@ class DashboardServer:
             try:
                 await _srv._client_db.set_trap_instruments(client_id, payload.instruments)
                 return {"ok": True, "client_id": client_id, "instruments": payload.instruments}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        @app.get("/api/admin/trap/clients/instruments", tags=["Admin"])
+        async def api_trap_all_clients_instruments(_: dict = Depends(_require_admin)):
+            """Return trap_instruments for all clients in one call (avoids N+1 per-client fetches)."""
+            try:
+                clients = await asyncio.to_thread(_srv._client_db.get_all_clients_sync)
+                result = {}
+                for c in clients:
+                    cid = c.get("client_id") or c.get("id")
+                    if not cid:
+                        continue
+                    result[cid] = await _srv._client_db.get_trap_instruments(cid)
+                return {"ok": True, "instruments": result}
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 

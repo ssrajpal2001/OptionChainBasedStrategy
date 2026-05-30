@@ -2090,7 +2090,8 @@ document.addEventListener('alpine:init', () => {
 function trapConfig() {
   return {
     cfg: { HTF_MINUTES: 75, MTF_MINUTES: 5, LTF_MINUTES: 1,
-           RETEST_ZONE_PERCENT: 0.5, SLIPPAGE_BUFFER: 0.5, LOT_SIZE: 25 },
+           RETEST_ZONE_PERCENT: 0.5, SLIPPAGE_BUFFER: 0.5, LOT_SIZE: 25,
+           bars_lookback_days: 5 },
     statusMsg: '',
     isError: false,
     async load() {
@@ -2111,6 +2112,7 @@ function trapConfig() {
         LTF_MINUTES:         this.cfg.LTF_MINUTES,
         RETEST_ZONE_PERCENT: this.cfg.RETEST_ZONE_PERCENT,
         SLIPPAGE_BUFFER:     this.cfg.SLIPPAGE_BUFFER,
+        bars_lookback_days:  this.cfg.bars_lookback_days,
       };
       try {
         const token = localStorage.getItem('terminus_token');
@@ -2140,39 +2142,55 @@ function trapConfig() {
 function clientTrapInstruments() {
   return {
     clients: [],
+    _authHeaders() {
+      const token = localStorage.getItem('terminus_token');
+      return token ? { 'Authorization': 'Bearer ' + token } : {};
+    },
     async init() {
       try {
-        const token = localStorage.getItem('terminus_token');
-        const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
-        const r = await fetch('/api/admin/clients', { headers });
-        const d = await r.json();
-        const list = d.clients || d || [];
-        this.clients = await Promise.all(list.map(async c => {
-          try {
-            const ir = await fetch(`/api/admin/trap/client/${c.client_id}/instruments`, { headers });
-            const id = await ir.json();
-            return { ...c, trap_instruments: id.ok ? id.instruments : [], _saving: false, _saved: false };
-          } catch { return { ...c, trap_instruments: [], _saving: false, _saved: false }; }
+        const [clientsRes, instrumentsRes] = await Promise.all([
+          fetch('/api/admin/clients', { headers: this._authHeaders() }),
+          fetch('/api/admin/trap/clients/instruments', { headers: this._authHeaders() }),
+        ]);
+        const clientsData  = await clientsRes.json();
+        const instrData    = await instrumentsRes.json();
+        const instrMap     = instrData.ok ? instrData.instruments : {};
+        const list = clientsData.clients || clientsData || [];
+        this.clients = list.map(c => ({
+          ...c,
+          trap_instruments: instrMap[c.client_id] || [],
+          _saving: false,
+          _saved:  false,
+          _error:  false,
         }));
       } catch(e) { console.warn('clientTrapInstruments init failed', e); }
     },
     async toggle(client, instrument) {
+      // Save pre-mutation state for rollback
+      const previous = [...(client.trap_instruments || [])];
       const idx = (client.trap_instruments || []).indexOf(instrument);
       if (idx === -1) client.trap_instruments.push(instrument);
       else client.trap_instruments.splice(idx, 1);
-      client._saving = true; client._saved = false;
+
+      client._saving = true; client._saved = false; client._error = false;
       try {
-        const token = localStorage.getItem('terminus_token');
-        await fetch(`/api/admin/trap/client/${client.client_id}/instruments`, {
+        const r = await fetch(`/api/admin/trap/client/${client.client_id}/instruments`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json',
-                     ...(token ? { 'Authorization': 'Bearer ' + token } : {}) },
+          headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
           body: JSON.stringify({ instruments: client.trap_instruments }),
         });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || 'Server error');
         client._saved = true;
         setTimeout(() => client._saved = false, 2000);
-      } catch(e) { console.warn('toggle failed', e); }
-      finally { client._saving = false; }
+      } catch(e) {
+        client.trap_instruments = previous;   // rollback
+        client._error = true;
+        setTimeout(() => client._error = false, 3000);
+        console.warn('toggle failed, rolled back', e);
+      } finally {
+        client._saving = false;
+      }
     },
   }
 }
@@ -3927,9 +3945,15 @@ function clientTrapInstruments() {
       </div><!-- end iron_condor config -->
 
       <!-- ══ TRAP TRADING config ════════════════════════════════════════════ -->
+      <!-- NOTE: These controls manage RuntimeConfig overrides (adx_threshold,
+           volume_spike_multiplier, swing_lookback, zone_tolerance_pct,
+           void_atr_mult). Core timeframe parameters (HTF_MINUTES, MTF_MINUTES,
+           LTF_MINUTES, RETEST_ZONE_PERCENT, SLIPPAGE_BUFFER, bars_lookback_days)
+           are managed in the TRAP ENGINE tab → TrapEngine Parameters panel. -->
       <div x-show="adminStrategyTab==='trap_trading'" class="p-4 flex flex-col gap-3">
         <div class="text-xs font-mono mb-1" style="color:var(--t-muted)">
           Dual-timeframe institutional trap detection. Settings apply globally (not per-index).
+          <span class="text-yellow-500 ml-1">RuntimeConfig overrides only — see TRAP ENGINE tab for timeframe parameters.</span>
         </div>
         <div class="grid grid-cols-2 gap-3">
           <div>
@@ -4495,9 +4519,14 @@ function clientTrapInstruments() {
         <input type="number" x-model.number="cfg.RETEST_ZONE_PERCENT" min="0.01" max="10" step="0.05"
                class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
       </label>
-      <label class="flex flex-col gap-1 col-span-2">
+      <label class="flex flex-col gap-1">
         <span class="text-gray-400">Slippage Buffer (pts)</span>
         <input type="number" x-model.number="cfg.SLIPPAGE_BUFFER" min="0" step="0.25"
+               class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="text-gray-400">Bars Lookback (days)</span>
+        <input type="number" x-model.number="cfg.bars_lookback_days" min="1"
                class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
       </label>
     </div>
@@ -4535,6 +4564,7 @@ function clientTrapInstruments() {
         </template>
         <span x-show="c._saving" class="text-yellow-400 text-[10px] ml-auto">saving...</span>
         <span x-show="c._saved"  class="text-green-400 text-[10px] ml-auto">saved</span>
+        <span x-show="c._error"  class="text-red-400 text-[10px] ml-auto">failed ✕</span>
       </div>
     </template>
     <div x-show="clients.length === 0" class="text-gray-500 text-xs py-2">No clients found.</div>

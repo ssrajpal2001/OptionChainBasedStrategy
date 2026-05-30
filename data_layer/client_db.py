@@ -272,10 +272,20 @@ class ClientDB:
 
     def set_trap_instruments_sync(self, client_id: str, instruments: list) -> None:
         """Persist the TrapTrading instrument list for a client."""
-        self._exec(
-            "UPDATE clients SET trap_instruments = ?, updated_at = ? WHERE client_id = ?",
-            (json.dumps(instruments), datetime.now(IST).isoformat(), client_id),
-        )
+        con = sqlite3.connect(self._db_path)
+        try:
+            cursor = con.execute(
+                "UPDATE clients SET trap_instruments = ?, updated_at = ? WHERE client_id = ?",
+                (json.dumps(instruments), datetime.now(IST).isoformat(), client_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(f"Client '{client_id}' not found")
+            con.commit()
+        except Exception as exc:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
     async def get_trap_instruments(self, client_id: str) -> list:
         return await asyncio.to_thread(self.get_trap_instruments_sync, client_id)
