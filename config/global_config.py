@@ -9,6 +9,7 @@ parameter is expressed as a typed field here.
 from __future__ import annotations
 
 import os
+import threading as _threading
 from dataclasses import dataclass, field
 from datetime import time
 from typing import Dict, List, Literal
@@ -155,6 +156,161 @@ class StrategyParams:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TrapEngine Config — runtime-tunable params for the MTF TrapTradingEngine
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class TrapEngineConfig:
+    """
+    Runtime-tunable parameters for the MTF TrapTradingEngine.
+
+    All reads and writes are serialised through _lock (threading.RLock) so that
+    async engine workers and the Admin UI/REST thread can operate concurrently
+    without torn reads or partial updates.
+
+    LOT_SIZE is immutable — set by NSE exchange contract specification.
+    bars_lookback_days is used by the warm-start loader.
+    """
+
+    # --- mutable fields (protected by _lock) ---
+    _HTF_MINUTES:         int   = field(default=75,  init=False, repr=False)
+    _MTF_MINUTES:         int   = field(default=5,   init=False, repr=False)
+    _LTF_MINUTES:         int   = field(default=1,   init=False, repr=False)
+    _RETEST_ZONE_PERCENT: float = field(default=0.5, init=False, repr=False)
+    _SLIPPAGE_BUFFER:     float = field(default=0.5, init=False, repr=False)
+    _bars_lookback_days:  int   = field(default=5,   init=False, repr=False)
+
+    # --- immutable constant (NSE contract size — never changes) ---
+    LOT_SIZE: int = field(default=25, init=False)
+
+    # --- internal lock ---
+    _lock: object = field(default_factory=_threading.RLock, init=False, repr=False, compare=False)
+
+    # ── Thread-safe getters ───────────────────────────────────────────────────
+
+    @property
+    def HTF_MINUTES(self) -> int:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._HTF_MINUTES
+
+    @property
+    def MTF_MINUTES(self) -> int:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._MTF_MINUTES
+
+    @property
+    def LTF_MINUTES(self) -> int:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._LTF_MINUTES
+
+    @property
+    def RETEST_ZONE_PERCENT(self) -> float:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._RETEST_ZONE_PERCENT
+
+    @property
+    def SLIPPAGE_BUFFER(self) -> float:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._SLIPPAGE_BUFFER
+
+    @property
+    def bars_lookback_days(self) -> int:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._bars_lookback_days
+
+    # ── Thread-safe setters ───────────────────────────────────────────────────
+
+    @HTF_MINUTES.setter
+    def HTF_MINUTES(self, value: int) -> None:
+        if value < 1:
+            raise ValueError(f"HTF_MINUTES must be >= 1, got {value}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_HTF_MINUTES", int(value))
+
+    @MTF_MINUTES.setter
+    def MTF_MINUTES(self, value: int) -> None:
+        if value < 1:
+            raise ValueError(f"MTF_MINUTES must be >= 1, got {value}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_MTF_MINUTES", int(value))
+
+    @LTF_MINUTES.setter
+    def LTF_MINUTES(self, value: int) -> None:
+        if value < 1:
+            raise ValueError(f"LTF_MINUTES must be >= 1, got {value}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_LTF_MINUTES", int(value))
+
+    @RETEST_ZONE_PERCENT.setter
+    def RETEST_ZONE_PERCENT(self, value: float) -> None:
+        if not (0.0 < value <= 10.0):
+            raise ValueError(f"RETEST_ZONE_PERCENT must be in (0, 10], got {value}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_RETEST_ZONE_PERCENT", float(value))
+
+    @SLIPPAGE_BUFFER.setter
+    def SLIPPAGE_BUFFER(self, value: float) -> None:
+        if value < 0.0:
+            raise ValueError(f"SLIPPAGE_BUFFER must be >= 0, got {value}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_SLIPPAGE_BUFFER", float(value))
+
+    # ── Atomic bulk update (used by Admin REST endpoint) ─────────────────────
+
+    def reconfigure(self, **kwargs) -> dict:
+        """
+        Atomically update one or more mutable fields in a single lock acquisition.
+        Validates all values before applying any — either all succeed or none apply.
+        Returns a dict of the updated field names and their new values.
+
+        Raises ValueError on invalid input.
+        Raises AttributeError if an unknown field name is passed.
+        LOT_SIZE is immutable and will raise ValueError if passed.
+        """
+        _MUTABLE = {
+            "HTF_MINUTES":         (int,   lambda v: v >= 1,          "must be >= 1"),
+            "MTF_MINUTES":         (int,   lambda v: v >= 1,          "must be >= 1"),
+            "LTF_MINUTES":         (int,   lambda v: v >= 1,          "must be >= 1"),
+            "RETEST_ZONE_PERCENT": (float, lambda v: 0.0 < v <= 10.0, "must be in (0, 10]"),
+            "SLIPPAGE_BUFFER":     (float, lambda v: v >= 0.0,        "must be >= 0"),
+            "bars_lookback_days":  (int,   lambda v: v >= 1,          "must be >= 1"),
+        }
+        if "LOT_SIZE" in kwargs:
+            raise ValueError("LOT_SIZE is immutable — fixed by NSE exchange contract.")
+        unknown = set(kwargs) - set(_MUTABLE)
+        if unknown:
+            raise AttributeError(f"Unknown TrapEngineConfig fields: {unknown}")
+
+        # Validate all values before acquiring the lock
+        validated: dict = {}
+        for key, raw in kwargs.items():
+            cast_type, validator, msg = _MUTABLE[key]
+            casted = cast_type(raw)
+            if not validator(casted):
+                raise ValueError(f"{key}={casted} invalid: {msg}")
+            validated[key] = casted
+
+        with self._lock:  # type: ignore[attr-defined]
+            for key, val in validated.items():
+                object.__setattr__(self, f"_{key}", val)
+
+        return validated
+
+    def snapshot(self) -> dict:
+        """Return a thread-safe copy of all current values."""
+        with self._lock:  # type: ignore[attr-defined]
+            return {
+                "HTF_MINUTES":         self._HTF_MINUTES,
+                "MTF_MINUTES":         self._MTF_MINUTES,
+                "LTF_MINUTES":         self._LTF_MINUTES,
+                "RETEST_ZONE_PERCENT": self._RETEST_ZONE_PERCENT,
+                "SLIPPAGE_BUFFER":     self._SLIPPAGE_BUFFER,
+                "LOT_SIZE":            self.LOT_SIZE,
+                "bars_lookback_days":  self._bars_lookback_days,
+            }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Auth Config — dashboard login credentials (must precede GlobalConfig)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -195,6 +351,7 @@ class GlobalConfig:
     storage: StorageConfig = field(default_factory=StorageConfig)
     strategy: StrategyParams = field(default_factory=StrategyParams)
     auth: AuthConfig = field(default_factory=AuthConfig)
+    trap_engine: TrapEngineConfig = field(default_factory=TrapEngineConfig)
 
     # Active indices to monitor (feeder subscribes to all)
     monitored_indices: List[str] = field(

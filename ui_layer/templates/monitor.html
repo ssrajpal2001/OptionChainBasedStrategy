@@ -2086,6 +2086,98 @@ document.addEventListener('alpine:init', () => {
 });
 </script>
 
+<script>
+function trapConfig() {
+  return {
+    cfg: { HTF_MINUTES: 75, MTF_MINUTES: 5, LTF_MINUTES: 1,
+           RETEST_ZONE_PERCENT: 0.5, SLIPPAGE_BUFFER: 0.5, LOT_SIZE: 25 },
+    statusMsg: '',
+    isError: false,
+    async load() {
+      try {
+        const token = localStorage.getItem('terminus_token');
+        const r = await fetch('/api/admin/trap/config', {
+          headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+        });
+        const d = await r.json();
+        if (d.ok) this.cfg = d.config;
+      } catch(e) { console.warn('trapConfig load failed', e); }
+    },
+    async save() {
+      this.statusMsg = '';
+      const payload = {
+        HTF_MINUTES:         this.cfg.HTF_MINUTES,
+        MTF_MINUTES:         this.cfg.MTF_MINUTES,
+        LTF_MINUTES:         this.cfg.LTF_MINUTES,
+        RETEST_ZONE_PERCENT: this.cfg.RETEST_ZONE_PERCENT,
+        SLIPPAGE_BUFFER:     this.cfg.SLIPPAGE_BUFFER,
+      };
+      try {
+        const token = localStorage.getItem('terminus_token');
+        const r = await fetch('/api/admin/trap/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json',
+                     ...(token ? { 'Authorization': 'Bearer ' + token } : {}) },
+          body: JSON.stringify(payload),
+        });
+        const d = await r.json();
+        if (d.ok) {
+          this.cfg = d.config;
+          this.statusMsg = 'Saved';
+          this.isError = false;
+        } else {
+          this.statusMsg = d.error || 'Save failed';
+          this.isError = true;
+        }
+      } catch(e) {
+        this.statusMsg = 'Network error';
+        this.isError = true;
+      }
+    },
+  }
+}
+
+function clientTrapInstruments() {
+  return {
+    clients: [],
+    async init() {
+      try {
+        const token = localStorage.getItem('terminus_token');
+        const headers = token ? { 'Authorization': 'Bearer ' + token } : {};
+        const r = await fetch('/api/admin/clients', { headers });
+        const d = await r.json();
+        const list = d.clients || d || [];
+        this.clients = await Promise.all(list.map(async c => {
+          try {
+            const ir = await fetch(`/api/admin/trap/client/${c.client_id}/instruments`, { headers });
+            const id = await ir.json();
+            return { ...c, trap_instruments: id.ok ? id.instruments : [], _saving: false, _saved: false };
+          } catch { return { ...c, trap_instruments: [], _saving: false, _saved: false }; }
+        }));
+      } catch(e) { console.warn('clientTrapInstruments init failed', e); }
+    },
+    async toggle(client, instrument) {
+      const idx = (client.trap_instruments || []).indexOf(instrument);
+      if (idx === -1) client.trap_instruments.push(instrument);
+      else client.trap_instruments.splice(idx, 1);
+      client._saving = true; client._saved = false;
+      try {
+        const token = localStorage.getItem('terminus_token');
+        await fetch(`/api/admin/trap/client/${client.client_id}/instruments`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json',
+                     ...(token ? { 'Authorization': 'Bearer ' + token } : {}) },
+          body: JSON.stringify({ instruments: client.trap_instruments }),
+        });
+        client._saved = true;
+        setTimeout(() => client._saved = false, 2000);
+      } catch(e) { console.warn('toggle failed', e); }
+      finally { client._saving = false; }
+    },
+  }
+}
+</script>
+
 <!-- ════════════════════════════════════════════════════════════════════════════
      BODY
 ════════════════════════════════════════════════════════════════════════════ -->
@@ -2304,6 +2396,8 @@ document.addEventListener('alpine:init', () => {
             @click="adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadStrategyTelemetry(); loadIndexConfig(adminSelectedIndex)">&#x2699; STRATEGY ADMIN</button>
     <button class="admin-tab" :class="{active: adminTab==='feeder'}"
             @click="adminTab='feeder'">&#x26A1; DATA FEEDER</button>
+    <button class="admin-tab" :class="{active: adminTab==='trap'}"
+            @click="adminTab='trap'">&#x1F3AF; TRAP ENGINE</button>
     <button class="admin-tab" :class="{active: adminTab==='clients'}"
             @click="adminTab='clients'; loadClientProfiles(); loadRiskSummary()">&#x1F465; CLIENT PROFILES</button>
   </div>
@@ -4372,6 +4466,81 @@ document.addEventListener('alpine:init', () => {
   </div>
 
   </div><!-- end feeder tab -->
+
+  <!-- ════════════════════ TRAP ENGINE CONFIG TAB ═══════════════════════════ -->
+  <div x-show="adminTab === 'trap'" class="flex flex-col gap-3 flex-1">
+
+  <!-- ── TrapEngine Config Panel (Admin only) ──────────────────────── -->
+  <div x-data="trapConfig()" x-init="load()" class="mt-4 bg-gray-900 rounded-lg p-4 border border-gray-700">
+    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">TrapEngine Parameters</h4>
+
+    <div class="grid grid-cols-2 gap-3 text-xs">
+      <label class="flex flex-col gap-1">
+        <span class="text-gray-400">HTF Minutes</span>
+        <input type="number" x-model.number="cfg.HTF_MINUTES" min="1"
+               class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="text-gray-400">MTF Minutes</span>
+        <input type="number" x-model.number="cfg.MTF_MINUTES" min="1"
+               class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="text-gray-400">LTF Minutes</span>
+        <input type="number" x-model.number="cfg.LTF_MINUTES" min="1"
+               class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
+      </label>
+      <label class="flex flex-col gap-1">
+        <span class="text-gray-400">Retest Zone %</span>
+        <input type="number" x-model.number="cfg.RETEST_ZONE_PERCENT" min="0.01" max="10" step="0.05"
+               class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
+      </label>
+      <label class="flex flex-col gap-1 col-span-2">
+        <span class="text-gray-400">Slippage Buffer (pts)</span>
+        <input type="number" x-model.number="cfg.SLIPPAGE_BUFFER" min="0" step="0.25"
+               class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
+      </label>
+    </div>
+
+    <div class="flex items-center gap-3 mt-3">
+      <button @click="save()"
+              class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-xs text-white font-semibold">
+        Save Config
+      </button>
+      <span x-text="statusMsg"
+            :class="isError ? 'text-red-400' : 'text-green-400'"
+            class="text-xs" x-show="statusMsg"></span>
+      <span class="ml-auto text-xs text-gray-500">
+        LOT_SIZE: <span class="text-gray-300 font-mono" x-text="cfg.LOT_SIZE || 25"></span> (immutable)
+      </span>
+    </div>
+  </div>
+
+  <!-- ── Client TrapTrading Instrument Selector ────────────────────── -->
+  <div x-data="clientTrapInstruments()" x-init="init()" class="mt-4 bg-gray-900 rounded-lg p-4 border border-gray-700">
+    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Client TrapTrading Scripts</h4>
+
+    <div class="text-xs text-gray-400 mb-2">Select instruments per client for TrapTrading strategy:</div>
+    <template x-for="c in clients" :key="c.client_id">
+      <div class="flex items-center gap-3 py-1.5 border-b border-gray-800">
+        <span class="w-28 font-mono text-gray-200 truncate" x-text="c.client_id"></span>
+        <template x-for="inst in ['NIFTY','BANKNIFTY','FINNIFTY']" :key="inst">
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox"
+                   :checked="(c.trap_instruments || []).includes(inst)"
+                   @change="toggle(c, inst)"
+                   class="w-3 h-3 accent-blue-500" />
+            <span class="text-gray-300" x-text="inst"></span>
+          </label>
+        </template>
+        <span x-show="c._saving" class="text-yellow-400 text-[10px] ml-auto">saving...</span>
+        <span x-show="c._saved"  class="text-green-400 text-[10px] ml-auto">saved</span>
+      </div>
+    </template>
+    <div x-show="clients.length === 0" class="text-gray-500 text-xs py-2">No clients found.</div>
+  </div>
+
+  </div><!-- end trap tab -->
 
   <!-- ════════════════════ CLIENT PROFILES TAB ══════════════════════════════ -->
   <div x-show="adminTab === 'clients'" class="flex flex-col gap-3 flex-1">

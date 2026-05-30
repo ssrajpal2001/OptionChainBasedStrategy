@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
 import sqlite3
@@ -251,6 +252,36 @@ class ClientDB:
         ).fetchone()
         con.close()
         return dict(row) if row else None
+
+    def get_trap_instruments_sync(self, client_id: str) -> list:
+        """Return the list of instruments this client has enabled for TrapTrading."""
+        con = sqlite3.connect(self._db_path)
+        try:
+            row = con.execute(
+                "SELECT trap_instruments FROM clients WHERE client_id = ?",
+                (client_id,)
+            ).fetchone()
+        finally:
+            con.close()
+        if row is None:
+            return []
+        try:
+            return json.loads(row[0] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def set_trap_instruments_sync(self, client_id: str, instruments: list) -> None:
+        """Persist the TrapTrading instrument list for a client."""
+        self._exec(
+            "UPDATE clients SET trap_instruments = ?, updated_at = ? WHERE client_id = ?",
+            (json.dumps(instruments), datetime.now(IST).isoformat(), client_id),
+        )
+
+    async def get_trap_instruments(self, client_id: str) -> list:
+        return await asyncio.to_thread(self.get_trap_instruments_sync, client_id)
+
+    async def set_trap_instruments(self, client_id: str, instruments: list) -> None:
+        await asyncio.to_thread(self.set_trap_instruments_sync, client_id, instruments)
 
     def get_all_clients_sync(self) -> List[dict]:
         try:
@@ -916,6 +947,7 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN terminal_connected INTEGER DEFAULT 0",
             "ALTER TABLE broker_bindings ADD COLUMN terminal_connected_at TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN engine_active INTEGER DEFAULT 0",
+            "ALTER TABLE clients ADD COLUMN trap_instruments TEXT DEFAULT '[]'",
         ):
             try:
                 con.execute(migration)

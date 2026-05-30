@@ -344,6 +344,17 @@ try:
         max_sl_rs:      float = 0.0
         squareoff_time: str   = "15:15"
 
+    class _TrapConfigUpdateSchema(_PydanticBase):
+        HTF_MINUTES:         Optional[int]   = None
+        MTF_MINUTES:         Optional[int]   = None
+        LTF_MINUTES:         Optional[int]   = None
+        RETEST_ZONE_PERCENT: Optional[float] = None
+        SLIPPAGE_BUFFER:     Optional[float] = None
+        bars_lookback_days:  Optional[int]   = None
+
+    class _TrapInstrumentsSchema(_PydanticBase):
+        instruments: List[str]
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -2358,6 +2369,58 @@ class DashboardServer:
                     logger.warning("Trap config live-inject failed: %s", exc)
             logger.info("Trap Trading config saved: %s", patch)
             return {"ok": True, "message": "Trap Trading config saved."}
+
+        # ── ADMIN — TrapEngineConfig REST endpoints ───────────────────────────
+
+        @app.get("/api/admin/trap/config", tags=["Admin"])
+        async def api_trap_engine_config_get(_: dict = Depends(_require_admin)):
+            """Return current TrapEngineConfig values."""
+            engine_cfg = getattr(_srv._cfg, "trap_engine", None)
+            if engine_cfg is None:
+                return {"ok": False, "error": "TrapEngineConfig not available"}
+            return {"ok": True, "config": engine_cfg.snapshot()}
+
+        @app.post("/api/admin/trap/config", tags=["Admin"])
+        async def api_trap_engine_config_set(
+            payload: _TrapConfigUpdateSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            """Update one or more TrapEngineConfig fields atomically."""
+            engine_cfg = getattr(_srv._cfg, "trap_engine", None)
+            if engine_cfg is None:
+                return {"ok": False, "error": "TrapEngineConfig not available"}
+            try:
+                updates = {k: v for k, v in payload.dict().items() if v is not None}
+                if not updates:
+                    return {"ok": False, "error": "No fields provided."}
+                updated = engine_cfg.reconfigure(**updates)
+                return {"ok": True, "updated": updated, "config": engine_cfg.snapshot()}
+            except (ValueError, AttributeError) as exc:
+                return {"ok": False, "error": str(exc)}
+
+        @app.get("/api/admin/trap/client/{client_id}/instruments", tags=["Admin"])
+        async def api_trap_client_instruments_get(
+            client_id: str, _: dict = Depends(_require_admin),
+        ):
+            """Get the TrapTrading instrument list for a client."""
+            try:
+                instruments = await _srv._client_db.get_trap_instruments(client_id)
+                return {"ok": True, "client_id": client_id, "instruments": instruments}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        @app.post("/api/admin/trap/client/{client_id}/instruments", tags=["Admin"])
+        async def api_trap_client_instruments_set(
+            client_id: str,
+            payload: _TrapInstrumentsSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            """Set the TrapTrading instrument list for a client."""
+            try:
+                await _srv._client_db.set_trap_instruments(client_id, payload.instruments)
+                return {"ok": True, "client_id": client_id, "instruments": payload.instruments}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
 
         # ── ADMIN — portfolio risk command center ────────────────────────────
 
