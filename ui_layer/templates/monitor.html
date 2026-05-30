@@ -750,7 +750,7 @@ document.addEventListener('alpine:init', () => {
 
     /* Hydrate all admin panels — called right after login or session restore */
     _hydrateAdminOnLogin() {
-      this.loadFeederStatus();
+      this.loadFeederStatus(true);   // sync toggle from DB only on login
       this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
@@ -1096,7 +1096,7 @@ document.addEventListener('alpine:init', () => {
       let tries = 0;
       const iv = setInterval(async () => {
         tries++;
-        await this.loadFeederStatus();
+        await this.loadFeederStatus(true);  // sync toggle while waiting for OAuth
         if ((this.systemStatus.providers || {})[p]?.token_fresh) {
           clearInterval(iv);
           this.feederToggle[p] = true;
@@ -1204,16 +1204,19 @@ document.addEventListener('alpine:init', () => {
       finally { this.redirectBaseSaving = false; }
     },
 
-    async loadFeederStatus() {
+    async loadFeederStatus(syncToggle = false) {
       try {
         const r = await this._fetch('/api/admin/feeder/status');
         if (r && r.ok) {
           const d = await r.json();
           this.systemStatus = d;
-          // Sync feeder toggle state from DB token freshness on every status load
-          for (const p of ['upstox', 'fyers']) {
-            const prov = (d.providers || {})[p] || {};
-            if (prov.token_fresh) this.feederToggle[p] = true;
+          // Only sync toggle from DB on explicit request (initial login).
+          // During normal operation, feederToggle reflects user's live intent.
+          if (syncToggle) {
+            for (const p of ['upstox', 'fyers']) {
+              const prov = (d.providers || {})[p] || {};
+              if (prov.token_fresh) this.feederToggle[p] = true;
+            }
           }
         }
       } catch {}
