@@ -2390,7 +2390,7 @@ class DashboardServer:
             if engine_cfg is None:
                 return {"ok": False, "error": "TrapEngineConfig not available"}
             try:
-                updates = {k: v for k, v in payload.dict().items() if v is not None}
+                updates = {k: v for k, v in payload.model_dump().items() if v is not None}
                 if not updates:
                     return {"ok": False, "error": "No fields provided."}
                 updated = engine_cfg.reconfigure(**updates)
