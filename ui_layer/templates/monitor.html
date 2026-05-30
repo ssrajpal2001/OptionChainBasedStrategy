@@ -1310,27 +1310,21 @@ document.addEventListener('alpine:init', () => {
     _ssDefaults() {
       return {
         entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
-        entry_workflow_mode: 'hybrid',
+        entry_workflow_mode: 'hybrid', ltp_target: 0,
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
-        profit_target_enabled: true, profit_pct: 30.0,
-        sl_enabled: true, sl_pct: 200.0,
-        tsl_enabled: false, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
-        tsl_scalable: { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
+        tsl_scalable:  { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
-        guardrail_pnl: { enabled: false, target_pts: 100.0, stoploss_pts: -60.0 },
         ratio_exit:    { enabled: false, threshold: 3.0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
-        smart_rolling_enabled: false,
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
         sl_cooldown_tf_multiplier: 1.0,
-        capital_deployed_inr: 0,
         max_trades: 1,
         per_day: {
-          monday:    { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          tuesday:   { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          wednesday: { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          thursday:  { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
-          friday:    { enabled: false, profit_target_pct: 0, single_trade_target_pts: 0, single_trade_stoploss_pts: 0, guardrail_pnl: { target_pts: 0, stoploss_pts: 0 } },
+          monday:    { enabled: false, profit_target_pct: 0, loss_sl_pct: 0 },
+          tuesday:   { enabled: false, profit_target_pct: 0, loss_sl_pct: 0 },
+          wednesday: { enabled: false, profit_target_pct: 0, loss_sl_pct: 0 },
+          thursday:  { enabled: false, profit_target_pct: 0, loss_sl_pct: 0 },
+          friday:    { enabled: false, profit_target_pct: 0, loss_sl_pct: 0 },
         }
       };
     },
@@ -1358,21 +1352,19 @@ document.addEventListener('alpine:init', () => {
       if (!Array.isArray(ss.entry_rules_beginning)) ss.entry_rules_beginning = [];
       if (!Array.isArray(ss.entry_rules_reentry))   ss.entry_rules_reentry   = [];
       if (!Array.isArray(ss.exit_rules))             ss.exit_rules             = [];
-      if (!ss.tsl_scalable) ss.tsl_scalable = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
+      if (!ss.tsl_scalable)  ss.tsl_scalable  = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
-      if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, target_pts: 100.0, stoploss_pts: -60.0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
-      if (ss.smart_rolling_enabled === undefined) ss.smart_rolling_enabled = false;
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
       if (ss.sl_cooldown_tf_multiplier === undefined) ss.sl_cooldown_tf_multiplier = 1.0;
-      if (ss.capital_deployed_inr === undefined) ss.capital_deployed_inr = 0;
-      const _dayDef = () => ({ enabled:false, profit_target_pct:0, single_trade_target_pts:0, single_trade_stoploss_pts:0, guardrail_pnl:{target_pts:0,stoploss_pts:0} });
+      if (ss.ltp_target === undefined) ss.ltp_target = 0;
+      const _dayDef = () => ({ enabled: false, profit_target_pct: 0, loss_sl_pct: 0 });
       if (!ss.per_day) ss.per_day = { monday:_dayDef(), tuesday:_dayDef(), wednesday:_dayDef(), thursday:_dayDef(), friday:_dayDef() };
       for (const d of ['monday','tuesday','wednesday','thursday','friday']) {
         if (!ss.per_day[d]) ss.per_day[d] = _dayDef();
         if (ss.per_day[d].profit_target_pct === undefined) ss.per_day[d].profit_target_pct = 0;
-        if (!ss.per_day[d].guardrail_pnl) ss.per_day[d].guardrail_pnl = { target_pts:0, stoploss_pts:0 };
+        if (ss.per_day[d].loss_sl_pct === undefined) ss.per_day[d].loss_sl_pct = 0;
       }
     },
     async selectAdminIndex(idx) {
@@ -3492,42 +3484,6 @@ function clientTrapInstruments() {
             <div class="flex flex-col gap-2">
               <div class="sec-label mb-1">EXIT GUARDRAILS &amp; TARGETS</div>
 
-              <!-- Profit Target -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-green)">PROFIT TARGET</span>
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.profit_target_enabled" class="accent-green-400">
-                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.profit_target_enabled?'ON':'OFF'"
-                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.profit_target_enabled?'var(--t-green)':'var(--t-muted)'}`"></span>
-                  </label>
-                </div>
-                <div class="flex items-center gap-2">
-                  <label class="sec-label">Target %</label>
-                  <input type="number" step="1" class="t-input" style="width:80px"
-                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.profit_pct">
-                  <span class="font-mono text-xs" style="color:var(--t-muted)">of premium received</span>
-                </div>
-              </div>
-
-              <!-- Hard SL -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-red)">HARD STOP LOSS</span>
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.sl_enabled" class="accent-red-400">
-                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.sl_enabled?'ON':'OFF'"
-                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.sl_enabled?'var(--t-red)':'var(--t-muted)'}`"></span>
-                  </label>
-                </div>
-                <div class="flex items-center gap-2">
-                  <label class="sec-label">SL %</label>
-                  <input type="number" step="10" class="t-input" style="width:80px"
-                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.sl_pct">
-                  <span class="font-mono text-xs" style="color:var(--t-muted)">of premium (200 = 2× premium)</span>
-                </div>
-              </div>
-
               <!-- ROC Guardrail -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
@@ -3558,30 +3514,6 @@ function clientTrapInstruments() {
                     <label class="sec-label">SL (pts)</label>
                     <input type="number" step="1" class="t-input mt-0.5"
                            x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.stoploss">
-                  </div>
-                </div>
-              </div>
-
-              <!-- P&L Guardrail -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">SESSION P&amp;L GUARDRAIL</span>
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled" class="accent-yellow-400">
-                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'ON':'OFF'"
-                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
-                  </label>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                  <div class="flex items-center gap-2">
-                    <label class="sec-label">Default Target (pts)</label>
-                    <input type="number" step="10" class="t-input" style="width:80px"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.target_pts">
-                  </div>
-                  <div class="flex items-center gap-2">
-                    <label class="sec-label">Default SL (pts)</label>
-                    <input type="number" step="10" class="t-input" style="width:80px"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.stoploss_pts">
                   </div>
                 </div>
               </div>
@@ -3619,21 +3551,6 @@ function clientTrapInstruments() {
                   <input type="number" step="1" class="t-input" style="width:80px"
                          x-model.number="indexConfig[adminSelectedIndex].sell_straddle.ltp_decay.ltp_exit_min">
                   <span class="font-mono text-xs" style="color:var(--t-muted)">exit/roll when either leg LTP &lt; this</span>
-                </div>
-              </div>
-
-              <!-- Smart Rolling -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="flex items-center justify-between">
-                  <div>
-                    <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">SMART ROLLING</span>
-                    <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">Scan V-slope candidate strikes before rolling on ATM shift</p>
-                  </div>
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.smart_rolling_enabled" class="accent-cyan-400">
-                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.smart_rolling_enabled?'ON':'OFF'"
-                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.smart_rolling_enabled?'var(--t-cyan)':'var(--t-muted)'}`"></span>
-                  </label>
                 </div>
               </div>
 
@@ -3679,22 +3596,6 @@ function clientTrapInstruments() {
                 </div>
               </div>
 
-              <!-- Capital-based Profit Target -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-green)">CAPITAL-BASED PROFIT TARGET</span>
-                  <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">Profit target = profit_pct % of this amount. Overrides premium-based % when &gt; 0. Per-day override via PER DAY tab.</p>
-                </div>
-                <div class="flex items-center gap-3 flex-wrap">
-                  <div class="flex items-center gap-2">
-                    <label class="sec-label">Capital / Margin (₹)</label>
-                    <input type="number" step="10000" min="0" class="t-input" style="width:100px"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.capital_deployed_inr"
-                           title="Deployed capital or margin blocked per session">
-                  </div>
-                  <span class="font-mono text-xs" style="color:var(--t-muted)">0 = use premium-based % (default)</span>
-                </div>
-              </div>
 
             </div>
           </template>
@@ -3705,30 +3606,6 @@ function clientTrapInstruments() {
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
             <div class="flex flex-col gap-2">
               <div class="sec-label mb-1">TRAILING STOP LOSS</div>
-
-              <!-- Basic TSL -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">TRAILING SL</span>
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.tsl_enabled">
-                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.tsl_enabled?'ENABLED':'DISABLED'"
-                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.tsl_enabled?'var(--t-cyan)':'var(--t-muted)'}`"></span>
-                  </label>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                  <div>
-                    <label class="sec-label">Lock at % profit</label>
-                    <input type="number" step="1" class="t-input mt-0.5"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.trail_lock_pct">
-                  </div>
-                  <div>
-                    <label class="sec-label">Floor % below peak</label>
-                    <input type="number" step="1" class="t-input mt-0.5"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.trail_floor_pct">
-                  </div>
-                </div>
-              </div>
 
               <!-- Scalable TSL -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
