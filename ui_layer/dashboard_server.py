@@ -1734,6 +1734,19 @@ class DashboardServer:
             await _srv._client_db.delete_deployment(deploy_id, cid)
             from data_layer.deployment_store import delete_deployment_json
             delete_deployment_json(deploy_id)
+            logger.info("Deployment deleted: %s for client %s", deploy_id, cid)
+            return {"ok": True, "message": "Deployment removed."}
+
+        @app.post("/api/client/strategy/deploy/{deploy_id}/remove", tags=["Client"])
+        async def api_client_remove_deployment(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            """POST-based alternative to DELETE for proxy-safe removal."""
+            cid = user.get("client_id", "")
+            await _srv._client_db.delete_deployment(deploy_id, cid)
+            from data_layer.deployment_store import delete_deployment_json
+            delete_deployment_json(deploy_id)
+            logger.info("Deployment removed (POST): %s for client %s", deploy_id, cid)
             return {"ok": True, "message": "Deployment removed."}
 
         # ── UNIFIED OAuth Callback Handler ────────────────────────────────────

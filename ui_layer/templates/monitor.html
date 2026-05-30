@@ -1879,18 +1879,29 @@ document.addEventListener('alpine:init', () => {
     },
 
     async deleteDeploy(deploy_id) {
-      // Spread to new object so Alpine.js tracks the new key reactively
+      if (!deploy_id) { this.deployMsg = 'Error: missing deploy_id'; this.deployOk = false; return; }
       this.deployDeleteLoading = { ...this.deployDeleteLoading, [deploy_id]: true };
+      this.deployMsg = ''; this.deployOk = null;
       try {
-        const r = await this._fetch(`/api/client/strategy/deploy/${encodeURIComponent(deploy_id)}`, { method: 'DELETE' });
-        const d = r ? await r.json() : null;
-        if (r && r.ok && d?.ok) {
+        // Use POST-based remove (proxy-safe alternative to DELETE method)
+        const r = await this._fetch(
+          `/api/client/strategy/deploy/${encodeURIComponent(deploy_id)}/remove`,
+          { method: 'POST' }
+        );
+        if (!r) { this.deployMsg = 'Auth error — please re-login.'; this.deployOk = false; return; }
+        const d = await r.json();
+        if (d?.ok) {
           await this._loadBrokerDeployments(this.deployBindingId);
           await this.loadClientStatus();
+          this.deployMsg = '✓ Strategy removed.'; this.deployOk = true;
         } else {
-          this.deployMsg = (d?.detail || d?.error || 'Delete failed.'); this.deployOk = false;
+          this.deployMsg = d?.detail || d?.error || `Remove failed (deploy_id: ${deploy_id.slice(-20)})`;
+          this.deployOk = false;
         }
-      } catch (e) { this.deployMsg = 'Delete error: ' + (e.message || e); this.deployOk = false; }
+      } catch (e) {
+        this.deployMsg = 'Error: ' + (e.message || e);
+        this.deployOk = false;
+      }
       finally { this.deployDeleteLoading = { ...this.deployDeleteLoading, [deploy_id]: false }; }
     },
 
