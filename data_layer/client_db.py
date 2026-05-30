@@ -845,6 +845,9 @@ class ClientDB:
                 (symbol, ts_str, open_, high, low, close, volume),
             )
             con.commit()
+        except Exception:
+            con.rollback()
+            raise
         finally:
             con.close()
 
@@ -890,6 +893,15 @@ class ClientDB:
             return [dict(zip(cols, row)) for row in cur.fetchall()]
         finally:
             con.close()
+
+    async def get_1m_bars(
+        self,
+        symbol: str,
+        since,
+        until=None,
+    ) -> list:
+        """Async wrapper — delegates to get_1m_bars_sync via asyncio.to_thread()."""
+        return await asyncio.to_thread(self.get_1m_bars_sync, symbol, since, until)
 
     # ── SQLite helpers — only called from asyncio.to_thread() ─────────────────
 

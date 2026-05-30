@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config.global_config import IST, Topic, SysEvent, GlobalConfig
 from data_layer.base_feeder import (
-    BaseFeeder, EventBus, IndexTick, OptionTick, SystemEvent,
+    BaseFeeder, CandleEvent, EventBus, IndexTick, OptionTick, SystemEvent,
 )
 
 logger = logging.getLogger(__name__)
@@ -775,7 +775,6 @@ class GlobalFeeder:
         This is the only correct way to drive the heartbeat — avoids the need
         for any external caller to invoke record_tick().
         """
-        from config.global_config import Topic
         q = self._bus.subscribe(Topic.INDEX_TICK)
         while self._running:
             try:
@@ -799,8 +798,6 @@ class GlobalFeeder:
 
     async def _candle_persist_loop(self) -> None:
         """Persist every 1-minute CandleEvent to option_1m_bar_repository."""
-        from data_layer.base_feeder import CandleEvent
-        from config.global_config import Topic
         q = self._bus.subscribe(Topic.CANDLE_CLOSE)
         try:
             while self._running:
