@@ -3248,8 +3248,8 @@ function clientTrapInstruments() {
           </div>
         </div>
 
-        <!-- Workflow mode + max trades -->
-        <div class="grid grid-cols-2 gap-2">
+        <!-- Workflow mode + max trades + min LTP -->
+        <div class="grid grid-cols-3 gap-2">
           <div>
             <label class="sec-label">Entry Mode</label>
             <select class="t-input mt-0.5"
@@ -3263,6 +3263,15 @@ function clientTrapInstruments() {
             <label class="sec-label">Max Trades / Day</label>
             <input type="number" min="1" max="10" class="t-input mt-0.5"
                    x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.max_trades">
+          </div>
+          <div>
+            <label class="sec-label">Min LTP (CE &amp; PE)</label>
+            <input type="number" min="0" step="5" class="t-input mt-0.5" placeholder="0 = disabled"
+                   title="Both CE and PE must individually be above this value before entry is considered. Set 0 to disable."
+                   x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.ltp_target">
+            <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+              First filter — both legs must be ≥ this. 0 = off.
+            </p>
           </div>
         </div>
 

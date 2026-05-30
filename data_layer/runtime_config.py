@@ -36,6 +36,9 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "entry_end":             "12:00",
     "squareoff_time":        "15:15",
     "entry_workflow_mode":   "hybrid",       # hybrid | beginning_only | reentry_only
+    # Pre-entry LTP filter: BOTH CE and PE must individually be >= ltp_target.
+    # 0 = disabled. sell_v3 default is 50.0; set to 0 until admin configures per index.
+    "ltp_target":            0.0,
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],

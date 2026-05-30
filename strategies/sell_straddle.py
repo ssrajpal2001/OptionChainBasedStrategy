@@ -505,13 +505,16 @@ class SellStraddleStrategy:
         if self._spot <= 0 or self._ce_ltp <= 0 or self._pe_ltp <= 0:
             return
 
-        # min_ltp filter — block entry if combined premium is below floor
+        # ltp_target — BOTH legs must individually be >= threshold.
+        # sell_v3 rule: anchor LTP checked before partner search; pool scan
+        # filters out any leg below ltp_target. Neither leg can be under the floor.
+        # Example: CE=50, PE=55, threshold=60 → neither qualifies → skip entry.
         if self._ltp_target > 0.0:
-            combined = self._ce_ltp + self._pe_ltp
-            if combined < self._ltp_target:
+            if self._ce_ltp < self._ltp_target or self._pe_ltp < self._ltp_target:
                 logger.debug(
-                    "SellStraddle[%s]: entry blocked — combined LTP %.2f < ltp_target %.2f",
-                    self._underlying, combined, self._ltp_target,
+                    "SellStraddle[%s]: entry blocked — CE=%.2f PE=%.2f, "
+                    "both must be >= ltp_target=%.2f",
+                    self._underlying, self._ce_ltp, self._pe_ltp, self._ltp_target,
                 )
                 return
 
