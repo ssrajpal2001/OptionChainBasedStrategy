@@ -770,12 +770,12 @@ class SellStraddleStrategy:
             if _rg_bucket != self._last_roc_guard_bucket:
                 self._last_roc_guard_bucket = _rg_bucket
                 _closes = list(self._prem_closes)
-                _roc_val = (
-                    (_closes[-1] - _closes[-(self._guardrail_roc_length + 1)])
-                    / _closes[-(self._guardrail_roc_length + 1)]
-                    * 100
-                )
-                if self._guardrail_roc_target < 0 and _roc_val <= self._guardrail_roc_target:
+                _denom  = _closes[-(self._guardrail_roc_length + 1)]
+                if _denom == 0:
+                    _roc_val = None
+                else:
+                    _roc_val = (_closes[-1] - _denom) / _denom * 100
+                if _roc_val is not None and self._guardrail_roc_target < 0 and _roc_val <= self._guardrail_roc_target:
                     logger.info(
                         "SellStraddle[%s]: ROC GUARDRAIL TARGET — roc=%.2f <= target=%.2f",
                         self._underlying, _roc_val, self._guardrail_roc_target,
@@ -784,7 +784,7 @@ class SellStraddleStrategy:
                     if not rolled:
                         await self._close_position("guardrail_roc_target")
                     return
-                if self._guardrail_roc_stoploss >= 0 and _roc_val >= self._guardrail_roc_stoploss:
+                if _roc_val is not None and self._guardrail_roc_stoploss >= 0 and _roc_val >= self._guardrail_roc_stoploss:
                     logger.info(
                         "SellStraddle[%s]: ROC GUARDRAIL SL — roc=%.2f >= sl=%.2f",
                         self._underlying, _roc_val, self._guardrail_roc_stoploss,
@@ -793,16 +793,6 @@ class SellStraddleStrategy:
                     if not rolled:
                         await self._close_position("guardrail_roc_sl")
                     return
-
-        # 8. ROC guardrail → smart roll first
-        if self._prev_spot > 0:
-            roc_pct = abs(self._spot - self._prev_spot) / self._prev_spot * 100
-            if roc_pct > self._roc_limit_pct:
-                logger.warning("SellStraddle[%s]: ROC GUARDRAIL — %.2f%%", self._underlying, roc_pct)
-                rolled = await self._try_smart_roll(now, "roc_guardrail")
-                if not rolled:
-                    await self._close_position("roc_guardrail")
-                return
 
         # exit_rules — dynamic technical exit conditions from admin config
         if self._exit_rules:
@@ -820,6 +810,16 @@ class SellStraddleStrategy:
                     if not rolled:
                         await self._close_position("exit_rules")
                     return
+
+        # 8. ROC spot-move guardrail → smart roll first (last resort, tick-level)
+        if self._prev_spot > 0:
+            roc_pct = abs(self._spot - self._prev_spot) / self._prev_spot * 100
+            if roc_pct > self._roc_limit_pct:
+                logger.warning("SellStraddle[%s]: ROC GUARDRAIL — %.2f%%", self._underlying, roc_pct)
+                rolled = await self._try_smart_roll(now, "roc_guardrail")
+                if not rolled:
+                    await self._close_position("roc_guardrail")
+                return
 
         self._prev_spot = self._spot
 
