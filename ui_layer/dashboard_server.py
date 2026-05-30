@@ -59,6 +59,27 @@ def _base_url(request) -> str:
     return f"{scheme}://{host}"
 
 
+def _redirect_base(request, client_db) -> str:
+    """
+    Return the base URL used as redirect_uri root for all broker OAuth flows.
+
+    Priority:
+      1. DB: system_settings.GLOBAL_REDIRECT_BASE  (admin-configured, persists)
+      2. Fallback: derive from incoming request (handles nginx X-Forwarded-Proto)
+
+    Set GLOBAL_REDIRECT_BASE in Admin Workspace → Data Feeder → Global Redirect Base.
+    Must begin with https:// for brokers that enforce HTTPS redirect URIs (Upstox, Zerodha).
+    """
+    stored = client_db.get_setting_sync("GLOBAL_REDIRECT_BASE", "").strip().rstrip("/")
+    if stored:
+        return stored
+    logger.warning(
+        "[OAuth] GLOBAL_REDIRECT_BASE not set — falling back to request-derived URL. "
+        "Configure it in Admin Workspace to ensure the correct redirect URI."
+    )
+    return _base_url(request)
+
+
 def _callback_page(status: str, provider: str, message: str) -> str:
     """Return a minimal HTML page shown after broker OAuth redirect."""
     color   = "#22c55e" if status == "success" else "#ef4444"
@@ -638,6 +659,32 @@ class DashboardServer:
                 "providers": providers_status,
             }
 
+        @app.get("/api/admin/settings", tags=["Admin"])
+        async def api_get_settings(_: dict = Depends(_require_admin)):
+            """Return persisted system settings (currently only GLOBAL_REDIRECT_BASE)."""
+            redirect_base = await asyncio.to_thread(
+                _srv._client_db.get_setting_sync, "GLOBAL_REDIRECT_BASE", ""
+            )
+            return {"ok": True, "GLOBAL_REDIRECT_BASE": redirect_base}
+
+        @app.post("/api/admin/settings", tags=["Admin"])
+        async def api_save_settings(
+            request: Request, _: dict = Depends(_require_admin),
+        ):
+            """Save system settings. Accepts JSON body with GLOBAL_REDIRECT_BASE."""
+            try:
+                body = await request.json()
+            except Exception:
+                raise HTTPException(400, "Invalid JSON body.")
+            redirect_base = str(body.get("GLOBAL_REDIRECT_BASE", "")).strip().rstrip("/")
+            await _srv._client_db.set_setting("GLOBAL_REDIRECT_BASE", redirect_base)
+            logger.info("[Settings] GLOBAL_REDIRECT_BASE updated to: %s", redirect_base)
+            return {
+                "ok": True,
+                "message": "Settings saved.",
+                "GLOBAL_REDIRECT_BASE": redirect_base,
+            }
+
         @app.get("/api/admin/feeder/auth-url", tags=["Admin"])
         async def api_feeder_auth_url(
             provider: str,
@@ -668,7 +715,7 @@ class DashboardServer:
                     ),
                 }
 
-            base_url     = _base_url(request)
+            base_url     = _redirect_base(request, _srv._client_db)
             callback_url = f"{base_url}/callback/{provider}"
             state        = build_state("admin", "feeder", provider)
 
@@ -777,7 +824,7 @@ class DashboardServer:
                 )
 
             # Step 2: generate OAuth URL
-            base_url     = _base_url(request)
+            base_url     = _redirect_base(request, _srv._client_db)
             callback_url = f"{base_url}/callback/{p}"
             state        = build_state("admin", "feeder", p)
 
@@ -1465,7 +1512,7 @@ class DashboardServer:
                 "[Terminal] [%s/%s] no valid token (reason=%s) — generating OAuth URL (%.1fms)",
                 cid, binding_id, msg, (_time.monotonic()-t0)*1000,
             )
-            base_url     = _base_url(request)
+            base_url     = _redirect_base(request, _srv._client_db)
             callback_url = f"{base_url}/callback/{provider}"
             state        = build_state("client", cid, binding_id)
             logger.debug("[Terminal] [%s/%s] callback_url=%s state=%s", cid, binding_id, callback_url, state[:20])
@@ -1793,7 +1840,7 @@ class DashboardServer:
 
                 api_key    = match["api_key"]
                 api_secret = match["api_secret"]
-                base_url   = _base_url(request)
+                base_url   = _redirect_base(request, _srv._client_db)
                 callback_url = f"{base_url}/callback/{provider}"
 
                 ok, msg, token = await asyncio.to_thread(
@@ -1823,7 +1870,7 @@ class DashboardServer:
                 role       = parsed.get("role", "")
                 client_id  = parsed.get("client_id", "")
                 binding_id = parsed.get("binding_id", "")
-                base_url   = _base_url(request)
+                base_url   = _redirect_base(request, _srv._client_db)
                 callback_url = f"{base_url}/callback/{provider}"
 
                 if role == "admin":
@@ -2527,7 +2574,7 @@ class DashboardServer:
             if not api_key:
                 return {"ok": False, "error": f"{provider.upper()} App ID/Key not saved. Configure credentials first."}
 
-            base_url     = _base_url(request)
+            base_url     = _redirect_base(request, _srv._client_db)
             callback_url = f"{base_url}/callback/{provider}"
             state        = build_state("admin", "admin", provider)
 
@@ -2546,7 +2593,7 @@ class DashboardServer:
             api_secret = db_row.get("secret", "")
             if not api_key:
                 return {"ok": False, "error": "Fyers App ID not saved."}
-            base_url     = _base_url(request)
+            base_url     = _redirect_base(request, _srv._client_db)
             callback_url = f"{base_url}/callback/fyers"
             state        = build_state("admin", "admin", "fyers")
             ok, url = generate_auth_url("fyers", api_key, api_secret, callback_url, state)

@@ -161,6 +161,11 @@ CREATE TABLE IF NOT EXISTS system_feeder_creds (
     token_expiry_at    TEXT DEFAULT '',
     updated_at         TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS system_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -704,6 +709,31 @@ class ClientDB:
                SET access_token=?, token_generated_at=?, token_expiry_at=?, updated_at=?
                WHERE provider=?""",
             (token, generated_at or now, expiry_at, now, provider),
+        )
+
+    # ── System settings (key-value) ───────────────────────────────────────────
+
+    def get_setting_sync(self, key: str, default: str = "") -> str:
+        """Read a system setting synchronously. Returns default if not set."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            row = con.execute(
+                "SELECT value FROM system_settings WHERE key=?", (key,)
+            ).fetchone()
+            con.close()
+            return row[0] if row else default
+        except Exception as exc:
+            logger.error("ClientDB.get_setting_sync(%s): %s", key, exc)
+            return default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        """Persist a system setting (upsert)."""
+        logger.info("[DB] set_setting %s=%r", key, value[:80] if value else "")
+        await asyncio.to_thread(
+            self._exec,
+            "INSERT INTO system_settings (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
         )
 
     # ── Boot-time bulk load ───────────────────────────────────────────────────

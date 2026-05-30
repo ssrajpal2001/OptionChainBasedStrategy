@@ -622,6 +622,7 @@ document.addEventListener('alpine:init', () => {
                     upstox_token_fresh: false,   fyers_token_fresh: false },
 
     supportedFeeders: ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue'],
+    redirectBase: '', redirectBaseMsg: '', redirectBaseSaving: false,
 
     /* ── Client broker modal ────────────────────────────────────────── */
     showBrokerModal: false,
@@ -750,6 +751,7 @@ document.addEventListener('alpine:init', () => {
     /* Hydrate all admin panels — called right after login or session restore */
     _hydrateAdminOnLogin() {
       this.loadFeederStatus();
+      this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
       this.loadTrapConfig();
@@ -1182,6 +1184,26 @@ document.addEventListener('alpine:init', () => {
     },
 
     /* ── Feeder status ───────────────────────────────────────────────────── */
+    async loadRedirectBase() {
+      try {
+        const r = await this._fetch('/api/admin/settings');
+        if (r && r.ok) { const d = await r.json(); this.redirectBase = d.GLOBAL_REDIRECT_BASE || ''; }
+      } catch {}
+    },
+
+    async saveRedirectBase() {
+      this.redirectBaseSaving = true; this.redirectBaseMsg = '';
+      try {
+        const r = await this._fetch('/api/admin/settings', {
+          json: { GLOBAL_REDIRECT_BASE: this.redirectBase.trim() }
+        });
+        if (!r) return;
+        const d = await r.json();
+        this.redirectBaseMsg = d.ok ? '✓ Saved — all OAuth redirect URIs will now use this base.' : (d.error || 'Save failed.');
+      } catch { this.redirectBaseMsg = 'Request failed.'; }
+      finally { this.redirectBaseSaving = false; }
+    },
+
     async loadFeederStatus() {
       try {
         const r = await this._fetch('/api/admin/feeder/status');
@@ -3966,6 +3988,33 @@ document.addEventListener('alpine:init', () => {
           <div class="font-mono text-lg font-bold" style="color:var(--t-text)" x-text="telemetry.ws_clients||0"></div>
         </div>
       </div>
+    </div>
+
+    <!-- Global Redirect Base URL — controls redirect_uri for all 6 broker OAuth flows -->
+    <div class="rounded p-3 mb-3" style="background:var(--t-surface);border:1px solid rgba(var(--t-cyan-rgb),0.25)">
+      <div class="flex items-center gap-2 mb-2">
+        <div class="font-ui font-bold text-xs tracking-widest" style="color:var(--t-cyan)">&#x1F310; GLOBAL AUTHORIZATION REDIRECT BASE</div>
+      </div>
+      <div class="font-mono text-xs mb-2" style="color:var(--t-muted)">
+        All broker OAuth callbacks redirect to <strong style="color:var(--t-bright)">this base URL + /callback/{broker}</strong>.
+        Must start with <code>https://</code> for Upstox, Zerodha, and other strict-HTTPS brokers.
+        Example: <code>https://abc123.ngrok-free.app</code> or <code>https://terminus.yourdomain.com</code>
+      </div>
+      <div class="flex items-center gap-2">
+        <input class="t-input flex-1" type="text" x-model="redirectBase"
+               placeholder="https://your-domain.com  or  https://xxxx.ngrok-free.app"
+               autocomplete="off" spellcheck="false"
+               @keydown.enter="saveRedirectBase()"/>
+        <button @click="saveRedirectBase()" :disabled="redirectBaseSaving"
+                class="font-ui font-bold text-xs px-4 py-1.5 rounded border shrink-0"
+                style="border-color:rgba(var(--t-cyan-rgb),0.4);color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06)">
+          <span x-show="!redirectBaseSaving">&#x1F4BE; SAVE</span>
+          <span x-show="redirectBaseSaving">Saving…</span>
+        </button>
+      </div>
+      <div x-show="redirectBaseMsg" class="font-mono text-xs mt-2"
+           :style="redirectBaseMsg.startsWith('✓')?'color:var(--t-green)':'color:var(--t-red)'"
+           x-text="redirectBaseMsg"></div>
     </div>
 
     <!-- Feeder toggle rows — Upstox + Fyers -->
