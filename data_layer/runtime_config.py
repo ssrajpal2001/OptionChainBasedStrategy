@@ -39,6 +39,10 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     # Pre-entry LTP filter: BOTH CE and PE must individually be >= ltp_target.
     # 0 = disabled. sell_v3 default is 50.0; set to 0 until admin configures per index.
     "ltp_target":            0.0,
+    # Trailing SL: activates at trail_lock_pct% profit, floor = trail_floor_pct% below peak.
+    # Set trail_lock_pct = 0 to disable. Values are percentages (divided by 100 in strategy).
+    "trail_lock_pct":        20.0,
+    "trail_floor_pct":       10.0,
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],

@@ -1312,6 +1312,7 @@ document.addEventListener('alpine:init', () => {
         entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
         entry_workflow_mode: 'hybrid', ltp_target: 0,
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
+        trail_lock_pct: 20.0, trail_floor_pct: 10.0,
         tsl_scalable:  { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
         ratio_exit:    { enabled: false, threshold: 3.0 },
@@ -1352,6 +1353,8 @@ document.addEventListener('alpine:init', () => {
       if (!Array.isArray(ss.entry_rules_beginning)) ss.entry_rules_beginning = [];
       if (!Array.isArray(ss.entry_rules_reentry))   ss.entry_rules_reentry   = [];
       if (!Array.isArray(ss.exit_rules))             ss.exit_rules             = [];
+      if (ss.trail_lock_pct  === undefined) ss.trail_lock_pct  = 20.0;
+      if (ss.trail_floor_pct === undefined) ss.trail_floor_pct = 10.0;
       if (!ss.tsl_scalable)  ss.tsl_scalable  = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
@@ -3606,6 +3609,33 @@ function clientTrapInstruments() {
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
             <div class="flex flex-col gap-2">
               <div class="sec-label mb-1">TRAILING STOP LOSS</div>
+
+              <!-- Trailing SL (% of credit) -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">TRAILING SL</span>
+                  <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">
+                    Activates once profit reaches Lock %. Exits if profit drops to (peak − Floor %) of credit. Set Lock % = 0 to disable.
+                  </p>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="sec-label">Lock at % profit</label>
+                    <input type="number" step="1" min="0" class="t-input mt-0.5"
+                           title="Trailing activates when unrealized profit >= this % of net credit. 0 = disabled."
+                           x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.trail_lock_pct">
+                  </div>
+                  <div>
+                    <label class="sec-label">Floor % below peak</label>
+                    <input type="number" step="1" min="0" class="t-input mt-0.5"
+                           title="Once active, exit when profit drops this % of credit below the peak."
+                           x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.trail_floor_pct">
+                  </div>
+                </div>
+                <p class="font-mono text-xs mt-2" style="color:var(--t-muted)">
+                  Example: Lock=12.5, Floor=20 → activates at 12.5% profit; exits if it drops 20% below the peak.
+                </p>
+              </div>
 
               <!-- Scalable TSL -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
