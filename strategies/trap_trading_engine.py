@@ -171,7 +171,7 @@ class _TrapState:
     mtf_bearish_high:  float = 0.0
     mtf_bearish_low:   float = 0.0
     mtf_bearish_ts:    Optional[datetime] = None
-    ltf_entry_line:    float = 0.0   # 5-min bearish.open → touch trigger
+    ltf_entry_line:    float = 0.0   # 5-min bearish.low → touch trigger (retest entry)
     ltf_sl_line:       float = 0.0   # 5-min bearish.low  → stop-loss
 
     # Rolling base (survives across trades)
@@ -441,6 +441,17 @@ class TrapTradingEngine:
                     c.symbol, st.htf_bearish_open, st.htf_bearish_high,
                     c.timestamp.strftime("%H:%M"),
                 )
+                # Same-candle check: confirmation candle may also sweep bears' SL
+                if c.high > st.htf_bearish_high:
+                    st.entry_origin = st.htf_bearish_open
+                    st.target_high  = c.high
+                    st.phase        = _Phase.TRAP_LOCKED
+                    logger.info(
+                        "TrapEngine [%s] Stage 1+2 same-candle TRAP_LOCKED — "
+                        "C2 swept SL: entry_origin=%.2f target=%.2f @ %s",
+                        c.symbol, st.entry_origin, st.target_high,
+                        c.timestamp.strftime("%H:%M"),
+                    )
 
         elif st.phase == _Phase.HTF_BEARISH:
             # Stage 2: any bar sweeping above bears' stop loss = trap confirmed
@@ -509,8 +520,8 @@ class TrapTradingEngine:
         elif st.phase == _Phase.MTF_BEARISH:
             # Stage 4b: next 5-min bar's high sweeps mtf_bearish_high?
             if c.high > st.mtf_bearish_high:
-                st.ltf_entry_line = st.mtf_bearish_open
-                st.ltf_sl_line    = st.mtf_bearish_low
+                st.ltf_entry_line = st.mtf_bearish_low   # retest entry = candle A low
+                st.ltf_sl_line    = st.mtf_bearish_low   # SL confirmed by 1-min close below
                 # MTF_LOCKED → ARMED immediately
                 st.phase = _Phase.ARMED
                 logger.info(
