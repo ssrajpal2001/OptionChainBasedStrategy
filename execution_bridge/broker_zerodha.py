@@ -81,6 +81,7 @@ class ZerodhaBroker(BaseBroker):
         self._api_key   = ""
         self._token     = ""
         self._product   = "MIS"         # default intraday; overridden per binding
+        self._is_amo    = False         # set True for after-market orders
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -137,8 +138,9 @@ class ZerodhaBroker(BaseBroker):
 
         order_type, price = self._resolve_order_type(req, kite)
 
+        variety = kite.VARIETY_AMO if self._is_amo else kite.VARIETY_REGULAR
         params: Dict[str, Any] = {
-            "variety":          kite.VARIETY_REGULAR,
+            "variety":          variety,
             "exchange":         exchange,
             "tradingsymbol":    req.broker_symbol,
             "transaction_type": transaction,
