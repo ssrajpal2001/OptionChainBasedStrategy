@@ -474,7 +474,7 @@ class TrapTradingEngine:
                     and len(htf_buf) >= 1
                     and c.high > c.open
                     and c.high > prev_high
-                    and body_pct >= 0.30):
+                    and body_pct >= 0.25):
                 lv = _TrapLevel(entry_origin=c.close, bears_sl=c.high,
                                 target_high=c.open, ts=c.timestamp)
                 st.trap_levels      = [lv]
@@ -496,8 +496,10 @@ class TrapTradingEngine:
             # ── Stage 1: single bearish candle → pending trap level ───────────
             # Bears entered short here. We wait for a SUBSEQUENT candle to sweep
             # above this candle's high (hit their SL) to confirm the trap.
-            # No two-candle requirement — any bearish candle with a real body qualifies.
-            elif is_bearish and body_pct >= 0.30:
+            # Require c.high > c.open: candle must have an upward wick — bears were
+            # lured above the open before reversing. H==O means price only dumped from
+            # open with no stop hunt, so no trapped positions above.
+            elif is_bearish and c.high > c.open and body_pct >= 0.25:
                 lv = _TrapLevel(entry_origin=c.low, bears_sl=c.high,
                                 ts=c.timestamp)
                 st.pending_levels.append(lv)
@@ -518,7 +520,7 @@ class TrapTradingEngine:
                 # Check if this sweep candle also closes bearish (single-candle trap)
                 body_range = c.high - c.low + 0.01
                 body_pct   = (c.open - c.close) / body_range
-                if is_bearish and c.high > c.open and body_pct >= 0.30:
+                if is_bearish and c.high > c.open and body_pct >= 0.25:
                     # Sweep + reversal in the same bar — go directly to RETEST_ALERT
                     lv = _TrapLevel(entry_origin=c.close, bears_sl=c.high,
                                     target_high=c.open, ts=c.timestamp)
@@ -543,7 +545,7 @@ class TrapTradingEngine:
                 # Another bearish candle — add as additional pending level
                 body_range = c.high - c.low + 0.01
                 body_pct   = (c.open - c.close) / body_range
-                if body_pct >= 0.30:
+                if c.high > c.open and body_pct >= 0.25:
                     lv = _TrapLevel(entry_origin=c.low, bears_sl=c.high,
                                     ts=c.timestamp)
                     st.pending_levels.append(lv)
