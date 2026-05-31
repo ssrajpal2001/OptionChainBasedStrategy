@@ -335,6 +335,11 @@ try:
     class _TrapInstrumentsSchema(_PydanticBase):
         instruments: List[str]
 
+    class _TrapReplaySchema(_PydanticBase):
+        symbol:     str
+        start_date: str   # ISO date string: "2026-05-01"
+        end_date:   str   # ISO date string: "2026-05-31"
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -2376,6 +2381,125 @@ class DashboardServer:
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
+        # ── ADMIN — TrapTrading paper backtest replay ─────────────────────────
+
+        @app.post("/api/strategies/trap_trading/replay", tags=["Admin"])
+        async def api_trap_replay(
+            payload: _TrapReplaySchema,
+            _: dict = Depends(_require_admin),
+        ):
+            """
+            Replay saved 1-min bars through the TrapTradingEngine in backtest mode.
+
+            Creates an isolated engine instance (is_backtest=True, no broker orders),
+            resamples bars to HTF/MTF, replays each bar through the state machine,
+            and returns the full trade log plus final phase per symbol.
+            """
+            import pandas as pd
+            from datetime import timedelta
+            from strategies.trap_trading_engine import TrapTradingEngine, _Phase
+            from data_layer.base_feeder import CandleEvent, EventBus as _EB
+
+            if _srv._client_db is None:
+                return {"ok": False, "error": "ClientDB not available."}
+
+            symbol = payload.symbol.upper()
+            try:
+                since = datetime.fromisoformat(payload.start_date).replace(
+                    hour=0, minute=0, second=0, microsecond=0, tzinfo=IST
+                )
+                until = datetime.fromisoformat(payload.end_date).replace(
+                    hour=23, minute=59, second=59, microsecond=0, tzinfo=IST
+                )
+            except ValueError as exc:
+                return {"ok": False, "error": f"Invalid date format: {exc}"}
+
+            rows = await asyncio.to_thread(
+                _srv._client_db.get_1m_bars_sync, symbol, since, until
+            )
+            if not rows:
+                return {
+                    "ok": False,
+                    "error": f"No 1-min bars found for {symbol} in [{payload.start_date}, {payload.end_date}].",
+                }
+
+            # Build isolated engine — no bus publishing, no DB client → pure sandbox
+            sandbox_bus = _EB()
+            sandbox_eng = TrapTradingEngine(sandbox_bus, _srv._cfg, client_db=None)
+
+            # Force every state to backtest mode as states are created
+            _original_get_state = sandbox_eng._get_state
+
+            def _bt_get_state(sym):
+                st = _original_get_state(sym)
+                st.is_backtest = True
+                return st
+
+            sandbox_eng._get_state = _bt_get_state  # monkey-patch for isolation
+
+            # Resample bars
+            tc = _srv._cfg.trap_engine
+            df = pd.DataFrame(rows)
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df.set_index("timestamp").sort_index()
+            agg = {"open": "first", "high": "max", "low": "min",
+                   "close": "last", "volume": "sum"}
+
+            htf_df = df.resample(
+                f"{tc.HTF_MINUTES}min", closed="left", label="left"
+            ).agg(agg).dropna()
+
+            mtf_df = df.resample(
+                f"{tc.MTF_MINUTES}min", closed="left", label="left"
+            ).agg(agg).dropna()
+
+            def _make_candle(sym, tf, ts, row):
+                return CandleEvent(
+                    symbol=sym, timeframe=tf,
+                    timestamp=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
+                    open=float(row["open"]), high=float(row["high"]),
+                    low=float(row["low"]),   close=float(row["close"]),
+                    volume=int(row["volume"]),
+                )
+
+            # Interleave HTF and MTF replay in chronological order
+            htf_events = [
+                (ts, "htf", row) for ts, row in htf_df.iterrows()
+            ]
+            mtf_events = [
+                (ts, "mtf", row) for ts, row in mtf_df.iterrows()
+            ]
+            all_events = sorted(htf_events + mtf_events, key=lambda x: x[0])
+
+            for ts, kind, row in all_events:
+                tf = tc.HTF_MINUTES if kind == "htf" else tc.MTF_MINUTES
+                candle = _make_candle(symbol, tf, ts, row)
+                if kind == "htf":
+                    sandbox_eng._process_htf(candle)
+                else:
+                    sandbox_eng._process_mtf(candle)
+
+            # Collect results
+            trade_log = sandbox_eng.backtest_log()
+            phase_map  = {
+                sym: st.phase.name
+                for sym, st in sandbox_eng._states.items()
+            }
+
+            return {
+                "ok":          True,
+                "symbol":      symbol,
+                "start_date":  payload.start_date,
+                "end_date":    payload.end_date,
+                "bars_total":  len(rows),
+                "htf_bars":    len(htf_df),
+                "mtf_bars":    len(mtf_df),
+                "trades":      trade_log,
+                "trade_count": len(trade_log),
+                "final_phase": phase_map,
+                "signal_count": sandbox_eng.signal_count(),
+            }
+
         # ── ADMIN — portfolio risk command center ────────────────────────────
 
         @app.get("/api/admin/risk/summary", tags=["Admin"])
@@ -3085,26 +3209,54 @@ class DashboardServer:
 
         @app.get("/api/admin/clients", tags=["Admin"])
         async def api_clients_list(_: dict = Depends(_require_admin)):
-            if _srv._registry is None:
-                return {"clients": [], "ts": datetime.now(IST).isoformat()}
             import json as _json
             clients = []
-            for c in _srv._registry._clients.values():
-                d = _build_client_dict(c)
-                d["halted"]         = bool(getattr(c, "_halted", False))
-                d["lot_multiplier"] = float(c.risk.size_multiplier)
-                d["broker_bindings"] = [
-                    {"binding_id": b.binding_id, "provider": b.provider, "enabled": b.enabled}
-                    for b in c.broker_bindings
-                ]
-                # Include client's own strategy selections (set from client side)
-                db_row = _srv._client_db.get_client_sync(c.client_id) or {}
-                raw_sel = db_row.get("strategy_selections", "[]") or "[]"
-                try:
-                    d["strategy_selections"] = _json.loads(raw_sel)
-                except Exception:
-                    d["strategy_selections"] = []
-                clients.append(d)
+
+            # Primary source: in-memory registry (has live runtime state)
+            registry_ids: set = set()
+            if _srv._registry is not None:
+                for c in _srv._registry._clients.values():
+                    d = _build_client_dict(c)
+                    d["halted"]          = bool(getattr(c, "_halted", False))
+                    d["lot_multiplier"]  = float(c.risk.size_multiplier)
+                    d["broker_bindings"] = [
+                        {"binding_id": b.binding_id, "provider": b.provider, "enabled": b.enabled}
+                        for b in c.broker_bindings
+                    ]
+                    db_row = _srv._client_db.get_client_sync(c.client_id) or {}
+                    raw_sel = db_row.get("strategy_selections", "[]") or "[]"
+                    try:
+                        d["strategy_selections"] = _json.loads(raw_sel)
+                    except Exception:
+                        d["strategy_selections"] = []
+                    clients.append(d)
+                    registry_ids.add(c.client_id)
+
+            # Fallback / supplement: DB rows not yet in registry (unapproved or demo mode)
+            if _srv._client_db is not None:
+                db_rows = await asyncio.to_thread(_srv._client_db.get_all_clients_sync)
+                for row in db_rows:
+                    cid = row.get("client_id")
+                    if not cid or cid in registry_ids:
+                        continue  # already included from registry
+                    raw_sel = row.get("strategy_selections", "[]") or "[]"
+                    try:
+                        strategy_selections = _json.loads(raw_sel)
+                    except Exception:
+                        strategy_selections = []
+                    clients.append({
+                        "client_id":          cid,
+                        "name":               row.get("name", ""),
+                        "email":              row.get("email", ""),
+                        "capital":            float(row.get("capital", 0)),
+                        "lot_multiplier":     float(row.get("lot_multiplier", 1.0)),
+                        "is_admin_approved":  bool(row.get("is_admin_approved", 0)),
+                        "is_active":          bool(row.get("is_active", 1)),
+                        "halted":             False,
+                        "broker_bindings":    [],
+                        "strategy_selections": strategy_selections,
+                    })
+
             return {"clients": clients, "ts": datetime.now(IST).isoformat()}
 
         @app.post("/api/admin/clients/register", tags=["Admin"])

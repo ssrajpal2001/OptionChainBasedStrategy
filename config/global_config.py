@@ -180,9 +180,6 @@ class TrapEngineConfig:
     _SLIPPAGE_BUFFER:     float = field(default=0.5, init=False, repr=False)
     _bars_lookback_days:  int   = field(default=5,   init=False, repr=False)
 
-    # --- immutable constant (NSE contract size — never changes) ---
-    LOT_SIZE: int = field(default=25, init=False)
-
     # --- internal lock ---
     _lock: object = field(default_factory=_threading.RLock, init=False, repr=False, compare=False)
 
@@ -275,8 +272,6 @@ class TrapEngineConfig:
             "SLIPPAGE_BUFFER":     (float, lambda v: v >= 0.0,        "must be >= 0"),
             "bars_lookback_days":  (int,   lambda v: v >= 1,          "must be >= 1"),
         }
-        if "LOT_SIZE" in kwargs:
-            raise ValueError("LOT_SIZE is immutable — fixed by NSE exchange contract.")
         unknown = set(kwargs) - set(_MUTABLE)
         if unknown:
             raise AttributeError(f"Unknown TrapEngineConfig fields: {unknown}")
@@ -305,7 +300,6 @@ class TrapEngineConfig:
                 "LTF_MINUTES":         self._LTF_MINUTES,
                 "RETEST_ZONE_PERCENT": self._RETEST_ZONE_PERCENT,
                 "SLIPPAGE_BUFFER":     self._SLIPPAGE_BUFFER,
-                "LOT_SIZE":            self.LOT_SIZE,
                 "bars_lookback_days":  self._bars_lookback_days,
             }
 

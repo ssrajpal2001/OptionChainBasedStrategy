@@ -617,7 +617,7 @@ class TrapTradingEngine:
             return
 
         tc  = self._cfg.trap_engine
-        lot = tc.LOT_SIZE
+        lot = self._cfg.exchange.lot_sizes.get(underlying, 75)
 
         # Get active clients
         active_clients: List[dict] = []
@@ -745,8 +745,7 @@ class TrapTradingEngine:
         entry_price: float,
         st: _TrapState,
     ) -> None:
-        tc  = self._cfg.trap_engine
-        qty = tc.LOT_SIZE
+        qty = self._cfg.exchange.lot_sizes.get(underlying, 75)
 
         trade_id = str(uuid.uuid4())[:8]
         st.trade_id    = trade_id
