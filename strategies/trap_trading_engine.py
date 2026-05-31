@@ -447,6 +447,7 @@ class TrapTradingEngine:
             body_pct   = (c.open - c.close) / body_range  # bearish body as % of range
             if (is_bearish
                     and len(htf_buf) >= 1
+                    and c.high > c.open             # candle actually spiked UP first (real sweep)
                     and c.high > prev_high          # swept above prior candle's high
                     and body_pct >= 0.30):          # body ≥ 30% of candle range
                 st.htf_bearish_open = c.open    # bears' entry = open of sweep candle
