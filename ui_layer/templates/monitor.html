@@ -4787,36 +4787,64 @@ function histReplay() {
             </div>
           </div>
 
-          <!-- 5-Stage Phase Transition Log -->
-          <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
-            <div class="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
-              <span class="text-[10px] font-semibold text-indigo-300 uppercase tracking-widest">5-Stage Phase Transition Log</span>
-              <span class="text-[10px] font-mono text-gray-500">Final:
-                <span :class="phaseColor(result.final_phase)" x-text="result.final_phase"></span>
-              </span>
+          <!-- Engine note -->
+          <div x-show="result.contract_info && result.contract_info.engine_note"
+               class="text-[10px] text-indigo-300 bg-indigo-900/20 border border-indigo-800 rounded px-3 py-2"
+               x-text="result.contract_info && result.contract_info.engine_note"></div>
+
+          <!-- CE Engine Phase Log -->
+          <template x-if="result.ce_engine">
+            <div class="bg-gray-800/60 rounded-lg border border-green-900 overflow-hidden">
+              <div class="px-3 py-2 border-b border-green-900 flex items-center justify-between">
+                <span class="text-[10px] font-semibold text-green-400 uppercase tracking-widest">CE Option — 5-Stage Phase Log</span>
+                <span class="text-[10px] font-mono text-gray-500">
+                  Final: <span :class="phaseColor(result.ce_engine.final_phase)" x-text="result.ce_engine.final_phase"></span>
+                  &nbsp;HTF:<span class="text-gray-400" x-text="result.ce_engine.htf_bars"></span>
+                  MTF:<span class="text-gray-400" x-text="result.ce_engine.mtf_bars"></span>
+                </span>
+              </div>
+              <div x-show="!result.ce_engine.phase_transitions.length" class="px-3 py-3 text-[10px] text-gray-500">No CE phase transitions detected.</div>
+              <div class="divide-y divide-gray-800">
+                <template x-for="(t,i) in result.ce_engine.phase_transitions" :key="i">
+                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono">
+                    <span class="text-gray-600 w-32 shrink-0" x-text="t.ts"></span>
+                    <span class="text-gray-500 w-8 shrink-0" x-text="t.timeframe"></span>
+                    <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
+                    <span class="text-gray-600">-&gt;</span>
+                    <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
+                    <span class="text-gray-600 ml-auto">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
+                  </div>
+                </template>
+              </div>
             </div>
-            <div x-show="result.phase_transitions.length === 0"
-                 class="px-3 py-4 text-[10px] text-gray-500">
-              No transitions detected. A 75-min bearish candle must close within the backtest window — try a full trading day that covers at least one 75-min bar.
+          </template>
+
+          <!-- PE Engine Phase Log -->
+          <template x-if="result.pe_engine">
+            <div class="bg-gray-800/60 rounded-lg border border-red-900 overflow-hidden">
+              <div class="px-3 py-2 border-b border-red-900 flex items-center justify-between">
+                <span class="text-[10px] font-semibold text-red-400 uppercase tracking-widest">PE Option — 5-Stage Phase Log</span>
+                <span class="text-[10px] font-mono text-gray-500">
+                  Final: <span :class="phaseColor(result.pe_engine.final_phase)" x-text="result.pe_engine.final_phase"></span>
+                  &nbsp;HTF:<span class="text-gray-400" x-text="result.pe_engine.htf_bars"></span>
+                  MTF:<span class="text-gray-400" x-text="result.pe_engine.mtf_bars"></span>
+                </span>
+              </div>
+              <div x-show="!result.pe_engine.phase_transitions.length" class="px-3 py-3 text-[10px] text-gray-500">No PE phase transitions detected.</div>
+              <div class="divide-y divide-gray-800">
+                <template x-for="(t,i) in result.pe_engine.phase_transitions" :key="i">
+                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono">
+                    <span class="text-gray-600 w-32 shrink-0" x-text="t.ts"></span>
+                    <span class="text-gray-500 w-8 shrink-0" x-text="t.timeframe"></span>
+                    <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
+                    <span class="text-gray-600">-&gt;</span>
+                    <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
+                    <span class="text-gray-600 ml-auto">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
+                  </div>
+                </template>
+              </div>
             </div>
-            <div class="divide-y divide-gray-800">
-              <template x-for="(t, i) in result.phase_transitions" :key="i">
-                <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono">
-                  <span class="text-gray-600 w-32 shrink-0" x-text="t.ts"></span>
-                  <span class="text-gray-500 w-8 shrink-0" x-text="t.timeframe"></span>
-                  <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
-                  <span class="text-gray-600">-&gt;</span>
-                  <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
-                  <span class="text-gray-600 ml-auto text-right">
-                    O:<span class="text-gray-400" x-text="t.bar.open"></span>
-                    H:<span class="text-gray-400" x-text="t.bar.high"></span>
-                    L:<span class="text-gray-400" x-text="t.bar.low"></span>
-                    C:<span class="text-gray-400" x-text="t.bar.close"></span>
-                  </span>
-                </div>
-              </template>
-            </div>
-          </div>
+          </template>
 
           <!-- Trade Log / Chart Alignment Table -->
           <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">

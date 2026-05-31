@@ -2798,84 +2798,56 @@ class DashboardServer:
                     ),
                 }
 
-            # 6. Fetch backtest_date bars — underlying (structural replay) + options (premium ref)
-            try:
-                spot_bars = await asyncio.to_thread(
-                    _fetch_upstox_candles_sync, access_token, index_key, bd_str, bd_str,
-                )
-            except Exception as exc:
-                return {"ok": False, "error": f"Failed to fetch underlying bars ({bd_str}): {exc}"}
-
-            if not spot_bars:
-                return {"ok": False, "error": f"No underlying bars for {script} on {bd_str}."}
+            # 6. Fetch option premium bars — 2 prior trading days + backtest_date
+            #    The engine runs on OPTION PREMIUM bars (not spot).
+            #    Spot was only used to calculate which strike to select.
+            lookback_days = 2
+            fetch_from = bd
+            for _ in range(lookback_days):
+                fetch_from = _prior_trading_day(fetch_from)
+            fetch_from_str = fetch_from.isoformat()
 
             ce_bars: list = []
             pe_bars: list = []
             ce_fetch_error: str = ""
             pe_fetch_error: str = ""
+
             try:
                 ce_bars = await asyncio.to_thread(
-                    _fetch_upstox_candles_sync, access_token, ce_key, bd_str, bd_str,
+                    _fetch_upstox_candles_sync, access_token, ce_key, fetch_from_str, bd_str,
                 )
             except Exception as exc:
                 ce_fetch_error = str(exc)
                 logger.warning("historical_replay CE fetch failed [%s]: %s", ce_key, exc)
+
             try:
                 pe_bars = await asyncio.to_thread(
-                    _fetch_upstox_candles_sync, access_token, pe_key, bd_str, bd_str,
+                    _fetch_upstox_candles_sync, access_token, pe_key, fetch_from_str, bd_str,
                 )
             except Exception as exc:
                 pe_fetch_error = str(exc)
                 logger.warning("historical_replay PE fetch failed [%s]: %s", pe_key, exc)
 
-            # Option bars are a bonus (premium reference only) — not fatal if empty.
-            # Structural HTF/MTF replay runs on underlying spot bars regardless.
-            option_data_note = ""
             if not ce_bars and not pe_bars:
-                err_detail = ""
-                if ce_fetch_error:
-                    err_detail += f" CE error: {ce_fetch_error}."
-                if pe_fetch_error:
-                    err_detail += f" PE error: {pe_fetch_error}."
-                if not err_detail:
-                    err_detail = " API returned empty candle list (check token freshness)."
-                option_data_note = (
-                    f"Option premium data not returned by Upstox for "
-                    f"CE={ce_key} / PE={pe_key}.{err_detail}"
-                )
+                err = f"CE error: {ce_fetch_error}" if ce_fetch_error else ""
+                err += f" PE error: {pe_fetch_error}" if pe_fetch_error else ""
+                return {"ok": False, "error": f"No option premium bars fetched. {err}".strip()}
 
-            # 7. Resample underlying to HTF/MTF and run sandbox engine
+            # 7. Helper: resample + run engine on one option's premium bars
             tc  = _srv._cfg.trap_engine
-            agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            agg = {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
+            from zoneinfo import ZoneInfo as _ZI
+            _IST = _ZI("Asia/Kolkata")
 
             def _to_df(bars):
                 df = pd.DataFrame(bars)
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Kolkata")
                 return df.set_index("timestamp").sort_index()
 
-            spot_df = _to_df(spot_bars)
-            htf_df  = spot_df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
-            mtf_df  = spot_df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
-
-            sandbox_bus = _EB()
-            sandbox_eng = TrapTradingEngine(sandbox_bus, _srv._cfg, client_db=None)
-            _orig_gs    = sandbox_eng._get_state
-
-            def _bt_gs(sym):
-                st = _orig_gs(sym)
-                st.is_backtest = True
-                return st
-
-            sandbox_eng._get_state = _bt_gs
-
-            phase_transitions: list = []
-            prev_phase: dict        = {}
-
             def _mk_candle(sym, tf, ts, row):
                 ts_dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
                 if getattr(ts_dt, "tzinfo", None) is None:
-                    from zoneinfo import ZoneInfo as _ZI
-                    ts_dt = ts_dt.replace(tzinfo=_ZI("Asia/Kolkata"))
+                    ts_dt = ts_dt.replace(tzinfo=_IST)
                 return CandleEvent(
                     symbol=sym, timeframe=tf, timestamp=ts_dt,
                     open=float(row["open"]),  high=float(row["high"]),
@@ -2883,71 +2855,110 @@ class DashboardServer:
                     volume=int(row.get("volume", 0)),
                 )
 
-            for ts, kind, row in sorted(
-                [(ts, "htf", row) for ts, row in htf_df.iterrows()] +
-                [(ts, "mtf", row) for ts, row in mtf_df.iterrows()],
-                key=lambda x: x[0],
-            ):
-                tf = tc.HTF_MINUTES if kind == "htf" else tc.MTF_MINUTES
-                sandbox_eng._process_htf(_mk_candle(script, tf, ts, row)) \
-                    if kind == "htf" else \
-                    sandbox_eng._process_mtf(_mk_candle(script, tf, ts, row))
+            def _run_engine_on_bars(bars: list, sym_label: str):
+                """Resample option premium 1m bars to HTF+MTF and run sandbox engine."""
+                df = _to_df(bars)
+                htf = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
+                mtf = df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
 
-                st = sandbox_eng._states.get(script)
-                if st and prev_phase.get(script) != st.phase.name:
-                    phase_transitions.append({
-                        "ts":         str(ts)[:19],
-                        "timeframe":  f"{tf}m",
-                        "from_phase": prev_phase.get(script, "IDLE"),
-                        "to_phase":   st.phase.name,
-                        "bar": {
-                            "open":  round(float(row["open"]),  2),
-                            "high":  round(float(row["high"]),  2),
-                            "low":   round(float(row["low"]),   2),
-                            "close": round(float(row["close"]), 2),
-                        },
+                eng = TrapTradingEngine(_EB(), _srv._cfg, client_db=None)
+                _orig = eng._get_state
+                def _bt(s):
+                    st = _orig(s)
+                    st.is_backtest = True
+                    return st
+                eng._get_state = _bt
+
+                transitions: list = []
+                prev: dict = {}
+
+                for ts, kind, row in sorted(
+                    [(ts, "htf", row) for ts, row in htf.iterrows()] +
+                    [(ts, "mtf", row) for ts, row in mtf.iterrows()],
+                    key=lambda x: x[0],
+                ):
+                    tf = tc.HTF_MINUTES if kind == "htf" else tc.MTF_MINUTES
+                    candle = _mk_candle(sym_label, tf, ts, row)
+                    eng._process_htf(candle) if kind == "htf" else eng._process_mtf(candle)
+
+                    st = eng._states.get(sym_label)
+                    if st and prev.get(sym_label) != st.phase.name:
+                        transitions.append({
+                            "ts":         str(ts)[:19],
+                            "timeframe":  f"{tf}m",
+                            "from_phase": prev.get(sym_label, "IDLE"),
+                            "to_phase":   st.phase.name,
+                            "bar": {
+                                "open":  round(float(row["open"]),  2),
+                                "high":  round(float(row["high"]),  2),
+                                "low":   round(float(row["low"]),   2),
+                                "close": round(float(row["close"]), 2),
+                            },
+                        })
+                        prev[sym_label] = st.phase.name
+
+                final = eng._states.get(sym_label)
+                trades_raw = eng.backtest_log()
+                return {
+                    "htf_bars":          len(htf),
+                    "mtf_bars":          len(mtf),
+                    "phase_transitions": transitions,
+                    "final_phase":       final.phase.name if final else "IDLE",
+                    "signal_count":      eng.signal_count(),
+                    "trades_raw":        trades_raw,
+                    "entry_origin":      round(final.entry_origin, 2) if final else 0,
+                    "target_high":       round(final.target_high,  2) if final else 0,
+                    "ltf_entry_line":    round(final.ltf_entry_line, 2) if final else 0,
+                    "ltf_sl_line":       round(final.ltf_sl_line,    2) if final else 0,
+                }
+
+            # 8. Run engine on CE premium bars and PE premium bars separately
+            ce_result = _run_engine_on_bars(ce_bars, "CE") if ce_bars else None
+            pe_result = _run_engine_on_bars(pe_bars, "PE") if pe_bars else None
+
+            # 9. Build trade logs with position sizing
+            def _build_trade_logs(trades_raw, opt_type):
+                logs = []
+                for t in trades_raw:
+                    ep  = float(t.get("entry_price", 0))
+                    qty = max(math.floor(payload.capital / (ep * lot)) * lot if ep > 0 else lot, lot)
+                    logs.append({
+                        "timestamp":         t.get("timestamp", "")[:19],
+                        "type":              opt_type,
+                        "entry_price":       round(ep, 2),
+                        "quantity":          qty,
+                        "lots":              qty // lot,
+                        "ltf_sl_line":       round(float(t.get("ltf_sl",       0)), 2),
+                        "macro_high_target": round(float(t.get("target_high",  0)), 2),
+                        "entry_origin":      round(float(t.get("entry_origin", 0)), 2),
+                        "margin_est":        round(ep * qty, 2),
                     })
-                    prev_phase[script] = st.phase.name
+                return logs
 
-            # 8. Option premium summary for chart alignment
+            ce_trade_logs = _build_trade_logs(ce_result["trades_raw"], "CE") if ce_result else []
+            pe_trade_logs = _build_trade_logs(pe_result["trades_raw"], "PE") if pe_result else []
+            all_trade_logs = ce_trade_logs + pe_trade_logs
+
             def _prem_summary(bars, key):
                 if not bars:
                     return {"instrument_key": key, "bars": 0, "open": 0, "close": 0, "day_high": 0, "day_low": 0}
                 return {
                     "instrument_key": key,
                     "bars":      len(bars),
-                    "open":      round(bars[0]["open"],          2),
-                    "close":     round(bars[-1]["close"],        2),
+                    "open":      round(bars[0]["open"],              2),
+                    "close":     round(bars[-1]["close"],            2),
                     "day_high":  round(max(b["high"] for b in bars), 2),
                     "day_low":   round(min(b["low"]  for b in bars), 2),
+                    "fetch_from": fetch_from_str,
+                    "fetch_to":   bd_str,
                 }
 
-            # 9. Trade log with capital-based position sizing
-            raw_trades = sandbox_eng.backtest_log()
-            trade_logs = []
-            for t in raw_trades:
-                ep  = float(t.get("entry_price", 0))
-                qty = max(math.floor(payload.capital / (ep * lot)) * lot if ep > 0 else lot, lot)
-                trade_logs.append({
-                    "timestamp":         t.get("timestamp", "")[:19],
-                    "underlying":        script,
-                    "option_symbol":     t.get("option_symbol", ""),
-                    "type":              "CE" if str(t.get("option_symbol", "")).endswith("CE") else "PE",
-                    "entry_price":       round(ep, 2),
-                    "quantity":          qty,
-                    "lots":              qty // lot,
-                    "ltf_sl_line":       round(float(t.get("ltf_sl",       0)), 2),
-                    "macro_high_target": round(float(t.get("target_high",  0)), 2),
-                    "entry_origin":      round(float(t.get("entry_origin", 0)), 2),
-                    "margin_est":        round(ep * qty, 2),
-                })
-
-            final_st = sandbox_eng._states.get(script)
             return {
                 "ok": True,
                 "contract_info": {
                     "script":                 script,
                     "backtest_date":          bd_str,
+                    "fetch_from":             fetch_from_str,
                     "prior_day":              prior_str,
                     "prior_day_open":         round(prior_open,  2),
                     "prior_day_close":        round(prior_close, 2),
@@ -2961,22 +2972,32 @@ class DashboardServer:
                     "selected_pe_symbol":     pe_key_display,
                     "lot_size":               lot,
                     "capital":                payload.capital,
+                    "engine_note": (
+                        "Engine runs on OPTION PREMIUM bars (CE and PE separately). "
+                        f"Bars fetched from {fetch_from_str} to {bd_str} ({lookback_days+1} trading days)."
+                    ),
                 },
                 "data_summary": {
-                    "spot_bars":      len(spot_bars),
-                    "htf_bars":       len(htf_df),
-                    "mtf_bars":       len(mtf_df),
                     "ce_premium":     _prem_summary(ce_bars, ce_key_display),
                     "pe_premium":     _prem_summary(pe_bars, pe_key_display),
                     "ce_fetch_error": ce_fetch_error,
                     "pe_fetch_error": pe_fetch_error,
                 },
-                "phase_transitions":  phase_transitions,
-                "trade_logs":         trade_logs,
-                "trade_count":        len(trade_logs),
-                "final_phase":        final_st.phase.name if final_st else "IDLE",
-                "signal_count":       sandbox_eng.signal_count(),
-                "option_data_note":   option_data_note,
+                "ce_engine": ce_result,
+                "pe_engine": pe_result,
+                # Flattened for UI compatibility
+                "phase_transitions": (ce_result or {}).get("phase_transitions", []),
+                "trade_logs":        all_trade_logs,
+                "trade_count":       len(all_trade_logs),
+                "final_phase": (
+                    f"CE:{(ce_result or {}).get('final_phase','N/A')} "
+                    f"PE:{(pe_result or {}).get('final_phase','N/A')}"
+                ),
+                "signal_count": (
+                    ((ce_result or {}).get("signal_count", 0)) +
+                    ((pe_result or {}).get("signal_count", 0))
+                ),
+                "option_data_note": "",
             }
 
         # ── ADMIN — AMO connectivity test ─────────────────────────────────────
