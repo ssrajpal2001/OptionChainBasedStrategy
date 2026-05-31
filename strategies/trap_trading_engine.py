@@ -390,6 +390,18 @@ class TrapTradingEngine:
     def _process_htf(self, c: CandleEvent) -> None:
         """
         Process a 75-min candle through stages 1 and 2.
+
+        Stage 1 requires TWO consecutive bearish candles for confirmation:
+          Candle 1 (prev): bearish (close < open)
+          Candle 2 (curr): close < low of Candle 1
+          → Bears entered at LOW of Candle 1 (breakdown level)
+          → Bears' stop loss = HIGH of Candle 2 (entry candle's high)
+
+        Stage 2: Any subsequent candle HIGH > htf_bearish_high (bears' SL)
+          → Bears stopped out → TRAP_LOCKED
+          → entry_origin = Candle 1's low (where bears entered)
+          → target_high  = Stage 2 candle's high (where the sweep went)
+
         Synchronous — no await.
         """
         st = self._get_state(c.symbol)
@@ -402,53 +414,63 @@ class TrapTradingEngine:
                 "TrapEngine [%s] HTF rolling_base -> %.2f @ %s",
                 c.symbol, st.rolling_base, c.timestamp.strftime("%H:%M"),
             )
+
+        is_bearish      = c.close < c.open
+        prev_is_bearish = (len(htf_buf) >= 1
+                           and htf_buf.last_close() < htf_buf._o[-1])
+        prev_low        = htf_buf.last_low()   # Candle 1's low (before push)
+        prev_high       = htf_buf.last_high()  # Candle 1's high (before push)
+
+        # Push current candle AFTER reading previous values
         htf_buf.push(c)
 
-        is_bearish = c.close < c.open
-
         if st.phase == _Phase.IDLE:
-            if is_bearish:
-                st.htf_bearish_open = c.open
-                st.htf_bearish_high = c.high
+            # Stage 1: need two bearish candles where candle 2 closes < candle 1 low
+            if (is_bearish
+                    and prev_is_bearish
+                    and len(htf_buf) >= 2
+                    and c.close < prev_low):
+                # Two-candle confirmation: bears entered at Candle 1's low
+                st.htf_bearish_open = prev_low    # bears' entry reference (Candle 1 low)
+                st.htf_bearish_high = prev_high   # bears' stop loss = HIGH of Candle 1
                 st.htf_bearish_ts   = c.timestamp
                 st.phase            = _Phase.HTF_BEARISH
                 logger.debug(
-                    "TrapEngine [%s] Stage 1 HTF_BEARISH open=%.2f high=%.2f @ %s",
-                    c.symbol, c.open, c.high, c.timestamp.strftime("%H:%M"),
+                    "TrapEngine [%s] Stage 1 HTF_BEARISH confirmed: "
+                    "entry_ref=%.2f (C1 low) bears_sl=%.2f (C1 high) @ %s",
+                    c.symbol, st.htf_bearish_open, st.htf_bearish_high,
+                    c.timestamp.strftime("%H:%M"),
                 )
 
         elif st.phase == _Phase.HTF_BEARISH:
-            # Stage 2: does this bar sweep the Stage 1 high?
+            # Stage 2: any bar sweeping above bears' stop loss = trap confirmed
             if c.high > st.htf_bearish_high:
-                # Sweep confirmed — lock trap
-                st.entry_origin = st.htf_bearish_open
-                st.target_high  = c.high
+                st.entry_origin = st.htf_bearish_open   # C1 low = where bears entered
+                st.target_high  = c.high                 # sweep high = our profit target
                 st.phase        = _Phase.TRAP_LOCKED
                 logger.info(
-                    "TrapEngine [%s] Stage 2 TRAP_LOCKED "
-                    "entry_origin=%.2f target_high=%.2f @ %s",
+                    "TrapEngine [%s] Stage 2 TRAP_LOCKED — bears SL hit: "
+                    "entry_origin=%.2f (C1 low) target=%.2f (sweep high) @ %s",
                     c.symbol, st.entry_origin, st.target_high,
                     c.timestamp.strftime("%H:%M"),
                 )
-            elif is_bearish:
-                # Update candidate to this new bearish bar
-                st.htf_bearish_open = c.open
-                st.htf_bearish_high = c.high
+            elif is_bearish and c.close < prev_low and prev_is_bearish:
+                # New two-candle bearish confirmation, update candidate
+                st.htf_bearish_open = prev_low    # new C1 low
+                st.htf_bearish_high = prev_high   # new C1 high = bears' SL
                 st.htf_bearish_ts   = c.timestamp
                 logger.debug(
-                    "TrapEngine [%s] HTF_BEARISH updated open=%.2f high=%.2f",
-                    c.symbol, c.open, c.high,
+                    "TrapEngine [%s] HTF_BEARISH candidate refreshed: "
+                    "entry_ref=%.2f sl=%.2f", c.symbol, prev_low, c.high,
                 )
-            else:
-                # Bullish bar, no sweep — reset
+            elif not is_bearish and c.high <= st.htf_bearish_high:
+                # Bullish bar that doesn't sweep — reset
                 logger.debug(
-                    "TrapEngine [%s] HTF bullish without sweep — reset to IDLE",
-                    c.symbol,
+                    "TrapEngine [%s] HTF bullish without sweep — reset IDLE", c.symbol,
                 )
                 self._reset_state(c.symbol)
 
-        # Beyond TRAP_LOCKED: HTF bars don't reset later phases
-        # but rolling_base is already updated above
+        # Beyond TRAP_LOCKED: HTF bars update rolling_base only (done above)
 
     # ── Stage 4: MTF processing ───────────────────────────────────────────────
 
