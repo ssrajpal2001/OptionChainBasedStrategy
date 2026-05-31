@@ -103,6 +103,7 @@ class Topic:
     MATRIX_SNAPSHOT  = "matrix_snapshot"
     SIGNAL           = "signal"
     ORDER_REQUEST    = "order_request"
+    IC_ORDER_REQUEST = "ic_order_request"
     ORDER_FILL       = "order_fill"
     SYSTEM_EVENT     = "system_event"
 

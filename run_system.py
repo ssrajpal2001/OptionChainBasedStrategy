@@ -252,6 +252,7 @@ async def _run_live(
     from strategies.sell_straddle import SellStraddleStrategy
     from execution_bridge import ExecutionRouter
     from execution_bridge.straddle_bridge import StraddleExecutionBridge
+    from execution_bridge.ic_bridge import ICExecutionBridge
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
     from management.risk_manager import RiskManager
@@ -283,6 +284,7 @@ async def _run_live(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    ic_bridge     = ICExecutionBridge(bus, registry, router)
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -383,6 +385,7 @@ async def _run_live(
         asyncio.create_task(trap_engine.run(),          name="trap_engine"),
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
+        asyncio.create_task(ic_bridge.run(),            name="ic_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -419,6 +422,7 @@ async def _run_live(
     strike_cleanup.stop()
     gap_handler.stop()
     straddle_bridge.stop()
+    ic_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task

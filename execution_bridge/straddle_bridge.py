@@ -69,6 +69,47 @@ class StraddleFillEvent:
     paper_mode: bool = True
 
 
+# ── Iron Condor order events ──────────────────────────────────────────────────
+
+@dataclass
+class ICOrderEvent:
+    """Published by IronCondorStrategy to Topic.IC_ORDER_REQUEST."""
+    action:          str    # "ENTRY" | "EXIT" | "ADJUST" (close + reopen one side)
+    underlying:      str
+    atm:             float
+    # Short legs (sell to open, buy to close)
+    short_ce_strike: float
+    short_pe_strike: float
+    short_ce_ltp:    float
+    short_pe_ltp:    float
+    # Long legs / hedges (buy to open, sell to close)
+    long_ce_strike:  float
+    long_pe_strike:  float
+    long_ce_ltp:     float
+    long_pe_ltp:     float
+    lot_size:        int   = 65
+    lot_multiplier:  int   = 1
+    close_reason:    str   = ""
+    cumulative_pnl:  float = 0.0   # running P&L across all rolls for this IC cycle
+    event_id:        str   = ""
+
+
+@dataclass
+class ICFillEvent:
+    """Published by ICExecutionBridge after order execution."""
+    action:          str
+    underlying:      str
+    short_ce_fill:   float
+    short_pe_fill:   float
+    long_ce_fill:    float
+    long_pe_fill:    float
+    client_id:       str
+    binding_id:      str
+    event_id:        str
+    paper_mode:      bool     = True
+    timestamp:       datetime = field(default_factory=lambda: datetime.now(IST))
+
+
 # ── Per-client-broker trade logger ────────────────────────────────────────────
 
 class TradeLogger:

@@ -26,9 +26,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, date, time as dtime
 from typing import Dict, List, Optional
 
+import uuid
+
 from config.global_config import IST, Topic
 from data_layer.base_feeder import EventBus, CandleEvent
 from data_layer.runtime_config import RuntimeConfig
+from execution_bridge.straddle_bridge import ICOrderEvent, ICFillEvent
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +107,7 @@ class IronCondorStrategy:
         self._running = False
         self._position: Optional[IronCondorPosition] = None
         self._spot: float = 0.0
+        self._prem_cache: Dict[str, float] = {}   # "NIFTY24500CE" → ltp
         self._tasks: list = []
 
         self._load_thresholds()
@@ -188,6 +192,10 @@ class IronCondorStrategy:
                 continue
             except asyncio.CancelledError:
                 break
+            # Update premium cache for all option ticks on this underlying
+            if tick.underlying == self._underlying:
+                key = f"{self._underlying}{int(tick.strike)}{tick.option_type}"
+                self._prem_cache[key] = tick.ltp
             if not self._position or self._position.underlying != tick.underlying:
                 continue
             self._update_leg_ltp(tick)
@@ -200,9 +208,17 @@ class IronCondorStrategy:
         # Reload thresholds every candle
         self._load_thresholds()
 
-        # Time gate: only enter between start_time and squareoff_time
-        if now.time() < self._start_time or now.time() >= self._squareoff_time:
+        # Time gate: only enter after start_time (IC is positional — no daily squareoff)
+        if now.time() < self._start_time:
             return
+
+        # Day gate: entry_day config (daily | monday | tuesday | ...)
+        if self._entry_day != "daily":
+            day_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+            if day_names[now.weekday()] != self._entry_day:
+                return
+
+        # Don't re-enter if a position is already open for this IC cycle
         if self._position and self._position.status == "open":
             return
 
@@ -226,14 +242,46 @@ class IronCondorStrategy:
             self._underlying, atm,
             short_ce_strike, short_pe_strike, long_ce_strike, long_pe_strike,
         )
-        logger.info(
-            "IronCondor[%s]: ORDER INTENT — "
-            "SELL %s%.0fCE, SELL %s%.0fPE, BUY %s%.0fCE, BUY %s%.0fPE",
-            self._underlying,
-            self._underlying, short_ce_strike,
-            self._underlying, short_pe_strike,
-            self._underlying, long_ce_strike,
-            self._underlying, long_pe_strike,
+
+        # Get current LTPs from premium cache if available
+        short_ce_ltp = self._prem_cache.get(f"{self._underlying}{int(short_ce_strike)}CE", 0.0)
+        short_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(short_pe_strike)}PE", 0.0)
+        long_ce_ltp  = self._prem_cache.get(f"{self._underlying}{int(long_ce_strike)}CE", 0.0)
+        long_pe_ltp  = self._prem_cache.get(f"{self._underlying}{int(long_pe_strike)}PE", 0.0)
+
+        ev = ICOrderEvent(
+            action          = "ENTRY",
+            underlying      = self._underlying,
+            atm             = atm,
+            short_ce_strike = short_ce_strike,
+            short_pe_strike = short_pe_strike,
+            short_ce_ltp    = short_ce_ltp,
+            short_pe_ltp    = short_pe_ltp,
+            long_ce_strike  = long_ce_strike,
+            long_pe_strike  = long_pe_strike,
+            long_ce_ltp     = long_ce_ltp,
+            long_pe_ltp     = long_pe_ltp,
+            lot_size        = self._lot_size,
+            event_id        = str(uuid.uuid4())[:8],
+        )
+        await self._bus.publish(Topic.IC_ORDER_REQUEST, ev)
+
+        # Record position locally for P&L tracking
+        from datetime import date as _d
+        today = datetime.now(IST).date()
+        self._position = IronCondorPosition(
+            underlying    = self._underlying,
+            expiry        = today,
+            atm_at_entry  = atm,
+            short_ce      = IronCondorLeg("sell", "CE", short_ce_strike, short_ce_ltp),
+            short_pe      = IronCondorLeg("sell", "PE", short_pe_strike, short_pe_ltp),
+            long_ce       = IronCondorLeg("buy",  "CE", long_ce_strike,  long_ce_ltp),
+            long_pe       = IronCondorLeg("buy",  "PE", long_pe_strike,  long_pe_ltp),
+            net_credit    = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp),
+            open_time     = datetime.now(IST),
+            _wing_width   = self._long_otm,
+            _profit_pct   = self._profit_pct,
+            _sl_pct       = self._sl_pct,
         )
 
     # ── Exit logic ────────────────────────────────────────────────────────────
@@ -290,8 +338,42 @@ class IronCondorStrategy:
     async def _close_position(self, reason: str) -> None:
         if not self._position:
             return
-        logger.info("IronCondor[%s]: closing position — reason=%s", self._underlying, reason)
-        self._position.status = "closed"
+        pos = self._position
+        logger.info("IronCondor[%s]: closing position — reason=%s pnl=₹%.0f",
+                    self._underlying, reason,
+                    pos.realized_pnl * self._lot_size)
+
+        short_ce_ltp = self._prem_cache.get(f"{self._underlying}{int(pos.short_ce.strike)}CE", pos.short_ce.entry_price)
+        short_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(pos.short_pe.strike)}PE", pos.short_pe.entry_price)
+        long_ce_ltp  = self._prem_cache.get(f"{self._underlying}{int(pos.long_ce.strike)}CE",  pos.long_ce.entry_price)
+        long_pe_ltp  = self._prem_cache.get(f"{self._underlying}{int(pos.long_pe.strike)}PE",  pos.long_pe.entry_price)
+
+        # Calculate final P&L in points (credit received - current cost to close)
+        exit_cost    = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp)
+        pnl_pts      = pos.net_credit - exit_cost
+        pos.realized_pnl = pos.realized_pnl + pnl_pts
+
+        ev = ICOrderEvent(
+            action          = "EXIT",
+            underlying      = self._underlying,
+            atm             = pos.atm_at_entry,
+            short_ce_strike = pos.short_ce.strike,
+            short_pe_strike = pos.short_pe.strike,
+            short_ce_ltp    = short_ce_ltp,
+            short_pe_ltp    = short_pe_ltp,
+            long_ce_strike  = pos.long_ce.strike,
+            long_pe_strike  = pos.long_pe.strike,
+            long_ce_ltp     = long_ce_ltp,
+            long_pe_ltp     = long_pe_ltp,
+            lot_size        = self._lot_size,
+            close_reason    = reason,
+            cumulative_pnl  = pos.realized_pnl,
+            event_id        = str(uuid.uuid4())[:8],
+        )
+        await self._bus.publish(Topic.IC_ORDER_REQUEST, ev)
+        pos.status     = "closed"
+        pos.close_time = datetime.now(IST)
+        self._position = None
         self._position.close_time = datetime.now(IST)
         self._position = None
 
