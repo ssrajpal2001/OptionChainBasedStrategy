@@ -2217,33 +2217,33 @@ function trapReplay() {
 
 function amoTest() {
   return {
-    clients: [], bindings: [],
+    clients: [], bindings: [], allBrokers: [],
     clientId: '', bindingId: '', underlying: 'NIFTY',
     expiryPref: 'current_week', strike: '', optType: 'CE',
-    running: false, result: null, error: '',
+    running: false, result: null, error: '', loadError: '',
     _auth() {
       const t = localStorage.getItem('terminus_token');
       return t ? { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
     },
     async init() {
       try {
-        const r = await fetch('/api/admin/clients', { headers: this._auth() });
-        const d = await r.json();
-        this.clients = d.clients || [];
+        const [cr, br] = await Promise.all([
+          fetch('/api/admin/clients',  { headers: this._auth() }),
+          fetch('/api/broker_status',  { headers: this._auth() }),
+        ]);
+        const cd = await cr.json();
+        const bd = await br.json();
+        this.clients    = cd.clients || [];
+        this.allBrokers = bd.brokers || [];
         if (this.clients.length > 0) {
           this.clientId = this.clients[0].client_id;
-          await this.loadBindings();
+          this.loadBindings();
         }
-      } catch(e) { console.warn('amoTest init failed', e); }
+      } catch(e) { this.loadError = 'Init failed: ' + (e.message || String(e)); }
     },
-    async loadBindings() {
-      if (!this.clientId) return;
-      try {
-        const r = await fetch(`/api/client/brokers?cid=${this.clientId}`, { headers: this._auth() });
-        const d = await r.json();
-        this.bindings = d.bindings || d || [];
-        if (this.bindings.length > 0) this.bindingId = this.bindings[0].binding_id;
-      } catch(e) { this.bindings = []; }
+    loadBindings() {
+      this.bindings  = this.allBrokers.filter(b => b.client_id === this.clientId);
+      this.bindingId = this.bindings.length > 0 ? this.bindings[0].binding_id : '';
     },
     async run() {
       this.running = true; this.result = null; this.error = '';
@@ -5004,7 +5004,7 @@ function histReplay() {
       <div class="flex flex-wrap gap-3 items-end mb-3">
         <div class="flex flex-col gap-1">
           <label class="text-[10px] text-gray-500 uppercase">Client</label>
-          <select x-model="clientId" @change="loadBindings()" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[120px]">
+          <select x-model="clientId" @change="loadBindings()" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[120px]" :class="clients.length===0 && 'opacity-50'">
             <template x-for="c in clients" :key="c.client_id">
               <option :value="c.client_id" x-text="c.client_id + ' (' + (c.name||'') + ')'"></option>
             </template>
@@ -5049,9 +5049,14 @@ function histReplay() {
           <span x-text="running ? 'Placing...' : 'Place AMO Test'"></span>
         </button>
       </div>
+      <div x-show="loadError" class="text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2 mb-2" x-text="loadError"></div>
+      <div x-show="!loadError && bindings.length === 0 && clientId" class="text-yellow-400 text-xs bg-yellow-900/20 border border-yellow-700 rounded px-3 py-2 mb-2">
+        No broker bindings found for this client. Add a broker binding in the CLIENT MANAGEMENT tab first.
+      </div>
       <div x-show="error" class="text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2 mb-2" x-text="error"></div>
       <div x-show="result" class="text-[10px] font-mono bg-gray-800 rounded px-3 py-2 space-y-1">
         <div class="text-green-400 font-semibold" x-show="result && result.ok">ORDER PLACED — cancel from broker terminal</div>
+        <div class="text-red-400 font-semibold" x-show="result && !result.ok">ORDER FAILED</div>
         <div x-show="result && result.ok">
           Order ID: <span class="text-white" x-text="result && result.order_id"></span> &nbsp;|&nbsp;
           Provider: <span class="text-blue-300" x-text="result && result.provider"></span> &nbsp;|&nbsp;
@@ -5065,8 +5070,10 @@ function histReplay() {
           Qty: <span class="text-gray-300" x-text="result && result.qty"></span>
           (<span x-text="result && result.lots"></span> lots × <span x-text="result && result.lot_size"></span>)
         </div>
-        <div x-show="result && result.broker_symbol && !result.ok" class="text-amber-300">
-          Symbol attempted: <span x-text="result && result.broker_symbol"></span>
+        <!-- Full response dump — always shown so every field / error is visible -->
+        <div class="mt-2 pt-2 border-t border-gray-700">
+          <div class="text-gray-500 mb-1">Full server response:</div>
+          <pre class="text-gray-300 whitespace-pre-wrap break-all" x-text="JSON.stringify(result, null, 2)"></pre>
         </div>
       </div>
     </div>
