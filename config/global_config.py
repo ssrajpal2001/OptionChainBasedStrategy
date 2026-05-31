@@ -183,6 +183,7 @@ class TrapEngineConfig:
     _SL_MODE:             str   = field(default="dynamic",   init=False, repr=False)  # "dynamic" | "structural"
     _SL_PCT:              float = field(default=2.0,         init=False, repr=False)  # % below entry (dynamic mode)
     _SL_BUFFER_PCT:       float = field(default=0.3,         init=False, repr=False)  # % below structural level (buffer so 1m wick doesn't exit)
+    _ENTRY_CUTOFF_TIME:   str   = field(default="14:45",     init=False, repr=False)  # no new entries after this IST time (HH:MM)
 
     # --- internal lock ---
     _lock: object = field(default_factory=_threading.RLock, init=False, repr=False, compare=False)
@@ -233,6 +234,11 @@ class TrapEngineConfig:
     def SL_BUFFER_PCT(self) -> float:
         with self._lock:  # type: ignore[attr-defined]
             return self._SL_BUFFER_PCT
+
+    @property
+    def ENTRY_CUTOFF_TIME(self) -> str:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._ENTRY_CUTOFF_TIME
 
     # ── Thread-safe setters ───────────────────────────────────────────────────
 
@@ -292,6 +298,15 @@ class TrapEngineConfig:
         with self._lock:  # type: ignore[attr-defined]
             object.__setattr__(self, "_SL_BUFFER_PCT", float(value))
 
+    @ENTRY_CUTOFF_TIME.setter
+    def ENTRY_CUTOFF_TIME(self, value: str) -> None:
+        try:
+            time.fromisoformat(value if len(value) == 8 else value + ":00")
+        except ValueError:
+            raise ValueError(f"ENTRY_CUTOFF_TIME must be HH:MM or HH:MM:SS, got {value!r}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_ENTRY_CUTOFF_TIME", value)
+
     # ── Atomic bulk update (used by Admin REST endpoint) ─────────────────────
 
     def reconfigure(self, **kwargs) -> dict:
@@ -314,6 +329,7 @@ class TrapEngineConfig:
             "SL_MODE":             (str,   lambda v: v in ("dynamic","structural"),"must be 'dynamic' or 'structural'"),
             "SL_PCT":              (float, lambda v: 0.1 <= v <= 20.0,            "must be in [0.1, 20.0]"),
             "SL_BUFFER_PCT":       (float, lambda v: 0.0 <= v <= 5.0,             "must be in [0.0, 5.0]"),
+            "ENTRY_CUTOFF_TIME":   (str,   lambda v: len(v) in (5, 8) and v[2] == ":", "must be HH:MM or HH:MM:SS"),
         }
         unknown = set(kwargs) - set(_MUTABLE)
         if unknown:
@@ -347,6 +363,7 @@ class TrapEngineConfig:
                 "SL_MODE":             self._SL_MODE,
                 "SL_PCT":              self._SL_PCT,
                 "SL_BUFFER_PCT":       self._SL_BUFFER_PCT,
+                "ENTRY_CUTOFF_TIME":   self._ENTRY_CUTOFF_TIME,
             }
 
 

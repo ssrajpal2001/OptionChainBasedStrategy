@@ -597,7 +597,7 @@ document.addEventListener('alpine:init', () => {
     adminSelectedIndex: 'NIFTY',
     adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor' | 'trap_trading'
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
-    indexConfig: { _trap: { htf_minutes:75, ltf_minutes:5, retest_zone_pct:0.5, slippage_buffer:0.5, sl_mode:'dynamic', sl_pct:2.0 } },
+    indexConfig: { _trap: { htf_minutes:75, ltf_minutes:5, retest_zone_pct:0.5, slippage_buffer:0.5, sl_mode:'dynamic', sl_pct:2.0, sl_buffer_pct:0.3, entry_cutoff_time:'14:45' } },
     trapSaveMsg: '', trapSaveOk: null,
     indexConfigLoading: false,
     indexConfigSaving:  false,
@@ -1316,7 +1316,7 @@ document.addEventListener('alpine:init', () => {
     _ssDefaults() {
       return {
         entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
-        entry_workflow_mode: 'hybrid', ltp_target: 0,
+        entry_workflow_mode: 'hybrid', ltp_target: 0, lot_size: 1,
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
         tsl_scalable:  { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
@@ -3402,6 +3402,15 @@ function histReplay() {
               First filter — both legs must be ≥ this. 0 = off.
             </p>
           </div>
+          <div>
+            <label class="sec-label">Lot Size (lots)</label>
+            <input type="number" min="1" max="100" step="1" class="t-input mt-0.5" placeholder="1"
+                   title="Number of lots to trade per entry."
+                   x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.lot_size">
+            <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+              Lots per entry (1 lot = exchange lot size for index).
+            </p>
+          </div>
         </div>
 
         <!-- Sub-tabs for rule sections -->
@@ -4058,6 +4067,22 @@ function histReplay() {
                    x-model.number="indexConfig._trap.slippage_buffer"
                    placeholder="0.5" min="0" max="20" step="0.25"/>
             <div class="text-xs mt-0.5" style="color:var(--t-muted)">Stage 5 touch trigger buffer above entry line (default: 0.5)</div>
+          </div>
+        </div>
+
+        <!-- Entry cutoff + SL buffer -->
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="sec-label">ENTRY CUTOFF TIME (IST)</label>
+            <input type="text" class="t-input" placeholder="14:45"
+                   x-model="indexConfig._trap.entry_cutoff_time"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">No new entries after this time. HH:MM format. Default: 14:45</div>
+          </div>
+          <div>
+            <label class="sec-label">SL BUFFER (%)</label>
+            <input type="number" class="t-input" placeholder="0.3" min="0" max="5" step="0.1"
+                   x-model.number="indexConfig._trap.sl_buffer_pct"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% below structural candle low to place SL (prevents wick exits). Default: 0.3</div>
           </div>
         </div>
 

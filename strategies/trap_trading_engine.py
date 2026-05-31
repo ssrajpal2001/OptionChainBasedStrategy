@@ -729,6 +729,20 @@ class TrapTradingEngine:
         st: _TrapState,
     ) -> None:
         """Stage 5 execution — allocate quantity per client and fire orders."""
+        tc = self._cfg.trap_engine
+        cutoff_str = tc.ENTRY_CUTOFF_TIME
+        try:
+            h, m = int(cutoff_str[:2]), int(cutoff_str[3:5])
+            cutoff = time(h, m, 0)
+        except Exception:
+            cutoff = time(14, 45, 0)
+        if datetime.now(IST).time() >= cutoff:
+            logger.info(
+                "TrapEngine [%s] entry blocked — past ENTRY_CUTOFF_TIME %s",
+                underlying, cutoff_str,
+            )
+            return
+
         if st.is_backtest:
             self._record_backtest_entry(underlying, option_symbol, entry_price, st)
             return
@@ -888,6 +902,19 @@ class TrapTradingEngine:
         entry_price: float,
         st: _TrapState,
     ) -> None:
+        tc = self._cfg.trap_engine
+        cutoff_str = tc.ENTRY_CUTOFF_TIME
+        try:
+            h, m = int(cutoff_str[:2]), int(cutoff_str[3:5])
+            cutoff = time(h, m, 0)
+        except Exception:
+            cutoff = time(14, 45, 0)
+        if datetime.now(IST).time() >= cutoff:
+            logger.debug(
+                "TrapEngine [%s][backtest] entry blocked — past ENTRY_CUTOFF_TIME %s",
+                underlying, cutoff_str,
+            )
+            return
         qty = self._cfg.exchange.lot_sizes.get(underlying, 75)
 
         tc = self._cfg.trap_engine

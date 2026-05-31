@@ -334,6 +334,7 @@ try:
         SL_MODE:             Optional[str]   = None  # "dynamic" | "structural"
         SL_PCT:              Optional[float] = None  # % below entry (dynamic mode)
         SL_BUFFER_PCT:       Optional[float] = None  # % buffer below structural SL level
+        ENTRY_CUTOFF_TIME:   Optional[str]   = None  # HH:MM — no new entries after this time
 
     class _TrapInstrumentsSchema(_PydanticBase):
         instruments: List[str]
@@ -2500,7 +2501,8 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": "Invalid JSON body."}
             allowed = {"htf_minutes", "ltf_minutes", "retest_zone_pct",
-                       "slippage_buffer", "sl_mode", "sl_pct"}
+                       "slippage_buffer", "sl_mode", "sl_pct",
+                       "sl_buffer_pct", "entry_cutoff_time"}
             patch = {k: v for k, v in body.items() if k in allowed}
             if not patch:
                 return {"ok": False, "error": "No valid fields provided."}
@@ -2518,6 +2520,10 @@ class DashboardServer:
                         live_updates["RETEST_ZONE_PERCENT"] = patch["retest_zone_pct"]
                     if "slippage_buffer" in patch:
                         live_updates["SLIPPAGE_BUFFER"] = patch["slippage_buffer"]
+                    if "sl_buffer_pct" in patch:
+                        live_updates["SL_BUFFER_PCT"] = patch["sl_buffer_pct"]
+                    if "entry_cutoff_time" in patch:
+                        live_updates["ENTRY_CUTOFF_TIME"] = patch["entry_cutoff_time"]
                     if live_updates:
                         engine_cfg.reconfigure(**live_updates)
                 except Exception as exc:
