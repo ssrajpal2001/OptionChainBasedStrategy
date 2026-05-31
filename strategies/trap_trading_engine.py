@@ -468,27 +468,28 @@ class TrapTradingEngine:
 
             # ── Single-candle trap ────────────────────────────────────────────
             # Candle spikes above prior high then closes bearish (sweep + reversal
-            # in one bar). Activate immediately as TRAP_LOCKED with one level.
+            # in one bar). The close IS the entry zone — skip the TRAP_LOCKED retest
+            # wait and go directly to RETEST_ALERT so the next bearish 5m candle arms.
             if (is_bearish
                     and len(htf_buf) >= 1
                     and c.high > c.open
                     and c.high > prev_high
                     and body_pct >= 0.30):
-                lv = _TrapLevel(entry_origin=c.open, bears_sl=c.high,
-                                target_high=c.high, ts=c.timestamp)
-                st.trap_levels   = [lv]
-                st.active_level  = None
-                st.entry_origin  = 0.0      # will be picked up on first retest scan
-                st.target_high   = c.high
+                lv = _TrapLevel(entry_origin=c.close, bears_sl=c.high,
+                                target_high=c.open, ts=c.timestamp)
+                st.trap_levels      = [lv]
+                st.active_level     = lv
+                st.entry_origin     = c.close   # already at the entry zone
+                st.target_high      = c.open    # price returns to pre-sweep open
                 st.htf_bearish_open = c.open
                 st.htf_bearish_high = c.high
                 st.htf_bearish_ts   = c.timestamp
-                st.phase         = _Phase.TRAP_LOCKED
+                st.phase            = _Phase.RETEST_ALERT
                 logger.info(
-                    "TrapEngine [%s] Single-candle TRAP_LOCKED — swept prev_high=%.2f "
-                    "body_pct=%.0f%% entry_origin=%.2f target=%.2f @ %s",
+                    "TrapEngine [%s] Single-candle RETEST_ALERT — swept prev_high=%.2f "
+                    "body_pct=%.0f%% entry_origin=%.2f(close) target=%.2f(open) @ %s",
                     c.symbol, prev_high, body_pct * 100,
-                    c.open, c.high, c.timestamp.strftime("%H:%M"),
+                    c.close, c.open, c.timestamp.strftime("%H:%M"),
                 )
 
             # ── Classic two-candle Stage 1 ────────────────────────────────────
