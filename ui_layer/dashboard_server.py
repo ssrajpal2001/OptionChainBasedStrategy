@@ -340,11 +340,129 @@ try:
         start_date: str   # ISO date string: "2026-05-01"
         end_date:   str   # ISO date string: "2026-05-31"
 
+    class _TrapHistoricalReplaySchema(_PydanticBase):
+        script:        str            # "NIFTY" | "BANKNIFTY"
+        provider:      str = "upstox"
+        backtest_date: str            # ISO date: "2026-05-29"
+        capital:       float = 500_000.0
+
 except ImportError:
     _HAS_FASTAPI = False
 
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 _MONITOR_HTML = os.path.join(_TEMPLATE_DIR, "monitor.html")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Historical replay helpers  (pure functions — no I/O, no imports at module level)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# NSE weekly expiry weekday per underlying (0=Mon … 6=Sun)
+_WEEKLY_EXPIRY_WEEKDAY: Dict[str, int] = {
+    "NIFTY":       1,   # Tuesday
+    "BANKNIFTY":   2,   # Wednesday
+    "FINNIFTY":    1,   # Tuesday
+    "MIDCPNIFTY":  0,   # Monday
+    "SENSEX":      1,   # Tuesday
+}
+
+_STRIKE_STEPS: Dict[str, int] = {
+    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50,
+    "SENSEX": 100, "MIDCPNIFTY": 50,
+}
+
+_LOT_SIZES_MAP: Dict[str, int] = {
+    "NIFTY": 65, "BANKNIFTY": 30, "FINNIFTY": 60,
+    "SENSEX": 20, "MIDCPNIFTY": 120,
+}
+
+_UPSTOX_INDEX_KEY: Dict[str, str] = {
+    "NIFTY":       "NSE_INDEX|Nifty 50",
+    "BANKNIFTY":   "NSE_INDEX|Nifty Bank",
+    "FINNIFTY":    "NSE_INDEX|Nifty Fin Service",
+    "MIDCPNIFTY":  "NSE_INDEX|NIFTY MID SELECT",
+    "SENSEX":      "BSE_INDEX|SENSEX",
+}
+
+
+def _next_weekly_expiry(from_date, underlying: str):
+    """Return the nearest weekly expiry on or after from_date for an underlying."""
+    from datetime import timedelta
+    target_wd = _WEEKLY_EXPIRY_WEEKDAY.get(underlying, 1)
+    days_ahead = (target_wd - from_date.weekday()) % 7
+    return from_date + timedelta(days=days_ahead)
+
+
+def _prior_trading_day(d):
+    """Return the last Mon–Fri before d (skips weekends)."""
+    from datetime import timedelta
+    prev = d - timedelta(days=1)
+    while prev.weekday() >= 5:   # Saturday=5, Sunday=6
+        prev -= timedelta(days=1)
+    return prev
+
+
+def _dte_itm_offset(dte: int, step: int) -> int:
+    """
+    Days-to-expiry → ITM strike offset (in index points).
+    step is the strike step (50 for NIFTY, 100 for BANKNIFTY).
+    """
+    # Matrix: dte → offset in multiples of step
+    if dte <= 0:
+        return 2 * step    # 0 DTE  → 100 pts for NIFTY (2 × 50)
+    elif dte == 1:
+        return 4 * step    # 1 DTE  → 200 pts for NIFTY (4 × 50)
+    elif dte == 2:
+        return 6 * step    # 2 DTE  → 300 pts for NIFTY
+    elif dte == 3:
+        return 8 * step    # 3 DTE  → 400 pts for NIFTY
+    else:
+        return 10 * step   # 4+ DTE → 500 pts for NIFTY
+
+
+def _upstox_option_key(underlying: str, expiry, strike: int, opt_type: str) -> str:
+    """
+    Upstox instrument key format: NSE_FO|NIFTY{YY}{DD}{MM}{strike}{CE/PE}
+    Matches SymbolTranslator.to_upstox() exactly.
+    """
+    segment = "BSE_FO" if underlying == "SENSEX" else "NSE_FO"
+    yy = expiry.strftime("%y")
+    dd = expiry.strftime("%d")
+    mm = expiry.strftime("%m")
+    return f"{segment}|{underlying}{yy}{dd}{mm}{strike}{opt_type}"
+
+
+def _fetch_upstox_candles_sync(access_token: str, instrument_key: str,
+                               from_date_str: str, to_date_str: str) -> list:
+    """
+    Fetch 1-minute candles from Upstox historical API (synchronous).
+    Returns list of dicts {timestamp, open, high, low, close, volume}.
+    Raises upstox_client.rest.ApiException on broker error.
+    """
+    import upstox_client
+    cfg = upstox_client.Configuration()
+    cfg.access_token = access_token
+    client = upstox_client.ApiClient(cfg)
+    api = upstox_client.HistoryApi(client)
+    resp = api.get_historical_candle_data1(
+        instrument_key=instrument_key,
+        interval="1minute",
+        to_date=to_date_str,
+        from_date=from_date_str,
+        api_version="2.0",
+    )
+    candles = getattr(getattr(resp, "data", None), "candles", None) or []
+    result = []
+    for c in candles:
+        # c = [timestamp_str, open, high, low, close, volume, oi]
+        result.append({
+            "timestamp": str(c[0]),
+            "open":   float(c[1]),
+            "high":   float(c[2]),
+            "low":    float(c[3]),
+            "close":  float(c[4]),
+            "volume": int(c[5] or 0),
+        })
+    return result
 
 
 class DashboardServer:
@@ -2498,6 +2616,243 @@ class DashboardServer:
                 "trade_count": len(trade_log),
                 "final_phase": phase_map,
                 "signal_count": sandbox_eng.signal_count(),
+            }
+
+        # ── ADMIN — Historical API replay (Upstox live data, no local DB) ────
+
+        @app.post("/api/strategies/trap_trading/historical_replay", tags=["Admin"])
+        async def api_trap_historical_replay(
+            payload: _TrapHistoricalReplaySchema,
+            _: dict = Depends(_require_admin),
+        ):
+            """
+            Pull real 1-min bars from Upstox historical API, run DTE ITM
+            strike selection, and replay through the TrapTradingEngine sandbox.
+
+            No local DB data required — works on weekends or when paper mode
+            has not accumulated bars yet.
+            """
+            import math
+            import pandas as pd
+            from datetime import date as _date, timedelta
+            from strategies.trap_trading_engine import TrapTradingEngine
+            from data_layer.base_feeder import CandleEvent, EventBus as _EB
+
+            script = payload.script.upper()
+            provider = payload.provider.lower()
+
+            # 1. Parse backtest_date
+            try:
+                bd = _date.fromisoformat(payload.backtest_date)
+            except ValueError as exc:
+                return {"ok": False, "error": f"Invalid backtest_date: {exc}"}
+
+            # 2. Provider + access token
+            if provider != "upstox":
+                return {"ok": False, "error": f"Provider '{provider}' not yet supported. Use 'upstox'."}
+            if _srv._client_db is None:
+                return {"ok": False, "error": "ClientDB not available."}
+
+            creds = await asyncio.to_thread(_srv._client_db.get_feeder_creds_sync, "upstox")
+            if not creds or not creds.get("access_token"):
+                return {
+                    "ok": False,
+                    "error": "No Upstox access token in DB. Authenticate via Admin > Feeder > Upstox first.",
+                }
+            access_token = creds["access_token"]
+
+            # 3. Active weekly expiry and DTE
+            expiry = _next_weekly_expiry(bd, script)
+            dte    = (expiry - bd).days
+            step   = _STRIKE_STEPS.get(script, 50)
+            lot    = _LOT_SIZES_MAP.get(script, 75)
+
+            # 4. Prior trading day → underlying open/close → base_strike
+            prior_day  = _prior_trading_day(bd)
+            index_key  = _UPSTOX_INDEX_KEY.get(script, f"NSE_INDEX|{script}")
+            prior_str  = prior_day.isoformat()
+            bd_str     = bd.isoformat()
+
+            try:
+                prior_bars = await asyncio.to_thread(
+                    _fetch_upstox_candles_sync, access_token, index_key, prior_str, prior_str,
+                )
+            except Exception as exc:
+                return {"ok": False, "error": f"Failed to fetch prior-day bars ({prior_str}): {exc}"}
+
+            if not prior_bars:
+                return {"ok": False, "error": f"No bars for {script} on {prior_str} (market holiday?). Try another date."}
+
+            prior_open  = prior_bars[0]["open"]
+            prior_close = prior_bars[-1]["close"]
+            base_strike = int(round(((prior_open + prior_close) / 2) / step) * step)
+
+            # 5. DTE ITM matrix
+            offset    = _dte_itm_offset(dte, step)
+            ce_strike = int(round((base_strike - offset) / step) * step)
+            pe_strike = int(round((base_strike + offset) / step) * step)
+            ce_key    = _upstox_option_key(script, expiry, ce_strike, "CE")
+            pe_key    = _upstox_option_key(script, expiry, pe_strike, "PE")
+
+            # 6. Fetch backtest_date bars — underlying (structural replay) + options (premium ref)
+            try:
+                spot_bars = await asyncio.to_thread(
+                    _fetch_upstox_candles_sync, access_token, index_key, bd_str, bd_str,
+                )
+            except Exception as exc:
+                return {"ok": False, "error": f"Failed to fetch underlying bars ({bd_str}): {exc}"}
+
+            if not spot_bars:
+                return {"ok": False, "error": f"No underlying bars for {script} on {bd_str}."}
+
+            ce_bars: list = []
+            pe_bars: list = []
+            try:
+                ce_bars = await asyncio.to_thread(
+                    _fetch_upstox_candles_sync, access_token, ce_key, bd_str, bd_str,
+                )
+            except Exception:
+                pass
+            try:
+                pe_bars = await asyncio.to_thread(
+                    _fetch_upstox_candles_sync, access_token, pe_key, bd_str, bd_str,
+                )
+            except Exception:
+                pass
+
+            if not ce_bars and not pe_bars:
+                return {"ok": False, "error": "Contract already expired or historical data unavailable from provider."}
+
+            # 7. Resample underlying to HTF/MTF and run sandbox engine
+            tc  = _srv._cfg.trap_engine
+            agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+
+            def _to_df(bars):
+                df = pd.DataFrame(bars)
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Kolkata")
+                return df.set_index("timestamp").sort_index()
+
+            spot_df = _to_df(spot_bars)
+            htf_df  = spot_df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
+            mtf_df  = spot_df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
+
+            sandbox_bus = _EB()
+            sandbox_eng = TrapTradingEngine(sandbox_bus, _srv._cfg, client_db=None)
+            _orig_gs    = sandbox_eng._get_state
+
+            def _bt_gs(sym):
+                st = _orig_gs(sym)
+                st.is_backtest = True
+                return st
+
+            sandbox_eng._get_state = _bt_gs
+
+            phase_transitions: list = []
+            prev_phase: dict        = {}
+
+            def _mk_candle(sym, tf, ts, row):
+                ts_dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+                if getattr(ts_dt, "tzinfo", None) is None:
+                    from zoneinfo import ZoneInfo as _ZI
+                    ts_dt = ts_dt.replace(tzinfo=_ZI("Asia/Kolkata"))
+                return CandleEvent(
+                    symbol=sym, timeframe=tf, timestamp=ts_dt,
+                    open=float(row["open"]),  high=float(row["high"]),
+                    low=float(row["low"]),    close=float(row["close"]),
+                    volume=int(row.get("volume", 0)),
+                )
+
+            for ts, kind, row in sorted(
+                [(ts, "htf", row) for ts, row in htf_df.iterrows()] +
+                [(ts, "mtf", row) for ts, row in mtf_df.iterrows()],
+                key=lambda x: x[0],
+            ):
+                tf = tc.HTF_MINUTES if kind == "htf" else tc.MTF_MINUTES
+                sandbox_eng._process_htf(_mk_candle(script, tf, ts, row)) \
+                    if kind == "htf" else \
+                    sandbox_eng._process_mtf(_mk_candle(script, tf, ts, row))
+
+                st = sandbox_eng._states.get(script)
+                if st and prev_phase.get(script) != st.phase.name:
+                    phase_transitions.append({
+                        "ts":         str(ts)[:19],
+                        "timeframe":  f"{tf}m",
+                        "from_phase": prev_phase.get(script, "IDLE"),
+                        "to_phase":   st.phase.name,
+                        "bar": {
+                            "open":  round(float(row["open"]),  2),
+                            "high":  round(float(row["high"]),  2),
+                            "low":   round(float(row["low"]),   2),
+                            "close": round(float(row["close"]), 2),
+                        },
+                    })
+                    prev_phase[script] = st.phase.name
+
+            # 8. Option premium summary for chart alignment
+            def _prem_summary(bars, key):
+                if not bars:
+                    return {"instrument_key": key, "bars": 0, "open": 0, "close": 0, "day_high": 0, "day_low": 0}
+                return {
+                    "instrument_key": key,
+                    "bars":      len(bars),
+                    "open":      round(bars[0]["open"],          2),
+                    "close":     round(bars[-1]["close"],        2),
+                    "day_high":  round(max(b["high"] for b in bars), 2),
+                    "day_low":   round(min(b["low"]  for b in bars), 2),
+                }
+
+            # 9. Trade log with capital-based position sizing
+            raw_trades = sandbox_eng.backtest_log()
+            trade_logs = []
+            for t in raw_trades:
+                ep  = float(t.get("entry_price", 0))
+                qty = max(math.floor(payload.capital / (ep * lot)) * lot if ep > 0 else lot, lot)
+                trade_logs.append({
+                    "timestamp":         t.get("timestamp", "")[:19],
+                    "underlying":        script,
+                    "option_symbol":     t.get("option_symbol", ""),
+                    "type":              "CE" if str(t.get("option_symbol", "")).endswith("CE") else "PE",
+                    "entry_price":       round(ep, 2),
+                    "quantity":          qty,
+                    "lots":              qty // lot,
+                    "ltf_sl_line":       round(float(t.get("ltf_sl",       0)), 2),
+                    "macro_high_target": round(float(t.get("target_high",  0)), 2),
+                    "entry_origin":      round(float(t.get("entry_origin", 0)), 2),
+                    "margin_est":        round(ep * qty, 2),
+                })
+
+            final_st = sandbox_eng._states.get(script)
+            return {
+                "ok": True,
+                "contract_info": {
+                    "script":                 script,
+                    "backtest_date":          bd_str,
+                    "prior_day":              prior_str,
+                    "prior_day_open":         round(prior_open,  2),
+                    "prior_day_close":        round(prior_close, 2),
+                    "calculated_base_strike": base_strike,
+                    "days_to_expiry":         dte,
+                    "itm_offset_pts":         offset,
+                    "target_expiry":          expiry.isoformat(),
+                    "ce_strike":              ce_strike,
+                    "pe_strike":              pe_strike,
+                    "selected_ce_symbol":     ce_key,
+                    "selected_pe_symbol":     pe_key,
+                    "lot_size":               lot,
+                    "capital":                payload.capital,
+                },
+                "data_summary": {
+                    "spot_bars": len(spot_bars),
+                    "htf_bars":  len(htf_df),
+                    "mtf_bars":  len(mtf_df),
+                    "ce_premium": _prem_summary(ce_bars, ce_key),
+                    "pe_premium": _prem_summary(pe_bars, pe_key),
+                },
+                "phase_transitions": phase_transitions,
+                "trade_logs":        trade_logs,
+                "trade_count":       len(trade_logs),
+                "final_phase":       final_st.phase.name if final_st else "IDLE",
+                "signal_count":      sandbox_eng.signal_count(),
             }
 
         # ── ADMIN — portfolio risk command center ────────────────────────────

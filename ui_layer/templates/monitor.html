@@ -2213,6 +2213,50 @@ function trapReplay() {
     },
   };
 }
+
+function histReplay() {
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0,10);
+  return {
+    script:       'NIFTY',
+    provider:     'upstox',
+    backtestDate: yesterday,
+    capital:      500000,
+    running:      false,
+    result:       null,
+    error:        '',
+    _auth() {
+      const t = localStorage.getItem('terminus_token');
+      return t ? { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+    },
+    async run() {
+      this.running = true; this.result = null; this.error = '';
+      try {
+        const r = await fetch('/api/strategies/trap_trading/historical_replay', {
+          method:  'POST',
+          headers: this._auth(),
+          body:    JSON.stringify({
+            script:        this.script,
+            provider:      this.provider,
+            backtest_date: this.backtestDate,
+            capital:       Number(this.capital),
+          }),
+        });
+        const d = await r.json();
+        if (!d.ok) throw new Error(d.error || 'Server error');
+        this.result = d;
+      } catch(e) { this.error = e.message || String(e); }
+      finally { this.running = false; }
+    },
+    phaseColor(phase) {
+      const m = {
+        IDLE:'text-gray-500', HTF_BEARISH:'text-amber-400', TRAP_LOCKED:'text-orange-400',
+        RETEST_ALERT:'text-yellow-300', MTF_BEARISH:'text-blue-400', MTF_LOCKED:'text-indigo-400',
+        ARMED:'text-purple-400', LIVE:'text-green-400',
+      };
+      return m[phase] || 'text-gray-300';
+    },
+  };
+}
 </script>
 
 <!-- ════════════════════════════════════════════════════════════════════════════
@@ -4531,6 +4575,233 @@ function trapReplay() {
     </div>
     <div x-show="result && result.trade_count === 0" class="text-gray-500 text-xs py-1">
       No trades triggered in this date range — try a wider window or check that 1-min bars are recorded.
+    </div>
+  </div>
+
+  <!-- ── Historical API Replay (Upstox, no local DB needed) ──────────── -->
+  <div x-data="histReplay()" class="mt-4 bg-gray-900 rounded-lg border border-indigo-800 overflow-hidden">
+
+    <!-- Card header -->
+    <div class="flex items-center justify-between px-4 py-2.5 border-b border-indigo-800 bg-indigo-950/40">
+      <div>
+        <div class="text-[10px] font-semibold text-indigo-400 uppercase tracking-widest">Historical API Replay</div>
+        <div class="text-xs text-gray-300 mt-0.5">Pull real Upstox bars on demand — no local DB required. Ideal for weekend backtesting.</div>
+      </div>
+      <span class="text-[10px] font-mono px-2 py-0.5 rounded border border-indigo-700 text-indigo-300">DTE ITM Matrix</span>
+    </div>
+
+    <div class="p-4">
+      <!-- Controls row -->
+      <div class="flex flex-wrap gap-3 items-end mb-4">
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Script</label>
+          <select x-model="script" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[110px]">
+            <option>NIFTY</option>
+            <option>BANKNIFTY</option>
+            <option>FINNIFTY</option>
+          </select>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Provider</label>
+          <select x-model="provider" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[100px]">
+            <option value="upstox">Upstox</option>
+          </select>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Backtest Date</label>
+          <input type="date" x-model="backtestDate" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200" />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Capital (₹)</label>
+          <input type="number" x-model.number="capital" min="50000" step="50000"
+                 class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 w-32" />
+        </div>
+        <button @click="run()" :disabled="running"
+                class="px-5 py-1.5 rounded text-xs font-semibold text-white transition-colors"
+                :class="running ? 'bg-indigo-900 opacity-50 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500'">
+          <span x-show="!running">Run Historical Replay</span>
+          <span x-show="running" class="flex items-center gap-1.5">
+            <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+            </svg>
+            Fetching...
+          </span>
+        </button>
+      </div>
+
+      <!-- DTE matrix legend -->
+      <div class="mb-4 text-[10px] text-gray-500 font-mono bg-gray-800/50 rounded px-3 py-2 flex flex-wrap gap-x-6 gap-y-1">
+        <span class="text-gray-400 font-semibold">ITM Matrix:</span>
+        <span>0 DTE (Tue) → 100 pts</span>
+        <span>1 DTE (Mon) → 200 pts</span>
+        <span>2 DTE (Sun) → 300 pts</span>
+        <span>3 DTE (Fri) → 400 pts</span>
+        <span>4+ DTE → 500 pts</span>
+        <span class="text-gray-400 ml-2">Base = round(avg(PriorOpen, PriorClose) / step) × step</span>
+      </div>
+
+      <!-- Error -->
+      <div x-show="error" class="mb-3 text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2" x-text="error"></div>
+
+      <!-- Results -->
+      <template x-if="result">
+        <div class="space-y-4">
+
+          <!-- Contract Parameters grid -->
+          <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
+            <div class="px-3 py-2 border-b border-gray-700 text-[10px] font-semibold text-indigo-300 uppercase tracking-widest">Contract Parameters</div>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-0 divide-x divide-y divide-gray-700/50 text-[10px] font-mono">
+              <template x-for="[k,v] in Object.entries({
+                'Prior Day':          result.contract_info.prior_day,
+                'Prior Open':         result.contract_info.prior_day_open,
+                'Prior Close':        result.contract_info.prior_day_close,
+                'Base Strike':        result.contract_info.calculated_base_strike,
+                'Expiry':             result.contract_info.target_expiry,
+                'DTE':                result.contract_info.days_to_expiry,
+                'ITM Offset':         result.contract_info.itm_offset_pts + ' pts',
+                'Lot Size':           result.contract_info.lot_size,
+              })" :key="k">
+                <div class="px-3 py-2">
+                  <div class="text-gray-500 mb-0.5" x-text="k"></div>
+                  <div class="text-white" x-text="v"></div>
+                </div>
+              </template>
+            </div>
+            <!-- CE/PE symbols -->
+            <div class="border-t border-gray-700 px-3 py-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] font-mono">
+              <div>
+                <span class="text-gray-500">CE Symbol: </span>
+                <span class="text-green-400" x-text="result.contract_info.selected_ce_symbol"></span>
+                <span class="text-gray-400 ml-2">Strike <span x-text="result.contract_info.ce_strike"></span></span>
+              </div>
+              <div>
+                <span class="text-gray-500">PE Symbol: </span>
+                <span class="text-red-400" x-text="result.contract_info.selected_pe_symbol"></span>
+                <span class="text-gray-400 ml-2">Strike <span x-text="result.contract_info.pe_strike"></span></span>
+              </div>
+            </div>
+            <!-- Premium snapshot -->
+            <div class="border-t border-gray-700 px-3 py-2 grid grid-cols-2 gap-4 text-[10px] font-mono">
+              <div>
+                <div class="text-gray-500 mb-1">CE Premium (backtest day)</div>
+                <template x-if="result.data_summary.ce_premium.bars > 0">
+                  <span class="text-gray-300">
+                    Open <span class="text-white" x-text="result.data_summary.ce_premium.open"></span> &nbsp;
+                    High <span class="text-green-400" x-text="result.data_summary.ce_premium.day_high"></span> &nbsp;
+                    Low <span class="text-red-400" x-text="result.data_summary.ce_premium.day_low"></span> &nbsp;
+                    Close <span class="text-white" x-text="result.data_summary.ce_premium.close"></span> &nbsp;
+                    (<span x-text="result.data_summary.ce_premium.bars"></span> bars)
+                  </span>
+                </template>
+                <template x-if="result.data_summary.ce_premium.bars === 0">
+                  <span class="text-gray-600">No CE data</span>
+                </template>
+              </div>
+              <div>
+                <div class="text-gray-500 mb-1">PE Premium (backtest day)</div>
+                <template x-if="result.data_summary.pe_premium.bars > 0">
+                  <span class="text-gray-300">
+                    Open <span class="text-white" x-text="result.data_summary.pe_premium.open"></span> &nbsp;
+                    High <span class="text-green-400" x-text="result.data_summary.pe_premium.day_high"></span> &nbsp;
+                    Low <span class="text-red-400" x-text="result.data_summary.pe_premium.day_low"></span> &nbsp;
+                    Close <span class="text-white" x-text="result.data_summary.pe_premium.close"></span> &nbsp;
+                    (<span x-text="result.data_summary.pe_premium.bars"></span> bars)
+                  </span>
+                </template>
+                <template x-if="result.data_summary.pe_premium.bars === 0">
+                  <span class="text-gray-600">No PE data</span>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- 5-Stage Phase Transition Log -->
+          <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
+            <div class="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
+              <span class="text-[10px] font-semibold text-indigo-300 uppercase tracking-widest">5-Stage Phase Transition Log</span>
+              <span class="text-[10px] font-mono text-gray-500">Final:
+                <span :class="phaseColor(result.final_phase)" x-text="result.final_phase"></span>
+              </span>
+            </div>
+            <div x-show="result.phase_transitions.length === 0"
+                 class="px-3 py-4 text-[10px] text-gray-500">
+              No transitions detected. A 75-min bearish candle must close within the backtest window — try a full trading day that covers at least one 75-min bar.
+            </div>
+            <div class="divide-y divide-gray-800">
+              <template x-for="(t, i) in result.phase_transitions" :key="i">
+                <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono">
+                  <span class="text-gray-600 w-32 shrink-0" x-text="t.ts"></span>
+                  <span class="text-gray-500 w-8 shrink-0" x-text="t.timeframe"></span>
+                  <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
+                  <span class="text-gray-600">-&gt;</span>
+                  <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
+                  <span class="text-gray-600 ml-auto text-right">
+                    O:<span class="text-gray-400" x-text="t.bar.open"></span>
+                    H:<span class="text-gray-400" x-text="t.bar.high"></span>
+                    L:<span class="text-gray-400" x-text="t.bar.low"></span>
+                    C:<span class="text-gray-400" x-text="t.bar.close"></span>
+                  </span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Trade Log / Chart Alignment Table -->
+          <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
+            <div class="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
+              <span class="text-[10px] font-semibold text-indigo-300 uppercase tracking-widest">Chart Alignment Table</span>
+              <span class="text-[10px] font-mono text-gray-500" x-text="result.trade_count + ' trade(s) triggered'"></span>
+            </div>
+            <div x-show="result.trade_count === 0" class="px-3 py-4 text-[10px] text-gray-500">
+              No trades triggered — engine did not reach ARMED state with this day's underlying structure. The 5-stage filter requires all stages to complete sequentially.
+            </div>
+            <div x-show="result.trade_count > 0" class="overflow-x-auto">
+              <table class="w-full text-[10px] font-mono">
+                <thead>
+                  <tr class="border-b border-gray-700 text-gray-500">
+                    <th class="text-left px-3 py-2">Timestamp</th>
+                    <th class="text-left px-3 py-2">Type</th>
+                    <th class="text-right px-3 py-2">Entry Px</th>
+                    <th class="text-right px-3 py-2">Qty</th>
+                    <th class="text-right px-3 py-2">Lots</th>
+                    <th class="text-right px-3 py-2">SL (1m close)</th>
+                    <th class="text-right px-3 py-2">Target</th>
+                    <th class="text-right px-3 py-2">Origin</th>
+                    <th class="text-right px-3 py-2">Margin est</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-800">
+                  <template x-for="(t,i) in result.trade_logs" :key="i">
+                    <tr class="hover:bg-gray-800/50">
+                      <td class="px-3 py-1.5 text-gray-400" x-text="t.timestamp"></td>
+                      <td class="px-3 py-1.5">
+                        <span :class="t.type==='CE' ? 'text-green-400' : 'text-red-400'" x-text="t.type"></span>
+                      </td>
+                      <td class="px-3 py-1.5 text-right text-white" x-text="t.entry_price"></td>
+                      <td class="px-3 py-1.5 text-right" x-text="t.quantity"></td>
+                      <td class="px-3 py-1.5 text-right" x-text="t.lots"></td>
+                      <td class="px-3 py-1.5 text-right text-red-400" x-text="t.ltf_sl_line"></td>
+                      <td class="px-3 py-1.5 text-right text-green-400" x-text="t.macro_high_target"></td>
+                      <td class="px-3 py-1.5 text-right text-amber-300" x-text="t.entry_origin"></td>
+                      <td class="px-3 py-1.5 text-right text-gray-300" x-text="t.margin_est.toLocaleString()"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Data summary footer -->
+          <div class="text-[10px] font-mono text-gray-600 flex flex-wrap gap-x-4">
+            <span>Spot bars: <span class="text-gray-500" x-text="result.data_summary.spot_bars"></span></span>
+            <span>HTF (75m): <span class="text-gray-500" x-text="result.data_summary.htf_bars"></span></span>
+            <span>MTF (5m): <span class="text-gray-500" x-text="result.data_summary.mtf_bars"></span></span>
+            <span>Signals: <span class="text-gray-500" x-text="result.signal_count"></span></span>
+          </div>
+
+        </div>
+      </template>
     </div>
   </div>
 
