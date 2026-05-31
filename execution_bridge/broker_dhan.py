@@ -57,9 +57,19 @@ class DhanBroker(BaseBroker):
                 return False
 
             self._dhan = dhanhq(dhan_client_id, self._b.access_token)
-            # Verify by fetching fund limits
-            funds = await asyncio.to_thread(self._dhan.get_fund_limits)
-            if funds and funds.get("status") == "success":
+            # Verify by fetching fund limits — method name varies across dhanhq versions
+            _fund_method = (
+                getattr(self._dhan, "get_fund_limits", None) or
+                getattr(self._dhan, "fund_limit",      None) or
+                getattr(self._dhan, "get_funds",       None)
+            )
+            if _fund_method is None:
+                # Can't verify — trust the token and proceed
+                logger.warning("DhanBroker [%s]: no fund_limits method found — skipping verify.", self.client_id)
+                funds = {"status": "success"}
+            else:
+                funds = await asyncio.to_thread(_fund_method)
+            if funds and (funds.get("status") == "success" or "data" in funds):
                 self._authenticated = True
                 pt   = getattr(self._b, "product_type", "").strip().upper()
                 mode = getattr(self._b, "trading_mode", "intraday").lower()

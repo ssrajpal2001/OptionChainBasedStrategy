@@ -137,8 +137,13 @@ class AngelBroker(BaseBroker):
         if req.trigger_price > 0:
             order_data["triggerprice"] = str(req.trigger_price)
         ret = await asyncio.to_thread(self._smartapi.placeOrder, order_data)
-        if ret and ret.get("status"):
-            return ret.get("data", {}).get("orderid", "")
+        # SmartAPI v1.5.5 returns orderid string directly on success
+        if isinstance(ret, str) and ret:
+            return ret
+        # Older builds return full response dict
+        if isinstance(ret, dict) and ret.get("status"):
+            data = ret.get("data") or {}
+            return str(data.get("orderid", ""))
         raise RuntimeError(f"Angel One place_order failed: {ret}")
 
     async def cancel_order(self, order_id: str) -> bool:
