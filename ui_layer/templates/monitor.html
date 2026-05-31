@@ -2271,14 +2271,15 @@ function amoTest() {
 function histReplay() {
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0,10);
   return {
-    script:       'NIFTY',
-    provider:     'upstox',
-    backtestDate: yesterday,
-    capital:      500000,
-    running:      false,
-    result:       null,
-    rawResult:    null,
-    error:        '',
+    script:        'NIFTY',
+    provider:      'upstox',
+    backtestDate:  yesterday,
+    capital:       500000,
+    lookbackDays:  2,
+    running:       false,
+    result:        null,
+    rawResult:     null,
+    error:         '',
     _auth() {
       const t = localStorage.getItem('terminus_token');
       return t ? { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
@@ -2294,6 +2295,7 @@ function histReplay() {
             provider:      this.provider,
             backtest_date: this.backtestDate,
             capital:       Number(this.capital),
+            lookback_days: Number(this.lookbackDays),
           }),
         });
         const d = await r.json();
@@ -4672,6 +4674,11 @@ function histReplay() {
           <input type="number" x-model.number="capital" min="50000" step="50000"
                  class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 w-32" />
         </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Lookback Days</label>
+          <input type="number" x-model.number="lookbackDays" min="1" max="10"
+                 class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 w-20" />
+        </div>
         <button @click="run()" :disabled="running"
                 class="px-5 py-1.5 rounded text-xs font-semibold text-white transition-colors"
                 :class="running ? 'bg-indigo-900 opacity-50 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500'">
@@ -4815,6 +4822,51 @@ function histReplay() {
                     <span class="text-gray-600 ml-auto">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
                   </div>
                 </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- CE HTF Candle Analysis Table -->
+          <template x-if="result.ce_engine && result.ce_engine.htf_table && result.ce_engine.htf_table.length">
+            <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
+              <div class="px-3 py-2 border-b border-gray-700">
+                <span class="text-[10px] font-semibold text-gray-300 uppercase tracking-widest">CE — 75m HTF Candle Analysis</span>
+              </div>
+              <!-- Key levels summary -->
+              <template x-if="result.ce_engine.entry_origin > 0">
+                <div class="px-3 py-2 border-b border-gray-700 grid grid-cols-2 sm:grid-cols-5 gap-2 text-[10px] font-mono">
+                  <div><div class="text-gray-500">HTF Entry Origin</div><div class="text-amber-300 font-bold" x-text="result.ce_engine.entry_origin"></div></div>
+                  <div><div class="text-gray-500">HTF Target High</div><div class="text-green-400 font-bold" x-text="result.ce_engine.target_high"></div></div>
+                  <div><div class="text-gray-500">MTF Entry Line</div><div class="text-indigo-300 font-bold" x-text="result.ce_engine.ltf_entry_line || '—'"></div></div>
+                  <div><div class="text-gray-500">MTF Stop Loss</div><div class="text-red-400 font-bold" x-text="result.ce_engine.ltf_sl_line || '—'"></div></div>
+                  <div><div class="text-gray-500">Rolling Base</div><div class="text-gray-300" x-text="result.ce_engine.rolling_base || '—'"></div></div>
+                </div>
+              </template>
+              <div class="overflow-x-auto">
+                <table class="w-full text-[10px] font-mono">
+                  <thead><tr class="border-b border-gray-700 text-gray-500">
+                    <th class="text-left px-2 py-1.5">Timestamp</th>
+                    <th class="text-right px-2 py-1.5">Open</th>
+                    <th class="text-right px-2 py-1.5">High</th>
+                    <th class="text-right px-2 py-1.5">Low</th>
+                    <th class="text-right px-2 py-1.5">Close</th>
+                    <th class="text-left px-2 py-1.5">Phase</th>
+                    <th class="text-left px-2 py-1.5">Remark</th>
+                  </tr></thead>
+                  <tbody class="divide-y divide-gray-800">
+                    <template x-for="(r,i) in result.ce_engine.htf_table" :key="i">
+                      <tr :class="r.remark.includes('STAGE 2') ? 'bg-green-900/20' : r.remark.includes('STAGE 1') ? 'bg-amber-900/20' : r.remark.includes('STAGE 5') ? 'bg-blue-900/30' : ''">
+                        <td class="px-2 py-1 text-gray-500" x-text="r.ts"></td>
+                        <td class="px-2 py-1 text-right" x-text="r.open"></td>
+                        <td class="px-2 py-1 text-right text-green-400" x-text="r.high"></td>
+                        <td class="px-2 py-1 text-right text-red-400" x-text="r.low"></td>
+                        <td class="px-2 py-1 text-right text-white font-bold" x-text="r.close"></td>
+                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='HTF_BEARISH','text-orange-400':r.phase==='TRAP_LOCKED','text-green-400':r.phase==='LIVE','text-purple-400':r.phase==='ARMED','text-gray-400':true}" x-text="r.phase"></td>
+                        <td class="px-2 py-1 text-gray-300 max-w-xs truncate" :title="r.remark" x-text="r.remark"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
               </div>
             </div>
           </template>

@@ -345,6 +345,7 @@ try:
         provider:      str = "upstox"
         backtest_date: str            # ISO date: "2026-05-29"
         capital:       float = 500_000.0
+        lookback_days: int   = 2      # trading days before backtest_date to include
 
     class _AmoTestSchema(_PydanticBase):
         client_id:    str
@@ -2801,7 +2802,7 @@ class DashboardServer:
             # 6. Fetch option premium bars — 2 prior trading days + backtest_date
             #    The engine runs on OPTION PREMIUM bars (not spot).
             #    Spot was only used to calculate which strike to select.
-            lookback_days = 2
+            lookback_days = max(1, int(payload.lookback_days))
             fetch_from = bd
             for _ in range(lookback_days):
                 fetch_from = _prior_trading_day(fetch_from)
@@ -2855,8 +2856,18 @@ class DashboardServer:
                     volume=int(row.get("volume", 0)),
                 )
 
+            from strategies.trap_trading_engine import _Phase as _TPhase
+
             def _run_engine_on_bars(bars: list, sym_label: str):
-                """Resample option premium 1m bars to HTF+MTF and run sandbox engine."""
+                """
+                Full 5-stage backtest on option premium 1m bars.
+
+                Stage 1+2: HTF (75m) candle processing
+                Stage 3:   1m bars used as synthetic ticks — check if premium
+                           retraces to entry_origin ± RETEST_ZONE_PERCENT
+                Stage 4:   MTF (5m) candle processing (only when in RETEST_ALERT)
+                Stage 5:   1m bars as ticks — check if premium touches ltf_entry_line
+                """
                 df = _to_df(bars)
                 htf = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
                 mtf = df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
@@ -2870,24 +2881,107 @@ class DashboardServer:
                 eng._get_state = _bt
 
                 transitions: list = []
-                prev: dict = {}
+                htf_table:   list = []   # every HTF bar with remarks
+                prev_phase = "IDLE"
+                retest_pct = tc.RETEST_ZONE_PERCENT / 100.0
+                slippage   = tc.SLIPPAGE_BUFFER
 
-                for ts, kind, row in sorted(
-                    [(ts, "htf", row) for ts, row in htf.iterrows()] +
-                    [(ts, "mtf", row) for ts, row in mtf.iterrows()],
-                    key=lambda x: x[0],
-                ):
-                    tf = tc.HTF_MINUTES if kind == "htf" else tc.MTF_MINUTES
-                    candle = _mk_candle(sym_label, tf, ts, row)
-                    eng._process_htf(candle) if kind == "htf" else eng._process_mtf(candle)
+                # Build chronological event list: HTF, MTF, and 1m ticks
+                htf_events = [(ts, "htf", row) for ts, row in htf.iterrows()]
+                mtf_events = [(ts, "mtf", row) for ts, row in mtf.iterrows()]
+                one_m_events = [(ts, "1m",  row) for ts, row in df.iterrows()]
 
+                all_events = sorted(htf_events + mtf_events + one_m_events, key=lambda x: x[0])
+
+                for ts, kind, row in all_events:
                     st = eng._states.get(sym_label)
-                    if st and prev.get(sym_label) != st.phase.name:
+                    prem = float(row["close"])
+
+                    if kind == "htf":
+                        tf = tc.HTF_MINUTES
+                        candle = _mk_candle(sym_label, tf, ts, row)
+                        eng._process_htf(candle)
+                        st = eng._states.get(sym_label)
+
+                        # Determine remark for HTF table
+                        new_phase = st.phase.name if st else "IDLE"
+                        remark = ""
+                        if prev_phase == "IDLE" and new_phase == "HTF_BEARISH":
+                            remark = "STAGE 1 — Bearish HTF candle. Trap candidate locked."
+                        elif prev_phase == "HTF_BEARISH" and new_phase == "TRAP_LOCKED":
+                            remark = (
+                                f"STAGE 2 — SWEEP CONFIRMED. "
+                                f"entry_origin={st.entry_origin:.2f}  "
+                                f"target={st.target_high:.2f}  "
+                                f"retest_zone=[{st.entry_origin*(1-retest_pct):.2f}–{st.entry_origin*(1+retest_pct):.2f}]"
+                            )
+                        elif prev_phase == "HTF_BEARISH" and new_phase == "IDLE":
+                            remark = "Bullish — no sweep. Reset to IDLE."
+                        elif new_phase == "HTF_BEARISH":
+                            remark = "Stage 1 candidate updated (still bearish, no sweep yet)."
+                        elif prev_phase == "TRAP_LOCKED" and new_phase not in ("TRAP_LOCKED", "RETEST_ALERT", "MTF_BEARISH", "MTF_LOCKED", "ARMED", "LIVE"):
+                            remark = "HTF bar after trap locked (monitoring for retest)."
+                        elif new_phase in ("RETEST_ALERT",):
+                            remark = f"STAGE 3 — Retest zone entered. premium={prem:.2f}"
+                        elif new_phase == "ARMED":
+                            remark = (
+                                f"STAGE 4 — MTF nested trap confirmed. "
+                                f"ltf_entry={st.ltf_entry_line:.2f}  ltf_sl={st.ltf_sl_line:.2f}"
+                            )
+                        elif new_phase == "LIVE":
+                            remark = f"STAGE 5 — ENTRY TRIGGERED. entry_price={st.entry_price:.2f}"
+
+                        htf_table.append({
+                            "ts":     str(ts)[:19],
+                            "open":   round(float(row["open"]),  2),
+                            "high":   round(float(row["high"]),  2),
+                            "low":    round(float(row["low"]),   2),
+                            "close":  round(float(row["close"]), 2),
+                            "phase":  new_phase,
+                            "remark": remark,
+                        })
+
+                    elif kind == "mtf":
+                        tf = tc.MTF_MINUTES
+                        candle = _mk_candle(sym_label, tf, ts, row)
+                        eng._process_mtf(candle)
+                        st = eng._states.get(sym_label)
+
+                    elif kind == "1m" and st is not None:
+                        # Stage 3: synthetic tick check — TRAP_LOCKED → RETEST_ALERT
+                        if st.phase == _TPhase.TRAP_LOCKED and st.entry_origin > 0:
+                            lo = st.entry_origin * (1.0 - retest_pct)
+                            hi = st.entry_origin * (1.0 + retest_pct)
+                            if lo <= prem <= hi:
+                                st.phase = _TPhase.RETEST_ALERT
+
+                        # Stage 5: synthetic tick check — ARMED → LIVE (backtest entry)
+                        elif st.phase == _TPhase.ARMED and st.ltf_entry_line > 0:
+                            if prem <= st.ltf_entry_line + slippage:
+                                eng._record_backtest_entry(sym_label, sym_label, prem, st)
+
+                        # LTF exit guard — LIVE: check SL and target
+                        elif st.phase == _TPhase.LIVE and st.trade_id:
+                            if st.ltf_sl_line > 0 and prem < st.ltf_sl_line:
+                                # SL hit on 1m close
+                                rb = st.rolling_base
+                                eng._reset_state(sym_label)
+                                eng._states[sym_label].rolling_base = rb
+                            elif st.target_high > 0 and prem >= st.target_high:
+                                # Target hit
+                                rb = st.rolling_base
+                                eng._reset_state(sym_label)
+                                eng._states[sym_label].rolling_base = rb
+
+                    # Track phase transitions
+                    st_now = eng._states.get(sym_label)
+                    new_phase = st_now.phase.name if st_now else "IDLE"
+                    if new_phase != prev_phase:
                         transitions.append({
                             "ts":         str(ts)[:19],
-                            "timeframe":  f"{tf}m",
-                            "from_phase": prev.get(sym_label, "IDLE"),
-                            "to_phase":   st.phase.name,
+                            "timeframe":  kind,
+                            "from_phase": prev_phase,
+                            "to_phase":   new_phase,
                             "bar": {
                                 "open":  round(float(row["open"]),  2),
                                 "high":  round(float(row["high"]),  2),
@@ -2895,21 +2989,24 @@ class DashboardServer:
                                 "close": round(float(row["close"]), 2),
                             },
                         })
-                        prev[sym_label] = st.phase.name
+                        prev_phase = new_phase
 
                 final = eng._states.get(sym_label)
                 trades_raw = eng.backtest_log()
                 return {
                     "htf_bars":          len(htf),
                     "mtf_bars":          len(mtf),
-                    "phase_transitions": transitions,
+                    "htf_table":         htf_table,
+                    "phase_transitions": [t for t in transitions if t["timeframe"] in ("htf","mtf")],
+                    "all_transitions":   transitions,
                     "final_phase":       final.phase.name if final else "IDLE",
                     "signal_count":      eng.signal_count(),
                     "trades_raw":        trades_raw,
-                    "entry_origin":      round(final.entry_origin, 2) if final else 0,
-                    "target_high":       round(final.target_high,  2) if final else 0,
+                    "entry_origin":      round(final.entry_origin,   2) if final else 0,
+                    "target_high":       round(final.target_high,    2) if final else 0,
                     "ltf_entry_line":    round(final.ltf_entry_line, 2) if final else 0,
                     "ltf_sl_line":       round(final.ltf_sl_line,    2) if final else 0,
+                    "rolling_base":      round(final.rolling_base,   2) if final else 0,
                 }
 
             # 8. Run engine on CE premium bars and PE premium bars separately
