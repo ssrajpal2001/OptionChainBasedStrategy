@@ -2941,7 +2941,7 @@ class DashboardServer:
                                 + (f"entry_origin={lv0.entry_origin:.2f} target={lv0.target_high:.2f}" if lv0 else "")
                             )
                         elif prev_phase == "IDLE" and new_phase == "HTF_BEARISH":
-                            remark = f"STAGE 1 — Bearish HTF candle. Trap candidate locked. ({len(st.pending_levels)} pending level(s))"
+                            remark = f"STAGE 1 — Bearish candle noted (H:{st.htf_bearish_high:.2f} L:{c.low:.2f}). Waiting for sweep above H:{st.htf_bearish_high:.2f} to lock trap."
                         elif prev_phase == "HTF_BEARISH" and new_phase == "HTF_BEARISH":
                             remark = f"Stage 1 additional level added ({len(st.pending_levels)} pending, sweep needed above {st.htf_bearish_high:.2f})"
                         elif prev_phase == "HTF_BEARISH" and new_phase == "TRAP_LOCKED":
