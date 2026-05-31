@@ -83,7 +83,7 @@ class MockFeeder(BaseFeeder):
             now = datetime.now(IST)
 
             for underlying in self._cfg.monitored_indices:
-                expiry = _nexp(underlying)
+                expiry = _nexp(underlying) or (now.date() + __import__("datetime").timedelta(days=7))
                 p = self._prices[underlying]
                 p = max(p * (1 + self._rng.gauss(0, 0.0003)), 1.0)
                 self._prices[underlying] = p

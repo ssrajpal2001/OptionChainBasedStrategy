@@ -217,8 +217,12 @@ class InstrumentRegistry:
             diag.append(f"Downloading master JSON: {url}")
             logger.info("InstrumentRegistry: downloading NSE master JSON ...")
             try:
+                import ssl as _ssl
+                _ctx = _ssl.create_default_context()
+                _ctx.check_hostname = False
+                _ctx.verify_mode = _ssl.CERT_NONE
                 req = Request(url, headers={"Accept-Encoding": "gzip"})
-                with urlopen(req, timeout=60) as r:
+                with urlopen(req, timeout=60, context=_ctx) as r:
                     raw = r.read()
                 try:
                     raw_instruments = json.loads(gzip.decompress(raw))

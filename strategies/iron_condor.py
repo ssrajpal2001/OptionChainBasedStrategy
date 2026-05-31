@@ -294,9 +294,13 @@ class IronCondorStrategy:
         await self._bus.publish(Topic.IC_ORDER_REQUEST, ev_order)
 
         from data_layer.instrument_registry import next_expiry as _nexp
+        _expiry = _nexp(self._underlying)
+        if not _expiry:
+            logger.warning("IronCondor[%s]: registry not loaded, skipping entry — authenticate Upstox first.", self._underlying)
+            return
         self._position = IronCondorPosition(
             underlying      = self._underlying,
-            expiry          = _nexp(self._underlying),
+            expiry          = _expiry,
             atm_at_entry    = atm,
             trade_id        = trade_id,
             short_ce        = IronCondorLeg("sell","CE", short_ce_strike, short_ce_ltp),
