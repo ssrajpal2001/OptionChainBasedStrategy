@@ -333,6 +333,7 @@ try:
         bars_lookback_days:  Optional[int]   = None
         SL_MODE:             Optional[str]   = None  # "dynamic" | "structural"
         SL_PCT:              Optional[float] = None  # % below entry (dynamic mode)
+        SL_BUFFER_PCT:       Optional[float] = None  # % buffer below structural SL level
 
     class _TrapInstrumentsSchema(_PydanticBase):
         instruments: List[str]
