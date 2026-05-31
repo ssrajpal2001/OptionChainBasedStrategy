@@ -3282,14 +3282,23 @@ class DashboardServer:
             except Exception as _e:
                 return {"ok": False, "error": f"Broker auth error: {_e}", "provider": provider}
             if not auth_ok:
+                # Show credential state to help diagnose — no secrets exposed
+                _cred_debug = {
+                    "has_access_token": bool(binding_row.get("access_token")),
+                    "token_len":        len(binding_row.get("access_token") or ""),
+                    "has_user_id":      bool(binding_row.get("user_id")),
+                    "has_api_key":      bool(binding_row.get("api_key")),
+                    "has_api_secret":   bool(binding_row.get("api_secret")),
+                }
                 _auth_hint = {
-                    "angelone": " — Complete the AngelOne OAuth login: go to client portal → Brokers → click your Angel One binding → Login button.",
-                    "zerodha":  " — Zerodha access_token expires daily. Re-authenticate from client portal.",
-                    "upstox":   " — Upstox access_token expires daily. Re-authenticate from client portal.",
-                    "fyers":    " — Fyers access_token may be expired. Re-authenticate from client portal.",
-                    "dhan":     " — Check Dhan client_code and access_token.",
+                    "angelone": " Token found but rejected — may be expired. Re-do OAuth login from client portal.",
+                    "zerodha":  " Access token expires daily. Re-authenticate from client portal.",
+                    "upstox":   " Access token expires daily. Re-authenticate from client portal.",
+                    "fyers":    " Access token may be expired. Re-authenticate from client portal.",
+                    "dhan":     " Access token may be expired. Re-authenticate from client portal.",
                 }.get(provider, "")
-                return {"ok": False, "error": f"Broker auth failed for {provider}/{payload.binding_id}.{_auth_hint}", "provider": provider}
+                return {"ok": False, "error": f"Broker auth failed for {provider}/{payload.binding_id}.{_auth_hint}",
+                        "provider": provider, "credential_state": _cred_debug}
 
             req = OrderRequest(
                 broker_symbol=broker_symbol,
