@@ -2195,8 +2195,10 @@ class DashboardServer:
                     )
                     elapsed = (_t.monotonic() - t0) * 1000
                     if ok and token:
+                        # Strip "Bearer " prefix some brokers include in the token value
+                        clean_token = token[7:] if token.startswith("Bearer ") else token
                         now = datetime.now(IST).isoformat()
-                        await _srv._client_db.update_access_token(client_id, binding_id, token, now, _ist_eod())
+                        await _srv._client_db.update_access_token(client_id, binding_id, clean_token, now, _ist_eod())
                         await _srv._client_db.set_terminal_connected(client_id, binding_id, True)
                         _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": client_id, "binding_id": binding_id, "provider": provider, "ok": True})
                         logger.info("[Callback] Client [%s/%s] %s token stored, terminal=ON in %.1fms",

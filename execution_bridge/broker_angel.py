@@ -40,15 +40,14 @@ class AngelBroker(BaseBroker):
 
             # Path 1 — OAuth access_token already stored (from /callback/angelone)
             if self._b.access_token:
-                # AngelOne OAuth returns the JWT directly as auth_token.
-                # Set it as the session token; SmartConnect uses it for subsequent API calls.
-                # Don't call getProfile here — it expects a *refresh* token, not the JWT,
-                # so it would always fail on a fresh OAuth token.
+                # Strip "Bearer " prefix if present — SmartAPI expects the raw JWT
+                raw_token = self._b.access_token
+                if raw_token.startswith("Bearer "):
+                    raw_token = raw_token[7:]
                 try:
-                    self._smartapi.setAccessToken(self._b.access_token)
+                    self._smartapi.setAccessToken(raw_token)
                 except AttributeError:
-                    # Older smartapi-python builds expose the attribute directly
-                    self._smartapi.access_token = self._b.access_token
+                    self._smartapi.access_token = raw_token
 
             # Path 2 — headless login with client_code (or user_id) + password + TOTP
             elif (self._b.client_code or self._b.user_id) and self._b.password:
