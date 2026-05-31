@@ -50,7 +50,6 @@ class BrokerRateProfile:
 
 # Hard limits per broker (conservative; raise if broker confirms higher limits)
 BROKER_RATE_PROFILES: Dict[str, BrokerRateProfile] = {
-    "shoonya":   BrokerRateProfile(rate=10.0, burst=10),
     "fyers":     BrokerRateProfile(rate=10.0, burst=10),
     "angelone":  BrokerRateProfile(rate=10.0, burst=10),
     "dhan":      BrokerRateProfile(rate=10.0, burst=10),

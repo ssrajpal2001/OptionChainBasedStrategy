@@ -89,6 +89,8 @@ class UpstoxBroker(BaseBroker):
         self._order_api: Any = None
         self._portfolio_api: Any = None
         self._user_api: Any = None
+        self._is_amo  = False
+        self._product = "I"   # I=intraday, D=delivery — overridden at auth
         # {lookup_key (InternalSymbol canonical str): instrument_key}
         self._instrument_map: Dict[str, str] = {}
 
@@ -132,8 +134,17 @@ class UpstoxBroker(BaseBroker):
             )
             if profile and profile.status == "success":
                 self._authenticated = True
-                logger.info("UpstoxBroker [%s]: Authenticated (user=%s).",
-                            self.client_id, profile.data.user_name if profile.data else "?")
+                pt   = getattr(self._b, "product_type", "").strip().upper()
+                mode = getattr(self._b, "trading_mode", "intraday").lower()
+                if pt in ("MIS", "INTRADAY", "I"):
+                    self._product = "I"
+                elif pt in ("NRML", "NORMAL", "DELIVERY", "D"):
+                    self._product = "D"
+                else:
+                    self._product = "I" if mode not in ("carryforward", "normal", "nrml") else "D"
+                logger.info("UpstoxBroker [%s]: Authenticated (user=%s) product=%s.",
+                            self.client_id, profile.data.user_name if profile.data else "?",
+                            self._product)
                 return True
 
             logger.error("UpstoxBroker [%s]: Auth check failed: %s", self.client_id, profile)
@@ -161,7 +172,7 @@ class UpstoxBroker(BaseBroker):
 
         body = upstox_client.PlaceOrderRequest(
             quantity=req.qty,
-            product="I",
+            product=self._product,
             validity="DAY",
             price=req.price,
             tag=req.tag[:20] if req.tag else "",
@@ -170,7 +181,7 @@ class UpstoxBroker(BaseBroker):
             transaction_type=req.side.value,
             disclosed_quantity=0,
             trigger_price=req.trigger_price if req.trigger_price > 0 else 0,
-            is_amo=False,
+            is_amo=self._is_amo,
         )
 
         ret = await asyncio.to_thread(

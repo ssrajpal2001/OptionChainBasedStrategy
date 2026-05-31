@@ -403,11 +403,11 @@ class InstrumentRegistry:
         """
         Return the correct symbol/key for a given broker provider.
 
-        Upstox → instrument_key from registry (required for API)
-        Fyers  → NSE:NIFTY2660224500CE (derived via SymbolTranslator)
-        Shoonya → NIFTY2JUN26C24500   (derived via SymbolTranslator)
-        AngelOne → NIFTY02JUN2624500CE (derived via SymbolTranslator)
-        Dhan   → internal canonical str (token lookup done by broker)
+        Upstox  → instrument_key from registry (required for API)
+        Fyers   → NSE:NIFTY2660224500CE (derived via SymbolTranslator)
+        Zerodha → NIFTY2662524500CE     (derived via SymbolTranslator)
+        AngelOne → NIFTY02JUN2624500CE  (derived via SymbolTranslator)
+        Dhan    → internal canonical str (token lookup done by broker)
         """
         from data_layer.symbol_translator import InternalSymbol, SymbolTranslator
 

@@ -6,9 +6,9 @@ logic uses the neutral InternalSymbol struct. Only the execution_bridge
 and the feeder adapters call these translation methods.
 
 Format references (verified as of 2025):
-  Shoonya  : NIFTY28MAY26C22000        (underlying + DDMONYY + C/P + strike)
   Fyers    : NSE:NIFTY2652822000CE     (exchange:underlying + YY + expiry_code + strike + CE/PE)
   AngelOne : NIFTY28MAY2422000CE       (underlying + DDMON + YY + strike + CE/PE)
+  Zerodha  : NIFTY2562822000CE         (underlying + YY + single-char-month + DD + strike + CE/PE)
   Dhan     : uses numeric security_id from instrument master (token-based)
   Upstox   : NSE_FO|NIFTY2562522000CE  (segment|underlying + YYDDMM + strike + CE/PE)
              instrument_key lookup required for API calls
@@ -68,38 +68,6 @@ class SymbolTranslator:
 
     All methods are pure functions (no I/O, no state).
     """
-
-    # ── Shoonya / Finvasia ────────────────────────────────────────────────────
-
-    @staticmethod
-    def to_shoonya(sym: InternalSymbol) -> str:
-        """
-        Format: NIFTY28MAY26C22000
-        Underlying + DD + MON + YY + C/P + strike (no decimal, no space)
-        """
-        dd = sym.expiry.strftime("%d").lstrip("0") or "0"
-        mon = _MONTH_3[sym.expiry.month - 1]
-        yy = sym.expiry.strftime("%y")
-        cp = "C" if sym.option_type == "CE" else "P"
-        return f"{sym.underlying}{dd}{mon}{yy}{cp}{sym.strike_int}"
-
-    @staticmethod
-    def from_shoonya(raw: str) -> Optional[InternalSymbol]:
-        """Parse a Shoonya symbol back to InternalSymbol."""
-        pattern = r"^([A-Z]+)(\d{1,2})([A-Z]{3})(\d{2})([CP])(\d+)$"
-        m = re.match(pattern, raw)
-        if not m:
-            return None
-        underlying, dd, mon, yy, cp, strike_str = m.groups()
-        month = _MONTH_3.index(mon) + 1
-        year = 2000 + int(yy)
-        expiry = date(year, month, int(dd))
-        return InternalSymbol(
-            underlying=underlying,
-            strike=float(strike_str),
-            option_type="CE" if cp == "C" else "PE",
-            expiry=expiry,
-        )
 
     # ── Fyers ─────────────────────────────────────────────────────────────────
 
@@ -255,9 +223,6 @@ class SymbolTranslator:
         """Verify to/from translation is lossless for each broker. Dev/test only."""
         from typing import Dict
         results: Dict[str, bool] = {}
-
-        sh = cls.to_shoonya(sym)
-        results["shoonya"] = cls.from_shoonya(sh) == sym
 
         fy = cls.to_fyers(sym)
         results["fyers"] = cls.from_fyers(fy) == sym

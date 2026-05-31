@@ -28,8 +28,8 @@ from typing import Dict, List, Literal, Optional
 @dataclass
 class BrokerBinding:
     """One broker account attached to one client."""
-    binding_id: str                     # Unique within the client; e.g. "shoonya_main"
-    provider: Literal["shoonya", "dhan", "fyers", "angelone", "upstox", "mock"]
+    binding_id: str                     # Unique within the client
+    provider: Literal["zerodha", "dhan", "fyers", "angelone", "upstox", "mock"]
     label: str = ""                     # Human-readable tag
 
     # Credentials — stored encrypted at rest in production
@@ -38,9 +38,7 @@ class BrokerBinding:
     api_key: str = ""
     api_secret: str = ""
     totp_secret: str = ""               # Base32 TOTP seed for 2FA
-    vendor_code: str = ""               # Shoonya-specific
-    imei: str = ""                      # Shoonya-specific
-    client_code: str = ""               # Angel One-specific
+    client_code: str = ""               # Angel One / Dhan client code
     access_token: str = ""              # Override (pre-fetched)
 
     # Lifecycle / strategy assignment (DB-backed)

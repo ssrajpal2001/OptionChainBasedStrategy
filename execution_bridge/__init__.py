@@ -20,7 +20,6 @@ from execution_bridge.base_broker import (
 from execution_bridge.execution_router import ExecutionRouter, CostCalc
 
 # Trigger self-registration of all broker modules
-import execution_bridge.broker_shoonya  # noqa: F401
 import execution_bridge.broker_fyers    # noqa: F401
 import execution_bridge.broker_angel    # noqa: F401
 import execution_bridge.broker_dhan     # noqa: F401

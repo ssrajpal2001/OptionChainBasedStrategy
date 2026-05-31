@@ -390,7 +390,7 @@ class GlobalConfig:
     candle_timeframes: List[int] = field(default_factory=lambda: [5, 15, 75])
 
     # Primary feeder broker (admin-selected)
-    primary_feeder_provider: Literal["shoonya", "dhan", "fyers", "angelone", "mock"] = "mock"
+    primary_feeder_provider: Literal["upstox", "fyers", "dhan", "angelone", "mock"] = "mock"
 
     def validate(self) -> None:
         if self.active_index not in self.monitored_indices:
