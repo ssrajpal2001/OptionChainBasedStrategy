@@ -128,7 +128,10 @@ def _callback_page(status: str, provider: str, message: str) -> str:
     color   = "#22c55e" if status == "success" else "#ef4444"
     icon    = "✓" if status == "success" else "✗"
     title   = "Connected!" if status == "success" else "Authentication Failed"
-    script  = "setTimeout(()=>window.close(),3000);" if status == "success" else ""
+    script  = (
+        "if(window.opener){window.opener.postMessage({type:'broker_connected',provider:'" + provider + "'},\"*\");}"
+        "setTimeout(()=>window.close(),3000);"
+    ) if status == "success" else ""
     return f"""<!DOCTYPE html><html><head><title>TERMINUS — {provider.upper()}</title>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{{font-family:monospace;background:#0a0a0f;color:#e2e8f0;

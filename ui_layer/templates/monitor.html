@@ -743,6 +743,13 @@ document.addEventListener('alpine:init', () => {
           this.loadClientStatus();
         }
       }
+      // Refresh broker status when OAuth callback tab sends success message
+      window.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'broker_connected') {
+          if (this.screen === 'client') this.loadClientStatus();
+          if (this.screen === 'admin') { this.loadClientProfiles(); }
+        }
+      });
       setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); } }, 5000);
