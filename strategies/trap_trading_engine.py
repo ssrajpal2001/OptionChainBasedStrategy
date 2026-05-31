@@ -772,7 +772,7 @@ class TrapTradingEngine:
             st.htf_trap_low  if st.htf_trap_low > 0.0 else st.mtf_sweep_low
         )
         if sl_mode == "structural" and structural_ref > 0.0:
-            computed_sl = structural_ref
+            computed_sl = structural_ref * (1.0 - tc.SL_BUFFER_PCT / 100.0)
             if computed_sl >= entry_price:
                 computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
                 logger.warning(
@@ -895,7 +895,7 @@ class TrapTradingEngine:
             st.htf_trap_low if st.htf_trap_low > 0.0 else st.mtf_sweep_low
         )
         if tc.SL_MODE == "structural" and structural_ref > 0.0:
-            computed_sl = structural_ref
+            computed_sl = structural_ref * (1.0 - tc.SL_BUFFER_PCT / 100.0)
             if computed_sl >= entry_price:
                 computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
         else:
