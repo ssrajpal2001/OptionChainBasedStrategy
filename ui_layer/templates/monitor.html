@@ -2227,23 +2227,25 @@ function amoTest() {
     },
     async init() {
       try {
-        const [cr, br] = await Promise.all([
-          fetch('/api/admin/clients',  { headers: this._auth() }),
-          fetch('/api/broker_status',  { headers: this._auth() }),
-        ]);
-        const cd = await cr.json();
-        const bd = await br.json();
-        this.clients    = cd.clients || [];
-        this.allBrokers = bd.brokers || [];
+        const r  = await fetch('/api/admin/clients', { headers: this._auth() });
+        const cd = await r.json();
+        this.clients = cd.clients || [];
         if (this.clients.length > 0) {
           this.clientId = this.clients[0].client_id;
-          this.loadBindings();
+          await this.loadBindings();
         }
       } catch(e) { this.loadError = 'Init failed: ' + (e.message || String(e)); }
     },
-    loadBindings() {
-      this.bindings  = this.allBrokers.filter(b => b.client_id === this.clientId);
-      this.bindingId = this.bindings.length > 0 ? this.bindings[0].binding_id : '';
+    async loadBindings() {
+      if (!this.clientId) return;
+      this.bindings  = [];
+      this.bindingId = '';
+      try {
+        const r = await fetch(`/api/admin/clients/${encodeURIComponent(this.clientId)}/bindings`, { headers: this._auth() });
+        const d = await r.json();
+        this.bindings  = d.bindings || [];
+        this.bindingId = this.bindings.length > 0 ? this.bindings[0].binding_id : '';
+      } catch(e) { this.loadError = 'Failed to load bindings: ' + (e.message || String(e)); }
     },
     async run() {
       this.running = true; this.result = null; this.error = '';

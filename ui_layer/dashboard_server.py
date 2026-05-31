@@ -3374,6 +3374,16 @@ class DashboardServer:
 
         # ── ADMIN — approve client + assign strategies ────────────────────────
 
+        @app.get("/api/admin/clients/{client_id}/bindings", tags=["Admin"])
+        async def api_admin_client_bindings(
+            client_id: str, _: dict = Depends(_require_admin)
+        ):
+            """Return all broker bindings for a client — reads DB directly, not registry."""
+            bindings = await asyncio.to_thread(
+                _srv._client_db.get_bindings_safe_sync, client_id
+            )
+            return {"ok": True, "client_id": client_id, "bindings": bindings}
+
         @app.post("/api/admin/clients/{client_id}/approve", tags=["Admin"])
         async def api_approve_client(
             client_id: str,
