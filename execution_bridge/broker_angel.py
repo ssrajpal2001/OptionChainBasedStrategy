@@ -88,8 +88,27 @@ class AngelBroker(BaseBroker):
 
     async def logout(self) -> None:
         if self._smartapi:
-            await asyncio.to_thread(self._smartapi.terminateSession, self._b.client_code)
+            try:
+                client = self._b.client_code or self._b.user_id
+                await asyncio.to_thread(self._smartapi.terminateSession, client)
+            except Exception:
+                pass
         self._authenticated = False
+
+    def _lookup_symbol_token(self, exchange: str, tradingsymbol: str) -> str:
+        """Fetch AngelOne symboltoken via searchScrip API. Returns empty string on failure."""
+        try:
+            result = self._smartapi.searchScrip(exchange, tradingsymbol)
+            if result and result.get("status") and result.get("data"):
+                for item in result["data"]:
+                    if item.get("tradingsymbol") == tradingsymbol:
+                        return str(item.get("symboltoken", ""))
+                # If exact match not found, return first result's token
+                return str(result["data"][0].get("symboltoken", ""))
+        except Exception as exc:
+            logger.warning("AngelBroker [%s]: symboltoken lookup failed for %s: %s",
+                           self.client_id, tradingsymbol, exc)
+        return ""
 
     async def place_order(self, req: OrderRequest) -> str:
         if not self._smartapi:
@@ -98,10 +117,14 @@ class AngelBroker(BaseBroker):
             OrderType.MARKET: "MARKET", OrderType.LIMIT: "LIMIT",
             OrderType.SL_M: "STOPLOSS_MARKET", OrderType.SL_L: "STOPLOSS_LIMIT",
         }
+        # Fetch symboltoken from AngelOne's scrip search — required for order placement
+        symbol_token = await asyncio.to_thread(
+            self._lookup_symbol_token, req.exchange, req.broker_symbol
+        )
         order_data = {
             "variety": "AMO" if self._is_amo else "NORMAL",
             "tradingsymbol": req.broker_symbol,
-            "symboltoken": "",      # Requires pre-lookup from instrument master
+            "symboltoken": symbol_token,
             "transactiontype": req.side.value,
             "exchange": req.exchange,
             "ordertype": _type_map[req.order_type],
