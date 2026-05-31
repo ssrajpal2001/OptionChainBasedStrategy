@@ -104,17 +104,24 @@ class SymbolTranslator:
     # ── Fyers ─────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def to_fyers(sym: InternalSymbol) -> str:
+    def to_fyers(sym: InternalSymbol, is_monthly: bool = False) -> str:
         """
-        Weekly: NSE:NIFTY2652822000CE
-        Format: NSE:{underlying}{YY}{M_CODE}{DD}{strike}{CE/PE}
-        Monthly expiries use full month number (2 digits).
+        Weekly : NSE:NIFTY2562522000CE  → YY + single-char-month + DD
+        Monthly: NSE:NIFTY25JUN22000CE  → YY + 3-letter-month (no DD)
+
+        is_monthly=True forces monthly format. If False (default), uses weekly format.
+        Monthly detection: caller should pass is_monthly=True when expiry is the
+        last-Thursday/Tuesday of the month (i.e. it IS the monthly contract).
         """
-        yy = sym.expiry.strftime("%y")
-        m_code = _FYERS_MONTH_CODE[sym.expiry.month]
-        dd = sym.expiry.strftime("%d")
+        yy       = sym.expiry.strftime("%y")
         exchange = "BSE" if sym.underlying == "SENSEX" else "NSE"
-        return f"{exchange}:{sym.underlying}{yy}{m_code}{dd}{sym.strike_int}{sym.option_type}"
+        if is_monthly:
+            mon = _MONTH_3[sym.expiry.month - 1]
+            return f"{exchange}:{sym.underlying}{yy}{mon}{sym.strike_int}{sym.option_type}"
+        else:
+            m_code = _FYERS_MONTH_CODE[sym.expiry.month]
+            dd     = sym.expiry.strftime("%d")
+            return f"{exchange}:{sym.underlying}{yy}{m_code}{dd}{sym.strike_int}{sym.option_type}"
 
     @staticmethod
     def from_fyers(raw: str) -> Optional[InternalSymbol]:
@@ -185,18 +192,24 @@ class SymbolTranslator:
         """
         Upstox instrument_key format for NFO options:
           NSE_FO|NIFTY2562522000CE
-          Segment (NSE_FO / BSE_FO) + | + underlying + YY + DD + MM + strike + CE/PE
+          Segment + | + underlying + YY + single-char-month + DD + strike + CE/PE
 
-        This string is a LOOKUP KEY used to resolve the actual numeric
-        instrument_token from the Upstox instrument master JSON.
-        Download from: https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz
-        and call UpstoxBroker.inject_instrument_map() at startup.
+        Month codes: 1-9 for Jan-Sep, O=Oct, N=Nov, D=Dec (same as Fyers).
+        Example: NIFTY Jun-25-2025 22000CE → NSE_FO|NIFTY2562522000CE
+
+        NOTE: This constructed string is a fallback only. Upstox historical API
+        and order placement require the real instrument_key from InstrumentRegistry.
+        Use InstrumentRegistry.get_upstox_key() for production use.
         """
+        _month_code = {
+            1:"1",2:"2",3:"3",4:"4",5:"5",6:"6",
+            7:"7",8:"8",9:"9",10:"O",11:"N",12:"D",
+        }
         segment = "BSE_FO" if sym.underlying == "SENSEX" else "NSE_FO"
         yy = sym.expiry.strftime("%y")
+        mc = _month_code[sym.expiry.month]
         dd = sym.expiry.strftime("%d")
-        mm = sym.expiry.strftime("%m")
-        return f"{segment}|{sym.underlying}{yy}{dd}{mm}{sym.strike_int}{sym.option_type}"
+        return f"{segment}|{sym.underlying}{yy}{mc}{dd}{sym.strike_int}{sym.option_type}"
 
     @staticmethod
     def to_upstox_index(underlying: str) -> str:

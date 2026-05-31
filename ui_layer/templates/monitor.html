@@ -2214,6 +2214,60 @@ function trapReplay() {
   };
 }
 
+function amoTest() {
+  return {
+    clients: [], bindings: [],
+    clientId: '', bindingId: '', underlying: 'NIFTY',
+    expiryPref: 'current_week', strike: '', optType: 'CE',
+    running: false, result: null, error: '',
+    _auth() {
+      const t = localStorage.getItem('terminus_token');
+      return t ? { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
+    },
+    async init() {
+      try {
+        const r = await fetch('/api/admin/clients', { headers: this._auth() });
+        const d = await r.json();
+        this.clients = d.clients || [];
+        if (this.clients.length > 0) {
+          this.clientId = this.clients[0].client_id;
+          await this.loadBindings();
+        }
+      } catch(e) { console.warn('amoTest init failed', e); }
+    },
+    async loadBindings() {
+      if (!this.clientId) return;
+      try {
+        const r = await fetch(`/api/client/brokers?cid=${this.clientId}`, { headers: this._auth() });
+        const d = await r.json();
+        this.bindings = d.bindings || d || [];
+        if (this.bindings.length > 0) this.bindingId = this.bindings[0].binding_id;
+      } catch(e) { this.bindings = []; }
+    },
+    async run() {
+      this.running = true; this.result = null; this.error = '';
+      try {
+        const r = await fetch('/api/admin/amo_test', {
+          method: 'POST', headers: this._auth(),
+          body: JSON.stringify({
+            client_id:   this.clientId,
+            binding_id:  this.bindingId,
+            underlying:  this.underlying,
+            expiry_pref: this.expiryPref,
+            strike:      this.strike ? Number(this.strike) : null,
+            opt_type:    this.optType,
+            qty:         1,
+          }),
+        });
+        const d = await r.json();
+        this.result = d;
+        if (!d.ok) this.error = d.error || 'Order failed';
+      } catch(e) { this.error = e.message || String(e); }
+      finally { this.running = false; }
+    },
+  };
+}
+
 function histReplay() {
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0,10);
   return {
@@ -4811,6 +4865,87 @@ function histReplay() {
 
         </div>
       </template>
+    </div>
+  </div>
+
+  <!-- ── AMO Broker Connectivity Test ────────────────────────────────── -->
+  <div x-data="amoTest()" x-init="init()" class="mt-4 bg-gray-900 rounded-lg border border-yellow-800 overflow-hidden">
+    <div class="flex items-center justify-between px-4 py-2.5 border-b border-yellow-800 bg-yellow-950/30">
+      <div>
+        <div class="text-[10px] font-semibold text-yellow-400 uppercase tracking-widest">AMO Broker Connectivity Test</div>
+        <div class="text-xs text-gray-400 mt-0.5">Place a 1-lot AMO to verify broker symbol resolution and order routing. Cancel immediately from broker terminal.</div>
+      </div>
+      <span class="text-[10px] font-mono px-2 py-0.5 rounded border border-yellow-700 text-yellow-400">REAL ORDER</span>
+    </div>
+    <div class="p-4">
+      <div class="flex flex-wrap gap-3 items-end mb-3">
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase">Client</label>
+          <select x-model="clientId" @change="loadBindings()" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[120px]">
+            <template x-for="c in clients" :key="c.client_id">
+              <option :value="c.client_id" x-text="c.client_id + ' (' + (c.name||'') + ')'"></option>
+            </template>
+          </select>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase">Binding</label>
+          <select x-model="bindingId" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[120px]">
+            <template x-for="b in bindings" :key="b.binding_id">
+              <option :value="b.binding_id" x-text="b.binding_id + ' / ' + b.provider"></option>
+            </template>
+          </select>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase">Script</label>
+          <select x-model="underlying" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200">
+            <option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option>
+          </select>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase">Expiry</label>
+          <select x-model="expiryPref" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200">
+            <option value="current_week">Current Week</option>
+            <option value="next_week">Next Week</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase">Strike (blank=ATM)</label>
+          <input type="number" x-model.number="strike" placeholder="auto" step="50" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 w-24" />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-[10px] text-gray-500 uppercase">Type</label>
+          <select x-model="optType" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200">
+            <option value="CE">CE (Call)</option>
+            <option value="PE">PE (Put)</option>
+          </select>
+        </div>
+        <button @click="run()" :disabled="running"
+                class="px-4 py-1.5 rounded text-xs font-semibold transition-colors"
+                :class="running ? 'bg-yellow-900 opacity-50 cursor-not-allowed text-yellow-300' : 'bg-yellow-600 hover:bg-yellow-500 text-black'">
+          <span x-text="running ? 'Placing...' : 'Place AMO Test'"></span>
+        </button>
+      </div>
+      <div x-show="error" class="text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2 mb-2" x-text="error"></div>
+      <div x-show="result" class="text-[10px] font-mono bg-gray-800 rounded px-3 py-2 space-y-1">
+        <div class="text-green-400 font-semibold" x-show="result && result.ok">ORDER PLACED — cancel from broker terminal</div>
+        <div x-show="result && result.ok">
+          Order ID: <span class="text-white" x-text="result && result.order_id"></span> &nbsp;|&nbsp;
+          Provider: <span class="text-blue-300" x-text="result && result.provider"></span> &nbsp;|&nbsp;
+          Symbol: <span class="text-yellow-300" x-text="result && result.broker_symbol"></span>
+        </div>
+        <div x-show="result && result.ok">
+          Underlying: <span class="text-gray-300" x-text="result && result.underlying"></span> &nbsp;
+          Expiry: <span class="text-gray-300" x-text="result && result.expiry"></span> &nbsp;
+          Strike: <span class="text-gray-300" x-text="result && result.strike"></span>
+          <span class="text-gray-300" x-text="result && result.opt_type"></span> &nbsp;
+          Qty: <span class="text-gray-300" x-text="result && result.qty"></span>
+          (<span x-text="result && result.lots"></span> lots × <span x-text="result && result.lot_size"></span>)
+        </div>
+        <div x-show="result && result.broker_symbol && !result.ok" class="text-amber-300">
+          Symbol attempted: <span x-text="result && result.broker_symbol"></span>
+        </div>
+      </div>
     </div>
   </div>
 

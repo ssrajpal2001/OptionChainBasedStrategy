@@ -346,6 +346,15 @@ try:
         backtest_date: str            # ISO date: "2026-05-29"
         capital:       float = 500_000.0
 
+    class _AmoTestSchema(_PydanticBase):
+        client_id:    str
+        binding_id:   str
+        underlying:   str = "NIFTY"
+        expiry_pref:  str = "current_week"   # current_week | next_week | monthly
+        strike:       Optional[int] = None   # None = ATM
+        opt_type:     str = "CE"
+        qty:          int = 1                # in lots (1 lot = exchange lot_size)
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -2756,19 +2765,20 @@ class DashboardServer:
             ce_strike = int(round((base_strike - offset) / step) * step)
             pe_strike = int(round((base_strike + offset) / step) * step)
 
-            # 5b. Resolve exact instrument_key from Upstox master
-            # (constructed keys are rejected by Upstox historical API — UDAPI100011)
-            try:
-                master = await asyncio.to_thread(
-                    _upstox_download_master_sync, bd_str
-                )
-            except Exception as exc:
-                return {"ok": False, "error": f"Failed to download Upstox instrument master: {exc}"}
+            # 5b. Resolve exact instrument_key via InstrumentRegistry
+            # (uses Upstox get_option_contracts API — targeted and lightweight)
+            from data_layer.instrument_registry import REGISTRY as _REG
 
-            ce_key = _find_upstox_instrument_key(master, script, expiry, ce_strike, "CE")
-            pe_key = _find_upstox_instrument_key(master, script, expiry, pe_strike, "PE")
+            if not _REG.is_loaded(script):
+                try:
+                    await asyncio.to_thread(_REG.load_sync, script, access_token)
+                except Exception as exc:
+                    return {"ok": False, "error": f"Failed to load instrument registry [{script}]: {exc}"}
 
-            # Fallback: show constructed key if not found in master (for display only)
+            ce_key = _REG.get_upstox_key(script, expiry, ce_strike, "CE")
+            pe_key = _REG.get_upstox_key(script, expiry, pe_strike, "PE")
+
+            # Fallback: show constructed key if not found in registry (for display only)
             ce_key_display = ce_key or _upstox_option_key(script, expiry, ce_strike, "CE")
             pe_key_display = pe_key or _upstox_option_key(script, expiry, pe_strike, "PE")
 
@@ -2776,9 +2786,9 @@ class DashboardServer:
                 return {
                     "ok": False,
                     "error": (
-                        f"Contracts not found in Upstox instrument master for "
+                        f"Contracts not found in Upstox registry for "
                         f"{script} expiry={expiry.isoformat()} CE={ce_strike} PE={pe_strike}. "
-                        "The expiry may have already passed or this contract is not listed."
+                        "Expiry may have passed or token may have expired."
                     ),
                 }
 
@@ -2962,6 +2972,154 @@ class DashboardServer:
                 "signal_count":       sandbox_eng.signal_count(),
                 "option_data_note":   option_data_note,
             }
+
+        # ── ADMIN — AMO connectivity test ─────────────────────────────────────
+
+        @app.post("/api/admin/amo_test", tags=["Admin"])
+        async def api_amo_test(
+            payload: _AmoTestSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            """
+            Place a real AMO (After Market Order) for 1 lot at market price to verify
+            broker connectivity, symbol resolution, and order routing end-to-end.
+
+            The order is placed as AMO=True so it is queued for next-session open —
+            safe to use as a connectivity test outside market hours.
+            Cancel the order immediately from the broker terminal after verifying.
+            """
+            from datetime import timedelta
+            from data_layer.instrument_registry import REGISTRY as _REG, next_expiry as _nexp
+            from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType, create_broker
+            from config.client_profiles import BrokerBinding
+
+            if _srv._client_db is None:
+                return {"ok": False, "error": "ClientDB not available."}
+
+            underlying = payload.underlying.upper()
+            lot_size   = _srv._cfg.exchange.lot_sizes.get(underlying, 75)
+            qty        = payload.qty * lot_size
+
+            # Resolve expiry
+            today = datetime.now(IST).date()
+            expiry_pref = payload.expiry_pref.lower()
+            if expiry_pref == "next_week":
+                expiry = _nexp(underlying, today + timedelta(days=1))
+                expiry = _nexp(underlying, expiry + timedelta(days=1))
+            elif expiry_pref == "monthly":
+                # Next month's last expiry weekday
+                m = today.month % 12 + 1
+                y = today.year + (1 if today.month == 12 else 0)
+                from calendar import monthrange as _mr
+                last_day = date(y, m, _mr(y, m)[1])
+                wd = _WEEKLY_EXPIRY_WEEKDAY.get(underlying, 1)
+                while last_day.weekday() != wd:
+                    last_day -= timedelta(days=1)
+                expiry = last_day
+            else:
+                expiry = _nexp(underlying, today)
+
+            # Resolve strike (ATM if not specified)
+            if payload.strike:
+                strike = int(payload.strike)
+            else:
+                # Use spot from trap engine telemetry or fallback
+                spot = 0.0
+                if _srv._trap_engine:
+                    try:
+                        snap = _srv._trap_engine.telemetry_snapshot()
+                        spot = snap.get(underlying, {}).get("current_prem", 0.0)
+                    except Exception:
+                        pass
+                if spot <= 0:
+                    return {"ok": False, "error": "Cannot determine spot price. Provide strike explicitly."}
+                step   = _STRIKE_STEPS.get(underlying, 50)
+                strike = int(round(spot / step) * step)
+
+            # Load registry if needed
+            _upstox_creds = await asyncio.to_thread(
+                _srv._client_db.get_feeder_creds_sync, "upstox"
+            )
+            _upstox_token = (_upstox_creds or {}).get("access_token", "")
+            if _upstox_token and not _REG.is_loaded(underlying):
+                try:
+                    await asyncio.to_thread(_REG.load_sync, underlying, _upstox_token)
+                except Exception:
+                    pass
+
+            # Fetch client binding
+            db_client = _srv._client_db.get_client_sync(payload.client_id)
+            if db_client is None:
+                return {"ok": False, "error": f"Client '{payload.client_id}' not found."}
+
+            bindings = await asyncio.to_thread(
+                _srv._client_db.get_bindings_sync, payload.client_id
+            )
+            binding_row = next((b for b in bindings if b["binding_id"] == payload.binding_id), None)
+            if binding_row is None:
+                return {"ok": False, "error": f"Binding '{payload.binding_id}' not found."}
+
+            provider = binding_row.get("provider", "mock")
+
+            # Build broker-specific symbol
+            broker_symbol = _REG.get_broker_symbol(
+                underlying, expiry, strike, payload.opt_type, provider
+            )
+
+            # Build broker instance
+            from config.client_profiles import BrokerBinding as _BB
+            bb = _BB(
+                binding_id=binding_row["binding_id"],
+                provider=provider,
+                label=binding_row.get("label", ""),
+                user_id=binding_row.get("user_id", ""),
+                api_key=binding_row.get("api_key", ""),
+                api_secret=binding_row.get("api_secret", ""),
+                access_token=binding_row.get("access_token", ""),
+                lot_multiplier=float(binding_row.get("lot_multiplier", 1.0)),
+                is_trade_enabled=bool(binding_row.get("is_trade_enabled", 1)),
+            )
+
+            broker = create_broker(bb, payload.client_id)
+            auth_ok = await broker.authenticate()
+            if not auth_ok:
+                return {"ok": False, "error": f"Broker auth failed for {provider}/{payload.binding_id}."}
+
+            req = OrderRequest(
+                broker_symbol=broker_symbol,
+                exchange="NFO" if underlying != "SENSEX" else "BFO",
+                side=OrderSide.BUY,
+                qty=qty,
+                order_type=OrderType.MARKET,
+                price=0.0,
+                tag=f"AMO_TEST_{underlying}_{payload.opt_type}",
+                client_id=payload.client_id,
+            )
+
+            # Enable AMO on the broker if supported
+            if hasattr(broker, "_is_amo"):
+                broker._is_amo = True
+
+            try:
+                order_id = await broker.place_order(req)
+                await broker.logout()
+                return {
+                    "ok":           True,
+                    "order_id":     order_id,
+                    "provider":     provider,
+                    "broker_symbol": broker_symbol,
+                    "underlying":   underlying,
+                    "expiry":       expiry.isoformat(),
+                    "strike":       strike,
+                    "opt_type":     payload.opt_type,
+                    "qty":          qty,
+                    "lots":         payload.qty,
+                    "lot_size":     lot_size,
+                    "message":      "AMO placed. Cancel from broker terminal immediately after verifying.",
+                }
+            except Exception as exc:
+                await broker.logout()
+                return {"ok": False, "error": str(exc), "broker_symbol": broker_symbol}
 
         # ── ADMIN — portfolio risk command center ────────────────────────────
 

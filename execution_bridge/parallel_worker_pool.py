@@ -323,48 +323,53 @@ class ClientExecutionWorker:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _translate(self, signal: SignalPackage, binding_id: str) -> Optional[str]:
-        expiry = self._derive_expiry()
-        internal = InternalSymbol(
-            underlying=signal.underlying,
-            strike=signal.target_strike,
-            option_type=signal.option_type,
-            expiry=expiry,
-        )
+        expiry = self._derive_expiry(signal.underlying)
         provider = next(
             (b.provider for b in self._client.broker_bindings if b.binding_id == binding_id),
             "mock",
         )
         try:
-            if provider == "shoonya":
-                return SymbolTranslator.to_shoonya(internal)
-            elif provider == "fyers":
-                return SymbolTranslator.to_fyers(internal)
-            elif provider == "angelone":
-                return SymbolTranslator.to_angelone(internal)
-            elif provider == "dhan":
-                return SymbolTranslator.to_dhan_lookup_key(internal)
-            elif provider == "upstox":
-                return SymbolTranslator.to_upstox(internal)
-            else:
-                return str(internal)
+            from data_layer.instrument_registry import REGISTRY
+            return REGISTRY.get_broker_symbol(
+                signal.underlying,
+                expiry,
+                int(signal.target_strike),
+                signal.option_type,
+                provider,
+            )
         except Exception as exc:
             logger.warning("Worker[%s]: symbol translation failed: %s", self._client.client_id, exc)
             return None
 
-    def _derive_expiry(self) -> date:
+    def _derive_expiry(self, underlying: str = "NIFTY") -> date:
+        """
+        Return the correct weekly expiry for this underlying.
+        NIFTY = Tuesday, BANKNIFTY = Wednesday, FINNIFTY = Tuesday.
+        Respects client expiry_preference (CURRENT_WEEK / NEXT_WEEK / MONTHLY).
+        """
+        from data_layer.instrument_registry import REGISTRY, _calc_next_expiry
         today = datetime.now(IST).date()
-        pref = self._client.expiry_preference
-        days_thu = (3 - today.weekday()) % 7 or 7
-        expiry = today + timedelta(days=days_thu)
+        pref  = self._client.expiry_preference
+
+        # Use registry if loaded (has real active expiries from Upstox)
+        if REGISTRY.is_loaded(underlying):
+            expiry = REGISTRY.get_active_expiry(underlying, today)
+            if expiry is None:
+                expiry = _calc_next_expiry(underlying, today)
+        else:
+            expiry = _calc_next_expiry(underlying, today)
+
         if pref == "NEXT_WEEK":
-            expiry += timedelta(weeks=1)
+            # Advance by 7 days, then snap to correct weekday
+            expiry = _calc_next_expiry(underlying, expiry + timedelta(days=1))
         elif pref == "MONTHLY":
-            from calendar import monthrange
+            # Last Thursday of next month (legacy — kept for non-NIFTY instruments)
             m = today.month % 12 + 1
             y = today.year + (1 if today.month == 12 else 0)
             last = date(y, m, 1) - timedelta(days=1)
             back = (last.weekday() - 3) % 7
             expiry = last - timedelta(days=back)
+
         return expiry
 
     def _compute_lots(self, signal: SignalPackage, broker: BaseBroker) -> int:

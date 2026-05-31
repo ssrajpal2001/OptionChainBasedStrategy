@@ -293,18 +293,42 @@ class StrikeRebalancer:
         )
 
     def _strikes_to_tokens(self, underlying: str, strikes) -> list:
-        """Convert strike prices to broker-agnostic subscription token strings."""
+        """
+        Convert strike prices to subscription tokens in the feeder's native format.
+        Uses InstrumentRegistry to derive the correct broker-specific symbol.
+        Falls back to internal canonical format if registry not loaded.
+        """
+        from data_layer.instrument_registry import REGISTRY, next_expiry as _next_expiry
+
+        today  = datetime.now(IST).date()
+        expiry = _next_expiry(underlying, today)
+
+        # Detect provider from feeder type
+        provider = "internal"
+        feeder_type = type(self._feeder).__name__
+        if "Fyers" in feeder_type:
+            provider = "fyers"
+        elif "Upstox" in feeder_type:
+            provider = "upstox"
+        elif "Shared" in feeder_type or "Mock" in feeder_type:
+            provider = "internal"
+
         tokens = []
-        today = datetime.now(IST).date()
         for strike in strikes:
+            strike_int = int(round(float(strike)))
             for otype in ("CE", "PE"):
-                sym = InternalSymbol(
-                    underlying=underlying,
-                    strike=float(strike),
-                    option_type=otype,
-                    expiry=today,
-                )
-                tokens.append(str(sym))
+                if provider == "internal":
+                    sym = InternalSymbol(
+                        underlying=underlying, strike=float(strike_int),
+                        option_type=otype, expiry=expiry,
+                    )
+                    tokens.append(str(sym))
+                else:
+                    sym = REGISTRY.get_broker_symbol(
+                        underlying, expiry, strike_int, otype, provider
+                    )
+                    if sym:
+                        tokens.append(sym)
         return tokens
 
 

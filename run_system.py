@@ -286,6 +286,32 @@ async def _run_live(
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
+    # ── Instrument registry — load active contracts from Upstox API ───────────
+    from data_layer.instrument_registry import REGISTRY as _instrument_registry
+    _upstox_creds = await asyncio.to_thread(
+        _shared_client_db.get_feeder_creds_sync, "upstox"
+    )
+    _upstox_token = (_upstox_creds or {}).get("access_token", "")
+    if _upstox_token:
+        for _idx in cfg.monitored_indices:
+            try:
+                await asyncio.to_thread(_instrument_registry.load_sync, _idx, _upstox_token)
+                # Inject Upstox instrument map into UpstoxBroker instances
+                _upstox_map = _instrument_registry.build_instrument_map(_idx)
+                for _brokers_by_binding in router._brokers.values():
+                    for _broker in _brokers_by_binding.values():
+                        if hasattr(_broker, "inject_instrument_map"):
+                            _broker.inject_instrument_map(_upstox_map)
+            except Exception as _exc:
+                logging.getLogger(__name__).warning(
+                    "InstrumentRegistry: failed to load [%s]: %s", _idx, _exc
+                )
+    else:
+        logging.getLogger(__name__).warning(
+            "InstrumentRegistry: no Upstox token — using constructed symbols. "
+            "Authenticate Upstox feeder via Admin > Feeder for exact instrument keys."
+        )
+
     # ── Data-layer operational modules ────────────────────────────────────────
     rebalancer     = StrikeRebalancer(bus, cfg, feeder)
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
