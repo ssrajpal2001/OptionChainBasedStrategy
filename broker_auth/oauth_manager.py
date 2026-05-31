@@ -164,14 +164,14 @@ def _dhan_auth_url(app_id: str, app_secret: str, dhan_client_id: str) -> str:
 def _angelone_auth_url(api_key: str, callback_url: str, state: str) -> str:
     """
     AngelOne implicit redirect flow.
-    State is embedded in the redirect_url path so it comes back even though
-    AngelOne does not reliably return the ?state= query param.
-    callback_url should be http://<server>/callback/angelone (without trailing state).
+    redirect_url must EXACTLY match the URL registered in the AngelOne developer portal.
+    State is passed as ?state= so AngelOne returns it unchanged in the callback.
+    callback_url should be https://<server>/callback/angelone (no trailing slash, no state suffix).
     """
-    callback_with_state = f"{callback_url.rstrip('/')}/{state}"
+    base_url = callback_url.rstrip("/")
     return (
         f"https://smartapi.angelone.in/publisher-login/"
-        f"?api_key={api_key}&state={state}&redirect_url={callback_with_state}"
+        f"?api_key={api_key}&state={state}&redirect_url={base_url}"
     )
 
 

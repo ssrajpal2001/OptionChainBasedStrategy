@@ -1990,9 +1990,9 @@ class DashboardServer:
         # ── UNIFIED OAuth Callback Handler ────────────────────────────────────
         # Receives redirects from ALL 6 broker login portals.
         # Routing strategy:
-        #   Fyers/Upstox/Zerodha/AliceBlue: state in ?state= query param
-        #   AngelOne: state in URL path (/callback/angelone/{state})
+        #   Fyers/Upstox/Zerodha/AngelOne: state in ?state= query param
         #   Dhan: no state; consume-consent returns dhanClientId → DB lookup
+        #   AliceBlue: state in ?state= query param
 
         async def _handle_oauth_callback(
             broker_name: str,
