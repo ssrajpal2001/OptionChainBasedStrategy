@@ -439,14 +439,39 @@ class TrapTradingEngine:
         htf_buf.push(c)
 
         if st.phase == _Phase.IDLE:
-            # Stage 1: need two bearish candles where candle 2 closes < candle 1 low
+            # ── Single-candle trap (priority check) ──────────────────────────
+            # Pattern: candle opens high, sweeps ABOVE prior candle's high
+            # (stop hunt), then closes BEARISH with meaningful body.
+            # The sweep and reversal happen in ONE bar — skip Stage 1 wait.
+            body_range = c.high - c.low + 0.01
+            body_pct   = (c.open - c.close) / body_range  # bearish body as % of range
             if (is_bearish
+                    and len(htf_buf) >= 1
+                    and c.high > prev_high          # swept above prior candle's high
+                    and body_pct >= 0.30):          # body ≥ 30% of candle range
+                st.htf_bearish_open = c.open    # bears' entry = open of sweep candle
+                st.htf_bearish_high = c.high    # bears' SL = sweep high
+                st.entry_origin     = c.open    # entry_origin = open (reversal start)
+                st.target_high      = c.high    # target = sweep high
+                st.htf_bearish_ts   = c.timestamp
+                st.phase            = _Phase.TRAP_LOCKED
+                logger.info(
+                    "TrapEngine [%s] Single-candle TRAP_LOCKED — swept prev_high=%.2f "
+                    "body_pct=%.0f%% entry_origin=%.2f target=%.2f @ %s",
+                    c.symbol, prev_high, body_pct * 100,
+                    st.entry_origin, st.target_high,
+                    c.timestamp.strftime("%H:%M"),
+                )
+
+            # ── Two-candle trap (classic pattern) ────────────────────────────
+            # Stage 1: two consecutive bearish candles, candle 2 closes < candle 1 low
+            elif (is_bearish
                     and prev_is_bearish
                     and len(htf_buf) >= 2
                     and c.close < prev_low):
-                # Two-candle confirmation: bears entered at Candle 1's low
-                st.htf_bearish_open = prev_low    # bears' entry reference (Candle 1 low)
-                st.htf_bearish_high = prev_high   # bears' stop loss = HIGH of Candle 1
+                # Bears entered at Candle 1's low; stop loss = HIGH of Candle 1
+                st.htf_bearish_open = prev_low
+                st.htf_bearish_high = prev_high
                 st.htf_bearish_ts   = c.timestamp
                 st.phase            = _Phase.HTF_BEARISH
                 logger.debug(
@@ -455,7 +480,7 @@ class TrapTradingEngine:
                     c.symbol, st.htf_bearish_open, st.htf_bearish_high,
                     c.timestamp.strftime("%H:%M"),
                 )
-                # Same-candle check: confirmation candle may also sweep bears' SL
+                # Same-candle sweep check
                 if c.high > st.htf_bearish_high:
                     st.entry_origin = st.htf_bearish_open
                     st.target_high  = c.high

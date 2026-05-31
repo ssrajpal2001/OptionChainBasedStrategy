@@ -2785,7 +2785,9 @@ class DashboardServer:
 
             prior_open  = prior_bars[0]["open"]
             prior_close = prior_bars[-1]["close"]
-            base_strike = int(round(((prior_open + prior_close) / 2) / step) * step)
+            prior_high  = max(b["high"] for b in prior_bars)
+            prior_low   = min(b["low"]  for b in prior_bars)
+            base_strike = int(round(((prior_high + prior_low) / 2) / step) * step)
 
             # 6. DTE ITM matrix
             offset    = _dte_itm_offset(dte, step)
@@ -2899,6 +2901,7 @@ class DashboardServer:
 
                 transitions: list = []
                 htf_table:   list = []   # every HTF bar with remarks
+                mtf_table:   list = []   # every MTF bar with remarks
                 prev_phase = "IDLE"
                 retest_pct = tc.RETEST_ZONE_PERCENT / 100.0
                 slippage   = tc.SLIPPAGE_BUFFER
@@ -2923,7 +2926,14 @@ class DashboardServer:
                         # Determine remark for HTF table
                         new_phase = st.phase.name if st else "IDLE"
                         remark = ""
-                        if prev_phase == "IDLE" and new_phase == "HTF_BEARISH":
+                        if prev_phase == "IDLE" and new_phase == "TRAP_LOCKED":
+                            remark = (
+                                f"STAGE 1+2 SINGLE-CANDLE TRAP — swept prev high, bearish close. "
+                                f"entry_origin={st.entry_origin:.2f}  "
+                                f"target={st.target_high:.2f}  "
+                                f"retest_zone=[{st.entry_origin*(1-retest_pct):.2f}–{st.entry_origin*(1+retest_pct):.2f}]"
+                            )
+                        elif prev_phase == "IDLE" and new_phase == "HTF_BEARISH":
                             remark = "STAGE 1 — Bearish HTF candle. Trap candidate locked."
                         elif prev_phase == "HTF_BEARISH" and new_phase == "TRAP_LOCKED":
                             remark = (
@@ -2961,8 +2971,27 @@ class DashboardServer:
                     elif kind == "mtf":
                         tf = tc.MTF_MINUTES
                         candle = _mk_candle(sym_label, tf, ts, row)
+                        phase_before = eng._states.get(sym_label)
+                        phase_before_name = phase_before.phase.name if phase_before else "IDLE"
                         eng._process_mtf(candle)
                         st = eng._states.get(sym_label)
+                        new_phase_mtf = st.phase.name if st else "IDLE"
+                        mtf_remark = ""
+                        if phase_before_name != "MTF_BEARISH" and new_phase_mtf == "MTF_BEARISH":
+                            mtf_remark = "STAGE 4a — Bearish 5m candle. MTF trap candidate."
+                        elif phase_before_name == "MTF_BEARISH" and new_phase_mtf == "ARMED":
+                            mtf_remark = f"STAGE 4b — MTF sweep confirmed. ARMED. ltf_entry={st.ltf_entry_line:.2f} ltf_sl={st.ltf_sl_line:.2f}"
+                        elif new_phase_mtf == "MTF_BEARISH":
+                            mtf_remark = "Stage 4a candidate updated."
+                        mtf_table.append({
+                            "ts":     str(ts)[:19],
+                            "open":   round(float(row["open"]),  2),
+                            "high":   round(float(row["high"]),  2),
+                            "low":    round(float(row["low"]),   2),
+                            "close":  round(float(row["close"]), 2),
+                            "phase":  new_phase_mtf,
+                            "remark": mtf_remark,
+                        })
 
                     elif kind == "1m" and st is not None:
                         # Stage 3: synthetic tick check — TRAP_LOCKED → RETEST_ALERT
@@ -3014,6 +3043,7 @@ class DashboardServer:
                     "htf_bars":          len(htf),
                     "mtf_bars":          len(mtf),
                     "htf_table":         htf_table,
+                    "mtf_table":         mtf_table,
                     "phase_transitions": [t for t in transitions if t["timeframe"] in ("htf","mtf")],
                     "all_transitions":   transitions,
                     "final_phase":       final.phase.name if final else "IDLE",
@@ -3076,6 +3106,8 @@ class DashboardServer:
                     "prior_day":              prior_str,
                     "prior_day_open":         round(prior_open,  2),
                     "prior_day_close":        round(prior_close, 2),
+                    "prior_day_high":         round(prior_high,  2),
+                    "prior_day_low":          round(prior_low,   2),
                     "calculated_base_strike": base_strike,
                     "days_to_expiry":         dte,
                     "itm_offset_pts":         offset,

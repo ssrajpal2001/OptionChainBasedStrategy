@@ -4733,7 +4733,7 @@ function histReplay() {
         <span>2 DTE (Sun) → 300 pts</span>
         <span>3 DTE (Fri) → 400 pts</span>
         <span>4+ DTE → 500 pts</span>
-        <span class="text-gray-400 ml-2">Base = round(avg(PriorOpen, PriorClose) / step) × step</span>
+        <span class="text-gray-400 ml-2">Base = round((PriorHigh + PriorLow) / 2 / step) × step</span>
       </div>
 
       <!-- Error -->
@@ -4760,8 +4760,8 @@ function histReplay() {
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-0 divide-x divide-y divide-gray-700/50 text-[10px] font-mono">
               <template x-for="[k,v] in Object.entries({
                 'Prior Day':          result.contract_info.prior_day,
-                'Prior Open':         result.contract_info.prior_day_open,
-                'Prior Close':        result.contract_info.prior_day_close,
+                'Prior High':         result.contract_info.prior_day_high,
+                'Prior Low':          result.contract_info.prior_day_low,
                 'Base Strike':        result.contract_info.calculated_base_strike,
                 'Expiry':             result.contract_info.target_expiry,
                 'DTE':                result.contract_info.days_to_expiry,
@@ -4833,25 +4833,25 @@ function histReplay() {
 
           <!-- CE Engine Phase Log -->
           <template x-if="result.ce_engine">
-            <div class="bg-gray-800/60 rounded-lg border border-green-900 overflow-hidden">
-              <div class="px-3 py-2 border-b border-green-900 flex items-center justify-between">
-                <span class="text-[10px] font-semibold text-green-400 uppercase tracking-widest">CE Option — 5-Stage Phase Log</span>
-                <span class="text-[10px] font-mono text-gray-500">
+            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:rgba(var(--t-green-rgb),0.4)">
+              <div class="px-3 py-2 border-b flex items-center justify-between" style="border-color:rgba(var(--t-green-rgb),0.3)">
+                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-green)">CE Option — 5-Stage Phase Log</span>
+                <span class="text-[10px] font-mono" style="color:var(--t-muted)">
                   Final: <span :class="phaseColor(result.ce_engine.final_phase)" x-text="result.ce_engine.final_phase"></span>
-                  &nbsp;HTF:<span class="text-gray-400" x-text="result.ce_engine.htf_bars"></span>
-                  MTF:<span class="text-gray-400" x-text="result.ce_engine.mtf_bars"></span>
+                  &nbsp;HTF:<span style="color:var(--t-text)" x-text="result.ce_engine.htf_bars"></span>
+                  MTF:<span style="color:var(--t-text)" x-text="result.ce_engine.mtf_bars"></span>
                 </span>
               </div>
-              <div x-show="!result.ce_engine.phase_transitions.length" class="px-3 py-3 text-[10px] text-gray-500">No CE phase transitions detected.</div>
-              <div class="divide-y divide-gray-800">
+              <div x-show="!result.ce_engine.phase_transitions.length" class="px-3 py-3 text-[10px]" style="color:var(--t-muted)">No CE phase transitions detected.</div>
+              <div>
                 <template x-for="(t,i) in result.ce_engine.phase_transitions" :key="i">
-                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono">
-                    <span class="text-gray-600 w-32 shrink-0" x-text="t.ts"></span>
-                    <span class="text-gray-500 w-8 shrink-0" x-text="t.timeframe"></span>
+                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono" style="border-bottom:1px solid var(--t-border)">
+                    <span class="w-32 shrink-0" style="color:var(--t-muted)" x-text="t.ts"></span>
+                    <span class="w-8 shrink-0" style="color:var(--t-muted)" x-text="t.timeframe"></span>
                     <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
-                    <span class="text-gray-600">-&gt;</span>
+                    <span style="color:var(--t-dim)">-&gt;</span>
                     <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
-                    <span class="text-gray-600 ml-auto">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
+                    <span class="ml-auto" style="color:var(--t-muted)">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
                   </div>
                 </template>
               </div>
@@ -4860,23 +4860,23 @@ function histReplay() {
 
           <!-- CE HTF Candle Analysis Table -->
           <template x-if="result.ce_engine && result.ce_engine.htf_table && result.ce_engine.htf_table.length">
-            <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
-              <div class="px-3 py-2 border-b border-gray-700">
-                <span class="text-[10px] font-semibold text-gray-300 uppercase tracking-widest">CE — 75m HTF Candle Analysis</span>
+            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
+              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
+                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-cyan)">CE — 75m HTF Candle Analysis</span>
               </div>
               <!-- Key levels summary -->
               <template x-if="result.ce_engine.entry_origin > 0">
-                <div class="px-3 py-2 border-b border-gray-700 grid grid-cols-2 sm:grid-cols-5 gap-2 text-[10px] font-mono">
-                  <div><div class="text-gray-500">HTF Entry Origin</div><div class="text-amber-300 font-bold" x-text="result.ce_engine.entry_origin"></div></div>
-                  <div><div class="text-gray-500">HTF Target High</div><div class="text-green-400 font-bold" x-text="result.ce_engine.target_high"></div></div>
-                  <div><div class="text-gray-500">MTF Entry Line</div><div class="text-indigo-300 font-bold" x-text="result.ce_engine.ltf_entry_line || '—'"></div></div>
-                  <div><div class="text-gray-500">MTF Stop Loss</div><div class="text-red-400 font-bold" x-text="result.ce_engine.ltf_sl_line || '—'"></div></div>
-                  <div><div class="text-gray-500">Rolling Base</div><div class="text-gray-300" x-text="result.ce_engine.rolling_base || '—'"></div></div>
+                <div class="px-3 py-2 border-b grid grid-cols-2 sm:grid-cols-5 gap-2 text-[10px] font-mono" style="border-color:var(--t-border)">
+                  <div><div style="color:var(--t-muted)">HTF Entry Origin</div><div class="text-amber-400 font-bold" x-text="result.ce_engine.entry_origin"></div></div>
+                  <div><div style="color:var(--t-muted)">HTF Target High</div><div class="font-bold" style="color:var(--t-green)" x-text="result.ce_engine.target_high"></div></div>
+                  <div><div style="color:var(--t-muted)">MTF Entry Line</div><div class="text-indigo-400 font-bold" x-text="result.ce_engine.ltf_entry_line || '—'"></div></div>
+                  <div><div style="color:var(--t-muted)">MTF Stop Loss</div><div class="font-bold" style="color:var(--t-red)" x-text="result.ce_engine.ltf_sl_line || '—'"></div></div>
+                  <div><div style="color:var(--t-muted)">Rolling Base</div><div style="color:var(--t-text)" x-text="result.ce_engine.rolling_base || '—'"></div></div>
                 </div>
               </template>
               <div class="overflow-x-auto">
                 <table class="w-full text-[10px] font-mono">
-                  <thead><tr class="border-b border-gray-700 text-gray-500">
+                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
                     <th class="text-left px-2 py-1.5">Timestamp</th>
                     <th class="text-right px-2 py-1.5">Open</th>
                     <th class="text-right px-2 py-1.5">High</th>
@@ -4885,16 +4885,53 @@ function histReplay() {
                     <th class="text-left px-2 py-1.5">Phase</th>
                     <th class="text-left px-2 py-1.5">Remark</th>
                   </tr></thead>
-                  <tbody class="divide-y divide-gray-800">
+                  <tbody>
                     <template x-for="(r,i) in result.ce_engine.htf_table" :key="i">
-                      <tr :class="r.remark.includes('STAGE 2') ? 'bg-green-900/20' : r.remark.includes('STAGE 1') ? 'bg-amber-900/20' : r.remark.includes('STAGE 5') ? 'bg-blue-900/30' : ''">
-                        <td class="px-2 py-1 text-gray-500" x-text="r.ts"></td>
-                        <td class="px-2 py-1 text-right" x-text="r.open"></td>
-                        <td class="px-2 py-1 text-right text-green-400" x-text="r.high"></td>
-                        <td class="px-2 py-1 text-right text-red-400" x-text="r.low"></td>
-                        <td class="px-2 py-1 text-right text-white font-bold" x-text="r.close"></td>
-                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='HTF_BEARISH','text-orange-400':r.phase==='TRAP_LOCKED','text-green-400':r.phase==='LIVE','text-purple-400':r.phase==='ARMED','text-gray-400':true}" x-text="r.phase"></td>
-                        <td class="px-2 py-1 text-gray-300 max-w-xs truncate" :title="r.remark" x-text="r.remark"></td>
+                      <tr :style="r.remark.includes('STAGE 2') || r.remark.includes('SINGLE-CANDLE') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 1') ? 'background:rgba(var(--t-amber-rgb),0.10)' : r.remark.includes('STAGE 5') ? 'background:rgba(var(--t-cyan-rgb),0.12)' : ''"
+                          style="border-bottom:1px solid var(--t-border)">
+                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
+                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
+                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='HTF_BEARISH','text-orange-400':r.phase==='TRAP_LOCKED','text-green-400':r.phase==='LIVE','text-purple-400':r.phase==='ARMED'}" x-text="r.phase"></td>
+                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <!-- CE MTF (5m) Candle Analysis Table -->
+          <template x-if="result.ce_engine && result.ce_engine.mtf_table && result.ce_engine.mtf_table.length">
+            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
+              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
+                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-cyan)">CE — 5m MTF Candle Analysis</span>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="w-full text-[10px] font-mono">
+                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
+                    <th class="text-left px-2 py-1.5">Timestamp</th>
+                    <th class="text-right px-2 py-1.5">Open</th>
+                    <th class="text-right px-2 py-1.5">High</th>
+                    <th class="text-right px-2 py-1.5">Low</th>
+                    <th class="text-right px-2 py-1.5">Close</th>
+                    <th class="text-left px-2 py-1.5">Phase</th>
+                    <th class="text-left px-2 py-1.5">Remark</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="(r,i) in result.ce_engine.mtf_table" :key="i">
+                      <tr :style="r.remark.includes('STAGE 4b') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4a') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
+                          style="border-bottom:1px solid var(--t-border)">
+                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
+                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
+                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='MTF_BEARISH','text-purple-400':r.phase==='ARMED','text-green-400':r.phase==='LIVE'}" x-text="r.phase"></td>
+                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
                       </tr>
                     </template>
                   </tbody>
@@ -4905,44 +4942,116 @@ function histReplay() {
 
           <!-- PE Engine Phase Log -->
           <template x-if="result.pe_engine">
-            <div class="bg-gray-800/60 rounded-lg border border-red-900 overflow-hidden">
-              <div class="px-3 py-2 border-b border-red-900 flex items-center justify-between">
-                <span class="text-[10px] font-semibold text-red-400 uppercase tracking-widest">PE Option — 5-Stage Phase Log</span>
-                <span class="text-[10px] font-mono text-gray-500">
+            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:rgba(var(--t-red-rgb),0.4)">
+              <div class="px-3 py-2 border-b flex items-center justify-between" style="border-color:rgba(var(--t-red-rgb),0.3)">
+                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-red)">PE Option — 5-Stage Phase Log</span>
+                <span class="text-[10px] font-mono" style="color:var(--t-muted)">
                   Final: <span :class="phaseColor(result.pe_engine.final_phase)" x-text="result.pe_engine.final_phase"></span>
-                  &nbsp;HTF:<span class="text-gray-400" x-text="result.pe_engine.htf_bars"></span>
-                  MTF:<span class="text-gray-400" x-text="result.pe_engine.mtf_bars"></span>
+                  &nbsp;HTF:<span style="color:var(--t-text)" x-text="result.pe_engine.htf_bars"></span>
+                  MTF:<span style="color:var(--t-text)" x-text="result.pe_engine.mtf_bars"></span>
                 </span>
               </div>
-              <div x-show="!result.pe_engine.phase_transitions.length" class="px-3 py-3 text-[10px] text-gray-500">No PE phase transitions detected.</div>
-              <div class="divide-y divide-gray-800">
+              <div x-show="!result.pe_engine.phase_transitions.length" class="px-3 py-3 text-[10px]" style="color:var(--t-muted)">No PE phase transitions detected.</div>
+              <div>
                 <template x-for="(t,i) in result.pe_engine.phase_transitions" :key="i">
-                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono">
-                    <span class="text-gray-600 w-32 shrink-0" x-text="t.ts"></span>
-                    <span class="text-gray-500 w-8 shrink-0" x-text="t.timeframe"></span>
+                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono" style="border-bottom:1px solid var(--t-border)">
+                    <span class="w-32 shrink-0" style="color:var(--t-muted)" x-text="t.ts"></span>
+                    <span class="w-8 shrink-0" style="color:var(--t-muted)" x-text="t.timeframe"></span>
                     <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
-                    <span class="text-gray-600">-&gt;</span>
+                    <span style="color:var(--t-dim)">-&gt;</span>
                     <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
-                    <span class="text-gray-600 ml-auto">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
+                    <span class="ml-auto" style="color:var(--t-muted)">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
                   </div>
                 </template>
               </div>
             </div>
           </template>
 
-          <!-- Trade Log / Chart Alignment Table -->
-          <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
-            <div class="px-3 py-2 border-b border-gray-700 flex items-center justify-between">
-              <span class="text-[10px] font-semibold text-indigo-300 uppercase tracking-widest">Chart Alignment Table</span>
-              <span class="text-[10px] font-mono text-gray-500" x-text="result.trade_count + ' trade(s) triggered'"></span>
+          <!-- PE HTF Candle Analysis Table -->
+          <template x-if="result.pe_engine && result.pe_engine.htf_table && result.pe_engine.htf_table.length">
+            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
+              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
+                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-red)">PE — 75m HTF Candle Analysis</span>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="w-full text-[10px] font-mono">
+                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
+                    <th class="text-left px-2 py-1.5">Timestamp</th>
+                    <th class="text-right px-2 py-1.5">Open</th>
+                    <th class="text-right px-2 py-1.5">High</th>
+                    <th class="text-right px-2 py-1.5">Low</th>
+                    <th class="text-right px-2 py-1.5">Close</th>
+                    <th class="text-left px-2 py-1.5">Phase</th>
+                    <th class="text-left px-2 py-1.5">Remark</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="(r,i) in result.pe_engine.htf_table" :key="i">
+                      <tr :style="r.remark.includes('STAGE 2') || r.remark.includes('SINGLE-CANDLE') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 1') ? 'background:rgba(var(--t-amber-rgb),0.10)' : r.remark.includes('STAGE 5') ? 'background:rgba(var(--t-cyan-rgb),0.12)' : ''"
+                          style="border-bottom:1px solid var(--t-border)">
+                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
+                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
+                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='HTF_BEARISH','text-orange-400':r.phase==='TRAP_LOCKED','text-green-400':r.phase==='LIVE','text-purple-400':r.phase==='ARMED','text-gray-400':true}" x-text="r.phase"></td>
+                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
             </div>
-            <div x-show="result.trade_count === 0" class="px-3 py-4 text-[10px] text-gray-500">
+          </template>
+
+          <!-- PE MTF (5m) Candle Analysis Table -->
+          <template x-if="result.pe_engine && result.pe_engine.mtf_table && result.pe_engine.mtf_table.length">
+            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
+              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
+                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-red)">PE — 5m MTF Candle Analysis</span>
+              </div>
+              <div class="overflow-x-auto">
+                <table class="w-full text-[10px] font-mono">
+                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
+                    <th class="text-left px-2 py-1.5">Timestamp</th>
+                    <th class="text-right px-2 py-1.5">Open</th>
+                    <th class="text-right px-2 py-1.5">High</th>
+                    <th class="text-right px-2 py-1.5">Low</th>
+                    <th class="text-right px-2 py-1.5">Close</th>
+                    <th class="text-left px-2 py-1.5">Phase</th>
+                    <th class="text-left px-2 py-1.5">Remark</th>
+                  </tr></thead>
+                  <tbody>
+                    <template x-for="(r,i) in result.pe_engine.mtf_table" :key="i">
+                      <tr :style="r.remark.includes('STAGE 4b') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4a') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
+                          style="border-bottom:1px solid var(--t-border)">
+                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
+                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
+                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
+                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='MTF_BEARISH','text-purple-400':r.phase==='ARMED','text-green-400':r.phase==='LIVE'}" x-text="r.phase"></td>
+                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+
+          <!-- Trade Log / Chart Alignment Table -->
+          <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
+            <div class="px-3 py-2 border-b flex items-center justify-between" style="border-color:var(--t-border)">
+              <span class="text-[10px] font-semibold text-indigo-400 uppercase tracking-widest">Chart Alignment Table</span>
+              <span class="text-[10px] font-mono" style="color:var(--t-muted)" x-text="result.trade_count + ' trade(s) triggered'"></span>
+            </div>
+            <div x-show="result.trade_count === 0" class="px-3 py-4 text-[10px]" style="color:var(--t-muted)">
               No trades triggered — engine did not reach ARMED state with this day's underlying structure. The 5-stage filter requires all stages to complete sequentially.
             </div>
             <div x-show="result.trade_count > 0" class="overflow-x-auto">
               <table class="w-full text-[10px] font-mono">
                 <thead>
-                  <tr class="border-b border-gray-700 text-gray-500">
+                  <tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
                     <th class="text-left px-3 py-2">Timestamp</th>
                     <th class="text-left px-3 py-2">Type</th>
                     <th class="text-right px-3 py-2">Entry Px</th>
@@ -4954,20 +5063,20 @@ function histReplay() {
                     <th class="text-right px-3 py-2">Margin est</th>
                   </tr>
                 </thead>
-                <tbody class="divide-y divide-gray-800">
+                <tbody>
                   <template x-for="(t,i) in result.trade_logs" :key="i">
-                    <tr class="hover:bg-gray-800/50">
-                      <td class="px-3 py-1.5 text-gray-400" x-text="t.timestamp"></td>
+                    <tr style="border-bottom:1px solid var(--t-border)">
+                      <td class="px-3 py-1.5" style="color:var(--t-muted)" x-text="t.timestamp"></td>
                       <td class="px-3 py-1.5">
-                        <span :class="t.type==='CE' ? 'text-green-400' : 'text-red-400'" x-text="t.type"></span>
+                        <span :style="t.type==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'" x-text="t.type"></span>
                       </td>
-                      <td class="px-3 py-1.5 text-right text-white" x-text="t.entry_price"></td>
-                      <td class="px-3 py-1.5 text-right" x-text="t.quantity"></td>
-                      <td class="px-3 py-1.5 text-right" x-text="t.lots"></td>
-                      <td class="px-3 py-1.5 text-right text-red-400" x-text="t.ltf_sl_line"></td>
-                      <td class="px-3 py-1.5 text-right text-green-400" x-text="t.macro_high_target"></td>
-                      <td class="px-3 py-1.5 text-right text-amber-300" x-text="t.entry_origin"></td>
-                      <td class="px-3 py-1.5 text-right text-gray-300" x-text="t.margin_est.toLocaleString()"></td>
+                      <td class="px-3 py-1.5 text-right font-bold" style="color:var(--t-bright)" x-text="t.entry_price"></td>
+                      <td class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="t.quantity"></td>
+                      <td class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="t.lots"></td>
+                      <td class="px-3 py-1.5 text-right" style="color:var(--t-red)" x-text="t.ltf_sl_line"></td>
+                      <td class="px-3 py-1.5 text-right" style="color:var(--t-green)" x-text="t.macro_high_target"></td>
+                      <td class="px-3 py-1.5 text-right text-amber-400" x-text="t.entry_origin"></td>
+                      <td class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="t.margin_est.toLocaleString()"></td>
                     </tr>
                   </template>
                 </tbody>
