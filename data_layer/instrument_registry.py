@@ -139,11 +139,15 @@ class InstrumentRegistry:
                         instrument_key=underlying_key,
                         expiry_date=expiry_str,
                     )
-                    # SDK sets _return_http_data_only=True — resp IS the list directly
                     resp_type = type(resp).__name__
-                    items = resp if isinstance(resp, list) else (
-                        list(resp) if hasattr(resp, "__iter__") else []
-                    )
+                    # SDK returns GetOptionContractResponse wrapper (not raw list)
+                    # .data contains the list[InstrumentData]
+                    if isinstance(resp, list):
+                        items = resp
+                    elif hasattr(resp, "data") and resp.data is not None:
+                        items = resp.data if isinstance(resp.data, list) else list(resp.data)
+                    else:
+                        items = []
                     diag.append(f"  {expiry_str}: resp type={resp_type} items={len(items)}")
                 except Exception as exc:
                     diag.append(f"  {expiry_str}: API EXCEPTION — {exc}")
@@ -231,13 +235,25 @@ class InstrumentRegistry:
         keys: Dict[Tuple[str, int, str], str] = {}
         expiry_set: Set[date] = set()
 
+        # Segment prefix for this underlying (BSE for SENSEX, NSE for rest)
+        seg_prefix = "BSE_FO|" if underlying == "SENSEX" else "NSE_FO|"
+        diag.append(f"Filtering master JSON: instrument_key startswith '{seg_prefix}' AND trading_symbol startswith '{underlying}'")
+
+        # Log first 3 instruments from the JSON so we can verify field names
+        for i, sample_inst in enumerate(raw_instruments[:3]):
+            ikey_s, ts_s, _, _ = self._parse_instrument(sample_inst)
+            diag.append(f"  sample[{i}]: instrument_key={ikey_s!r} trading_symbol={ts_s!r}")
+
         for inst in raw_instruments:
             ikey, ts, strike_raw, exp_raw = self._parse_instrument(inst)
-            seg   = inst.get("segment", "") if isinstance(inst, dict) else getattr(inst, "segment", "")
-            itype = inst.get("instrument_type", "") if isinstance(inst, dict) else getattr(inst, "instrument_type", "")
-            usym  = inst.get("underlying_symbol", "") if isinstance(inst, dict) else getattr(inst, "underlying_symbol", "")
 
-            if seg != "NSE_FO" or itype != "OPT" or usym != underlying or not ikey:
+            # Filter by instrument_key prefix (reliable, works regardless of field naming)
+            if not ikey or not ikey.startswith(seg_prefix):
+                continue
+
+            # Filter by trading_symbol starting with the underlying name
+            # Handles both weekly (NIFTY2660224500CE) and monthly (NIFTY26JUN24500CE)
+            if not ts.startswith(underlying):
                 continue
 
             try:
