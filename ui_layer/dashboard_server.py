@@ -3152,31 +3152,28 @@ class DashboardServer:
             if payload.strike:
                 strike = int(payload.strike)
             else:
-                # Use spot from trap engine telemetry or fallback
+                # Try spot from trap engine's spot cache (populated from live index ticks)
                 spot = 0.0
                 if _srv._trap_engine:
                     try:
-                        snap = _srv._trap_engine.telemetry_snapshot()
-                        spot = snap.get(underlying, {}).get("current_prem", 0.0)
+                        spot = _srv._trap_engine._spot_cache.get(underlying, 0.0)
                     except Exception:
                         pass
                 if spot <= 0:
-                    return {"ok": False, "error": "Cannot determine spot price. Provide strike explicitly."}
+                    step = _STRIKE_STEPS.get(underlying, 50)
+                    examples = {"NIFTY": "24500", "BANKNIFTY": "52000", "FINNIFTY": "23000"}
+                    hint = examples.get(underlying, f"nearest multiple of {step}")
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Market not live — spot price unavailable for {underlying}. "
+                            f"Enter a strike manually (e.g. {hint})."
+                        ),
+                    }
                 step   = _STRIKE_STEPS.get(underlying, 50)
                 strike = int(round(spot / step) * step)
 
-            # Load registry if needed
-            _upstox_creds = await asyncio.to_thread(
-                _srv._client_db.get_feeder_creds_sync, "upstox"
-            )
-            _upstox_token = (_upstox_creds or {}).get("access_token", "")
-            if _upstox_token and not _REG.is_loaded(underlying):
-                try:
-                    await asyncio.to_thread(_REG.load_sync, underlying, _upstox_token)
-                except Exception:
-                    pass
-
-            # Fetch client binding
+            # Fetch client binding (do this before registry load to fail fast)
             db_client = _srv._client_db.get_client_sync(payload.client_id)
             if db_client is None:
                 return {"ok": False, "error": f"Client '{payload.client_id}' not found."}
@@ -3190,10 +3187,41 @@ class DashboardServer:
 
             provider = binding_row.get("provider", "mock")
 
-            # Build broker-specific symbol
-            broker_symbol = _REG.get_broker_symbol(
-                underlying, expiry, strike, payload.opt_type, provider
+            # Load instrument registry if needed (requires Upstox token)
+            _upstox_creds = await asyncio.to_thread(
+                _srv._client_db.get_feeder_creds_sync, "upstox"
             )
+            _upstox_token = (_upstox_creds or {}).get("access_token", "")
+            if _upstox_token and not _REG.is_loaded(underlying):
+                try:
+                    await asyncio.to_thread(_REG.load_sync, underlying, _upstox_token)
+                except Exception as _e:
+                    logger.warning("AMO test: registry load failed: %s", _e)
+
+            # Build broker-specific symbol
+            try:
+                broker_symbol = _REG.get_broker_symbol(
+                    underlying, expiry, strike, payload.opt_type, provider
+                )
+            except Exception as _e:
+                broker_symbol = None
+                logger.warning("AMO test: get_broker_symbol failed: %s", _e)
+
+            if not broker_symbol:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Symbol not found in instrument registry for "
+                        f"{underlying} {expiry} {strike}{payload.opt_type} ({provider}). "
+                        f"Registry may not be loaded — ensure Upstox token is valid, "
+                        f"or the expiry/strike combination may not exist."
+                    ),
+                    "underlying": underlying,
+                    "expiry":     expiry.isoformat(),
+                    "strike":     strike,
+                    "opt_type":   payload.opt_type,
+                    "provider":   provider,
+                }
 
             # Build broker instance
             from config.client_profiles import BrokerBinding as _BB
@@ -3209,10 +3237,17 @@ class DashboardServer:
                 is_trade_enabled=bool(binding_row.get("is_trade_enabled", 1)),
             )
 
-            broker = create_broker(bb, payload.client_id)
-            auth_ok = await broker.authenticate()
+            try:
+                broker = create_broker(bb, payload.client_id)
+            except Exception as _e:
+                return {"ok": False, "error": f"Broker init failed: {_e}", "provider": provider}
+
+            try:
+                auth_ok = await broker.authenticate()
+            except Exception as _e:
+                return {"ok": False, "error": f"Broker auth error: {_e}", "provider": provider}
             if not auth_ok:
-                return {"ok": False, "error": f"Broker auth failed for {provider}/{payload.binding_id}."}
+                return {"ok": False, "error": f"Broker auth failed for {provider}/{payload.binding_id}. Check credentials/token.", "provider": provider}
 
             req = OrderRequest(
                 broker_symbol=broker_symbol,
@@ -3231,24 +3266,39 @@ class DashboardServer:
 
             try:
                 order_id = await broker.place_order(req)
-                await broker.logout()
+                try:
+                    await broker.logout()
+                except Exception:
+                    pass
                 return {
-                    "ok":           True,
-                    "order_id":     order_id,
-                    "provider":     provider,
+                    "ok":            True,
+                    "order_id":      order_id,
+                    "provider":      provider,
                     "broker_symbol": broker_symbol,
-                    "underlying":   underlying,
-                    "expiry":       expiry.isoformat(),
-                    "strike":       strike,
-                    "opt_type":     payload.opt_type,
-                    "qty":          qty,
-                    "lots":         payload.qty,
-                    "lot_size":     lot_size,
-                    "message":      "AMO placed. Cancel from broker terminal immediately after verifying.",
+                    "underlying":    underlying,
+                    "expiry":        expiry.isoformat(),
+                    "strike":        strike,
+                    "opt_type":      payload.opt_type,
+                    "qty":           qty,
+                    "lots":          payload.qty,
+                    "lot_size":      lot_size,
+                    "message":       "AMO placed. Cancel from broker terminal immediately after verifying.",
                 }
             except Exception as exc:
-                await broker.logout()
-                return {"ok": False, "error": str(exc), "broker_symbol": broker_symbol}
+                try:
+                    await broker.logout()
+                except Exception:
+                    pass
+                return {
+                    "ok":            False,
+                    "error":         str(exc),
+                    "broker_symbol": broker_symbol,
+                    "provider":      provider,
+                    "underlying":    underlying,
+                    "expiry":        expiry.isoformat(),
+                    "strike":        strike,
+                    "opt_type":      payload.opt_type,
+                }
 
         # ── ADMIN — Registry debug + reload ──────────────────────────────────
 
