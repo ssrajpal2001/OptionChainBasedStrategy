@@ -3942,55 +3942,72 @@ function histReplay() {
             <!-- Strike Distances -->
             <div>
               <div class="sec-label mb-1">STRIKE DISTANCES — <span x-text="adminSelectedIndex"></span></div>
-              <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">Both measured from ATM (not from each other)</p>
-              <div class="grid grid-cols-2 gap-2">
+              <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">Short = ATM ± short_otm. Hedge = Short ± wing_pts (further from ATM)</p>
+              <div class="grid grid-cols-3 gap-2">
                 <div>
                   <label class="sec-label">Short Leg OTM (pts)</label>
                   <input type="number" step="50" class="t-input mt-0.5"
                          x-model.number="indexConfig[adminSelectedIndex].iron_condor.short_leg_otm_pts"
                          title="Distance from ATM to short call/put strikes">
+                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">e.g. 300 → SELL ATM±300</div>
                 </div>
                 <div>
-                  <label class="sec-label">Long Leg OTM (pts)</label>
+                  <label class="sec-label">Wing Width (pts)</label>
                   <input type="number" step="50" class="t-input mt-0.5"
                          x-model.number="indexConfig[adminSelectedIndex].iron_condor.long_leg_otm_pts"
-                         title="Distance from ATM to long hedge strikes (must be > short OTM)">
+                         title="Distance from short strike to hedge (BUY) strike">
+                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">e.g. 150 → BUY short±150</div>
+                </div>
+                <div>
+                  <label class="sec-label">Min LTP Filter (₹)</label>
+                  <input type="number" step="1" min="0" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.min_ltp"
+                         title="Both short legs must have LTP >= this value before entry fires">
+                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">0 = disabled. Skips penny-premium entries</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Rolling / Adjustment -->
+            <div class="p-3 rounded" style="background:rgba(255,165,0,0.06);border:1px solid rgba(255,165,0,0.18)">
+              <div class="sec-label mb-2">DYNAMIC ROLLING (RATIO SHIFT)</div>
+              <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">
+                When one short leg LTP ÷ other ≥ Ratio Trigger: close profitable side at 2× qty,
+                old short becomes new hedge, new short = ATM ± (original_diff ÷ 2).
+              </p>
+              <div class="grid grid-cols-3 gap-2">
+                <div>
+                  <label class="sec-label">Ratio Trigger</label>
+                  <input type="number" step="0.1" min="1.5" max="5" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.ratio_trigger"
+                         title="CE/PE ltp ratio that triggers a roll (default 2.0 = 2:1)">
+                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">2.0 = one leg 2× the other</div>
+                </div>
+                <div>
+                  <label class="sec-label">Max Adjustments/Side</label>
+                  <input type="number" step="1" min="1" max="10" class="t-input mt-0.5"
+                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.max_adjustments_per_side"
+                         title="After this many rolls on one side, close entire IC and re-enter">
+                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">Hard stop → fresh IC</div>
                 </div>
               </div>
             </div>
 
             <!-- Exit & Risk -->
             <div>
-              <div class="sec-label mb-2">EXIT &amp; RISK</div>
+              <div class="sec-label mb-2">EXIT &amp; RISK (cumulative across all rolls)</div>
               <div class="grid grid-cols-2 gap-2">
                 <div>
                   <label class="sec-label">Profit Target (₹)</label>
                   <input type="number" step="500" class="t-input mt-0.5"
                          x-model.number="indexConfig[adminSelectedIndex].iron_condor.profit_target_inr"
-                         title="Close all 4 legs when total P&L reaches this ₹ amount">
+                         title="Close all legs when total cumulative P&L (incl. adj) reaches this">
                 </div>
                 <div>
                   <label class="sec-label">Stop Loss (₹)</label>
                   <input type="number" step="500" class="t-input mt-0.5"
                          x-model.number="indexConfig[adminSelectedIndex].iron_condor.stoploss_inr"
-                         title="Close all 4 legs when total loss reaches this ₹ amount">
-                </div>
-                <div>
-                  <label class="sec-label">Ratio Exit Threshold</label>
-                  <input type="number" step="0.1" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.ratio_exit_threshold"
-                         title="Roll one side if short_call_ltp / short_put_ltp exceeds this ratio">
-                </div>
-                <div>
-                  <label class="sec-label">Max Adjustments/Side</label>
-                  <input type="number" step="1" min="0" max="10" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.max_adjustments_per_side">
-                </div>
-                <div>
-                  <label class="sec-label">Roll Step (pts)</label>
-                  <input type="number" step="5" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.roll_step_pts"
-                         title="Move short leg closer to ATM by this amount on ratio breach">
+                         title="Close all legs when total cumulative loss reaches this">
                 </div>
               </div>
             </div>

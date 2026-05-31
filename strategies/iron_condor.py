@@ -1,32 +1,34 @@
 """
-strategies/iron_condor.py — Iron Condor options selling strategy.
+strategies/iron_condor.py — Iron Condor positional options strategy.
 
-All thresholds are read from RuntimeConfig at runtime — nothing is hardcoded.
-The admin can change any parameter via the Strategy Admin UI and it takes
-effect on the next candle evaluation without a restart.
+Entry: SELL short CE/PE at ATM ± short_otm_pts, BUY hedge CE/PE at short ± wing_pts.
+No daily squareoff — NRML positional. Exits on P&L targets or expiry.
 
-Entry logic:
-  • RSI between rsi_min–rsi_max (default 40–60).
-  • ADX < adx_max (default 25 — trending markets kill iron condors).
-  • Short strikes at configured OTM distance per index.
-  • Wing width: configurable per index.
+Dynamic Rolling (Ratio Shift):
+  When CE_ltp / PE_ltp (or reverse) >= ratio_trigger (default 2.0):
+  1. Close the PROFITABLE side at 2× quantity:
+       - Buy back 2× the short leg quantity (closes original 1× + opens new 1× long)
+       - Sell 1× the hedge leg (close)
+     Net result: 1× long at old short strike = new hedge for the rolled side.
+  2. New short = ATM ± (original_diff / 2) — converges toward ATM each roll.
+  3. Cumulative P&L from closed legs saved to DB per trade_id.
+  4. Increment adjustment_count for that side.
 
-Exit logic:
-  • Profit target: profit_pct% of max profit (default 50%).
-  • Stop loss: sl_pct% of premium received (default 200%).
-  • Time exit: squareoff_time IST (default 15:15).
-  • Breach exit: spot crosses a short strike.
+Hard stop: When adjustment_count reaches max_adjustments_per_side:
+  - Close the entire IC immediately.
+  - Re-enter a fresh IC at current ATM if within entry window.
+
+Min LTP filter: Short legs must each have LTP >= min_ltp before entry fires.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, date, time as dtime
-from typing import Dict, List, Optional
-
-import uuid
+from typing import Dict, List, Optional, Tuple
 
 from config.global_config import IST, Topic
 from data_layer.base_feeder import EventBus, CandleEvent
@@ -35,112 +37,120 @@ from execution_bridge.straddle_bridge import ICOrderEvent, ICFillEvent
 
 logger = logging.getLogger(__name__)
 
+_RETRY_LIMIT = 3  # max broker retries per leg on adjustment
+
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class IronCondorLeg:
-    side: str            # "sell" | "buy"
-    option_type: str     # "CE" | "PE"
-    strike: float
+    side:        str    # "sell" | "buy"
+    option_type: str    # "CE" | "PE"
+    strike:      float
     entry_price: float
-    ltp: float = 0.0
-    filled: bool = False
-    fill_time: Optional[datetime] = None
+    ltp:         float = 0.0
+    filled:      bool  = False
+    fill_time:   Optional[datetime] = None
 
 
 @dataclass
 class IronCondorPosition:
-    underlying: str
-    expiry: date
+    underlying:   str
+    expiry:       date
     atm_at_entry: float
+    trade_id:     str = field(default_factory=lambda: str(uuid.uuid4())[:12])
 
-    short_ce: IronCondorLeg = field(default_factory=lambda: IronCondorLeg("sell", "CE", 0, 0))
-    short_pe: IronCondorLeg = field(default_factory=lambda: IronCondorLeg("sell", "PE", 0, 0))
-    long_ce:  IronCondorLeg = field(default_factory=lambda: IronCondorLeg("buy",  "CE", 0, 0))
-    long_pe:  IronCondorLeg = field(default_factory=lambda: IronCondorLeg("buy",  "PE", 0, 0))
+    # Current active legs
+    short_ce: IronCondorLeg = field(default_factory=lambda: IronCondorLeg("sell","CE",0,0))
+    short_pe: IronCondorLeg = field(default_factory=lambda: IronCondorLeg("sell","PE",0,0))
+    long_ce:  IronCondorLeg = field(default_factory=lambda: IronCondorLeg("buy", "CE",0,0))
+    long_pe:  IronCondorLeg = field(default_factory=lambda: IronCondorLeg("buy", "PE",0,0))
 
-    net_credit: float  = 0.0
-    realized_pnl: float = 0.0
-    open_time: Optional[datetime] = None
-    close_time: Optional[datetime] = None
-    status: str = "open"
+    # P&L tracking
+    net_credit:         float = 0.0   # credit from current open legs
+    cumulative_adj_pnl: float = 0.0   # realized P&L from all closed adjustment legs
+    open_time:          Optional[datetime] = None
+    close_time:         Optional[datetime] = None
+    status:             str   = "open"  # "open" | "adjusting" | "closed"
 
-    # Thresholds captured at open so mid-trade config changes don't shift goalposts
-    _wing_width: float = field(default=200.0, repr=False)
-    _profit_pct: float = field(default=0.50,  repr=False)
-    _sl_pct:     float = field(default=2.00,  repr=False)
+    # Adjustment counters (per side)
+    adj_count_ce: int = 0
+    adj_count_pe: int = 0
 
-    @property
-    def max_profit(self) -> float:
-        return self.net_credit
-
-    @property
-    def max_loss(self) -> float:
-        return self._wing_width - self.net_credit
-
-    @property
-    def profit_target(self) -> float:
-        return self.net_credit * self._profit_pct
-
-    @property
-    def stop_loss(self) -> float:
-        return self.net_credit * self._sl_pct
+    # Captured at entry — don't shift goalposts during trade
+    original_diff:    float = 300.0   # ATM ± this = short strikes
+    wing_pts:         float = 150.0   # short ± this = hedge strikes
+    profit_target_rs: float = 5000.0
+    sl_rs:            float = 2000.0
+    max_adj:          int   = 4
+    lot_size:         int   = 65
 
     @property
     def legs(self) -> List[IronCondorLeg]:
         return [self.short_ce, self.short_pe, self.long_ce, self.long_pe]
+
+    @property
+    def total_pnl_pts(self) -> float:
+        """Current open P&L in points + cumulative closed adj P&L."""
+        # MTM on open legs: credit received - cost to close now
+        close_cost = (self.short_ce.ltp + self.short_pe.ltp) - (self.long_ce.ltp + self.long_pe.ltp)
+        open_pnl   = self.net_credit - close_cost
+        return open_pnl + self.cumulative_adj_pnl
+
+    @property
+    def total_pnl_rs(self) -> float:
+        return self.total_pnl_pts * self.lot_size
 
 
 # ── Strategy Engine ───────────────────────────────────────────────────────────
 
 class IronCondorStrategy:
     """
-    Event-driven iron condor engine.
+    Event-driven Iron Condor engine with dynamic rolling / ratio-shift adjustments.
     All thresholds read from RuntimeConfig — fully reconfigurable at runtime.
     """
 
     def __init__(self, bus: EventBus, cfg=None, underlying: str = "NIFTY") -> None:
-        self._bus = bus
-        self._cfg = cfg
+        self._bus        = bus
+        self._cfg        = cfg
         self._underlying = underlying
-        self._running = False
-        self._position: Optional[IronCondorPosition] = None
-        self._spot: float = 0.0
+        self._running    = False
+        self._position:  Optional[IronCondorPosition] = None
+        self._spot:      float = 0.0
         self._prem_cache: Dict[str, float] = {}   # "NIFTY24500CE" → ltp
-        self._tasks: list = []
-
+        self._tasks:     list = []
+        self._adjusting: bool = False  # lock to prevent re-entrant adjustments
         self._load_thresholds()
 
+    # ── Config ────────────────────────────────────────────────────────────────
+
     def _load_thresholds(self) -> None:
-        from data_layer.runtime_config import RuntimeConfig
         ic = RuntimeConfig.index_section(self._underlying, "iron_condor")
-        self._start_time      = _parse_time(ic.get("start_time",      "09:16"))
-        self._squareoff_time  = _parse_time(ic.get("squareoff_time",  "15:15"))
-        self._entry_day       = str(ic.get("entry_day", "daily"))
-        self._profit_target   = float(ic.get("profit_target_inr", 5000.0))
-        self._stoploss        = float(ic.get("stoploss_inr",       2000.0))
-        self._ratio_threshold = float(ic.get("ratio_exit_threshold", 3.0))
-        self._short_otm       = float(ic.get("short_leg_otm_pts",   200.0))
-        self._long_otm        = float(ic.get("long_leg_otm_pts",    300.0))
-        self._lot_size        = int(ic.get("lot_size",  65))
-        self._strike_step     = int(ic.get("strike_step", 50))
+        self._start_time      = _parse_time(ic.get("start_time",       "09:16"))
+        self._entry_day       = str(ic.get("entry_day",                "daily"))
+        self._profit_target   = float(ic.get("profit_target_inr",      5000.0))
+        self._stoploss        = float(ic.get("stoploss_inr",           2000.0))
+        self._ratio_trigger   = float(ic.get("ratio_trigger",           2.0))   # NEW: 2:1 ratio
+        self._short_otm       = float(ic.get("short_leg_otm_pts",       300.0))
+        self._wing_pts        = float(ic.get("long_leg_otm_pts",        150.0))
+        self._lot_size        = int(ic.get("lot_size",                   65))
+        self._strike_step     = int(ic.get("strike_step",                50))
+        self._max_adj         = int(ic.get("max_adjustments_per_side",   4))
+        self._min_ltp         = float(ic.get("min_ltp",                  0.0))  # NEW: min LTP filter
 
     def reconfigure(self) -> None:
         self._load_thresholds()
-        logger.info(
-            "IronCondor[%s]: reconfigured — entry=%s sq=%s profit=₹%.0f sl=₹%.0f ratio=%.1fx",
-            self._underlying,
-            self._start_time, self._squareoff_time,
-            self._profit_target, self._stoploss, self._ratio_threshold,
-        )
+        logger.info("IronCondor[%s]: reconfigured ratio_trigger=%.1f min_ltp=%.2f max_adj=%d",
+                    self._underlying, self._ratio_trigger, self._min_ltp, self._max_adj)
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
         self._running = True
         self._tasks = [
-            asyncio.create_task(self._candle_loop(),  name="ic_candle_loop"),
-            asyncio.create_task(self._tick_loop(),    name="ic_tick_loop"),
-            asyncio.create_task(self._option_loop(),  name="ic_option_loop"),
+            asyncio.create_task(self._candle_loop(),  name="ic_candle"),
+            asyncio.create_task(self._tick_loop(),    name="ic_tick"),
+            asyncio.create_task(self._option_loop(),  name="ic_option"),
         ]
         logger.info("IronCondorStrategy[%s]: started.", self._underlying)
 
@@ -162,9 +172,12 @@ class IronCondorStrategy:
                 continue
             except asyncio.CancelledError:
                 break
-            if ev.symbol != self._underlying:
+            if ev.symbol != self._underlying or ev.timeframe != 5:
                 continue
-            await self._on_candle(ev)
+            try:
+                await self._on_candle(ev)
+            except Exception as exc:
+                logger.exception("IronCondor[%s]: candle error: %s", self._underlying, exc)
 
     async def _tick_loop(self) -> None:
         from data_layer.base_feeder import IndexTick
@@ -179,8 +192,9 @@ class IronCondorStrategy:
             if tick.symbol != self._underlying:
                 continue
             self._spot = tick.ltp
-            if self._position and self._position.status == "open":
+            if self._position and self._position.status == "open" and not self._adjusting:
                 await self._check_exits()
+                await self._check_adjustment_criteria()
 
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick
@@ -192,33 +206,29 @@ class IronCondorStrategy:
                 continue
             except asyncio.CancelledError:
                 break
-            # Update premium cache for all option ticks on this underlying
             if tick.underlying == self._underlying:
                 key = f"{self._underlying}{int(tick.strike)}{tick.option_type}"
                 self._prem_cache[key] = tick.ltp
-            if not self._position or self._position.underlying != tick.underlying:
-                continue
-            self._update_leg_ltp(tick)
+            if self._position and self._position.underlying == tick.underlying:
+                self._update_leg_ltp(tick)
 
     # ── Entry logic ───────────────────────────────────────────────────────────
 
     async def _on_candle(self, ev: CandleEvent) -> None:
+        self._load_thresholds()
         now = datetime.now(IST)
 
-        # Reload thresholds every candle
-        self._load_thresholds()
-
-        # Time gate: only enter after start_time (IC is positional — no daily squareoff)
+        # Time gate: only enter after start_time
         if now.time() < self._start_time:
             return
 
-        # Day gate: entry_day config (daily | monday | tuesday | ...)
+        # Day gate
         if self._entry_day != "daily":
             day_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
             if day_names[now.weekday()] != self._entry_day:
                 return
 
-        # Don't re-enter if a position is already open for this IC cycle
+        # Don't re-enter while position is open
         if self._position and self._position.status == "open":
             return
 
@@ -229,27 +239,38 @@ class IronCondorStrategy:
         step = self._strike_step
         atm  = round(spot / step) * step
 
-        # short legs at ±short_leg_otm_pts from ATM
-        # long (hedge) legs at ±long_leg_otm_pts from ATM
         short_ce_strike = atm + self._short_otm
         short_pe_strike = atm - self._short_otm
-        long_ce_strike  = atm + self._long_otm
-        long_pe_strike  = atm - self._long_otm
+        long_ce_strike  = short_ce_strike + self._wing_pts
+        long_pe_strike  = short_pe_strike - self._wing_pts
 
-        logger.info(
-            "IronCondor[%s]: entry signal at ATM=%.0f | "
-            "short CE=%.0f / PE=%.0f | long CE=%.0f / PE=%.0f",
-            self._underlying, atm,
-            short_ce_strike, short_pe_strike, long_ce_strike, long_pe_strike,
-        )
-
-        # Get current LTPs from premium cache if available
+        # Min LTP filter — both short legs must have meaningful premium
         short_ce_ltp = self._prem_cache.get(f"{self._underlying}{int(short_ce_strike)}CE", 0.0)
         short_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(short_pe_strike)}PE", 0.0)
-        long_ce_ltp  = self._prem_cache.get(f"{self._underlying}{int(long_ce_strike)}CE", 0.0)
-        long_pe_ltp  = self._prem_cache.get(f"{self._underlying}{int(long_pe_strike)}PE", 0.0)
 
-        ev = ICOrderEvent(
+        if self._min_ltp > 0 and (short_ce_ltp < self._min_ltp or short_pe_ltp < self._min_ltp):
+            logger.debug(
+                "IronCondor[%s]: min_ltp filter — CE=%.2f PE=%.2f < min=%.2f, skipping entry",
+                self._underlying, short_ce_ltp, short_pe_ltp, self._min_ltp,
+            )
+            return
+
+        long_ce_ltp = self._prem_cache.get(f"{self._underlying}{int(long_ce_strike)}CE", 0.0)
+        long_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(long_pe_strike)}PE", 0.0)
+
+        net_credit = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp)
+
+        logger.info(
+            "IronCondor[%s]: ENTRY ATM=%.0f | short CE=%.0f(%.2f) PE=%.0f(%.2f) "
+            "| hedge CE=%.0f(%.2f) PE=%.0f(%.2f) | net_credit=%.2f",
+            self._underlying, atm,
+            short_ce_strike, short_ce_ltp, short_pe_strike, short_pe_ltp,
+            long_ce_strike,  long_ce_ltp,  long_pe_strike,  long_pe_ltp,
+            net_credit,
+        )
+
+        trade_id = str(uuid.uuid4())[:12]
+        ev_order = ICOrderEvent(
             action          = "ENTRY",
             underlying      = self._underlying,
             atm             = atm,
@@ -262,100 +283,249 @@ class IronCondorStrategy:
             long_ce_ltp     = long_ce_ltp,
             long_pe_ltp     = long_pe_ltp,
             lot_size        = self._lot_size,
-            event_id        = str(uuid.uuid4())[:8],
+            event_id        = trade_id,
         )
-        await self._bus.publish(Topic.IC_ORDER_REQUEST, ev)
+        await self._bus.publish(Topic.IC_ORDER_REQUEST, ev_order)
 
-        # Record position locally for P&L tracking
-        from datetime import date as _d
-        today = datetime.now(IST).date()
         self._position = IronCondorPosition(
-            underlying    = self._underlying,
-            expiry        = today,
-            atm_at_entry  = atm,
-            short_ce      = IronCondorLeg("sell", "CE", short_ce_strike, short_ce_ltp),
-            short_pe      = IronCondorLeg("sell", "PE", short_pe_strike, short_pe_ltp),
-            long_ce       = IronCondorLeg("buy",  "CE", long_ce_strike,  long_ce_ltp),
-            long_pe       = IronCondorLeg("buy",  "PE", long_pe_strike,  long_pe_ltp),
-            net_credit    = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp),
-            open_time     = datetime.now(IST),
-            _wing_width   = self._long_otm,
-            _profit_pct   = self._profit_pct,
-            _sl_pct       = self._sl_pct,
+            underlying      = self._underlying,
+            expiry          = date.today(),
+            atm_at_entry    = atm,
+            trade_id        = trade_id,
+            short_ce        = IronCondorLeg("sell","CE", short_ce_strike, short_ce_ltp),
+            short_pe        = IronCondorLeg("sell","PE", short_pe_strike, short_pe_ltp),
+            long_ce         = IronCondorLeg("buy", "CE", long_ce_strike,  long_ce_ltp),
+            long_pe         = IronCondorLeg("buy", "PE", long_pe_strike,  long_pe_ltp),
+            net_credit      = net_credit,
+            open_time       = datetime.now(IST),
+            original_diff   = self._short_otm,
+            wing_pts        = self._wing_pts,
+            profit_target_rs = self._profit_target,
+            sl_rs           = self._stoploss,
+            max_adj         = self._max_adj,
+            lot_size        = self._lot_size,
         )
+        await self._log_trade_db("ENTRY")
 
-    # ── Exit logic ────────────────────────────────────────────────────────────
+    # ── Exit checks ───────────────────────────────────────────────────────────
 
     async def _check_exits(self) -> None:
         pos = self._position
         if not pos:
             return
 
-        now = datetime.now(IST)
+        pnl_rs = pos.total_pnl_rs
 
-        if now.time() >= self._squareoff_time:
-            logger.info("IronCondor[%s]: time exit at %s IST.", self._underlying, self._squareoff_time)
-            await self._close_position("time_exit")
-            return
-
-        # MTM P&L in ₹
-        call_entry_net = pos.short_ce.entry_price - pos.long_ce.entry_price
-        put_entry_net  = pos.short_pe.entry_price - pos.long_pe.entry_price
-        call_live_net  = pos.short_ce.ltp - pos.long_ce.ltp
-        put_live_net   = pos.short_pe.ltp - pos.long_pe.ltp
-        open_pnl_pts = (call_entry_net - call_live_net) + (put_entry_net - put_live_net)
-        pnl_inr = open_pnl_pts * self._lot_size
-
-        if pnl_inr >= self._profit_target:
-            logger.info(
-                "IronCondor[%s]: profit target hit — ₹%.0f >= ₹%.0f",
-                self._underlying, pnl_inr, self._profit_target,
-            )
+        if pnl_rs >= pos.profit_target_rs:
+            logger.info("IronCondor[%s]: PROFIT TARGET ₹%.0f >= ₹%.0f",
+                        self._underlying, pnl_rs, pos.profit_target_rs)
             await self._close_position("profit_target")
             return
 
-        if pnl_inr <= -self._stoploss:
-            logger.info(
-                "IronCondor[%s]: stop loss hit — ₹%.0f <= -₹%.0f",
-                self._underlying, pnl_inr, self._stoploss,
-            )
+        if pnl_rs <= -pos.sl_rs:
+            logger.info("IronCondor[%s]: STOP LOSS ₹%.0f <= -₹%.0f",
+                        self._underlying, pnl_rs, pos.sl_rs)
             await self._close_position("stop_loss")
             return
 
-        # Ratio check: roll side if one short leg has ballooned vs the other
+    # ── Adjustment / Rolling ──────────────────────────────────────────────────
+
+    def check_adjustment_criteria(self) -> Optional[str]:
+        """
+        Returns 'CE' if CE side needs adjustment, 'PE' if PE side does, else None.
+        Trigger: one short leg's ltp >= ratio_trigger × the other short leg's ltp.
+        """
+        pos = self._position
+        if not pos or pos.status != "open":
+            return None
         ce_ltp = pos.short_ce.ltp
         pe_ltp = pos.short_pe.ltp
-        if ce_ltp > 0 and pe_ltp > 0:
-            if ce_ltp / pe_ltp >= self._ratio_threshold:
-                logger.warning("IronCondor[%s]: CE ratio %.2fx — rolling call side.", self._underlying, ce_ltp / pe_ltp)
-                await self._close_position("ce_ratio_breach")
-                return
-            if pe_ltp / ce_ltp >= self._ratio_threshold:
-                logger.warning("IronCondor[%s]: PE ratio %.2fx — rolling put side.", self._underlying, pe_ltp / ce_ltp)
-                await self._close_position("pe_ratio_breach")
-                return
+        if ce_ltp <= 0 or pe_ltp <= 0:
+            return None
+
+        if ce_ltp / pe_ltp >= self._ratio_trigger:
+            return "CE"   # CE leg is bleeding; PE is profitable
+        if pe_ltp / ce_ltp >= self._ratio_trigger:
+            return "PE"   # PE leg is bleeding; CE is profitable
+        return None
+
+    async def _check_adjustment_criteria(self) -> None:
+        if self._adjusting:
+            return
+        side = self.check_adjustment_criteria()
+        if side:
+            await self.adjust_iron_condor(side)
+
+    async def adjust_iron_condor(self, profitable_side: str) -> None:
+        """
+        Roll the profitable side using the ratio-shift mechanism.
+
+        profitable_side: 'CE' (PE is bleeding, CE is profit) or 'PE' (CE is bleeding).
+
+        Mechanics:
+          1. Close the profitable side at 2× quantity:
+               Buy back 2× short leg  → closes 1× original + opens 1× new long
+               Sell 1× long (hedge)   → closes hedge position
+             Net: 1× long at old short strike = new hedge for rolled position.
+          2. New short strike = current_ATM ± (original_diff / 2) → converges to ATM.
+          3. Increment adj_count for that side.
+          4. If adj_count >= max_adj: hard stop → close all → re-enter.
+        """
+        pos = self._position
+        if not pos or self._adjusting:
+            return
+
+        self._adjusting = True
+        try:
+            # Determine which side is profitable vs bleeding
+            if profitable_side == "CE":
+                # CE is profitable, PE is bleeding
+                profit_short  = pos.short_ce
+                profit_hedge  = pos.long_ce
+                bleed_short   = pos.short_pe
+                bleed_hedge   = pos.long_pe
+                direction     = +1  # CE side = call side, new short goes UP
+                adj_count     = pos.adj_count_ce
+            else:
+                # PE is profitable, CE is bleeding
+                profit_short  = pos.short_pe
+                profit_hedge  = pos.long_pe
+                bleed_short   = pos.short_ce
+                bleed_hedge   = pos.long_ce
+                direction     = -1  # PE side = put side, new short goes DOWN
+                adj_count     = pos.adj_count_pe
+
+            logger.info(
+                "IronCondor[%s]: ADJUSTMENT — profitable_side=%s "
+                "profit_short_ltp=%.2f bleed_short_ltp=%.2f adj_count=%d/%d",
+                self._underlying, profitable_side,
+                profit_short.ltp, bleed_short.ltp, adj_count + 1, pos.max_adj,
+            )
+
+            # ── Step 1: Close profitable side at 2× quantity ──────────────────
+            # Realized P&L from closing:
+            #   Short leg: sold at entry_price, buying back 1× at ltp = (entry - ltp) per unit
+            #   Hedge leg: bought at entry_price, selling at ltp = (ltp - entry) per unit
+            pnl_from_short = (profit_short.entry_price - profit_short.ltp) * pos.lot_size
+            pnl_from_hedge = (profit_hedge.ltp - profit_hedge.entry_price) * pos.lot_size
+            adj_pnl = pnl_from_short + pnl_from_hedge
+            pos.cumulative_adj_pnl += adj_pnl / pos.lot_size  # store in points
+
+            # Publish close order for profitable side (2× qty on short leg)
+            close_ev = ICOrderEvent(
+                action          = "ADJUST_CLOSE",
+                underlying      = pos.underlying,
+                atm             = self._spot,
+                # Use only profitable side legs, 2× qty on short
+                short_ce_strike = profit_short.strike if profitable_side == "CE" else bleed_short.strike,
+                short_pe_strike = profit_short.strike if profitable_side == "PE" else bleed_short.strike,
+                short_ce_ltp    = profit_short.ltp if profitable_side == "CE" else 0.0,
+                short_pe_ltp    = profit_short.ltp if profitable_side == "PE" else 0.0,
+                long_ce_strike  = profit_hedge.strike if profitable_side == "CE" else bleed_hedge.strike,
+                long_pe_strike  = profit_hedge.strike if profitable_side == "PE" else bleed_hedge.strike,
+                long_ce_ltp     = profit_hedge.ltp if profitable_side == "CE" else 0.0,
+                long_pe_ltp     = profit_hedge.ltp if profitable_side == "PE" else 0.0,
+                lot_size        = pos.lot_size,
+                close_reason    = f"ratio_shift_{profitable_side}",
+                cumulative_pnl  = pos.cumulative_adj_pnl,
+                event_id        = f"{pos.trade_id}_adj{adj_count+1}",
+            )
+            await self._bus.publish(Topic.IC_ORDER_REQUEST, close_ev)
+
+            # ── Step 2: New short = ATM ± (original_diff / 2) ────────────────
+            step         = self._strike_step
+            atm_now      = round(self._spot / step) * step
+            new_diff     = pos.original_diff / 2
+            new_short_strike = round((atm_now + direction * new_diff) / step) * step
+            new_hedge_strike = round((new_short_strike + direction * pos.wing_pts) / step) * step
+
+            new_short_ltp = self._prem_cache.get(
+                f"{self._underlying}{int(new_short_strike)}{'CE' if profitable_side == 'CE' else 'PE'}", 0.0)
+            new_hedge_ltp = self._prem_cache.get(
+                f"{self._underlying}{int(new_hedge_strike)}{'CE' if profitable_side == 'CE' else 'PE'}", 0.0)
+            # Old short strike (now our new hedge) — already "long" from 2× buyback
+            old_short_ltp = profit_short.ltp   # 1× long position at old short strike
+
+            # Publish open order for new short + new hedge
+            open_ev = ICOrderEvent(
+                action          = "ADJUST_OPEN",
+                underlying      = pos.underlying,
+                atm             = atm_now,
+                short_ce_strike = new_short_strike if profitable_side == "CE" else pos.short_ce.strike,
+                short_pe_strike = new_short_strike if profitable_side == "PE" else pos.short_pe.strike,
+                short_ce_ltp    = new_short_ltp if profitable_side == "CE" else pos.short_ce.ltp,
+                short_pe_ltp    = new_short_ltp if profitable_side == "PE" else pos.short_pe.ltp,
+                long_ce_strike  = new_hedge_strike if profitable_side == "CE" else pos.long_ce.strike,
+                long_pe_strike  = new_hedge_strike if profitable_side == "PE" else pos.long_pe.strike,
+                long_ce_ltp     = new_hedge_ltp if profitable_side == "CE" else pos.long_ce.ltp,
+                long_pe_ltp     = new_hedge_ltp if profitable_side == "PE" else pos.long_pe.ltp,
+                lot_size        = pos.lot_size,
+                event_id        = f"{pos.trade_id}_adj{adj_count+1}_open",
+            )
+            await self._bus.publish(Topic.IC_ORDER_REQUEST, open_ev)
+
+            # ── Step 3: Update position state ────────────────────────────────
+            if profitable_side == "CE":
+                # Old short CE (profit_short.strike) becomes new hedge CE
+                pos.long_ce   = IronCondorLeg("buy", "CE", profit_short.strike, old_short_ltp)
+                pos.short_ce  = IronCondorLeg("sell","CE", new_short_strike,    new_short_ltp)
+                pos.adj_count_ce += 1
+                adj_count = pos.adj_count_ce
+            else:
+                pos.long_pe   = IronCondorLeg("buy", "PE", profit_short.strike, old_short_ltp)
+                pos.short_pe  = IronCondorLeg("sell","PE", new_short_strike,    new_short_ltp)
+                pos.adj_count_pe += 1
+                adj_count = pos.adj_count_pe
+
+            # Update net_credit with new leg prices
+            pos.net_credit = (
+                (pos.short_ce.entry_price + pos.short_pe.entry_price)
+                - (pos.long_ce.entry_price  + pos.long_pe.entry_price)
+            )
+
+            await self._log_trade_db("ADJUST")
+            logger.info(
+                "IronCondor[%s]: adjustment complete — new_short=%.0f "
+                "adj_pnl=₹%.0f cumulative=₹%.0f adj_count=%d/%d",
+                self._underlying, new_short_strike,
+                adj_pnl, pos.cumulative_adj_pnl * pos.lot_size,
+                adj_count, pos.max_adj,
+            )
+
+            # ── Step 4: Hard stop if max_adjustments reached ──────────────────
+            if adj_count >= pos.max_adj:
+                logger.warning(
+                    "IronCondor[%s]: MAX ADJUSTMENTS REACHED (%d/%d) — closing all, "
+                    "will re-enter on next candle if within entry window.",
+                    self._underlying, adj_count, pos.max_adj,
+                )
+                await self._close_position("max_adjustments_reached")
+
+        finally:
+            self._adjusting = False
+
+    # ── Position close ────────────────────────────────────────────────────────
 
     async def _close_position(self, reason: str) -> None:
-        if not self._position:
-            return
         pos = self._position
-        logger.info("IronCondor[%s]: closing position — reason=%s pnl=₹%.0f",
-                    self._underlying, reason,
-                    pos.realized_pnl * self._lot_size)
+        if not pos:
+            return
+
+        pos_pnl_rs = pos.total_pnl_rs
+        logger.info(
+            "IronCondor[%s]: CLOSE reason=%s total_pnl=₹%.0f adj_ce=%d adj_pe=%d",
+            self._underlying, reason, pos_pnl_rs,
+            pos.adj_count_ce, pos.adj_count_pe,
+        )
 
         short_ce_ltp = self._prem_cache.get(f"{self._underlying}{int(pos.short_ce.strike)}CE", pos.short_ce.entry_price)
         short_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(pos.short_pe.strike)}PE", pos.short_pe.entry_price)
         long_ce_ltp  = self._prem_cache.get(f"{self._underlying}{int(pos.long_ce.strike)}CE",  pos.long_ce.entry_price)
         long_pe_ltp  = self._prem_cache.get(f"{self._underlying}{int(pos.long_pe.strike)}PE",  pos.long_pe.entry_price)
 
-        # Calculate final P&L in points (credit received - current cost to close)
-        exit_cost    = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp)
-        pnl_pts      = pos.net_credit - exit_cost
-        pos.realized_pnl = pos.realized_pnl + pnl_pts
-
-        ev = ICOrderEvent(
+        exit_ev = ICOrderEvent(
             action          = "EXIT",
-            underlying      = self._underlying,
+            underlying      = pos.underlying,
             atm             = pos.atm_at_entry,
             short_ce_strike = pos.short_ce.strike,
             short_pe_strike = pos.short_pe.strike,
@@ -365,27 +535,59 @@ class IronCondorStrategy:
             long_pe_strike  = pos.long_pe.strike,
             long_ce_ltp     = long_ce_ltp,
             long_pe_ltp     = long_pe_ltp,
-            lot_size        = self._lot_size,
+            lot_size        = pos.lot_size,
             close_reason    = reason,
-            cumulative_pnl  = pos.realized_pnl,
-            event_id        = str(uuid.uuid4())[:8],
+            cumulative_pnl  = pos.cumulative_adj_pnl,
+            event_id        = pos.trade_id,
         )
-        await self._bus.publish(Topic.IC_ORDER_REQUEST, ev)
+        await self._bus.publish(Topic.IC_ORDER_REQUEST, exit_ev)
+
         pos.status     = "closed"
         pos.close_time = datetime.now(IST)
+        await self._log_trade_db("EXIT")
         self._position = None
-        self._position.close_time = datetime.now(IST)
-        self._position = None
+
+    # ── DB logging ────────────────────────────────────────────────────────────
+
+    async def _log_trade_db(self, event: str) -> None:
+        """Log trade state to DB for audit and reporting."""
+        if not self._position:
+            return
+        pos = self._position
+        try:
+            from data_layer.client_db import ClientDB
+            db = getattr(self._cfg, "_client_db", None) if self._cfg else None
+            if db and hasattr(db, "upsert_ic_trade_log"):
+                await asyncio.to_thread(
+                    db.upsert_ic_trade_log,
+                    trade_id         = pos.trade_id,
+                    underlying       = pos.underlying,
+                    event            = event,
+                    short_ce_strike  = pos.short_ce.strike,
+                    short_pe_strike  = pos.short_pe.strike,
+                    long_ce_strike   = pos.long_ce.strike,
+                    long_pe_strike   = pos.long_pe.strike,
+                    net_credit       = pos.net_credit,
+                    cumulative_adj_pnl = pos.cumulative_adj_pnl,
+                    total_pnl_rs     = pos.total_pnl_rs,
+                    adj_count_ce     = pos.adj_count_ce,
+                    adj_count_pe     = pos.adj_count_pe,
+                    status           = pos.status,
+                    timestamp        = datetime.now(IST).isoformat(),
+                )
+        except Exception as exc:
+            logger.warning("IronCondor[%s]: DB log failed: %s", self._underlying, exc)
+
+    # ── Leg LTP updater ───────────────────────────────────────────────────────
 
     def _update_leg_ltp(self, tick) -> None:
         if not self._position:
             return
         for leg in self._position.legs:
-            if (abs(leg.strike - tick.strike) < 0.01
-                    and leg.option_type == tick.option_type):
+            if abs(leg.strike - tick.strike) < 0.01 and leg.option_type == tick.option_type:
                 leg.ltp = tick.ltp
 
-    # ── Public accessors ─────────────────────────────────────────────────────
+    # ── Public accessors ──────────────────────────────────────────────────────
 
     @property
     def has_open_position(self) -> bool:
@@ -395,12 +597,6 @@ class IronCondorStrategy:
     def position(self) -> Optional[IronCondorPosition]:
         return self._position
 
-    @property
-    def entry_allowed(self) -> bool:
-        from datetime import datetime
-        now = datetime.now(IST).time()
-        return self._start_time <= now < self._squareoff_time
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -409,4 +605,4 @@ def _parse_time(s: str) -> dtime:
         h, m = s.split(":")
         return dtime(int(h), int(m))
     except Exception:
-        return dtime(15, 15)
+        return dtime(9, 16)

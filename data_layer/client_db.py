@@ -183,6 +183,25 @@ CREATE TABLE IF NOT EXISTS option_1m_bar_repository (
 
 CREATE INDEX IF NOT EXISTS ix_option1m_symbol_timestamp
     ON option_1m_bar_repository(symbol, timestamp);
+
+CREATE TABLE IF NOT EXISTS ic_trade_log (
+    trade_id            TEXT    NOT NULL,
+    underlying          TEXT    NOT NULL,
+    event               TEXT    NOT NULL,    -- ENTRY | ADJUST | EXIT
+    short_ce_strike     REAL    DEFAULT 0,
+    short_pe_strike     REAL    DEFAULT 0,
+    long_ce_strike      REAL    DEFAULT 0,
+    long_pe_strike      REAL    DEFAULT 0,
+    net_credit          REAL    DEFAULT 0,
+    cumulative_adj_pnl  REAL    DEFAULT 0,   -- in points across all rolls
+    total_pnl_rs        REAL    DEFAULT 0,   -- in rupees
+    adj_count_ce        INTEGER DEFAULT 0,
+    adj_count_pe        INTEGER DEFAULT 0,
+    status              TEXT    DEFAULT 'open',
+    timestamp           TEXT    NOT NULL,
+    is_active_adjustment INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ic_trade_log_id ON ic_trade_log(trade_id);
 """
 
 
@@ -856,6 +875,37 @@ class ClientDB:
                 profile.client_id, len(profile.broker_bindings),
             )
         return profiles
+
+    # ── Iron Condor trade log ─────────────────────────────────────────────────
+
+    def upsert_ic_trade_log(
+        self, trade_id: str, underlying: str, event: str,
+        short_ce_strike: float, short_pe_strike: float,
+        long_ce_strike: float, long_pe_strike: float,
+        net_credit: float, cumulative_adj_pnl: float, total_pnl_rs: float,
+        adj_count_ce: int, adj_count_pe: int, status: str, timestamp: str,
+    ) -> None:
+        """Insert a trade log row for this IC trade event. Synchronous — call via to_thread."""
+        con = sqlite3.connect(self._db_path)
+        try:
+            con.execute(
+                """INSERT INTO ic_trade_log
+                   (trade_id, underlying, event, short_ce_strike, short_pe_strike,
+                    long_ce_strike, long_pe_strike, net_credit, cumulative_adj_pnl,
+                    total_pnl_rs, adj_count_ce, adj_count_pe, status, timestamp,
+                    is_active_adjustment)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (trade_id, underlying, event, short_ce_strike, short_pe_strike,
+                 long_ce_strike, long_pe_strike, net_credit, cumulative_adj_pnl,
+                 total_pnl_rs, adj_count_ce, adj_count_pe, status, timestamp,
+                 1 if event == "ADJUST" else 0),
+            )
+            con.commit()
+        except Exception as exc:
+            import logging as _l
+            _l.getLogger(__name__).error("upsert_ic_trade_log: %s", exc)
+        finally:
+            con.close()
 
     # ── 1-minute option bar repository ───────────────────────────────────────
 
