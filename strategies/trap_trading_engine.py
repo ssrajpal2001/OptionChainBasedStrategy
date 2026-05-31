@@ -35,7 +35,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from config.global_config import IST, Topic, GlobalConfig
-from data_layer.base_feeder import CandleEvent, OptionTick, EventBus
+from data_layer.base_feeder import CandleEvent, IndexTick, OptionTick, EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +222,7 @@ class TrapTradingEngine:
         # Queues — subscribed in run() so the event loop is already running
         self._candle_q: Optional[asyncio.Queue] = None
         self._opt_q:    Optional[asyncio.Queue] = None
+        self._index_q:  Optional[asyncio.Queue] = None
 
         # Per-symbol state
         self._states: Dict[str, _TrapState] = {}
@@ -244,13 +245,15 @@ class TrapTradingEngine:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Main async entry — starts candle and option tick loops concurrently."""
+        """Main async entry — starts candle, index tick, and option tick loops."""
         self._candle_q = self._bus.subscribe(Topic.CANDLE_CLOSE)
         self._opt_q    = self._bus.subscribe(Topic.OPTION_TICK)
+        self._index_q  = self._bus.subscribe(Topic.INDEX_TICK)
         self._running  = True
         logger.info("TrapTradingEngine: starting NewTrap MTF engine.")
         await asyncio.gather(
             self._candle_loop(),
+            self._index_tick_loop(),
             self._option_tick_loop(),
         )
 
@@ -349,6 +352,17 @@ class TrapTradingEngine:
                     event.symbol, event.timeframe, exc,
                 )
 
+    async def _index_tick_loop(self) -> None:
+        while self._running:
+            try:
+                event = await asyncio.wait_for(self._index_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(event, IndexTick):
+                continue
+            # Store real underlying spot price (index LTP, e.g. 24500 for NIFTY)
+            self._spot_cache[event.symbol] = event.ltp
+
     async def _option_tick_loop(self) -> None:
         while self._running:
             try:
@@ -358,9 +372,8 @@ class TrapTradingEngine:
             if not isinstance(event, OptionTick):
                 continue
             try:
-                # Update premium and spot caches
+                # Update option premium cache only — spot comes from INDEX_TICK
                 self._prem_cache[event.symbol] = event.ltp
-                self._spot_cache[event.underlying] = event.ltp  # underlying proxy via option
 
                 await self._check_touch_trigger(event)
             except Exception as exc:

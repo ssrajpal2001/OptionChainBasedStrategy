@@ -3148,9 +3148,23 @@ class DashboardServer:
             else:
                 expiry = _nexp(underlying, today)
 
+            # Minimum valid strikes per underlying (sanity guard)
+            _MIN_STRIKE = {"NIFTY": 5000, "BANKNIFTY": 10000, "FINNIFTY": 5000,
+                           "SENSEX": 20000, "MIDCPNIFTY": 5000}
+
             # Resolve strike (ATM if not specified)
             if payload.strike:
                 strike = int(payload.strike)
+                min_valid = _MIN_STRIKE.get(underlying, 100)
+                if strike < min_valid:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"Strike {strike} looks wrong for {underlying} "
+                            f"(minimum valid: {min_valid}). "
+                            f"Enter the full ATM strike, e.g. 24500 for NIFTY."
+                        ),
+                    }
             else:
                 # Try spot from trap engine's spot cache (populated from live index ticks)
                 spot = 0.0
