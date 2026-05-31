@@ -110,6 +110,10 @@ class ZerodhaBroker(BaseBroker):
         pt   = getattr(creds, "product_type", "").strip().upper()
         if pt in ("MIS", "NRML"):
             self._product = pt
+        elif pt == "INTRADAY":
+            self._product = "MIS"
+        elif pt in ("NORMAL", "DELIVERY"):
+            self._product = "NRML"
         else:
             self._product = "NRML" if mode in ("carryforward", "normal", "nrml") else "MIS"
         logger.info(
@@ -147,10 +151,13 @@ class ZerodhaBroker(BaseBroker):
             "quantity":         req.qty,
             "product":          product,
             "order_type":       order_type,
-            "price":            price,
+            "price":            0.0 if price == -1.0 else price,
             "validity":         "DAY",
             "tag":              req.tag[:20] if req.tag else "",
         }
+        # Zerodha requires market_protection % for MARKET orders on F&O
+        if price == -1.0:
+            params["market_protection"] = 1   # 1% protection — accepted by NSE OMS
 
         logger.info(
             "ZerodhaBroker[%s]: placing %s %s x %s | type=%s price=%.2f product=%s",
@@ -187,13 +194,14 @@ class ZerodhaBroker(BaseBroker):
                 supports_mprot = False
 
             if supports_mprot:
-                # Modern kiteconnect — use true MARKET order
-                return kite.ORDER_TYPE_MARKET, 0.0
+                # Zerodha does not support pure MARKET for F&O — use market_protection %
+                # We inject this into params after returning; signal via special sentinel price=-1
+                return kite.ORDER_TYPE_MARKET, -1.0   # sentinel: caller adds market_protection
             else:
-                # Legacy fallback — LIMIT at LTP ± 1 tick (market-limit)
+                # Legacy kiteconnect fallback — LIMIT at LTP ± 1 tick (fills immediately)
                 ltp = self._get_ltp_safe(req.broker_symbol, req.exchange)
                 if ltp <= 0:
-                    ltp = 100.0     # safe fallback if LTP unavailable
+                    ltp = 100.0
                 if req.side == OrderSide.BUY:
                     price = round((ltp + 1.0) / 0.05) * 0.05
                 else:

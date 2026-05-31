@@ -25,6 +25,8 @@ class AngelBroker(BaseBroker):
         super().__init__(binding.binding_id, client_id)
         self._b = binding
         self._smartapi: Any = None
+        self._is_amo  = False
+        self._product = "INTRADAY"   # overridden from binding at auth time
 
     async def authenticate(self) -> bool:
         try:
@@ -39,7 +41,15 @@ class AngelBroker(BaseBroker):
             )
             if data and data.get("status"):
                 self._authenticated = True
-                logger.info("AngelBroker [%s]: Authenticated.", self.client_id)
+                pt = getattr(self._b, "product_type", "").strip().upper()
+                mode = getattr(self._b, "trading_mode", "intraday").lower()
+                if pt in ("MIS", "INTRADAY"):
+                    self._product = "INTRADAY"
+                elif pt in ("NRML", "NORMAL"):
+                    self._product = "DELIVERY"
+                else:
+                    self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "DELIVERY"
+                logger.info("AngelBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
                 return True
             logger.error("AngelBroker [%s]: Auth failed: %s", self.client_id, data)
             return False
@@ -60,13 +70,13 @@ class AngelBroker(BaseBroker):
             OrderType.SL_M: "STOPLOSS_MARKET", OrderType.SL_L: "STOPLOSS_LIMIT",
         }
         order_data = {
-            "variety": "NORMAL",
+            "variety": "AMO" if self._is_amo else "NORMAL",
             "tradingsymbol": req.broker_symbol,
             "symboltoken": "",      # Requires pre-lookup from instrument master
             "transactiontype": req.side.value,
             "exchange": req.exchange,
             "ordertype": _type_map[req.order_type],
-            "producttype": "INTRADAY",
+            "producttype": self._product,
             "duration": "DAY",
             "price": str(req.price),
             "squareoff": "0",

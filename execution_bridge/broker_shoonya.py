@@ -28,6 +28,8 @@ class ShoonyaBroker(BaseBroker):
         super().__init__(binding.binding_id, client_id)
         self._b = binding
         self._api: Any = None
+        self._is_amo  = False
+        self._product = "I"   # I=Intraday, M=Margin/NRML — overridden at auth
 
     async def authenticate(self) -> bool:
         try:
@@ -51,7 +53,15 @@ class ShoonyaBroker(BaseBroker):
             )
             if ret and ret.get("stat") == "Ok":
                 self._authenticated = True
-                logger.info("ShoonyaBroker [%s]: Authenticated.", self.client_id)
+                pt   = getattr(self._b, "product_type", "").strip().upper()
+                mode = getattr(self._b, "trading_mode", "intraday").lower()
+                if pt in ("MIS", "INTRADAY", "I"):
+                    self._product = "I"
+                elif pt in ("NRML", "NORMAL", "M"):
+                    self._product = "M"
+                else:
+                    self._product = "I" if mode not in ("carryforward", "normal", "nrml") else "M"
+                logger.info("ShoonyaBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
                 return True
             logger.error("ShoonyaBroker [%s]: Auth failed: %s", self.client_id, ret)
             return False
@@ -74,7 +84,7 @@ class ShoonyaBroker(BaseBroker):
         ret = await asyncio.to_thread(
             self._api.place_order,
             buy_or_sell="B" if req.side == OrderSide.BUY else "S",
-            product_type="I",          # Intraday
+            product_type=self._product,
             exchange=req.exchange,
             tradingsymbol=req.broker_symbol,
             quantity=req.qty,
@@ -82,7 +92,7 @@ class ShoonyaBroker(BaseBroker):
             price_type=_type_map[req.order_type],
             price=req.price,
             trigger_price=req.trigger_price or None,
-            retention="DAY",
+            retention="EOS" if self._is_amo else "DAY",  # EOS = After Market Order
             remarks=req.tag,
         )
         if ret and ret.get("stat") == "Ok":

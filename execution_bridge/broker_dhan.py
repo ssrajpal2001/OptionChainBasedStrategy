@@ -31,6 +31,8 @@ class DhanBroker(BaseBroker):
         super().__init__(binding.binding_id, client_id)
         self._b = binding
         self._dhan: Any = None
+        self._is_amo  = False
+        self._product = "INTRADAY"   # overridden from binding at auth time
         # symbol_map: {internal_key: security_id}
         self._symbol_map: Dict[str, str] = {}
 
@@ -57,7 +59,15 @@ class DhanBroker(BaseBroker):
             funds = await asyncio.to_thread(self._dhan.get_fund_limits)
             if funds and funds.get("status") == "success":
                 self._authenticated = True
-                logger.info("DhanBroker [%s]: Authenticated.", self.client_id)
+                pt   = getattr(self._b, "product_type", "").strip().upper()
+                mode = getattr(self._b, "trading_mode", "intraday").lower()
+                if pt in ("MIS", "INTRADAY"):
+                    self._product = "INTRADAY"
+                elif pt in ("NRML", "NORMAL"):
+                    self._product = "MARGIN"
+                else:
+                    self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "MARGIN"
+                logger.info("DhanBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
                 return True
             logger.error("DhanBroker [%s]: Auth check failed: %s", self.client_id, funds)
             return False
@@ -82,16 +92,17 @@ class DhanBroker(BaseBroker):
             OrderType.SL_L:   "STOP_LOSS",
         }
         order_params = {
-            "security_id": security_id,
-            "exchange_segment": "NSE_FNO" if req.exchange == "NFO" else "BSE_FNO",
-            "transaction_type": req.side.value,
-            "quantity": req.qty,
-            "order_type": _type_map[req.order_type],
-            "product_type": "INTRADAY",
-            "price": req.price,
-            "trigger_price": req.trigger_price if req.trigger_price > 0 else 0,
-            "validity": "DAY",
-            "tag": req.tag[:20] if req.tag else "",
+            "security_id":        security_id,
+            "exchange_segment":   "NSE_FNO" if req.exchange == "NFO" else "BSE_FNO",
+            "transaction_type":   req.side.value,
+            "quantity":           req.qty,
+            "order_type":         _type_map[req.order_type],
+            "product_type":       self._product,
+            "price":              req.price,
+            "trigger_price":      req.trigger_price if req.trigger_price > 0 else 0,
+            "validity":           "DAY",
+            "after_market_order": self._is_amo,
+            "tag":                req.tag[:20] if req.tag else "",
         }
         ret = await asyncio.to_thread(self._dhan.place_order, **order_params)
         if ret and ret.get("status") == "success":

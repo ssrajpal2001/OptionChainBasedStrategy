@@ -26,6 +26,8 @@ class FyersBroker(BaseBroker):
         super().__init__(binding.binding_id, client_id)
         self._b = binding
         self._fyers: Any = None
+        self._is_amo  = False
+        self._product = "INTRADAY"   # overridden from binding at auth time
 
     async def authenticate(self) -> bool:
         try:
@@ -44,7 +46,15 @@ class FyersBroker(BaseBroker):
             profile = await asyncio.to_thread(self._fyers.get_profile)
             if profile and profile.get("s") == "ok":
                 self._authenticated = True
-                logger.info("FyersBroker [%s]: Authenticated.", self.client_id)
+                pt   = getattr(self._b, "product_type", "").strip().upper()
+                mode = getattr(self._b, "trading_mode", "intraday").lower()
+                if pt in ("MIS", "INTRADAY"):
+                    self._product = "INTRADAY"
+                elif pt in ("NRML", "NORMAL"):
+                    self._product = "MARGIN"
+                else:
+                    self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "MARGIN"
+                logger.info("FyersBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
                 return True
             logger.error("FyersBroker [%s]: Auth check failed: %s", self.client_id, profile)
             return False
@@ -63,19 +73,19 @@ class FyersBroker(BaseBroker):
             OrderType.SL_M: 4, OrderType.SL_L: 3,
         }
         data = {
-            "symbol": req.broker_symbol,
-            "qty": req.qty,
-            "type": _type_map[req.order_type],
-            "side": 1 if req.side == OrderSide.BUY else -1,
-            "productType": "INTRADAY",
-            "limitPrice": req.price,
-            "stopPrice": req.trigger_price,
-            "validity": "DAY",
+            "symbol":       req.broker_symbol,
+            "qty":          req.qty,
+            "type":         _type_map[req.order_type],
+            "side":         1 if req.side == OrderSide.BUY else -1,
+            "productType":  self._product,
+            "limitPrice":   req.price,
+            "stopPrice":    req.trigger_price,
+            "validity":     "DAY",
             "disclosedQty": 0,
-            "offlineOrder": False,
-            "stopLoss": 0,
-            "takeProfit": 0,
-            "orderTag": req.tag[:20] if req.tag else "",
+            "offlineOrder": self._is_amo,   # True = AMO
+            "stopLoss":     0,
+            "takeProfit":   0,
+            "orderTag":     req.tag[:20] if req.tag else "",
         }
         ret = await asyncio.to_thread(self._fyers.place_order, data=data)
         if ret and ret.get("s") == "ok":
