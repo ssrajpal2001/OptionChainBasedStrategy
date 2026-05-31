@@ -2714,27 +2714,37 @@ class DashboardServer:
 
             ce_bars: list = []
             pe_bars: list = []
+            ce_fetch_error: str = ""
+            pe_fetch_error: str = ""
             try:
                 ce_bars = await asyncio.to_thread(
                     _fetch_upstox_candles_sync, access_token, ce_key, bd_str, bd_str,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                ce_fetch_error = str(exc)
+                logger.warning("historical_replay CE fetch failed [%s]: %s", ce_key, exc)
             try:
                 pe_bars = await asyncio.to_thread(
                     _fetch_upstox_candles_sync, access_token, pe_key, bd_str, bd_str,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                pe_fetch_error = str(exc)
+                logger.warning("historical_replay PE fetch failed [%s]: %s", pe_key, exc)
 
             # Option bars are a bonus (premium reference only) — not fatal if empty.
             # Structural HTF/MTF replay runs on underlying spot bars regardless.
             option_data_note = ""
             if not ce_bars and not pe_bars:
+                err_detail = ""
+                if ce_fetch_error:
+                    err_detail += f" CE error: {ce_fetch_error}."
+                if pe_fetch_error:
+                    err_detail += f" PE error: {pe_fetch_error}."
+                if not err_detail:
+                    err_detail = " API returned empty candle list (check token freshness)."
                 option_data_note = (
-                    f"Option premium data unavailable from Upstox for CE={ce_key} / PE={pe_key}. "
-                    "This is common for deep-ITM or illiquid strikes. "
-                    "Structural replay (phase transitions) still runs on underlying spot bars."
+                    f"Option premium data not returned by Upstox for "
+                    f"CE={ce_key} / PE={pe_key}.{err_detail}"
                 )
 
             # 7. Resample underlying to HTF/MTF and run sandbox engine
@@ -2856,11 +2866,13 @@ class DashboardServer:
                     "capital":                payload.capital,
                 },
                 "data_summary": {
-                    "spot_bars": len(spot_bars),
-                    "htf_bars":  len(htf_df),
-                    "mtf_bars":  len(mtf_df),
-                    "ce_premium": _prem_summary(ce_bars, ce_key),
-                    "pe_premium": _prem_summary(pe_bars, pe_key),
+                    "spot_bars":      len(spot_bars),
+                    "htf_bars":       len(htf_df),
+                    "mtf_bars":       len(mtf_df),
+                    "ce_premium":     _prem_summary(ce_bars, ce_key),
+                    "pe_premium":     _prem_summary(pe_bars, pe_key),
+                    "ce_fetch_error": ce_fetch_error,
+                    "pe_fetch_error": pe_fetch_error,
                 },
                 "phase_transitions":  phase_transitions,
                 "trade_logs":         trade_logs,

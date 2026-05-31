@@ -4695,7 +4695,9 @@ function histReplay() {
                   </span>
                 </template>
                 <template x-if="result.data_summary.ce_premium.bars === 0">
-                  <span class="text-gray-600">No CE data</span>
+                  <span class="text-red-400 text-[10px]">No CE data
+                    <span x-show="result.data_summary.ce_fetch_error" x-text="' — ' + result.data_summary.ce_fetch_error"></span>
+                  </span>
                 </template>
               </div>
               <div>
@@ -4710,7 +4712,9 @@ function histReplay() {
                   </span>
                 </template>
                 <template x-if="result.data_summary.pe_premium.bars === 0">
-                  <span class="text-gray-600">No PE data</span>
+                  <span class="text-red-400 text-[10px]">No PE data
+                    <span x-show="result.data_summary.pe_fetch_error" x-text="' — ' + result.data_summary.pe_fetch_error"></span>
+                  </span>
                 </template>
               </div>
             </div>
