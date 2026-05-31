@@ -17,9 +17,13 @@ env/
 # Data and logs (large / sensitive)
 data/recorded/
 data/backtest/
+data/*.db
+data/*.db-shm
+data/*.db-wal
 logs/
 *.parquet
 *.zst
+*.log
 
 # Credentials — NEVER commit
 *.env
