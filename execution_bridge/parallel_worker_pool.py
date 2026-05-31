@@ -352,36 +352,39 @@ class ClientExecutionWorker:
             logger.warning("Worker[%s]: symbol translation failed: %s", self._client.client_id, exc)
             return None
 
-    def _derive_expiry(self, underlying: str = "NIFTY") -> date:
+    def _derive_expiry(self, underlying: str = "NIFTY") -> Optional[date]:
         """
-        Return the correct weekly expiry for this underlying.
-        NIFTY = Tuesday, BANKNIFTY = Wednesday, FINNIFTY = Tuesday.
+        Return the correct weekly expiry from InstrumentRegistry (real contract dates).
         Respects client expiry_preference (CURRENT_WEEK / NEXT_WEEK / MONTHLY).
+        Returns None if registry is not loaded — caller must handle.
         """
-        from data_layer.instrument_registry import REGISTRY, _calc_next_expiry
+        from data_layer.instrument_registry import REGISTRY
         today = datetime.now(IST).date()
         pref  = self._client.expiry_preference
 
-        # Use registry if loaded (has real active expiries from Upstox)
-        if REGISTRY.is_loaded(underlying):
-            expiry = REGISTRY.get_active_expiry(underlying, today)
-            if expiry is None:
-                expiry = _calc_next_expiry(underlying, today)
-        else:
-            expiry = _calc_next_expiry(underlying, today)
+        if not REGISTRY.is_loaded(underlying):
+            logger.warning("_derive_expiry: registry not loaded for %s — returning None", underlying)
+            return None
+
+        all_expiries = REGISTRY.all_expiries(underlying)
+        future = [e for e in all_expiries if e >= today]
+        if not future:
+            logger.warning("_derive_expiry: no future expiries in registry for %s", underlying)
+            return None
 
         if pref == "NEXT_WEEK":
-            # Advance by 7 days, then snap to correct weekday
-            expiry = _calc_next_expiry(underlying, expiry + timedelta(days=1))
+            # Second-nearest expiry
+            return future[1] if len(future) > 1 else future[0]
         elif pref == "MONTHLY":
-            # Last Thursday of next month (legacy — kept for non-NIFTY instruments)
-            m = today.month % 12 + 1
-            y = today.year + (1 if today.month == 12 else 0)
-            last = date(y, m, 1) - timedelta(days=1)
-            back = (last.weekday() - 3) % 7
-            expiry = last - timedelta(days=back)
+            # Last expiry of the current or next calendar month
+            for exp in future:
+                next_exp_idx = future.index(exp) + 1
+                if next_exp_idx >= len(future) or future[next_exp_idx].month != exp.month:
+                    return exp
+            return future[-1]
 
-        return expiry
+        # Default: nearest (CURRENT_WEEK)
+        return future[0]
 
     def _compute_lots(self, signal: SignalPackage, broker: BaseBroker) -> int:
         risk = self._client.risk

@@ -281,12 +281,9 @@ class MockBroker(BaseBroker):
 
         records = []
         today = date.today()
-        # Simulate weekly expiry (next Thursday)
-        days_until_thursday = (3 - today.weekday()) % 7
-        if days_until_thursday == 0:
-            days_until_thursday = 7
-        from datetime import timedelta
-        expiry = today + timedelta(days=days_until_thursday)
+        from data_layer.instrument_registry import REGISTRY as _REG
+        # Use first known expiry from registry; fall back to today+7 for mock data only
+        expiry = _REG.get_active_expiry(list(self._BASE_PRICES.keys())[0], today) or (today + __import__("datetime").timedelta(days=7))
 
         token_base = 10000
         for underlying, base_price in self._BASE_PRICES.items():

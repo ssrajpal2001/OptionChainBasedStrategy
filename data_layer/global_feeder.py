@@ -78,11 +78,12 @@ class MockFeeder(BaseFeeder):
         that _parse_frame() will convert into typed ticks.  No heavy computation
         happens here — the frame dict is created cheaply and enqueued immediately.
         """
+        from data_layer.instrument_registry import next_expiry as _nexp
         while self._running:
             now = datetime.now(IST)
-            expiry = self._next_thursday()
 
             for underlying in self._cfg.monitored_indices:
+                expiry = _nexp(underlying)
                 p = self._prices[underlying]
                 p = max(p * (1 + self._rng.gauss(0, 0.0003)), 1.0)
                 self._prices[underlying] = p
@@ -143,11 +144,6 @@ class MockFeeder(BaseFeeder):
                 )
                 await self._publish_option(opt)
 
-    @staticmethod
-    def _next_thursday() -> date:
-        today = datetime.now(IST).date()
-        days = (3 - today.weekday()) % 7 or 7
-        return today + timedelta(days=days)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

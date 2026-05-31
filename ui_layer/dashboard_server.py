@@ -370,7 +370,7 @@ _MONITOR_HTML = os.path.join(_TEMPLATE_DIR, "monitor.html")
 
 # NSE weekly expiry weekday per underlying (0=Mon … 6=Sun)
 _WEEKLY_EXPIRY_WEEKDAY: Dict[str, int] = {
-    "NIFTY":       3,   # Thursday
+    "NIFTY":       1,   # Tuesday  (moved from Thursday Feb 2025)
     "BANKNIFTY":   2,   # Wednesday
     "FINNIFTY":    1,   # Tuesday
     "MIDCPNIFTY":  0,   # Monday
@@ -397,11 +397,19 @@ _UPSTOX_INDEX_KEY: Dict[str, str] = {
 
 
 def _next_weekly_expiry(from_date, underlying: str):
-    """Return the nearest weekly expiry on or after from_date for an underlying."""
-    from datetime import timedelta
-    target_wd = _WEEKLY_EXPIRY_WEEKDAY.get(underlying, 1)
-    days_ahead = (target_wd - from_date.weekday()) % 7
-    return from_date + timedelta(days=days_ahead)
+    """
+    Return the nearest active expiry on or after from_date.
+    Always from InstrumentRegistry (real Upstox contract dates). Never calculated.
+    Caller must ensure registry is loaded before calling this.
+    """
+    from data_layer.instrument_registry import REGISTRY as _REG
+    exp = _REG.get_active_expiry(underlying, from_date)
+    if exp:
+        return exp
+    raise RuntimeError(
+        f"No active expiry found in registry for {underlying} from {from_date}. "
+        "Load the registry first (call _REG.load_sync) before resolving expiry."
+    )
 
 
 def _prior_trading_day(d):
@@ -2745,13 +2753,21 @@ class DashboardServer:
                 }
             access_token = creds["access_token"]
 
-            # 3. Active weekly expiry and DTE
+            # 3. Load registry first — expiry must come from real contract dates, not weekday math
+            from data_layer.instrument_registry import REGISTRY as _REG
+            if not _REG.is_loaded(script):
+                try:
+                    await asyncio.to_thread(_REG.load_sync, script, access_token)
+                except Exception as exc:
+                    return {"ok": False, "error": f"Failed to load instrument registry [{script}]: {exc}"}
+
+            # 4. Active weekly expiry and DTE — always from registry
             expiry = _next_weekly_expiry(bd, script)
             dte    = (expiry - bd).days
             step   = _STRIKE_STEPS.get(script, 50)
             lot    = _LOT_SIZES_MAP.get(script, 75)
 
-            # 4. Prior trading day → underlying open/close → base_strike
+            # 5. Prior trading day → underlying open/close → base_strike
             prior_day  = _prior_trading_day(bd)
             index_key  = _UPSTOX_INDEX_KEY.get(script, f"NSE_INDEX|{script}")
             prior_str  = prior_day.isoformat()
@@ -2771,21 +2787,12 @@ class DashboardServer:
             prior_close = prior_bars[-1]["close"]
             base_strike = int(round(((prior_open + prior_close) / 2) / step) * step)
 
-            # 5. DTE ITM matrix
+            # 6. DTE ITM matrix
             offset    = _dte_itm_offset(dte, step)
             ce_strike = int(round((base_strike - offset) / step) * step)
             pe_strike = int(round((base_strike + offset) / step) * step)
 
-            # 5b. Resolve exact instrument_key via InstrumentRegistry
-            # (uses Upstox get_option_contracts API — targeted and lightweight)
-            from data_layer.instrument_registry import REGISTRY as _REG
-
-            if not _REG.is_loaded(script):
-                try:
-                    await asyncio.to_thread(_REG.load_sync, script, access_token)
-                except Exception as exc:
-                    return {"ok": False, "error": f"Failed to load instrument registry [{script}]: {exc}"}
-
+            # 6b. Instrument keys from already-loaded registry
             ce_key = _REG.get_upstox_key(script, expiry, ce_strike, "CE")
             pe_key = _REG.get_upstox_key(script, expiry, pe_strike, "PE")
 
@@ -3171,12 +3178,14 @@ class DashboardServer:
                 else:
                     expiry = future_expiries[0]  # nearest upcoming
             else:
-                # Registry not loaded — fall back to _nexp with correct weekday
-                expiry = _nexp(underlying, today)
-                logger.warning(
-                    "AMO test: no expiries in registry for %s — using calculated fallback %s",
-                    underlying, expiry,
-                )
+                # Registry loaded but returned no future expiries — cannot proceed
+                return {
+                    "ok": False,
+                    "error": (
+                        f"No active expiries found in registry for {underlying}. "
+                        "Re-authenticate Upstox so the registry can fetch live contract dates."
+                    ),
+                }
 
             # Minimum valid strikes per underlying (sanity guard)
             _MIN_STRIKE = {"NIFTY": 5000, "BANKNIFTY": 10000, "FINNIFTY": 5000,

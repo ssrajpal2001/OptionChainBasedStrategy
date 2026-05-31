@@ -356,15 +356,14 @@ class InstrumentRegistry:
     def get_active_expiry(self, underlying: str, from_date: date = None) -> Optional[date]:
         """
         Return the nearest active expiry on or after from_date.
-        Falls back to mathematical calculation if registry not loaded.
+        Returns None if registry not yet loaded — never calculates from weekday math.
         """
         from_date = from_date or date.today()
         expiries = self._expiries.get(underlying, [])
         for exp in expiries:
             if exp >= from_date:
                 return exp
-        # Fallback: mathematical next-expiry
-        return _calc_next_expiry(underlying, from_date)
+        return None
 
     def all_expiries(self, underlying: str) -> List[date]:
         """Return all loaded active expiry dates for an underlying."""
@@ -515,15 +514,32 @@ def _calc_next_expiry(underlying: str, from_date: date) -> date:
 
 def is_monthly_expiry(expiry: date, underlying: str) -> bool:
     """
-    True if this expiry is the monthly (last weekly expiry of the month).
-    Monthly = the last occurrence of the weekly expiry weekday in the month.
+    True if this expiry is the monthly (last expiry of the month).
+
+    Uses the registry's sorted expiry list: if the NEXT expiry after this one
+    falls in a different calendar month, this expiry is the monthly one.
+    Falls back to the +7-day heuristic only if the registry has no data.
     """
-    wd = _EXPIRY_WEEKDAY.get(underlying, 1)
-    # Check if adding 7 days crosses into the next month
+    all_exp = REGISTRY.all_expiries(underlying)
+    if all_exp:
+        try:
+            idx = all_exp.index(expiry)
+            next_exp = all_exp[idx + 1] if idx + 1 < len(all_exp) else None
+            if next_exp is not None:
+                return next_exp.month != expiry.month
+            # expiry is the last known — treat as monthly
+            return True
+        except ValueError:
+            pass  # expiry not in list — fall through
+    # Registry not loaded: compare months via +7-day offset (no weekday math)
     return (expiry + timedelta(days=7)).month != expiry.month
 
 
-def next_expiry(underlying: str, from_date: date = None) -> date:
-    """Public helper — uses REGISTRY if loaded, else mathematical fallback."""
+def next_expiry(underlying: str, from_date: date = None) -> Optional[date]:
+    """
+    Public helper — always from REGISTRY (real Upstox contract dates).
+    Returns None if registry is not yet loaded. Never falls back to weekday math.
+    Callers must load the registry before calling this.
+    """
     from_date = from_date or date.today()
-    return REGISTRY.get_active_expiry(underlying, from_date) or _calc_next_expiry(underlying, from_date)
+    return REGISTRY.get_active_expiry(underlying, from_date)

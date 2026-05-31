@@ -118,6 +118,8 @@ class IronCondorStrategy:
         self._position:  Optional[IronCondorPosition] = None
         self._spot:      float = 0.0
         self._prem_cache: Dict[str, float] = {}   # "NIFTY24500CE" → ltp
+        self._bid_cache:  Dict[str, float] = {}   # same key → best bid
+        self._ask_cache:  Dict[str, float] = {}   # same key → best ask
         self._tasks:     list = []
         self._adjusting: bool = False  # lock to prevent re-entrant adjustments
         self._load_thresholds()
@@ -209,6 +211,10 @@ class IronCondorStrategy:
             if tick.underlying == self._underlying:
                 key = f"{self._underlying}{int(tick.strike)}{tick.option_type}"
                 self._prem_cache[key] = tick.ltp
+                if tick.bid > 0:
+                    self._bid_cache[key] = tick.bid
+                if tick.ask > 0:
+                    self._ask_cache[key] = tick.ask
             if self._position and self._position.underlying == tick.underlying:
                 self._update_leg_ltp(tick)
 
@@ -287,9 +293,10 @@ class IronCondorStrategy:
         )
         await self._bus.publish(Topic.IC_ORDER_REQUEST, ev_order)
 
+        from data_layer.instrument_registry import next_expiry as _nexp
         self._position = IronCondorPosition(
             underlying      = self._underlying,
-            expiry          = date.today(),
+            expiry          = _nexp(self._underlying),
             atm_at_entry    = atm,
             trade_id        = trade_id,
             short_ce        = IronCondorLeg("sell","CE", short_ce_strike, short_ce_ltp),
@@ -344,9 +351,9 @@ class IronCondorStrategy:
             return None
 
         if ce_ltp / pe_ltp >= self._ratio_trigger:
-            return "CE"   # CE leg is bleeding; PE is profitable
+            return "PE"   # PE is profitable (CE is bleeding); roll the profitable PE side
         if pe_ltp / ce_ltp >= self._ratio_trigger:
-            return "PE"   # PE leg is bleeding; CE is profitable
+            return "CE"   # CE is profitable (PE is bleeding); roll the profitable CE side
         return None
 
     async def _check_adjustment_criteria(self) -> None:
@@ -355,6 +362,18 @@ class IronCondorStrategy:
         side = self.check_adjustment_criteria()
         if side:
             await self.adjust_iron_condor(side)
+
+    def _exec_price(self, key: str, side: str) -> float:
+        """
+        Return the correct execution price for a leg.
+          side='buy'  → ask price (what you pay to buy back a short)
+          side='sell' → bid price (what you receive when selling)
+        Falls back to LTP if bid/ask not yet populated (non-live / stale quote).
+        """
+        ltp = self._prem_cache.get(key, 0.0)
+        if side == "buy":
+            return self._ask_cache.get(key, ltp) or ltp
+        return self._bid_cache.get(key, ltp) or ltp
 
     async def adjust_iron_condor(self, profitable_side: str) -> None:
         """
@@ -370,61 +389,76 @@ class IronCondorStrategy:
           2. New short strike = current_ATM ± (original_diff / 2) → converges to ATM.
           3. Increment adj_count for that side.
           4. If adj_count >= max_adj: hard stop → close all → re-enter.
+
+        Execution prices use ask-to-buy / bid-to-sell to avoid stale-LTP slippage.
+        On any mid-sequence exception the position is marked 'broken' and locked from
+        further auto-adjustments until manually reviewed.
         """
         pos = self._position
         if not pos or self._adjusting:
+            return
+        if pos.status == "broken":
+            logger.error(
+                "IronCondor[%s]: position %s is BROKEN — manual review required, "
+                "no further auto-adjustments.",
+                self._underlying, pos.trade_id,
+            )
             return
 
         self._adjusting = True
         try:
             # Determine which side is profitable vs bleeding
             if profitable_side == "CE":
-                # CE is profitable, PE is bleeding
                 profit_short  = pos.short_ce
                 profit_hedge  = pos.long_ce
                 bleed_short   = pos.short_pe
                 bleed_hedge   = pos.long_pe
-                direction     = +1  # CE side = call side, new short goes UP
+                direction     = +1
                 adj_count     = pos.adj_count_ce
             else:
-                # PE is profitable, CE is bleeding
                 profit_short  = pos.short_pe
                 profit_hedge  = pos.long_pe
                 bleed_short   = pos.short_ce
                 bleed_hedge   = pos.long_ce
-                direction     = -1  # PE side = put side, new short goes DOWN
+                direction     = -1
                 adj_count     = pos.adj_count_pe
+
+            ot = profitable_side   # "CE" or "PE"
+
+            # Execution prices — ask to buy back, bid to sell
+            ps_key = f"{self._underlying}{int(profit_short.strike)}{ot}"
+            ph_key = f"{self._underlying}{int(profit_hedge.strike)}{ot}"
+            ps_close_px = self._exec_price(ps_key, "buy")   # buying back 2× short
+            ph_close_px = self._exec_price(ph_key, "sell")  # selling 1× hedge
 
             logger.info(
                 "IronCondor[%s]: ADJUSTMENT — profitable_side=%s "
-                "profit_short_ltp=%.2f bleed_short_ltp=%.2f adj_count=%d/%d",
+                "short_ask=%.2f hedge_bid=%.2f bleed_short_ltp=%.2f adj_count=%d/%d",
                 self._underlying, profitable_side,
-                profit_short.ltp, bleed_short.ltp, adj_count + 1, pos.max_adj,
+                ps_close_px, ph_close_px, bleed_short.ltp, adj_count + 1, pos.max_adj,
             )
 
-            # ── Step 1: Close profitable side at 2× quantity ──────────────────
-            # Realized P&L from closing:
-            #   Short leg: sold at entry_price, buying back 1× at ltp = (entry - ltp) per unit
-            #   Hedge leg: bought at entry_price, selling at ltp = (ltp - entry) per unit
-            pnl_from_short = (profit_short.entry_price - profit_short.ltp) * pos.lot_size
-            pnl_from_hedge = (profit_hedge.ltp - profit_hedge.entry_price) * pos.lot_size
+            # ── Step 1: Realized P&L uses actual execution prices ─────────────
+            # Short was sold at entry; buying back at ask → cost = ask price
+            # Hedge was bought at entry; selling at bid → receive = bid price
+            pnl_from_short = (profit_short.entry_price - ps_close_px) * pos.lot_size
+            pnl_from_hedge = (ph_close_px - profit_hedge.entry_price) * pos.lot_size
             adj_pnl = pnl_from_short + pnl_from_hedge
             pos.cumulative_adj_pnl += adj_pnl / pos.lot_size  # store in points
 
-            # Publish close order for profitable side (2× qty on short leg)
+            # ── Step 2: Publish ADJUST_CLOSE ─────────────────────────────────
             close_ev = ICOrderEvent(
                 action          = "ADJUST_CLOSE",
                 underlying      = pos.underlying,
                 atm             = self._spot,
-                # Use only profitable side legs, 2× qty on short
-                short_ce_strike = profit_short.strike if profitable_side == "CE" else bleed_short.strike,
-                short_pe_strike = profit_short.strike if profitable_side == "PE" else bleed_short.strike,
-                short_ce_ltp    = profit_short.ltp if profitable_side == "CE" else 0.0,
-                short_pe_ltp    = profit_short.ltp if profitable_side == "PE" else 0.0,
-                long_ce_strike  = profit_hedge.strike if profitable_side == "CE" else bleed_hedge.strike,
-                long_pe_strike  = profit_hedge.strike if profitable_side == "PE" else bleed_hedge.strike,
-                long_ce_ltp     = profit_hedge.ltp if profitable_side == "CE" else 0.0,
-                long_pe_ltp     = profit_hedge.ltp if profitable_side == "PE" else 0.0,
+                short_ce_strike = profit_short.strike if ot == "CE" else bleed_short.strike,
+                short_pe_strike = profit_short.strike if ot == "PE" else bleed_short.strike,
+                short_ce_ltp    = ps_close_px if ot == "CE" else 0.0,   # ask price used
+                short_pe_ltp    = ps_close_px if ot == "PE" else 0.0,
+                long_ce_strike  = profit_hedge.strike if ot == "CE" else bleed_hedge.strike,
+                long_pe_strike  = profit_hedge.strike if ot == "PE" else bleed_hedge.strike,
+                long_ce_ltp     = ph_close_px if ot == "CE" else 0.0,   # bid price used
+                long_pe_ltp     = ph_close_px if ot == "PE" else 0.0,
                 lot_size        = pos.lot_size,
                 close_reason    = f"ratio_shift_{profitable_side}",
                 cumulative_pnl  = pos.cumulative_adj_pnl,
@@ -432,52 +466,51 @@ class IronCondorStrategy:
             )
             await self._bus.publish(Topic.IC_ORDER_REQUEST, close_ev)
 
-            # ── Step 2: New short = ATM ± (original_diff / 2) ────────────────
-            step         = self._strike_step
-            atm_now      = round(self._spot / step) * step
-            new_diff     = pos.original_diff / 2
+            # ── Step 3: New short strike converges → ATM ± (original_diff / 2) ─
+            step             = self._strike_step
+            atm_now          = round(self._spot / step) * step
+            new_diff         = pos.original_diff / 2
             new_short_strike = round((atm_now + direction * new_diff) / step) * step
             new_hedge_strike = round((new_short_strike + direction * pos.wing_pts) / step) * step
 
-            new_short_ltp = self._prem_cache.get(
-                f"{self._underlying}{int(new_short_strike)}{'CE' if profitable_side == 'CE' else 'PE'}", 0.0)
-            new_hedge_ltp = self._prem_cache.get(
-                f"{self._underlying}{int(new_hedge_strike)}{'CE' if profitable_side == 'CE' else 'PE'}", 0.0)
-            # Old short strike (now our new hedge) — already "long" from 2× buyback
-            old_short_ltp = profit_short.ltp   # 1× long position at old short strike
+            ns_key = f"{self._underlying}{int(new_short_strike)}{ot}"
+            nh_key = f"{self._underlying}{int(new_hedge_strike)}{ot}"
+            # New short: we're selling → use bid price
+            # New hedge: we're buying → use ask price
+            new_short_px  = self._exec_price(ns_key, "sell")
+            new_hedge_px  = self._exec_price(nh_key, "buy")
+            old_short_ltp = profit_short.ltp  # 1× long at old short strike from 2× buyback
 
-            # Publish open order for new short + new hedge
+            # ── Step 4: Publish ADJUST_OPEN ───────────────────────────────────
             open_ev = ICOrderEvent(
                 action          = "ADJUST_OPEN",
                 underlying      = pos.underlying,
                 atm             = atm_now,
-                short_ce_strike = new_short_strike if profitable_side == "CE" else pos.short_ce.strike,
-                short_pe_strike = new_short_strike if profitable_side == "PE" else pos.short_pe.strike,
-                short_ce_ltp    = new_short_ltp if profitable_side == "CE" else pos.short_ce.ltp,
-                short_pe_ltp    = new_short_ltp if profitable_side == "PE" else pos.short_pe.ltp,
-                long_ce_strike  = new_hedge_strike if profitable_side == "CE" else pos.long_ce.strike,
-                long_pe_strike  = new_hedge_strike if profitable_side == "PE" else pos.long_pe.strike,
-                long_ce_ltp     = new_hedge_ltp if profitable_side == "CE" else pos.long_ce.ltp,
-                long_pe_ltp     = new_hedge_ltp if profitable_side == "PE" else pos.long_pe.ltp,
+                short_ce_strike = new_short_strike if ot == "CE" else pos.short_ce.strike,
+                short_pe_strike = new_short_strike if ot == "PE" else pos.short_pe.strike,
+                short_ce_ltp    = new_short_px if ot == "CE" else pos.short_ce.ltp,
+                short_pe_ltp    = new_short_px if ot == "PE" else pos.short_pe.ltp,
+                long_ce_strike  = new_hedge_strike if ot == "CE" else pos.long_ce.strike,
+                long_pe_strike  = new_hedge_strike if ot == "PE" else pos.long_pe.strike,
+                long_ce_ltp     = new_hedge_px if ot == "CE" else pos.long_ce.ltp,
+                long_pe_ltp     = new_hedge_px if ot == "PE" else pos.long_pe.ltp,
                 lot_size        = pos.lot_size,
                 event_id        = f"{pos.trade_id}_adj{adj_count+1}_open",
             )
             await self._bus.publish(Topic.IC_ORDER_REQUEST, open_ev)
 
-            # ── Step 3: Update position state ────────────────────────────────
-            if profitable_side == "CE":
-                # Old short CE (profit_short.strike) becomes new hedge CE
+            # ── Step 5: Update position state ────────────────────────────────
+            if ot == "CE":
                 pos.long_ce   = IronCondorLeg("buy", "CE", profit_short.strike, old_short_ltp)
-                pos.short_ce  = IronCondorLeg("sell","CE", new_short_strike,    new_short_ltp)
+                pos.short_ce  = IronCondorLeg("sell","CE", new_short_strike,    new_short_px)
                 pos.adj_count_ce += 1
                 adj_count = pos.adj_count_ce
             else:
                 pos.long_pe   = IronCondorLeg("buy", "PE", profit_short.strike, old_short_ltp)
-                pos.short_pe  = IronCondorLeg("sell","PE", new_short_strike,    new_short_ltp)
+                pos.short_pe  = IronCondorLeg("sell","PE", new_short_strike,    new_short_px)
                 pos.adj_count_pe += 1
                 adj_count = pos.adj_count_pe
 
-            # Update net_credit with new leg prices
             pos.net_credit = (
                 (pos.short_ce.entry_price + pos.short_pe.entry_price)
                 - (pos.long_ce.entry_price  + pos.long_pe.entry_price)
@@ -492,15 +525,29 @@ class IronCondorStrategy:
                 adj_count, pos.max_adj,
             )
 
-            # ── Step 4: Hard stop if max_adjustments reached ──────────────────
+            # ── Step 6: Hard stop if max_adjustments reached ──────────────────
             if adj_count >= pos.max_adj:
                 logger.warning(
-                    "IronCondor[%s]: MAX ADJUSTMENTS REACHED (%d/%d) — closing all, "
-                    "will re-enter on next candle if within entry window.",
+                    "IronCondor[%s]: MAX ADJUSTMENTS REACHED (%d/%d) — closing all.",
                     self._underlying, adj_count, pos.max_adj,
                 )
                 await self._close_position("max_adjustments_reached")
 
+        except Exception as exc:
+            # Mid-sequence failure: one or more legs may have been placed but not the
+            # counterpart. Mark the position broken so no further auto-adjustments run.
+            # The operator MUST manually reconcile the open legs in the broker terminal.
+            if pos and pos.status != "closed":
+                pos.status = "broken"
+                await self._log_trade_db("BROKEN")
+            logger.critical(
+                "IronCondor[%s]: ADJUSTMENT FAILED mid-sequence — position %s marked BROKEN. "
+                "Manual reconciliation required. Error: %s",
+                self._underlying,
+                pos.trade_id if pos else "?",
+                exc,
+                exc_info=True,
+            )
         finally:
             self._adjusting = False
 

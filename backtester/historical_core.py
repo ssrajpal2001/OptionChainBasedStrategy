@@ -410,7 +410,8 @@ class HistoricalBacktester:
         ind_state = _IndicatorState()
         candle_builder = _LightCandleBuilder(self._cfg.candle_timeframes[0])
         open_trade: Optional[TradeRecord] = None
-        expiry = self._next_thursday(start)
+        from data_layer.instrument_registry import REGISTRY as _REG
+        expiry = _REG.get_active_expiry(underlying, start)
 
         for tick_ts, ltp, volume in spot_data:
             # Build candle
@@ -429,8 +430,8 @@ class HistoricalBacktester:
                 continue
 
             # Rebuild expiry if past current
-            if tick_ts.date() > expiry:
-                expiry = self._next_thursday(tick_ts.date())
+            if expiry is None or tick_ts.date() > expiry:
+                expiry = _REG.get_active_expiry(underlying, tick_ts.date())
 
             chain = self._build_chain(underlying, c, tick_ts, expiry)
 
@@ -671,8 +672,9 @@ class HistoricalBacktester:
         reason: str,
         report: BacktestReport,
     ) -> None:
-        expiry = self._next_thursday(ts.date())
-        tte = (expiry - ts.date()).days + 1
+        from data_layer.instrument_registry import REGISTRY as _REG
+        expiry = _REG.get_active_expiry(trade.signal.underlying if hasattr(trade.signal, "underlying") else "NIFTY", ts.date())
+        tte = (expiry - ts.date()).days + 1 if expiry else 1
         is_call = trade.signal.option_type == "CE"
         opt_price = _approx_option_price(
             spot, trade.signal.target_strike, tte, is_call=is_call
@@ -688,9 +690,3 @@ class HistoricalBacktester:
             reason, opt_price, trade.gross_pnl, trade.net_pnl,
         )
 
-    @staticmethod
-    def _next_thursday(from_date: date) -> date:
-        days_ahead = (3 - from_date.weekday()) % 7
-        if days_ahead == 0:
-            days_ahead = 7
-        return from_date + timedelta(days=days_ahead)

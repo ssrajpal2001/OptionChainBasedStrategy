@@ -614,8 +614,15 @@ def main() -> None:
 
     underlying = args.symbol.upper()
 
-    # ── Expiry & strike ───────────────────────────────────────────────────────
-    expiry     = next_tuesday()
+    # ── Expiry & strike — from registry (real contract dates, never calculated) ─
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+    from data_layer.instrument_registry import REGISTRY as _REG
+    expiry = _REG.get_active_expiry(underlying) if _REG.is_loaded(underlying) else None
+    if expiry is None:
+        print(f"  [warn] Registry not loaded for {underlying} — expiry unknown. "
+              f"Run the dashboard and authenticate Upstox first.")
+        expiry = date.today()   # placeholder for symbol display only
     spot       = args.spot or 24500.0     # fallback if API unavailable
     step       = _STRIKE_STEPS.get(underlying, 50)
     strike     = atm_strike(spot, underlying)

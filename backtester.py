@@ -407,10 +407,8 @@ class BacktestEngine:
         first_atm = round(first_close / step) * step
         first_ts = spot_df.index[0]
         first_expiry_date = first_ts.date() if isinstance(first_ts, datetime) else first_ts
-        days_to_thu = (3 - first_expiry_date.weekday()) % 7
-        if days_to_thu == 0:
-            days_to_thu = 7
-        first_expiry = first_expiry_date + timedelta(days=days_to_thu)
+        from data_layer.instrument_registry import next_expiry as _nexp
+        first_expiry = _nexp(self._underlying, first_expiry_date)
         self._matrix.initialize_chain(self._underlying, first_close, first_atm, first_expiry)
         self._active_expiry = first_expiry
         self._build_instruments(first_expiry)
@@ -573,12 +571,10 @@ class BacktestEngine:
                 await self._matrix.process_tick(opt_tick)
 
     def _refresh_expiry(self, timestamp: datetime) -> None:
-        """Set active expiry as the nearest Thursday."""
+        """Set active expiry from registry (real contract dates, not day-of-week math)."""
+        from data_layer.instrument_registry import next_expiry as _nexp
         ts_date = timestamp.date() if isinstance(timestamp, datetime) else timestamp
-        days_to_thu = (3 - ts_date.weekday()) % 7
-        if days_to_thu == 0:
-            days_to_thu = 7
-        candidate = ts_date + timedelta(days=days_to_thu)
+        candidate = _nexp(self._underlying, ts_date)
         if self._active_expiry != candidate:
             self._active_expiry = candidate
             self._build_instruments(candidate)
