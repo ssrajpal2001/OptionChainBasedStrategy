@@ -85,91 +85,158 @@ class InstrumentRegistry:
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
-    def load_sync(self, underlying: str, access_token: str = "") -> None:
+    def load_sync(self, underlying: str, access_token: str = "", weeks_ahead: int = 8) -> None:
         """
-        Load active option contracts from Upstox static instrument master JSON.
+        Load active option contracts via Upstox get_option_contracts API.
 
-        Downloads https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz
-        once per session (cached by date string), then filters to:
-          segment=NSE_FO, instrument_type=OPT, underlying_symbol=underlying, expiry>=today
+        Calls get_option_contracts(underlying_key, expiry_date=X) for each of
+        the next `weeks_ahead` weekly expiries. The API returns list[InstrumentData]
+        directly (SDK sets _return_http_data_only=True internally), each record
+        having instrument_key, trading_symbol, strike_price, expiry.
 
-        Works 24/7 including weekends — static file, no live market required.
+        If the API fails (e.g. weekend/token issue), falls back to downloading
+        the static NSE instrument master JSON (works 24/7, cached per session).
+
         Must be called via asyncio.to_thread() from async code.
         """
+        try:
+            import upstox_client
+        except ImportError:
+            logger.warning("InstrumentRegistry: upstox_client not installed.")
+            return
+
+        today = date.today()
+        underlying_key = _UPSTOX_UNDERLYING_KEY.get(underlying)
+        if not underlying_key:
+            logger.warning("InstrumentRegistry: no key mapping for '%s'", underlying)
+            return
+
+        # ── Primary: API call per expiry (lightweight, targeted) ──────────────
+        if access_token:
+            cfg = upstox_client.Configuration()
+            cfg.access_token = access_token
+            api_client_obj = upstox_client.ApiClient(cfg)
+            opt_api = upstox_client.OptionsApi(api_client_obj)
+
+            # Calculate next N weekly expiry dates
+            expiry_dates: List[date] = []
+            d = today
+            for _ in range(weeks_ahead):
+                d = _calc_next_expiry(underlying, d)
+                expiry_dates.append(d)
+                d = d + timedelta(days=1)
+
+            keys: Dict[Tuple[str, int, str], str] = {}
+            expiry_set: Set[date] = set()
+
+            for expiry_date in expiry_dates:
+                expiry_str = expiry_date.isoformat()
+                try:
+                    # resp is already list[InstrumentData] (SDK sets _return_http_data_only=True)
+                    resp = opt_api.get_option_contracts(
+                        instrument_key=underlying_key,
+                        expiry_date=expiry_str,
+                    )
+                    # resp is the list directly — not a wrapper object
+                    items = resp if isinstance(resp, list) else (
+                        list(resp) if hasattr(resp, "__iter__") else []
+                    )
+                except Exception as exc:
+                    logger.debug("InstrumentRegistry [%s] expiry=%s: API failed: %s",
+                                 underlying, expiry_str, exc)
+                    items = []
+
+                count_before = len(keys)
+                for inst in items:
+                    ikey, ts, strike_raw, exp_raw = self._parse_instrument(inst)
+                    if not ikey:
+                        continue
+                    opt_type = "CE" if (ts.endswith("CE") or ikey.endswith("CE")) else \
+                               "PE" if (ts.endswith("PE") or ikey.endswith("PE")) else None
+                    if not opt_type:
+                        continue
+                    strike = int(round(float(strike_raw or 0)))
+                    if strike <= 0:
+                        continue
+                    keys[(expiry_str, strike, opt_type)] = ikey
+                    expiry_set.add(expiry_date)
+
+                logger.debug("InstrumentRegistry [%s] expiry=%s: +%d contracts",
+                             underlying, expiry_str, len(keys) - count_before)
+
+            if keys:
+                self._upstox_keys[underlying] = keys
+                self._expiries[underlying] = sorted(expiry_set)
+                self._loaded.add(underlying)
+                logger.info(
+                    "InstrumentRegistry [%s]: %d contracts via API across: %s",
+                    underlying, len(keys),
+                    ", ".join(e.isoformat() for e in sorted(expiry_set)[:6]),
+                )
+                return
+
+            logger.warning(
+                "InstrumentRegistry [%s]: API returned 0 contracts "
+                "(market may be closed). Falling back to master JSON.", underlying
+            )
+
+        # ── Fallback: static NSE master JSON (works 24/7, cached per session) ──
+        self._load_from_master_json(underlying, today)
+
+    def _load_from_master_json(self, underlying: str, today: date) -> None:
+        """Download and parse the Upstox NSE instrument master JSON (cached per session)."""
         import gzip
         import json
         from urllib.request import urlopen, Request
 
-        today = date.today()
         cache_key = today.isoformat()
-
-        # Download + cache the master JSON (10MB compressed, ~40MB parsed)
-        # Cache is module-level to survive multiple load_sync calls in same process
         raw_instruments = _MASTER_CACHE.get(cache_key)
+
         if raw_instruments is None:
             url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
-            logger.info("InstrumentRegistry: downloading Upstox NSE master from %s ...", url)
+            logger.info("InstrumentRegistry: downloading NSE master JSON from %s ...", url)
             try:
                 req = Request(url, headers={"Accept-Encoding": "gzip"})
-                with urlopen(req, timeout=60) as resp:
-                    raw = resp.read()
-                # Handle both pre-decompressed and gzipped responses
+                with urlopen(req, timeout=60) as r:
+                    raw = r.read()
                 try:
                     raw_instruments = json.loads(gzip.decompress(raw))
                 except Exception:
                     raw_instruments = json.loads(raw)
                 _MASTER_CACHE[cache_key] = raw_instruments
-                logger.info("InstrumentRegistry: master loaded — %d total instruments", len(raw_instruments))
+                logger.info("InstrumentRegistry: master JSON loaded — %d instruments", len(raw_instruments))
             except Exception as exc:
-                logger.error("InstrumentRegistry: master download failed: %s", exc)
-                self._loaded.add(underlying)   # mark as attempted to avoid infinite retry
+                logger.error("InstrumentRegistry: master JSON download failed: %s", exc)
+                self._loaded.add(underlying)
                 return
 
-        # Filter to this underlying's active options
         keys: Dict[Tuple[str, int, str], str] = {}
         expiry_set: Set[date] = set()
 
         for inst in raw_instruments:
-            if isinstance(inst, dict):
-                seg  = inst.get("segment", "")
-                itype = inst.get("instrument_type", "")
-                usym = inst.get("underlying_symbol", "")
-                ikey = inst.get("instrument_key", "")
-                ts   = inst.get("trading_symbol", "")
-                exp_raw = inst.get("expiry", "")
-                strike_raw = inst.get("strike_price", 0)
-            else:
-                seg  = getattr(inst, "segment", "")
-                itype = getattr(inst, "instrument_type", "")
-                usym = getattr(inst, "underlying_symbol", "")
-                ikey = getattr(inst, "instrument_key", "")
-                ts   = getattr(inst, "trading_symbol", "")
-                exp_raw = getattr(inst, "expiry", "")
-                strike_raw = getattr(inst, "strike_price", 0)
+            ikey, ts, strike_raw, exp_raw = self._parse_instrument(inst)
+            seg   = inst.get("segment", "") if isinstance(inst, dict) else getattr(inst, "segment", "")
+            itype = inst.get("instrument_type", "") if isinstance(inst, dict) else getattr(inst, "instrument_type", "")
+            usym  = inst.get("underlying_symbol", "") if isinstance(inst, dict) else getattr(inst, "underlying_symbol", "")
 
-            if seg != "NSE_FO" or itype != "OPT" or usym != underlying:
-                continue
-            if not ikey:
+            if seg != "NSE_FO" or itype != "OPT" or usym != underlying or not ikey:
                 continue
 
-            # Parse expiry
             try:
-                if isinstance(exp_raw, (date, datetime)):
-                    expiry_date = exp_raw.date() if isinstance(exp_raw, datetime) else exp_raw
-                else:
-                    expiry_date = date.fromisoformat(str(exp_raw)[:10])
+                expiry_date = (
+                    exp_raw.date() if isinstance(exp_raw, datetime)
+                    else exp_raw if isinstance(exp_raw, date)
+                    else date.fromisoformat(str(exp_raw)[:10])
+                )
             except (ValueError, TypeError):
                 continue
 
             if expiry_date < today:
                 continue
 
-            # Determine option type from trading_symbol or instrument_key suffix
-            if ts.endswith("CE") or ikey.endswith("CE"):
-                opt_type = "CE"
-            elif ts.endswith("PE") or ikey.endswith("PE"):
-                opt_type = "PE"
-            else:
+            opt_type = "CE" if (ts.endswith("CE") or ikey.endswith("CE")) else \
+                       "PE" if (ts.endswith("PE") or ikey.endswith("PE")) else None
+            if not opt_type:
                 continue
 
             strike = int(round(float(strike_raw or 0)))
@@ -182,11 +249,27 @@ class InstrumentRegistry:
         self._upstox_keys[underlying] = keys
         self._expiries[underlying] = sorted(expiry_set)
         self._loaded.add(underlying)
-
         logger.info(
-            "InstrumentRegistry [%s]: %d contracts across expiries: %s",
+            "InstrumentRegistry [%s]: %d contracts from master JSON across: %s",
             underlying, len(keys),
             ", ".join(e.isoformat() for e in sorted(expiry_set)[:6]),
+        )
+
+    @staticmethod
+    def _parse_instrument(inst) -> tuple:
+        """Extract (instrument_key, trading_symbol, strike_price, expiry_raw) from dict or object."""
+        if isinstance(inst, dict):
+            return (
+                inst.get("instrument_key", ""),
+                inst.get("trading_symbol", ""),
+                inst.get("strike_price", 0),
+                inst.get("expiry", ""),
+            )
+        return (
+            getattr(inst, "instrument_key", ""),
+            getattr(inst, "trading_symbol", ""),
+            getattr(inst, "strike_price", 0),
+            getattr(inst, "expiry", ""),
         )
 
     def is_loaded(self, underlying: str) -> bool:
