@@ -87,13 +87,9 @@ class AngelBroker(BaseBroker):
             return False
 
     async def logout(self) -> None:
-        if self._smartapi:
-            try:
-                client = self._b.client_code or self._b.user_id
-                await asyncio.to_thread(self._smartapi.terminateSession, client)
-            except Exception:
-                pass
+        # AngelOne terminateSession requires the refresh token; skip silently if not available
         self._authenticated = False
+        self._smartapi = None
 
     def _lookup_symbol_token(self, exchange: str, tradingsymbol: str) -> str:
         """Fetch AngelOne symboltoken via searchScrip API. Returns empty string on failure."""
@@ -121,8 +117,10 @@ class AngelBroker(BaseBroker):
         symbol_token = await asyncio.to_thread(
             self._lookup_symbol_token, req.exchange, req.broker_symbol
         )
+        # AngelOne does not support variety='AMO' — valid values: NORMAL, STOPLOSS, ROBO.
+        # Orders placed outside market hours with NORMAL are queued as AMO automatically.
         order_data = {
-            "variety": "AMO" if self._is_amo else "NORMAL",
+            "variety": "NORMAL",
             "tradingsymbol": req.broker_symbol,
             "symboltoken": symbol_token,
             "transactiontype": req.side.value,
