@@ -82,36 +82,37 @@ class InstrumentRegistry:
         self._expiries: Dict[str, List[date]] = {}
         # track which underlyings have been loaded
         self._loaded: Set[str] = set()
+        # {underlying: list of diagnostic strings from last load attempt}
+        self._diag: Dict[str, List[str]] = {}
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
     def load_sync(self, underlying: str, access_token: str = "", weeks_ahead: int = 8) -> None:
         """
         Load active option contracts via Upstox get_option_contracts API.
-
-        Calls get_option_contracts(underlying_key, expiry_date=X) for each of
-        the next `weeks_ahead` weekly expiries. The API returns list[InstrumentData]
-        directly (SDK sets _return_http_data_only=True internally), each record
-        having instrument_key, trading_symbol, strike_price, expiry.
-
-        If the API fails (e.g. weekend/token issue), falls back to downloading
-        the static NSE instrument master JSON (works 24/7, cached per session).
-
-        Must be called via asyncio.to_thread() from async code.
+        Falls back to static NSE master JSON if API returns 0 contracts.
+        All steps logged into self._diag[underlying] for UI diagnostics.
         """
+        diag: List[str] = []
+        self._diag[underlying] = diag
+
         try:
             import upstox_client
         except ImportError:
-            logger.warning("InstrumentRegistry: upstox_client not installed.")
+            diag.append("ERROR: upstox_client not installed — pip install upstox-python-sdk")
+            logger.warning(diag[-1])
             return
 
         today = date.today()
         underlying_key = _UPSTOX_UNDERLYING_KEY.get(underlying)
         if not underlying_key:
-            logger.warning("InstrumentRegistry: no key mapping for '%s'", underlying)
+            diag.append(f"ERROR: no Upstox underlying key mapping for '{underlying}'")
             return
 
-        # ── Primary: API call per expiry (lightweight, targeted) ──────────────
+        diag.append(f"underlying_key = {underlying_key}")
+        diag.append(f"access_token present = {bool(access_token)} (len={len(access_token)})")
+
+        # ── Primary: get_option_contracts API (lightweight, targeted) ─────────
         if access_token:
             cfg = upstox_client.Configuration()
             cfg.access_token = access_token
@@ -126,24 +127,27 @@ class InstrumentRegistry:
                 expiry_dates.append(d)
                 d = d + timedelta(days=1)
 
+            diag.append(f"expiries to query: {[e.isoformat() for e in expiry_dates[:4]]} ...")
+
             keys: Dict[Tuple[str, int, str], str] = {}
             expiry_set: Set[date] = set()
 
             for expiry_date in expiry_dates:
                 expiry_str = expiry_date.isoformat()
                 try:
-                    # resp is already list[InstrumentData] (SDK sets _return_http_data_only=True)
                     resp = opt_api.get_option_contracts(
                         instrument_key=underlying_key,
                         expiry_date=expiry_str,
                     )
-                    # resp is the list directly — not a wrapper object
+                    # SDK sets _return_http_data_only=True — resp IS the list directly
+                    resp_type = type(resp).__name__
                     items = resp if isinstance(resp, list) else (
                         list(resp) if hasattr(resp, "__iter__") else []
                     )
+                    diag.append(f"  {expiry_str}: resp type={resp_type} items={len(items)}")
                 except Exception as exc:
-                    logger.debug("InstrumentRegistry [%s] expiry=%s: API failed: %s",
-                                 underlying, expiry_str, exc)
+                    diag.append(f"  {expiry_str}: API EXCEPTION — {exc}")
+                    logger.warning("InstrumentRegistry [%s] expiry=%s: %s", underlying, expiry_str, exc)
                     items = []
 
                 count_before = len(keys)
@@ -161,30 +165,39 @@ class InstrumentRegistry:
                     keys[(expiry_str, strike, opt_type)] = ikey
                     expiry_set.add(expiry_date)
 
-                logger.debug("InstrumentRegistry [%s] expiry=%s: +%d contracts",
-                             underlying, expiry_str, len(keys) - count_before)
+                added = len(keys) - count_before
+                if added > 0:
+                    # Show a sample key for the first one loaded
+                    sample = next(
+                        (v for (e, s, o), v in keys.items() if e == expiry_str), ""
+                    )
+                    diag.append(f"    → {added} contracts parsed. Sample: {sample}")
+
+            diag.append(f"API total: {len(keys)} contracts across {len(expiry_set)} expiries")
 
             if keys:
                 self._upstox_keys[underlying] = keys
                 self._expiries[underlying] = sorted(expiry_set)
                 self._loaded.add(underlying)
-                logger.info(
-                    "InstrumentRegistry [%s]: %d contracts via API across: %s",
-                    underlying, len(keys),
-                    ", ".join(e.isoformat() for e in sorted(expiry_set)[:6]),
-                )
+                logger.info("InstrumentRegistry [%s]: %d contracts via API", underlying, len(keys))
                 return
 
-            logger.warning(
-                "InstrumentRegistry [%s]: API returned 0 contracts "
-                "(market may be closed). Falling back to master JSON.", underlying
-            )
+            diag.append("API returned 0 contracts — falling back to master JSON (works 24/7)")
+            logger.warning("InstrumentRegistry [%s]: 0 from API, trying master JSON", underlying)
+        else:
+            diag.append("No access_token — skipping API, going straight to master JSON fallback")
 
         # ── Fallback: static NSE master JSON (works 24/7, cached per session) ──
-        self._load_from_master_json(underlying, today)
+        self._load_from_master_json(underlying, today, diag)
 
-    def _load_from_master_json(self, underlying: str, today: date) -> None:
+    def get_diagnostics(self, underlying: str) -> List[str]:
+        """Return the diagnostic log from the last load_sync call for this underlying."""
+        return list(self._diag.get(underlying, ["No load attempted yet."]))
+
+    def _load_from_master_json(self, underlying: str, today: date, diag: List[str] = None) -> None:
         """Download and parse the Upstox NSE instrument master JSON (cached per session)."""
+        if diag is None:
+            diag = self._diag.setdefault(underlying, [])
         import gzip
         import json
         from urllib.request import urlopen, Request
@@ -194,7 +207,8 @@ class InstrumentRegistry:
 
         if raw_instruments is None:
             url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
-            logger.info("InstrumentRegistry: downloading NSE master JSON from %s ...", url)
+            diag.append(f"Downloading master JSON: {url}")
+            logger.info("InstrumentRegistry: downloading NSE master JSON ...")
             try:
                 req = Request(url, headers={"Accept-Encoding": "gzip"})
                 with urlopen(req, timeout=60) as r:
@@ -204,11 +218,15 @@ class InstrumentRegistry:
                 except Exception:
                     raw_instruments = json.loads(raw)
                 _MASTER_CACHE[cache_key] = raw_instruments
+                diag.append(f"Master JSON downloaded: {len(raw_instruments)} total instruments")
                 logger.info("InstrumentRegistry: master JSON loaded — %d instruments", len(raw_instruments))
             except Exception as exc:
+                diag.append(f"Master JSON DOWNLOAD FAILED: {exc}")
                 logger.error("InstrumentRegistry: master JSON download failed: %s", exc)
                 self._loaded.add(underlying)
                 return
+        else:
+            diag.append(f"Master JSON served from session cache: {len(raw_instruments)} instruments")
 
         keys: Dict[Tuple[str, int, str], str] = {}
         expiry_set: Set[date] = set()
@@ -249,11 +267,12 @@ class InstrumentRegistry:
         self._upstox_keys[underlying] = keys
         self._expiries[underlying] = sorted(expiry_set)
         self._loaded.add(underlying)
-        logger.info(
-            "InstrumentRegistry [%s]: %d contracts from master JSON across: %s",
-            underlying, len(keys),
-            ", ".join(e.isoformat() for e in sorted(expiry_set)[:6]),
+        summary = (
+            f"Master JSON result: {len(keys)} contracts across expiries: "
+            + ", ".join(e.isoformat() for e in sorted(expiry_set)[:6])
         )
+        diag.append(summary)
+        logger.info("InstrumentRegistry [%s]: %s", underlying, summary)
 
     @staticmethod
     def _parse_instrument(inst) -> tuple:

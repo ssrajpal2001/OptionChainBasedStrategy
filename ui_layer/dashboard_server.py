@@ -2783,12 +2783,18 @@ class DashboardServer:
             pe_key_display = pe_key or _upstox_option_key(script, expiry, pe_strike, "PE")
 
             if not ce_key and not pe_key:
+                diag_lines = _REG.get_diagnostics(script)
                 return {
                     "ok": False,
                     "error": (
                         f"Contracts not found in Upstox registry for "
-                        f"{script} expiry={expiry.isoformat()} CE={ce_strike} PE={pe_strike}. "
-                        "Expiry may have passed or token may have expired."
+                        f"{script} expiry={expiry.isoformat()} CE={ce_strike} PE={pe_strike}."
+                    ),
+                    "registry_diagnostics": diag_lines,
+                    "debug_hint": (
+                        f"Registry loaded {len(_REG._upstox_keys.get(script, {}))} contracts. "
+                        f"Known expiries: {[e.isoformat() for e in _REG.all_expiries(script)]}. "
+                        f"Check registry_diagnostics for full step-by-step log."
                     ),
                 }
 
@@ -3130,12 +3136,16 @@ class DashboardServer:
             result = {}
             for idx in _srv._cfg.monitored_indices:
                 keys = _R._upstox_keys.get(idx, {})
-                sample = [(f"{e}/{s}/{o}", k) for (e, s, o), k in list(keys.items())[:3]]
+                sample = [
+                    {"key": f"{e}/{s}/{o}", "instrument_key": k}
+                    for (e, s, o), k in list(keys.items())[:5]
+                ]
                 result[idx] = {
                     "loaded":         _R.is_loaded(idx),
                     "contract_count": len(keys),
                     "expiries":       [d.isoformat() for d in _R.all_expiries(idx)],
                     "sample_keys":    sample,
+                    "diagnostics":    _R.get_diagnostics(idx),
                 }
             return {"ok": True, "registry": result}
 

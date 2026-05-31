@@ -2277,13 +2277,14 @@ function histReplay() {
     capital:      500000,
     running:      false,
     result:       null,
+    rawResult:    null,
     error:        '',
     _auth() {
       const t = localStorage.getItem('terminus_token');
       return t ? { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
     },
     async run() {
-      this.running = true; this.result = null; this.error = '';
+      this.running = true; this.result = null; this.rawResult = null; this.error = '';
       try {
         const r = await fetch('/api/strategies/trap_trading/historical_replay', {
           method:  'POST',
@@ -2296,7 +2297,8 @@ function histReplay() {
           }),
         });
         const d = await r.json();
-        if (!d.ok) throw new Error(d.error || 'Server error');
+        this.rawResult = d;
+        if (!d.ok) { this.error = d.error || 'Server error'; return; }
         this.result = d;
       } catch(e) { this.error = e.message || String(e); }
       finally { this.running = false; }
@@ -4696,7 +4698,18 @@ function histReplay() {
       </div>
 
       <!-- Error -->
-      <div x-show="error" class="mb-3 text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2" x-text="error"></div>
+      <div x-show="error" class="mb-3 text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2">
+        <div class="font-semibold mb-1" x-text="error"></div>
+        <div x-show="rawResult && rawResult.debug_hint" class="text-amber-300 mb-1" x-text="rawResult && rawResult.debug_hint"></div>
+        <template x-if="rawResult && rawResult.registry_diagnostics && rawResult.registry_diagnostics.length">
+          <div class="mt-1 font-mono text-[10px] text-gray-300 space-y-0.5">
+            <div class="text-gray-500 mb-1">Registry load log:</div>
+            <template x-for="(line, i) in (rawResult.registry_diagnostics || [])" :key="i">
+              <div x-text="line"></div>
+            </template>
+          </div>
+        </template>
+      </div>
 
       <!-- Results -->
       <template x-if="result">
