@@ -421,8 +421,7 @@ class TrapTradingEngine:
             self._process_htf(c)
         elif c.timeframe == tc.MTF_MINUTES:
             self._process_mtf(c)
-        elif c.timeframe == tc.LTF_MINUTES:
-            await self._process_ltf_exit_guard(c)
+            await self._process_ltf_exit_guard(c)  # SL/profit exit on 5m close (not 1m)
 
     # ── Stage 1+2: HTF processing ─────────────────────────────────────────────
 
@@ -680,7 +679,8 @@ class TrapTradingEngine:
 
     async def _process_ltf_exit_guard(self, c: CandleEvent) -> None:
         """
-        On every 1-min candle close for LIVE positions:
+        On every 5-min candle close for LIVE positions (moved from 1m to avoid
+        noise wicks stopping out trades set up on 75m timeframe):
           - close < ltf_sl_line → VOID (SL)
           - prem >= target_high  → MITIGATE (profit)
           - time >= 15:30        → EOD force-exit
