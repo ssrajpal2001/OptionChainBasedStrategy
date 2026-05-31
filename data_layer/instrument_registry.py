@@ -155,12 +155,18 @@ class InstrumentRegistry:
                     items = []
 
                 count_before = len(keys)
+                # Log first item's actual fields for debugging
+                if items and len(keys) == 0 and expiry_str == expiry_dates[0].isoformat():
+                    first = items[0]
+                    fi_key, fi_ts, fi_strike, fi_exp = self._parse_instrument(first)
+                    itype_f = first.get("instrument_type","?") if isinstance(first,dict) else getattr(first,"instrument_type","?")
+                    diag.append(f"  first item: ikey={fi_key!r} ts={fi_ts!r} strike={fi_strike} expiry={fi_exp!r} instrument_type={itype_f!r}")
+
                 for inst in items:
                     ikey, ts, strike_raw, exp_raw = self._parse_instrument(inst)
                     if not ikey:
                         continue
-                    opt_type = "CE" if (ts.endswith("CE") or ikey.endswith("CE")) else \
-                               "PE" if (ts.endswith("PE") or ikey.endswith("PE")) else None
+                    opt_type = self._detect_opt_type(ts, ikey, inst)
                     if not opt_type:
                         continue
                     strike = int(round(float(strike_raw or 0)))
@@ -171,10 +177,7 @@ class InstrumentRegistry:
 
                 added = len(keys) - count_before
                 if added > 0:
-                    # Show a sample key for the first one loaded
-                    sample = next(
-                        (v for (e, s, o), v in keys.items() if e == expiry_str), ""
-                    )
+                    sample = next((v for (e,s,o),v in keys.items() if e == expiry_str), "")
                     diag.append(f"    → {added} contracts parsed. Sample: {sample}")
 
             diag.append(f"API total: {len(keys)} contracts across {len(expiry_set)} expiries")
@@ -237,12 +240,18 @@ class InstrumentRegistry:
 
         # Segment prefix for this underlying (BSE for SENSEX, NSE for rest)
         seg_prefix = "BSE_FO|" if underlying == "SENSEX" else "NSE_FO|"
-        diag.append(f"Filtering master JSON: instrument_key startswith '{seg_prefix}' AND trading_symbol startswith '{underlying}'")
+        diag.append(f"Filtering master JSON: ikey startswith '{seg_prefix}' AND ts startswith '{underlying}'")
 
-        # Log first 3 instruments from the JSON so we can verify field names
-        for i, sample_inst in enumerate(raw_instruments[:3]):
-            ikey_s, ts_s, _, _ = self._parse_instrument(sample_inst)
-            diag.append(f"  sample[{i}]: instrument_key={ikey_s!r} trading_symbol={ts_s!r}")
+        # Log first 3 overall samples + first matching NSE_FO sample
+        for i, si in enumerate(raw_instruments[:3]):
+            ik, ts_i, _, _ = self._parse_instrument(si)
+            diag.append(f"  sample[{i}]: ikey={ik!r} ts={ts_i!r}")
+        # Find first NSE_FO instrument to show actual NIFTY format
+        for si in raw_instruments:
+            ik, ts_i, _, _ = self._parse_instrument(si)
+            if ik.startswith(seg_prefix):
+                diag.append(f"  first NSE_FO sample: ikey={ik!r} ts={ts_i!r}")
+                break
 
         for inst in raw_instruments:
             ikey, ts, strike_raw, exp_raw = self._parse_instrument(inst)
@@ -268,8 +277,7 @@ class InstrumentRegistry:
             if expiry_date < today:
                 continue
 
-            opt_type = "CE" if (ts.endswith("CE") or ikey.endswith("CE")) else \
-                       "PE" if (ts.endswith("PE") or ikey.endswith("PE")) else None
+            opt_type = self._detect_opt_type(ts, ikey, inst)
             if not opt_type:
                 continue
 
@@ -306,6 +314,39 @@ class InstrumentRegistry:
             getattr(inst, "strike_price", 0),
             getattr(inst, "expiry", ""),
         )
+
+    @staticmethod
+    def _detect_opt_type(ts: str, ikey: str, inst) -> Optional[str]:
+        """
+        Detect CE/PE from trading_symbol or instrument_key.
+
+        Upstox trading_symbol formats observed:
+          Compact : NIFTY2660224500CE        (endswith CE/PE)
+          Spaced  : NIFTY 24500 CE 02 JUN 26 (CE/PE in middle, space-delimited)
+
+        Also checks instrument_type field directly (may be 'CE' or 'PE').
+        """
+        # Direct suffix (compact format)
+        if ts.endswith("CE") or ikey.endswith("CE"):
+            return "CE"
+        if ts.endswith("PE") or ikey.endswith("PE"):
+            return "PE"
+
+        # Space-delimited format: " CE " or " PE " anywhere in trading_symbol
+        ts_upper = ts.upper()
+        if " CE " in ts_upper or ts_upper.endswith(" CE"):
+            return "CE"
+        if " PE " in ts_upper or ts_upper.endswith(" PE"):
+            return "PE"
+
+        # Fall back to instrument_type field
+        itype = inst.get("instrument_type", "") if isinstance(inst, dict) else getattr(inst, "instrument_type", "")
+        if str(itype).upper() in ("CE", "CALL"):
+            return "CE"
+        if str(itype).upper() in ("PE", "PUT"):
+            return "PE"
+
+        return None
 
     def is_loaded(self, underlying: str) -> bool:
         return underlying in self._loaded
