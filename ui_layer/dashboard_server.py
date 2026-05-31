@@ -2994,6 +2994,8 @@ class DashboardServer:
                         })
 
                     elif kind == "1m" and st is not None:
+                        ts_time = ts.time() if hasattr(ts, "time") else None
+
                         # Stage 3: synthetic tick check — TRAP_LOCKED → RETEST_ALERT
                         if st.phase == _TPhase.TRAP_LOCKED and st.entry_origin > 0:
                             lo = st.entry_origin * (1.0 - retest_pct)
@@ -3006,15 +3008,27 @@ class DashboardServer:
                             if prem <= st.ltf_entry_line + slippage:
                                 eng._record_backtest_entry(sym_label, sym_label, prem, st)
 
-                        # LTF exit guard — LIVE: check SL and target
+                        # LTF exit guard — LIVE: check SL, target, EOD
                         elif st.phase == _TPhase.LIVE and st.trade_id:
+                            exit_reason = None
                             if st.ltf_sl_line > 0 and prem < st.ltf_sl_line:
-                                # SL hit on 1m close
-                                rb = st.rolling_base
-                                eng._reset_state(sym_label)
-                                eng._states[sym_label].rolling_base = rb
+                                exit_reason = "SL_HIT"
                             elif st.target_high > 0 and prem >= st.target_high:
-                                # Target hit
+                                exit_reason = "TARGET_HIT"
+                            elif ts_time and ts_time.hour == 15 and ts_time.minute >= 25:
+                                exit_reason = "EOD_1530"
+                            if exit_reason:
+                                # Record exit into the backtest log entry
+                                for rec in eng._backtest_log:
+                                    if rec.get("trade_id") == st.trade_id:
+                                        entry_px = float(rec.get("entry_price", 0))
+                                        pnl_pts  = prem - entry_px
+                                        rec["exit_price"]  = round(prem, 2)
+                                        rec["exit_time"]   = str(ts)[:19]
+                                        rec["exit_reason"] = exit_reason
+                                        rec["pnl_pts"]     = round(pnl_pts, 2)
+                                        rec["pnl_rs"]      = round(pnl_pts * lot, 2)
+                                        break
                                 rb = st.rolling_base
                                 eng._reset_state(sym_label)
                                 eng._states[sym_label].rolling_base = rb
@@ -3060,22 +3074,31 @@ class DashboardServer:
             ce_result = _run_engine_on_bars(ce_bars, "CE") if ce_bars else None
             pe_result = _run_engine_on_bars(pe_bars, "PE") if pe_bars else None
 
-            # 9. Build trade logs with position sizing
+            # 9. Build trade logs with position sizing + exit summary
             def _build_trade_logs(trades_raw, opt_type):
                 logs = []
                 for t in trades_raw:
-                    ep  = float(t.get("entry_price", 0))
-                    qty = max(math.floor(payload.capital / (ep * lot)) * lot if ep > 0 else lot, lot)
+                    ep   = float(t.get("entry_price", 0))
+                    qty  = max(math.floor(payload.capital / (ep * lot)) * lot if ep > 0 else lot, lot)
+                    lots = qty // lot
+                    xp   = t.get("exit_price")
+                    pnl_pts = t.get("pnl_pts")
+                    pnl_rs  = round(float(pnl_pts) * lots, 2) if pnl_pts is not None else None
                     logs.append({
                         "timestamp":         t.get("timestamp", "")[:19],
                         "type":              opt_type,
                         "entry_price":       round(ep, 2),
                         "quantity":          qty,
-                        "lots":              qty // lot,
+                        "lots":              lots,
                         "ltf_sl_line":       round(float(t.get("ltf_sl",       0)), 2),
                         "macro_high_target": round(float(t.get("target_high",  0)), 2),
                         "entry_origin":      round(float(t.get("entry_origin", 0)), 2),
                         "margin_est":        round(ep * qty, 2),
+                        "exit_price":        round(xp, 2) if xp is not None else None,
+                        "exit_time":         t.get("exit_time", ""),
+                        "exit_reason":       t.get("exit_reason", "OPEN"),
+                        "pnl_pts":           round(float(pnl_pts), 2) if pnl_pts is not None else None,
+                        "pnl_rs":            pnl_rs,
                     })
                 return logs
 

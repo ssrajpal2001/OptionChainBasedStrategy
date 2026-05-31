@@ -5039,47 +5039,72 @@ function histReplay() {
             </div>
           </template>
 
-          <!-- Trade Log / Chart Alignment Table -->
+          <!-- Trade Summary Table -->
           <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
             <div class="px-3 py-2 border-b flex items-center justify-between" style="border-color:var(--t-border)">
-              <span class="text-[10px] font-semibold text-indigo-400 uppercase tracking-widest">Chart Alignment Table</span>
+              <span class="text-[10px] font-semibold text-indigo-400 uppercase tracking-widest">Trade Summary</span>
               <span class="text-[10px] font-mono" style="color:var(--t-muted)" x-text="result.trade_count + ' trade(s) triggered'"></span>
             </div>
             <div x-show="result.trade_count === 0" class="px-3 py-4 text-[10px]" style="color:var(--t-muted)">
-              No trades triggered — engine did not reach ARMED state with this day's underlying structure. The 5-stage filter requires all stages to complete sequentially.
+              No trades triggered — engine did not reach ARMED state. The 5-stage filter requires all stages to complete sequentially.
             </div>
             <div x-show="result.trade_count > 0" class="overflow-x-auto">
               <table class="w-full text-[10px] font-mono">
                 <thead>
                   <tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
-                    <th class="text-left px-3 py-2">Timestamp</th>
-                    <th class="text-left px-3 py-2">Type</th>
-                    <th class="text-right px-3 py-2">Entry Px</th>
-                    <th class="text-right px-3 py-2">Qty</th>
-                    <th class="text-right px-3 py-2">Lots</th>
-                    <th class="text-right px-3 py-2">SL (1m close)</th>
-                    <th class="text-right px-3 py-2">Target</th>
-                    <th class="text-right px-3 py-2">Origin</th>
-                    <th class="text-right px-3 py-2">Margin est</th>
+                    <th class="text-left px-2 py-2">Entry Time</th>
+                    <th class="text-left px-2 py-2">Type</th>
+                    <th class="text-right px-2 py-2">Entry Px</th>
+                    <th class="text-right px-2 py-2">SL</th>
+                    <th class="text-right px-2 py-2">Target</th>
+                    <th class="text-left px-2 py-2">Exit Time</th>
+                    <th class="text-right px-2 py-2">Exit Px</th>
+                    <th class="text-left px-2 py-2">Reason</th>
+                    <th class="text-right px-2 py-2">P&L (pts)</th>
+                    <th class="text-right px-2 py-2">P&L (₹/lot)</th>
+                    <th class="text-right px-2 py-2">Lots</th>
+                    <th class="text-right px-2 py-2">Total P&L ₹</th>
                   </tr>
                 </thead>
                 <tbody>
                   <template x-for="(t,i) in result.trade_logs" :key="i">
-                    <tr style="border-bottom:1px solid var(--t-border)">
-                      <td class="px-3 py-1.5" style="color:var(--t-muted)" x-text="t.timestamp"></td>
-                      <td class="px-3 py-1.5">
+                    <tr :style="t.pnl_rs > 0 ? 'background:rgba(var(--t-green-rgb),0.07)' : t.pnl_rs < 0 ? 'background:rgba(var(--t-red-rgb),0.07)' : ''"
+                        style="border-bottom:1px solid var(--t-border)">
+                      <td class="px-2 py-1.5" style="color:var(--t-muted)" x-text="t.timestamp"></td>
+                      <td class="px-2 py-1.5 font-bold">
                         <span :style="t.type==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'" x-text="t.type"></span>
                       </td>
-                      <td class="px-3 py-1.5 text-right font-bold" style="color:var(--t-bright)" x-text="t.entry_price"></td>
-                      <td class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="t.quantity"></td>
-                      <td class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="t.lots"></td>
-                      <td class="px-3 py-1.5 text-right" style="color:var(--t-red)" x-text="t.ltf_sl_line"></td>
-                      <td class="px-3 py-1.5 text-right" style="color:var(--t-green)" x-text="t.macro_high_target"></td>
-                      <td class="px-3 py-1.5 text-right text-amber-400" x-text="t.entry_origin"></td>
-                      <td class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="t.margin_est.toLocaleString()"></td>
+                      <td class="px-2 py-1.5 text-right font-bold" style="color:var(--t-bright)" x-text="t.entry_price"></td>
+                      <td class="px-2 py-1.5 text-right" style="color:var(--t-red)" x-text="t.ltf_sl_line || '—'"></td>
+                      <td class="px-2 py-1.5 text-right" style="color:var(--t-green)" x-text="t.macro_high_target || '—'"></td>
+                      <td class="px-2 py-1.5" style="color:var(--t-muted)" x-text="t.exit_time || '—'"></td>
+                      <td class="px-2 py-1.5 text-right font-bold" style="color:var(--t-bright)" x-text="t.exit_price ?? '—'"></td>
+                      <td class="px-2 py-1.5">
+                        <span :style="t.exit_reason==='TARGET_HIT' ? 'color:var(--t-green)' : t.exit_reason==='SL_HIT' ? 'color:var(--t-red)' : t.exit_reason==='EOD_1530' ? 'color:var(--t-amber)' : 'color:var(--t-muted)'"
+                              x-text="t.exit_reason || 'OPEN'"></span>
+                      </td>
+                      <td class="px-2 py-1.5 text-right font-bold"
+                          :style="t.pnl_pts > 0 ? 'color:var(--t-green)' : t.pnl_pts < 0 ? 'color:var(--t-red)' : 'color:var(--t-muted)'"
+                          x-text="t.pnl_pts != null ? (t.pnl_pts > 0 ? '+' : '') + t.pnl_pts : '—'"></td>
+                      <td class="px-2 py-1.5 text-right"
+                          :style="t.pnl_pts > 0 ? 'color:var(--t-green)' : t.pnl_pts < 0 ? 'color:var(--t-red)' : 'color:var(--t-muted)'"
+                          x-text="t.pnl_pts != null ? (t.pnl_pts > 0 ? '+' : '') + (t.pnl_pts * 65).toFixed(0) : '—'"></td>
+                      <td class="px-2 py-1.5 text-right" style="color:var(--t-text)" x-text="t.lots"></td>
+                      <td class="px-2 py-1.5 text-right font-bold"
+                          :style="t.pnl_rs > 0 ? 'color:var(--t-green)' : t.pnl_rs < 0 ? 'color:var(--t-red)' : 'color:var(--t-muted)'"
+                          x-text="t.pnl_rs != null ? (t.pnl_rs > 0 ? '+₹' : '-₹') + Math.abs(t.pnl_rs).toLocaleString() : '—'"></td>
                     </tr>
                   </template>
                 </tbody>
+                <!-- Totals row -->
+                <tfoot>
+                  <tr class="border-t" style="border-color:var(--t-border)">
+                    <td colspan="11" class="px-2 py-1.5 text-right text-[10px]" style="color:var(--t-muted)">Total P&L</td>
+                    <td class="px-2 py-1.5 text-right font-bold text-[10px]"
+                        :style="result.trade_logs.reduce((s,t)=>s+(t.pnl_rs||0),0) > 0 ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                        x-text="(() => { const tot = result.trade_logs.reduce((s,t)=>s+(t.pnl_rs||0),0); return (tot>=0?'+₹':'-₹')+Math.abs(tot).toLocaleString(); })()"></td>
+                  </tr>
+                </tfoot>
               </table>
             </div>
           </div>
