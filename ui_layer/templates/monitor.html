@@ -546,7 +546,7 @@ document.addEventListener('alpine:init', () => {
     availableStrategies: [
       { id: 'sell_straddle', name: 'Sell Straddle',  desc: 'ATM straddle — premium decay (theta)' },
       { id: 'iron_condor',   name: 'Iron Condor',    desc: 'OTM 4-leg credit spread (range-bound)' },
-      { id: 'trap_trading',  name: 'Trap Trading',   desc: 'Institutional trap detection (directional)' },
+      { id: 'trap_trading',  name: 'Liquidity Trap Trading', desc: 'MTF institutional liquidity sweep — 5-stage directional entry' },
     ],
     availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
@@ -5051,7 +5051,9 @@ function histReplay() {
       </div>
       <div x-show="loadError" class="text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2 mb-2" x-text="loadError"></div>
       <div x-show="!loadError && bindings.length === 0 && clientId" class="text-yellow-400 text-xs bg-yellow-900/20 border border-yellow-700 rounded px-3 py-2 mb-2">
-        No broker bindings found for this client. Add a broker binding in the CLIENT MANAGEMENT tab first.
+        No broker bindings found for <span class="font-semibold" x-text="clientId"></span>.
+        Log in as that client &rarr; go to the <span class="font-semibold">Brokers</span> tab &rarr; click <span class="font-semibold">+ Add Broker</span>, fill in credentials and save.
+        Then come back here and re-open this panel (it reloads on open).
       </div>
       <div x-show="error" class="text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2 mb-2" x-text="error"></div>
       <div x-show="result" class="text-[10px] font-mono bg-gray-800 rounded px-3 py-2 space-y-1">
@@ -5355,7 +5357,7 @@ function histReplay() {
           </div>
         </div>
         <div class="px-3 py-2.5 rounded text-xs" style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.18);color:var(--t-muted)">
-          Strategy selection is done by the client after login. Available strategies: <span style="color:var(--t-text);font-weight:600">Sell Straddle · Iron Condor · Trap Trading</span>
+          Strategy selection is done by the client after login. Available strategies: <span style="color:var(--t-text);font-weight:600">Sell Straddle · Iron Condor · Liquidity Trap Trading</span>
         </div>
         <div class="flex items-center gap-3 pt-1">
           <button class="btn-add" style="min-width:220px" @click="registerClient()" :disabled="clientRegLoading || !newClient.client_id">
@@ -6016,7 +6018,7 @@ function histReplay() {
                         x-text="dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap Trading')+' · '+dep.underlying"></div>
+                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Liquidity Trap Trading')+' · '+dep.underlying"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
                   </div>
@@ -6043,7 +6045,7 @@ function histReplay() {
               <select x-model="deployForm.strategy_name" class="t-input">
                 <option value="sell_straddle">Sell Straddle (SS)</option>
                 <option value="iron_condor">Iron Condor (IC)</option>
-                <option value="trap_trading">Trap Trading (TT)</option>
+                <option value="trap_trading">Liquidity Trap Trading (LTT)</option>
               </select>
             </div>
             <div>
@@ -6319,7 +6321,7 @@ function histReplay() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap Trading'"></div>
+                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Liquidity Trap Trading'"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
