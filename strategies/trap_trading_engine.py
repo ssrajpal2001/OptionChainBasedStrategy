@@ -171,8 +171,9 @@ class _TrapState:
     mtf_bearish_high:  float = 0.0
     mtf_bearish_low:   float = 0.0
     mtf_bearish_ts:    Optional[datetime] = None
+    mtf_sweep_low:     float = 0.0   # Stage 4b sweep candle low (structural SL reference)
     ltf_entry_line:    float = 0.0   # 5-min bearish.low → touch trigger (retest entry)
-    ltf_sl_line:       float = 0.0   # 5-min bearish.low  → stop-loss
+    ltf_sl_line:       float = 0.0   # set at entry time (dynamic: % below fill; structural: sweep low)
 
     # Rolling base (survives across trades)
     rolling_base:      float = 0.0
@@ -521,7 +522,8 @@ class TrapTradingEngine:
             # Stage 4b: next 5-min bar's high sweeps mtf_bearish_high?
             if c.high > st.mtf_bearish_high:
                 st.ltf_entry_line = st.mtf_bearish_low   # retest entry = candle A low
-                st.ltf_sl_line    = st.mtf_bearish_low   # SL confirmed by 1-min close below
+                st.mtf_sweep_low  = c.low                # structural SL reference (sweep candle low)
+                # ltf_sl_line set at entry time based on SL_MODE config
                 # MTF_LOCKED → ARMED immediately
                 st.phase = _Phase.ARMED
                 logger.info(
@@ -679,6 +681,22 @@ class TrapTradingEngine:
         if total_qty == 0:
             total_qty = lot  # default 1 lot for demo
 
+        # Set SL based on configured mode — always below entry price
+        sl_mode = tc.SL_MODE
+        if sl_mode == "structural" and st.mtf_sweep_low > 0.0:
+            computed_sl = st.mtf_sweep_low
+            if computed_sl >= entry_price:
+                # structural level is above fill — fall back to dynamic
+                computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
+                logger.warning(
+                    "TrapEngine [%s] structural SL %.2f >= entry %.2f — "
+                    "falling back to dynamic SL %.2f",
+                    underlying, st.mtf_sweep_low, entry_price, computed_sl,
+                )
+        else:
+            computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
+        st.ltf_sl_line = computed_sl
+
         st.trade_id    = trade_id
         st.entry_price = entry_price
         st.quantity    = total_qty
@@ -779,6 +797,15 @@ class TrapTradingEngine:
         st: _TrapState,
     ) -> None:
         qty = self._cfg.exchange.lot_sizes.get(underlying, 75)
+
+        tc = self._cfg.trap_engine
+        if tc.SL_MODE == "structural" and st.mtf_sweep_low > 0.0:
+            computed_sl = st.mtf_sweep_low
+            if computed_sl >= entry_price:
+                computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
+        else:
+            computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
+        st.ltf_sl_line = computed_sl
 
         trade_id = str(uuid.uuid4())[:8]
         st.trade_id    = trade_id

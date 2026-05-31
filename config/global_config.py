@@ -173,12 +173,14 @@ class TrapEngineConfig:
     """
 
     # --- mutable fields (protected by _lock) ---
-    _HTF_MINUTES:         int   = field(default=75,  init=False, repr=False)
-    _MTF_MINUTES:         int   = field(default=5,   init=False, repr=False)
-    _LTF_MINUTES:         int   = field(default=1,   init=False, repr=False)
-    _RETEST_ZONE_PERCENT: float = field(default=0.5, init=False, repr=False)
-    _SLIPPAGE_BUFFER:     float = field(default=0.5, init=False, repr=False)
-    _bars_lookback_days:  int   = field(default=5,   init=False, repr=False)
+    _HTF_MINUTES:         int   = field(default=75,          init=False, repr=False)
+    _MTF_MINUTES:         int   = field(default=5,           init=False, repr=False)
+    _LTF_MINUTES:         int   = field(default=1,           init=False, repr=False)
+    _RETEST_ZONE_PERCENT: float = field(default=0.5,         init=False, repr=False)
+    _SLIPPAGE_BUFFER:     float = field(default=0.5,         init=False, repr=False)
+    _bars_lookback_days:  int   = field(default=5,           init=False, repr=False)
+    _SL_MODE:             str   = field(default="dynamic",   init=False, repr=False)  # "dynamic" | "structural"
+    _SL_PCT:              float = field(default=2.0,         init=False, repr=False)  # % below entry (dynamic mode)
 
     # --- internal lock ---
     _lock: object = field(default_factory=_threading.RLock, init=False, repr=False, compare=False)
@@ -214,6 +216,16 @@ class TrapEngineConfig:
     def bars_lookback_days(self) -> int:
         with self._lock:  # type: ignore[attr-defined]
             return self._bars_lookback_days
+
+    @property
+    def SL_MODE(self) -> str:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._SL_MODE
+
+    @property
+    def SL_PCT(self) -> float:
+        with self._lock:  # type: ignore[attr-defined]
+            return self._SL_PCT
 
     # ── Thread-safe setters ───────────────────────────────────────────────────
 
@@ -252,6 +264,20 @@ class TrapEngineConfig:
         with self._lock:  # type: ignore[attr-defined]
             object.__setattr__(self, "_SLIPPAGE_BUFFER", float(value))
 
+    @SL_MODE.setter
+    def SL_MODE(self, value: str) -> None:
+        if value not in ("dynamic", "structural"):
+            raise ValueError(f"SL_MODE must be 'dynamic' or 'structural', got {value!r}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_SL_MODE", value)
+
+    @SL_PCT.setter
+    def SL_PCT(self, value: float) -> None:
+        if not (0.1 <= value <= 20.0):
+            raise ValueError(f"SL_PCT must be in [0.1, 20.0], got {value}")
+        with self._lock:  # type: ignore[attr-defined]
+            object.__setattr__(self, "_SL_PCT", float(value))
+
     # ── Atomic bulk update (used by Admin REST endpoint) ─────────────────────
 
     def reconfigure(self, **kwargs) -> dict:
@@ -265,12 +291,14 @@ class TrapEngineConfig:
         LOT_SIZE is immutable and will raise ValueError if passed.
         """
         _MUTABLE = {
-            "HTF_MINUTES":         (int,   lambda v: v >= 1,          "must be >= 1"),
-            "MTF_MINUTES":         (int,   lambda v: v >= 1,          "must be >= 1"),
-            "LTF_MINUTES":         (int,   lambda v: v >= 1,          "must be >= 1"),
-            "RETEST_ZONE_PERCENT": (float, lambda v: 0.0 < v <= 10.0, "must be in (0, 10]"),
-            "SLIPPAGE_BUFFER":     (float, lambda v: v >= 0.0,        "must be >= 0"),
-            "bars_lookback_days":  (int,   lambda v: v >= 1,          "must be >= 1"),
+            "HTF_MINUTES":         (int,   lambda v: v >= 1,                      "must be >= 1"),
+            "MTF_MINUTES":         (int,   lambda v: v >= 1,                      "must be >= 1"),
+            "LTF_MINUTES":         (int,   lambda v: v >= 1,                      "must be >= 1"),
+            "RETEST_ZONE_PERCENT": (float, lambda v: 0.0 < v <= 10.0,             "must be in (0, 10]"),
+            "SLIPPAGE_BUFFER":     (float, lambda v: v >= 0.0,                    "must be >= 0"),
+            "bars_lookback_days":  (int,   lambda v: v >= 1,                      "must be >= 1"),
+            "SL_MODE":             (str,   lambda v: v in ("dynamic","structural"),"must be 'dynamic' or 'structural'"),
+            "SL_PCT":              (float, lambda v: 0.1 <= v <= 20.0,            "must be in [0.1, 20.0]"),
         }
         unknown = set(kwargs) - set(_MUTABLE)
         if unknown:
@@ -301,6 +329,8 @@ class TrapEngineConfig:
                 "RETEST_ZONE_PERCENT": self._RETEST_ZONE_PERCENT,
                 "SLIPPAGE_BUFFER":     self._SLIPPAGE_BUFFER,
                 "bars_lookback_days":  self._bars_lookback_days,
+                "SL_MODE":             self._SL_MODE,
+                "SL_PCT":              self._SL_PCT,
             }
 
 

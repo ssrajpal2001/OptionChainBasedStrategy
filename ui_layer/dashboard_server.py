@@ -248,6 +248,8 @@ try:
         tt_swing_lookback:       int   = 5
         tt_zone_tol_pct:         float = 0.5
         tt_void_atr_mult:        float = 2.0
+        tt_sl_mode:              str   = "dynamic"   # "dynamic" | "structural"
+        tt_sl_pct:               float = 2.0         # % below entry (dynamic mode only)
 
     class _KillAllConfirmSchema(_PydanticBase):
         confirm: bool = False   # must be True to proceed
@@ -331,6 +333,8 @@ try:
         RETEST_ZONE_PERCENT: Optional[float] = None
         SLIPPAGE_BUFFER:     Optional[float] = None
         bars_lookback_days:  Optional[int]   = None
+        SL_MODE:             Optional[str]   = None  # "dynamic" | "structural"
+        SL_PCT:              Optional[float] = None  # % below entry (dynamic mode)
 
     class _TrapInstrumentsSchema(_PydanticBase):
         instruments: List[str]
@@ -2345,6 +2349,8 @@ class DashboardServer:
                 "tt_swing_lookback":  tt.get("swing_lookback",       5),
                 "tt_zone_tol_pct":    tt.get("zone_tolerance_pct",   0.5),
                 "tt_void_atr_mult":   tt.get("void_atr_mult",        2.0),
+                "tt_sl_mode":         tt.get("sl_mode",              "dynamic"),
+                "tt_sl_pct":          tt.get("sl_pct",               2.0),
             }
 
         @app.post("/api/admin/strategy/config/update", tags=["Admin"])
@@ -2383,6 +2389,8 @@ class DashboardServer:
                     "swing_lookback":          body.tt_swing_lookback,
                     "zone_tolerance_pct":      body.tt_zone_tol_pct,
                     "void_atr_mult":           body.tt_void_atr_mult,
+                    "sl_mode":                 body.tt_sl_mode,
+                    "sl_pct":                  body.tt_sl_pct,
                 },
             }
             RuntimeConfig.update(patch)
@@ -2401,7 +2409,10 @@ class DashboardServer:
                     reconfigure_errors.append(f"sell_straddle[{ss._underlying}]: {e}")
             if _srv._trap_engine is not None:
                 try:
-                    _srv._trap_engine.reconfigure()
+                    _srv._cfg.trap_engine.reconfigure(
+                        SL_MODE=body.tt_sl_mode,
+                        SL_PCT=body.tt_sl_pct,
+                    )
                 except Exception as e:
                     reconfigure_errors.append(f"trap_engine: {e}")
 
@@ -2491,18 +2502,25 @@ class DashboardServer:
                 return {"ok": False, "error": "Invalid JSON body."}
             allowed = {"htf_minutes", "ltf_minutes", "adx_threshold",
                        "volume_spike_multiplier", "swing_lookback",
-                       "zone_tolerance_pct", "void_atr_mult"}
+                       "zone_tolerance_pct", "void_atr_mult",
+                       "sl_mode", "sl_pct"}
             patch = {k: v for k, v in body.items() if k in allowed}
             if not patch:
                 return {"ok": False, "error": "No valid fields provided."}
             RuntimeConfig.update({"trap_trading": patch})
-            # Live-inject into running TrapTradingEngine instances
-            te = getattr(_srv, "_trap_engine", None)
-            if te and hasattr(te, "reconfigure"):
+            # Live-inject SL_MODE / SL_PCT into TrapEngineConfig
+            engine_cfg = getattr(getattr(_srv, "_cfg", None), "trap_engine", None)
+            if engine_cfg is not None:
                 try:
-                    te.reconfigure(RuntimeConfig.get("trap_trading"))
+                    live_updates = {}
+                    if "sl_mode" in patch:
+                        live_updates["SL_MODE"] = patch["sl_mode"]
+                    if "sl_pct" in patch:
+                        live_updates["SL_PCT"] = patch["sl_pct"]
+                    if live_updates:
+                        engine_cfg.reconfigure(**live_updates)
                 except Exception as exc:
-                    logger.warning("Trap config live-inject failed: %s", exc)
+                    logger.warning("Trap SL config live-inject failed: %s", exc)
             logger.info("Trap Trading config saved: %s", patch)
             return {"ok": True, "message": "Trap Trading config saved."}
 

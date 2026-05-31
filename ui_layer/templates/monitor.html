@@ -588,6 +588,7 @@ document.addEventListener('alpine:init', () => {
       ss_max_trades: 1,
       tt_htf_minutes: 75, tt_ltf_minutes: 5, tt_adx_threshold: 20,
       tt_volume_spike_mult: 1.5, tt_swing_lookback: 5, tt_zone_tol_pct: 0.5, tt_void_atr_mult: 2.0,
+      tt_sl_mode: 'dynamic', tt_sl_pct: 2.0,
     },
     strategyConfigLoading: false,
     strategyConfigSaving: false,
@@ -4057,6 +4058,35 @@ function histReplay() {
             <div class="text-xs mt-0.5" style="color:var(--t-muted)">ATR multiple to define price void (default: 2.0)</div>
           </div>
         </div>
+
+        <!-- SL Mode selector -->
+        <div class="mt-2 p-3 rounded" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08)">
+          <label class="sec-label mb-2 block">STOP LOSS MODE</label>
+          <div class="flex gap-4">
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input type="radio" class="mt-0.5" x-model="indexConfig._trap.sl_mode" value="dynamic"/>
+              <div>
+                <div class="text-xs font-semibold" style="color:var(--t-text)">Dynamic (% below fill)</div>
+                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = entry price &minus; SL%. Always below entry. Recommended.</div>
+              </div>
+            </label>
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input type="radio" class="mt-0.5" x-model="indexConfig._trap.sl_mode" value="structural"/>
+              <div>
+                <div class="text-xs font-semibold" style="color:var(--t-text)">Structural (sweep candle low)</div>
+                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = low of Stage 4b sweep candle. Falls back to dynamic if above fill.</div>
+              </div>
+            </label>
+          </div>
+          <div x-show="indexConfig._trap.sl_mode === 'dynamic'" class="mt-3">
+            <label class="sec-label">SL PERCENT (%)</label>
+            <input type="number" class="t-input w-32"
+                   x-model.number="indexConfig._trap.sl_pct"
+                   placeholder="2.0" min="0.1" max="20" step="0.1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% below entry price for stop loss (default: 2.0%)</div>
+          </div>
+        </div>
+
         <button @click="saveTrapConfig()"
                 class="btn-save-cfg self-start mt-1">
           <span>&#x1F4BE; Save Trap Trading Config</span>
