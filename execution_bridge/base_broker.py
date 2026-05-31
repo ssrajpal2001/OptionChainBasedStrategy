@@ -107,7 +107,8 @@ class BaseBroker(ABC):
     def __init__(self, binding_id: str, client_id: str) -> None:
         self.binding_id = binding_id
         self.client_id = client_id
-        self._authenticated = False
+        self._authenticated   = False
+        self._trading_mode_raw = "paper"  # "paper" | "live" — set by each broker at auth
 
     @abstractmethod
     async def authenticate(self) -> bool:

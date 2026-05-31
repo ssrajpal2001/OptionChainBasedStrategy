@@ -48,6 +48,7 @@ class FyersBroker(BaseBroker):
                 self._authenticated = True
                 pt   = getattr(self._b, "product_type", "").strip().upper()
                 mode = getattr(self._b, "trading_mode", "intraday").lower()
+                self._trading_mode_raw = "live" if mode == "live" else "paper"
                 if pt in ("MIS", "INTRADAY"):
                     self._product = "INTRADAY"
                 elif pt in ("NRML", "NORMAL"):

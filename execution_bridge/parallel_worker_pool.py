@@ -259,6 +259,17 @@ class ClientExecutionWorker:
             return
 
         for binding_id, broker in self._brokers.items():
+            # Respect trading_mode — paper bindings log intent but do not place real orders
+            binding_mode = getattr(broker, "_product", None)  # already set at auth
+            raw_mode = getattr(broker, "_trading_mode_raw", "paper")
+            if raw_mode == "paper":
+                logger.info(
+                    "Worker[%s/%s]: [PAPER] signal received %s %s — no real order placed.",
+                    self._client.client_id, binding_id,
+                    signal.source.value, signal.underlying,
+                )
+                continue
+
             sym_str = self._translate(signal, binding_id)
             if sym_str is None:
                 continue

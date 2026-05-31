@@ -107,6 +107,7 @@ class ZerodhaBroker(BaseBroker):
         # 1. Explicit product_type field on binding ("MIS" or "NRML") — highest priority
         # 2. Infer from trading_mode ("carryforward"/"normal" → NRML, else MIS)
         mode = getattr(creds, "trading_mode", "intraday").lower()
+        self._trading_mode_raw = "live" if mode == "live" else "paper"
         pt   = getattr(creds, "product_type", "").strip().upper()
         if pt in ("MIS", "NRML"):
             self._product = pt
