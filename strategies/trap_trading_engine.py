@@ -195,6 +195,7 @@ class _TrapState:
     mtf_bearish_high:  float = 0.0
     mtf_bearish_low:   float = 0.0
     mtf_bearish_ts:    Optional[datetime] = None
+    htf_trap_low:      float = 0.0   # HTF single-candle trap candle low (widest structural SL)
     mtf_sweep_low:     float = 0.0   # Stage 4b sweep candle low (structural SL reference)
     ltf_entry_line:    float = 0.0   # 5-min bearish.low → touch trigger (retest entry)
     ltf_sl_line:       float = 0.0   # set at entry time (dynamic: % below fill; structural: sweep low)
@@ -484,6 +485,7 @@ class TrapTradingEngine:
                 st.htf_bearish_open = c.open
                 st.htf_bearish_high = c.high
                 st.htf_bearish_ts   = c.timestamp
+                st.htf_trap_low     = c.low     # widest SL reference for this trap
                 st.phase            = _Phase.RETEST_ALERT
                 logger.info(
                     "TrapEngine [%s] Single-candle RETEST_ALERT — swept prev_high=%.2f "
@@ -744,17 +746,22 @@ class TrapTradingEngine:
         if total_qty == 0:
             total_qty = lot  # default 1 lot for demo
 
-        # Set SL based on configured mode — always below entry price
+        # Set SL based on configured mode — always below entry price.
+        # For single-candle traps htf_trap_low (HTF candle low) is preferred over
+        # mtf_sweep_low because the MTF candle is the same bar and its low equals
+        # ltf_entry_line — giving zero room. The HTF low is the natural invalidation.
         sl_mode = tc.SL_MODE
-        if sl_mode == "structural" and st.mtf_sweep_low > 0.0:
-            computed_sl = st.mtf_sweep_low
+        structural_ref = (
+            st.htf_trap_low  if st.htf_trap_low > 0.0 else st.mtf_sweep_low
+        )
+        if sl_mode == "structural" and structural_ref > 0.0:
+            computed_sl = structural_ref
             if computed_sl >= entry_price:
-                # structural level is above fill — fall back to dynamic
                 computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
                 logger.warning(
                     "TrapEngine [%s] structural SL %.2f >= entry %.2f — "
                     "falling back to dynamic SL %.2f",
-                    underlying, st.mtf_sweep_low, entry_price, computed_sl,
+                    underlying, structural_ref, entry_price, computed_sl,
                 )
         else:
             computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
@@ -867,8 +874,11 @@ class TrapTradingEngine:
         qty = self._cfg.exchange.lot_sizes.get(underlying, 75)
 
         tc = self._cfg.trap_engine
-        if tc.SL_MODE == "structural" and st.mtf_sweep_low > 0.0:
-            computed_sl = st.mtf_sweep_low
+        structural_ref = (
+            st.htf_trap_low if st.htf_trap_low > 0.0 else st.mtf_sweep_low
+        )
+        if tc.SL_MODE == "structural" and structural_ref > 0.0:
+            computed_sl = structural_ref
             if computed_sl >= entry_price:
                 computed_sl = entry_price * (1.0 - tc.SL_PCT / 100.0)
         else:
@@ -937,6 +947,7 @@ class TrapTradingEngine:
             st.target_high   = next_lv.target_high
             st.phase = _Phase.TRAP_LOCKED
             # Reset MTF state so Stage 4 starts fresh at the new level
+            st.htf_trap_low     = 0.0
             st.mtf_bearish_open = 0.0
             st.mtf_bearish_high = 0.0
             st.mtf_bearish_low  = 0.0
