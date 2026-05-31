@@ -25,6 +25,7 @@ import execution_bridge.broker_fyers    # noqa: F401
 import execution_bridge.broker_angel    # noqa: F401
 import execution_bridge.broker_dhan     # noqa: F401
 import execution_bridge.broker_upstox   # noqa: F401
+import execution_bridge.broker_zerodha  # noqa: F401
 
 __all__ = [
     "BaseBroker", "MockBroker", "OrderFill", "OrderRequest",
