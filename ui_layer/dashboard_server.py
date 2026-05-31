@@ -424,6 +424,63 @@ _UPSTOX_MONTH_CODE: Dict[int, str] = {
     7:"7", 8:"8", 9:"9", 10:"O", 11:"N", 12:"D",
 }
 
+# ── Instrument master cache (keyed by calendar date string, refreshed daily) ─
+_UPSTOX_MASTER_CACHE: dict = {}   # date_str -> list[dict]
+
+
+def _upstox_download_master_sync(date_str: str) -> list:
+    """
+    Download and cache the Upstox NSE instrument master JSON.
+    File is ~10 MB gzipped; cached in memory for the day to avoid re-downloading.
+    date_str is used only as a cache key (e.g. "2026-05-31").
+    """
+    import gzip, json
+    from urllib.request import urlopen
+
+    if date_str in _UPSTOX_MASTER_CACHE:
+        return _UPSTOX_MASTER_CACHE[date_str]
+
+    url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+    logger.info("Downloading Upstox NSE instrument master from %s ...", url)
+    with urlopen(url, timeout=60) as resp:
+        data = gzip.decompress(resp.read())
+    instruments = json.loads(data)
+    _UPSTOX_MASTER_CACHE[date_str] = instruments
+    logger.info("Upstox master loaded: %d instruments", len(instruments))
+    return instruments
+
+
+def _find_upstox_instrument_key(
+    instruments: list,
+    underlying: str,
+    expiry_date,
+    strike: int,
+    opt_type: str,
+) -> str:
+    """
+    Scan the instrument master for the exact instrument_key matching
+    underlying / expiry / strike / CE|PE.
+    Returns empty string if not found.
+    """
+    target_expiry = expiry_date.isoformat() if hasattr(expiry_date, "isoformat") else str(expiry_date)
+    for inst in instruments:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        if inst.get("instrument_type") != "OPT":
+            continue
+        if inst.get("underlying_symbol") != underlying:
+            continue
+        # Expiry may be "2026-06-02" or "2026-06-02T00:00:00+05:30"
+        if str(inst.get("expiry", ""))[:10] != target_expiry:
+            continue
+        if abs(float(inst.get("strike_price", -1)) - strike) > 0.01:
+            continue
+        # Option type is embedded in trading_symbol (ends with CE or PE)
+        ts = inst.get("trading_symbol", "")
+        if ts.endswith(opt_type):
+            return inst.get("instrument_key", "")
+    return ""
+
 
 def _upstox_option_key(underlying: str, expiry, strike: int, opt_type: str) -> str:
     """
@@ -2698,8 +2755,32 @@ class DashboardServer:
             offset    = _dte_itm_offset(dte, step)
             ce_strike = int(round((base_strike - offset) / step) * step)
             pe_strike = int(round((base_strike + offset) / step) * step)
-            ce_key    = _upstox_option_key(script, expiry, ce_strike, "CE")
-            pe_key    = _upstox_option_key(script, expiry, pe_strike, "PE")
+
+            # 5b. Resolve exact instrument_key from Upstox master
+            # (constructed keys are rejected by Upstox historical API — UDAPI100011)
+            try:
+                master = await asyncio.to_thread(
+                    _upstox_download_master_sync, bd_str
+                )
+            except Exception as exc:
+                return {"ok": False, "error": f"Failed to download Upstox instrument master: {exc}"}
+
+            ce_key = _find_upstox_instrument_key(master, script, expiry, ce_strike, "CE")
+            pe_key = _find_upstox_instrument_key(master, script, expiry, pe_strike, "PE")
+
+            # Fallback: show constructed key if not found in master (for display only)
+            ce_key_display = ce_key or _upstox_option_key(script, expiry, ce_strike, "CE")
+            pe_key_display = pe_key or _upstox_option_key(script, expiry, pe_strike, "PE")
+
+            if not ce_key and not pe_key:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Contracts not found in Upstox instrument master for "
+                        f"{script} expiry={expiry.isoformat()} CE={ce_strike} PE={pe_strike}. "
+                        "The expiry may have already passed or this contract is not listed."
+                    ),
+                }
 
             # 6. Fetch backtest_date bars — underlying (structural replay) + options (premium ref)
             try:
@@ -2860,8 +2941,8 @@ class DashboardServer:
                     "target_expiry":          expiry.isoformat(),
                     "ce_strike":              ce_strike,
                     "pe_strike":              pe_strike,
-                    "selected_ce_symbol":     ce_key,
-                    "selected_pe_symbol":     pe_key,
+                    "selected_ce_symbol":     ce_key_display,
+                    "selected_pe_symbol":     pe_key_display,
                     "lot_size":               lot,
                     "capital":                payload.capital,
                 },
@@ -2869,8 +2950,8 @@ class DashboardServer:
                     "spot_bars":      len(spot_bars),
                     "htf_bars":       len(htf_df),
                     "mtf_bars":       len(mtf_df),
-                    "ce_premium":     _prem_summary(ce_bars, ce_key),
-                    "pe_premium":     _prem_summary(pe_bars, pe_key),
+                    "ce_premium":     _prem_summary(ce_bars, ce_key_display),
+                    "pe_premium":     _prem_summary(pe_bars, pe_key_display),
                     "ce_fetch_error": ce_fetch_error,
                     "pe_fetch_error": pe_fetch_error,
                 },
