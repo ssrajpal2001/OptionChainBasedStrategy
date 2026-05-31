@@ -3121,6 +3121,51 @@ class DashboardServer:
                 await broker.logout()
                 return {"ok": False, "error": str(exc), "broker_symbol": broker_symbol}
 
+        # ── ADMIN — Registry debug + reload ──────────────────────────────────
+
+        @app.get("/api/admin/registry/status", tags=["Admin"])
+        async def api_registry_status(_: dict = Depends(_require_admin)):
+            """Show what's loaded in InstrumentRegistry per underlying."""
+            from data_layer.instrument_registry import REGISTRY as _R
+            result = {}
+            for idx in _srv._cfg.monitored_indices:
+                keys = _R._upstox_keys.get(idx, {})
+                sample = [(f"{e}/{s}/{o}", k) for (e, s, o), k in list(keys.items())[:3]]
+                result[idx] = {
+                    "loaded":         _R.is_loaded(idx),
+                    "contract_count": len(keys),
+                    "expiries":       [d.isoformat() for d in _R.all_expiries(idx)],
+                    "sample_keys":    sample,
+                }
+            return {"ok": True, "registry": result}
+
+        @app.post("/api/admin/registry/reload", tags=["Admin"])
+        async def api_registry_reload(_: dict = Depends(_require_admin)):
+            """Force reload InstrumentRegistry from Upstox for all monitored indices."""
+            from data_layer.instrument_registry import REGISTRY as _R
+
+            if _srv._client_db is None:
+                return {"ok": False, "error": "ClientDB not available."}
+
+            creds = await asyncio.to_thread(_srv._client_db.get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return {"ok": False, "error": "No Upstox access token. Authenticate feeder first."}
+
+            results = {}
+            for idx in _srv._cfg.monitored_indices:
+                try:
+                    await asyncio.to_thread(_R.load_sync, idx, token)
+                    results[idx] = {
+                        "ok":       True,
+                        "contracts": len(_R._upstox_keys.get(idx, {})),
+                        "expiries":  [d.isoformat() for d in _R.all_expiries(idx)],
+                    }
+                except Exception as exc:
+                    results[idx] = {"ok": False, "error": str(exc)}
+
+            return {"ok": True, "results": results}
+
         # ── ADMIN — portfolio risk command center ────────────────────────────
 
         @app.get("/api/admin/risk/summary", tags=["Admin"])

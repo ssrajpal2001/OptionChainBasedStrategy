@@ -82,12 +82,13 @@ class InstrumentRegistry:
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
-    def load_sync(self, underlying: str, access_token: str) -> None:
+    def load_sync(self, underlying: str, access_token: str, weeks_ahead: int = 8) -> None:
         """
-        Load all active option contracts for an underlying from Upstox API.
+        Load active option contracts for an underlying from Upstox API.
 
-        Calls OptionsApi.get_option_contracts() — returns only active/listed
-        contracts for the underlying, much lighter than the full master JSON.
+        Uses get_put_call_option_chain(instrument_key, expiry_date) for each
+        of the next `weeks_ahead` weekly expiries. Each call returns OptionStrikeData
+        objects with call_options.instrument_key and put_options.instrument_key.
 
         Must be called via asyncio.to_thread() from async code.
         Safe to call multiple times — subsequent calls refresh the cache.
@@ -103,87 +104,86 @@ class InstrumentRegistry:
             logger.warning("InstrumentRegistry: no Upstox key for underlying '%s'", underlying)
             return
 
-        try:
-            cfg = upstox_client.Configuration()
-            cfg.access_token = access_token
-            client = upstox_client.ApiClient(cfg)
-            api = upstox_client.OptionsApi(client)
-            resp = api.get_option_contracts(
-                instrument_key=underlying_key,
-                api_version="2.0",
-            )
-        except Exception as exc:
-            logger.error("InstrumentRegistry.load_sync [%s]: API call failed: %s", underlying, exc)
-            return
+        cfg = upstox_client.Configuration()
+        cfg.access_token = access_token
+        api_client = upstox_client.ApiClient(cfg)
+        api = upstox_client.OptionsApi(api_client)
 
-        # Parse response — data is a list of instrument records
-        instruments = []
-        data = getattr(resp, "data", None)
-        if data is None:
-            logger.warning("InstrumentRegistry [%s]: empty response from get_option_contracts", underlying)
-            return
-
-        # data may be a list directly or an object with items
-        if isinstance(data, list):
-            instruments = data
-        elif hasattr(data, "__iter__"):
-            instruments = list(data)
-        else:
-            logger.warning("InstrumentRegistry [%s]: unexpected response type: %s", underlying, type(data))
-            return
+        # Calculate next N weekly expiry dates for this underlying
+        today = date.today()
+        expiry_dates: List[date] = []
+        d = today
+        for _ in range(weeks_ahead):
+            d = _calc_next_expiry(underlying, d)
+            expiry_dates.append(d)
+            d = d + timedelta(days=1)
 
         keys: Dict[Tuple[str, int, str], str] = {}
         expiry_set: Set[date] = set()
 
-        for inst in instruments:
-            # Each instrument is either a dict or an object with attributes
-            if isinstance(inst, dict):
-                inst_key   = inst.get("instrument_key", "")
-                ts         = inst.get("trading_symbol", "")
-                expiry_raw = inst.get("expiry", "")
-                strike_raw = inst.get("strike_price", 0)
-            else:
-                inst_key   = getattr(inst, "instrument_key", "")
-                ts         = getattr(inst, "trading_symbol", "")
-                expiry_raw = getattr(inst, "expiry", "")
-                strike_raw = getattr(inst, "strike_price", 0)
-
-            if not inst_key or not ts:
-                continue
-
-            # Determine option type from trading_symbol suffix
-            if ts.endswith("CE"):
-                opt_type = "CE"
-            elif ts.endswith("PE"):
-                opt_type = "PE"
-            else:
-                continue
-
-            # Parse expiry date (may be "2026-06-02" or datetime object)
+        for expiry_date in expiry_dates:
+            expiry_str = expiry_date.isoformat()
             try:
-                if isinstance(expiry_raw, (date, datetime)):
-                    expiry_date = expiry_raw.date() if isinstance(expiry_raw, datetime) else expiry_raw
-                else:
-                    expiry_date = date.fromisoformat(str(expiry_raw)[:10])
-            except (ValueError, TypeError):
+                resp = api.get_put_call_option_chain(
+                    instrument_key=underlying_key,
+                    expiry_date=expiry_str,
+                    api_version="2.0",
+                )
+            except Exception as exc:
+                logger.debug(
+                    "InstrumentRegistry [%s] expiry=%s: chain fetch failed: %s",
+                    underlying, expiry_str, exc,
+                )
                 continue
 
-            # Skip already-expired contracts
-            if expiry_date < date.today():
+            data = getattr(resp, "data", None)
+            if not data:
+                logger.debug("InstrumentRegistry [%s] expiry=%s: empty chain", underlying, expiry_str)
                 continue
 
-            strike = int(round(float(strike_raw)))
-            key_tuple = (expiry_date.isoformat(), strike, opt_type)
-            keys[key_tuple] = inst_key
-            expiry_set.add(expiry_date)
+            items = data if isinstance(data, list) else list(data)
+            count_before = len(keys)
+
+            for strike_data in items:
+                # strike_data is OptionStrikeData:
+                #   strike_price: float
+                #   expiry: datetime
+                #   call_options: PutCallOptionChainData  (has .instrument_key)
+                #   put_options:  PutCallOptionChainData  (has .instrument_key)
+                strike_raw = (
+                    strike_data.get("strike_price", 0)
+                    if isinstance(strike_data, dict)
+                    else getattr(strike_data, "strike_price", 0)
+                )
+                strike = int(round(float(strike_raw or 0)))
+                if strike <= 0:
+                    continue
+
+                for opt_type, attr in (("CE", "call_options"), ("PE", "put_options")):
+                    if isinstance(strike_data, dict):
+                        opt_data = strike_data.get(attr, {})
+                        inst_key = (opt_data or {}).get("instrument_key", "") if isinstance(opt_data, dict) else ""
+                    else:
+                        opt_data = getattr(strike_data, attr, None)
+                        inst_key = getattr(opt_data, "instrument_key", "") if opt_data else ""
+
+                    if inst_key:
+                        keys[(expiry_str, strike, opt_type)] = inst_key
+                        expiry_set.add(expiry_date)
+
+            added = len(keys) - count_before
+            logger.debug(
+                "InstrumentRegistry [%s] expiry=%s: +%d contracts", underlying, expiry_str, added
+            )
 
         self._upstox_keys[underlying] = keys
         self._expiries[underlying] = sorted(expiry_set)
         self._loaded.add(underlying)
 
         logger.info(
-            "InstrumentRegistry [%s]: loaded %d contracts across %d expiries.",
+            "InstrumentRegistry [%s]: loaded %d contracts across %d expiries (%s).",
             underlying, len(keys), len(expiry_set),
+            ", ".join(e.isoformat() for e in sorted(expiry_set)),
         )
 
     def is_loaded(self, underlying: str) -> bool:
