@@ -2662,8 +2662,9 @@ class DashboardServer:
             agg = {"open": "first", "high": "max", "low": "min",
                    "close": "last", "volume": "sum"}
 
+            _htf_origin = df.index[0].normalize().replace(hour=9, minute=15, second=0)
             htf_df = df.resample(
-                f"{tc.HTF_MINUTES}min", closed="left", label="right", offset="225min"
+                f"{tc.HTF_MINUTES}min", closed="left", label="right", origin=_htf_origin
             ).agg(agg).dropna()
 
             mtf_df = df.resample(
@@ -2895,7 +2896,8 @@ class DashboardServer:
                 Stage 5:   1m bars as ticks — check if premium touches ltf_entry_line
                 """
                 df = _to_df(bars)
-                htf = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="right", offset="225min").agg(agg).dropna()
+                _origin = df.index[0].normalize().replace(hour=9, minute=15, second=0)
+                htf = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="right", origin=_origin).agg(agg).dropna()
                 mtf = df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="right").agg(agg).dropna()
 
                 eng = TrapTradingEngine(_EB(), _srv._cfg, client_db=None)

@@ -323,8 +323,9 @@ class TrapTradingEngine:
                        "close": "last", "volume": "sum"}
 
                 # Replay HTF bars
+                _origin = df.index[0].normalize().replace(hour=9, minute=15, second=0)
                 htf_df = df.resample(
-                    f"{tc.HTF_MINUTES}min", closed="left", label="right", offset="225min"
+                    f"{tc.HTF_MINUTES}min", closed="left", label="right", origin=_origin
                 ).agg(agg).dropna()
                 for ts, row in htf_df.iterrows():
                     fake = CandleEvent(
