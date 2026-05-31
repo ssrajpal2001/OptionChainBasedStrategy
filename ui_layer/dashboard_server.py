@@ -2979,12 +2979,12 @@ class DashboardServer:
                         st = eng._states.get(sym_label)
                         new_phase_mtf = st.phase.name if st else "IDLE"
                         mtf_remark = ""
-                        if phase_before_name != "MTF_BEARISH" and new_phase_mtf == "MTF_BEARISH":
-                            mtf_remark = "STAGE 4a — Bearish 5m candle. MTF trap candidate."
+                        if phase_before_name == "RETEST_ALERT" and new_phase_mtf == "ARMED":
+                            mtf_remark = f"STAGE 4 — Bearish 5m candle → ARMED immediately. ltf_entry={st.ltf_entry_line:.2f}"
                         elif phase_before_name == "MTF_BEARISH" and new_phase_mtf == "ARMED":
-                            mtf_remark = f"STAGE 4b — MTF sweep confirmed. ARMED. ltf_entry={st.ltf_entry_line:.2f} ltf_sl={st.ltf_sl_line:.2f}"
+                            mtf_remark = f"STAGE 4 — ARMED. ltf_entry={st.ltf_entry_line:.2f}"
                         elif new_phase_mtf == "MTF_BEARISH":
-                            mtf_remark = "Stage 4a candidate updated."
+                            mtf_remark = "Stage 4 — legacy MTF_BEARISH (updating candidate)."
                         mtf_table.append({
                             "ts":     str(ts)[:19],
                             "open":   round(float(row["open"]),  2),

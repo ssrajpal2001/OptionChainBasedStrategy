@@ -563,49 +563,42 @@ class TrapTradingEngine:
         is_bearish = c.close < c.open
 
         if st.phase == _Phase.RETEST_ALERT:
-            # Stage 4a: find a 5-min bearish candle
+            # Stage 4: bearish 5m candle in retest zone → ARMED immediately
+            # Entry = low of bearish candle (the MTF entry zone)
+            # Bullish 5m candles are ignored — stay in RETEST_ALERT, no oscillation
             if is_bearish:
                 st.mtf_bearish_open = c.open
                 st.mtf_bearish_high = c.high
                 st.mtf_bearish_low  = c.low
                 st.mtf_bearish_ts   = c.timestamp
-                st.phase            = _Phase.MTF_BEARISH
-                logger.debug(
-                    "TrapEngine [%s] Stage 4a MTF_BEARISH open=%.2f high=%.2f low=%.2f @ %s",
-                    c.symbol, c.open, c.high, c.low, c.timestamp.strftime("%H:%M"),
+                st.ltf_entry_line   = c.low   # entry = bearish candle low
+                st.mtf_sweep_low    = c.low   # structural SL reference
+                st.phase            = _Phase.ARMED
+                logger.info(
+                    "TrapEngine [%s] Stage 4 ARMED — bearish 5m candle "
+                    "O=%.2f H=%.2f L=%.2f ltf_entry=%.2f @ %s",
+                    c.symbol, c.open, c.high, c.low, st.ltf_entry_line,
+                    c.timestamp.strftime("%H:%M"),
                 )
 
         elif st.phase == _Phase.MTF_BEARISH:
-            # Stage 4b: next 5-min bar's high sweeps mtf_bearish_high?
-            if c.high > st.mtf_bearish_high:
-                st.ltf_entry_line = st.mtf_bearish_low   # retest entry = candle A low
-                st.mtf_sweep_low  = c.low                # structural SL reference (sweep candle low)
-                # ltf_sl_line set at entry time based on SL_MODE config
-                # MTF_LOCKED → ARMED immediately
-                st.phase = _Phase.ARMED
-                logger.info(
-                    "TrapEngine [%s] Stage 4b MTF sweep confirmed → ARMED "
-                    "ltf_entry=%.2f ltf_sl=%.2f @ %s",
-                    c.symbol, st.ltf_entry_line, st.ltf_sl_line,
-                    c.timestamp.strftime("%H:%M"),
-                )
-            elif is_bearish:
-                # Update MTF candidate
+            # Legacy path — should not be reached with the new Stage 4 flow
+            # Kept for safety: if somehow we land here, convert to ARMED
+            if is_bearish:
+                # Update to newer bearish candle (lower entry)
                 st.mtf_bearish_open = c.open
                 st.mtf_bearish_high = c.high
                 st.mtf_bearish_low  = c.low
                 st.mtf_bearish_ts   = c.timestamp
-                logger.debug(
-                    "TrapEngine [%s] MTF_BEARISH candidate updated open=%.2f",
-                    c.symbol, c.open,
-                )
-            else:
-                # Bullish bar without sweep — back to RETEST_ALERT
-                st.phase = _Phase.RETEST_ALERT
-                logger.debug(
-                    "TrapEngine [%s] MTF bullish without sweep — back to RETEST_ALERT",
-                    c.symbol,
-                )
+                st.ltf_entry_line   = c.low
+                st.mtf_sweep_low    = c.low
+                st.phase            = _Phase.ARMED
+            elif c.high > st.mtf_bearish_high:
+                # Sweep (old Stage 4b path) — still valid if reached
+                st.ltf_entry_line = st.mtf_bearish_low
+                st.mtf_sweep_low  = c.low
+                st.phase          = _Phase.ARMED
+            # Bullish without sweep — stay in MTF_BEARISH (no reset to RETEST_ALERT)
 
     # ── Stage 3 + Stage 5: option tick handler ────────────────────────────────
 

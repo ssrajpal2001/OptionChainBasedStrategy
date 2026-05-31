@@ -4076,7 +4076,7 @@ function histReplay() {
               <input type="radio" class="mt-0.5" x-model="indexConfig._trap.sl_mode" value="structural"/>
               <div>
                 <div class="text-xs font-semibold" style="color:var(--t-text)">Structural (sweep candle low)</div>
-                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = Stage 4b sweep candle low. Falls back to dynamic if above fill.</div>
+                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = dynamic % below entry price (set at fill time).</div>
               </div>
             </label>
           </div>
@@ -4923,7 +4923,7 @@ function histReplay() {
                   </tr></thead>
                   <tbody>
                     <template x-for="(r,i) in result.ce_engine.mtf_table" :key="i">
-                      <tr :style="r.remark.includes('STAGE 4b') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4a') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
+                      <tr :style="r.remark.includes('STAGE 4 — ARMED') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
                           style="border-bottom:1px solid var(--t-border)">
                         <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
                         <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
@@ -5022,7 +5022,7 @@ function histReplay() {
                   </tr></thead>
                   <tbody>
                     <template x-for="(r,i) in result.pe_engine.mtf_table" :key="i">
-                      <tr :style="r.remark.includes('STAGE 4b') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4a') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
+                      <tr :style="r.remark.includes('STAGE 4 — ARMED') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
                           style="border-bottom:1px solid var(--t-border)">
                         <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
                         <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
