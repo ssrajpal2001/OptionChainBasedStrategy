@@ -7,6 +7,8 @@ Requires: pip install dhanhq
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 from typing import Any, Dict, List
 
@@ -79,7 +81,10 @@ class DhanBroker(BaseBroker):
                     self._product = "MARGIN"
                 else:
                     self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "MARGIN"
-                logger.info("DhanBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
+                # Load Dhan instrument master to build security_id map
+                await self._load_instrument_master()
+                logger.info("DhanBroker [%s]: Authenticated. product=%s symbols=%d",
+                            self.client_id, self._product, len(self._symbol_map))
                 return True
             logger.error("DhanBroker [%s]: Auth check failed: %s", self.client_id, funds)
             return False
@@ -89,6 +94,55 @@ class DhanBroker(BaseBroker):
 
     async def logout(self) -> None:
         self._authenticated = False
+
+    async def _load_instrument_master(self) -> None:
+        """Download Dhan instrument master CSV and build {lookup_key: security_id} map."""
+        import urllib.request
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        try:
+            data = await asyncio.to_thread(
+                lambda: urllib.request.urlopen(url, timeout=15).read().decode("utf-8")
+            )
+            reader = csv.DictReader(io.StringIO(data))
+            count = 0
+            for row in reader:
+                seg  = (row.get("SEM_EXM_EXCH_ID") or "").strip()
+                sym  = (row.get("SEM_TRADING_SYMBOL") or "").strip()
+                sid  = (row.get("SEM_SMST_SECURITY_ID") or "").strip()
+                exp  = (row.get("SEM_EXPIRY_DATE") or "").strip()[:10]  # YYYY-MM-DD
+                strike_raw = (row.get("SEM_STRIKE_PRICE") or "0").strip()
+                opt  = (row.get("SEM_OPTION_TYPE") or "").strip()
+                inst = (row.get("SEM_INSTRUMENT_NAME") or "").strip()
+                undl = (row.get("SEM_LOT_UNITS") or "").strip()
+                series = (row.get("SEM_SERIES") or "").strip()
+
+                if not sid or seg not in ("NSE", "BSE") or inst not in ("OPTIDX", "OPTSTK"):
+                    continue
+                # Build canonical key: UNDERLYING:DDMONYY:STRIKE:CE/PE
+                # Match format used by to_dhan_lookup_key (InternalSymbol.__str__)
+                # InternalSymbol str: "NIFTY:02JUN26:24450:CE"
+                try:
+                    from datetime import date as _date
+                    exp_d = _date.fromisoformat(exp)
+                    dd  = exp_d.strftime("%d")
+                    mon = exp_d.strftime("%b").upper()
+                    yy  = exp_d.strftime("%y")
+                    strike_i = int(float(strike_raw))
+                    # Extract underlying from trading symbol (strip expiry/strike suffix)
+                    underlying = sym  # fallback
+                    # Dhan trading symbol for NIFTY options starts with "NIFTY"
+                    for prefix in ("NIFTY","BANKNIFTY","FINNIFTY","SENSEX","MIDCPNIFTY"):
+                        if sym.startswith(prefix):
+                            underlying = prefix
+                            break
+                    key = f"{underlying}:{dd}{mon}{yy}:{strike_i}:{opt}"
+                    self._symbol_map[key] = sid
+                    count += 1
+                except Exception:
+                    continue
+            logger.info("DhanBroker [%s]: loaded %d instrument keys from master.", self.client_id, count)
+        except Exception as exc:
+            logger.warning("DhanBroker [%s]: instrument master load failed: %s — orders may fail without security_id.", self.client_id, exc)
 
     async def place_order(self, req: OrderRequest) -> str:
         if not self._dhan:
