@@ -302,6 +302,9 @@ class StrikeRebalancer:
 
         today  = datetime.now(IST).date()
         expiry = _next_expiry(underlying, today)
+        if expiry is None:
+            logger.warning("StrikeRebalancer[%s]: no expiry in registry — skipping token build", underlying)
+            return []
 
         # Detect provider from feeder type
         provider = "internal"

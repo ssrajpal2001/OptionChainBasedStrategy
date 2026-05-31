@@ -412,6 +412,10 @@ class HistoricalBacktester:
         open_trade: Optional[TradeRecord] = None
         from data_layer.instrument_registry import REGISTRY as _REG
         expiry = _REG.get_active_expiry(underlying, start)
+        if expiry is None:
+            raise RuntimeError(
+                f"Registry has no expiry for {underlying} — load registry before running backtest."
+            )
 
         for tick_ts, ltp, volume in spot_data:
             # Build candle
