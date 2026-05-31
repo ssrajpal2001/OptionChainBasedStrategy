@@ -586,9 +586,7 @@ document.addEventListener('alpine:init', () => {
       ic_midcp_otm: 150, ic_midcp_wing: 200,
       ss_entry_start: '09:20', ss_entry_end: '12:00', ss_squareoff_time: '15:15',
       ss_max_trades: 1,
-      tt_htf_minutes: 75, tt_ltf_minutes: 5, tt_adx_threshold: 20,
-      tt_volume_spike_mult: 1.5, tt_swing_lookback: 5, tt_zone_tol_pct: 0.5, tt_void_atr_mult: 2.0,
-      tt_sl_mode: 'dynamic', tt_sl_pct: 2.0,
+      tt_htf_minutes: 75, tt_ltf_minutes: 5, tt_sl_mode: 'dynamic', tt_sl_pct: 2.0,
     },
     strategyConfigLoading: false,
     strategyConfigSaving: false,
@@ -599,7 +597,7 @@ document.addEventListener('alpine:init', () => {
     adminSelectedIndex: 'NIFTY',
     adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor' | 'trap_trading'
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
-    indexConfig: { _trap: { htf_minutes:75, ltf_minutes:5, adx_threshold:20.0, volume_spike_multiplier:1.5, swing_lookback:5, zone_tolerance_pct:0.5, void_atr_mult:2.0 } },
+    indexConfig: { _trap: { htf_minutes:75, ltf_minutes:5, retest_zone_pct:0.5, slippage_buffer:0.5, sl_mode:'dynamic', sl_pct:2.0 } },
     trapSaveMsg: '', trapSaveOk: null,
     indexConfigLoading: false,
     indexConfigSaving:  false,
@@ -1420,7 +1418,7 @@ document.addEventListener('alpine:init', () => {
         if (!r) throw new Error('No response');
         const d = await r.json();
         this.trapSaveOk  = d.ok !== false;
-        this.trapSaveMsg = d.message || (d.ok ? 'Trap Trading config saved.' : (d.error || 'Save failed.'));
+        this.trapSaveMsg = d.message || (d.ok ? 'Liquidity Trap config saved.' : (d.error || 'Save failed.'));
       } catch (e) {
         this.trapSaveOk = false;
         this.trapSaveMsg = 'Network error: ' + (e.message || String(e));
@@ -3998,105 +3996,83 @@ function histReplay() {
         </div>
       </div><!-- end iron_condor config -->
 
-      <!-- ══ TRAP TRADING config ════════════════════════════════════════════ -->
-      <!-- NOTE: These controls manage RuntimeConfig overrides (adx_threshold,
-           volume_spike_multiplier, swing_lookback, zone_tolerance_pct,
-           void_atr_mult). Core timeframe parameters (HTF_MINUTES, MTF_MINUTES,
-           LTF_MINUTES, RETEST_ZONE_PERCENT, SLIPPAGE_BUFFER, bars_lookback_days)
-           are managed in the TRAP ENGINE tab → TrapEngine Parameters panel. -->
+      <!-- ══ LIQUIDITY TRAP TRADING config ══════════════════════════════════ -->
       <div x-show="adminStrategyTab==='trap_trading'" class="p-4 flex flex-col gap-3">
         <div class="text-xs font-mono mb-1" style="color:var(--t-muted)">
-          Dual-timeframe institutional trap detection. Settings apply globally (not per-index).
-          <span class="text-yellow-500 ml-1">RuntimeConfig overrides only — see TRAP ENGINE tab for timeframe parameters.</span>
+          <span class="font-semibold" style="color:var(--t-text)">Liquidity Trap Trading</span> —
+          5-stage MTF institutional liquidity sweep engine. All parameters apply globally.
+          Detailed timeframe tuning (HTF/MTF/LTF minutes, retest zone, slippage) is in the
+          <span class="text-yellow-400 font-semibold">TRAP ENGINE</span> tab.
         </div>
+
+        <!-- Entry parameters -->
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="sec-label">HTF MINUTES (slow TF)</label>
+            <label class="sec-label">HTF MINUTES (Stage 1–2)</label>
             <input type="number" class="t-input"
                    x-model.number="indexConfig._trap.htf_minutes"
                    placeholder="75" min="15" max="240" step="5"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Higher timeframe for trend context (default: 75)</div>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Slow timeframe for bearish trap setup (default: 75)</div>
           </div>
           <div>
-            <label class="sec-label">LTF MINUTES (fast TF)</label>
+            <label class="sec-label">MTF MINUTES (Stage 4)</label>
             <input type="number" class="t-input"
                    x-model.number="indexConfig._trap.ltf_minutes"
                    placeholder="5" min="1" max="30" step="1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Lower timeframe for entry timing (default: 5)</div>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Nested trap timeframe for entry timing (default: 5)</div>
           </div>
           <div>
-            <label class="sec-label">ADX THRESHOLD</label>
+            <label class="sec-label">RETEST ZONE (%)</label>
             <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.adx_threshold"
-                   placeholder="20" min="10" max="50" step="0.5"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Min ADX to confirm trend strength (default: 20)</div>
+                   x-model.number="indexConfig._trap.retest_zone_pct"
+                   placeholder="0.5" min="0.1" max="5.0" step="0.1"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Stage 3 retest band around entry origin ± % (default: 0.5)</div>
           </div>
           <div>
-            <label class="sec-label">VOLUME SPIKE MULTIPLIER</label>
+            <label class="sec-label">SLIPPAGE BUFFER (pts)</label>
             <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.volume_spike_multiplier"
-                   placeholder="1.5" min="1.0" max="5.0" step="0.1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Volume vs avg to confirm trap (default: 1.5×)</div>
-          </div>
-          <div>
-            <label class="sec-label">SWING LOOKBACK (candles)</label>
-            <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.swing_lookback"
-                   placeholder="5" min="3" max="20" step="1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Candles to scan for swing high/low (default: 5)</div>
-          </div>
-          <div>
-            <label class="sec-label">ZONE TOLERANCE (%)</label>
-            <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.zone_tolerance_pct"
-                   placeholder="0.5" min="0.1" max="2.0" step="0.1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% buffer around zone for false-breakout detection (default: 0.5)</div>
-          </div>
-          <div>
-            <label class="sec-label">VOID ATR MULTIPLIER</label>
-            <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.void_atr_mult"
-                   placeholder="2.0" min="0.5" max="5.0" step="0.1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">ATR multiple to define price void (default: 2.0)</div>
+                   x-model.number="indexConfig._trap.slippage_buffer"
+                   placeholder="0.5" min="0" max="20" step="0.25"/>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Stage 5 touch trigger buffer above entry line (default: 0.5)</div>
           </div>
         </div>
 
-        <!-- SL Mode selector -->
-        <div class="mt-2 p-3 rounded" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08)">
+        <!-- SL Mode -->
+        <div class="p-3 rounded" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08)">
           <label class="sec-label mb-2 block">STOP LOSS MODE</label>
-          <div class="flex gap-4">
+          <div class="flex gap-4 flex-wrap">
             <label class="flex items-start gap-2 cursor-pointer">
               <input type="radio" class="mt-0.5" x-model="indexConfig._trap.sl_mode" value="dynamic"/>
               <div>
                 <div class="text-xs font-semibold" style="color:var(--t-text)">Dynamic (% below fill)</div>
-                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = entry price &minus; SL%. Always below entry. Recommended.</div>
+                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = entry price − SL%. Always below entry. Recommended.</div>
               </div>
             </label>
             <label class="flex items-start gap-2 cursor-pointer">
               <input type="radio" class="mt-0.5" x-model="indexConfig._trap.sl_mode" value="structural"/>
               <div>
                 <div class="text-xs font-semibold" style="color:var(--t-text)">Structural (sweep candle low)</div>
-                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = low of Stage 4b sweep candle. Falls back to dynamic if above fill.</div>
+                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = Stage 4b sweep candle low. Falls back to dynamic if above fill.</div>
               </div>
             </label>
           </div>
-          <div x-show="indexConfig._trap.sl_mode === 'dynamic'" class="mt-3">
+          <div x-show="indexConfig._trap.sl_mode !== 'structural'" class="mt-3">
             <label class="sec-label">SL PERCENT (%)</label>
             <input type="number" class="t-input w-32"
                    x-model.number="indexConfig._trap.sl_pct"
                    placeholder="2.0" min="0.1" max="20" step="0.1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% below entry price for stop loss (default: 2.0%)</div>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% below entry fill for stop loss (default: 2.0%)</div>
           </div>
         </div>
 
         <button @click="saveTrapConfig()"
                 class="btn-save-cfg self-start mt-1">
-          <span>&#x1F4BE; Save Trap Trading Config</span>
+          <span>&#x1F4BE; Save Liquidity Trap Config</span>
         </button>
         <div x-show="trapSaveMsg" class="font-mono text-xs px-2 py-1 rounded"
              :style="trapSaveOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08)' : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08)'"
              x-text="trapSaveMsg"></div>
-      </div><!-- end trap_trading config -->
+      </div><!-- end liquidity trap trading config -->
 
     </div><!-- end strategy tabs card -->
 

@@ -240,16 +240,11 @@ try:
         ss_entry_end:      str   = "12:00"
         ss_squareoff_time: str   = "15:15"
         ss_max_trades:     int   = 1
-        # Trap Trading RuntimeConfig overrides
-        tt_htf_minutes:          int   = 75
-        tt_ltf_minutes:          int   = 5
-        tt_adx_threshold:        float = 20.0
-        tt_volume_spike_mult:    float = 1.5
-        tt_swing_lookback:       int   = 5
-        tt_zone_tol_pct:         float = 0.5
-        tt_void_atr_mult:        float = 2.0
-        tt_sl_mode:              str   = "dynamic"   # "dynamic" | "structural"
-        tt_sl_pct:               float = 2.0         # % below entry (dynamic mode only)
+        # Liquidity Trap Trading (new 5-stage MTF engine)
+        tt_htf_minutes:   int   = 75
+        tt_ltf_minutes:   int   = 5
+        tt_sl_mode:       str   = "dynamic"
+        tt_sl_pct:        float = 2.0
 
     class _KillAllConfirmSchema(_PydanticBase):
         confirm: bool = False   # must be True to proceed
@@ -2342,15 +2337,10 @@ class DashboardServer:
                 "ss_entry_end":       ss.get("entry_end",      "12:00"),
                 "ss_squareoff_time":  ss.get("squareoff_time", "15:15"),
                 "ss_max_trades":      ss.get("max_trades",      1),
-                "tt_htf_minutes":     tt.get("htf_minutes",         75),
-                "tt_ltf_minutes":     tt.get("ltf_minutes",          5),
-                "tt_adx_threshold":   tt.get("adx_threshold",       20.0),
-                "tt_volume_spike_mult": tt.get("volume_spike_multiplier", 1.5),
-                "tt_swing_lookback":  tt.get("swing_lookback",       5),
-                "tt_zone_tol_pct":    tt.get("zone_tolerance_pct",   0.5),
-                "tt_void_atr_mult":   tt.get("void_atr_mult",        2.0),
-                "tt_sl_mode":         tt.get("sl_mode",              "dynamic"),
-                "tt_sl_pct":          tt.get("sl_pct",               2.0),
+                "tt_htf_minutes":     tt.get("htf_minutes",      75),
+                "tt_ltf_minutes":     tt.get("ltf_minutes",       5),
+                "tt_sl_mode":         tt.get("sl_mode",           "dynamic"),
+                "tt_sl_pct":          tt.get("sl_pct",            2.0),
             }
 
         @app.post("/api/admin/strategy/config/update", tags=["Admin"])
@@ -2382,15 +2372,10 @@ class DashboardServer:
                     "max_trades":     body.ss_max_trades,
                 },
                 "trap_trading": {
-                    "htf_minutes":             body.tt_htf_minutes,
-                    "ltf_minutes":             body.tt_ltf_minutes,
-                    "adx_threshold":           body.tt_adx_threshold,
-                    "volume_spike_multiplier": body.tt_volume_spike_mult,
-                    "swing_lookback":          body.tt_swing_lookback,
-                    "zone_tolerance_pct":      body.tt_zone_tol_pct,
-                    "void_atr_mult":           body.tt_void_atr_mult,
-                    "sl_mode":                 body.tt_sl_mode,
-                    "sl_pct":                  body.tt_sl_pct,
+                    "htf_minutes": body.tt_htf_minutes,
+                    "ltf_minutes": body.tt_ltf_minutes,
+                    "sl_mode":     body.tt_sl_mode,
+                    "sl_pct":      body.tt_sl_pct,
                 },
             }
             RuntimeConfig.update(patch)
@@ -2500,15 +2485,13 @@ class DashboardServer:
                 body = await request.json()
             except Exception:
                 return {"ok": False, "error": "Invalid JSON body."}
-            allowed = {"htf_minutes", "ltf_minutes", "adx_threshold",
-                       "volume_spike_multiplier", "swing_lookback",
-                       "zone_tolerance_pct", "void_atr_mult",
-                       "sl_mode", "sl_pct"}
+            allowed = {"htf_minutes", "ltf_minutes", "retest_zone_pct",
+                       "slippage_buffer", "sl_mode", "sl_pct"}
             patch = {k: v for k, v in body.items() if k in allowed}
             if not patch:
                 return {"ok": False, "error": "No valid fields provided."}
             RuntimeConfig.update({"trap_trading": patch})
-            # Live-inject SL_MODE / SL_PCT into TrapEngineConfig
+            # Live-inject into TrapEngineConfig
             engine_cfg = getattr(getattr(_srv, "_cfg", None), "trap_engine", None)
             if engine_cfg is not None:
                 try:
@@ -2517,10 +2500,14 @@ class DashboardServer:
                         live_updates["SL_MODE"] = patch["sl_mode"]
                     if "sl_pct" in patch:
                         live_updates["SL_PCT"] = patch["sl_pct"]
+                    if "retest_zone_pct" in patch:
+                        live_updates["RETEST_ZONE_PERCENT"] = patch["retest_zone_pct"]
+                    if "slippage_buffer" in patch:
+                        live_updates["SLIPPAGE_BUFFER"] = patch["slippage_buffer"]
                     if live_updates:
                         engine_cfg.reconfigure(**live_updates)
                 except Exception as exc:
-                    logger.warning("Trap SL config live-inject failed: %s", exc)
+                    logger.warning("Trap config live-inject failed: %s", exc)
             logger.info("Trap Trading config saved: %s", patch)
             return {"ok": True, "message": "Trap Trading config saved."}
 
