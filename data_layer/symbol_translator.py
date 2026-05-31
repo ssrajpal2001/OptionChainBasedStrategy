@@ -177,6 +177,24 @@ class SymbolTranslator:
     # ── Dhan ──────────────────────────────────────────────────────────────────
 
     @staticmethod
+    def to_zerodha(sym: InternalSymbol, is_monthly: bool = False) -> str:
+        """
+        Zerodha Kite trading symbol format:
+          Weekly : NIFTY2662524450CE  → YY + single-char-month + DD + strike + CE/PE
+          Monthly: NIFTY26JUN24450CE  → YY + 3-letter-month + strike + CE/PE
+
+        Same single-char month codes as Fyers (NSE standard).
+        """
+        yy = sym.expiry.strftime("%y")
+        if is_monthly:
+            mon = _MONTH_3[sym.expiry.month - 1]
+            return f"{sym.underlying}{yy}{mon}{sym.strike_int}{sym.option_type}"
+        else:
+            m_code = _FYERS_MONTH_CODE[sym.expiry.month]
+            dd     = sym.expiry.strftime("%d")
+            return f"{sym.underlying}{yy}{m_code}{dd}{sym.strike_int}{sym.option_type}"
+
+    @staticmethod
     def to_dhan_lookup_key(sym: InternalSymbol) -> str:
         """
         Dhan is token-based. Return a lookup key to find the numeric

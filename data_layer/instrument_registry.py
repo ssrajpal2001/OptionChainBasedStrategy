@@ -441,7 +441,7 @@ class InstrumentRegistry:
             return SymbolTranslator.to_dhan_lookup_key(internal)
 
         elif p == "zerodha":
-            return SymbolTranslator.to_angelone(internal)
+            return SymbolTranslator.to_zerodha(internal, is_monthly=is_monthly_expiry(expiry, underlying))
 
         else:
             return str(internal)

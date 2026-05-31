@@ -367,7 +367,7 @@ _MONITOR_HTML = os.path.join(_TEMPLATE_DIR, "monitor.html")
 
 # NSE weekly expiry weekday per underlying (0=Mon … 6=Sun)
 _WEEKLY_EXPIRY_WEEKDAY: Dict[str, int] = {
-    "NIFTY":       1,   # Tuesday
+    "NIFTY":       3,   # Thursday
     "BANKNIFTY":   2,   # Wednesday
     "FINNIFTY":    1,   # Tuesday
     "MIDCPNIFTY":  0,   # Monday
@@ -3129,24 +3129,39 @@ class DashboardServer:
             lot_size   = _srv._cfg.exchange.lot_sizes.get(underlying, 75)
             qty        = payload.qty * lot_size
 
-            # Resolve expiry
+            # Resolve expiry — always from registry (real contract dates), never calculated
             today = datetime.now(IST).date()
             expiry_pref = payload.expiry_pref.lower()
-            if expiry_pref == "next_week":
-                expiry = _nexp(underlying, today + timedelta(days=1))
-                expiry = _nexp(underlying, expiry + timedelta(days=1))
-            elif expiry_pref == "monthly":
-                # Next month's last expiry weekday
-                m = today.month % 12 + 1
-                y = today.year + (1 if today.month == 12 else 0)
-                from calendar import monthrange as _mr
-                last_day = date(y, m, _mr(y, m)[1])
-                wd = _WEEKLY_EXPIRY_WEEKDAY.get(underlying, 1)
-                while last_day.weekday() != wd:
-                    last_day -= timedelta(days=1)
-                expiry = last_day
+
+            # Load registry first so we have real expiry dates
+            _upstox_creds_pre = await asyncio.to_thread(
+                _srv._client_db.get_feeder_creds_sync, "upstox"
+            )
+            _upstox_token_pre = (_upstox_creds_pre or {}).get("access_token", "")
+            if _upstox_token_pre and not _REG.is_loaded(underlying):
+                try:
+                    await asyncio.to_thread(_REG.load_sync, underlying, _upstox_token_pre)
+                except Exception as _le:
+                    logger.warning("AMO test: registry pre-load failed: %s", _le)
+
+            real_expiries = _REG.all_expiries(underlying)  # sorted list from broker API
+            future_expiries = [e for e in real_expiries if e >= today]
+
+            if future_expiries:
+                if expiry_pref == "next_week":
+                    expiry = future_expiries[1] if len(future_expiries) > 1 else future_expiries[0]
+                elif expiry_pref == "monthly":
+                    # Last expiry in list = farthest (usually monthly)
+                    expiry = future_expiries[-1]
+                else:
+                    expiry = future_expiries[0]  # nearest upcoming
             else:
+                # Registry not loaded — fall back to _nexp with correct weekday
                 expiry = _nexp(underlying, today)
+                logger.warning(
+                    "AMO test: no expiries in registry for %s — using calculated fallback %s",
+                    underlying, expiry,
+                )
 
             # Minimum valid strikes per underlying (sanity guard)
             _MIN_STRIKE = {"NIFTY": 5000, "BANKNIFTY": 10000, "FINNIFTY": 5000,
@@ -3201,16 +3216,7 @@ class DashboardServer:
 
             provider = binding_row.get("provider", "mock")
 
-            # Load instrument registry if needed (requires Upstox token)
-            _upstox_creds = await asyncio.to_thread(
-                _srv._client_db.get_feeder_creds_sync, "upstox"
-            )
-            _upstox_token = (_upstox_creds or {}).get("access_token", "")
-            if _upstox_token and not _REG.is_loaded(underlying):
-                try:
-                    await asyncio.to_thread(_REG.load_sync, underlying, _upstox_token)
-                except Exception as _e:
-                    logger.warning("AMO test: registry load failed: %s", _e)
+            # Registry already loaded above (expiry resolution step)
 
             # Build broker-specific symbol
             try:
@@ -3227,14 +3233,14 @@ class DashboardServer:
                     "error": (
                         f"Symbol not found in instrument registry for "
                         f"{underlying} {expiry} {strike}{payload.opt_type} ({provider}). "
-                        f"Registry may not be loaded — ensure Upstox token is valid, "
-                        f"or the expiry/strike combination may not exist."
+                        f"Ensure Upstox token is valid so registry can load."
                     ),
-                    "underlying": underlying,
-                    "expiry":     expiry.isoformat(),
-                    "strike":     strike,
-                    "opt_type":   payload.opt_type,
-                    "provider":   provider,
+                    "underlying":        underlying,
+                    "expiry":            expiry.isoformat(),
+                    "strike":            strike,
+                    "opt_type":          payload.opt_type,
+                    "provider":          provider,
+                    "available_expiries": [e.isoformat() for e in future_expiries[:6]],
                 }
 
             # Build broker instance
