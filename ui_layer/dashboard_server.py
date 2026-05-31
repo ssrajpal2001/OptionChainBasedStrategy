@@ -3136,11 +3136,21 @@ class DashboardServer:
             today = datetime.now(IST).date()
             expiry_pref = payload.expiry_pref.lower()
 
-            # Load registry first so we have real expiry dates
+            # Load registry first so we have real expiry dates.
+            # Try feeder creds first, then fall back to any Upstox broker binding token.
             _upstox_creds_pre = await asyncio.to_thread(
                 _srv._client_db.get_feeder_creds_sync, "upstox"
             )
             _upstox_token_pre = (_upstox_creds_pre or {}).get("access_token", "")
+            if not _upstox_token_pre:
+                # Feeder has no token — try any Upstox broker binding
+                _all_bindings = await asyncio.to_thread(
+                    _srv._client_db.get_bindings_sync, payload.client_id
+                )
+                for _b in _all_bindings:
+                    if _b.get("provider") == "upstox" and _b.get("access_token"):
+                        _upstox_token_pre = _b["access_token"]
+                        break
             if _upstox_token_pre and not _REG.is_loaded(underlying):
                 try:
                     await asyncio.to_thread(_REG.load_sync, underlying, _upstox_token_pre)

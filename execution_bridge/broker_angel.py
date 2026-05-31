@@ -40,21 +40,24 @@ class AngelBroker(BaseBroker):
 
             # Path 1 — OAuth access_token already stored (from /callback/angelone)
             if self._b.access_token:
-                self._smartapi.setAccessToken(self._b.access_token)
-                # Verify token by fetching profile
-                profile = await asyncio.to_thread(self._smartapi.getProfile, self._b.access_token)
-                ok = bool(profile and profile.get("status"))
-                if not ok:
-                    logger.error("AngelBroker [%s]: OAuth token invalid: %s", self.client_id, profile)
-                    return False
+                # AngelOne OAuth returns the JWT directly as auth_token.
+                # Set it as the session token; SmartConnect uses it for subsequent API calls.
+                # Don't call getProfile here — it expects a *refresh* token, not the JWT,
+                # so it would always fail on a fresh OAuth token.
+                try:
+                    self._smartapi.setAccessToken(self._b.access_token)
+                except AttributeError:
+                    # Older smartapi-python builds expose the attribute directly
+                    self._smartapi.access_token = self._b.access_token
 
-            # Path 2 — headless login with client_code + password + TOTP
-            elif self._b.client_code and self._b.password:
+            # Path 2 — headless login with client_code (or user_id) + password + TOTP
+            elif (self._b.client_code or self._b.user_id) and self._b.password:
                 import pyotp
                 totp = pyotp.TOTP(self._b.totp_secret).now() if self._b.totp_secret else ""
+                angel_client = self._b.client_code or self._b.user_id
                 data = await asyncio.to_thread(
                     self._smartapi.generateSession,
-                    self._b.client_code, self._b.password, totp,
+                    angel_client, self._b.password, totp,
                 )
                 if not (data and data.get("status")):
                     logger.error("AngelBroker [%s]: Headless auth failed: %s", self.client_id, data)

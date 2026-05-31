@@ -47,14 +47,16 @@ class DhanBroker(BaseBroker):
         try:
             from dhanhq import dhanhq  # type: ignore[import]
 
-            if not self._b.access_token or not self._b.client_code:
+            # client_code stores the Dhan Client ID; fall back to user_id if not set
+            dhan_client_id = self._b.client_code or self._b.user_id
+            if not self._b.access_token or not dhan_client_id:
                 logger.error(
-                    "DhanBroker [%s]: access_token and client_code are required.",
+                    "DhanBroker [%s]: access_token and client_code (or user_id) are required.",
                     self.client_id,
                 )
                 return False
 
-            self._dhan = dhanhq(self._b.client_code, self._b.access_token)
+            self._dhan = dhanhq(dhan_client_id, self._b.access_token)
             # Verify by fetching fund limits
             funds = await asyncio.to_thread(self._dhan.get_fund_limits)
             if funds and funds.get("status") == "success":
