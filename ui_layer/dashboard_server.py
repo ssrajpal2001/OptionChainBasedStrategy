@@ -419,16 +419,23 @@ def _dte_itm_offset(dte: int, step: int) -> int:
         return 10 * step   # 4+ DTE → 500 pts for NIFTY
 
 
+_UPSTOX_MONTH_CODE: Dict[int, str] = {
+    1:"1", 2:"2", 3:"3", 4:"4", 5:"5", 6:"6",
+    7:"7", 8:"8", 9:"9", 10:"O", 11:"N", 12:"D",
+}
+
+
 def _upstox_option_key(underlying: str, expiry, strike: int, opt_type: str) -> str:
     """
-    Upstox instrument key format: NSE_FO|NIFTY{YY}{DD}{MM}{strike}{CE/PE}
-    Matches SymbolTranslator.to_upstox() exactly.
+    Upstox instrument key: NSE_FO|NIFTY{YY}{M}{DD}{strike}{CE/PE}
+    YY = 2-digit year, M = single-char month code (1-9, O, N, D), DD = 2-digit day.
+    Example: NIFTY Jun-25-2025 22000CE → NSE_FO|NIFTY2562522000CE
     """
     segment = "BSE_FO" if underlying == "SENSEX" else "NSE_FO"
     yy = expiry.strftime("%y")
+    mc = _UPSTOX_MONTH_CODE[expiry.month]
     dd = expiry.strftime("%d")
-    mm = expiry.strftime("%m")
-    return f"{segment}|{underlying}{yy}{dd}{mm}{strike}{opt_type}"
+    return f"{segment}|{underlying}{yy}{mc}{dd}{strike}{opt_type}"
 
 
 def _fetch_upstox_candles_sync(access_token: str, instrument_key: str,
@@ -2720,8 +2727,15 @@ class DashboardServer:
             except Exception:
                 pass
 
+            # Option bars are a bonus (premium reference only) — not fatal if empty.
+            # Structural HTF/MTF replay runs on underlying spot bars regardless.
+            option_data_note = ""
             if not ce_bars and not pe_bars:
-                return {"ok": False, "error": "Contract already expired or historical data unavailable from provider."}
+                option_data_note = (
+                    f"Option premium data unavailable from Upstox for CE={ce_key} / PE={pe_key}. "
+                    "This is common for deep-ITM or illiquid strikes. "
+                    "Structural replay (phase transitions) still runs on underlying spot bars."
+                )
 
             # 7. Resample underlying to HTF/MTF and run sandbox engine
             tc  = _srv._cfg.trap_engine
@@ -2848,11 +2862,12 @@ class DashboardServer:
                     "ce_premium": _prem_summary(ce_bars, ce_key),
                     "pe_premium": _prem_summary(pe_bars, pe_key),
                 },
-                "phase_transitions": phase_transitions,
-                "trade_logs":        trade_logs,
-                "trade_count":       len(trade_logs),
-                "final_phase":       final_st.phase.name if final_st else "IDLE",
-                "signal_count":      sandbox_eng.signal_count(),
+                "phase_transitions":  phase_transitions,
+                "trade_logs":         trade_logs,
+                "trade_count":        len(trade_logs),
+                "final_phase":        final_st.phase.name if final_st else "IDLE",
+                "signal_count":       sandbox_eng.signal_count(),
+                "option_data_note":   option_data_note,
             }
 
         # ── ADMIN — portfolio risk command center ────────────────────────────

@@ -4792,6 +4792,11 @@ function histReplay() {
             </div>
           </div>
 
+          <!-- Option data note (shown when option bars unavailable) -->
+          <div x-show="result.option_data_note"
+               class="text-[10px] text-amber-400 bg-amber-900/20 border border-amber-800 rounded px-3 py-2"
+               x-text="result.option_data_note"></div>
+
           <!-- Data summary footer -->
           <div class="text-[10px] font-mono text-gray-600 flex flex-wrap gap-x-4">
             <span>Spot bars: <span class="text-gray-500" x-text="result.data_summary.spot_bars"></span></span>
