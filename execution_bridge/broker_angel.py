@@ -30,31 +30,58 @@ class AngelBroker(BaseBroker):
 
     async def authenticate(self) -> bool:
         try:
-            import pyotp
             from SmartApi import SmartConnect  # type: ignore[import]
-
-            self._smartapi = SmartConnect(api_key=self._b.api_key)
-            totp = pyotp.TOTP(self._b.totp_secret).now() if self._b.totp_secret else ""
-            data = await asyncio.to_thread(
-                self._smartapi.generateSession,
-                self._b.client_code, self._b.password, totp,
-            )
-            if data and data.get("status"):
-                self._authenticated = True
-                pt = getattr(self._b, "product_type", "").strip().upper()
-                mode = getattr(self._b, "trading_mode", "intraday").lower()
-                if pt in ("MIS", "INTRADAY"):
-                    self._product = "INTRADAY"
-                elif pt in ("NRML", "NORMAL"):
-                    self._product = "DELIVERY"
-                else:
-                    self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "DELIVERY"
-                logger.info("AngelBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
-                return True
-            logger.error("AngelBroker [%s]: Auth failed: %s", self.client_id, data)
-            return False
         except ImportError:
             logger.error("smartapi-python not installed. pip install smartapi-python pyotp")
+            return False
+
+        try:
+            self._smartapi = SmartConnect(api_key=self._b.api_key)
+
+            # Path 1 — OAuth access_token already stored (from /callback/angelone)
+            if self._b.access_token:
+                self._smartapi.setAccessToken(self._b.access_token)
+                # Verify token by fetching profile
+                profile = await asyncio.to_thread(self._smartapi.getProfile, self._b.access_token)
+                ok = bool(profile and profile.get("status"))
+                if not ok:
+                    logger.error("AngelBroker [%s]: OAuth token invalid: %s", self.client_id, profile)
+                    return False
+
+            # Path 2 — headless login with client_code + password + TOTP
+            elif self._b.client_code and self._b.password:
+                import pyotp
+                totp = pyotp.TOTP(self._b.totp_secret).now() if self._b.totp_secret else ""
+                data = await asyncio.to_thread(
+                    self._smartapi.generateSession,
+                    self._b.client_code, self._b.password, totp,
+                )
+                if not (data and data.get("status")):
+                    logger.error("AngelBroker [%s]: Headless auth failed: %s", self.client_id, data)
+                    return False
+
+            else:
+                logger.error(
+                    "AngelBroker [%s]: No access_token (OAuth) and no client_code+password "
+                    "(headless). Complete the AngelOne OAuth login from the client portal.",
+                    self.client_id,
+                )
+                return False
+
+            self._authenticated = True
+            pt   = getattr(self._b, "product_type", "").strip().upper()
+            mode = getattr(self._b, "trading_mode", "intraday").lower()
+            if pt in ("MIS", "INTRADAY"):
+                self._product = "INTRADAY"
+            elif pt in ("NRML", "NORMAL"):
+                self._product = "DELIVERY"
+            else:
+                self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "DELIVERY"
+            logger.info("AngelBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
+            return True
+
+        except Exception as exc:
+            logger.error("AngelBroker [%s]: authenticate() error: %s", self.client_id, exc)
             return False
 
     async def logout(self) -> None:

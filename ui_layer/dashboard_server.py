@@ -3267,7 +3267,14 @@ class DashboardServer:
             except Exception as _e:
                 return {"ok": False, "error": f"Broker auth error: {_e}", "provider": provider}
             if not auth_ok:
-                return {"ok": False, "error": f"Broker auth failed for {provider}/{payload.binding_id}. Check credentials/token.", "provider": provider}
+                _auth_hint = {
+                    "angelone": " — Complete the AngelOne OAuth login: go to client portal → Brokers → click your Angel One binding → Login button.",
+                    "zerodha":  " — Zerodha access_token expires daily. Re-authenticate from client portal.",
+                    "upstox":   " — Upstox access_token expires daily. Re-authenticate from client portal.",
+                    "fyers":    " — Fyers access_token may be expired. Re-authenticate from client portal.",
+                    "dhan":     " — Check Dhan client_code and access_token.",
+                }.get(provider, "")
+                return {"ok": False, "error": f"Broker auth failed for {provider}/{payload.binding_id}.{_auth_hint}", "provider": provider}
 
             req = OrderRequest(
                 broker_symbol=broker_symbol,
@@ -3281,7 +3288,10 @@ class DashboardServer:
             )
 
             # Enable AMO on the broker if supported
-            if hasattr(broker, "_is_amo"):
+            # Upstox discontinued API AMO (UDAPI1162) — skip AMO flag, use regular order
+            # which will be rejected outside hours but proves connectivity
+            _UPSTOX_NO_AMO = provider == "upstox"
+            if hasattr(broker, "_is_amo") and not _UPSTOX_NO_AMO:
                 broker._is_amo = True
 
             try:
@@ -3309,9 +3319,18 @@ class DashboardServer:
                     await broker.logout()
                 except Exception:
                     pass
+                err_str = str(exc)
+                # Annotate known broker-specific errors with actionable hints
+                hint = ""
+                if "UDAPI1162" in err_str:
+                    hint = " [Upstox has discontinued API AMO — use Upstox app/web for AMO. API connectivity confirmed OK.]"
+                elif "Algo orders are not allowed" in err_str or "-50" in err_str:
+                    hint = " [Fyers: enable API/Algo trading in your Fyers account settings → My Profile → API Access.]"
+                elif "not authorized" in err_str.lower() or "unauthorized" in err_str.lower():
+                    hint = " [Token may be expired — re-authenticate from the client portal.]"
                 return {
                     "ok":            False,
-                    "error":         str(exc),
+                    "error":         err_str + hint,
                     "broker_symbol": broker_symbol,
                     "provider":      provider,
                     "underlying":    underlying,
