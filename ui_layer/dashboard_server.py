@@ -2927,20 +2927,22 @@ class DashboardServer:
                         new_phase = st.phase.name if st else "IDLE"
                         remark = ""
                         if prev_phase == "IDLE" and new_phase == "TRAP_LOCKED":
+                            lvs = st.trap_levels
+                            lv0 = lvs[0] if lvs else None
                             remark = (
                                 f"STAGE 1+2 SINGLE-CANDLE TRAP — swept prev high, bearish close. "
-                                f"entry_origin={st.entry_origin:.2f}  "
-                                f"target={st.target_high:.2f}  "
-                                f"retest_zone=[{st.entry_origin*(1-retest_pct):.2f}–{st.entry_origin*(1+retest_pct):.2f}]"
+                                + (f"entry_origin={lv0.entry_origin:.2f} target={lv0.target_high:.2f}" if lv0 else "")
                             )
                         elif prev_phase == "IDLE" and new_phase == "HTF_BEARISH":
-                            remark = "STAGE 1 — Bearish HTF candle. Trap candidate locked."
+                            remark = f"STAGE 1 — Bearish HTF candle. Trap candidate locked. ({len(st.pending_levels)} pending level(s))"
+                        elif prev_phase == "HTF_BEARISH" and new_phase == "HTF_BEARISH":
+                            remark = f"Stage 1 additional level added ({len(st.pending_levels)} pending, sweep needed above {st.htf_bearish_high:.2f})"
                         elif prev_phase == "HTF_BEARISH" and new_phase == "TRAP_LOCKED":
+                            lvs = st.trap_levels
+                            levels_str = " | ".join(f"{lv.entry_origin:.0f}" for lv in lvs)
                             remark = (
-                                f"STAGE 2 — SWEEP CONFIRMED. "
-                                f"entry_origin={st.entry_origin:.2f}  "
-                                f"target={st.target_high:.2f}  "
-                                f"retest_zone=[{st.entry_origin*(1-retest_pct):.2f}–{st.entry_origin*(1+retest_pct):.2f}]"
+                                f"STAGE 2 — SWEEP CONFIRMED. {len(lvs)} level(s) activated: [{levels_str}]  "
+                                f"target={st.target_high:.2f}"
                             )
                         elif prev_phase == "HTF_BEARISH" and new_phase == "IDLE":
                             remark = "Bullish — no sweep. Reset to IDLE."
@@ -2996,12 +2998,19 @@ class DashboardServer:
                     elif kind == "1m" and st is not None:
                         ts_time = ts.time() if hasattr(ts, "time") else None
 
-                        # Stage 3: synthetic tick check — TRAP_LOCKED → RETEST_ALERT
-                        if st.phase == _TPhase.TRAP_LOCKED and st.entry_origin > 0:
-                            lo = st.entry_origin * (1.0 - retest_pct)
-                            hi = st.entry_origin * (1.0 + retest_pct)
-                            if lo <= prem <= hi:
-                                st.phase = _TPhase.RETEST_ALERT
+                        # Stage 3: scan all active trap levels highest-first
+                        if st.phase == _TPhase.TRAP_LOCKED:
+                            for lv in st.trap_levels:
+                                if not lv.active:
+                                    continue
+                                lo = lv.entry_origin * (1.0 - retest_pct)
+                                hi = lv.entry_origin * (1.0 + retest_pct)
+                                if lo <= prem <= hi:
+                                    st.active_level = lv
+                                    st.entry_origin = lv.entry_origin
+                                    st.target_high  = lv.target_high
+                                    st.phase = _TPhase.RETEST_ALERT
+                                    break
 
                         # Stage 5: synthetic tick check — ARMED → LIVE (backtest entry)
                         elif st.phase == _TPhase.ARMED and st.ltf_entry_line > 0:
@@ -3029,9 +3038,15 @@ class DashboardServer:
                                         rec["pnl_pts"]     = round(pnl_pts, 2)
                                         rec["pnl_rs"]      = round(pnl_pts * lot, 2)
                                         break
-                                rb = st.rolling_base
+                                rb          = st.rolling_base
+                                trap_levels = st.trap_levels
+                                act_level   = st.active_level
                                 eng._reset_state(sym_label)
                                 eng._states[sym_label].rolling_base = rb
+                                eng._states[sym_label].trap_levels  = trap_levels
+                                eng._states[sym_label].active_level = act_level
+                                if exit_reason == "SL_HIT":
+                                    eng._reset_to_next_level(sym_label)
 
                     # Track phase transitions
                     st_now = eng._states.get(sym_label)
@@ -3065,6 +3080,11 @@ class DashboardServer:
                     "trades_raw":        trades_raw,
                     "entry_origin":      round(final.entry_origin,   2) if final else 0,
                     "target_high":       round(final.target_high,    2) if final else 0,
+                    "trap_levels":       [
+                        {"entry_origin": lv.entry_origin, "target": lv.target_high,
+                         "active": lv.active}
+                        for lv in (final.trap_levels if final else [])
+                    ],
                     "ltf_entry_line":    round(final.ltf_entry_line, 2) if final else 0,
                     "ltf_sl_line":       round(final.ltf_sl_line,    2) if final else 0,
                     "rolling_base":      round(final.rolling_base,   2) if final else 0,

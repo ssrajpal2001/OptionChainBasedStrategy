@@ -156,15 +156,39 @@ class _Phase(Enum):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
+class _TrapLevel:
+    """One HTF bearish candle's trap zone. Multiple can be active simultaneously."""
+    entry_origin:    float          # low of the bearish candle (bears' entry reference)
+    bears_sl:        float          # high of the bearish candle (bears' stop loss)
+    target_high:     float = 0.0    # filled when sweep fires (sweep candle high)
+    disabled:        bool  = False  # True after this level's SL is hit in a live trade
+    ts:              Optional[datetime] = None
+
+    @property
+    def active(self) -> bool:
+        return not self.disabled and self.target_high > 0.0
+
+
+@dataclass
 class _TrapState:
     phase: _Phase = _Phase.IDLE
 
-    # Stage 1+2 — HTF structural levels
+    # Stage 1 accumulator — bearish candles pending a sweep
+    # Each entry: (entry_origin=candle_low, bears_sl=candle_high)
+    pending_levels:    list = field(default_factory=list)  # List[_TrapLevel], no sweep yet
+
+    # Stage 2 — all confirmed trap levels (sweep fired, sorted highest→lowest)
+    trap_levels:       list = field(default_factory=list)  # List[_TrapLevel]
+
+    # Active level currently being retested (Stage 3 onward)
+    active_level:      Optional[_TrapLevel] = None
+
+    # Legacy single-level fields kept for backward compat with MTF/exit logic
     htf_bearish_open:  float = 0.0
     htf_bearish_high:  float = 0.0
     htf_bearish_ts:    Optional[datetime] = None
-    entry_origin:      float = 0.0   # htf_bearish.open → premium sell level
-    target_high:       float = 0.0   # sweep bar high → profit target
+    entry_origin:      float = 0.0   # mirrors active_level.entry_origin
+    target_high:       float = 0.0   # mirrors active_level.target_high
 
     # Stage 4 — MTF nested trap
     mtf_bearish_open:  float = 0.0
@@ -439,86 +463,80 @@ class TrapTradingEngine:
         htf_buf.push(c)
 
         if st.phase == _Phase.IDLE:
-            # ── Single-candle trap (priority check) ──────────────────────────
-            # Pattern: candle opens high, sweeps ABOVE prior candle's high
-            # (stop hunt), then closes BEARISH with meaningful body.
-            # The sweep and reversal happen in ONE bar — skip Stage 1 wait.
             body_range = c.high - c.low + 0.01
-            body_pct   = (c.open - c.close) / body_range  # bearish body as % of range
+            body_pct   = (c.open - c.close) / body_range
+
+            # ── Single-candle trap ────────────────────────────────────────────
+            # Candle spikes above prior high then closes bearish (sweep + reversal
+            # in one bar). Activate immediately as TRAP_LOCKED with one level.
             if (is_bearish
                     and len(htf_buf) >= 1
-                    and c.high > c.open             # candle actually spiked UP first (real sweep)
-                    and c.high > prev_high          # swept above prior candle's high
-                    and body_pct >= 0.30):          # body ≥ 30% of candle range
-                st.htf_bearish_open = c.open    # bears' entry = open of sweep candle
-                st.htf_bearish_high = c.high    # bears' SL = sweep high
-                st.entry_origin     = c.open    # entry_origin = open (reversal start)
-                st.target_high      = c.high    # target = sweep high
+                    and c.high > c.open
+                    and c.high > prev_high
+                    and body_pct >= 0.30):
+                lv = _TrapLevel(entry_origin=c.open, bears_sl=c.high,
+                                target_high=c.high, ts=c.timestamp)
+                st.trap_levels   = [lv]
+                st.active_level  = None
+                st.entry_origin  = 0.0      # will be picked up on first retest scan
+                st.target_high   = c.high
+                st.htf_bearish_open = c.open
+                st.htf_bearish_high = c.high
                 st.htf_bearish_ts   = c.timestamp
-                st.phase            = _Phase.TRAP_LOCKED
+                st.phase         = _Phase.TRAP_LOCKED
                 logger.info(
                     "TrapEngine [%s] Single-candle TRAP_LOCKED — swept prev_high=%.2f "
                     "body_pct=%.0f%% entry_origin=%.2f target=%.2f @ %s",
                     c.symbol, prev_high, body_pct * 100,
-                    st.entry_origin, st.target_high,
-                    c.timestamp.strftime("%H:%M"),
+                    c.open, c.high, c.timestamp.strftime("%H:%M"),
                 )
 
-            # ── Two-candle trap (classic pattern) ────────────────────────────
-            # Stage 1: two consecutive bearish candles, candle 2 closes < candle 1 low
+            # ── Classic two-candle Stage 1 ────────────────────────────────────
             elif (is_bearish
                     and prev_is_bearish
                     and len(htf_buf) >= 2
                     and c.close < prev_low):
-                # Bears entered at Candle 1's low; stop loss = HIGH of Candle 1
+                # Add this bearish pair as a pending trap level
+                lv = _TrapLevel(entry_origin=prev_low, bears_sl=prev_high,
+                                ts=c.timestamp)
+                st.pending_levels.append(lv)
                 st.htf_bearish_open = prev_low
                 st.htf_bearish_high = prev_high
                 st.htf_bearish_ts   = c.timestamp
-                st.phase            = _Phase.HTF_BEARISH
+                st.phase = _Phase.HTF_BEARISH
                 logger.debug(
-                    "TrapEngine [%s] Stage 1 HTF_BEARISH confirmed: "
-                    "entry_ref=%.2f (C1 low) bears_sl=%.2f (C1 high) @ %s",
-                    c.symbol, st.htf_bearish_open, st.htf_bearish_high,
-                    c.timestamp.strftime("%H:%M"),
+                    "TrapEngine [%s] Stage 1 HTF_BEARISH — level added "
+                    "entry_ref=%.2f bears_sl=%.2f @ %s (%d pending)",
+                    c.symbol, prev_low, prev_high,
+                    c.timestamp.strftime("%H:%M"), len(st.pending_levels),
                 )
                 # Same-candle sweep check
                 if c.high > st.htf_bearish_high:
-                    st.entry_origin = st.htf_bearish_open
-                    st.target_high  = c.high
-                    st.phase        = _Phase.TRAP_LOCKED
-                    logger.info(
-                        "TrapEngine [%s] Stage 1+2 same-candle TRAP_LOCKED — "
-                        "C2 swept SL: entry_origin=%.2f target=%.2f @ %s",
-                        c.symbol, st.entry_origin, st.target_high,
-                        c.timestamp.strftime("%H:%M"),
-                    )
+                    self._activate_all_pending_levels(c.symbol, c.high, c.timestamp)
 
         elif st.phase == _Phase.HTF_BEARISH:
-            # Stage 2: any bar sweeping above bears' stop loss = trap confirmed
+            # Stage 2: sweep fires — activate ALL accumulated pending levels
             if c.high > st.htf_bearish_high:
-                st.entry_origin = st.htf_bearish_open   # C1 low = where bears entered
-                st.target_high  = c.high                 # sweep high = our profit target
-                st.phase        = _Phase.TRAP_LOCKED
-                logger.info(
-                    "TrapEngine [%s] Stage 2 TRAP_LOCKED — bears SL hit: "
-                    "entry_origin=%.2f (C1 low) target=%.2f (sweep high) @ %s",
-                    c.symbol, st.entry_origin, st.target_high,
-                    c.timestamp.strftime("%H:%M"),
-                )
+                self._activate_all_pending_levels(c.symbol, c.high, c.timestamp)
+
             elif is_bearish and c.close < prev_low and prev_is_bearish:
-                # New two-candle bearish confirmation, update candidate
-                st.htf_bearish_open = prev_low    # new C1 low
-                st.htf_bearish_high = prev_high   # new C1 high = bears' SL
+                # Additional bearish candle — add another pending level (stack it)
+                lv = _TrapLevel(entry_origin=prev_low, bears_sl=prev_high,
+                                ts=c.timestamp)
+                st.pending_levels.append(lv)
+                # Update the primary bears_sl to the HIGHEST of all pending levels
+                # (sweep must clear all of them to confirm the trap)
+                st.htf_bearish_high = max(lv.bears_sl for lv in st.pending_levels)
+                st.htf_bearish_open = prev_low
                 st.htf_bearish_ts   = c.timestamp
                 logger.debug(
-                    "TrapEngine [%s] HTF_BEARISH candidate refreshed: "
-                    "entry_ref=%.2f sl=%.2f", c.symbol, prev_low, c.high,
+                    "TrapEngine [%s] HTF_BEARISH additional level — "
+                    "entry_ref=%.2f bears_sl=%.2f total_pending=%d sweep_needed_above=%.2f @ %s",
+                    c.symbol, prev_low, prev_high, len(st.pending_levels),
+                    st.htf_bearish_high, c.timestamp.strftime("%H:%M"),
                 )
             elif not is_bearish and c.high <= st.htf_bearish_high:
                 # Bullish bar that doesn't sweep — reset
-                logger.debug(
-                    "TrapEngine [%s] HTF bullish without sweep — reset IDLE", c.symbol,
-                )
                 self._reset_state(c.symbol)
 
         # Beyond TRAP_LOCKED: HTF bars update rolling_base only (done above)
@@ -608,19 +626,29 @@ class TrapTradingEngine:
         prem = tick.ltp
 
         # Stage 3 — TRAP_LOCKED → RETEST_ALERT
-        if st.phase == _Phase.TRAP_LOCKED and st.entry_origin > 0.0:
+        # Scan ALL active trap levels highest-first; activate the first one hit
+        if st.phase == _Phase.TRAP_LOCKED:
             tc = self._cfg.trap_engine
             retest_pct = tc.RETEST_ZONE_PERCENT / 100.0
-            low_band   = st.entry_origin * (1.0 - retest_pct)
-            high_band  = st.entry_origin * (1.0 + retest_pct)
-            if low_band <= prem <= high_band:
-                st.phase = _Phase.RETEST_ALERT
-                logger.info(
-                    "TrapEngine [%s] Stage 3 RETEST_ALERT prem=%.2f "
-                    "entry_origin=%.2f ±%.1f%%",
-                    underlying, prem, st.entry_origin,
-                    tc.RETEST_ZONE_PERCENT,
-                )
+            # Scan active levels from highest entry_origin to lowest
+            for lv in st.trap_levels:
+                if not lv.active:
+                    continue
+                lo = lv.entry_origin * (1.0 - retest_pct)
+                hi = lv.entry_origin * (1.0 + retest_pct)
+                if lo <= prem <= hi:
+                    # This level's retest zone is hit — activate it
+                    st.active_level = lv
+                    st.entry_origin = lv.entry_origin
+                    st.target_high  = lv.target_high
+                    st.phase = _Phase.RETEST_ALERT
+                    logger.info(
+                        "TrapEngine [%s] Stage 3 RETEST_ALERT prem=%.2f "
+                        "level entry_origin=%.2f ±%.1f%% (of %d active levels)",
+                        underlying, prem, lv.entry_origin,
+                        tc.RETEST_ZONE_PERCENT, sum(1 for l in st.trap_levels if l.active),
+                    )
+                    break
 
         # Stage 5 — ARMED → fire entry
         elif st.phase == _Phase.ARMED and st.ltf_entry_line > 0.0:
@@ -659,13 +687,15 @@ class TrapTradingEngine:
         else:
             current_prem = 0.0
 
-        # SL check
+        # SL check — disable this level and watch remaining levels
         if st.ltf_sl_line > 0.0 and c.close < st.ltf_sl_line:
             logger.info(
                 "TrapEngine [%s] EXIT SL — 1m_close=%.2f < ltf_sl=%.2f",
                 c.symbol, c.close, st.ltf_sl_line,
             )
             await self._fire_exit(st.trade_id, current_prem, "SL")
+            # After fire_exit resets state, apply level-aware reset
+            self._reset_to_next_level(c.symbol)
             return
 
         # Profit target
@@ -802,9 +832,14 @@ class TrapTradingEngine:
 
         if underlying:
             st = self._states[underlying]
-            rb = st.rolling_base  # preserve rolling base
+            rb          = st.rolling_base
+            trap_levels = st.trap_levels      # preserve for level-aware SL handling
+            act_level   = st.active_level
             self._reset_state(underlying)
             self._states[underlying].rolling_base = rb
+            # Restore trap levels so _reset_to_next_level can use them
+            self._states[underlying].trap_levels  = trap_levels
+            self._states[underlying].active_level = act_level
 
         logger.info(
             "TrapTradingEngine EXIT | trade_id=%s | %s | reason=%s "
@@ -887,11 +922,74 @@ class TrapTradingEngine:
         self._states[symbol] = _TrapState()
         self._states[symbol].rolling_base = rb
 
+    def _reset_to_next_level(self, symbol: str) -> None:
+        """
+        After a SL exit: disable the active level and check if any remaining
+        trap levels can still be retested. If yes, stay TRAP_LOCKED watching
+        the next-highest active level. If none remain, go IDLE.
+        """
+        st = self._states[symbol]
+        if st.active_level:
+            st.active_level.disabled = True
+            st.active_level = None
+
+        # Find next highest active level
+        remaining = [lv for lv in st.trap_levels if lv.active]
+        if remaining:
+            # Already sorted highest→lowest, pick first
+            next_lv = remaining[0]
+            st.active_level  = None   # will be picked up on next retest tick
+            st.entry_origin  = 0.0    # clear so retest check rescans
+            st.target_high   = next_lv.target_high
+            st.phase = _Phase.TRAP_LOCKED
+            # Reset MTF state so Stage 4 starts fresh at the new level
+            st.mtf_bearish_open = 0.0
+            st.mtf_bearish_high = 0.0
+            st.mtf_bearish_low  = 0.0
+            st.ltf_entry_line   = 0.0
+            st.ltf_sl_line      = 0.0
+            logger.info(
+                "TrapEngine [%s] level disabled after SL — %d level(s) remaining, "
+                "back to TRAP_LOCKED watching highest=%.2f",
+                symbol, len(remaining), remaining[0].entry_origin,
+            )
+        else:
+            self._reset_state(symbol)
+            logger.info("TrapEngine [%s] all trap levels exhausted → IDLE", symbol)
+
     def _get_mtf_buf(self, key: str, capacity: int = 200) -> OHLCVBuffer:
         """Get (or create) the OHLCVBuffer for a given key (symbol or symbol+suffix)."""
         if key not in self._mtf_bufs:
             self._mtf_bufs[key] = OHLCVBuffer(capacity)
         return self._mtf_bufs[key]
+
+    def _activate_all_pending_levels(
+        self, symbol: str, sweep_high: float, ts
+    ) -> None:
+        """
+        Stage 2 sweep fired. Stamp target_high on all pending levels,
+        sort highest entry_origin first, and transition to TRAP_LOCKED.
+        """
+        st = self._states[symbol]
+        for lv in st.pending_levels:
+            lv.target_high = sweep_high
+        # Sort highest entry_origin first (check closest to sweep first)
+        st.trap_levels = sorted(
+            st.pending_levels, key=lambda lv: lv.entry_origin, reverse=True
+        )
+        st.pending_levels = []
+        st.active_level   = None
+        st.entry_origin   = 0.0      # retest scan will populate from trap_levels
+        st.target_high    = sweep_high
+        st.htf_bearish_high = sweep_high
+        st.phase = _Phase.TRAP_LOCKED
+        logger.info(
+            "TrapEngine [%s] Stage 2 TRAP_LOCKED — sweep_high=%.2f "
+            "activated %d level(s): %s @ %s",
+            symbol, sweep_high, len(st.trap_levels),
+            [f"{lv.entry_origin:.0f}" for lv in st.trap_levels],
+            ts.strftime("%H:%M") if hasattr(ts, "strftime") else str(ts)[:5],
+        )
 
     # ── Strike helpers ────────────────────────────────────────────────────────
 
