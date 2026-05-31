@@ -2663,11 +2663,11 @@ class DashboardServer:
                    "close": "last", "volume": "sum"}
 
             htf_df = df.resample(
-                f"{tc.HTF_MINUTES}min", closed="left", label="left"
+                f"{tc.HTF_MINUTES}min", closed="left", label="right"
             ).agg(agg).dropna()
 
             mtf_df = df.resample(
-                f"{tc.MTF_MINUTES}min", closed="left", label="left"
+                f"{tc.MTF_MINUTES}min", closed="left", label="right"
             ).agg(agg).dropna()
 
             def _make_candle(sym, tf, ts, row):
@@ -2895,8 +2895,8 @@ class DashboardServer:
                 Stage 5:   1m bars as ticks — check if premium touches ltf_entry_line
                 """
                 df = _to_df(bars)
-                htf = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
-                mtf = df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="left").agg(agg).dropna()
+                htf = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="right").agg(agg).dropna()
+                mtf = df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="right").agg(agg).dropna()
 
                 eng = TrapTradingEngine(_EB(), _srv._cfg, client_db=None)
                 _orig = eng._get_state
