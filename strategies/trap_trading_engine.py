@@ -467,10 +467,9 @@ class TrapTradingEngine:
             body_range = c.high - c.low + 0.01
             body_pct   = (c.open - c.close) / body_range
 
-            # ── Single-candle trap ────────────────────────────────────────────
-            # Candle spikes above prior high then closes bearish (sweep + reversal
-            # in one bar). The close IS the entry zone — skip the TRAP_LOCKED retest
-            # wait and go directly to RETEST_ALERT so the next bearish 5m candle arms.
+            # ── Single-candle trap (sweep + reversal in one bar) ──────────────
+            # Candle spikes above prior high AND closes bearish.
+            # The close IS the entry zone — skip TRAP_LOCKED, go to RETEST_ALERT.
             if (is_bearish
                     and len(htf_buf) >= 1
                     and c.high > c.open
@@ -480,12 +479,12 @@ class TrapTradingEngine:
                                 target_high=c.open, ts=c.timestamp)
                 st.trap_levels      = [lv]
                 st.active_level     = lv
-                st.entry_origin     = c.close   # already at the entry zone
-                st.target_high      = c.open    # price returns to pre-sweep open
+                st.entry_origin     = c.close
+                st.target_high      = c.open
                 st.htf_bearish_open = c.open
                 st.htf_bearish_high = c.high
                 st.htf_bearish_ts   = c.timestamp
-                st.htf_trap_low     = c.low     # widest SL reference for this trap
+                st.htf_trap_low     = c.low
                 st.phase            = _Phase.RETEST_ALERT
                 logger.info(
                     "TrapEngine [%s] Single-candle RETEST_ALERT — swept prev_high=%.2f "
@@ -494,51 +493,69 @@ class TrapTradingEngine:
                     c.close, c.open, c.timestamp.strftime("%H:%M"),
                 )
 
-            # ── Classic two-candle Stage 1 ────────────────────────────────────
-            elif (is_bearish
-                    and prev_is_bearish
-                    and len(htf_buf) >= 2
-                    and c.close < prev_low):
-                # Add this bearish pair as a pending trap level
-                lv = _TrapLevel(entry_origin=prev_low, bears_sl=prev_high,
+            # ── Stage 1: single bearish candle → pending trap level ───────────
+            # Bears entered short here. We wait for a SUBSEQUENT candle to sweep
+            # above this candle's high (hit their SL) to confirm the trap.
+            # No two-candle requirement — any bearish candle with a real body qualifies.
+            elif is_bearish and body_pct >= 0.30:
+                lv = _TrapLevel(entry_origin=c.low, bears_sl=c.high,
                                 ts=c.timestamp)
                 st.pending_levels.append(lv)
-                st.htf_bearish_open = prev_low
-                st.htf_bearish_high = prev_high
+                st.htf_bearish_open = c.open
+                st.htf_bearish_high = c.high
                 st.htf_bearish_ts   = c.timestamp
                 st.phase = _Phase.HTF_BEARISH
                 logger.debug(
-                    "TrapEngine [%s] Stage 1 HTF_BEARISH — level added "
-                    "entry_ref=%.2f bears_sl=%.2f @ %s (%d pending)",
-                    c.symbol, prev_low, prev_high,
-                    c.timestamp.strftime("%H:%M"), len(st.pending_levels),
+                    "TrapEngine [%s] Stage 1 HTF_BEARISH — bearish candle "
+                    "entry_ref=%.2f bears_sl=%.2f @ %s",
+                    c.symbol, c.low, c.high,
+                    c.timestamp.strftime("%H:%M"),
                 )
-                # Same-candle sweep check
-                if c.high > st.htf_bearish_high:
-                    self._activate_all_pending_levels(c.symbol, c.high, c.timestamp)
 
         elif st.phase == _Phase.HTF_BEARISH:
-            # Stage 2: sweep fires — activate ALL accumulated pending levels
+            # Stage 2: any candle sweeps above bears' SL → trap confirmed
             if c.high > st.htf_bearish_high:
-                self._activate_all_pending_levels(c.symbol, c.high, c.timestamp)
+                # Check if this sweep candle also closes bearish (single-candle trap)
+                body_range = c.high - c.low + 0.01
+                body_pct   = (c.open - c.close) / body_range
+                if is_bearish and c.high > c.open and body_pct >= 0.30:
+                    # Sweep + reversal in the same bar — go directly to RETEST_ALERT
+                    lv = _TrapLevel(entry_origin=c.close, bears_sl=c.high,
+                                    target_high=c.open, ts=c.timestamp)
+                    st.trap_levels      = [lv]
+                    st.active_level     = lv
+                    st.entry_origin     = c.close
+                    st.target_high      = c.open
+                    st.htf_bearish_high = c.high
+                    st.htf_trap_low     = c.low
+                    st.pending_levels   = []
+                    st.phase            = _Phase.RETEST_ALERT
+                    logger.info(
+                        "TrapEngine [%s] Stage 2 sweep+reversal → RETEST_ALERT "
+                        "entry_origin=%.2f(close) target=%.2f(open) @ %s",
+                        c.symbol, c.close, c.open, c.timestamp.strftime("%H:%M"),
+                    )
+                else:
+                    # Normal sweep — activate all pending levels, wait for retest
+                    self._activate_all_pending_levels(c.symbol, c.high, c.timestamp)
 
-            elif is_bearish and c.close < prev_low and prev_is_bearish:
-                # Additional bearish candle — add another pending level (stack it)
-                lv = _TrapLevel(entry_origin=prev_low, bears_sl=prev_high,
-                                ts=c.timestamp)
-                st.pending_levels.append(lv)
-                # Update the primary bears_sl to the HIGHEST of all pending levels
-                # (sweep must clear all of them to confirm the trap)
-                st.htf_bearish_high = max(lv.bears_sl for lv in st.pending_levels)
-                st.htf_bearish_open = prev_low
-                st.htf_bearish_ts   = c.timestamp
-                logger.debug(
-                    "TrapEngine [%s] HTF_BEARISH additional level — "
-                    "entry_ref=%.2f bears_sl=%.2f total_pending=%d sweep_needed_above=%.2f @ %s",
-                    c.symbol, prev_low, prev_high, len(st.pending_levels),
-                    st.htf_bearish_high, c.timestamp.strftime("%H:%M"),
-                )
-            elif not is_bearish and c.high <= st.htf_bearish_high:
+            elif is_bearish:
+                # Another bearish candle — add as additional pending level
+                body_range = c.high - c.low + 0.01
+                body_pct   = (c.open - c.close) / body_range
+                if body_pct >= 0.30:
+                    lv = _TrapLevel(entry_origin=c.low, bears_sl=c.high,
+                                    ts=c.timestamp)
+                    st.pending_levels.append(lv)
+                    st.htf_bearish_high = max(lv.bears_sl for lv in st.pending_levels)
+                    st.htf_bearish_ts   = c.timestamp
+                    logger.debug(
+                        "TrapEngine [%s] HTF_BEARISH additional level — "
+                        "entry_ref=%.2f bears_sl=%.2f pending=%d sweep_needed_above=%.2f @ %s",
+                        c.symbol, c.low, c.high, len(st.pending_levels),
+                        st.htf_bearish_high, c.timestamp.strftime("%H:%M"),
+                    )
+            else:
                 # Bullish bar that doesn't sweep — reset
                 self._reset_state(c.symbol)
 
