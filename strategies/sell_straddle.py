@@ -110,6 +110,39 @@ class StraddlePosition:
     # Session VWAP tracking for VWAP Rise SL
     session_min_vwap: float = float("inf")
 
+    def to_dict(self) -> dict:
+        """JSON-serialisable snapshot for PositionStore."""
+        def _leg(l: StraddleLeg) -> dict:
+            return {"option_type": l.option_type, "strike": l.strike,
+                    "entry_price": l.entry_price, "ltp": l.ltp}
+        return {
+            "underlying": self.underlying, "atm_at_entry": self.atm_at_entry,
+            "entry_spot": self.entry_spot,
+            "ce_leg": _leg(self.ce_leg), "pe_leg": _leg(self.pe_leg),
+            "net_credit": self.net_credit, "tsl_high_lock_rs": self.tsl_high_lock_rs,
+            "peak_profit": self.peak_profit, "trailing_active": self.trailing_active,
+            "open_time": self.open_time.isoformat() if self.open_time else None,
+            "realized_pnl": self.realized_pnl, "status": self.status,
+            "entry_indicators": dict(self.entry_indicators),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "StraddlePosition":
+        from datetime import datetime as _dt
+        def _leg(x: dict) -> StraddleLeg:
+            return StraddleLeg(option_type=x["option_type"], strike=x["strike"],
+                               entry_price=x["entry_price"], ltp=x.get("ltp", 0.0))
+        return cls(
+            underlying=d["underlying"], atm_at_entry=d.get("atm_at_entry", 0.0),
+            entry_spot=d.get("entry_spot", 0.0),
+            ce_leg=_leg(d["ce_leg"]), pe_leg=_leg(d["pe_leg"]),
+            net_credit=d.get("net_credit", 0.0), tsl_high_lock_rs=d.get("tsl_high_lock_rs", 0.0),
+            peak_profit=d.get("peak_profit", 0.0), trailing_active=d.get("trailing_active", False),
+            open_time=_dt.fromisoformat(d["open_time"]) if d.get("open_time") else None,
+            realized_pnl=d.get("realized_pnl", 0.0), status=d.get("status", "open"),
+            entry_indicators=dict(d.get("entry_indicators", {})),
+        )
+
     @property
     def current_value(self) -> float:
         return self.ce_leg.ltp + self.pe_leg.ltp
@@ -298,8 +331,35 @@ class SellStraddleStrategy:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    @property
+    def _persist_key(self) -> str:
+        return f"{self._underlying}_sell_straddle"
+
+    def _persist(self) -> None:
+        try:
+            from data_layer import position_store as _ps
+            if self._position and self._position.status == "open":
+                _ps.save(self._persist_key, self._position.to_dict(),
+                         product_type=getattr(self, "_product_type", "MIS"))
+            else:
+                _ps.clear(self._persist_key)
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: persist failed: %s", self._underlying, exc)
+
     def start(self) -> None:
         self._running = True
+        # Restore an open position across restarts (MIS prior-day positions are
+        # discarded by the store — broker squared them off at EOD).
+        try:
+            from data_layer import position_store as _ps
+            _saved = _ps.load(self._persist_key)
+            if _saved:
+                self._position = StraddlePosition.from_dict(_saved)
+                self._trades_today = max(self._trades_today, 1)
+                logger.info("SellStraddle[%s]: restored open position from store (credit=%.2f).",
+                            self._underlying, self._position.net_credit)
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: restore failed: %s", self._underlying, exc)
         self._tasks = [
             asyncio.create_task(self._candle_loop(), name=f"ss_{self._underlying}_candle"),
             asyncio.create_task(self._tick_loop(),   name=f"ss_{self._underlying}_tick"),
@@ -688,6 +748,7 @@ class SellStraddleStrategy:
             session_min_vwap  = self._ind.get("vwap", float("inf")),
             entry_indicators  = dict(self._ind),
         )
+        self._persist()   # survive restarts
         self._trades_today  += 1
         self._order_pending  = True
         # Lock initial credit as the denominator for all day-% calculations
@@ -1096,6 +1157,7 @@ class SellStraddleStrategy:
         )
 
         self._position = None
+        self._persist()   # clears the stored position
         if reason == "stop_loss":
             self._apply_sl_cooldown()
 
