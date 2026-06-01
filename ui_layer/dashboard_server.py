@@ -1575,26 +1575,92 @@ class DashboardServer:
 
         @app.get("/api/client/positions", tags=["Client"])
         async def api_client_positions(user: dict = Depends(_require_client)):
+            """
+            Live open legs per (binding, strategy), read from the GLOBAL strategy
+            instances (_iron_condors / _sell_straddles / _trap_engine). Positions
+            are engine-level (per underlying); we surface them under each of the
+            client's deployments so the portal shows the strikes being traded.
+            """
             cid = user.get("client_id", "")
-            reg_client = _srv._registry.get(cid) if _srv._registry else None
+            try:
+                deployments = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+            except Exception:
+                deployments = []
+
+            def _ic_legs(pos):
+                out = []
+                for leg in (pos.short_ce, pos.short_pe, pos.long_ce, pos.long_pe):
+                    strike = int(getattr(leg, "strike", 0))
+                    if strike <= 0:
+                        continue
+                    side = getattr(leg, "side", "")
+                    ot   = getattr(leg, "option_type", "")
+                    ep   = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp  = float(getattr(leg, "ltp", ep) or ep)
+                    qty  = int(getattr(pos, "lot_size", 0)) * (-1 if side == "sell" else 1)
+                    # sell profits when price falls; buy profits when price rises
+                    pnl = round((ep - ltp) * abs(qty), 2) if side == "sell" else round((ltp - ep) * abs(qty), 2)
+                    out.append({"symbol": f"{pos.underlying} {strike}{ot} {side.upper()}",
+                                "qty": qty, "entry_price": round(ep, 2),
+                                "ltp": round(ltp, 2), "pnl": pnl})
+                return out
+
+            def _ss_legs(pos):
+                out = []
+                for leg in (pos.ce_leg, pos.pe_leg):
+                    strike = int(getattr(leg, "strike", 0))
+                    if strike <= 0:
+                        continue
+                    ot = getattr(leg, "option_type", "")
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    qty = -int(getattr(pos, "lot_size", 0) or 0)  # straddle is short both
+                    out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
+                                "qty": qty, "entry_price": round(ep, 2),
+                                "ltp": round(ltp, 2), "pnl": round((ep - ltp) * abs(qty), 2)})
+                return out
+
+            def _find(strategies, underlying):
+                for s in strategies or []:
+                    if getattr(s, "_underlying", None) == underlying:
+                        return s
+                return None
+
             by_broker: dict = {}
-            if reg_client is not None:
-                for binding_id, worker in getattr(reg_client, "workers", {}).items():
-                    by_broker[binding_id] = {}
-                    for strat_name, strat in getattr(worker, "strategies", {}).items():
-                        legs = []
-                        pos = getattr(strat, "_position", None) or getattr(strat, "position", None)
-                        if pos:
-                            for attr in ("ce_symbol", "pe_symbol"):
-                                sym = getattr(pos, attr, None)
-                                if sym:
-                                    qty  = getattr(pos, attr.replace("symbol","qty"), 0)
-                                    ep   = getattr(pos, attr.replace("symbol","entry_price"), 0)
-                                    ltp  = getattr(pos, attr.replace("symbol","ltp"), ep)
-                                    pnl  = round((ep - ltp) * abs(qty or 0), 2)
-                                    legs.append({"symbol": sym, "qty": qty, "entry_price": round(ep,2), "ltp": round(ltp,2), "pnl": pnl})
-                        pnl_total = sum(l["pnl"] for l in legs)
-                        by_broker[binding_id][strat_name] = {"legs": legs, "pnl": pnl_total}
+            for dep in deployments:
+                bid = dep.get("binding_id", "")
+                sname = dep.get("strategy_name", "")
+                underlying = dep.get("underlying") or dep.get("assigned_instrument") or "NIFTY"
+                by_broker.setdefault(bid, {})
+                legs = []
+                try:
+                    if sname == "iron_condor":
+                        strat = _find(getattr(_srv, "_iron_condors", []), underlying)
+                        pos = getattr(strat, "_position", None) if strat else None
+                        if pos and getattr(pos, "status", "open") == "open":
+                            legs = _ic_legs(pos)
+                    elif sname == "sell_straddle":
+                        strat = _find(getattr(_srv, "_sell_straddles", []), underlying)
+                        pos = getattr(strat, "_position", None) if strat else None
+                        if pos and getattr(pos, "status", "open") == "open":
+                            legs = _ss_legs(pos)
+                    elif sname == "trap_trading":
+                        eng = getattr(_srv, "_trap_engine", None)
+                        op = getattr(eng, "_open_positions", {}) if eng else {}
+                        prem = getattr(eng, "_prem_cache", {}) if eng else {}
+                        for _tid, tup in op.items():
+                            try:
+                                _t, opt_sym, entry_px, qty = tup
+                            except Exception:
+                                continue
+                            ltp = float(prem.get(opt_sym, entry_px) or entry_px)
+                            legs.append({"symbol": opt_sym, "qty": int(qty),
+                                         "entry_price": round(float(entry_px), 2),
+                                         "ltp": round(ltp, 2),
+                                         "pnl": round((float(entry_px) - ltp) * abs(int(qty)), 2)})
+                except Exception as exc:
+                    logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
+                by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2)}
             return {"ok": True, "by_broker": by_broker}
 
         # ── CLIENT — history ──────────────────────────────────────────────────
