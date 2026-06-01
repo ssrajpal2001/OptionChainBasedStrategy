@@ -625,6 +625,7 @@ class GlobalFeeder:
         self._running = False
         self._dual_feeder: Optional[DualFeeder] = None
         self._active_provider: str = "mock"
+        self._cached_tokens: List[str] = []  # option tokens to re-apply on every reconnect
 
     async def start(self) -> None:
         """Create feeder, connect, and launch the run + heartbeat tasks."""
@@ -681,6 +682,9 @@ class GlobalFeeder:
 
     async def subscribe_tokens(self, tokens: list) -> None:
         """Proxy to active feeder — DualFeeder takes priority over initial feeder."""
+        for t in tokens:
+            if t not in self._cached_tokens:
+                self._cached_tokens.append(t)
         if self._dual_feeder is not None:
             for feeder in self._dual_feeder._feeders.values():
                 await feeder.subscribe_tokens(tokens)
@@ -689,11 +693,24 @@ class GlobalFeeder:
 
     async def unsubscribe_tokens(self, tokens: list) -> None:
         """Proxy to active feeder — DualFeeder takes priority over initial feeder."""
+        for t in tokens:
+            if t in self._cached_tokens:
+                self._cached_tokens.remove(t)
         if self._dual_feeder is not None:
             for feeder in self._dual_feeder._feeders.values():
                 await feeder.unsubscribe_tokens(tokens)
         elif self._feeder is not None:
             await self._feeder.unsubscribe_tokens(tokens)
+
+    async def _reapply_cached_tokens(self) -> None:
+        """Re-subscribe cached option tokens after a DualFeeder reconnect."""
+        if not self._cached_tokens:
+            return
+        if self._dual_feeder is not None:
+            for feeder in self._dual_feeder._feeders.values():
+                await feeder.subscribe_tokens(self._cached_tokens)
+            logger.info("GlobalFeeder: re-applied %d cached option tokens after reconnect.",
+                        len(self._cached_tokens))
 
     async def _stop_initial_feeder(self) -> None:
         """Stop and discard the initial (mock) feeder when switching to a real provider."""
@@ -731,6 +748,7 @@ class GlobalFeeder:
             SystemEvent(SysEvent.FEEDER_RESTORED, "dual_active_active"),
         )
         logger.info("GlobalFeeder: DualFeeder (active-active) started.")
+        await self._reapply_cached_tokens()
 
     async def start_single(self, provider: str, creds: Dict[str, str]) -> None:
         """Bootstrap single-provider DualFeeder. Stops MockFeeder and any prior DualFeeder."""
@@ -749,6 +767,7 @@ class GlobalFeeder:
             SystemEvent(SysEvent.FEEDER_RESTORED, f"single_{provider}"),
         )
         logger.info("GlobalFeeder: single-provider '%s' feeder started.", provider)
+        await self._reapply_cached_tokens()
 
     @property
     def dual_latency(self) -> Dict[str, float]:
