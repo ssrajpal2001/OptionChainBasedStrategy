@@ -229,7 +229,8 @@ def _load_registry_from_db(registry) -> None:
                 email=row["email"] or "",
                 capital=float(row["capital"] or 500000),
                 risk=RiskProfile(
-                    max_risk_pct=float(row["max_risk_pct"] or 1.0),
+                    capital=float(row["capital"] or 500000),
+                    max_risk_per_trade_pct=float(row["max_risk_pct"] or 1.0),
                     max_daily_loss_pct=float(row["max_daily_loss_pct"] or 3.0),
                 ),
                 lot_multiplier=float(row["lot_multiplier"] or 1.0),
