@@ -1394,6 +1394,10 @@ class DashboardServer:
                     f"(e.g. '{body.provider}_main').",
                 )
 
+            # Is this a brand-new binding or an edit of an existing one?
+            _is_new_binding = not any(
+                b["binding_id"] == body.binding_id for b in existing_bindings
+            )
             try:
                 await _srv._client_db.upsert_binding(
                     client_id=cid,
@@ -1410,8 +1414,12 @@ class DashboardServer:
                     assigned_strategy=body.assigned_strategy,
                     assigned_instrument=body.assigned_instrument,
                 )
-                # New broker starts with trade OFF — user must explicitly enable it
-                await _srv._client_db.set_trade_enabled(cid, body.binding_id, False)
+                # Only a BRAND-NEW broker starts with trade OFF. Editing an
+                # existing binding (e.g. changing product to NRML) must NOT
+                # silently disable trade/engine — upsert already preserves
+                # engine_active/terminal_connected.
+                if _is_new_binding:
+                    await _srv._client_db.set_trade_enabled(cid, body.binding_id, False)
             except HTTPException:
                 raise
             except Exception as exc:
