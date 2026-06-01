@@ -63,6 +63,7 @@ class OptionTick:
     iv: float
     delta: float
     timestamp: datetime          # Always IST-aware
+    atp: float = 0.0             # Exchange Average Traded Price = broker VWAP for this instrument
 
 
 @dataclass(frozen=True)

@@ -142,6 +142,11 @@ class SellStraddleStrategy:
         self._spot: float      = 0.0
         self._ce_ltp: float    = 0.0
         self._pe_ltp: float    = 0.0
+        # Broker ATP (exchange VWAP) for the ATM legs — VWAP is NEVER computed,
+        # it comes from the feed. Combined VWAP = CE ATP + PE ATP.
+        self._ce_atp: float    = 0.0
+        self._pe_atp: float    = 0.0
+        self._prev_vwap_atp: Optional[float] = None   # previous closed-candle combined VWAP
         self._ltp_target: float = 0.0
 
         # Trailing SL — enable toggle + thresholds
@@ -433,10 +438,15 @@ class SellStraddleStrategy:
             # Ignore zero/garbage premium ticks — they corrupt VWAP/SLOPE and the
             # OPT_TICKS log (seen as CE=0.00 PE=0.00).
             if atm > 0 and tick.ltp > 0 and abs(tick.strike - atm) < step / 2:
+                _atp = float(getattr(tick, "atp", 0.0) or 0.0)  # broker VWAP for this leg
                 if tick.option_type == "CE":
                     self._ce_ltp = tick.ltp
+                    if _atp > 0:
+                        self._ce_atp = _atp
                 elif tick.option_type == "PE":
                     self._pe_ltp = tick.ltp
+                    if _atp > 0:
+                        self._pe_atp = _atp
             if self._position and self._position.status == "open":
                 if abs(tick.strike - self._position.atm_at_entry) < 0.01:
                     if tick.option_type == "CE":
@@ -508,8 +518,6 @@ class SellStraddleStrategy:
         self._ind["close"] = ltp
         if len(closes) >= 15:
             self._ind["rsi"] = rsi(closes)
-        if len(closes) >= 2:
-            self._ind["vwap"] = vwap(closes, closes, closes, vols)
         if len(closes) >= 9:
             self._ind["ema_fast"] = ema(closes, 9)
         if len(closes) >= 21:
@@ -519,22 +527,25 @@ class SellStraddleStrategy:
             self._ind["adx"] = adx_val
             self._ind["pdi"] = pdi_val
             self._ind["mdi"] = mdi_val
-        # SLOPE / VWAP_SLOPE — change in VWAP between the previous and current
-        # candle: slope = current_vwap - prev_vwap. Negative => VWAP falling
-        # (premium decaying, favourable for selling). This matches the prior
-        # system's definition (prev VWAP vs current VWAP), NOT a regression.
-        # Without this, any rule using SLOPE evaluates N/A and never passes.
-        if "vwap" in self._ind:
-            _cur_vwap = self._ind["vwap"]
-            _prev_vwap = getattr(self, "_prev_vwap", None)
-            if _prev_vwap is not None:
-                _slope = float(_cur_vwap - _prev_vwap)
+        # ── VWAP from the BROKER (exchange ATP), NEVER computed ──────────────
+        # Combined VWAP for the ATM straddle = ATM CE ATP + ATM PE ATP.
+        # SLOPE = current closed-candle VWAP − previous closed-candle VWAP
+        # (needs 2 valid closed VWAPs). CRITICAL: a candle with no valid VWAP
+        # does NOT overwrite prev_vwap, so the next slope stays correct — this
+        # fixes the intermittent VWAP=0 / slope=huge bug from the self-computed
+        # VWAP. Negative slope => VWAP falling => favourable for selling.
+        _cur_vwap = None
+        if self._ce_atp > 0 and self._pe_atp > 0:
+            _cur_vwap = float(self._ce_atp + self._pe_atp)
+            self._ind["vwap"] = _cur_vwap
+            _prev = self._prev_vwap_atp
+            if _prev is not None and _prev > 0:
+                _slope = float(_cur_vwap - _prev)
                 self._ind["slope"]      = _slope
                 self._ind["vwap_slope"] = _slope
-                self._ind["slope_curr"] = float(_cur_vwap)
-                self._ind["slope_prev"] = float(_prev_vwap)
-            # Remember this candle's VWAP for the next slope computation
-            self._prev_vwap = _cur_vwap
+                self._ind["slope_curr"] = _cur_vwap
+                self._ind["slope_prev"] = _prev
+            self._prev_vwap_atp = _cur_vwap   # update ONLY on a valid broker VWAP
         # ROC — rate of change of the combined premium over the last N closes (%).
         # Used by exit rules (e.g. ROC > 10). Standard ROC formula.
         if len(closes) >= 10:

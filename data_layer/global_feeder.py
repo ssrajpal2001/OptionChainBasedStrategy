@@ -410,9 +410,9 @@ class UpstoxFeeder(BaseFeeder):
         return None
 
     @staticmethod
-    def _extract_extras(feed_data) -> Dict[str, int]:
-        """Extract OI and volume from a full-mode dict feed entry."""
-        result: Dict[str, int] = {"oi": 0, "volume": 0}
+    def _extract_extras(feed_data) -> Dict[str, float]:
+        """Extract OI, volume, and ATP (broker VWAP) from a full-mode dict feed entry."""
+        result: Dict[str, float] = {"oi": 0, "volume": 0, "atp": 0.0}
         if not isinstance(feed_data, dict):
             return result
         ff = feed_data.get("fullFeed") or feed_data.get("ff") or {}
@@ -423,7 +423,12 @@ class UpstoxFeeder(BaseFeeder):
             except (TypeError, ValueError):
                 pass
             try:
-                result["volume"] = int(float((mff.get("eFeedDetails") or {}).get("atp") or mff.get("vtt") or 0))
+                result["volume"] = int(float(mff.get("vtt") or 0))
+            except (TypeError, ValueError):
+                pass
+            try:
+                # ATP = exchange average traded price = broker VWAP for this contract
+                result["atp"] = float((mff.get("eFeedDetails") or {}).get("atp") or mff.get("atp") or 0.0)
             except (TypeError, ValueError):
                 pass
         return result
@@ -499,6 +504,7 @@ class UpstoxFeeder(BaseFeeder):
                     iv=0.0,
                     delta=0.0,
                     timestamp=now,
+                    atp=float(extras.get("atp") or 0.0),  # broker VWAP
                 )
                 await self._publish_option(opt_tick)
 
@@ -779,6 +785,7 @@ class FyersFeeder(BaseFeeder):
                         iv          = float(raw.get("iv") or 0.0),
                         delta       = 0.0,
                         timestamp   = datetime.now(IST),
+                        atp         = float(raw.get("avg_trade_price") or 0.0),  # broker VWAP
                     )
                     await self._publish_option(opt_tick)
             except Exception as _exc:
