@@ -297,12 +297,10 @@ class FyersFeeder(BaseFeeder):
             logger.warning("FyersFeeder: WS error: %s", msg)
 
         def _on_connect() -> None:
-            # Subscribe immediately from the WS thread — litemode=True means no Full Mode On handshake
+            # Subscribe all symbols from WS thread on every connect/reconnect
             self._connected = True
             symbols = self._index_symbols()
-            all_symbols = list(symbols)
-            if self._subscribed_tokens:
-                all_symbols += self._subscribed_tokens
+            all_symbols = list(symbols) + list(self._subscribed_tokens)
             if all_symbols and self._socket:
                 self._socket.subscribe(symbols=all_symbols, data_type="SymbolUpdate")
                 logger.info("FyersFeeder: connected and subscribed — %d index + %d option tokens",
@@ -315,7 +313,7 @@ class FyersFeeder(BaseFeeder):
         self._socket = data_ws.FyersDataSocket(
             access_token=access_token,
             write_to_file=False,
-            litemode=True,   # lite mode avoids Full Mode On handshake that causes snapshot+disconnect
+            litemode=False,  # full mode needed for continuous option tick streaming
             reconnect=True,
             on_message=_on_message,
             on_error=_on_error,
