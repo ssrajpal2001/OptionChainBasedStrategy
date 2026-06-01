@@ -84,6 +84,10 @@ class MockFeeder(BaseFeeder):
 
             for underlying in self._cfg.monitored_indices:
                 expiry = _nexp(underlying) or (now.date() + __import__("datetime").timedelta(days=7))
+                # Commodities/unknowns have no synthetic base — skip in mock mode
+                # (the live dual feed provides their futures/ATM ticks).
+                if underlying not in self._prices:
+                    continue
                 p = self._prices[underlying]
                 p = max(p * (1 + self._rng.gauss(0, 0.0003)), 1.0)
                 self._prices[underlying] = p
@@ -659,10 +663,10 @@ class FyersFeeder(BaseFeeder):
     def _is_fyers_symbol(token: str) -> bool:
         """
         Fyers symbols start with an exchange prefix: NSE:NIFTY... / BSE:SENSEX...
-        This deliberately EXCLUDES the internal canonical format (NIFTY:02JUN26:...)
-        which also uses colons but has no NSE:/BSE: prefix, and Upstox keys (NSE_FO|...).
+        / MCX:CRUDEOIL... (commodities). Excludes the internal canonical format
+        (NIFTY:02JUN26:...) which has no exchange prefix, and Upstox keys (...|...).
         """
-        return token.startswith(("NSE:", "BSE:")) and "|" not in token
+        return token.startswith(("NSE:", "BSE:", "MCX:")) and "|" not in token
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
