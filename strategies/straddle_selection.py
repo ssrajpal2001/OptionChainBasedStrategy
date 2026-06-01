@@ -143,7 +143,7 @@ def scan_pool(
     pe_corr = strip_intrinsic(pe_atm.get("ltp", 0.0), "PE", atm, spot)
     ce_bias_stronger = ce_corr > pe_corr
 
-    strikes = [int(atm + i * step) for i in range(-offset, offset + 1) if i != 0]
+    strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
     best = None  # (score, ce_strike, pe_strike, ce_ltp, pe_ltp)
     for s_ce in strikes:
         ce = strike_prem.get((s_ce, "CE"))

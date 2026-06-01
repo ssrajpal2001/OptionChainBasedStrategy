@@ -85,18 +85,19 @@ from strategies.straddle_selection import scan_pool
 
 
 def test_scan_pool_picks_min_balanced_score():
-    # CE bias stronger (CE corrected > PE corrected) → require ce_ltp < pe_ltp.
-    # Two passing pairs; the more balanced (smaller abs(ce-pe)/(ce+pe)) wins.
+    # ATM (100): CE corr 55 > PE corr 50 → CE bias stronger → require ce_ltp < pe_ltp.
+    # ATM is INCLUDED as a candidate (matches reference). Valid pairs (ce<pe, both>=30):
+    #   100CE55 / 110PE70 → score 0.12
+    #   95CE40  / 105PE42 → score 0.024   ← min
+    #   95CE40  / 100PE50 → score 0.111
+    #   90CE30  / ...     → larger
+    # Global min balanced score → 95CE / 105PE.
     cache = _cache({
-        (100, "CE"): 50.0, (100, "PE"): 50.0,   # ATM: ce_corr==pe_corr → CE not stronger
-        (95, "CE"): 40.0, (105, "PE"): 60.0,
+        (100, "CE"): 55.0, (100, "PE"): 50.0,
+        (95, "CE"): 40.0, (105, "PE"): 42.0,
         (90, "CE"): 30.0, (110, "PE"): 70.0,
     })
-    # Force a deterministic bias by making ATM CE corrected > PE corrected:
-    cache[(100, "CE")] = {"ltp": 55.0, "atp": 55.0}
-    cache[(100, "PE")] = {"ltp": 50.0, "atp": 50.0}
 
-    # rules: always pass (empty) so selection is pure balanced-score.
     def always_ok(ce_s, pe_s):
         return True
 
@@ -106,15 +107,20 @@ def test_scan_pool_picks_min_balanced_score():
     )
     assert res is not None
     ce_strike, pe_strike, ce_ltp, pe_ltp = res
-    # CE stronger → ce_ltp < pe_ltp enforced. Candidate (95CE=40, 105PE=60):
-    # score=abs(40-60)/100=0.20; (90CE=30,110PE=70): score=0.40 → 95/105 wins.
     assert (ce_strike, pe_strike) == (95, 105)
+    assert (ce_ltp, pe_ltp) == (40.0, 42.0)
 
 
 def test_scan_pool_respects_ltp_target_floor():
+    # ATM (100): PE corr 55 > CE corr 50 → PE bias stronger → require pe_ltp < ce_ltp.
+    # ATM included. Candidate CE strikes: 100=50, 105=40. PE strikes: 100=55, 95=25.
+    # Valid pairs need pe_ltp < ce_ltp and BOTH >= 30:
+    #   pe=100(55): needs ce>55 → none (50,40) → no pair
+    #   pe=95(25): below floor 30 → excluded
+    # → no valid pair → None (proves the below-floor 95PE is excluded).
     cache = _cache({
-        (100, "CE"): 55.0, (100, "PE"): 50.0,
-        (95, "CE"): 40.0, (105, "PE"): 25.0,   # PE 25 below target → excluded
+        (100, "CE"): 50.0, (100, "PE"): 55.0,
+        (105, "CE"): 40.0, (95, "PE"): 25.0,
     })
 
     def always_ok(ce_s, pe_s):
