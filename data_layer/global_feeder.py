@@ -315,7 +315,12 @@ class UpstoxFeeder(BaseFeeder):
             self._subscribed_keys.append(k)
         if self._streamer and self._connected:
             try:
-                self._streamer.subscribe(instrument_keys=new_keys, mode="full")
+                # SDK signature: subscribe(instrumentKeys, mode='ltpc') — positional.
+                # Some SDK builds accept only keys; fall back if mode is rejected.
+                try:
+                    self._streamer.subscribe(new_keys, "full")
+                except TypeError:
+                    self._streamer.subscribe(new_keys)
                 logger.info("UpstoxFeeder: subscribed %d option keys.", len(new_keys))
             except Exception as exc:
                 logger.warning("UpstoxFeeder: subscribe error: %s", exc)
@@ -327,7 +332,7 @@ class UpstoxFeeder(BaseFeeder):
                 self._subscribed_keys.remove(t)
         if self._streamer and self._connected and mine:
             try:
-                self._streamer.unsubscribe(instrument_keys=mine, mode="full")
+                self._streamer.unsubscribe(mine)
             except Exception as exc:
                 logger.debug("UpstoxFeeder: unsubscribe error: %s", exc)
 
