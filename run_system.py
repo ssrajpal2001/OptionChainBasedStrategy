@@ -143,7 +143,9 @@ def get_client_logger(client_id: str, strategy: str, log_dir: str = "logs") -> l
     if logger.handlers:
         return logger  # already configured
     logger.setLevel(logging.DEBUG)
-    log_path = os.path.join(log_dir, "clients", f"{client_id}_{strategy}_{date_str}.log")
+    client_log_dir = os.path.join(log_dir, "clients")
+    os.makedirs(client_log_dir, exist_ok=True)
+    log_path = os.path.join(client_log_dir, f"{client_id}_{strategy}_{date_str}.log")
     fh = logging.FileHandler(log_path, encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
     logger.addHandler(fh)

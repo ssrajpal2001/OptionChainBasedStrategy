@@ -49,10 +49,31 @@ from data_layer.base_feeder import EventBus, CandleEvent
 from data_layer.runtime_config import RuntimeConfig
 from matrix_engine.indicators import rsi, vwap, adx, ema
 
+import os
+
 logger = logging.getLogger(__name__)
 
 _BUF             = 600    # ring-buffer depth ≥ VWAP_WINDOW(500)
 _MARKET_OPEN     = dtime(9, 15)   # NSE session start
+
+
+def _make_strategy_logger(underlying: str) -> logging.Logger:
+    """Write per-strategy evaluation log to logs/clients/ss_{underlying}_YYYYMMDD.log"""
+    name = f"client.ss.{underlying}"
+    lg = logging.getLogger(name)
+    if lg.handlers:
+        return lg
+    lg.setLevel(logging.DEBUG)
+    log_dir = os.path.join("logs", "clients")
+    os.makedirs(log_dir, exist_ok=True)
+    date_str = datetime.now().strftime("%Y%m%d")
+    fh = logging.FileHandler(
+        os.path.join(log_dir, f"ss_{underlying}_{date_str}.log"), encoding="utf-8"
+    )
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
+    lg.addHandler(fh)
+    lg.propagate = False
+    return lg
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -176,6 +197,7 @@ class SellStraddleStrategy:
             "ltp": 0.0,  "close": 0.0,
         }
 
+        self._clog: logging.Logger = _make_strategy_logger(underlying)
         self._load_thresholds()
 
     # ── Config ────────────────────────────────────────────────────────────────
@@ -524,6 +546,10 @@ class SellStraddleStrategy:
         if self._order_pending:
             return  # Waiting for fill confirmation from bridge
         if self._spot <= 0 or self._ce_ltp <= 0 or self._pe_ltp <= 0:
+            self._clog.info(
+                "WAIT  spot=%.2f CE_ltp=%.2f PE_ltp=%.2f — waiting for option ticks",
+                self._spot, self._ce_ltp, self._pe_ltp,
+            )
             return
 
         # ltp_target — BOTH legs must individually be >= threshold.
@@ -532,10 +558,9 @@ class SellStraddleStrategy:
         # Example: CE=50, PE=55, threshold=60 → neither qualifies → skip entry.
         if self._ltp_target > 0.0:
             if self._ce_ltp < self._ltp_target or self._pe_ltp < self._ltp_target:
-                logger.debug(
-                    "SellStraddle[%s]: entry blocked — CE=%.2f PE=%.2f, "
-                    "both must be >= ltp_target=%.2f",
-                    self._underlying, self._ce_ltp, self._pe_ltp, self._ltp_target,
+                self._clog.info(
+                    "BLOCK ltp_target=%.2f  CE=%.2f PE=%.2f — leg below floor",
+                    self._ltp_target, self._ce_ltp, self._pe_ltp,
                 )
                 return
 
@@ -549,9 +574,17 @@ class SellStraddleStrategy:
 
         passed, reason = _eval_rules(rules, self._ind)
         if not passed:
-            logger.debug("SellStraddle[%s]: %s blocked — %s", self._underlying, rule_key, reason)
+            self._clog.info(
+                "BLOCK %s — %s  ind=%s",
+                rule_key, reason,
+                {k: round(v, 2) for k, v in self._ind.items() if v != 0.0},
+            )
             return
 
+        self._clog.info(
+            "ENTRY attempting — spot=%.2f CE=%.2f PE=%.2f credit=%.2f rules_passed",
+            self._spot, self._ce_ltp, self._pe_ltp, self._ce_ltp + self._pe_ltp,
+        )
         await self._open_position(now, ss, rule_key, reason)
 
     async def _open_position(

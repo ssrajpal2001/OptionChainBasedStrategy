@@ -420,7 +420,7 @@ class GlobalConfig:
     chain_depth: int = 10          # ATM ± 10 strikes
 
     # Candle timeframes (minutes)
-    candle_timeframes: List[int] = field(default_factory=lambda: [5, 15, 75])
+    candle_timeframes: List[int] = field(default_factory=lambda: [1, 2, 5, 15, 75])
 
     # Primary feeder broker (admin-selected)
     primary_feeder_provider: Literal["upstox", "fyers", "dhan", "angelone", "mock"] = "mock"

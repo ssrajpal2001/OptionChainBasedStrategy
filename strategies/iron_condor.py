@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, date, time as dtime
@@ -38,6 +39,24 @@ from execution_bridge.straddle_bridge import ICOrderEvent, ICFillEvent
 logger = logging.getLogger(__name__)
 
 _RETRY_LIMIT = 3  # max broker retries per leg on adjustment
+
+
+def _make_ic_logger(underlying: str) -> logging.Logger:
+    name = f"client.ic.{underlying}"
+    lg = logging.getLogger(name)
+    if lg.handlers:
+        return lg
+    lg.setLevel(logging.DEBUG)
+    log_dir = os.path.join("logs", "clients")
+    os.makedirs(log_dir, exist_ok=True)
+    date_str = datetime.now().strftime("%Y%m%d")
+    fh = logging.FileHandler(
+        os.path.join(log_dir, f"ic_{underlying}_{date_str}.log"), encoding="utf-8"
+    )
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
+    lg.addHandler(fh)
+    lg.propagate = False
+    return lg
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -122,6 +141,7 @@ class IronCondorStrategy:
         self._ask_cache:  Dict[str, float] = {}   # same key → best ask
         self._tasks:     list = []
         self._adjusting: bool = False  # lock to prevent re-entrant adjustments
+        self._clog: logging.Logger = _make_ic_logger(underlying)
         self._load_thresholds()
 
     # ── Config ────────────────────────────────────────────────────────────────
@@ -240,6 +260,7 @@ class IronCondorStrategy:
 
         spot = self._spot
         if spot <= 0:
+            self._clog.info("WAIT  spot=0 — no index tick received yet")
             return
 
         step = self._strike_step
@@ -255,9 +276,11 @@ class IronCondorStrategy:
         short_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(short_pe_strike)}PE", 0.0)
 
         if self._min_ltp > 0 and (short_ce_ltp < self._min_ltp or short_pe_ltp < self._min_ltp):
-            logger.debug(
-                "IronCondor[%s]: min_ltp filter — CE=%.2f PE=%.2f < min=%.2f, skipping entry",
-                self._underlying, short_ce_ltp, short_pe_ltp, self._min_ltp,
+            self._clog.info(
+                "BLOCK min_ltp=%.2f  short_CE[%s]=%.2f  short_PE[%s]=%.2f — leg below floor",
+                self._min_ltp,
+                f"{self._underlying}{int(short_ce_strike)}CE", short_ce_ltp,
+                f"{self._underlying}{int(short_pe_strike)}PE", short_pe_ltp,
             )
             return
 

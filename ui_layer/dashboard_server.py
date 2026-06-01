@@ -2314,8 +2314,8 @@ class DashboardServer:
                     "has_position": ss.has_open_position,
                     "trades_today": ss.trades_today,
                     "spot":         round(ss._spot, 2),
-                    "rsi":          round(ss._rsi, 1),   # live reference — may be used in entry rules
-                    "adx":          round(ss._adx, 1),   # live reference — may be used in entry rules
+                    "rsi":          round(ss._ind.get("rsi", 0.0), 1),
+                    "adx":          round(ss._ind.get("adx", 0.0), 1),
                     "entry_allowed": getattr(ss, "entry_allowed", True),
                     "position":     entry,
                 })
@@ -2482,7 +2482,7 @@ class DashboardServer:
         @app.get("/api/admin/strategy/trap-config", tags=["Admin"])
         async def api_trap_config_get(_: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
-            cfg = RuntimeConfig.get("trap_trading") or {}
+            cfg = RuntimeConfig.get().get("trap_trading") or {}
             return {"ok": True, "config": cfg}
 
         @app.post("/api/admin/strategy/trap-config", tags=["Admin"])
