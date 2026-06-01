@@ -295,12 +295,8 @@ class FyersFeeder(BaseFeeder):
             logger.warning("FyersFeeder: WS error: %s", msg)
 
         def _on_connect() -> None:
-            logger.info("FyersFeeder: WebSocket authenticated — subscribing to indices.")
+            logger.info("FyersFeeder: WebSocket authenticated — waiting for Full Mode On before subscribing.")
             self._connected = True
-            symbols = self._index_symbols()
-            if symbols and self._socket:
-                self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
-                logger.info("FyersFeeder: subscribed to %s", symbols)
 
         def _on_close(msg: dict) -> None:
             logger.info("FyersFeeder: WebSocket closed: %s", msg)
@@ -377,15 +373,17 @@ class FyersFeeder(BaseFeeder):
         if not isinstance(raw, dict):
             logger.info("FyersFeeder: raw frame is not dict — type=%s val=%r", type(raw).__name__, str(raw)[:200])
             return
+        # Handle control frames — subscribe AFTER "Full Mode On" ack
         symbol_fyers = raw.get("symbol", "")
         ltp = raw.get("ltp")
         if not symbol_fyers or ltp is None:
-            if not hasattr(self, "_logged_control_frames"):
-                self._logged_control_frames = 0
-            self._logged_control_frames += 1
-            if self._logged_control_frames <= 5:
-                logger.info("FyersFeeder: non-tick frame #%d keys=%s val=%r",
-                            self._logged_control_frames, list(raw.keys()), str(raw)[:200])
+            msg_type = raw.get("type", "")
+            if msg_type == "ful" and raw.get("code") == 200:
+                # Full mode confirmed — subscribe now
+                symbols = self._index_symbols()
+                if symbols and self._socket:
+                    self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
+                    logger.info("FyersFeeder: subscribed after Full Mode On — %s", symbols)
             return
         if not hasattr(self, "_logged_first_tick"):
             self._logged_first_tick = True
