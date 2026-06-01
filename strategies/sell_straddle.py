@@ -506,20 +506,22 @@ class SellStraddleStrategy:
             self._ind["adx"] = adx_val
             self._ind["pdi"] = pdi_val
             self._ind["mdi"] = mdi_val
-        # SLOPE / VWAP_SLOPE — trend of the combined premium (negative = decaying,
-        # favourable for selling). Linear-regression slope of the last N premium
-        # closes. Without this, any entry/exit rule using SLOPE evaluates N/A and
-        # the strategy can never enter. (Verify semantics vs your prior system.)
-        if len(closes) >= 3:
-            _n = int(min(len(closes), 5))
-            _x = np.arange(_n, dtype=np.float64)
-            _slope = float(np.polyfit(_x, closes[-_n:], 1)[0])
-            self._ind["slope"]      = _slope
-            self._ind["vwap_slope"] = _slope
-            self._ind["slope_curr"] = _slope
-            self._ind["slope_prev"] = float(
-                np.polyfit(_x, closes[-_n - 1:-1], 1)[0]
-            ) if len(closes) >= _n + 1 else _slope
+        # SLOPE / VWAP_SLOPE — change in VWAP between the previous and current
+        # candle: slope = current_vwap - prev_vwap. Negative => VWAP falling
+        # (premium decaying, favourable for selling). This matches the prior
+        # system's definition (prev VWAP vs current VWAP), NOT a regression.
+        # Without this, any rule using SLOPE evaluates N/A and never passes.
+        if "vwap" in self._ind:
+            _cur_vwap = self._ind["vwap"]
+            _prev_vwap = getattr(self, "_prev_vwap", None)
+            if _prev_vwap is not None:
+                _slope = float(_cur_vwap - _prev_vwap)
+                self._ind["slope"]      = _slope
+                self._ind["vwap_slope"] = _slope
+                self._ind["slope_curr"] = float(_cur_vwap)
+                self._ind["slope_prev"] = float(_prev_vwap)
+            # Remember this candle's VWAP for the next slope computation
+            self._prev_vwap = _cur_vwap
         # ROC — rate of change of the combined premium over the last N closes (%).
         # Used by exit rules (e.g. ROC > 10). Standard ROC formula.
         if len(closes) >= 10:
