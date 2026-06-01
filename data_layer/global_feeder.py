@@ -572,8 +572,12 @@ class FyersFeeder(BaseFeeder):
 
     @staticmethod
     def _is_fyers_symbol(token: str) -> bool:
-        """Fyers symbols look like NSE:NIFTY...  Upstox keys contain a pipe and are excluded."""
-        return ":" in token and "|" not in token
+        """
+        Fyers symbols start with an exchange prefix: NSE:NIFTY... / BSE:SENSEX...
+        This deliberately EXCLUDES the internal canonical format (NIFTY:02JUN26:...)
+        which also uses colons but has no NSE:/BSE: prefix, and Upstox keys (NSE_FO|...).
+        """
+        return token.startswith(("NSE:", "BSE:")) and "|" not in token
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
