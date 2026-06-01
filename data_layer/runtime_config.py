@@ -113,18 +113,34 @@ _IC_STRIKE_DEFAULTS: Dict[str, Dict[str, float]] = {
     "FINNIFTY":   {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0},
     "SENSEX":     {"short_leg_otm_pts": 500.0, "long_leg_otm_pts": 750.0},
     "MIDCPNIFTY": {"short_leg_otm_pts": 150.0, "long_leg_otm_pts": 250.0},
+    "CRUDEOIL":   {"short_leg_otm_pts": 100.0, "long_leg_otm_pts": 200.0},
 }
 
-_ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"]
+# MCX commodities trade the evening session — different hours/lots/strikes.
+_MCX_INDICES = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS"}
+_ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"]
+
+
+def _ss_index_default(index: str) -> Dict[str, Any]:
+    base = copy.deepcopy(_SS_INDEX_DEFAULT)
+    if index.upper() in _MCX_INDICES:
+        # MCX session: start 09:00, NO new trade after 23:15, square off 23:30.
+        base.update({"entry_start": "09:00", "entry_end": "23:15", "squareoff_time": "23:30"})
+    return base
+
 
 def _ic_index_default(index: str) -> Dict[str, Any]:
     strikes = _IC_STRIKE_DEFAULTS.get(index, {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0})
-    return {**_IC_BASE_DEFAULT, **strikes}
+    base = {**_IC_BASE_DEFAULT, **strikes}
+    if index.upper() in _MCX_INDICES:
+        base.update({"start_time": "09:00", "squareoff_time": "23:30",
+                     "strike_step": 50, "lot_size": 100})
+    return base
 
 def _build_index_defaults() -> Dict[str, Any]:
     return {
         idx: {
-            "sell_straddle": copy.deepcopy(_SS_INDEX_DEFAULT),
+            "sell_straddle": _ss_index_default(idx),
             "iron_condor":   _ic_index_default(idx),
         }
         for idx in _ALL_INDICES
