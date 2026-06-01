@@ -421,10 +421,16 @@ class SellStraddleStrategy:
                                 _tick_count, self._ce_ltp, self._pe_ltp)
                 _tick_count = 0
                 _last_log_ts = now_ts
-            if tick.option_type == "CE":
-                self._ce_ltp = tick.ltp
-            elif tick.option_type == "PE":
-                self._pe_ltp = tick.ltp
+            # Only capture the ATM strike's premium for entry — otherwise a
+            # far-OTM CE/PE tick would corrupt _ce_ltp/_pe_ltp and the straddle
+            # would enter on the wrong (non-ATM) premium. Straddle sells ATM.
+            step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+            atm = round(self._spot / step) * step if self._spot > 0 else 0
+            if atm > 0 and abs(tick.strike - atm) < step / 2:
+                if tick.option_type == "CE":
+                    self._ce_ltp = tick.ltp
+                elif tick.option_type == "PE":
+                    self._pe_ltp = tick.ltp
             if self._position and self._position.status == "open":
                 if abs(tick.strike - self._position.atm_at_entry) < 0.01:
                     if tick.option_type == "CE":
