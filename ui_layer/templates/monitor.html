@@ -471,7 +471,7 @@ document.addEventListener('alpine:init', () => {
     ws:           null,
     wsConnected:  false,
     activeIndex:  'NIFTY',
-    indices:      ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY'],
+    indices:      ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL'],
     spots:        {},
     snapshots:    {},
     clients:      [],
@@ -548,7 +548,7 @@ document.addEventListener('alpine:init', () => {
       { id: 'iron_condor',   name: 'Iron Condor',    desc: 'OTM 4-leg credit spread (range-bound)' },
       { id: 'trap_trading',  name: 'Liquidity Trap Trading', desc: 'MTF institutional liquidity sweep — 5-stage directional entry' },
     ],
-    availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY'],
+    availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
     csSaving: false, csSaveMsg: '', csSaveOk: null,
     csSelectionsLoaded: false,
@@ -1336,7 +1336,7 @@ document.addEventListener('alpine:init', () => {
       };
     },
     _icDefaults(idx) {
-      const strikes = { NIFTY:{s:200,w:200}, BANKNIFTY:{s:400,w:500}, FINNIFTY:{s:200,w:200}, SENSEX:{s:500,w:500}, MIDCPNIFTY:{s:150,w:200} };
+      const strikes = { NIFTY:{s:200,w:200}, BANKNIFTY:{s:400,w:500}, FINNIFTY:{s:200,w:200}, SENSEX:{s:500,w:500}, MIDCPNIFTY:{s:150,w:200}, CRUDEOIL:{s:100,w:200} };
       const d = strikes[idx] || {s:200,w:200};
       return {
         enabled: true, start_time: '09:16', squareoff_time: '15:15',
