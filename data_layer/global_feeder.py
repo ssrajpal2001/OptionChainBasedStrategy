@@ -288,22 +288,6 @@ class FyersFeeder(BaseFeeder):
         from fyers_apiv3.FyersWebsocket import data_ws
 
         def _on_message(msg: dict) -> None:
-            # Subscribe after "Full Mode On" from the same WS thread (deferred 300ms)
-            if isinstance(msg, dict) and msg.get("type") == "ful" and msg.get("code") == 200:
-                import threading
-                symbols = list(self._index_symbols())
-                sock = self._socket
-                loop = self._loop
-                def _do_subscribe():
-                    import time as _time
-                    _time.sleep(0.3)
-                    if sock:
-                        sock.subscribe(symbols=symbols, data_type="SymbolUpdate")
-                    if loop and not loop.is_closed():
-                        loop.call_soon_threadsafe(
-                            lambda: logger.info("FyersFeeder: subscribed after Full Mode On — %s", symbols)
-                        )
-                threading.Thread(target=_do_subscribe, daemon=True).start()
             # Use run_coroutine_threadsafe so _parse_frame runs even if _parse_task is cancelled
             if self._loop and not self._loop.is_closed():
                 asyncio.run_coroutine_threadsafe(self._parse_frame(msg), self._loop)
@@ -312,8 +296,12 @@ class FyersFeeder(BaseFeeder):
             logger.warning("FyersFeeder: WS error: %s", msg)
 
         def _on_connect() -> None:
-            logger.info("FyersFeeder: WebSocket authenticated — waiting for Full Mode On before subscribing.")
+            # Subscribe immediately from the WS thread — litemode=True means no Full Mode On handshake
             self._connected = True
+            symbols = self._index_symbols()
+            if symbols and self._socket:
+                self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
+                logger.info("FyersFeeder: connected and subscribed — %s", symbols)
 
         def _on_close(msg: dict) -> None:
             logger.info("FyersFeeder: WebSocket closed: %s", msg)
@@ -322,7 +310,7 @@ class FyersFeeder(BaseFeeder):
         self._socket = data_ws.FyersDataSocket(
             access_token=access_token,
             write_to_file=False,
-            litemode=False,
+            litemode=True,   # lite mode avoids Full Mode On handshake that causes snapshot+disconnect
             reconnect=True,
             on_message=_on_message,
             on_error=_on_error,
