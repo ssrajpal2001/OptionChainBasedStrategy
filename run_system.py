@@ -198,10 +198,65 @@ def _setup_default_client(registry, capital: float) -> None:
 def _setup_live_clients(registry) -> None:
     registry.load_non_sensitive()
     if registry.count() == 0:
+        # JSON file empty — load from DB instead
+        _load_registry_from_db(registry)
+    if registry.count() == 0:
         logging.getLogger(__name__).warning(
             "No client profiles found. Add profiles to config/client_profiles.json "
             "or register via AdminConsole add_client command."
         )
+
+
+def _load_registry_from_db(registry) -> None:
+    """Populate in-memory ClientRegistry from clients.db at startup."""
+    import sqlite3
+    from config.client_profiles import ClientProfile, RiskProfile, BrokerBinding
+    log = logging.getLogger(__name__)
+    db_path = os.path.join("data", "clients.db")
+    if not os.path.exists(db_path):
+        return
+    try:
+        con = sqlite3.connect(db_path)
+        con.row_factory = sqlite3.Row
+        clients = con.execute(
+            "SELECT * FROM clients WHERE is_active=1"
+        ).fetchall()
+        for row in clients:
+            cid = row["client_id"]
+            profile = ClientProfile(
+                client_id=cid,
+                name=row["name"] or "",
+                email=row["email"] or "",
+                capital=float(row["capital"] or 500000),
+                risk=RiskProfile(
+                    max_risk_pct=float(row["max_risk_pct"] or 1.0),
+                    max_daily_loss_pct=float(row["max_daily_loss_pct"] or 3.0),
+                ),
+                lot_multiplier=float(row["lot_multiplier"] or 1.0),
+                is_admin_approved=bool(row["is_admin_approved"]),
+                is_client_bot_active=bool(row["is_client_bot_active"]),
+                target_index=row["target_index"] or "NIFTY",
+            )
+            # Load broker bindings
+            bindings = con.execute(
+                "SELECT * FROM broker_bindings WHERE client_id=? AND enabled=1", (cid,)
+            ).fetchall()
+            for b in bindings:
+                profile.broker_bindings.append(BrokerBinding(
+                    binding_id=b["binding_id"],
+                    provider=b["provider"],
+                    label=b["label"] or "",
+                    trading_mode=b["trading_mode"] or "paper",
+                    assigned_strategy=b["assigned_strategy"] or "",
+                    assigned_instrument=b["assigned_instrument"] or "NIFTY",
+                    is_trade_enabled=bool(b["is_trade_enabled"]),
+                    lot_multiplier=float(b["lot_multiplier"] or 1.0),
+                ))
+            registry.register(profile)
+            log.info("Loaded client from DB: %s (approved=%s)", cid, profile.is_admin_approved)
+        con.close()
+    except Exception as exc:
+        logging.getLogger(__name__).error("_load_registry_from_db failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
