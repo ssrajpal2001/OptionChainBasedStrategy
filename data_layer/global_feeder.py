@@ -288,6 +288,15 @@ class FyersFeeder(BaseFeeder):
         from fyers_apiv3.FyersWebsocket import data_ws
 
         def _on_message(msg: dict) -> None:
+            # Subscribe after "Full Mode On" — must run in WS thread (not asyncio)
+            if isinstance(msg, dict) and msg.get("type") == "ful" and msg.get("code") == 200:
+                symbols = self._index_symbols()
+                if symbols and self._socket:
+                    self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(
+                            lambda s=symbols: logger.info("FyersFeeder: subscribed after Full Mode On — %s", s)
+                        )
             if self._loop and not self._loop.is_closed():
                 self._loop.call_soon_threadsafe(self._enqueue_raw, msg)
 
@@ -373,19 +382,9 @@ class FyersFeeder(BaseFeeder):
         if not isinstance(raw, dict):
             logger.info("FyersFeeder: raw frame is not dict — type=%s val=%r", type(raw).__name__, str(raw)[:200])
             return
-        # Handle control frames — subscribe AFTER "Full Mode On" ack
         symbol_fyers = raw.get("symbol", "")
         ltp = raw.get("ltp")
         if not symbol_fyers or ltp is None:
-            msg_type = raw.get("type", "")
-            if msg_type == "ful" and raw.get("code") == 200:
-                # Full mode confirmed — subscribe in a thread (blocking call, must not block event loop)
-                symbols = self._index_symbols()
-                if symbols and self._socket:
-                    sock = self._socket
-                    syms = list(symbols)
-                    await asyncio.to_thread(sock.subscribe, symbols=syms, data_type="SymbolUpdate")
-                    logger.info("FyersFeeder: subscribed after Full Mode On — %s", syms)
             return
         if not hasattr(self, "_logged_first_tick"):
             self._logged_first_tick = True
