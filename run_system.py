@@ -118,6 +118,7 @@ def _parse_args() -> argparse.Namespace:
 def _setup_logging(log_dir: str, level: str) -> None:
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.join(log_dir, "trades"), exist_ok=True)
+    os.makedirs(os.path.join(log_dir, "clients"), exist_ok=True)
     # System log: logs/system-YYYYMMDD.log  (one per day, appended)
     date_str = datetime.now().strftime("%Y%m%d")
     log_file = os.path.join(log_dir, f"system-{date_str}.log")
@@ -129,6 +130,25 @@ def _setup_logging(log_dir: str, level: str) -> None:
             logging.FileHandler(log_file, encoding="utf-8"),
         ],
     )
+
+
+def get_client_logger(client_id: str, strategy: str, log_dir: str = "logs") -> logging.Logger:
+    """
+    Return a logger that writes to logs/clients/{client_id}_{strategy}_YYYYMMDD.log.
+    Safe to call multiple times — reuses the handler if already set up.
+    """
+    date_str = datetime.now().strftime("%Y%m%d")
+    name = f"client.{client_id}.{strategy}"
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger  # already configured
+    logger.setLevel(logging.DEBUG)
+    log_path = os.path.join(log_dir, "clients", f"{client_id}_{strategy}_{date_str}.log")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
+    logger.addHandler(fh)
+    logger.propagate = True  # also appears in main system log
+    return logger
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -817,6 +817,20 @@ class TrapTradingEngine:
             self._signals, trade_id, underlying, option_symbol,
             entry_price, total_qty,
         )
+        # Per-client log file
+        try:
+            from run_system import get_client_logger
+            for client in active_clients:
+                cid = client.get("client_id", "unknown")
+                cl = get_client_logger(cid, f"trap_{underlying}")
+                cl.info(
+                    "ENTRY trade_id=%s symbol=%s entry=%.2f qty=%d "
+                    "sl=%.2f target=%.2f entry_origin=%.2f",
+                    trade_id, option_symbol, entry_price, total_qty,
+                    computed_sl, st.target_high, st.entry_origin,
+                )
+        except Exception:
+            pass
 
         # Publish to SIGNAL topic
         from strategies.base_strategy import Direction, SignalPackage, StrategyID
@@ -882,6 +896,22 @@ class TrapTradingEngine:
             trade_id, opt_sym, reason,
             entry_price, exit_price, qty, pnl,
         )
+        # Per-client log file
+        try:
+            from run_system import get_client_logger
+            if self._client_db is not None:
+                clients = await asyncio.to_thread(self._client_db.get_all_clients_sync)
+                for client in clients:
+                    if client.get("is_admin_approved") and client.get("is_active"):
+                        cid = client.get("client_id", "unknown")
+                        sym_part = opt_sym.split("|")[-1] if "|" in opt_sym else opt_sym
+                        cl = get_client_logger(cid, f"trap_{underlying or sym_part}")
+                        cl.info(
+                            "EXIT trade_id=%s reason=%s entry=%.2f exit=%.2f qty=%d pnl=%.2f",
+                            trade_id, reason, entry_price, exit_price, qty, pnl,
+                        )
+        except Exception:
+            pass
 
     async def _force_exit_all(self, reason: str) -> None:
         """Force-exit all LIVE positions (EOD or kill switch)."""

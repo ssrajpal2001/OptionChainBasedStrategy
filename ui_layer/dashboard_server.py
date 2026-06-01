@@ -2289,7 +2289,7 @@ class DashboardServer:
                     "running":      ic._running,
                     "has_position": ic.has_open_position,
                     "spot":         round(ic._spot, 2),
-                    "entry_allowed": ic.entry_allowed,
+                    "entry_allowed": getattr(ic, "entry_allowed", True),
                     "position":     entry,
                 })
             for ss in _srv._sell_straddles:
@@ -2316,7 +2316,7 @@ class DashboardServer:
                     "spot":         round(ss._spot, 2),
                     "rsi":          round(ss._rsi, 1),   # live reference — may be used in entry rules
                     "adx":          round(ss._adx, 1),   # live reference — may be used in entry rules
-                    "entry_allowed": ss.entry_allowed,
+                    "entry_allowed": getattr(ss, "entry_allowed", True),
                     "position":     entry,
                 })
             return {"strategies": out, "ts": now_ist}
