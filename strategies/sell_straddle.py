@@ -426,7 +426,9 @@ class SellStraddleStrategy:
             # would enter on the wrong (non-ATM) premium. Straddle sells ATM.
             step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
             atm = round(self._spot / step) * step if self._spot > 0 else 0
-            if atm > 0 and abs(tick.strike - atm) < step / 2:
+            # Ignore zero/garbage premium ticks — they corrupt VWAP/SLOPE and the
+            # OPT_TICKS log (seen as CE=0.00 PE=0.00).
+            if atm > 0 and tick.ltp > 0 and abs(tick.strike - atm) < step / 2:
                 if tick.option_type == "CE":
                     self._ce_ltp = tick.ltp
                 elif tick.option_type == "PE":
@@ -504,6 +506,26 @@ class SellStraddleStrategy:
             self._ind["adx"] = adx_val
             self._ind["pdi"] = pdi_val
             self._ind["mdi"] = mdi_val
+        # SLOPE / VWAP_SLOPE — trend of the combined premium (negative = decaying,
+        # favourable for selling). Linear-regression slope of the last N premium
+        # closes. Without this, any entry/exit rule using SLOPE evaluates N/A and
+        # the strategy can never enter. (Verify semantics vs your prior system.)
+        if len(closes) >= 3:
+            _n = int(min(len(closes), 5))
+            _x = np.arange(_n, dtype=np.float64)
+            _slope = float(np.polyfit(_x, closes[-_n:], 1)[0])
+            self._ind["slope"]      = _slope
+            self._ind["vwap_slope"] = _slope
+            self._ind["slope_curr"] = _slope
+            self._ind["slope_prev"] = float(
+                np.polyfit(_x, closes[-_n - 1:-1], 1)[0]
+            ) if len(closes) >= _n + 1 else _slope
+        # ROC — rate of change of the combined premium over the last N closes (%).
+        # Used by exit rules (e.g. ROC > 10). Standard ROC formula.
+        if len(closes) >= 10:
+            _ref = closes[-10]
+            if _ref != 0:
+                self._ind["roc"] = float((closes[-1] - _ref) / _ref * 100.0)
 
     # ── Priming wait ──────────────────────────────────────────────────────────
 
@@ -585,16 +607,30 @@ class SellStraddleStrategy:
         rule_key = "entry_rules_beginning" if is_beginning else "entry_rules_reentry"
         rules    = ss.get(rule_key, [])
 
+        # Compute the ATM strike we're evaluating so the log shows exactly which
+        # contracts the entry decision is about.
+        _step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        _atm  = round(self._spot / _step) * _step
+
         if not self._is_primed(now, rules):
+            self._clog.info(
+                "EVAL %s [%s] PRIMING — ATM=%.0f CE%d=%.2f PE%d=%.2f — waiting for indicator priming",
+                self._underlying, rule_key, _atm,
+                int(_atm), self._ce_ltp, int(_atm), self._pe_ltp,
+            )
             return
 
         passed, reason = _eval_rules(rules, self._ind)
+        # Always log the full entry evaluation: which strike, which bucket,
+        # every rule with its live values (✓/✗), and all available indicators.
+        self._clog.info(
+            "EVAL %s [%s] ATM=%.0f sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind=%s",
+            self._underlying, rule_key, _atm,
+            int(_atm), self._ce_ltp, int(_atm), self._pe_ltp, self._ce_ltp + self._pe_ltp,
+            reason, "PASS" if passed else "BLOCK",
+            {k: round(v, 2) for k, v in self._ind.items()},
+        )
         if not passed:
-            self._clog.info(
-                "BLOCK %s — %s  ind=%s",
-                rule_key, reason,
-                {k: round(v, 2) for k, v in self._ind.items() if v != 0.0},
-            )
             return
 
         self._clog.info(
@@ -837,6 +873,14 @@ class SellStraddleStrategy:
             if _er_bucket != self._last_exit_rules_bucket:
                 self._last_exit_rules_bucket = _er_bucket
                 _passed, _reason = _eval_rules(self._exit_rules, self._ind)
+                # Always log the exit-rule evaluation so you can see what's checked
+                # on the open ATM position each timeframe bucket.
+                self._clog.info(
+                    "EXIT-EVAL %s ATM=%.0f pnl=%.2f (target=%.0f%% sl=%.0f%% of credit=%.2f) | rules: %s | result=%s",
+                    self._underlying, pos.atm_at_entry, pnl,
+                    self._profit_pct, self._sl_pct, pos.net_credit,
+                    _reason, "EXIT" if _passed else "HOLD",
+                )
                 if _passed:
                     logger.info(
                         "SellStraddle[%s]: EXIT_RULES triggered — %s",
