@@ -443,6 +443,15 @@ class SellStraddleStrategy:
     # ── Candle processing ─────────────────────────────────────────────────────
 
     async def _on_candle(self, ev: CandleEvent) -> None:
+        # Build the indicator series from ONE base timeframe (1-minute) only.
+        # The candle bus emits 1/2/5/15/75m events for the same symbol; appending
+        # all of them mixed/over-sampled the premium series and corrupted
+        # VWAP/RSI/SLOPE. Using 1m gives a clean intraday series so the rolling
+        # VWAP window (>1 day of 1m bars) ≈ cumulative intraday VWAP, matching the
+        # reference system. (Exits are tick-driven, so this does not delay them.)
+        if getattr(ev, "timeframe", 1) != 1:
+            return
+
         now = datetime.now(IST)
         self._load_thresholds()
 
