@@ -402,6 +402,9 @@ class SellStraddleStrategy:
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick
         q = self._bus.subscribe(Topic.OPTION_TICK)
+        _tick_count = 0
+        _last_log_ts = 0.0
+        import time as _time
         while self._running:
             try:
                 tick: OptionTick = await asyncio.wait_for(q.get(), timeout=1.0)
@@ -411,6 +414,13 @@ class SellStraddleStrategy:
                 break
             if tick.underlying != self._underlying:
                 continue
+            _tick_count += 1
+            now_ts = _time.monotonic()
+            if now_ts - _last_log_ts >= 60.0:
+                self._clog.info("OPT_TICKS: %d option ticks received in last 60s  CE=%.2f PE=%.2f",
+                                _tick_count, self._ce_ltp, self._pe_ltp)
+                _tick_count = 0
+                _last_log_ts = now_ts
             if tick.option_type == "CE":
                 self._ce_ltp = tick.ltp
             elif tick.option_type == "PE":
