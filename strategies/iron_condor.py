@@ -108,6 +108,47 @@ class IronCondorPosition:
     def legs(self) -> List[IronCondorLeg]:
         return [self.short_ce, self.short_pe, self.long_ce, self.long_pe]
 
+    def to_dict(self) -> dict:
+        """JSON-serialisable snapshot for PositionStore."""
+        def _leg(l: IronCondorLeg) -> dict:
+            return {"side": l.side, "option_type": l.option_type, "strike": l.strike,
+                    "entry_price": l.entry_price, "ltp": l.ltp, "filled": l.filled}
+        return {
+            "underlying": self.underlying,
+            "expiry": self.expiry.isoformat() if self.expiry else None,
+            "atm_at_entry": self.atm_at_entry, "trade_id": self.trade_id,
+            "short_ce": _leg(self.short_ce), "short_pe": _leg(self.short_pe),
+            "long_ce": _leg(self.long_ce), "long_pe": _leg(self.long_pe),
+            "net_credit": self.net_credit, "cumulative_adj_pnl": self.cumulative_adj_pnl,
+            "open_time": self.open_time.isoformat() if self.open_time else None,
+            "status": self.status, "adj_count_ce": self.adj_count_ce, "adj_count_pe": self.adj_count_pe,
+            "original_diff": self.original_diff, "wing_pts": self.wing_pts,
+            "profit_target_rs": self.profit_target_rs, "sl_rs": self.sl_rs,
+            "max_adj": self.max_adj, "lot_size": self.lot_size,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "IronCondorPosition":
+        from datetime import date as _date, datetime as _dt
+        def _leg(x: dict) -> IronCondorLeg:
+            return IronCondorLeg(side=x["side"], option_type=x["option_type"],
+                                 strike=x["strike"], entry_price=x["entry_price"],
+                                 ltp=x.get("ltp", 0.0), filled=x.get("filled", False))
+        return cls(
+            underlying=d["underlying"],
+            expiry=_date.fromisoformat(d["expiry"]) if d.get("expiry") else _date.today(),
+            atm_at_entry=d.get("atm_at_entry", 0.0), trade_id=d.get("trade_id", ""),
+            short_ce=_leg(d["short_ce"]), short_pe=_leg(d["short_pe"]),
+            long_ce=_leg(d["long_ce"]), long_pe=_leg(d["long_pe"]),
+            net_credit=d.get("net_credit", 0.0), cumulative_adj_pnl=d.get("cumulative_adj_pnl", 0.0),
+            open_time=_dt.fromisoformat(d["open_time"]) if d.get("open_time") else None,
+            status=d.get("status", "open"),
+            adj_count_ce=d.get("adj_count_ce", 0), adj_count_pe=d.get("adj_count_pe", 0),
+            original_diff=d.get("original_diff", 300.0), wing_pts=d.get("wing_pts", 150.0),
+            profit_target_rs=d.get("profit_target_rs", 5000.0), sl_rs=d.get("sl_rs", 2000.0),
+            max_adj=d.get("max_adj", 4), lot_size=d.get("lot_size", 65),
+        )
+
     @property
     def total_pnl_pts(self) -> float:
         """Current open P&L in points + cumulative closed adj P&L."""
@@ -150,6 +191,7 @@ class IronCondorStrategy:
         ic = RuntimeConfig.index_section(self._underlying, "iron_condor")
         self._start_time      = _parse_time(ic.get("start_time",       "09:16"))
         self._entry_day       = str(ic.get("entry_day",                "daily"))
+        self._product_type    = str(ic.get("product_type",            "MIS")).upper()
         self._profit_target   = float(ic.get("profit_target_inr",      5000.0))
         self._stoploss        = float(ic.get("stoploss_inr",           2000.0))
         self._ratio_trigger   = float(ic.get("ratio_trigger",           2.0))   # NEW: 2:1 ratio
@@ -167,14 +209,41 @@ class IronCondorStrategy:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    @property
+    def _persist_key(self) -> str:
+        return f"{self._underlying}_iron_condor"
+
     def start(self) -> None:
         self._running = True
+        # Restore an open position across restarts (MIS positions from a prior
+        # day are auto-discarded by the store — broker squared them off).
+        try:
+            from data_layer import position_store as _ps
+            _saved = _ps.load(self._persist_key)
+            if _saved:
+                self._position = IronCondorPosition.from_dict(_saved)
+                logger.info("IronCondor[%s]: restored open position from store (status=%s, net_credit=%.2f).",
+                            self._underlying, self._position.status, self._position.net_credit)
+        except Exception as exc:
+            logger.warning("IronCondor[%s]: restore failed: %s", self._underlying, exc)
         self._tasks = [
             asyncio.create_task(self._candle_loop(),  name="ic_candle"),
             asyncio.create_task(self._tick_loop(),    name="ic_tick"),
             asyncio.create_task(self._option_loop(),  name="ic_option"),
         ]
         logger.info("IronCondorStrategy[%s]: started.", self._underlying)
+
+    def _persist(self) -> None:
+        """Write the current open position to the store (or clear if none)."""
+        try:
+            from data_layer import position_store as _ps
+            if self._position and self._position.status == "open":
+                _ps.save(self._persist_key, self._position.to_dict(),
+                         product_type=getattr(self, "_product_type", "MIS"))
+            else:
+                _ps.clear(self._persist_key)
+        except Exception as exc:
+            logger.warning("IronCondor[%s]: persist failed: %s", self._underlying, exc)
 
     def stop(self) -> None:
         self._running = False
@@ -377,6 +446,7 @@ class IronCondorStrategy:
             max_adj         = self._max_adj,
             lot_size        = self._lot_size,
         )
+        self._persist()   # survive restarts
         await self._log_trade_db("ENTRY")
 
     # ── Exit checks ───────────────────────────────────────────────────────────
@@ -658,6 +728,7 @@ class IronCondorStrategy:
         pos.close_time = datetime.now(IST)
         await self._log_trade_db("EXIT")
         self._position = None
+        self._persist()   # clears the stored position
 
     # ── DB logging ────────────────────────────────────────────────────────────
 
