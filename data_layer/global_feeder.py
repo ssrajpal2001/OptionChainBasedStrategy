@@ -397,9 +397,33 @@ class FyersFeeder(BaseFeeder):
             await self._publish_index(tick)
             if hasattr(self, "_latency_dict"):
                 self._latency_dict[self._latency_provider] = (time.monotonic() - t0) * 1000.0
-        # Option ticks from Fyers: symbol format e.g. "NSE:NIFTY2552424650CE"
-        # Full option chain subscription is handled via subscribe_tokens
-        # when the rebalancer subscribes specific strikes.
+        else:
+            # Option tick — parse Fyers symbol and publish OptionTick
+            try:
+                from data_layer.symbol_translator import SymbolTranslator
+                sym = SymbolTranslator.from_fyers(symbol_fyers)
+                if sym is not None:
+                    from data_layer.base_feeder import OptionTick
+                    from datetime import date as _date
+                    opt_tick = OptionTick(
+                        symbol      = symbol_fyers,
+                        underlying  = sym.underlying,
+                        strike      = sym.strike,
+                        option_type = sym.option_type,
+                        expiry      = sym.expiry,
+                        ltp         = float(ltp),
+                        bid         = float(raw.get("bid_price") or ltp),
+                        ask         = float(raw.get("ask_price") or ltp),
+                        oi          = int(raw.get("oi") or 0),
+                        change_oi   = int(raw.get("chng_oi") or 0),
+                        volume      = int(raw.get("vol_traded_today") or 0),
+                        iv          = float(raw.get("iv") or 0.0),
+                        delta       = 0.0,
+                        timestamp   = datetime.now(IST),
+                    )
+                    await self._publish_option(opt_tick)
+            except Exception as _exc:
+                logger.debug("FyersFeeder: option tick parse error for %s: %s", symbol_fyers, _exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
