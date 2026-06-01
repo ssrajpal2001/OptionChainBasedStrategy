@@ -50,9 +50,9 @@ class ExchangeConfig:
         "FINNIFTY": 50.0,
         "SENSEX": 100.0,
         "MIDCPNIFTY": 50.0,
-        # MCX commodities
-        "CRUDEOIL": 50.0,        # crude option strikes are 50 apart
-        "CRUDEOILM": 50.0,
+        # MCX commodities — round ATM to 100 (50-step crude strikes are illiquid)
+        "CRUDEOIL": 100.0,
+        "CRUDEOILM": 100.0,
         "NATURALGAS": 5.0,
     })
 

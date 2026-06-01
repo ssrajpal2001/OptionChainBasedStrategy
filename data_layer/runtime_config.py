@@ -134,7 +134,7 @@ def _ic_index_default(index: str) -> Dict[str, Any]:
     base = {**_IC_BASE_DEFAULT, **strikes}
     if index.upper() in _MCX_INDICES:
         base.update({"start_time": "09:00", "squareoff_time": "23:30",
-                     "strike_step": 50, "lot_size": 100})
+                     "strike_step": 100, "lot_size": 100})
     return base
 
 def _build_index_defaults() -> Dict[str, Any]:
