@@ -362,10 +362,12 @@ class IronCondorStrategy:
             expiry          = _expiry,
             atm_at_entry    = atm,
             trade_id        = trade_id,
-            short_ce        = IronCondorLeg("sell","CE", short_ce_strike, short_ce_ltp),
-            short_pe        = IronCondorLeg("sell","PE", short_pe_strike, short_pe_ltp),
-            long_ce         = IronCondorLeg("buy", "CE", long_ce_strike,  long_ce_ltp),
-            long_pe         = IronCondorLeg("buy", "PE", long_pe_strike,  long_pe_ltp),
+            # Seed ltp = entry price so total_pnl_pts is ~0 at entry (else legs'
+            # ltp default to 0 -> close_cost=0 -> fake instant profit = net_credit).
+            short_ce        = IronCondorLeg("sell","CE", short_ce_strike, short_ce_ltp, short_ce_ltp),
+            short_pe        = IronCondorLeg("sell","PE", short_pe_strike, short_pe_ltp, short_pe_ltp),
+            long_ce         = IronCondorLeg("buy", "CE", long_ce_strike,  long_ce_ltp,  long_ce_ltp),
+            long_pe         = IronCondorLeg("buy", "PE", long_pe_strike,  long_pe_ltp,  long_pe_ltp),
             net_credit      = net_credit,
             open_time       = datetime.now(IST),
             original_diff   = self._short_otm,
@@ -564,13 +566,13 @@ class IronCondorStrategy:
 
             # ── Step 5: Update position state ────────────────────────────────
             if ot == "CE":
-                pos.long_ce   = IronCondorLeg("buy", "CE", profit_short.strike, old_short_ltp)
-                pos.short_ce  = IronCondorLeg("sell","CE", new_short_strike,    new_short_px)
+                pos.long_ce   = IronCondorLeg("buy", "CE", profit_short.strike, old_short_ltp, old_short_ltp)
+                pos.short_ce  = IronCondorLeg("sell","CE", new_short_strike,    new_short_px,  new_short_px)
                 pos.adj_count_ce += 1
                 adj_count = pos.adj_count_ce
             else:
-                pos.long_pe   = IronCondorLeg("buy", "PE", profit_short.strike, old_short_ltp)
-                pos.short_pe  = IronCondorLeg("sell","PE", new_short_strike,    new_short_px)
+                pos.long_pe   = IronCondorLeg("buy", "PE", profit_short.strike, old_short_ltp, old_short_ltp)
+                pos.short_pe  = IronCondorLeg("sell","PE", new_short_strike,    new_short_px,  new_short_px)
                 pos.adj_count_pe += 1
                 adj_count = pos.adj_count_pe
 
