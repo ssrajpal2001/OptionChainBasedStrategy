@@ -288,15 +288,23 @@ class FyersFeeder(BaseFeeder):
         from fyers_apiv3.FyersWebsocket import data_ws
 
         def _on_message(msg: dict) -> None:
-            # Subscribe after "Full Mode On" — must run in WS thread (not asyncio)
+            # After "Full Mode On", subscribe via a separate thread (deferred)
+            # so we don't call socket.subscribe() re-entrantly from within the callback
             if isinstance(msg, dict) and msg.get("type") == "ful" and msg.get("code") == 200:
-                symbols = self._index_symbols()
-                if symbols and self._socket:
-                    self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
-                    if self._loop and not self._loop.is_closed():
-                        self._loop.call_soon_threadsafe(
-                            lambda s=symbols: logger.info("FyersFeeder: subscribed after Full Mode On — %s", s)
+                import threading
+                symbols = list(self._index_symbols())
+                sock = self._socket
+                loop = self._loop
+                def _do_subscribe():
+                    import time as _time
+                    _time.sleep(0.3)   # let _on_message return first
+                    if sock:
+                        sock.subscribe(symbols=symbols, data_type="SymbolUpdate")
+                    if loop and not loop.is_closed():
+                        loop.call_soon_threadsafe(
+                            lambda: logger.info("FyersFeeder: subscribed after Full Mode On — %s", symbols)
                         )
+                threading.Thread(target=_do_subscribe, daemon=True).start()
             if self._loop and not self._loop.is_closed():
                 self._loop.call_soon_threadsafe(self._enqueue_raw, msg)
 
