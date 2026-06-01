@@ -701,7 +701,7 @@ class SellStraddleStrategy:
             indicators     = dict(self._ind),
             event_id       = event_id,
         )
-        self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
 
     # ── Exit ─────────────────────────────────────────────────────────────────
 
@@ -1067,7 +1067,7 @@ class SellStraddleStrategy:
             realized_pnl   = pos.realized_pnl,
             event_id       = f"{self._underlying}_EXIT_{self._event_counter}",
         )
-        self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
 
         # Accumulate session realized P&L (in premium points)
         self._session_realized_pnl_pts += pos.realized_pnl
