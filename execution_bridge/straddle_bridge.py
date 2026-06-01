@@ -370,7 +370,7 @@ class StraddleExecutionBridge:
             )
             req = OrderRequest(
                 broker_symbol=symbol,
-                exchange=_order_exchange(ev.underlying),
+                exchange=order_exchange(ev.underlying),
                 side=side,
                 qty=qty,
                 order_type=OrderType.MARKET,
