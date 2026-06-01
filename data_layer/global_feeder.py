@@ -609,6 +609,12 @@ class FyersFeeder(BaseFeeder):
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
         mine = [t for t in tokens if self._is_fyers_symbol(t)]
+        # Diagnostic: reveal received vs matched so we can see why options may be 0.
+        logger.info(
+            "FyersFeeder.subscribe_tokens: received=%d matched_fyers=%d connected=%s sample_in=%r sample_mine=%r",
+            len(tokens), len(mine), self._connected,
+            tokens[:2], mine[:2],
+        )
         # Remember tokens so they are re-subscribed on every reconnect
         for t in mine:
             if t not in self._subscribed_tokens:
