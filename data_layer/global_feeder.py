@@ -288,8 +288,7 @@ class FyersFeeder(BaseFeeder):
         from fyers_apiv3.FyersWebsocket import data_ws
 
         def _on_message(msg: dict) -> None:
-            # After "Full Mode On", subscribe via a separate thread (deferred)
-            # so we don't call socket.subscribe() re-entrantly from within the callback
+            # Subscribe after "Full Mode On" from the same WS thread (deferred 300ms)
             if isinstance(msg, dict) and msg.get("type") == "ful" and msg.get("code") == 200:
                 import threading
                 symbols = list(self._index_symbols())
@@ -297,7 +296,7 @@ class FyersFeeder(BaseFeeder):
                 loop = self._loop
                 def _do_subscribe():
                     import time as _time
-                    _time.sleep(0.3)   # let _on_message return first
+                    _time.sleep(0.3)
                     if sock:
                         sock.subscribe(symbols=symbols, data_type="SymbolUpdate")
                     if loop and not loop.is_closed():
@@ -305,8 +304,9 @@ class FyersFeeder(BaseFeeder):
                             lambda: logger.info("FyersFeeder: subscribed after Full Mode On — %s", symbols)
                         )
                 threading.Thread(target=_do_subscribe, daemon=True).start()
+            # Use run_coroutine_threadsafe so _parse_frame runs even if _parse_task is cancelled
             if self._loop and not self._loop.is_closed():
-                self._loop.call_soon_threadsafe(self._enqueue_raw, msg)
+                asyncio.run_coroutine_threadsafe(self._parse_frame(msg), self._loop)
 
         def _on_error(msg: dict) -> None:
             logger.warning("FyersFeeder: WS error: %s", msg)
