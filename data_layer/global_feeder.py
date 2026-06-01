@@ -262,6 +262,7 @@ class FyersFeeder(BaseFeeder):
         self._creds: Dict[str, str] = {}
         self._socket = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._subscribed_tokens: List[str] = []  # option tokens to re-subscribe on reconnect
         try:
             import fyers_apiv3  # noqa: F401
             self._sdk_available = True
@@ -299,9 +300,13 @@ class FyersFeeder(BaseFeeder):
             # Subscribe immediately from the WS thread — litemode=True means no Full Mode On handshake
             self._connected = True
             symbols = self._index_symbols()
-            if symbols and self._socket:
-                self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
-                logger.info("FyersFeeder: connected and subscribed — %s", symbols)
+            all_symbols = list(symbols)
+            if self._subscribed_tokens:
+                all_symbols += self._subscribed_tokens
+            if all_symbols and self._socket:
+                self._socket.subscribe(symbols=all_symbols, data_type="SymbolUpdate")
+                logger.info("FyersFeeder: connected and subscribed — %d index + %d option tokens",
+                            len(symbols), len(self._subscribed_tokens))
 
         def _on_close(msg: dict) -> None:
             logger.info("FyersFeeder: WebSocket closed: %s", msg)
@@ -341,15 +346,21 @@ class FyersFeeder(BaseFeeder):
         return [_FYERS_INDEX_SYMBOLS[i] for i in indices if i in _FYERS_INDEX_SYMBOLS]
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
+        # Remember tokens so they are re-subscribed on every reconnect
+        for t in tokens:
+            if t not in self._subscribed_tokens:
+                self._subscribed_tokens.append(t)
         if self._socket and self._connected:
-            # tokens are Fyers-format strings from the rebalancer
             try:
                 self._socket.subscribe(symbols=tokens, data_type="SymbolUpdate")
-                logger.debug("FyersFeeder: subscribed to %d tokens.", len(tokens))
+                logger.info("FyersFeeder: subscribed to %d option tokens.", len(tokens))
             except Exception as exc:
                 logger.warning("FyersFeeder: subscribe_tokens error: %s", exc)
 
     async def unsubscribe_tokens(self, tokens: List[str]) -> None:
+        for t in tokens:
+            if t in self._subscribed_tokens:
+                self._subscribed_tokens.remove(t)
         if self._socket and self._connected:
             try:
                 self._socket.unsubscribe(symbols=tokens, data_type="SymbolUpdate")
