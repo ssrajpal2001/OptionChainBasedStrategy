@@ -379,11 +379,13 @@ class FyersFeeder(BaseFeeder):
         if not symbol_fyers or ltp is None:
             msg_type = raw.get("type", "")
             if msg_type == "ful" and raw.get("code") == 200:
-                # Full mode confirmed — subscribe now
+                # Full mode confirmed — subscribe in a thread (blocking call, must not block event loop)
                 symbols = self._index_symbols()
                 if symbols and self._socket:
-                    self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
-                    logger.info("FyersFeeder: subscribed after Full Mode On — %s", symbols)
+                    sock = self._socket
+                    syms = list(symbols)
+                    await asyncio.to_thread(sock.subscribe, symbols=syms, data_type="SymbolUpdate")
+                    logger.info("FyersFeeder: subscribed after Full Mode On — %s", syms)
             return
         if not hasattr(self, "_logged_first_tick"):
             self._logged_first_tick = True
