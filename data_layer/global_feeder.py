@@ -372,58 +372,80 @@ class UpstoxFeeder(BaseFeeder):
 
     @staticmethod
     def _extract_ltp(feed_data) -> Optional[float]:
-        """Extract LTP from decoded Upstox protobuf feed entry (handles full and ltpc modes)."""
-        try:
-            ff = feed_data.ff
-            # Index feed path
-            if ff.HasField("indexFF"):
-                ltp = ff.indexFF.ltpc.ltp
-                return float(ltp) if ltp else None
-            # Market feed path (FO options, equities)
-            if ff.HasField("marketFF"):
-                ltp = ff.marketFF.ltpc.ltp
-                return float(ltp) if ltp else None
-        except Exception:
-            pass
-        # ltpc mode fallback
-        try:
-            ltp = feed_data.ltpc.ltp
-            return float(ltp) if ltp else None
-        except Exception:
-            pass
+        """
+        Extract LTP from a decoded Upstox feed entry (dict form from MarketDataStreamerV3).
+        Handles full mode (fullFeed.marketFF / fullFeed.indexFF) and ltpc mode.
+        """
+        if not isinstance(feed_data, dict):
+            return None
+        # Full mode
+        ff = feed_data.get("fullFeed") or feed_data.get("ff")
+        if isinstance(ff, dict):
+            for sub in ("marketFF", "indexFF"):
+                blk = ff.get(sub)
+                if isinstance(blk, dict):
+                    ltp = (blk.get("ltpc") or {}).get("ltp")
+                    if ltp:
+                        return float(ltp)
+        # ltpc mode
+        ltpc = feed_data.get("ltpc")
+        if isinstance(ltpc, dict) and ltpc.get("ltp"):
+            return float(ltpc["ltp"])
         return None
 
     @staticmethod
     def _extract_extras(feed_data) -> Dict[str, int]:
-        """Extract OI and volume from full-mode feed entry."""
+        """Extract OI and volume from a full-mode dict feed entry."""
         result: Dict[str, int] = {"oi": 0, "volume": 0}
-        try:
-            mff = feed_data.ff.marketFF
-            result["oi"] = int(getattr(mff, "oi", 0) or 0)
-            result["volume"] = int(getattr(mff, "vol", 0) or 0)
-        except Exception:
-            pass
+        if not isinstance(feed_data, dict):
+            return result
+        ff = feed_data.get("fullFeed") or feed_data.get("ff") or {}
+        mff = ff.get("marketFF") if isinstance(ff, dict) else None
+        if isinstance(mff, dict):
+            try:
+                result["oi"] = int(float(mff.get("oi") or 0))
+            except (TypeError, ValueError):
+                pass
+            try:
+                result["volume"] = int(float((mff.get("eFeedDetails") or {}).get("atp") or mff.get("vtt") or 0))
+            except (TypeError, ValueError):
+                pass
         return result
 
     async def _parse_frame(self, raw: Any) -> None:
-        import upstox_client
-        try:
-            decoded = upstox_client.MarketDataStreamerV3.decode_protobuf(raw)
-        except Exception as exc:
-            logger.debug("UpstoxFeeder: decode_protobuf error: %s", exc)
-            return
+        # MarketDataStreamerV3 on("message") delivers an already-decoded dict in
+        # recent SDKs; older builds emit raw protobuf bytes. Handle both.
+        decoded = raw
+        if not isinstance(raw, dict):
+            try:
+                import upstox_client
+                obj = upstox_client.MarketDataStreamerV3.decode_protobuf(raw)
+                # Convert protobuf to dict if helper available
+                decoded = obj if isinstance(obj, dict) else getattr(obj, "__dict__", {}) or {}
+            except Exception as exc:
+                if not hasattr(self, "_logged_raw_type"):
+                    self._logged_raw_type = True
+                    logger.warning("UpstoxFeeder: cannot decode message type=%s err=%s sample=%r",
+                                   type(raw).__name__, exc, str(raw)[:200])
+                return
 
-        if not decoded or not hasattr(decoded, "feeds"):
+        if not hasattr(self, "_logged_raw_type"):
+            self._logged_raw_type = True
+            logger.info("UpstoxFeeder: first raw message type=%s keys=%s",
+                        type(raw).__name__,
+                        list(decoded.keys())[:6] if isinstance(decoded, dict) else "n/a")
+
+        feeds = decoded.get("feeds") if isinstance(decoded, dict) else None
+        if not isinstance(feeds, dict):
             return
 
         if not hasattr(self, "_logged_first_tick"):
             self._logged_first_tick = True
-            keys_sample = list(decoded.feeds.keys())[:3]
-            logger.info("UpstoxFeeder: first decoded frame keys sample: %s", keys_sample)
+            logger.info("UpstoxFeeder: first decoded frame keys sample: %s", list(feeds.keys())[:3])
 
         now = datetime.now(IST)
 
-        for inst_key, feed_data in decoded.feeds.items():
+        for inst_key, feed_data in feeds.items():
             ltp = self._extract_ltp(feed_data)
             if ltp is None or ltp == 0.0:
                 continue
