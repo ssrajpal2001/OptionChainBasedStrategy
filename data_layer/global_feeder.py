@@ -375,10 +375,15 @@ class FyersFeeder(BaseFeeder):
 
     async def _parse_frame(self, raw: Any) -> None:
         if not isinstance(raw, dict):
+            logger.info("FyersFeeder: raw frame is not dict — type=%s val=%r", type(raw).__name__, str(raw)[:200])
             return
+        if not hasattr(self, "_logged_first_raw"):
+            self._logged_first_raw = True
+            logger.info("FyersFeeder: first raw frame keys=%s sample=%r", list(raw.keys()), str(raw)[:300])
         symbol_fyers = raw.get("symbol", "")
         ltp = raw.get("ltp")
         if not symbol_fyers or ltp is None:
+            logger.debug("FyersFeeder: dropped frame — symbol=%r ltp=%r keys=%s", symbol_fyers, ltp, list(raw.keys()))
             return
 
         internal = _FYERS_TO_INTERNAL.get(symbol_fyers)
