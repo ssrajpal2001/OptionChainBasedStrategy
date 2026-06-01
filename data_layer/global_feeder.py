@@ -182,19 +182,32 @@ class DedupBuffer:
 # UpstoxFeeder — stub for Upstox API v2 WebSocket feed
 # ─────────────────────────────────────────────────────────────────────────────
 
+_UPSTOX_INDEX_KEY_TO_INTERNAL: Dict[str, str] = {
+    "NSE_INDEX|Nifty 50":        "NIFTY",
+    "NSE_INDEX|Nifty Bank":      "BANKNIFTY",
+    "NSE_INDEX|Nifty Fin Service": "FINNIFTY",
+    "NSE_INDEX|NIFTY MID SELECT": "MIDCPNIFTY",
+    "BSE_INDEX|SENSEX":          "SENSEX",
+}
+
+
 class UpstoxFeeder(BaseFeeder):
     """
-    Stub feeder for Upstox API v2.
+    Live Upstox API v3 data feeder using MarketDataStreamerV3.
 
-    If the `upstox_client` SDK is not installed, connect() logs a warning and
-    returns False. _ws_loop idles — replace with real SDK WebSocket wiring when
-    the SDK is available.
+    Streams real-time INDEX_TICK and OPTION_TICK events for all configured
+    monitored indices. The WebSocket runs in a thread via asyncio.to_thread;
+    the on_message callback uses run_coroutine_threadsafe to safely enqueue
+    frames into the asyncio raw queue.
     """
 
     def __init__(self, bus: EventBus, cfg: GlobalConfig = None) -> None:  # type: ignore[assignment]
         super().__init__(bus)
         self._cfg = cfg
         self._creds: Dict[str, str] = {}
+        self._streamer = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._subscribed_keys: List[str] = []   # all currently subscribed instrument keys
         try:
             import upstox_client  # noqa: F401
             self._sdk_available = True
@@ -204,6 +217,16 @@ class UpstoxFeeder(BaseFeeder):
     def set_credentials(self, creds: Dict[str, str]) -> None:
         self._creds = creds
 
+    def _index_instrument_keys(self) -> List[str]:
+        """Return Upstox instrument keys for all configured monitored indices."""
+        from data_layer.symbol_translator import SymbolTranslator
+        indices = (
+            self._cfg.monitored_indices
+            if self._cfg and hasattr(self._cfg, "monitored_indices")
+            else list(_UPSTOX_INDEX_KEY_TO_INTERNAL.values())
+        )
+        return [SymbolTranslator.to_upstox_index(i) for i in indices]
+
     async def connect(self) -> bool:
         if not self._sdk_available:
             logger.warning(
@@ -211,26 +234,230 @@ class UpstoxFeeder(BaseFeeder):
                 "pip install upstox-client.  Feeder will not connect."
             )
             return False
-        self._connected = True
-        logger.info("UpstoxFeeder: connected (stub).")
+        access_token = self._creds.get("access_token", "")
+        if not access_token:
+            logger.warning("UpstoxFeeder: no access_token in credentials — cannot connect.")
+            return False
+
+        self._loop = asyncio.get_running_loop()
+
+        import upstox_client
+
+        cfg_obj = upstox_client.Configuration()
+        cfg_obj.access_token = access_token
+        api_client_obj = upstox_client.ApiClient(cfg_obj)
+
+        # Combine index keys + cached option keys into initial subscription list
+        index_keys = self._index_instrument_keys()
+        all_keys = list(index_keys)
+        for k in self._subscribed_keys:
+            if k not in all_keys:
+                all_keys.append(k)
+        self._subscribed_keys = all_keys
+
+        def _on_open() -> None:
+            self._connected = True
+            logger.info(
+                "UpstoxFeeder: WebSocket connected — subscribed to %d keys (%d index, %d option).",
+                len(self._subscribed_keys),
+                len(index_keys),
+                len(self._subscribed_keys) - len(index_keys),
+            )
+
+        def _on_message(message: bytes) -> None:
+            if self._loop and not self._loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    self._parse_frame(message), self._loop
+                )
+
+        def _on_error(error) -> None:
+            logger.warning("UpstoxFeeder: WS error: %s", error)
+
+        def _on_close() -> None:
+            logger.info("UpstoxFeeder: WebSocket closed.")
+            self._connected = False
+
+        self._streamer = upstox_client.MarketDataStreamerV3(
+            api_client=api_client_obj,
+            instrumentKeys=self._subscribed_keys,
+            mode="full",
+        )
+        self._streamer.on("open", _on_open)
+        self._streamer.on("message", _on_message)
+        self._streamer.on("error", _on_error)
+        self._streamer.on("close", _on_close)
+
+        logger.info("UpstoxFeeder: streamer created — will connect in _ws_loop.")
         return True
 
     async def disconnect(self) -> None:
         self._running = False
         self._connected = False
+        if self._streamer:
+            try:
+                self._streamer.disconnect()
+            except Exception:
+                pass
+            self._streamer = None
+
+    @staticmethod
+    def _is_upstox_key(token: str) -> bool:
+        """Upstox instrument_keys contain a pipe (e.g. NSE_FO|...). Fyers symbols don't."""
+        return "|" in token
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
-        logger.debug("UpstoxFeeder: subscribe_tokens %d tokens (stub).", len(tokens))
+        # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
+        mine = [t for t in tokens if self._is_upstox_key(t)]
+        new_keys = [t for t in mine if t not in self._subscribed_keys]
+        if not new_keys:
+            return
+        for k in new_keys:
+            self._subscribed_keys.append(k)
+        if self._streamer and self._connected:
+            try:
+                self._streamer.subscribe(instrument_keys=new_keys, mode="full")
+                logger.info("UpstoxFeeder: subscribed %d option keys.", len(new_keys))
+            except Exception as exc:
+                logger.warning("UpstoxFeeder: subscribe error: %s", exc)
 
     async def unsubscribe_tokens(self, tokens: List[str]) -> None:
-        pass
+        mine = [t for t in tokens if self._is_upstox_key(t)]
+        for t in mine:
+            if t in self._subscribed_keys:
+                self._subscribed_keys.remove(t)
+        if self._streamer and self._connected and mine:
+            try:
+                self._streamer.unsubscribe(instrument_keys=mine, mode="full")
+            except Exception as exc:
+                logger.debug("UpstoxFeeder: unsubscribe error: %s", exc)
 
     async def _ws_loop(self) -> None:
-        while self._running:
-            await asyncio.sleep(1)
+        if not self._streamer:
+            return
+        self._running = True
+        try:
+            await asyncio.to_thread(self._streamer.connect)
+        except Exception as exc:
+            logger.error("UpstoxFeeder: _ws_loop ended with error: %s", exc)
+        finally:
+            self._connected = False
+            self._running = False
+
+    def _get_option_meta(self, inst_key: str):
+        """
+        Return (underlying, strike, opt_type, expiry) for an Upstox instrument_key,
+        using a lazily-built reverse lookup cache. Rebuilds when registry grows.
+        """
+        from data_layer.instrument_registry import REGISTRY
+        from datetime import date as _date
+
+        total = sum(len(v) for v in REGISTRY._upstox_keys.values())
+        if not hasattr(self, "_rev_map") or total != getattr(self, "_rev_map_size", -1):
+            rev: Dict[str, tuple] = {}
+            for underlying, kmap in REGISTRY._upstox_keys.items():
+                for (exp_str, strike, opt_type), stored_key in kmap.items():
+                    try:
+                        expiry = _date.fromisoformat(exp_str)
+                    except ValueError:
+                        continue
+                    rev[stored_key] = (underlying, strike, opt_type, expiry)
+            self._rev_map: Dict[str, tuple] = rev
+            self._rev_map_size: int = total
+        return self._rev_map.get(inst_key)
+
+    @staticmethod
+    def _extract_ltp(feed_data) -> Optional[float]:
+        """Extract LTP from decoded Upstox protobuf feed entry (handles full and ltpc modes)."""
+        try:
+            ff = feed_data.ff
+            # Index feed path
+            if ff.HasField("indexFF"):
+                ltp = ff.indexFF.ltpc.ltp
+                return float(ltp) if ltp else None
+            # Market feed path (FO options, equities)
+            if ff.HasField("marketFF"):
+                ltp = ff.marketFF.ltpc.ltp
+                return float(ltp) if ltp else None
+        except Exception:
+            pass
+        # ltpc mode fallback
+        try:
+            ltp = feed_data.ltpc.ltp
+            return float(ltp) if ltp else None
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _extract_extras(feed_data) -> Dict[str, int]:
+        """Extract OI and volume from full-mode feed entry."""
+        result: Dict[str, int] = {"oi": 0, "volume": 0}
+        try:
+            mff = feed_data.ff.marketFF
+            result["oi"] = int(getattr(mff, "oi", 0) or 0)
+            result["volume"] = int(getattr(mff, "vol", 0) or 0)
+        except Exception:
+            pass
+        return result
 
     async def _parse_frame(self, raw: Any) -> None:
-        pass
+        import upstox_client
+        try:
+            decoded = upstox_client.MarketDataStreamerV3.decode_protobuf(raw)
+        except Exception as exc:
+            logger.debug("UpstoxFeeder: decode_protobuf error: %s", exc)
+            return
+
+        if not decoded or not hasattr(decoded, "feeds"):
+            return
+
+        if not hasattr(self, "_logged_first_tick"):
+            self._logged_first_tick = True
+            keys_sample = list(decoded.feeds.keys())[:3]
+            logger.info("UpstoxFeeder: first decoded frame keys sample: %s", keys_sample)
+
+        now = datetime.now(IST)
+
+        for inst_key, feed_data in decoded.feeds.items():
+            ltp = self._extract_ltp(feed_data)
+            if ltp is None or ltp == 0.0:
+                continue
+
+            # ── Index tick ──────────────────────────────────────────────────
+            internal_name = _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key)
+            if internal_name:
+                tick = IndexTick(
+                    symbol=internal_name,
+                    ltp=ltp,
+                    open=ltp, high=ltp, low=ltp, close=ltp,
+                    volume=0,
+                    timestamp=now,
+                )
+                await self._publish_index(tick)
+                continue
+
+            # ── Option tick — look up via cached reverse map ──────────────
+            meta = self._get_option_meta(inst_key)
+            if meta:
+                underlying, strike, opt_type, expiry = meta
+                extras = self._extract_extras(feed_data)
+                opt_tick = OptionTick(
+                    symbol=inst_key,
+                    underlying=underlying,
+                    strike=float(strike),
+                    option_type=opt_type,
+                    expiry=expiry,
+                    ltp=ltp,
+                    bid=ltp,
+                    ask=ltp,
+                    oi=extras["oi"],
+                    change_oi=0,
+                    volume=extras["volume"],
+                    iv=0.0,
+                    delta=0.0,
+                    timestamp=now,
+                )
+                await self._publish_option(opt_tick)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,25 +570,33 @@ class FyersFeeder(BaseFeeder):
         )
         return [_FYERS_INDEX_SYMBOLS[i] for i in indices if i in _FYERS_INDEX_SYMBOLS]
 
+    @staticmethod
+    def _is_fyers_symbol(token: str) -> bool:
+        """Fyers symbols look like NSE:NIFTY...  Upstox keys contain a pipe and are excluded."""
+        return ":" in token and "|" not in token
+
     async def subscribe_tokens(self, tokens: List[str]) -> None:
+        # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
+        mine = [t for t in tokens if self._is_fyers_symbol(t)]
         # Remember tokens so they are re-subscribed on every reconnect
-        for t in tokens:
+        for t in mine:
             if t not in self._subscribed_tokens:
                 self._subscribed_tokens.append(t)
-        if self._socket and self._connected:
+        if self._socket and self._connected and mine:
             try:
-                self._socket.subscribe(symbols=tokens, data_type="SymbolUpdate")
-                logger.info("FyersFeeder: subscribed to %d option tokens.", len(tokens))
+                self._socket.subscribe(symbols=mine, data_type="SymbolUpdate")
+                logger.info("FyersFeeder: subscribed to %d option tokens.", len(mine))
             except Exception as exc:
                 logger.warning("FyersFeeder: subscribe_tokens error: %s", exc)
 
     async def unsubscribe_tokens(self, tokens: List[str]) -> None:
-        for t in tokens:
+        mine = [t for t in tokens if self._is_fyers_symbol(t)]
+        for t in mine:
             if t in self._subscribed_tokens:
                 self._subscribed_tokens.remove(t)
-        if self._socket and self._connected:
+        if self._socket and self._connected and mine:
             try:
-                self._socket.unsubscribe(symbols=tokens, data_type="SymbolUpdate")
+                self._socket.unsubscribe(symbols=mine, data_type="SymbolUpdate")
             except Exception as exc:
                 logger.debug("FyersFeeder: unsubscribe_tokens error: %s", exc)
 
@@ -476,6 +711,9 @@ class DualFeeder:
         for provider, feeder in (("upstox", upstox), ("fyers", fyers)):
             if hasattr(feeder, "set_latency_tracker"):
                 feeder.set_latency_tracker(provider, self._latency)
+            # Share one dedup buffer across both feeders so the trailing provider's
+            # duplicate ticks are dropped — but failover is seamless if one dies.
+            feeder.set_dedup_buffer(self._dedup)
             try:
                 ok = await feeder.connect()
             except Exception as exc:

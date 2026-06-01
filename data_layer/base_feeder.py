@@ -197,6 +197,14 @@ class BaseFeeder(ABC):
         self._raw_queue: asyncio.Queue = asyncio.Queue(maxsize=self.RAW_QUEUE_SIZE)
         self._parse_task: Optional[asyncio.Task] = None
         self._raw_drop_count: int = 0
+        # Optional shared dedup buffer (set by DualFeeder for active-active mode).
+        # When two feeders publish the same symbol in parallel, only the first
+        # tick within the dedup window is forwarded to the EventBus.
+        self._dedup_buffer = None
+
+    def set_dedup_buffer(self, buffer) -> None:
+        """Attach a shared DedupBuffer so duplicate ticks from a parallel feeder are dropped."""
+        self._dedup_buffer = buffer
 
     # ── Abstract interface ─────────────────────────────────────────────────────
 
@@ -315,8 +323,16 @@ class BaseFeeder(ABC):
 
     async def _publish_index(self, tick: IndexTick) -> None:
         from config.global_config import Topic
+        if self._dedup_buffer is not None and not self._dedup_buffer.accept(tick.symbol, tick.ltp):
+            return
         await self._bus.publish(Topic.INDEX_TICK, tick)
 
     async def _publish_option(self, tick: OptionTick) -> None:
         from config.global_config import Topic
+        if self._dedup_buffer is not None:
+            # Canonical key — Upstox & Fyers use different symbol strings for the
+            # same contract, so dedup on the contract identity, not the raw symbol.
+            dedup_key = f"{tick.underlying}:{tick.expiry}:{int(tick.strike)}:{tick.option_type}"
+            if not self._dedup_buffer.accept(dedup_key, tick.ltp):
+                return
         await self._bus.publish(Topic.OPTION_TICK, tick)

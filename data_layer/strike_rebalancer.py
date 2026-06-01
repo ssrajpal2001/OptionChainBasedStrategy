@@ -306,37 +306,47 @@ class StrikeRebalancer:
             logger.warning("StrikeRebalancer[%s]: no expiry in registry — skipping token build", underlying)
             return []
 
-        # Detect provider from feeder — use active_provider if available (GlobalFeeder)
-        provider = "internal"
+        # Detect which provider format(s) to build. In dual mode we build BOTH
+        # Upstox instrument_keys AND Fyers symbols so each feeder in the
+        # active-active pair receives option contracts in its own native format.
+        # Each feeder filters out tokens it doesn't understand (see
+        # UpstoxFeeder/FyersFeeder.subscribe_tokens).
+        providers = []
         if hasattr(self._feeder, "active_provider"):
             ap = self._feeder.active_provider
-            if ap in ("fyers", "dual"):
-                provider = "fyers"
+            if ap == "dual":
+                providers = ["upstox", "fyers"]
+            elif ap == "fyers":
+                providers = ["fyers"]
             elif ap == "upstox":
-                provider = "upstox"
+                providers = ["upstox"]
         else:
             feeder_type = type(self._feeder).__name__
             if "Fyers" in feeder_type:
-                provider = "fyers"
+                providers = ["fyers"]
             elif "Upstox" in feeder_type:
-                provider = "upstox"
+                providers = ["upstox"]
+
+        if not providers:
+            providers = ["internal"]
 
         tokens = []
         for strike in strikes:
             strike_int = int(round(float(strike)))
             for otype in ("CE", "PE"):
-                if provider == "internal":
-                    sym = InternalSymbol(
-                        underlying=underlying, strike=float(strike_int),
-                        option_type=otype, expiry=expiry,
-                    )
-                    tokens.append(str(sym))
-                else:
-                    sym = REGISTRY.get_broker_symbol(
-                        underlying, expiry, strike_int, otype, provider
-                    )
-                    if sym:
-                        tokens.append(sym)
+                for provider in providers:
+                    if provider == "internal":
+                        sym = InternalSymbol(
+                            underlying=underlying, strike=float(strike_int),
+                            option_type=otype, expiry=expiry,
+                        )
+                        tokens.append(str(sym))
+                    else:
+                        sym = REGISTRY.get_broker_symbol(
+                            underlying, expiry, strike_int, otype, provider
+                        )
+                        if sym:
+                            tokens.append(sym)
         return tokens
 
 
