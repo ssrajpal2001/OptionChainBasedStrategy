@@ -400,21 +400,25 @@ async def _run_live(
         _shared_client_db.get_feeder_creds_sync, "upstox"
     )
     _upstox_token = (_upstox_creds or {}).get("access_token", "")
-    if _upstox_token:
-        for _idx in cfg.monitored_indices:
-            try:
-                await asyncio.to_thread(_instrument_registry.load_sync, _idx, _upstox_token)
-                # Inject Upstox instrument map into UpstoxBroker instances
-                _upstox_map = _instrument_registry.build_instrument_map(_idx)
-                for _brokers_by_binding in router._brokers.values():
-                    for _broker in _brokers_by_binding.values():
-                        if hasattr(_broker, "inject_instrument_map"):
-                            _broker.inject_instrument_map(_upstox_map)
-            except Exception as _exc:
-                logging.getLogger(__name__).warning(
-                    "InstrumentRegistry: failed to load [%s]: %s", _idx, _exc
-                )
-    else:
+    from data_layer.instrument_registry import _MCX_UNDERLYINGS as _MCX_SET
+    # MCX commodities (CRUDEOIL) load from the public MCX master — no token needed.
+    # NSE/BSE indices need the Upstox token for get_option_contracts.
+    for _idx in cfg.monitored_indices:
+        _is_mcx = _idx.upper() in _MCX_SET
+        if not _is_mcx and not _upstox_token:
+            continue
+        try:
+            await asyncio.to_thread(_instrument_registry.load_sync, _idx, _upstox_token)
+            _upstox_map = _instrument_registry.build_instrument_map(_idx)
+            for _brokers_by_binding in router._brokers.values():
+                for _broker in _brokers_by_binding.values():
+                    if hasattr(_broker, "inject_instrument_map"):
+                        _broker.inject_instrument_map(_upstox_map)
+        except Exception as _exc:
+            logging.getLogger(__name__).warning(
+                "InstrumentRegistry: failed to load [%s]: %s", _idx, _exc
+            )
+    if not _upstox_token:
         logging.getLogger(__name__).warning(
             "InstrumentRegistry: no Upstox token — using constructed symbols. "
             "Authenticate Upstox feeder via Admin > Feeder for exact instrument keys."
