@@ -452,7 +452,7 @@ class GlobalConfig:
 
     # Active indices to monitor (feeder subscribes to all)
     monitored_indices: List[str] = field(
-        default_factory=lambda: ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"]
+        default_factory=lambda: ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"]
     )
     active_index: str = "NIFTY"
 
