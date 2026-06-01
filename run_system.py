@@ -242,6 +242,8 @@ def _load_registry_from_db(registry) -> None:
             # can never crash the whole registry load (which leaves Router with 0
             # clients and blocks all order routing). Pass auth creds so the broker
             # can authenticate for LIVE orders (otherwise broker=None → paper fill).
+            from data_layer.client_db import _decode_cred
+
             def _bget(row, key, default=""):
                 try:
                     val = row[key]
@@ -249,18 +251,29 @@ def _load_registry_from_db(registry) -> None:
                     return default
                 return val if val is not None else default
 
+            def _bdec(row, key):
+                """Read an XOR-encoded *_enc column and decode it to plaintext."""
+                enc = _bget(row, key, "")
+                if not enc:
+                    return ""
+                try:
+                    return _decode_cred(enc)
+                except Exception:
+                    return ""
+
             bindings = con.execute(
                 "SELECT * FROM broker_bindings WHERE client_id=? AND enabled=1", (cid,)
             ).fetchall()
             for b in bindings:
+                # Credentials are stored XOR-encoded in *_enc columns; access_token
+                # is plaintext. Decode so the broker can authenticate for LIVE orders.
                 profile.broker_bindings.append(BrokerBinding(
                     binding_id=b["binding_id"],
                     provider=b["provider"],
                     label=_bget(b, "label", "") or "",
-                    user_id=_bget(b, "user_id", "") or "",
-                    api_key=_bget(b, "api_key", "") or "",
-                    api_secret=_bget(b, "api_secret", "") or "",
-                    totp_secret=_bget(b, "totp_secret", "") or "",
+                    user_id=_bdec(b, "user_id_enc"),
+                    api_key=_bdec(b, "api_key_enc"),
+                    api_secret=_bdec(b, "api_secret_enc"),
                     access_token=_bget(b, "access_token", "") or "",
                     trading_mode=_bget(b, "trading_mode", "paper") or "paper",
                     assigned_strategy=_bget(b, "assigned_strategy", "") or "",
