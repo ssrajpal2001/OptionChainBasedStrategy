@@ -2268,58 +2268,62 @@ class DashboardServer:
         @app.get("/api/admin/strategies", tags=["Admin"])
         async def api_strategies(_: dict = Depends(_require_admin)):
             now_ist = datetime.now(IST).isoformat()
-            out = []
-            for ic in _srv._iron_condors:
-                pos = ic.position
-                entry = None
-                if pos:
-                    entry = {
-                        "short_ce": pos.short_ce.strike,
-                        "short_pe": pos.short_pe.strike,
-                        "long_ce":  pos.long_ce.strike,
-                        "long_pe":  pos.long_pe.strike,
-                        "net_credit":    round(pos.net_credit, 2),
-                        "profit_target": round(pos.profit_target, 2),
-                        "stop_loss":     round(pos.stop_loss, 2),
-                        "open_time": pos.open_time.isoformat() if pos.open_time else None,
-                    }
-                out.append({
-                    "type":         "iron_condor",
-                    "underlying":   ic._underlying,
-                    "running":      ic._running,
-                    "has_position": ic.has_open_position,
-                    "spot":         round(ic._spot, 2),
-                    "entry_allowed": getattr(ic, "entry_allowed", True),
-                    "position":     entry,
-                })
-            for ss in _srv._sell_straddles:
-                pos = ss.position
-                entry = None
-                if pos:
-                    entry = {
-                        "atm":       pos.atm_at_entry,
-                        "ce_strike": pos.ce_leg.strike,
-                        "pe_strike": pos.pe_leg.strike,
-                        "net_credit":    round(pos.net_credit, 2),
-                        "unrealized_pnl": round(pos.unrealized_pnl, 2),
-                        "profit_target": round(pos.profit_target, 2),
-                        "stop_loss":     round(pos.stop_loss_limit, 2),
-                        "trailing_active": pos.trailing_active,
-                        "open_time": pos.open_time.isoformat() if pos.open_time else None,
-                    }
-                out.append({
-                    "type":         "sell_straddle",
-                    "underlying":   ss._underlying,
-                    "running":      ss._running,
-                    "has_position": ss.has_open_position,
-                    "trades_today": ss.trades_today,
-                    "spot":         round(ss._spot, 2),
-                    "rsi":          round(ss._ind.get("rsi", 0.0), 1),
-                    "adx":          round(ss._ind.get("adx", 0.0), 1),
-                    "entry_allowed": getattr(ss, "entry_allowed", True),
-                    "position":     entry,
-                })
-            return {"strategies": out, "ts": now_ist}
+            try:
+                out = []
+                for ic in _srv._iron_condors:
+                    pos = ic.position
+                    entry = None
+                    if pos:
+                        entry = {
+                            "short_ce": pos.short_ce.strike,
+                            "short_pe": pos.short_pe.strike,
+                            "long_ce":  pos.long_ce.strike,
+                            "long_pe":  pos.long_pe.strike,
+                            "net_credit":    round(pos.net_credit, 2),
+                            "profit_target": round(pos.profit_target_rs, 2),
+                            "stop_loss":     round(pos.sl_rs, 2),
+                            "unrealized_pnl": round(pos.total_pnl_pts * pos.lot_size, 2),
+                            "open_time": pos.open_time.isoformat() if pos.open_time else None,
+                        }
+                    out.append({
+                        "type":         "iron_condor",
+                        "underlying":   ic._underlying,
+                        "running":      ic._running,
+                        "has_position": ic.has_open_position,
+                        "spot":         round(ic._spot, 2),
+                        "entry_allowed": getattr(ic, "entry_allowed", True),
+                        "position":     entry,
+                    })
+                for ss in _srv._sell_straddles:
+                    pos = ss.position
+                    entry = None
+                    if pos:
+                        entry = {
+                            "atm":       pos.atm_at_entry,
+                            "ce_strike": pos.ce_leg.strike,
+                            "pe_strike": pos.pe_leg.strike,
+                            "net_credit":    round(pos.net_credit, 2),
+                            "unrealized_pnl": round(pos.unrealized_pnl, 2),
+                            "peak_profit":   round(pos.peak_profit, 2),
+                            "trailing_active": pos.trailing_active,
+                            "open_time": pos.open_time.isoformat() if pos.open_time else None,
+                        }
+                    out.append({
+                        "type":         "sell_straddle",
+                        "underlying":   ss._underlying,
+                        "running":      ss._running,
+                        "has_position": ss.has_open_position,
+                        "trades_today": ss.trades_today,
+                        "spot":         round(ss._spot, 2),
+                        "rsi":          round(ss._ind.get("rsi", 0.0), 1),
+                        "adx":          round(ss._ind.get("adx", 0.0), 1),
+                        "entry_allowed": getattr(ss, "entry_allowed", True),
+                        "position":     entry,
+                    })
+                return {"strategies": out, "ts": now_ist}
+            except Exception as exc:
+                logger.warning("Dashboard: /api/admin/strategies failed: %s", exc)
+                return {"ok": False, "error": str(exc), "strategies": [], "ts": now_ist}
 
         # ── ADMIN — runtime strategy configuration ───────────────────────
 
