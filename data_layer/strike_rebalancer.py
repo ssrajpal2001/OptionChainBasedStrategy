@@ -88,6 +88,7 @@ class StrikeRebalancer:
         self._feeder = feeder
         self._tick_queue = bus.subscribe(Topic.INDEX_TICK)
         self._fill_queue = bus.subscribe(Topic.ORDER_FILL)
+        self._sysevt_queue = bus.subscribe(Topic.SYSTEM_EVENT)
         self._running = False
         self._state: Dict[str, _UnderlyingState] = {
             u: _UnderlyingState() for u in cfg.monitored_indices
@@ -139,10 +140,11 @@ class StrikeRebalancer:
     async def run(self) -> None:
         self._running = True
         logger.info("StrikeRebalancer: started.")
-        # Run tick consumer and fill consumer as concurrent sub-tasks
+        # Run tick consumer, fill consumer, and feed-switch listener concurrently
         await asyncio.gather(
             self._tick_loop(),
             self._fill_loop(),
+            self._sysevt_loop(),
         )
 
     def stop(self) -> None:
@@ -159,6 +161,33 @@ class StrikeRebalancer:
             except asyncio.TimeoutError:
                 continue
             await self._on_tick(tick)
+
+    async def _sysevt_loop(self) -> None:
+        """
+        Listen for feed-provider switches. When the live feed (dual/single)
+        activates, the market-open ATM may have been anchored on a MockFeeder
+        synthetic tick (e.g. NIFTY 24500 vs real 23500). Reset the anchor so the
+        rebalancer re-subscribes the strike window around the REAL ATM on the
+        next incoming index tick — otherwise every strategy reads 0.00 premiums
+        for strikes that were never subscribed.
+        """
+        while self._running:
+            try:
+                evt = await asyncio.wait_for(self._sysevt_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            msg = str(getattr(evt, "message", "")).lower()
+            code = getattr(evt, "code", None)
+            if code == SysEvent.FEEDER_RESTORED and ("dual" in msg or "single" in msg):
+                for underlying, st in self._state.items():
+                    st.open_atm = None
+                    st.current_atm = None
+                logger.info(
+                    "StrikeRebalancer: live feed activated (%s) — ATM anchors reset; "
+                    "will re-subscribe around real ATM on next tick.", msg,
+                )
 
     async def _fill_loop(self) -> None:
         """
