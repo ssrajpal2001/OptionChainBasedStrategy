@@ -711,17 +711,12 @@ class SellStraddleStrategy:
             )
             return
 
-        # ltp_target — BOTH legs must individually be >= threshold.
-        # sell_v3 rule: anchor LTP checked before partner search; pool scan
-        # filters out any leg below ltp_target. Neither leg can be under the floor.
-        # Example: CE=50, PE=55, threshold=60 → neither qualifies → skip entry.
-        if self._ltp_target > 0.0:
-            if self._ce_ltp < self._ltp_target or self._pe_ltp < self._ltp_target:
-                self._clog.info(
-                    "BLOCK ltp_target=%.2f  CE=%.2f PE=%.2f — leg below floor",
-                    self._ltp_target, self._ce_ltp, self._pe_ltp,
-                )
-                return
+        # NOTE: the ltp_target floor is enforced INSIDE selection (reference parity):
+        # select_balanced_pair requires anchor>=target and partner>=target; scan_pool
+        # requires both legs>=target. We deliberately do NOT pre-gate on the ATM
+        # legs here — an ATM-premium pre-check would wrongly block valid non-ATM
+        # balanced pairs (ITM strikes carry higher premium than ATM). The spot/ce/pe>0
+        # wait above already guarantees ATM ticks exist, which selection needs.
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         is_beginning = (self._trades_today == 0)
