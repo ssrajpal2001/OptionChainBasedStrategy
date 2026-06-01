@@ -197,7 +197,9 @@ class IronCondorStrategy:
             if ev.symbol != self._underlying or ev.timeframe != 5:
                 continue
             try:
-                await self._on_candle(ev)
+                # Candle close also triggers an entry attempt (belt-and-suspenders);
+                # the primary immediate trigger is the tick loop.
+                await self._try_entry()
             except Exception as exc:
                 logger.exception("IronCondor[%s]: candle error: %s", self._underlying, exc)
 
@@ -217,6 +219,13 @@ class IronCondorStrategy:
             if self._position and self._position.status == "open" and not self._adjusting:
                 await self._check_exits()
                 await self._check_adjustment_criteria()
+            elif not self._position or self._position.status != "open":
+                # No open position → attempt entry IMMEDIATELY on every tick
+                # (throttled inside _try_entry). IC needs no candle close.
+                try:
+                    await self._try_entry()
+                except Exception as exc:
+                    logger.exception("IronCondor[%s]: entry error: %s", self._underlying, exc)
 
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick
@@ -240,7 +249,19 @@ class IronCondorStrategy:
 
     # ── Entry logic ───────────────────────────────────────────────────────────
 
-    async def _on_candle(self, ev: CandleEvent) -> None:
+    async def _try_entry(self) -> None:
+        """
+        Attempt an Iron Condor entry IMMEDIATELY (driven by index ticks, not
+        candle closes). IC has no indicator/timeframe gate — it enters as soon
+        as the entry window is open, no position is held, and live premiums are
+        present. Throttled to avoid re-evaluating on every tick.
+        """
+        import time as _time
+        nowm = _time.monotonic()
+        if nowm - getattr(self, "_last_entry_attempt", 0.0) < 1.0:
+            return
+        self._last_entry_attempt = nowm
+
         self._load_thresholds()
         now = datetime.now(IST)
 
@@ -289,6 +310,26 @@ class IronCondorStrategy:
 
         net_credit = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp)
 
+        # Guard 1: never fire a zero/negative-credit order. Missing premiums
+        # (option feed not yet populated for these strikes) yield net_credit<=0.
+        # Throttle this log so it doesn't spam on every tick while waiting.
+        if net_credit <= 0 or short_ce_ltp <= 0 or short_pe_ltp <= 0:
+            if nowm - getattr(self, "_last_wait_log", 0.0) > 30.0:
+                self._last_wait_log = nowm
+                self._clog.info(
+                    "WAIT premiums — short CE[%d]=%.2f PE[%d]=%.2f net_credit=%.2f (feed not ready)",
+                    int(short_ce_strike), short_ce_ltp,
+                    int(short_pe_strike), short_pe_ltp, net_credit,
+                )
+            return
+
+        # Guard 2: registry/expiry must be loaded BEFORE we route any order.
+        from data_layer.instrument_registry import next_expiry as _nexp
+        _expiry = _nexp(self._underlying)
+        if not _expiry:
+            logger.warning("IronCondor[%s]: registry not loaded, skipping entry — authenticate Upstox first.", self._underlying)
+            return
+
         logger.info(
             "IronCondor[%s]: ENTRY ATM=%.0f | short CE=%.0f(%.2f) PE=%.0f(%.2f) "
             "| hedge CE=%.0f(%.2f) PE=%.0f(%.2f) | net_credit=%.2f",
@@ -316,11 +357,6 @@ class IronCondorStrategy:
         )
         await self._bus.publish(Topic.IC_ORDER_REQUEST, ev_order)
 
-        from data_layer.instrument_registry import next_expiry as _nexp
-        _expiry = _nexp(self._underlying)
-        if not _expiry:
-            logger.warning("IronCondor[%s]: registry not loaded, skipping entry — authenticate Upstox first.", self._underlying)
-            return
         self._position = IronCondorPosition(
             underlying      = self._underlying,
             expiry          = _expiry,
