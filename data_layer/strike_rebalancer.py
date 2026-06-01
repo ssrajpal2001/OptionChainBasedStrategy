@@ -306,15 +306,20 @@ class StrikeRebalancer:
             logger.warning("StrikeRebalancer[%s]: no expiry in registry — skipping token build", underlying)
             return []
 
-        # Detect provider from feeder type
+        # Detect provider from feeder — use active_provider if available (GlobalFeeder)
         provider = "internal"
-        feeder_type = type(self._feeder).__name__
-        if "Fyers" in feeder_type:
-            provider = "fyers"
-        elif "Upstox" in feeder_type:
-            provider = "upstox"
-        elif "Shared" in feeder_type or "Mock" in feeder_type:
-            provider = "internal"
+        if hasattr(self._feeder, "active_provider"):
+            ap = self._feeder.active_provider
+            if ap in ("fyers", "dual"):
+                provider = "fyers"
+            elif ap == "upstox":
+                provider = "upstox"
+        else:
+            feeder_type = type(self._feeder).__name__
+            if "Fyers" in feeder_type:
+                provider = "fyers"
+            elif "Upstox" in feeder_type:
+                provider = "upstox"
 
         tokens = []
         for strike in strikes:
