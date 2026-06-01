@@ -180,6 +180,14 @@ class SellStraddleStrategy:
         self._ce_atp: float    = 0.0
         self._pe_atp: float    = 0.0
         self._prev_vwap_atp: Optional[float] = None   # previous closed-candle combined VWAP
+        # Per-strike feed cache for balanced-pair selection (all subscribed strikes).
+        # Key = (int strike, "CE"/"PE") -> {"ltp": float, "atp": float}.
+        self._strike_prem: Dict[Tuple[int, str], dict] = {}
+        # Previous closed-candle ATP per leg, for per-pair VWAP slope.
+        self._prev_atp_closed: Dict[Tuple[int, str], float] = {}
+        # Hybrid workflow: set when the beginning concept's pair fails its gate,
+        # routes the next pulse to the pool scan even while trades_today == 0.
+        self._beginning_failed: bool = False
         self._ltp_target: float = 0.0
 
         # Trailing SL — enable toggle + thresholds
@@ -390,6 +398,9 @@ class SellStraddleStrategy:
         self._idx_closes.clear()
         self._last_exit_rules_bucket = ""
         self._last_roc_guard_bucket  = ""
+        self._strike_prem.clear()
+        self._prev_atp_closed.clear()
+        self._beginning_failed = False
         logger.info("SellStraddleStrategy[%s]: session reset.", self._underlying)
 
     # ── EventBus loops ────────────────────────────────────────────────────────
@@ -497,6 +508,17 @@ class SellStraddleStrategy:
             atm = round(self._spot / step) * step if self._spot > 0 else 0
             # Ignore zero/garbage premium ticks — they corrupt VWAP/SLOPE and the
             # OPT_TICKS log (seen as CE=0.00 PE=0.00).
+            # Per-strike cache (every subscribed strike) for balanced-pair selection.
+            if tick.ltp > 0:
+                _k = (int(tick.strike), tick.option_type)
+                _a = float(getattr(tick, "atp", 0.0) or 0.0)
+                entry = self._strike_prem.get(_k)
+                if entry is None:
+                    self._strike_prem[_k] = {"ltp": float(tick.ltp), "atp": _a}
+                else:
+                    entry["ltp"] = float(tick.ltp)
+                    if _a > 0:
+                        entry["atp"] = _a
             if atm > 0 and tick.ltp > 0 and abs(tick.strike - atm) < step / 2:
                 _atp = float(getattr(tick, "atp", 0.0) or 0.0)  # broker VWAP for this leg
                 if tick.option_type == "CE":
@@ -557,6 +579,14 @@ class SellStraddleStrategy:
 
         self._recompute_indicators()
 
+        # Snapshot every cached leg's current ATP as its "previous closed" value
+        # for the next candle's per-pair slope. Only overwrite on a valid ATP so a
+        # missing tick never corrupts the slope (same discipline as the ATM path).
+        for _k, _v in self._strike_prem.items():
+            _a = _v.get("atp", 0.0)
+            if _a and _a > 0:
+                self._prev_atp_closed[_k] = _a
+
         # Force-exit
         if now.time() >= self._force_exit:
             if self._position and self._position.status == "open":
@@ -612,6 +642,11 @@ class SellStraddleStrategy:
             _ref = closes[-10]
             if _ref != 0:
                 self._ind["roc"] = float((closes[-1] - _ref) / _ref * 100.0)
+
+    def _pair_indicators(self, ce_strike: int, pe_strike: int) -> Optional[Dict[str, float]]:
+        """Per-pair {close, vwap, slope} from the feed cache (broker ATP). None if not ready."""
+        from strategies.straddle_selection import pair_indicators
+        return pair_indicators(self._strike_prem, self._prev_atp_closed, ce_strike, pe_strike)
 
     # ── Priming wait ──────────────────────────────────────────────────────────
 
