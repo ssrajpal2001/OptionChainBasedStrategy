@@ -34,6 +34,15 @@ class ExchangeConfig:
     market_close: time = time(15, 30, 0)         # Halt processing, flush all buffers
     eod_cleanup: time = time(15, 45, 0)          # Rotate log/parquet files
 
+    # MCX (commodity) session — open well past the NSE/BSE close.
+    # Used for CRUDEOIL etc. so the after-hours test (and live commodity trading)
+    # is not force-squared-off at 15:30.
+    mcx_market_open: time = time(9, 0, 0)
+    mcx_market_close: time = time(23, 30, 0)     # MCX evening session close (~23:30 IST)
+
+    # Underlyings that trade on MCX (commodity segment, futures-driven ATM)
+    mcx_underlyings: tuple = ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER")
+
     # Strike granularity per index (points)
     strike_steps: Dict[str, float] = field(default_factory=lambda: {
         "NIFTY": 50.0,
@@ -41,16 +50,32 @@ class ExchangeConfig:
         "FINNIFTY": 50.0,
         "SENSEX": 100.0,
         "MIDCPNIFTY": 50.0,
+        # MCX commodities
+        "CRUDEOIL": 50.0,        # crude option strikes are 50 apart
+        "CRUDEOILM": 50.0,
+        "NATURALGAS": 5.0,
     })
 
-    # Standard lot sizes (NSE/BSE current values)
+    # Standard lot sizes (NSE/BSE current values + MCX commodity lots)
     lot_sizes: Dict[str, int] = field(default_factory=lambda: {
         "NIFTY": 65,
         "BANKNIFTY": 30,
         "FINNIFTY": 60,
         "SENSEX": 20,
         "MIDCPNIFTY": 120,
+        # MCX commodities (verify against current contract spec before live)
+        "CRUDEOIL": 100,        # 100 barrels
+        "CRUDEOILM": 10,        # mini = 10 barrels
+        "NATURALGAS": 1250,
     })
+
+    def is_mcx(self, underlying: str) -> bool:
+        """True if this underlying trades on MCX (commodity session + segment)."""
+        return underlying.upper() in self.mcx_underlyings
+
+    def session_close(self, underlying: str) -> time:
+        """Return the force-exit/close time appropriate for this underlying's exchange."""
+        return self.mcx_market_close if self.is_mcx(underlying) else self.market_close
 
 
 # ─────────────────────────────────────────────────────────────────────────────
