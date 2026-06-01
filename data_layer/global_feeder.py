@@ -218,14 +218,26 @@ class UpstoxFeeder(BaseFeeder):
         self._creds = creds
 
     def _index_instrument_keys(self) -> List[str]:
-        """Return Upstox instrument keys for all configured monitored indices."""
+        """
+        Upstox instrument keys for monitored instruments. MCX commodities use the
+        near-month FUTURES instrument_key from the registry as the ATM source.
+        """
         from data_layer.symbol_translator import SymbolTranslator
+        from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
         indices = (
             self._cfg.monitored_indices
             if self._cfg and hasattr(self._cfg, "monitored_indices")
             else list(_UPSTOX_INDEX_KEY_TO_INTERNAL.values())
         )
-        return [SymbolTranslator.to_upstox_index(i) for i in indices]
+        keys: List[str] = []
+        for i in indices:
+            if i.upper() in _MCX_UNDERLYINGS:
+                fk = REGISTRY.get_futures_upstox(i.upper())
+                if fk:
+                    keys.append(fk)
+            else:
+                keys.append(SymbolTranslator.to_upstox_index(i))
+        return keys
 
     async def connect(self) -> bool:
         if not self._sdk_available:
@@ -451,7 +463,7 @@ class UpstoxFeeder(BaseFeeder):
                 continue
 
             # ── Index tick ──────────────────────────────────────────────────
-            internal_name = _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key)
+            internal_name = _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key) or _mcx_upstox_fut_to_internal(inst_key)
             if internal_name:
                 tick = IndexTick(
                     symbol=internal_name,
@@ -499,6 +511,39 @@ _FYERS_INDEX_SYMBOLS: Dict[str, str] = {
     "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
 }
 _FYERS_TO_INTERNAL: Dict[str, str] = {v: k for k, v in _FYERS_INDEX_SYMBOLS.items()}
+
+
+def _mcx_fyers_fut_to_internal(symbol: str) -> Optional[str]:
+    """Map an MCX futures Fyers symbol (e.g. MCX:CRUDEOIL26JUNFUT) -> 'CRUDEOIL'."""
+    from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
+    for u in _MCX_UNDERLYINGS:
+        if symbol and REGISTRY.get_futures_fyers(u) == symbol:
+            return u
+    return None
+
+
+def _mcx_upstox_fut_to_internal(ikey: str) -> Optional[str]:
+    """Map an MCX futures Upstox key (e.g. MCX_FO|499095) -> 'CRUDEOIL'."""
+    from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
+    for u in _MCX_UNDERLYINGS:
+        if ikey and REGISTRY.get_futures_upstox(u) == ikey:
+            return u
+    return None
+
+
+import re as _re
+_MCX_FY_OPT_RE = _re.compile(r"^MCX:([A-Z]+?)(\d{2})([A-Z]{3})(\d+)(CE|PE)$")
+
+
+def _parse_mcx_fyers_option(symbol: str):
+    """Parse 'MCX:CRUDEOIL26JUN8850CE' -> (underlying, strike, opt_type, expiry)."""
+    m = _MCX_FY_OPT_RE.match(symbol or "")
+    if not m:
+        return None
+    underlying, _yy, _mon, strike, ot = m.groups()
+    from data_layer.instrument_registry import REGISTRY
+    exp = REGISTRY.get_active_expiry(underlying)
+    return (underlying, float(strike), ot, exp)
 
 
 class FyersFeeder(BaseFeeder):
@@ -589,13 +634,26 @@ class FyersFeeder(BaseFeeder):
             self._socket = None
 
     def _index_symbols(self) -> List[str]:
-        """Return Fyers-format symbols for all configured monitored indices."""
+        """
+        Fyers-format 'index' symbols for all monitored instruments. For MCX
+        commodities (CRUDEOIL) the ATM source is the near-month FUTURES symbol
+        from the registry (e.g. MCX:CRUDEOIL26JUNFUT), not a spot index.
+        """
+        from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
         indices = (
             self._cfg.monitored_indices
             if self._cfg and hasattr(self._cfg, "monitored_indices")
             else list(_FYERS_INDEX_SYMBOLS.keys())
         )
-        return [_FYERS_INDEX_SYMBOLS[i] for i in indices if i in _FYERS_INDEX_SYMBOLS]
+        syms: List[str] = []
+        for i in indices:
+            if i.upper() in _MCX_UNDERLYINGS:
+                fut = REGISTRY.get_futures_fyers(i.upper())
+                if fut:
+                    syms.append(fut)
+            elif i in _FYERS_INDEX_SYMBOLS:
+                syms.append(_FYERS_INDEX_SYMBOLS[i])
+        return syms
 
     @staticmethod
     def _is_fyers_symbol(token: str) -> bool:
@@ -667,7 +725,7 @@ class FyersFeeder(BaseFeeder):
             self._logged_first_tick = True
             logger.info("FyersFeeder: first TICK frame keys=%s sample=%r", list(raw.keys()), str(raw)[:400])
 
-        internal = _FYERS_TO_INTERNAL.get(symbol_fyers)
+        internal = _FYERS_TO_INTERNAL.get(symbol_fyers) or _mcx_fyers_fut_to_internal(symbol_fyers)
         if internal:
             t0 = time.monotonic()
             tick = IndexTick(
@@ -684,19 +742,25 @@ class FyersFeeder(BaseFeeder):
             if hasattr(self, "_latency_dict"):
                 self._latency_dict[self._latency_provider] = (time.monotonic() - t0) * 1000.0
         else:
-            # Option tick — parse Fyers symbol and publish OptionTick
+            # Option tick — parse Fyers symbol (NSE or MCX) and publish OptionTick
             try:
                 from data_layer.symbol_translator import SymbolTranslator
+                _u = _s = _ot = _exp = None
                 sym = SymbolTranslator.from_fyers(symbol_fyers)
                 if sym is not None:
+                    _u, _s, _ot, _exp = sym.underlying, sym.strike, sym.option_type, sym.expiry
+                else:
+                    mcx = _parse_mcx_fyers_option(symbol_fyers)
+                    if mcx is not None:
+                        _u, _s, _ot, _exp = mcx
+                if _u is not None and _exp is not None:
                     from data_layer.base_feeder import OptionTick
-                    from datetime import date as _date
                     opt_tick = OptionTick(
                         symbol      = symbol_fyers,
-                        underlying  = sym.underlying,
-                        strike      = sym.strike,
-                        option_type = sym.option_type,
-                        expiry      = sym.expiry,
+                        underlying  = _u,
+                        strike      = _s,
+                        option_type = _ot,
+                        expiry      = _exp,
                         ltp         = float(ltp),
                         bid         = float(raw.get("bid_price") or ltp),
                         ask         = float(raw.get("ask_price") or ltp),
