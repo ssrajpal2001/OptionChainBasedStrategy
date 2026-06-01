@@ -329,7 +329,7 @@ class UpstoxFeeder(BaseFeeder):
             return
         for k in new_keys:
             self._subscribed_keys.append(k)
-        if self._streamer and self._connected:
+        if self._streamer:   # don't gate on possibly-stale _connected flag
             try:
                 # SDK signature: subscribe(instrumentKeys, mode='ltpc') — positional.
                 # Some SDK builds accept only keys; fall back if mode is rejected.
@@ -681,10 +681,15 @@ class FyersFeeder(BaseFeeder):
         for t in mine:
             if t not in self._subscribed_tokens:
                 self._subscribed_tokens.append(t)
-        if self._socket and self._connected and mine:
+        # Subscribe whenever the socket exists — do NOT gate on the _connected
+        # flag, which can be stale (e.g. options arrive after _on_connect already
+        # fired, or during DualFeeder churn) and would silently drop the tokens.
+        # The FyersDataSocket dedups duplicate subscriptions, so this is safe.
+        if self._socket and mine:
             try:
                 self._socket.subscribe(symbols=mine, data_type="SymbolUpdate")
-                logger.info("FyersFeeder: subscribed to %d option tokens.", len(mine))
+                logger.info("FyersFeeder: subscribed to %d option tokens (connected=%s).",
+                            len(mine), self._connected)
             except Exception as exc:
                 logger.warning("FyersFeeder: subscribe_tokens error: %s", exc)
 
