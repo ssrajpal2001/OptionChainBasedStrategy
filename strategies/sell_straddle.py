@@ -963,9 +963,8 @@ class SellStraddleStrategy:
                 # Always log the exit-rule evaluation so you can see what's checked
                 # on the open ATM position each timeframe bucket.
                 self._clog.info(
-                    "EXIT-EVAL %s ATM=%.0f pnl=%.2f (target=%.0f%% sl=%.0f%% of credit=%.2f) | rules: %s | result=%s",
-                    self._underlying, pos.atm_at_entry, pnl,
-                    self._profit_pct, self._sl_pct, pos.net_credit,
+                    "EXIT-EVAL %s ATM=%.0f pnl=%.2f (credit=%.2f) | rules: %s | result=%s",
+                    self._underlying, pos.atm_at_entry, pnl, pos.net_credit,
                     _reason, "EXIT" if _passed else "HOLD",
                 )
                 if _passed:
