@@ -52,7 +52,9 @@ class ClientManager:
         self._running = False
 
     async def _process_fill(self, fill: OrderFill) -> None:
-        if fill.status != OrderStatus.COMPLETE:
+        # Topic.ORDER_FILL also carries bridge fill events (ICFillEvent /
+        # StraddleFillEvent) without a .status field — skip those here.
+        if getattr(fill, "status", None) != OrderStatus.COMPLETE:
             return
         client = self._registry.get(fill.client_id)
         if client is None:

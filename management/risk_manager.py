@@ -363,7 +363,9 @@ class RiskManager:
     # ── Fill handler ───────────────────────────────────────────────────────────
 
     async def _handle_fill(self, fill: OrderFill) -> None:
-        if fill.status != OrderStatus.COMPLETE:
+        # Topic.ORDER_FILL also carries bridge fill events (ICFillEvent /
+        # StraddleFillEvent) which have no .status — skip those here.
+        if getattr(fill, "status", None) != OrderStatus.COMPLETE:
             return
 
         self._sync_registry()
