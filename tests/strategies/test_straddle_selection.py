@@ -39,3 +39,43 @@ def test_pair_indicators_no_prev_omits_slope():
     ind = pair_indicators(cache, {}, 100, 100)
     assert ind["close"] == 56.0 and ind["vwap"] == 53.0
     assert "slope" not in ind
+
+
+from strategies.straddle_selection import select_balanced_pair
+
+
+def _cache(d):
+    # d: {(strike, side): ltp} -> full cache with atp == ltp
+    return {k: {"ltp": v, "atp": v} for k, v in d.items()}
+
+
+def test_select_balanced_anchor_is_lower_time_value_side():
+    # spot=atm=100, CE=60, PE=80 → CE is anchor (lower LTP, both OTM-ish).
+    # Partner = PE side strike with ltp_target<=ltp<60, highest such.
+    cache = _cache({
+        (100, "CE"): 60.0, (100, "PE"): 80.0,
+        (105, "PE"): 55.0, (110, "PE"): 40.0,
+    })
+    res = select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0)
+    assert res is not None
+    ce_strike, pe_strike, ce_ltp, pe_ltp = res
+    # Anchor CE@100=60; partner PE = highest strictly below 60 and >=30 → 105@55
+    assert (ce_strike, ce_ltp) == (100, 60.0)
+    assert (pe_strike, pe_ltp) == (105, 55.0)
+
+
+def test_select_balanced_anchor_below_target_returns_none():
+    cache = _cache({(100, "CE"): 20.0, (100, "PE"): 80.0, (105, "PE"): 15.0})
+    # CE anchor LTP 20 < target 30 → None
+    assert select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0) is None
+
+
+def test_select_balanced_no_partner_below_anchor_returns_none():
+    # All partner candidates >= anchor LTP → no strictly-lower partner.
+    cache = _cache({(100, "CE"): 50.0, (100, "PE"): 80.0, (105, "PE"): 90.0})
+    assert select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0) is None
+
+
+def test_select_balanced_missing_atm_returns_none():
+    cache = _cache({(100, "CE"): 60.0})  # no PE ATM
+    assert select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0) is None

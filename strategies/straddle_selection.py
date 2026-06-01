@@ -57,3 +57,59 @@ def pair_indicators(
         prev = ce_prev + pe_prev
         ind["slope"] = cur - prev
     return ind
+
+
+def select_balanced_pair(
+    strike_prem: Dict[Key, dict],
+    spot: float,
+    step: float,
+    offset: int,
+    ltp_target: float,
+) -> Optional[Tuple[int, int, float, float]]:
+    """
+    Beginning concept (reference _get_strictly_lower_balanced_pair):
+      1. ATM both sides; require both LTP > 0.
+      2. Anchor = side with LOWER time-value (intrinsic-stripped) LTP.
+      3. Anchor raw LTP must be >= ltp_target.
+      4. Partner = scan other side over ATM +/- offset for ltp_target <= ltp < anchor_ltp;
+         pick the HIGHEST such LTP (closest below anchor).
+    Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
+    """
+    atm = int(round(spot / step) * step)
+    ce_atm = strike_prem.get((atm, "CE"))
+    pe_atm = strike_prem.get((atm, "PE"))
+    if not ce_atm or not pe_atm:
+        return None
+    ce_ltp = ce_atm.get("ltp", 0.0)
+    pe_ltp = pe_atm.get("ltp", 0.0)
+    if ce_ltp <= 0 or pe_ltp <= 0:
+        return None
+
+    ce_corr = strip_intrinsic(ce_ltp, "CE", atm, spot)
+    pe_corr = strip_intrinsic(pe_ltp, "PE", atm, spot)
+
+    if ce_corr < pe_corr:
+        anchor_side, anchor_strike, anchor_ltp, partner_side = "CE", atm, ce_ltp, "PE"
+    else:
+        anchor_side, anchor_strike, anchor_ltp, partner_side = "PE", atm, pe_ltp, "CE"
+
+    if anchor_ltp < ltp_target:
+        return None
+
+    best = None  # (ltp, strike)
+    for i in range(-offset, offset + 1):
+        s = int(atm + i * step)
+        leg = strike_prem.get((s, partner_side))
+        if not leg:
+            continue
+        ltp = leg.get("ltp", 0.0)
+        if ltp_target <= ltp < anchor_ltp:
+            if best is None or ltp > best[0]:
+                best = (ltp, s)
+    if best is None:
+        return None
+
+    partner_ltp, partner_strike = best
+    if anchor_side == "CE":
+        return anchor_strike, partner_strike, anchor_ltp, partner_ltp
+    return partner_strike, anchor_strike, partner_ltp, anchor_ltp
