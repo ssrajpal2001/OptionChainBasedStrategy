@@ -55,6 +55,12 @@ _UPSTOX_UNDERLYING_KEY: Dict[str, str] = {
     "SENSEX":      "BSE_INDEX|SENSEX",
 }
 
+# MCX commodities — loaded from the MCX master JSON (futures-driven ATM).
+_MCX_UNDERLYINGS: Set[str] = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
+_MCX_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz"
+_MONTH_ABBR_UP = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # InstrumentRegistry
@@ -84,6 +90,10 @@ class InstrumentRegistry:
         self._loaded: Set[str] = set()
         # {underlying: list of diagnostic strings from last load attempt}
         self._diag: Dict[str, List[str]] = {}
+        # MCX commodities: near-month FUTURES symbols (the ATM source)
+        self._futures_upstox: Dict[str, str] = {}   # underlying -> "MCX_FO|499095"
+        self._futures_fyers: Dict[str, str] = {}     # underlying -> "MCX:CRUDEOIL26JUNFUT"
+        self._futures_expiry: Dict[str, date] = {}
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
@@ -96,6 +106,13 @@ class InstrumentRegistry:
         diag: List[str] = []
         self._diag[underlying] = diag
 
+        today = date.today()
+
+        # MCX commodities load from the MCX master JSON (no Upstox SDK needed).
+        if underlying.upper() in _MCX_UNDERLYINGS:
+            self._load_mcx(underlying.upper(), today, diag)
+            return
+
         try:
             import upstox_client
         except ImportError:
@@ -103,7 +120,6 @@ class InstrumentRegistry:
             logger.warning(diag[-1])
             return
 
-        today = date.today()
         underlying_key = _UPSTOX_UNDERLYING_KEY.get(underlying)
         if not underlying_key:
             diag.append(f"ERROR: no Upstox underlying key mapping for '{underlying}'")
@@ -196,6 +212,113 @@ class InstrumentRegistry:
 
         # ── Fallback: static NSE master JSON (works 24/7, cached per session) ──
         self._load_from_master_json(underlying, today, diag)
+
+    def _load_mcx(self, underlying: str, today: date, diag: List[str]) -> None:
+        """
+        Load an MCX commodity (e.g. CRUDEOIL) option chain + near-month futures
+        from the Upstox MCX master JSON. Stores option instrument_keys, expiries,
+        and the near FUTURES key (Upstox) + derived Fyers futures symbol (the ATM
+        source). trading_symbol format is spaced, e.g.:
+          option : 'CRUDEOIL 8500 CE 16 JUN 26'   ikey 'MCX_FO|565901'
+          futures: 'CRUDEOIL FUT 18 JUN 26'        ikey 'MCX_FO|499095'
+        """
+        import gzip, json
+        from urllib.request import urlopen, Request
+
+        cache_key = "MCX:" + today.isoformat()
+        data = _MASTER_CACHE.get(cache_key)
+        if data is None:
+            try:
+                import ssl as _ssl
+                ctx = _ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+                req = Request(_MCX_MASTER_URL, headers={"Accept-Encoding": "gzip"})
+                with urlopen(req, timeout=60, context=ctx) as r:
+                    raw = r.read()
+                try:
+                    data = json.loads(gzip.decompress(raw))
+                except Exception:
+                    data = json.loads(raw)
+                _MASTER_CACHE[cache_key] = data
+                diag.append(f"MCX master loaded: {len(data)} instruments")
+            except Exception as exc:
+                diag.append(f"MCX master download failed: {exc}")
+                logger.error("InstrumentRegistry MCX[%s]: download failed: %s", underlying, exc)
+                self._loaded.add(underlying)
+                return
+
+        def _parse_ts_date(parts: List[str]):
+            # parts end with [DD, MON, YY]; returns a date or None
+            try:
+                dd = int(parts[-3]); mon = _MONTH_ABBR_UP.index(parts[-2].upper()) + 1
+                yy = 2000 + int(parts[-1])
+                return date(yy, mon, dd)
+            except Exception:
+                return None
+
+        keys: Dict[Tuple[str, int, str], str] = {}
+        expiry_set: Set[date] = set()
+        fut_candidates: List[Tuple[date, str]] = []   # (expiry, ikey)
+
+        for inst in data:
+            ikey, ts, strike_raw, _exp = self._parse_instrument(inst)
+            if not ikey or not ikey.startswith("MCX_FO|") or not ts:
+                continue
+            parts = ts.split()
+            if not parts or parts[0].upper() != underlying:   # EXACT underlying (CRUDEOIL != CRUDEOILM)
+                continue
+            # Futures: 'CRUDEOIL FUT 18 JUN 26'
+            if len(parts) >= 2 and parts[1].upper() == "FUT":
+                exp = _parse_ts_date(parts)
+                if exp and exp >= today:
+                    fut_candidates.append((exp, ikey))
+                continue
+            # Options: 'CRUDEOIL 8500 CE 16 JUN 26'
+            opt_type = "CE" if " CE " in f" {ts} " else ("PE" if " PE " in f" {ts} " else None)
+            if not opt_type:
+                continue
+            exp = _parse_ts_date(parts)
+            if not exp or exp < today:
+                continue
+            try:
+                strike = int(round(float(strike_raw or 0)))
+                if strike <= 0:
+                    # fall back to the numeric token in ts (parts[1])
+                    strike = int(round(float(parts[1])))
+            except (ValueError, TypeError):
+                continue
+            if strike <= 0:
+                continue
+            keys[(exp.isoformat(), strike, opt_type)] = ikey
+            expiry_set.add(exp)
+
+        self._upstox_keys[underlying] = keys
+        self._expiries[underlying] = sorted(expiry_set)
+        self._loaded.add(underlying)
+
+        # Near-month futures = nearest expiry on/after today → ATM source.
+        if fut_candidates:
+            fut_candidates.sort(key=lambda x: x[0])
+            f_exp, f_ikey = fut_candidates[0]
+            self._futures_upstox[underlying] = f_ikey
+            self._futures_expiry[underlying] = f_exp
+            yy = f_exp.strftime("%y"); mon = _MONTH_ABBR_UP[f_exp.month - 1]
+            self._futures_fyers[underlying] = f"MCX:{underlying}{yy}{mon}FUT"
+            diag.append(f"futures: upstox={f_ikey} fyers={self._futures_fyers[underlying]} expiry={f_exp}")
+
+        diag.append(f"MCX[{underlying}] result: {len(keys)} options across "
+                    f"{len(expiry_set)} expiries: {', '.join(e.isoformat() for e in sorted(expiry_set)[:4])}")
+        logger.info("InstrumentRegistry MCX[%s]: %d options, futures=%s",
+                    underlying, len(keys), self._futures_fyers.get(underlying, "?"))
+
+    # ── MCX futures accessors (ATM source for commodities) ─────────────────────
+
+    def get_futures_fyers(self, underlying: str) -> str:
+        return self._futures_fyers.get(underlying.upper(), "")
+
+    def get_futures_upstox(self, underlying: str) -> str:
+        return self._futures_upstox.get(underlying.upper(), "")
 
     def get_diagnostics(self, underlying: str) -> List[str]:
         """Return the diagnostic log from the last load_sync call for this underlying."""
@@ -422,6 +545,20 @@ class InstrumentRegistry:
         )
 
         p = provider.lower()
+
+        # ── MCX commodities (CRUDEOIL etc.) — monthly format, exchange MCX ──────
+        if underlying.upper() in _MCX_UNDERLYINGS:
+            yy = expiry.strftime("%y")
+            mon = _MONTH_ABBR_UP[expiry.month - 1]
+            core = f"{underlying.upper()}{yy}{mon}{int(strike)}{opt_type}"  # CRUDEOIL26JUN8500CE
+            if p == "fyers":
+                return f"MCX:{core}"
+            if p == "zerodha":
+                return core
+            if p == "upstox":
+                return self.get_upstox_key(underlying.upper(), expiry, int(strike), opt_type)
+            return core
+
         if p == "upstox":
             key = self.get_upstox_key(underlying, expiry, strike, opt_type)
             if key:
