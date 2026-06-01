@@ -222,7 +222,7 @@ class SellStraddleStrategy:
             return node if node is not None else default
 
         self._entry_start     = _parse_time(ss.get("entry_start",    "09:20"))
-        self._entry_cutoff    = _parse_time(ss.get("entry_end",      "12:00"))
+        self._entry_cutoff    = _parse_time(ss.get("entry_end",      "15:15"))
         self._force_exit      = _parse_time(ss.get("squareoff_time", "15:15"))
         self._max_trades      = int(ss.get("max_trades", 1))
         self._sl_cooldown_tf_mult = float(ss.get("sl_cooldown_tf_multiplier", 1.0))

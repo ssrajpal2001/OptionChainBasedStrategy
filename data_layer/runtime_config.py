@@ -33,7 +33,7 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "strategy_c
 # ── Per-index sell_straddle defaults ─────────────────────────────────────────
 _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "entry_start":           "09:20",
-    "entry_end":             "12:00",
+    "entry_end":             "15:15",
     "squareoff_time":        "15:15",
     "entry_workflow_mode":   "hybrid",       # hybrid | beginning_only | reentry_only
     # Pre-entry LTP filter: BOTH CE and PE must individually be >= ltp_target.
@@ -156,7 +156,7 @@ _DEFAULTS: Dict[str, Any] = {
     },
     "sell_straddle": {
         "entry_start":              "09:20",
-        "entry_end":                "12:00",
+        "entry_end":                "15:15",
         "squareoff_time":           "15:15",
         # Per-TRADE exit thresholds (% of credit collected on this trade)
         "profit_pct":               30.0,   # exit this trade when it reaches 30% of its credit
