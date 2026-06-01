@@ -157,20 +157,33 @@ class CandleCache:
 
     async def run(self) -> None:
         self._running = True
+        ticks_received = 0
+        logger.info("CandleCache: run() started — waiting for INDEX_TICK events.")
         while self._running:
             try:
                 tick: IndexTick = await asyncio.wait_for(self._tick_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
 
-            for tf in self._cfg.candle_timeframes:
-                key = (tick.symbol, tf)
-                closed = self._series[key].on_tick(tick, tf)
-                if closed:
-                    await self._bus.publish(Topic.CANDLE_CLOSE, closed)
-                    snap = self._compute_snapshot(tick.symbol, tf, tick.ltp, tick.timestamp)
-                    if snap:
-                        await self._bus.publish(Topic.MATRIX_SNAPSHOT, snap)
+            ticks_received += 1
+            if ticks_received == 1:
+                logger.info("CandleCache: first tick received — %s ltp=%.2f", tick.symbol, tick.ltp)
+
+            try:
+                for tf in self._cfg.candle_timeframes:
+                    key = (tick.symbol, tf)
+                    closed = self._series[key].on_tick(tick, tf)
+                    if closed:
+                        logger.info(
+                            "CandleCache: CANDLE_CLOSE %s/%dm O=%.2f H=%.2f L=%.2f C=%.2f",
+                            tick.symbol, tf, closed.open, closed.high, closed.low, closed.close,
+                        )
+                        await self._bus.publish(Topic.CANDLE_CLOSE, closed)
+                        snap = self._compute_snapshot(tick.symbol, tf, tick.ltp, tick.timestamp)
+                        if snap:
+                            await self._bus.publish(Topic.MATRIX_SNAPSHOT, snap)
+            except Exception as exc:
+                logger.exception("CandleCache: tick processing error for %s: %s", tick.symbol, exc)
 
     def stop(self) -> None:
         self._running = False
