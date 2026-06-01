@@ -377,14 +377,19 @@ class FyersFeeder(BaseFeeder):
         if not isinstance(raw, dict):
             logger.info("FyersFeeder: raw frame is not dict — type=%s val=%r", type(raw).__name__, str(raw)[:200])
             return
-        if not hasattr(self, "_logged_first_raw"):
-            self._logged_first_raw = True
-            logger.info("FyersFeeder: first raw frame keys=%s sample=%r", list(raw.keys()), str(raw)[:300])
         symbol_fyers = raw.get("symbol", "")
         ltp = raw.get("ltp")
         if not symbol_fyers or ltp is None:
-            logger.debug("FyersFeeder: dropped frame — symbol=%r ltp=%r keys=%s", symbol_fyers, ltp, list(raw.keys()))
+            if not hasattr(self, "_logged_control_frames"):
+                self._logged_control_frames = 0
+            self._logged_control_frames += 1
+            if self._logged_control_frames <= 5:
+                logger.info("FyersFeeder: non-tick frame #%d keys=%s val=%r",
+                            self._logged_control_frames, list(raw.keys()), str(raw)[:200])
             return
+        if not hasattr(self, "_logged_first_tick"):
+            self._logged_first_tick = True
+            logger.info("FyersFeeder: first TICK frame keys=%s sample=%r", list(raw.keys()), str(raw)[:400])
 
         internal = _FYERS_TO_INTERNAL.get(symbol_fyers)
         if internal:
