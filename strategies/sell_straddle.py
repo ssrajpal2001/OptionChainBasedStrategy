@@ -530,11 +530,11 @@ class SellStraddleStrategy:
                     if _atp > 0:
                         self._pe_atp = _atp
             if self._position and self._position.status == "open":
-                if abs(tick.strike - self._position.atm_at_entry) < 0.01:
-                    if tick.option_type == "CE":
-                        self._position.ce_leg.ltp = tick.ltp
-                    elif tick.option_type == "PE":
-                        self._position.pe_leg.ltp = tick.ltp
+                pos = self._position
+                if tick.option_type == "CE" and abs(tick.strike - pos.ce_leg.strike) < 0.01:
+                    pos.ce_leg.ltp = tick.ltp
+                elif tick.option_type == "PE" and abs(tick.strike - pos.pe_leg.strike) < 0.01:
+                    pos.pe_leg.ltp = tick.ltp
 
     # ── Candle processing ─────────────────────────────────────────────────────
 
