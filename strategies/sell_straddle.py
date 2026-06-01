@@ -725,43 +725,75 @@ class SellStraddleStrategy:
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         is_beginning = (self._trades_today == 0)
-        rule_key = "entry_rules_beginning" if is_beginning else "entry_rules_reentry"
-        rules    = ss.get(rule_key, [])
 
-        # Compute the ATM strike we're evaluating so the log shows exactly which
-        # contracts the entry decision is about.
-        _step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        _atm  = round(self._spot / _step) * _step
+        # Workflow mode: hybrid (default) → beginning concept first trade, else pool.
+        # _beginning_failed flips a hybrid first-trade pulse to the pool scan.
+        workflow_mode = ss.get("entry_workflow_mode", "hybrid")
+        if workflow_mode == "beginning_only":
+            use_beginning = True
+        elif workflow_mode == "reentry_only":
+            use_beginning = False
+        else:  # hybrid
+            use_beginning = is_beginning and not self._beginning_failed
+
+        rule_key = "entry_rules_beginning" if use_beginning else "entry_rules_reentry"
+        rules    = ss.get(rule_key, [])
 
         if not self._is_primed(now, rules):
             self._clog.info(
-                "EVAL %s [%s] PRIMING — ATM=%.0f CE%d=%.2f PE%d=%.2f — waiting for indicator priming",
-                self._underlying, rule_key, _atm,
-                int(_atm), self._ce_ltp, int(_atm), self._pe_ltp,
+                "EVAL %s [%s] PRIMING — waiting for indicator priming", self._underlying, rule_key,
             )
             return
 
-        passed, reason = _eval_rules(rules, self._ind)
-        # Always log the full entry evaluation: which strike, which bucket,
-        # every rule with its live values (✓/✗), and all available indicators.
+        step   = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
+
+        from strategies.straddle_selection import select_balanced_pair, scan_pool
+
+        if use_beginning:
+            sel = select_balanced_pair(self._strike_prem, self._spot, step, offset, ltp_target)
+            concept = "beginning"
+        else:
+            sel = scan_pool(
+                self._strike_prem, self._spot, step, offset, ltp_target,
+                rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
+                metric=ss.get("reentry_best_metric", "balanced_premium"),
+            )
+            concept = "reentry"
+
+        if not sel:
+            self._clog.info(
+                "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (target=%.2f offset=%d)",
+                self._underlying, rule_key, self._spot, ltp_target, offset,
+            )
+            return
+
+        ce_strike, pe_strike, ce_ltp, pe_ltp = sel
+        ind = self._pair_indicators(ce_strike, pe_strike) or dict(self._ind)
+        passed, reason = _eval_rules(rules, ind)
         self._clog.info(
-            "EVAL %s [%s] ATM=%.0f sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind=%s",
-            self._underlying, rule_key, _atm,
-            int(_atm), self._ce_ltp, int(_atm), self._pe_ltp, self._ce_ltp + self._pe_ltp,
+            "EVAL %s [%s/%s] sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind=%s",
+            self._underlying, rule_key, concept,
+            ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
             reason, "PASS" if passed else "BLOCK",
-            {k: round(v, 2) for k, v in self._ind.items()},
+            {k: round(v, 2) for k, v in ind.items()},
         )
         if not passed:
+            # Hybrid: beginning concept failed its gate → next pulse uses the pool scan.
+            if use_beginning and workflow_mode == "hybrid":
+                self._beginning_failed = True
             return
 
         self._clog.info(
-            "ENTRY attempting — spot=%.2f CE=%.2f PE=%.2f credit=%.2f rules_passed",
-            self._spot, self._ce_ltp, self._pe_ltp, self._ce_ltp + self._pe_ltp,
+            "ENTRY attempting — CE%d=%.2f PE%d=%.2f credit=%.2f rules_passed",
+            ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
         )
-        await self._open_position(now, ss, rule_key, reason)
+        await self._open_position(now, ce_strike, pe_strike, ce_ltp, pe_ltp, rule_key, reason)
 
     async def _open_position(
-        self, now: datetime, ss: dict, rule_key: str, reason: str,
+        self, now: datetime, ce_strike: int, pe_strike: int,
+        ce_ltp: float, pe_ltp: float, rule_key: str, reason: str,
     ) -> None:
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
@@ -775,25 +807,25 @@ class SellStraddleStrategy:
             underlying        = self._underlying,
             atm_at_entry      = atm,
             entry_spot        = self._spot,
-            ce_leg            = StraddleLeg("CE", atm, self._ce_ltp, self._ce_ltp),
-            pe_leg            = StraddleLeg("PE", atm, self._pe_ltp, self._pe_ltp),
-            net_credit        = self._ce_ltp + self._pe_ltp,
+            ce_leg            = StraddleLeg("CE", ce_strike, ce_ltp, ce_ltp),
+            pe_leg            = StraddleLeg("PE", pe_strike, pe_ltp, pe_ltp),
+            net_credit        = ce_ltp + pe_ltp,
             open_time         = now,
             status            = "open",
             session_min_vwap  = self._ind.get("vwap", float("inf")),
-            entry_indicators  = dict(self._ind),
+            entry_indicators  = self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
         )
         self._persist()   # survive restarts
         self._trades_today  += 1
+        self._beginning_failed = False
         self._order_pending  = True
         # Lock initial credit as the denominator for all day-% calculations
         if self._initial_net_credit <= 0:
-            self._initial_net_credit = self._ce_ltp + self._pe_ltp
+            self._initial_net_credit = ce_ltp + pe_ltp
 
         logger.info(
-            "SellStraddle[%s]: ENTERED — ATM=%.0f CE=%.2f PE=%.2f credit=%.2f | %s=PASS [%s]",
-            self._underlying, atm,
-            self._ce_ltp, self._pe_ltp, self._position.net_credit,
+            "SellStraddle[%s]: ENTERED — CE%d=%.2f PE%d=%.2f credit=%.2f | %s=PASS [%s]",
+            self._underlying, ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
             rule_key, reason,
         )
 
@@ -802,10 +834,10 @@ class SellStraddleStrategy:
             action         = "ENTRY",
             underlying     = self._underlying,
             atm            = atm,
-            ce_strike      = atm,
-            pe_strike      = atm,
-            ce_ltp         = self._ce_ltp,
-            pe_ltp         = self._pe_ltp,
+            ce_strike      = ce_strike,
+            pe_strike      = pe_strike,
+            ce_ltp         = ce_ltp,
+            pe_ltp         = pe_ltp,
             lot_multiplier = self._lot_multiplier,
             lot_size       = self._lot_size,
             spot           = self._spot,
