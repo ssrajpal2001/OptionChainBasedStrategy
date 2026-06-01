@@ -340,7 +340,11 @@ class SellStraddleStrategy:
                 break
             if ev.symbol != self._underlying:
                 continue
-            await self._on_candle(ev)
+            try:
+                await self._on_candle(ev)
+            except Exception as exc:
+                # Never let one candle error kill the loop (was stopping entries).
+                logger.exception("SellStraddle[%s]: _on_candle error: %s", self._underlying, exc)
 
     async def _tick_loop(self) -> None:
         from data_layer.base_feeder import IndexTick
