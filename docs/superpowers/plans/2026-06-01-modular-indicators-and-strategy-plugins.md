@@ -10,6 +10,41 @@
 
 ---
 
+## SCOPE REVISION (2026-06-01, mid-execution)
+
+Per user decisions during Task 1, the scope expanded/clarified:
+
+1. **Full delete of the legacy confluence stack** — remove `StrategyA_OIZone`,
+   `StrategyB_Trap`, `StrategyC_Panic`, `ConfluenceEngine`, and the backtester
+   confluence path (`backtester.py`, `backtester/historical_core.py`,
+   `backtester/unified_iterator.py`, `main.py` references). Keep
+   `strategies/base_strategy.py`'s `SignalPackage`/`Direction` (still used by
+   execution_router, parallel_worker_pool, trap_trading_engine).
+2. **VWAP is NEVER computed** — always broker ATP. The legacy computed `vwap()`
+   shim is removed entirely once the confluence/backtester path is gone.
+3. **Slim indicators** — live strategies use ONLY: Straddle = VWAP(ATP)/SLOPE/
+   RSI/ROC/CLOSE; IC = LTP + ratio (no indicators); Trap = price action (no
+   indicators). **ADX, EMA, ATR, volume_spike are never used** → drop them from
+   the package (and `TechSnapshot` index fields that depended on them).
+4. New Task 1b (below) performs the deletion before the engine work.
+
+See memory: project_indicator_usage, feedback_vwap_from_feed.
+
+### Task 1b: Delete legacy confluence stack + slim indicators
+- Remove A/B/C strategy files + `ConfluenceEngine` class; delete `backtester.py`,
+  `backtester/` confluence modules, and `main.py` if it only drives the old
+  backtester. Remove their wiring from `run_system.py` (both backtest and live
+  branches).
+- Remove `vwap()` (computed), `adx.py`, `ema.py`, `atr.py`, `volume.py` from the
+  indicators package and from `__init__` exports; keep `rsi`, `roc`, `vwap`
+  (ATP helpers: leg_atp/combined_vwap), `slope`, `constants`, `snapshot`.
+- Fix `candle_cache.py` + `state_persistence.py` to not reference removed
+  indicator fields (set/skip vwap_val/adx_val).
+- Verify: `python -c "import run_system"` and the indicator tests pass.
+- Commit: "refactor: delete legacy confluence stack + unused indicators".
+
+---
+
 ## File Structure
 
 | File | Responsibility |
