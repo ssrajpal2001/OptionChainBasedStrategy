@@ -79,3 +79,61 @@ def test_select_balanced_no_partner_below_anchor_returns_none():
 def test_select_balanced_missing_atm_returns_none():
     cache = _cache({(100, "CE"): 60.0})  # no PE ATM
     assert select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0) is None
+
+
+from strategies.straddle_selection import scan_pool
+
+
+def test_scan_pool_picks_min_balanced_score():
+    # CE bias stronger (CE corrected > PE corrected) → require ce_ltp < pe_ltp.
+    # Two passing pairs; the more balanced (smaller abs(ce-pe)/(ce+pe)) wins.
+    cache = _cache({
+        (100, "CE"): 50.0, (100, "PE"): 50.0,   # ATM: ce_corr==pe_corr → CE not stronger
+        (95, "CE"): 40.0, (105, "PE"): 60.0,
+        (90, "CE"): 30.0, (110, "PE"): 70.0,
+    })
+    # Force a deterministic bias by making ATM CE corrected > PE corrected:
+    cache[(100, "CE")] = {"ltp": 55.0, "atp": 55.0}
+    cache[(100, "PE")] = {"ltp": 50.0, "atp": 50.0}
+
+    # rules: always pass (empty) so selection is pure balanced-score.
+    def always_ok(ce_s, pe_s):
+        return True
+
+    res = scan_pool(
+        cache, spot=100, step=5, offset=4, ltp_target=30.0,
+        rule_pass=always_ok, metric="balanced_premium",
+    )
+    assert res is not None
+    ce_strike, pe_strike, ce_ltp, pe_ltp = res
+    # CE stronger → ce_ltp < pe_ltp enforced. Candidate (95CE=40, 105PE=60):
+    # score=abs(40-60)/100=0.20; (90CE=30,110PE=70): score=0.40 → 95/105 wins.
+    assert (ce_strike, pe_strike) == (95, 105)
+
+
+def test_scan_pool_respects_ltp_target_floor():
+    cache = _cache({
+        (100, "CE"): 55.0, (100, "PE"): 50.0,
+        (95, "CE"): 40.0, (105, "PE"): 25.0,   # PE 25 below target → excluded
+    })
+
+    def always_ok(ce_s, pe_s):
+        return True
+
+    res = scan_pool(cache, spot=100, step=5, offset=4, ltp_target=30.0,
+                    rule_pass=always_ok, metric="balanced_premium")
+    assert res is None
+
+
+def test_scan_pool_rule_rejection_excludes_pair():
+    cache = _cache({
+        (100, "CE"): 55.0, (100, "PE"): 50.0,
+        (95, "CE"): 40.0, (105, "PE"): 60.0,
+    })
+
+    def reject_all(ce_s, pe_s):
+        return False
+
+    res = scan_pool(cache, spot=100, step=5, offset=4, ltp_target=30.0,
+                    rule_pass=reject_all, metric="balanced_premium")
+    assert res is None

@@ -113,3 +113,67 @@ def select_balanced_pair(
     if anchor_side == "CE":
         return anchor_strike, partner_strike, anchor_ltp, partner_ltp
     return partner_strike, anchor_strike, partner_ltp, anchor_ltp
+
+
+def scan_pool(
+    strike_prem: Dict[Key, dict],
+    spot: float,
+    step: float,
+    offset: int,
+    ltp_target: float,
+    rule_pass,                      # callable(ce_strike:int, pe_strike:int) -> bool
+    metric: str = "balanced_premium",
+) -> Optional[Tuple[int, int, float, float]]:
+    """
+    Re-entry concept (reference _scan_v_slope_pool, balanced_premium metric):
+      1. Strikes = ATM +/- offset.
+      2. ATM bias from corrected ATM LTP: CE stronger if ce_corr > pe_corr.
+      3. N x N over (s_ce, s_pe): both LTP >= ltp_target; bias filter
+         (CE stronger -> ce_ltp < pe_ltp; else pe_ltp < ce_ltp).
+      4. rule_pass(ce_strike, pe_strike) must be True (dynamic technical gate).
+      5. balanced_score = abs(ce-pe)/(ce+pe); pick MIN score.
+    Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
+    """
+    atm = int(round(spot / step) * step)
+    ce_atm = strike_prem.get((atm, "CE"))
+    pe_atm = strike_prem.get((atm, "PE"))
+    if not ce_atm or not pe_atm:
+        return None
+    ce_corr = strip_intrinsic(ce_atm.get("ltp", 0.0), "CE", atm, spot)
+    pe_corr = strip_intrinsic(pe_atm.get("ltp", 0.0), "PE", atm, spot)
+    ce_bias_stronger = ce_corr > pe_corr
+
+    strikes = [int(atm + i * step) for i in range(-offset, offset + 1) if i != 0]
+    best = None  # (score, ce_strike, pe_strike, ce_ltp, pe_ltp)
+    for s_ce in strikes:
+        ce = strike_prem.get((s_ce, "CE"))
+        if not ce:
+            continue
+        ce_ltp = ce.get("ltp", 0.0)
+        if ce_ltp <= 0:
+            continue
+        for s_pe in strikes:
+            pe = strike_prem.get((s_pe, "PE"))
+            if not pe:
+                continue
+            pe_ltp = pe.get("ltp", 0.0)
+            if pe_ltp <= 0:
+                continue
+            if ce_ltp < ltp_target or pe_ltp < ltp_target:
+                continue
+            if ce_bias_stronger:
+                if ce_ltp >= pe_ltp:
+                    continue
+            else:
+                if pe_ltp >= ce_ltp:
+                    continue
+            if not rule_pass(s_ce, s_pe):
+                continue
+            denom = ce_ltp + pe_ltp
+            score = abs(ce_ltp - pe_ltp) / denom if denom > 0 else 999.0
+            if best is None or score < best[0]:
+                best = (score, s_ce, s_pe, ce_ltp, pe_ltp)
+    if best is None:
+        return None
+    _, s_ce, s_pe, ce_ltp, pe_ltp = best
+    return s_ce, s_pe, ce_ltp, pe_ltp
