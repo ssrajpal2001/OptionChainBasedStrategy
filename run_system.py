@@ -223,22 +223,32 @@ def _load_registry_from_db(registry) -> None:
         ).fetchall()
         for row in clients:
             cid = row["client_id"]
+            # capital lives on RiskProfile; lot_multiplier is per BrokerBinding —
+            # neither is a ClientProfile field, so do NOT pass them here.
             profile = ClientProfile(
                 client_id=cid,
                 name=row["name"] or "",
                 email=row["email"] or "",
-                capital=float(row["capital"] or 500000),
                 risk=RiskProfile(
                     capital=float(row["capital"] or 500000),
                     max_risk_per_trade_pct=float(row["max_risk_pct"] or 1.0),
                     max_daily_loss_pct=float(row["max_daily_loss_pct"] or 3.0),
                 ),
-                lot_multiplier=float(row["lot_multiplier"] or 1.0),
                 is_admin_approved=bool(row["is_admin_approved"]),
                 is_client_bot_active=bool(row["is_client_bot_active"]),
                 target_index=row["target_index"] or "NIFTY",
             )
-            # Load broker bindings
+            # Load broker bindings. Use a defensive getter so a missing DB column
+            # can never crash the whole registry load (which leaves Router with 0
+            # clients and blocks all order routing). Pass auth creds so the broker
+            # can authenticate for LIVE orders (otherwise broker=None → paper fill).
+            def _bget(row, key, default=""):
+                try:
+                    val = row[key]
+                except (IndexError, KeyError):
+                    return default
+                return val if val is not None else default
+
             bindings = con.execute(
                 "SELECT * FROM broker_bindings WHERE client_id=? AND enabled=1", (cid,)
             ).fetchall()
@@ -246,12 +256,17 @@ def _load_registry_from_db(registry) -> None:
                 profile.broker_bindings.append(BrokerBinding(
                     binding_id=b["binding_id"],
                     provider=b["provider"],
-                    label=b["label"] or "",
-                    trading_mode=b["trading_mode"] or "paper",
-                    assigned_strategy=b["assigned_strategy"] or "",
-                    assigned_instrument=b["assigned_instrument"] or "NIFTY",
-                    is_trade_enabled=bool(b["is_trade_enabled"]),
-                    lot_multiplier=float(b["lot_multiplier"] or 1.0),
+                    label=_bget(b, "label", "") or "",
+                    user_id=_bget(b, "user_id", "") or "",
+                    api_key=_bget(b, "api_key", "") or "",
+                    api_secret=_bget(b, "api_secret", "") or "",
+                    totp_secret=_bget(b, "totp_secret", "") or "",
+                    access_token=_bget(b, "access_token", "") or "",
+                    trading_mode=_bget(b, "trading_mode", "paper") or "paper",
+                    assigned_strategy=_bget(b, "assigned_strategy", "") or "",
+                    is_trade_enabled=bool(_bget(b, "is_trade_enabled", 1)),
+                    lot_multiplier=float(_bget(b, "lot_multiplier", 1.0) or 1.0),
+                    product_type=_bget(b, "product_type", "MIS") or "MIS",
                 ))
             registry.register(profile)
             log.info("Loaded client from DB: %s (approved=%s)", cid, profile.is_admin_approved)
