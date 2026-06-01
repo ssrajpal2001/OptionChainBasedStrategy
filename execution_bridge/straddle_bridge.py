@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from config.global_config import IST, Topic
+from config.global_config import IST, Topic, order_exchange
 from data_layer.base_feeder import EventBus
 
 logger = logging.getLogger(__name__)
@@ -343,7 +343,7 @@ class StraddleExecutionBridge:
             self._trade_log.log_exit(client_id, binding_id, ev, fill, entry_ce, entry_pe)
 
         # Publish fill so SellStraddleStrategy can confirm
-        self._bus.publish(Topic.ORDER_FILL, fill)
+        await self._bus.publish(Topic.ORDER_FILL, fill)
 
     async def _live_fill(
         self,
@@ -370,7 +370,7 @@ class StraddleExecutionBridge:
             )
             req = OrderRequest(
                 broker_symbol=symbol,
-                exchange="NFO",
+                exchange=_order_exchange(ev.underlying),
                 side=side,
                 qty=qty,
                 order_type=OrderType.MARKET,
@@ -415,4 +415,4 @@ class StraddleExecutionBridge:
             entry_pe = entry_ev.pe_ltp if entry_ev else 0.0
             self._trade_log.log_exit(client_id, binding_id, ev, fill_ev, entry_ce, entry_pe)
 
-        self._bus.publish(Topic.ORDER_FILL, fill_ev)
+        await self._bus.publish(Topic.ORDER_FILL, fill_ev)

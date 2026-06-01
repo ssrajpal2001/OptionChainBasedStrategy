@@ -44,6 +44,17 @@ logger = logging.getLogger(__name__)
 # Zerodha exchange constants (matched to kiteconnect strings)
 _EXCHANGE_NFO = "NFO"
 _EXCHANGE_BFO = "BFO"
+_EXCHANGE_MCX = "MCX"
+
+
+def _resolve_exchange(req_exchange: str) -> str:
+    """Map an OrderRequest exchange string to a Zerodha exchange constant."""
+    e = (req_exchange or "").upper()
+    if e == "BFO":
+        return _EXCHANGE_BFO
+    if e == "MCX":
+        return _EXCHANGE_MCX
+    return _EXCHANGE_NFO
 
 # Month abbreviations for monthly expiry symbol construction
 _MONTH_ABBR = {1:"JAN",2:"FEB",3:"MAR",4:"APR",5:"MAY",6:"JUN",
@@ -135,7 +146,7 @@ class ZerodhaBroker(BaseBroker):
             raise RuntimeError("ZerodhaBroker: not authenticated")
 
         kite = self._kite
-        exchange = _EXCHANGE_BFO if req.exchange == "BFO" else _EXCHANGE_NFO
+        exchange = _resolve_exchange(req.exchange)
         transaction = (kite.TRANSACTION_TYPE_BUY
                        if req.side == OrderSide.BUY
                        else kite.TRANSACTION_TYPE_SELL)
@@ -227,7 +238,7 @@ class ZerodhaBroker(BaseBroker):
     def _get_ltp_safe(self, symbol: str, exchange: str) -> float:
         """Fetch LTP from Kite; return 0 on any failure."""
         try:
-            full = f"{_EXCHANGE_BFO if exchange == 'BFO' else _EXCHANGE_NFO}:{symbol}"
+            full = f"{_resolve_exchange(exchange)}:{symbol}"
             data = self._kite.ltp([full])
             return float(data[full]["last_price"])
         except Exception:

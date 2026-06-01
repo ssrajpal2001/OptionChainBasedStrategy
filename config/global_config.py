@@ -78,6 +78,21 @@ class ExchangeConfig:
         return self.mcx_market_close if self.is_mcx(underlying) else self.market_close
 
 
+# Module-level set + helper so execution bridges can pick the order exchange
+# without threading a config object through (kept in sync with ExchangeConfig).
+_MCX_UNDERLYINGS = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
+
+
+def order_exchange(underlying: str) -> str:
+    """Zerodha/broker order exchange for an underlying: MCX (commodity), BFO (SENSEX), else NFO."""
+    u = (underlying or "").upper()
+    if u in _MCX_UNDERLYINGS:
+        return "MCX"
+    if u == "SENSEX":
+        return "BFO"
+    return "NFO"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Indicator Params — hard-pinned per specification
 # ─────────────────────────────────────────────────────────────────────────────

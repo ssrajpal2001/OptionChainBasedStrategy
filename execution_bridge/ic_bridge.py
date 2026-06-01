@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Optional
 
-from config.global_config import IST, Topic
+from config.global_config import IST, Topic, order_exchange
 from data_layer.base_feeder import EventBus
 from execution_bridge.straddle_bridge import ICOrderEvent, ICFillEvent
 
@@ -141,7 +141,7 @@ class ICExecutionBridge:
             ev.cumulative_pnl * ev.lot_size * ev.lot_multiplier,
             client_id,
         )
-        self._bus.publish(Topic.ORDER_FILL, fill)
+        await self._bus.publish(Topic.ORDER_FILL, fill)
 
     # ── Live fill ─────────────────────────────────────────────────────────────
 
@@ -188,7 +188,7 @@ class ICExecutionBridge:
 
             req = OrderRequest(
                 broker_symbol=broker_sym,
-                exchange="NFO" if ev.underlying != "SENSEX" else "BFO",
+                exchange=_order_exchange(ev.underlying),
                 side=side,
                 qty=qty,
                 order_type=OrderType.MARKET,
@@ -219,4 +219,4 @@ class ICExecutionBridge:
             event_id      = ev.event_id,
             paper_mode    = False,
         )
-        self._bus.publish(Topic.ORDER_FILL, fill_ev)
+        await self._bus.publish(Topic.ORDER_FILL, fill_ev)
