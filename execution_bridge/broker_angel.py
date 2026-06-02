@@ -27,6 +27,9 @@ class AngelBroker(BaseBroker):
         self._smartapi: Any = None
         self._is_amo  = False
         self._product = "INTRADAY"   # overridden from binding at auth time
+        # Symboltoken resolution caches (avoid per-order searchScrip → rate limit).
+        self._tok_cache: dict = {}     # (exchange, our_symbol) -> (token, angel_symbol)
+        self._scrip_cache: dict = {}   # (exchange, underlying) -> [scrip dicts]
 
     async def authenticate(self) -> bool:
         try:
@@ -92,20 +95,47 @@ class AngelBroker(BaseBroker):
         self._authenticated = False
         self._smartapi = None
 
-    def _lookup_symbol_token(self, exchange: str, tradingsymbol: str) -> str:
-        """Fetch AngelOne symboltoken via searchScrip API. Returns empty string on failure."""
+    def _lookup_symbol(self, exchange: str, tradingsymbol: str):
+        """Resolve (symboltoken, angel_tradingsymbol). Cached so we never re-hit
+        searchScrip for the same contract (the rate-limit cause). Strategy:
+          1. exact match on our symbol (works for NSE),
+          2. else search by UNDERLYING NAME (cached once per underlying) and match
+             the contract by strike + option type + expiry month/year. Needed for
+             MCX where Angel's tradingsymbol format differs from ours
+             (e.g. our CRUDEOIL26JUN8800CE ≠ Angel's master symbol)."""
+        import re
+        key = (exchange, tradingsymbol)
+        if key in self._tok_cache:
+            return self._tok_cache[key]
+        resolved = ("", tradingsymbol)
         try:
-            result = self._smartapi.searchScrip(exchange, tradingsymbol)
-            if result and result.get("status") and result.get("data"):
-                for item in result["data"]:
-                    if item.get("tradingsymbol") == tradingsymbol:
-                        return str(item.get("symboltoken", ""))
-                # If exact match not found, return first result's token
-                return str(result["data"][0].get("symboltoken", ""))
+            res = self._smartapi.searchScrip(exchange, tradingsymbol)
+            if res and res.get("status") and res.get("data"):
+                for it in res["data"]:
+                    if it.get("tradingsymbol") == tradingsymbol:
+                        resolved = (str(it.get("symboltoken", "")), tradingsymbol)
+                        break
+
+            if not resolved[0]:
+                m = re.match(r'^([A-Z]+?)(\d{2})([A-Z]{3})(\d+)(CE|PE)$', tradingsymbol)
+                if m:
+                    name, yy, mon, strike, opt = m.groups()
+                    lst = self._scrip_cache.get((exchange, name))
+                    if lst is None:
+                        r2 = self._smartapi.searchScrip(exchange, name)
+                        lst = (r2.get("data") or []) if r2 and r2.get("status") else []
+                        self._scrip_cache[(exchange, name)] = lst
+                    for it in lst:
+                        ts = str(it.get("tradingsymbol", "")).upper()
+                        if (ts.endswith(opt) and mon in ts and yy in ts
+                                and re.search(rf'(?<!\d){int(strike)}(?={opt}$)', ts)):
+                            resolved = (str(it.get("symboltoken", "")), it.get("tradingsymbol", tradingsymbol))
+                            break
         except Exception as exc:
-            logger.warning("AngelBroker [%s]: symboltoken lookup failed for %s: %s",
+            logger.warning("AngelBroker [%s]: symbol resolve failed for %s: %s",
                            self.client_id, tradingsymbol, exc)
-        return ""
+        self._tok_cache[key] = resolved
+        return resolved
 
     async def place_order(self, req: OrderRequest) -> str:
         if not self._smartapi:
@@ -114,15 +144,19 @@ class AngelBroker(BaseBroker):
             OrderType.MARKET: "MARKET", OrderType.LIMIT: "LIMIT",
             OrderType.SL_M: "STOPLOSS_MARKET", OrderType.SL_L: "STOPLOSS_LIMIT",
         }
-        # Fetch symboltoken from AngelOne's scrip search — required for order placement
-        symbol_token = await asyncio.to_thread(
-            self._lookup_symbol_token, req.exchange, req.broker_symbol
+        # Resolve symboltoken + Angel's own tradingsymbol (cached; handles MCX).
+        symbol_token, resolved_symbol = await asyncio.to_thread(
+            self._lookup_symbol, req.exchange, req.broker_symbol
         )
+        if not symbol_token:
+            raise RuntimeError(
+                f"Angel One: could not resolve symboltoken for {req.broker_symbol} "
+                f"on {req.exchange} (not in scrip master)")
         # AngelOne does not support variety='AMO' — valid values: NORMAL, STOPLOSS, ROBO.
         # Orders placed outside market hours with NORMAL are queued as AMO automatically.
         order_data = {
             "variety": "NORMAL",
-            "tradingsymbol": req.broker_symbol,
+            "tradingsymbol": resolved_symbol,
             "symboltoken": symbol_token,
             "transactiontype": req.side.value,
             "exchange": req.exchange,
