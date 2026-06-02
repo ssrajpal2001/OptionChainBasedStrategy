@@ -177,3 +177,22 @@ def scan_pool(
         return None
     _, s_ce, s_pe, ce_ltp, pe_ltp = best
     return s_ce, s_pe, ce_ltp, pe_ltp
+
+
+def classify_roll(ce_same: bool, pe_same: bool, has_candidates: bool) -> str:
+    """Smart-roll outcome (reference exit_logic.perform_smart_roll):
+      no candidates       -> "full_exit"
+      both strikes same    -> "virtual"
+      only PE changed      -> "partial_pe"   (CE stays)
+      only CE changed      -> "partial_ce"   (PE stays)
+      both changed         -> "physical"
+    """
+    if not has_candidates:
+        return "full_exit"
+    if ce_same and pe_same:
+        return "virtual"
+    if ce_same and not pe_same:
+        return "partial_pe"
+    if pe_same and not ce_same:
+        return "partial_ce"
+    return "physical"
