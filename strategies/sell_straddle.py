@@ -638,8 +638,13 @@ class SellStraddleStrategy:
 
         # Record market-open for this session (first candle of the day)
         if self._market_open_dt is None or self._market_open_dt.date() != now.date():
+            # Session open is instrument-specific: MCX commodities (CRUDEOIL…) open
+            # 09:00, NSE/BSE indices 09:15. Using the wrong open mis-times priming
+            # (e.g. CRUDEOIL showing 'ready at 09:17' instead of 09:02).
+            _mcx = set(getattr(self._cfg, "mcx_underlyings", ())) if self._cfg else set()
+            _open = dtime(9, 0) if self._underlying in _mcx else _MARKET_OPEN
             self._market_open_dt = now.replace(
-                hour=_MARKET_OPEN.hour, minute=_MARKET_OPEN.minute,
+                hour=_open.hour, minute=_open.minute,
                 second=0, microsecond=0,
             )
             self._primed = False

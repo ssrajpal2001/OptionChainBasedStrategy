@@ -506,6 +506,22 @@ class TrapTradingEngine:
         tc = self._cfg.trap_engine
         sym = c.symbol
 
+        # Per-minute heartbeat to the per-symbol log so you can SEE the engine is
+        # alive and where it is, without waiting for a 5m/75m close.
+        import time as _t
+        if not hasattr(self, "_last_hb"):
+            self._last_hb = {}
+        if _t.monotonic() - self._last_hb.get(sym, 0.0) > 60.0:
+            self._last_hb[sym] = _t.monotonic()
+            st = self._states.get(sym)
+            if st is not None:
+                self._tlog(sym).info(
+                    "heartbeat phase=%s rolling_base=%.2f trap_levels=%d pending=%d %s",
+                    st.phase.name, st.rolling_base, len(st.trap_levels),
+                    len(getattr(st, "pending_levels", [])),
+                    f"LIVE trade={st.trade_id}" if st.trade_id else "no-position",
+                )
+
         # EOD guard — force-exit all if market has closed
         if datetime.now(IST).time() >= _MARKET_CLOSE:
             await self._force_exit_all("EOD")
