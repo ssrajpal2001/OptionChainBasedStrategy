@@ -492,36 +492,41 @@ class TrapTradingEngine:
         except Exception:
             return 0
 
-    async def _lock_day_strikes(self, underlying: str) -> None:
-        """Fetch JUST the previous trading day's high/low (one day's worth of 1m bars)
-        and lock the day's tracked CE/PE strikes. Independent of the full warm-start
-        replay — only needs prev-day high+low to find the ATM centre."""
-        if self._client_db is None:
+    async def _lock_day_strikes(self, underlying: str, fallback_spot: float = 0.0) -> None:
+        """Lock the day's tracked CE/PE strikes from the PREVIOUS trading day's high/low
+        (one day of 1m bars). If no prior-day data exists yet (e.g. instrument added
+        today), seed the ATM centre from the live spot so the trap still tracks the
+        correct strikes; real prev-day high/low takes over once it has been recorded."""
+        if self._client_db is None and fallback_spot <= 0:
             return
         try:
             from datetime import timedelta
             now   = datetime.now(IST)
             today = now.date()
-            # Look back a few calendar days to safely span weekends/holidays.
-            start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
-            rows = await asyncio.to_thread(
-                self._client_db.get_1m_bars_sync, underlying, start, now
-            )
-            # Keep only bars STRICTLY before today, then take the most recent such day.
-            prior = [r for r in (rows or []) if _row_date(r) is not None and _row_date(r) < today]
-            if not prior:
-                logger.warning("TrapEngine[%s]: no prev-day bars to lock day strikes.", underlying)
-                return
-            target_day = max(_row_date(r) for r in prior)
-            day_rows = [r for r in prior if _row_date(r) == target_day]
-            prev_high = max(float(r["high"]) for r in day_rows)
-            prev_low  = min(float(r["low"])  for r in day_rows)
-            self._compute_day_strikes(underlying, prev_high, prev_low)
+            prior = []
+            if self._client_db is not None:
+                start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+                rows = await asyncio.to_thread(
+                    self._client_db.get_1m_bars_sync, underlying, start, now
+                )
+                prior = [r for r in (rows or []) if _row_date(r) is not None and _row_date(r) < today]
+            if prior:
+                target_day = max(_row_date(r) for r in prior)
+                day_rows = [r for r in prior if _row_date(r) == target_day]
+                prev_high = max(float(r["high"]) for r in day_rows)
+                prev_low  = min(float(r["low"])  for r in day_rows)
+                self._compute_day_strikes(underlying, prev_high, prev_low, source="prev-day")
+            elif fallback_spot > 0:
+                # No prior-day data yet — seed ATM from live spot (high=low=spot).
+                self._compute_day_strikes(underlying, fallback_spot, fallback_spot, source="live-spot")
+            else:
+                logger.warning("TrapEngine[%s]: no prev-day bars and no spot to lock day strikes.", underlying)
         except Exception as exc:
             logger.warning("TrapEngine[%s]: _lock_day_strikes failed: %s", underlying, exc)
 
-    def _compute_day_strikes(self, underlying: str, prev_high: float, prev_low: float) -> None:
-        """Lock the day's tracked CE/PE strikes from the previous day's high/low and DTE."""
+    def _compute_day_strikes(self, underlying: str, prev_high: float, prev_low: float,
+                             source: str = "prev-day") -> None:
+        """Lock the day's tracked CE/PE strikes from the (prev-day or seeded) high/low + DTE."""
         try:
             from strategies.trap_strike_selection import select_trap_strikes
             step = float(self._cfg.exchange.strike_steps.get(underlying, 50.0))
@@ -529,9 +534,9 @@ class TrapTradingEngine:
             sel  = select_trap_strikes(prev_high, prev_low, dte, step)
             self._day_strikes[underlying] = sel
             self._tlog(underlying).info(
-                "DAY STRIKES locked: prev_high=%.2f prev_low=%.2f ATM=%d DTE=%d "
+                "DAY STRIKES locked [%s]: high=%.2f low=%.2f ATM=%d DTE=%d "
                 "offset=%d (%d steps) | track CE=%d PE=%d",
-                prev_high, prev_low, sel.atm, sel.dte, sel.offset_pts,
+                source, prev_high, prev_low, sel.atm, sel.dte, sel.offset_pts,
                 sel.offset_steps, sel.ce_strike, sel.pe_strike,
             )
         except Exception as exc:
@@ -565,6 +570,15 @@ class TrapTradingEngine:
                 continue
             # Store real underlying spot price (index LTP, e.g. 24500 for NIFTY)
             self._spot_cache[event.symbol] = event.ltp
+            # Lazily lock day strikes if not set yet (prev-day data, else seed from
+            # this live spot). Throttled so we don't hit the DB every tick.
+            if event.symbol not in self._day_strikes:
+                import time as _t
+                if not hasattr(self, "_lock_try"):
+                    self._lock_try = {}
+                if _t.monotonic() - self._lock_try.get(event.symbol, 0.0) > 30.0:
+                    self._lock_try[event.symbol] = _t.monotonic()
+                    await self._lock_day_strikes(event.symbol, fallback_spot=event.ltp)
             # Live heartbeat driven by ticks (not candles), so the per-symbol log
             # is created immediately and shows what the engine sees every minute —
             # even between 5m/75m candle closes.
