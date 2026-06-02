@@ -416,6 +416,10 @@ class IronCondorStrategy:
             return
         self._last_entry_attempt = nowm
 
+        # Re-entry cooldown after a close — stops the churn loop.
+        if nowm < getattr(self, "_reentry_until", 0.0):
+            return
+
         self._load_thresholds()
         now = datetime.now(IST)
 
@@ -846,6 +850,11 @@ class IronCondorStrategy:
         await self._log_trade_db("EXIT")
         self._position = None
         self._persist()   # clears the stored position
+        # Re-entry cooldown — prevents the enter→instant-target/SL→re-enter churn
+        # loop (esp. on volatile CRUDEOIL where one reprice blows past target/SL).
+        import time as _t
+        self._reentry_until = _t.monotonic() + float(
+            RuntimeConfig.index_section(self._underlying, "iron_condor").get("reentry_cooldown_sec", 60))
 
     # ── DB logging ────────────────────────────────────────────────────────────
 
