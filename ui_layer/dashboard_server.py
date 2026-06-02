@@ -1600,7 +1600,7 @@ class DashboardServer:
         ):
             cid = user.get("client_id", "")
             allowed_strategies = {"sell_straddle", "iron_condor", "trap_trading"}
-            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"}
             import json as _json
             validated = []
             for item in (body.selections or []):
@@ -2539,7 +2539,7 @@ class DashboardServer:
         async def api_index_config_get(index: str, _: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             idx = index.upper()
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"}
             if idx not in allowed:
                 raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
             return {
@@ -2554,7 +2554,7 @@ class DashboardServer:
         ):
             from data_layer.runtime_config import RuntimeConfig
             idx = index.upper()
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"}
             if idx not in allowed:
                 raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
             try:
