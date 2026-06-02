@@ -921,7 +921,28 @@ class SellStraddleStrategy:
                 self._stop_for_day = True
             return
 
-        # ── DAY-LEVEL % GUARDRAILS (highest priority, stops trading for the day) ──
+        # ── MANDATORY GLOBAL GUARDRAILS (first — reference exit_logic order) ──────
+        # guardrail_pnl — cumulative session premium points target / SL.
+        # Runs BEFORE the day-% checks to mirror Option_Selling_May_2026 sell_v3.
+        if self._guardrail_pnl_enabled:
+            _session_pts = self._session_realized_pnl_pts + pnl
+            if self._guardrail_pnl_target_pts > 0 and _session_pts >= self._guardrail_pnl_target_pts:
+                logger.info(
+                    "SellStraddle[%s]: GUARDRAIL_PNL TARGET — session=%.2f pts >= %.2f",
+                    self._underlying, _session_pts, self._guardrail_pnl_target_pts,
+                )
+                await self._close_position("guardrail_pnl_target")
+                self._stop_for_day = True
+                return
+            if self._guardrail_pnl_sl_pts != 0 and _session_pts <= self._guardrail_pnl_sl_pts:
+                logger.info(
+                    "SellStraddle[%s]: GUARDRAIL_PNL SL — session=%.2f pts <= %.2f",
+                    self._underlying, _session_pts, self._guardrail_pnl_sl_pts,
+                )
+                await self._close_position("guardrail_pnl_sl")
+                return
+
+        # ── DAY-LEVEL % GUARDRAILS (stops trading for the day) ──
         # total_day_pct = (all closed trades + running P&L) / initial credit × 100
         if self._initial_net_credit > 0:
             total_day_pts = self._session_realized_pnl_pts + pnl
@@ -949,25 +970,6 @@ class SellStraddleStrategy:
                 await self._close_position("day_loss_sl")
                 self._stop_for_day = True
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
-                return
-
-        # guardrail_pnl — cumulative session premium points target / SL
-        if self._guardrail_pnl_enabled:
-            _session_pts = self._session_realized_pnl_pts + pnl
-            if self._guardrail_pnl_target_pts > 0 and _session_pts >= self._guardrail_pnl_target_pts:
-                logger.info(
-                    "SellStraddle[%s]: GUARDRAIL_PNL TARGET — session=%.2f pts >= %.2f",
-                    self._underlying, _session_pts, self._guardrail_pnl_target_pts,
-                )
-                await self._close_position("guardrail_pnl_target")
-                self._stop_for_day = True
-                return
-            if self._guardrail_pnl_sl_pts != 0 and _session_pts <= self._guardrail_pnl_sl_pts:
-                logger.info(
-                    "SellStraddle[%s]: GUARDRAIL_PNL SL — session=%.2f pts <= %.2f",
-                    self._underlying, _session_pts, self._guardrail_pnl_sl_pts,
-                )
-                await self._close_position("guardrail_pnl_sl")
                 return
 
         # LTP Decay → single-side roll per decayed leg (reference exit_logic step 2)
