@@ -1695,16 +1695,15 @@ class DashboardServer:
                         prem = getattr(eng, "_prem_cache", {}) if eng else {}
                         # Day-locked tracked strikes (prev-day ATM + DTE), shown even
                         # when there is no open position so the UI reflects scanning.
+                        _legp = getattr(eng, "_leg_prem", {}) if eng else {}
                         _ds = getattr(eng, "_day_strikes", {}).get(underlying) if eng else None
                         _st = getattr(eng, "_states", {}).get(underlying) if eng else None
                         if _ds is not None:
-                            _cesym = f"{underlying}{_ds.ce_strike}CE"
-                            _pesym = f"{underlying}{_ds.pe_strike}PE"
                             tracking = {
                                 "atm": _ds.atm, "dte": _ds.dte, "offset": _ds.offset_pts,
                                 "ce_strike": _ds.ce_strike, "pe_strike": _ds.pe_strike,
-                                "ce_ltp": round(float(prem.get(_cesym, 0.0) or 0.0), 2),
-                                "pe_ltp": round(float(prem.get(_pesym, 0.0) or 0.0), 2),
+                                "ce_ltp": round(float(_legp.get((underlying, _ds.ce_strike, "CE"), 0.0) or 0.0), 2),
+                                "pe_ltp": round(float(_legp.get((underlying, _ds.pe_strike, "PE"), 0.0) or 0.0), 2),
                                 "phase": getattr(getattr(_st, "phase", None), "name", "IDLE") if _st else "IDLE",
                                 "entry_line": round(float(getattr(_st, "ltf_entry_line", 0.0) or 0.0), 2) if _st else 0.0,
                             }
