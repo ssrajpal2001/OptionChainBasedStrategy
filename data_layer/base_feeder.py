@@ -202,10 +202,16 @@ class BaseFeeder(ABC):
         # When two feeders publish the same symbol in parallel, only the first
         # tick within the dedup window is forwarded to the EventBus.
         self._dedup_buffer = None
+        # Provider name ("upstox"/"fyers") so the gate can apply active-passive
+        # failover (only the primary drives prices; secondary used only when primary down).
+        self._provider_name: Optional[str] = None
 
     def set_dedup_buffer(self, buffer) -> None:
         """Attach a shared DedupBuffer so duplicate ticks from a parallel feeder are dropped."""
         self._dedup_buffer = buffer
+
+    def set_provider_name(self, name: str) -> None:
+        self._provider_name = name
 
     # ── Abstract interface ─────────────────────────────────────────────────────
 
@@ -324,7 +330,7 @@ class BaseFeeder(ABC):
 
     async def _publish_index(self, tick: IndexTick) -> None:
         from config.global_config import Topic
-        if self._dedup_buffer is not None and not self._dedup_buffer.accept(tick.symbol, tick.ltp):
+        if self._dedup_buffer is not None and not self._dedup_buffer.accept(tick.symbol, tick.ltp, self._provider_name):
             return
         await self._bus.publish(Topic.INDEX_TICK, tick)
 
@@ -334,6 +340,6 @@ class BaseFeeder(ABC):
             # Canonical key — Upstox & Fyers use different symbol strings for the
             # same contract, so dedup on the contract identity, not the raw symbol.
             dedup_key = f"{tick.underlying}:{tick.expiry}:{int(tick.strike)}:{tick.option_type}"
-            if not self._dedup_buffer.accept(dedup_key, tick.ltp):
+            if not self._dedup_buffer.accept(dedup_key, tick.ltp, self._provider_name):
                 return
         await self._bus.publish(Topic.OPTION_TICK, tick)

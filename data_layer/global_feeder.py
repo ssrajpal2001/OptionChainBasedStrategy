@@ -168,9 +168,26 @@ class DedupBuffer:
 
     def __init__(self) -> None:
         self._last: Dict[str, Tuple[float, float]] = {}   # symbol → (ts, ltp)
+        # Active-PASSIVE failover: when a primary provider is set, ONLY the primary
+        # feeder's ticks drive prices; the secondary is used only when the primary
+        # goes stale (down). This prevents two feeds disagreeing on the same
+        # contract (the price flip-flop, e.g. 711 vs 365). None → legacy active-active.
+        self._primary: Optional[str] = None
+        self._stale_sec: float = 3.0
+        self._last_primary_ts: float = 0.0
 
-    def accept(self, symbol: str, ltp: float) -> bool:
+    def set_primary(self, provider: Optional[str], stale_sec: float = 3.0) -> None:
+        self._primary = (provider or "").lower() or None
+        self._stale_sec = stale_sec
+
+    def accept(self, symbol: str, ltp: float, provider: Optional[str] = None) -> bool:
         now = time.monotonic()
+        # Active-passive gate
+        if self._primary is not None and provider is not None:
+            if provider.lower() == self._primary:
+                self._last_primary_ts = now
+            elif (now - self._last_primary_ts) < self._stale_sec:
+                return False   # secondary dropped while primary is healthy
         entry = self._last.get(symbol)
         if entry is None:
             self._last[symbol] = (now, ltp)
@@ -825,11 +842,21 @@ class DualFeeder:
         fyers = FyersFeeder(self._bus, self._cfg)
         fyers.set_credentials(fyers_creds)
 
+        # Active-PASSIVE: the primary provider drives all prices; the secondary is
+        # used only when the primary goes stale (down). Avoids the two feeds
+        # disagreeing on a contract (price flip-flop). Primary from config
+        # (primary_feeder_provider), default upstox.
+        _primary = (getattr(self._cfg, "primary_feeder_provider", "upstox") or "upstox").lower()
+        if _primary not in ("upstox", "fyers"):
+            _primary = "upstox"
+        self._dedup.set_primary(_primary, float(getattr(self._cfg, "feeder_failover_stale_sec", 3.0)))
+        logger.info("DualFeeder: active-passive — primary=%s (secondary used only when primary stale).", _primary)
+
         for provider, feeder in (("upstox", upstox), ("fyers", fyers)):
+            feeder.set_provider_name(provider)
             if hasattr(feeder, "set_latency_tracker"):
                 feeder.set_latency_tracker(provider, self._latency)
-            # Share one dedup buffer across both feeders so the trailing provider's
-            # duplicate ticks are dropped — but failover is seamless if one dies.
+            # Shared gate across both feeders → active-passive failover.
             feeder.set_dedup_buffer(self._dedup)
             try:
                 ok = await feeder.connect()
