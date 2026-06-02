@@ -37,7 +37,28 @@ import numpy as np
 from config.global_config import IST, Topic, GlobalConfig
 from data_layer.base_feeder import CandleEvent, IndexTick, OptionTick, EventBus
 
+import os
+
 logger = logging.getLogger(__name__)
+
+
+def _make_trap_logger(underlying: str) -> logging.Logger:
+    """Per-symbol Trap log → logs/clients/tt_{underlying}_YYYYMMDD.log so the 5-stage
+    HTF→MTF→LTF progression is visible (the engine had no per-symbol log file)."""
+    name = f"client.tt.{underlying}"
+    lg = logging.getLogger(name)
+    if lg.handlers:
+        return lg
+    lg.setLevel(logging.INFO)
+    log_dir = os.path.join("logs", "clients")
+    os.makedirs(log_dir, exist_ok=True)
+    date_str = datetime.now().strftime("%Y%m%d")
+    fh = logging.FileHandler(os.path.join(log_dir, f"tt_{underlying}_{date_str}.log"), encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
+    lg.addHandler(fh)
+    lg.propagate = False
+    return lg
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Module-level constants
@@ -262,6 +283,8 @@ class TrapTradingEngine:
 
         # Open positions: trade_id → (trade_id, option_symbol, entry_price, quantity)
         self._open_positions: Dict[str, Tuple[str, str, float, int]] = {}
+        # Per-symbol log files (HTF/MTF/LTF stage visibility)
+        self._clogs: Dict[str, logging.Logger] = {}
 
         # Telemetry / stats
         self._signals:      int = 0
@@ -481,23 +504,7 @@ class TrapTradingEngine:
 
     async def _on_candle(self, c: CandleEvent) -> None:
         tc = self._cfg.trap_engine
-
-        # Heartbeat — surface each symbol's current stage so the engine isn't a
-        # black box when no trade fires (throttled once/120s per symbol).
-        import time as _t
-        if not hasattr(self, "_last_hb"):
-            self._last_hb = {}
         sym = c.symbol
-        if _t.monotonic() - self._last_hb.get(sym, 0.0) > 120.0:
-            self._last_hb[sym] = _t.monotonic()
-            st = self._states.get(sym)
-            if st is not None:
-                _pos = (f"LIVE trade={st.trade_id} entry={st.entry_price:.2f}"
-                        if st.trade_id else "(no position)")
-                logger.info(
-                    "TrapTradingEngine[%s]: phase=%s rolling_base=%.2f trap_levels=%d %s",
-                    sym, st.phase.name, st.rolling_base, len(st.trap_levels), _pos,
-                )
 
         # EOD guard — force-exit all if market has closed
         if datetime.now(IST).time() >= _MARKET_CLOSE:
@@ -506,9 +513,41 @@ class TrapTradingEngine:
 
         if c.timeframe == tc.HTF_MINUTES:
             self._process_htf(c)
+            self._log_stage(sym, "HTF", c)
         elif c.timeframe == tc.MTF_MINUTES:
             self._process_mtf(c)
+            self._log_stage(sym, "MTF", c)
             await self._process_ltf_exit_guard(c)  # SL/profit exit on 5m close (not 1m)
+
+    def _tlog(self, symbol: str) -> logging.Logger:
+        lg = self._clogs.get(symbol)
+        if lg is None:
+            lg = _make_trap_logger(symbol)
+            self._clogs[symbol] = lg
+        return lg
+
+    def _log_stage(self, symbol: str, tf: str, c: CandleEvent) -> None:
+        """Log the full 5-stage state on each HTF/MTF close so you can follow exactly
+        what the engine is checking and where it is in HTF→MTF→LTF."""
+        try:
+            st = self._states.get(symbol)
+            if st is None:
+                return
+            bearish = c.close < c.open
+            pend = len(getattr(st, "pending_levels", []))
+            _pos = (f"LIVE trade={st.trade_id} entry={st.entry_price:.2f} sl={st.ltf_sl_line:.2f} "
+                    f"target={st.target_high:.2f}" if st.trade_id else "no-position")
+            self._tlog(symbol).info(
+                "%s close O=%.2f H=%.2f L=%.2f C=%.2f %s | phase=%s rolling_base=%.2f | "
+                "Stage1 pending=%d | Stage2 trap_levels=%d entry_origin=%.2f target=%.2f | "
+                "Stage4 mtf_bear_high=%.2f mtf_sweep_low=%.2f | Stage5 ltf_entry=%.2f | %s",
+                tf, c.open, c.high, c.low, c.close, "BEARISH" if bearish else "bullish",
+                st.phase.name, st.rolling_base,
+                pend, len(st.trap_levels), st.entry_origin, st.target_high,
+                st.mtf_bearish_high, st.mtf_sweep_low, st.ltf_entry_line, _pos,
+            )
+        except Exception as exc:
+            logger.debug("TrapEngine _log_stage[%s] failed: %s", symbol, exc)
 
     # ── Stage 1+2: HTF processing ─────────────────────────────────────────────
 
