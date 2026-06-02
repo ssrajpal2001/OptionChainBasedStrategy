@@ -934,6 +934,27 @@ class SellStraddleStrategy:
         now = datetime.now(IST)
         pnl = pos.unrealized_pnl
 
+        # ── Visibility: SHOW that exits are being evaluated each candle, with the
+        #    live P&L vs the active thresholds (throttled to once/min, not per tick).
+        import time as _t
+        if _t.monotonic() - getattr(self, "_last_exit_log", 0.0) > 60.0:
+            self._last_exit_log = _t.monotonic()
+            _active = "".join([
+                " PnLguard" if self._guardrail_pnl_enabled else "",
+                " Decay"    if self._ltp_decay_enabled else "",
+                " Ratio"    if getattr(self, "_ratio_exit_enabled", False) else "",
+                " TSL"      if self._tsl_enabled else "",
+                " ROC"      if getattr(self, "_guardrail_roc_enabled", getattr(self, "_roc_guardrail_enabled", False)) else "",
+                " VWAPrise" if self._vwap_rise_enabled else "",
+                " exit_rules" if getattr(self, "_exit_rules", None) else "",
+            ]) or " (none)"
+            logger.info(
+                "SellStraddle[%s]: EXIT-CHECK pnl=%.2f pts | per-trade target=%.0f%% sl=%.0f%% | "
+                "EOD@%s | active dynamic exits:%s",
+                self._underlying, pnl, getattr(self, "_profit_pct", 0.0),
+                getattr(self, "_sl_pct", 0.0), self._force_exit.strftime("%H:%M"), _active,
+            )
+
         # ── EOD FORCE SQUARE-OFF — highest priority, checked before all else ──────
         if now.time() >= self._force_exit:
             if self._position and self._position.status == "open":
