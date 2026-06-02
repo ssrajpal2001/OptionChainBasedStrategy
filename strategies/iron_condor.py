@@ -559,6 +559,20 @@ class IronCondorStrategy:
 
         pnl_rs = pos.total_pnl_rs
 
+        # Heartbeat — so you can see the IC is alive and managing a position even
+        # when no exit/adjustment fires (throttled to once per 60s, per strategy log).
+        import time as _t
+        if _t.monotonic() - getattr(self, "_last_hb", 0.0) > 60.0:
+            self._last_hb = _t.monotonic()
+            self._clog.info(
+                "HOLDING exp=%s | short CE%d=%.2f PE%d=%.2f | hedge CE%d=%.2f PE%d=%.2f | "
+                "credit=%.2f pnl=₹%.0f (target=₹%.0f sl=₹%.0f)",
+                pos.expiry.isoformat() if pos.expiry else "?",
+                int(pos.short_ce.strike), pos.short_ce.ltp, int(pos.short_pe.strike), pos.short_pe.ltp,
+                int(pos.long_ce.strike), pos.long_ce.ltp, int(pos.long_pe.strike), pos.long_pe.ltp,
+                pos.net_credit, pnl_rs, pos.profit_target_rs, pos.sl_rs,
+            )
+
         if pnl_rs >= pos.profit_target_rs:
             logger.info("IronCondor[%s]: PROFIT TARGET ₹%.0f >= ₹%.0f",
                         self._underlying, pnl_rs, pos.profit_target_rs)

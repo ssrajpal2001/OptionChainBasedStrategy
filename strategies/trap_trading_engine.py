@@ -482,6 +482,23 @@ class TrapTradingEngine:
     async def _on_candle(self, c: CandleEvent) -> None:
         tc = self._cfg.trap_engine
 
+        # Heartbeat — surface each symbol's current stage so the engine isn't a
+        # black box when no trade fires (throttled once/120s per symbol).
+        import time as _t
+        if not hasattr(self, "_last_hb"):
+            self._last_hb = {}
+        sym = c.symbol
+        if _t.monotonic() - self._last_hb.get(sym, 0.0) > 120.0:
+            self._last_hb[sym] = _t.monotonic()
+            st = self._states.get(sym)
+            if st is not None:
+                _pos = (f"LIVE trade={st.trade_id} entry={st.entry_price:.2f}"
+                        if st.trade_id else "(no position)")
+                logger.info(
+                    "TrapTradingEngine[%s]: phase=%s rolling_base=%.2f trap_levels=%d %s",
+                    sym, st.phase.name, st.rolling_base, len(st.trap_levels), _pos,
+                )
+
         # EOD guard — force-exit all if market has closed
         if datetime.now(IST).time() >= _MARKET_CLOSE:
             await self._force_exit_all("EOD")
