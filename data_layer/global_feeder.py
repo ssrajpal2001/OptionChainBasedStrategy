@@ -179,6 +179,11 @@ class DedupBuffer:
     def set_primary(self, provider: Optional[str], stale_sec: float = 3.0) -> None:
         self._primary = (provider or "").lower() or None
         self._stale_sec = stale_sec
+        # Treat the primary as "just ticked" at startup so the secondary is NOT used
+        # in the boot window before the primary's first tick (which would capture a
+        # stale secondary price at entry). The secondary only takes over after the
+        # primary actually goes stale_sec without a tick.
+        self._last_primary_ts = time.monotonic()
 
     def accept(self, symbol: str, ltp: float, provider: Optional[str] = None) -> bool:
         now = time.monotonic()
