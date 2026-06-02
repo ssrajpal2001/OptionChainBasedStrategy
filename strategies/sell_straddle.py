@@ -375,6 +375,67 @@ class SellStraddleStrategy:
             asyncio.create_task(self._fill_loop(),   name=f"ss_{self._underlying}_fill"),
         ]
         logger.info("SellStraddleStrategy[%s]: started.", self._underlying)
+        try:
+            self._log_settings_banner()
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: settings banner failed: %s", self._underlying, exc)
+
+    def _log_settings_banner(self) -> None:
+        """Print a boxed summary of active settings at startup (what's configured and
+        about to happen) — mirrors the Option_Selling_May_2026 'ACTIVE V3 STRATEGY' banner."""
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+
+        def _render(rules: list) -> str:
+            if not rules:
+                return "(none — immediate when LTP target met)"
+            parts: list = []
+            for i, r in enumerate(rules):
+                if (r.get("indicator") or "").lower() == "advanced":
+                    o1, o2 = (r.get("operand1") or "").upper(), (r.get("operand2") or "").upper()
+                    seg = f"{o1}{r.get('operator_sym','')}{o2}({r.get('tf','')}m)"
+                else:
+                    seg = f"{(r.get('indicator') or '').upper()}{r.get('operator_sym','')}{r.get('threshold','')}({r.get('tf','')}m)"
+                if i > 0:
+                    parts.append((r.get("operator") or "AND").upper())
+                parts.append(seg)
+            return " ".join(parts)
+
+        workflow   = ss.get("entry_workflow_mode", "hybrid")
+        offset     = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        beg        = _render(ss.get("entry_rules_beginning", []))
+        ren        = _render(ss.get("entry_rules_reentry", []))
+        exit_rules = _render(ss.get("exit_rules", []))
+        ratio_on   = ss.get("ratio_exit", {}).get("enabled", True)
+        decay_on   = self._ltp_decay_enabled
+
+        L = [
+            "╔══════════════════════════════════════════════════════════════════════",
+            f"║ ACTIVE SELL-STRADDLE SETTINGS — {self._underlying}",
+            "╠══════════════════════════════════════════════════════════════════════",
+            f"║ TIMING: Start:{self._entry_start.strftime('%H:%M')} | EntryEnd:{self._entry_cutoff.strftime('%H:%M')} | "
+            f"SquareOff:{self._force_exit.strftime('%H:%M')} | Lot:{self._lot_size} x{self._lot_multiplier}",
+            f"║ SELECTION: workflow={workflow} | pool_offset=±{offset} | Target LTP(floor):{self._ltp_target:.0f}",
+            f"║ BEGINNING ENTRY: {beg}",
+            f"║ RE-ENTRY GATES:  {ren}",
+            f"║ ROLLOVERS: Decay:{'ON' if decay_on else 'OFF'}({self._ltp_exit_min:.0f}) | "
+            f"Ratio:{'ON' if ratio_on else 'OFF'}({self._ratio_threshold:.1f}x) | SmartRoll:ON",
+            f"║ SCALABLE TSL: {'ON' if self._tsl_enabled else 'OFF'} "
+            f"Base:{self._tsl_base_profit_rs:.0f}/{self._tsl_base_lock_rs:.0f} "
+            f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} (₹)",
+            f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%) | "
+            f"ROC GUARDRAIL: {'ON' if self._guardrail_roc_enabled else 'OFF'}"
+            f"({self._guardrail_roc_tf}m T:{self._guardrail_roc_target}/SL:{self._guardrail_roc_stoploss})",
+            f"║ PNL GUARDRAIL: {'ON' if self._guardrail_pnl_enabled else 'OFF'} "
+            f"T:{self._guardrail_pnl_target_pts:.0f}pts SL:{self._guardrail_pnl_sl_pts:.0f}pts | "
+            f"DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}%",
+            f"║ DYNAMIC EXITS: {exit_rules}",
+            f"║ EXIT PRIORITY: EOD→Day%→PnLguard→LTPdecay→Ratio→ScalableTSL→ROC→VWAPrise→exit_rules",
+            f"║ LIMITS: Max Daily Trades:{self._max_trades}",
+            "╚══════════════════════════════════════════════════════════════════════",
+        ]
+        for line in L:
+            logger.info(line)
+            self._clog.info(line)
 
     def stop(self) -> None:
         self._running = False
@@ -926,35 +987,9 @@ class SellStraddleStrategy:
                     await self._close_position(f"ltp_decay_{decayed_side}")
                 return
 
-        # Trailing SL — activates once profit >= net_credit * trail_lock_pct;
-        # once active, exit if profit drops to (peak - net_credit * trail_floor_pct).
-        # Disabled via admin toggle or when trail_lock_pct == 0.
-        if self._trail_sl_enabled and self._trail_lock_pct > 0:
-            if pnl > pos.peak_profit:
-                pos.peak_profit = pnl
-                if pnl >= pos.net_credit * self._trail_lock_pct:
-                    pos.trailing_active = True
-            if pos.trailing_active:
-                trail_floor = pos.peak_profit - pos.net_credit * self._trail_floor_pct
-                if pnl < trail_floor:
-                    logger.info(
-                        "SellStraddle[%s]: TRAILING SL — pnl=%.2f floor=%.2f "
-                        "(peak=%.2f lock=%.0f%% floor=%.0f%%)",
-                        self._underlying, pnl, trail_floor,
-                        pos.peak_profit,
-                        self._trail_lock_pct * 100, self._trail_floor_pct * 100,
-                    )
-                    await self._close_position("trailing_sl")
-                    return
-
-        # 3. Scalable TSL → smart roll first, then full exit
-        if self._tsl_enabled:
-            if self._check_scalable_tsl(pos, pnl):
-                logger.info("SellStraddle[%s]: SCALABLE TSL — locked=₹%.0f pnl=₹%.0f", self._underlying, pos.tsl_high_lock_rs, self._pnl_rs(pnl))
-                rolled = await self._try_smart_roll(now, "scalable_tsl")
-                if not rolled:
-                    await self._close_position("scalable_tsl")
-                return
+        # ── Exit priority below matches Option_Selling_May_2026 sell_v3 corrected order:
+        #    LTP-decay → Ratio → Scalable TSL → ROC guardrail → VWAP-Rise → exit_rules.
+        #    (No separate pct-based trailing SL — the reference uses Scalable TSL only.)
 
         # 6. Ratio exit → smart roll first
         if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
@@ -967,25 +1002,16 @@ class SellStraddleStrategy:
                     await self._close_position("ratio_exit")
                 return
 
-        # 7. VWAP Rise SL → smart roll first
-        if self._vwap_rise_enabled:
-            curr_vwap = self._ind.get("vwap", 0)
-            if curr_vwap > 0:
-                if curr_vwap < pos.session_min_vwap:
-                    pos.session_min_vwap = curr_vwap
-                if pos.session_min_vwap < float("inf"):
-                    rise_pct = (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100
-                    if rise_pct >= self._vwap_rise_threshold:
-                        logger.info(
-                            "SellStraddle[%s]: VWAP RISE SL — rise=%.2f%% curr=%.2f low=%.2f",
-                            self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
-                        )
-                        rolled = await self._try_smart_roll(now, "vwap_rise_sl")
-                        if not rolled:
-                            await self._close_position("vwap_rise_sl")
-                        return
+        # 7. Scalable TSL → smart roll first, then full exit
+        if self._tsl_enabled:
+            if self._check_scalable_tsl(pos, pnl):
+                logger.info("SellStraddle[%s]: SCALABLE TSL — locked=₹%.0f pnl=₹%.0f", self._underlying, pos.tsl_high_lock_rs, self._pnl_rs(pnl))
+                rolled = await self._try_smart_roll(now, "scalable_tsl")
+                if not rolled:
+                    await self._close_position("scalable_tsl")
+                return
 
-        # guardrail_roc — TF-boundary ROC of combined premium
+        # 8. guardrail_roc — TF-boundary ROC of combined premium → smart roll first
         if self._guardrail_roc_enabled and len(self._prem_closes) >= self._guardrail_roc_length + 1:
             _rg_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // self._guardrail_roc_tf) * self._guardrail_roc_tf:02d}"
             if _rg_bucket != self._last_roc_guard_bucket:
@@ -1014,6 +1040,24 @@ class SellStraddleStrategy:
                     if not rolled:
                         await self._close_position("guardrail_roc_sl")
                     return
+
+        # 9. VWAP Rise SL → smart roll first
+        if self._vwap_rise_enabled:
+            curr_vwap = self._ind.get("vwap", 0)
+            if curr_vwap > 0:
+                if curr_vwap < pos.session_min_vwap:
+                    pos.session_min_vwap = curr_vwap
+                if pos.session_min_vwap < float("inf"):
+                    rise_pct = (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100
+                    if rise_pct >= self._vwap_rise_threshold:
+                        logger.info(
+                            "SellStraddle[%s]: VWAP RISE SL — rise=%.2f%% curr=%.2f low=%.2f",
+                            self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
+                        )
+                        rolled = await self._try_smart_roll(now, "vwap_rise_sl")
+                        if not rolled:
+                            await self._close_position("vwap_rise_sl")
+                        return
 
         # exit_rules — dynamic technical exit conditions from admin config
         if self._exit_rules:
