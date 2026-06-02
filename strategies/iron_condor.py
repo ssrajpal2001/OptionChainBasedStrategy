@@ -563,6 +563,14 @@ class IronCondorStrategy:
         if not pos:
             return
 
+        # Entry grace period — skip profit/SL checks for the first few seconds so a
+        # single anomalous tick (e.g. a stale dual-feed price) can't instantly close
+        # a just-opened position. Config entry_grace_sec (default 5s).
+        if pos.open_time is not None:
+            _grace = float(RuntimeConfig.index_section(self._underlying, "iron_condor").get("entry_grace_sec", 5))
+            if (datetime.now(IST) - pos.open_time).total_seconds() < _grace:
+                return
+
         pnl_rs = pos.total_pnl_rs
 
         # Heartbeat — so you can see the IC is alive and managing a position even
