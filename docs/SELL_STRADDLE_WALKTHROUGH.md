@@ -168,40 +168,47 @@ legs and `net_credit`, clears `_order_pending`. Now the position is fully live.
 
 Runs on **every index tick** while a position is open. Priority order (first match wins):
 
-1. **EOD force square-off** (`now >= squareoff_time`) → `_close_position("eod_squareoff")`,
-   `_stop_for_day = True`.
-2. **Day-level % guardrails**: `(session_realized + running_pnl)/initial_credit ×100` vs
-   `day_profit_target_pct` / `−day_loss_sl_pct` → close + stop for day.
-3. **guardrail_pnl**: cumulative session premium points vs target/SL.
-4. **LTP decay**: a leg's LTP below `ltp_exit_min` → try smart roll, else close.
-5. **Trailing SL**: activates once profit ≥ `net_credit × trail_lock_pct`; exits if profit falls
-   below `peak − net_credit × trail_floor_pct`.
-6. **Scalable TSL** (`tsl_scalable`): ₹ staircase lock (`base_lock + N×step_lock`); breach →
-   try smart roll, else close.
-7. **Ratio exit**: `max(ce,pe)/min(ce,pe) ≥ ratio_threshold` → try smart roll, else close.
-8. **VWAP rise SL**: combined VWAP risen ≥ `threshold%` above session low → try smart roll, else close.
-9. **guardrail_roc**: TF-boundary ROC of combined premium vs target/SL → try smart roll, else close.
-10. **exit_rules** (dynamic, config): evaluated once per TF bucket via `_eval_rules` → try smart roll, else close.
+Priority mirrors the reference `exit_logic.check_exits`:
+1. **EOD force square-off** (`now >= squareoff_time`) → `_close_position`, `_stop_for_day`.
+2. **guardrail_pnl** (mandatory, first): cumulative session points vs target/SL → close + stop day.
+3. **Day-level % guardrails**: `(session_realized + running_pnl)/initial_credit ×100` vs
+   `day_profit_target_pct` / `−day_loss_sl_pct` → close + stop day.
+4. **LTP decay**: loops **both** legs; each leg below `ltp_exit_min` → **single-side roll** (§7a).
+5. **Ratio exit**: `max(ce,pe)/min(ce,pe) ≥ ratio_threshold` → smart roll (§7b).
+6. **Scalable TSL** (`tsl_scalable`): ₹ staircase lock (`base_lock + N×step_lock`); breach → smart roll.
+7. **guardrail_roc**: TF-boundary ROC of combined premium vs target/SL → smart roll.
+8. **VWAP rise SL**: combined VWAP risen ≥ `threshold%` above session low → smart roll.
+9. **exit_rules** (dynamic, config): once per TF bucket via `_eval_rules` → smart roll.
 
-> Leg LTPs feeding all of the above now update per-leg-strike (§2.3), so exit math is correct
-> even when CE strike ≠ PE strike.
+> The pct-based Trailing SL was removed (reference uses Scalable TSL only). Leg LTPs update
+> per-leg-strike (§2.3), so exit math is correct even when CE strike ≠ PE strike.
 
 ---
 
-## 7. ROLLOVER — `_try_smart_roll`  (sell_straddle.py:1022 region)  — UNCHANGED
+## 7. ROLLOVER — faithful sell_v3 mirror (places real orders)
 
-Triggered by the "try smart roll" exits (decay, scalable TSL, ratio, VWAP-rise, ROC, exit_rules).
-Re-evaluates `entry_rules_reentry` against current indicators:
-- **FAIL** → returns False → caller performs a **full exit** (§8).
-- **PASS**, branch on current ATM vs `pos.atm_at_entry`:
-  - **Virtual roll** (same ATM): keep the position; refresh entry prices to current LTP; reset
-    `net_credit`, TSL lock, peak, trailing, `open_time`, `session_min_vwap`. "Reset the clock."
-  - **Physical roll** (ATM moved): book the old P&L (`status=closed`), open a NEW position at the
-    new (symmetric) ATM immediately, no cooldown.
+Two roll paths, both running the `scan_pool` re-entry gate and the **0-or-2 leg invariant**
+(never leave a single open leg):
 
-> Note (unchanged behavior): rolls update state and log `ORDER INTENT` but do **not** currently
-> publish ORDER_REQUEST — i.e. a roll is virtual/logged, not a broker round-trip. Tracked as a
-> separate future item; intentionally out of scope here.
+### 7a. Single-side roll (LTP decay) — `_single_side_roll(side)`
+The LTP-decay exit loops **both** legs; for each leg below `ltp_exit_min`:
+1. `_close_leg(side)` → publishes **EXIT `legs=[side]`** (bridge BUYs back only that leg) and
+   books that leg's P&L into the session total.
+2. `scan_pool` (re-entry rules) → candidate for that side; if its LTP ≥ `ltp_target`,
+   `_open_leg(side, strike, ltp)` → publishes **ENTRY `legs=[side]`** (SELL the new strike).
+3. **0-or-2 invariant:** if no candidate → `_close_leg(other_side)` and `position=None`.
+
+### 7b. Smart roll (ratio / scalable-TSL / ROC / VWAP-rise / exit_rules) — `_try_smart_roll`
+Runs `scan_pool`, then `classify_roll(ce_same, pe_same, has_candidates)` decides by **per-leg
+strike** comparison (reference `perform_smart_roll`):
+- **full_exit** (no candidates) → `_close_position`.
+- **virtual** (both strikes same) → refresh both legs' prices, reset TSL/peak/clock. No orders.
+- **partial_ce / partial_pe** (one side same) → `_single_side_roll_to(changed_side, candidate)`:
+  close + reopen only the changed leg (single-leg EXIT+ENTRY), 0-or-2 on failure.
+- **physical** (both different) → close both legs, open the new scanned pair.
+
+> Rolls now place **real broker orders** (single-leg EXIT/ENTRY via the bridge `legs=` selector),
+> so they are visible in the order flow — matching the reference exactly.
 
 ---
 
@@ -258,9 +265,9 @@ next day → reset_session → fresh start
 | Intrinsic handling | none | time-value stripping for anchor/bias (CE `max(0,spot−K)`, PE `max(0,K−spot)`) |
 | Workflow | beginning/re-entry by trade count | hybrid mode + `_beginning_failed` transition (reference) |
 | Leg pricing | both legs vs single ATM | per-leg-strike routing (asymmetric-safe) |
-| Exits / rollover | (as built) | **UNCHANGED** |
+| Exit order | Day% → … (pct-trailing-SL present) | EOD → guardrail_pnl → Day% → decay → ratio → TSL → ROC → VWAP-rise → exit_rules (pct-trailing-SL removed) |
+| Rollover | virtual/logged, no orders | faithful 4-outcome (virtual/partial/physical/full-exit) + single-side decay roll; **places real single-leg orders**; 0-or-2 invariant |
 | Rules | dynamic via `_eval_rules` | **still dynamic** — only the evaluated strikes changed |
 
-Tests: `tests/strategies/test_straddle_selection.py` (13),
-`tests/strategies/test_sell_straddle_legs.py` (1),
-`tests/strategies/test_straddle_entry_integration.py` (1). Hot-path runtime smoke verified.
+Tests: selection (13) + classify_roll (5) + bridge legs (2) + single-side roll (1) +
+entry/leg/integration/smoke = 24 unit tests; hot-path + roll runtime smokes verified.
