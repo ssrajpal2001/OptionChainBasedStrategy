@@ -36,6 +36,7 @@ import numpy as np
 
 from config.global_config import IST, Topic, GlobalConfig
 from data_layer.base_feeder import CandleEvent, IndexTick, OptionTick, EventBus
+from strategies.trap_seller_detection import SellerTrapDetector, State as _DetState
 
 import os
 
@@ -286,8 +287,13 @@ class TrapTradingEngine:
         self._opt_q:    Optional[asyncio.Queue] = None
         self._index_q:  Optional[asyncio.Queue] = None
 
-        # Per-symbol state
+        # Per-symbol state (legacy — retained only for graceful telemetry fallback)
         self._states: Dict[str, _TrapState] = {}
+
+        # v2 per-leg seller-trap detectors, keyed by leg_key. Two timeframes:
+        # HTF arms the setup; MTF (gated by HTF ENTRY_READY) fires the entry signal.
+        self._htf_det: Dict[str, SellerTrapDetector] = {}
+        self._mtf_det: Dict[str, SellerTrapDetector] = {}
 
         # Day-fixed tracked strikes per underlying (prev-day ATM + DTE offset).
         # Computed once at warm-start; drives which CE/PE the trap follows.
@@ -696,12 +702,13 @@ class TrapTradingEngine:
         if expiry is None:
             return
         tc = self._cfg.trap_engine
+        lookback = self._lookback_days(underlying)
         import pandas as pd
         for strike, opt in ((sel.ce_strike, "CE"), (sel.pe_strike, "PE")):
             okey = _REG.get_upstox_key(underlying, expiry, int(strike), opt)
             if not okey:
                 continue
-            candles = await self._upstox_candles(okey, "1minute", 3)
+            candles = await self._upstox_candles(okey, "1minute", lookback)
             if not candles:
                 self._tlog(underlying).info("no intraday history to seed %d%s detection", strike, opt)
                 continue
@@ -714,23 +721,25 @@ class TrapTradingEngine:
             df = df.set_index("timestamp").sort_index()
             agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
             _origin = df.index[0].normalize().replace(hour=9, minute=15, second=0)
-            for tf, kwargs in ((tc.HTF_MINUTES, dict(origin=_origin)), (tc.MTF_MINUTES, {})):
-                res = df.resample(f"{tf}min", closed="left", label="right", **kwargs).agg(agg).dropna()
-                for ts, r in res.iterrows():
-                    ev = CandleEvent(
-                        symbol=leg_key, timeframe=tf,
-                        timestamp=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
-                        open=float(r["open"]), high=float(r["high"]), low=float(r["low"]),
-                        close=float(r["close"]), volume=int(r["volume"]),
-                    )
-                    if tf == tc.HTF_MINUTES:
-                        self._process_htf(ev)
-                    else:
-                        self._process_mtf(ev)
-            st = self._get_state(leg_key)
+            # Seed the HTF detector by replaying each HTF candle: feed its intrabar price
+            # path as ticks (testing the PRIOR reference), then register it as a new level.
+            htf = self._det(leg_key, "htf")
+            res = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="right",
+                              origin=_origin).agg(agg).dropna()
+            for _ts, r in res.iterrows():
+                o, h, l, c = float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])
+                htf.on_tick(o)
+                if c < o:                # bearish: high then low
+                    htf.on_tick(h); htf.on_tick(l)
+                else:                    # bullish: low then high
+                    htf.on_tick(l); htf.on_tick(h)
+                htf.on_tick(c)
+                htf.on_candle({"open": o, "high": h, "low": l, "close": c})
+            lv = htf.active_level
             self._tlog(underlying).info(
-                "seeded %d%s detection: phase=%s rolling_base=%.2f trap_levels=%d",
-                strike, opt, st.phase.name, st.rolling_base, len(st.trap_levels))
+                "seeded %d%s HTF detection: state=%s%s",
+                strike, opt, htf.state.name,
+                (f" level L={lv.entry_l:.2f}/H={lv.sl_h:.2f}" if lv else ""))
 
     async def _seed_legs_from_history(self, underlying: str) -> None:
         """Seed the tracked CE/PE LTP from each option's latest historical close so the
@@ -760,14 +769,58 @@ class TrapTradingEngine:
                     "seeded %d%s LTP=%.2f from historical (live ticks will update)",
                     strike, opt, close)
 
+    # ── v2 settings helpers ───────────────────────────────────────────────────
+    def _tt_cfg(self, underlying: str) -> dict:
+        try:
+            from data_layer.runtime_config import RuntimeConfig
+            return RuntimeConfig.index_section(underlying, "trap_trading") or {}
+        except Exception:
+            return {}
+
+    def _dte_offset_steps_from_cfg(self, underlying: str, dte: int) -> int:
+        """Resolve the DTE→ITM step offset from the configured `dte_offset_ladder`
+        (JSON string keys, e.g. {"5":5,...}). Returns the value for the HIGHEST
+        threshold k where dte > k; else 0. Falls back to min(max(dte-1,0),5)."""
+        ladder = self._tt_cfg(underlying).get("dte_offset_ladder") or {}
+        if not ladder:
+            return min(max(int(dte) - 1, 0), 5)
+        best_k, best_v = -1, 0
+        for k, v in ladder.items():
+            try:
+                thr = int(k)
+            except (TypeError, ValueError):
+                continue
+            if int(dte) > thr and thr > best_k:
+                best_k, best_v = thr, int(v)
+        return best_v
+
+    def _lookback_days(self, underlying: str) -> int:
+        try:
+            n = int(self._tt_cfg(underlying).get("lookback_days", 2))
+        except (TypeError, ValueError):
+            n = 2
+        return max(n, 2)
+
+    def _det(self, leg_key: str, kind: str) -> SellerTrapDetector:
+        """Lazily create/return the per-leg detector ('htf' or 'mtf')."""
+        store = self._htf_det if kind == "htf" else self._mtf_det
+        if leg_key not in store:
+            store[leg_key] = SellerTrapDetector()
+        return store[leg_key]
+
     def _compute_day_strikes(self, underlying: str, prev_high: float, prev_low: float,
                              source: str = "prev-day") -> None:
-        """Lock the day's tracked CE/PE strikes from the (prev-day or seeded) high/low + DTE."""
+        """Lock the day's tracked CE/PE strikes from the (prev-day or seeded) high/low + DTE,
+        using the configured DTE offset ladder + round-off step."""
         try:
-            from strategies.trap_strike_selection import select_trap_strikes
+            from strategies.trap_strike_selection import TrapStrikes
             step = float(self._cfg.exchange.strike_steps.get(underlying, 50.0))
             dte  = self._dte(underlying)
-            sel  = select_trap_strikes(prev_high, prev_low, dte, step)
+            atm  = int(round(((float(prev_high) + float(prev_low)) / 2.0) / step) * step)
+            steps = self._dte_offset_steps_from_cfg(underlying, dte)
+            offset_pts = int(steps * step)
+            sel = TrapStrikes(atm=atm, ce_strike=atm - offset_pts, pe_strike=atm + offset_pts,
+                              offset_steps=steps, offset_pts=offset_pts, dte=int(dte))
             self._day_strikes[underlying] = sel
             self._tlog(underlying).info(
                 "DAY STRIKES locked [%s]: high=%.2f low=%.2f ATM=%d DTE=%d "
@@ -854,52 +907,63 @@ class TrapTradingEngine:
                 )
 
     def _feed_leg_tick(self, leg_key: str, ts, ltp: float) -> None:
-        """Aggregate a tracked-leg premium tick into HTF/MTF candles; on bucket rollover
-        emit a CandleEvent into the per-leg detection (keyed by leg_key)."""
+        """Drive the per-leg seller-trap detectors from a premium tick. The HTF detector
+        is always advanced; the MTF detector is advanced ONLY while HTF is ENTRY_READY
+        (the nested gate). On MTF entry-ready → fire the (stubbed) entry signal."""
         tc = self._cfg.trap_engine
         try:
             base = ts.replace(second=0, microsecond=0)
         except Exception:
             base = datetime.now(IST).replace(second=0, microsecond=0)
-        for tf in (tc.HTF_MINUTES, tc.MTF_MINUTES):
+
+        htf = self._det(leg_key, "htf")
+        mtf = self._det(leg_key, "mtf")
+        htf_armed = (htf.state == _DetState.ENTRY_READY)
+
+        # Price-path detection (Below→Above→Return) on each tick.
+        htf.on_tick(ltp)
+        if htf_armed:
+            mtf.on_tick(ltp)
+            if mtf.entry_ready:
+                self._on_mtf_entry_signal(leg_key, ltp)
+                mtf.consume_entry()
+
+        # Build the leg's HTF/MTF candles; on bucket close feed det.on_candle().
+        # MTF candles are only fed while the HTF gate is open.
+        for tf, det, gated in ((tc.HTF_MINUTES, htf, False), (tc.MTF_MINUTES, mtf, True)):
             minute = base.hour * 60 + base.minute
             floored = minute - (minute % tf)
             bstart = base.replace(hour=floored // 60, minute=floored % 60)
             key = (leg_key, tf)
             cur = self._leg_bars.get(key)
             if cur is None or cur["start"] != bstart:
-                if cur is not None:   # previous bucket closed → emit it
-                    ev = CandleEvent(symbol=leg_key, timeframe=tf, timestamp=cur["start"],
-                                     open=cur["o"], high=cur["h"], low=cur["l"],
-                                     close=cur["c"], volume=0)
-                    if tf == tc.HTF_MINUTES:
-                        self._process_htf(ev)
-                    else:
-                        self._process_mtf(ev)
+                if cur is not None and ((not gated) or htf_armed):
+                    det.on_candle({"open": cur["o"], "high": cur["h"],
+                                   "low": cur["l"], "close": cur["c"]})
                 self._leg_bars[key] = {"start": bstart, "o": ltp, "h": ltp, "l": ltp, "c": ltp}
             else:
                 cur["h"] = max(cur["h"], ltp)
                 cur["l"] = min(cur["l"], ltp)
                 cur["c"] = ltp
 
+    def _on_mtf_entry_signal(self, leg_key: str, ltp: float) -> None:
+        """STUB (Task 4 implements execution). For now, log that the nested HTF→MTF
+        seller trap completed and an entry would fire for this leg."""
+        parts = leg_key.split(":")
+        underlying = parts[0] if parts else leg_key
+        opt = parts[2] if len(parts) > 2 else "?"
+        self._tlog(underlying).info(
+            "MTF ENTRY SIGNAL leg=%s type=%s ltp=%.2f — (execution wired in Task 4)",
+            leg_key, opt, ltp)
+
     # ── Candle router ─────────────────────────────────────────────────────────
 
     async def _on_candle(self, c: CandleEvent) -> None:
-        tc = self._cfg.trap_engine
-        sym = c.symbol
-
-        # EOD guard — force-exit all if market has closed (MCX-aware)
+        # v2: per-leg detection runs in _feed_leg_tick (on the option premium), not on
+        # the underlying CANDLE_CLOSE. This handler only enforces the MCX-aware EOD guard.
         if datetime.now(IST).time() >= self._market_close_for(c.symbol):
             await self._force_exit_all("EOD")
             return
-
-        if c.timeframe == tc.HTF_MINUTES:
-            self._process_htf(c)
-            self._log_stage(sym, "HTF", c)
-        elif c.timeframe == tc.MTF_MINUTES:
-            self._process_mtf(c)
-            self._log_stage(sym, "MTF", c)
-            await self._process_ltf_exit_guard(c)  # SL/profit exit on 5m close (not 1m)
 
     def _tlog(self, symbol: str) -> logging.Logger:
         lg = self._clogs.get(symbol)
@@ -923,19 +987,18 @@ class TrapTradingEngine:
             if sel is None:
                 self._tlog(symbol).info("heartbeat (awaiting day-strikes) spot=%.2f", spot)
                 return
-            # Per-leg view: the trap scans the CE and PE PREMIUMS independently.
+            # Per-leg view: each CE/PE leg has its own HTF + MTF seller-trap detector.
             def _leg(strike, opt):
                 ltp = self._leg_prem.get((symbol, strike, opt), 0.0)
-                lst = self._states.get(self._leg_key(symbol, strike, opt))
-                if lst is None:
-                    return f"{opt} {strike}={ltp:.2f} phase=IDLE traps=0"
-                tag = ""
-                if lst.trade_id:
-                    tag = f" IN-POSITION entry={lst.entry_price:.2f} sl={lst.ltf_sl_line:.2f} target={lst.target_high:.2f}"
-                elif lst.phase.name in ("ARMED", "RETEST_ALERT"):
-                    tag = f" WAITING-ENTRY@{lst.ltf_entry_line:.2f}"
-                return (f"{opt} {strike}={ltp:.2f} phase={lst.phase.name} "
-                        f"rolling_base={lst.rolling_base:.2f} traps={len(lst.trap_levels)}{tag}")
+                lk = self._leg_key(symbol, strike, opt)
+                h = self._htf_det.get(lk)
+                m = self._mtf_det.get(lk)
+                hs = h.state.name if h else "—"
+                ms = m.state.name if m else "—"
+                lvl = ""
+                if h is not None and h.active_level is not None:
+                    lvl = f" [L={h.active_level.entry_l:.2f} H={h.active_level.sl_h:.2f}]"
+                return f"{opt} {strike}={ltp:.2f} HTF={hs} MTF={ms}{lvl}"
             self._tlog(symbol).info(
                 "heartbeat DTE=%d | %s | %s",
                 sel.dte, _leg(sel.ce_strike, "CE"), _leg(sel.pe_strike, "PE"),
@@ -1167,65 +1230,12 @@ class TrapTradingEngine:
     # ── Stage 3 + Stage 5: option tick handler ────────────────────────────────
 
     async def _check_touch_trigger(self, tick: OptionTick) -> None:
-        """
-        Stage 3: Check if premium has retested entry_origin (TRAP_LOCKED → RETEST_ALERT).
-        Stage 5: Check if premium has touched ltf_entry_line (ARMED → fire entry).
-        Also updates the spot cache from index tick.
-        Async — fires orders.
-        """
-        # EOD guard (MCX-aware)
+        """v2: entry detection moved to the per-leg seller-trap detectors driven from
+        `_feed_leg_tick`. This handler now only enforces the MCX-aware EOD guard.
+        (Stage-3/5 legacy entry logic removed.)"""
         if datetime.now(IST).time() >= self._market_close_for(tick.underlying):
             await self._force_exit_all("EOD")
             return
-
-        underlying = tick.underlying
-        # Operate on the PER-LEG state when this tick is one of the day's tracked
-        # legs (CE/PE), so Stage-3/5 retest+entry use that leg's detection state.
-        state_key = underlying
-        sel = self._day_strikes.get(underlying)
-        if sel is not None:
-            _strk = int(tick.strike)
-            if (_strk == sel.ce_strike and tick.option_type == "CE") or \
-               (_strk == sel.pe_strike and tick.option_type == "PE"):
-                state_key = self._leg_key(underlying, _strk, tick.option_type)
-        st = self._get_state(state_key)
-        prem = tick.ltp
-
-        # Stage 3 — TRAP_LOCKED → RETEST_ALERT
-        # Scan ALL active trap levels highest-first; activate the first one hit
-        if st.phase == _Phase.TRAP_LOCKED:
-            tc = self._cfg.trap_engine
-            retest_pct = tc.RETEST_ZONE_PERCENT / 100.0
-            # Scan active levels from highest entry_origin to lowest
-            for lv in st.trap_levels:
-                if not lv.active:
-                    continue
-                lo = lv.entry_origin * (1.0 - retest_pct)
-                hi = lv.entry_origin * (1.0 + retest_pct)
-                if lo <= prem <= hi:
-                    # This level's retest zone is hit — activate it
-                    st.active_level = lv
-                    st.entry_origin = lv.entry_origin
-                    st.target_high  = lv.target_high
-                    st.phase = _Phase.RETEST_ALERT
-                    logger.info(
-                        "TrapEngine [%s] Stage 3 RETEST_ALERT prem=%.2f "
-                        "level entry_origin=%.2f ±%.1f%% (of %d active levels)",
-                        underlying, prem, lv.entry_origin,
-                        tc.RETEST_ZONE_PERCENT, sum(1 for l in st.trap_levels if l.active),
-                    )
-                    break
-
-        # Stage 5 — ARMED → fire entry
-        elif st.phase == _Phase.ARMED and st.ltf_entry_line > 0.0:
-            tc = self._cfg.trap_engine
-            if prem <= st.ltf_entry_line + tc.SLIPPAGE_BUFFER:
-                logger.info(
-                    "TrapEngine [%s] Stage 5 TOUCH TRIGGER prem=%.2f "
-                    "ltf_entry=%.2f slippage=%.2f",
-                    underlying, prem, st.ltf_entry_line, tc.SLIPPAGE_BUFFER,
-                )
-                await self._fire_entry(underlying, tick.symbol, prem, st)
 
     # ── LTF (1-min) exit guard ────────────────────────────────────────────────
 
