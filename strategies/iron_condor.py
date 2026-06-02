@@ -450,19 +450,23 @@ class IronCondorStrategy:
         # value). min_ltp <= 0 keeps the legacy behaviour (current week).
         candidates = self._candidate_expiries()
         if not candidates:
-            logger.warning("IronCondor[%s]: no expiries from registry, skipping — authenticate feeder first.", self._underlying)
+            if nowm - getattr(self, "_last_noexp_log", 0.0) > 60.0:
+                self._last_noexp_log = nowm
+                logger.warning("IronCondor[%s]: no expiries from registry, skipping — authenticate feeder first.", self._underlying)
             return
+
+        # Subscribe ALL FOUR legs (shorts + hedges) for every candidate expiry up
+        # front, so the hedges actually stream and get priced (fixes the hedge=0
+        # entry + frozen-P&L). Deduped inside _ensure_subscribed.
+        for _e in candidates:
+            await self._ensure_subscribed(
+                _e, [short_ce_strike, short_pe_strike, long_ce_strike, long_pe_strike])
 
         rows = [(e, self._prem(e, short_ce_strike, "CE"), self._prem(e, short_pe_strike, "PE"))
                 for e in candidates]
         _expiry = choose_expiry(rows, self._min_ltp)
 
         if _expiry is None:
-            # No expiry qualifies yet. If the current week is too cheap, make sure
-            # the NEXT expiry's strikes are streamed so it can qualify on a later tick.
-            for e in candidates[1:]:
-                await self._ensure_subscribed(
-                    e, [short_ce_strike, short_pe_strike, long_ce_strike, long_pe_strike])
             if nowm - getattr(self, "_last_wait_log", 0.0) > 30.0:
                 self._last_wait_log = nowm
                 _cur = rows[0] if rows else (None, 0.0, 0.0)
@@ -479,15 +483,19 @@ class IronCondorStrategy:
         long_pe_ltp  = self._prem(_expiry, long_pe_strike,  "PE")
         net_credit = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp)
 
-        # Guard: never fire a zero/negative-credit order (hedges not yet priced).
-        if net_credit <= 0 or short_ce_ltp <= 0 or short_pe_ltp <= 0:
+        # Guard: ALL FOUR legs (shorts AND hedges) must be priced > 0, else we'd
+        # enter with a 0-priced hedge → inflated net_credit and broken P&L (the
+        # 'hedge CE=0' bug). Also never fire a zero/negative-credit order.
+        if (net_credit <= 0 or short_ce_ltp <= 0 or short_pe_ltp <= 0
+                or long_ce_ltp <= 0 or long_pe_ltp <= 0):
             if nowm - getattr(self, "_last_wait_log", 0.0) > 30.0:
                 self._last_wait_log = nowm
                 self._clog.info(
-                    "WAIT premiums — spot=%.2f atm=%d exp=%s short CE[%d]=%.2f PE[%d]=%.2f net_credit=%.2f (feed not ready)",
+                    "WAIT premiums — spot=%.2f atm=%d exp=%s short CE[%d]=%.2f PE[%d]=%.2f "
+                    "hedge CE[%d]=%.2f PE[%d]=%.2f net_credit=%.2f (a leg unpriced — feed not ready)",
                     spot, int(atm), _expiry.isoformat(),
-                    int(short_ce_strike), short_ce_ltp,
-                    int(short_pe_strike), short_pe_ltp, net_credit,
+                    int(short_ce_strike), short_ce_ltp, int(short_pe_strike), short_pe_ltp,
+                    int(long_ce_strike), long_ce_ltp, int(long_pe_strike), long_pe_ltp, net_credit,
                 )
             return
 
