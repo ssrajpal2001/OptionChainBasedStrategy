@@ -1120,91 +1120,85 @@ class SellStraddleStrategy:
     # ── Smart Rolling ─────────────────────────────────────────────────────────
 
     async def _try_smart_roll(self, now: datetime, trigger: str) -> bool:
-        """
-        After profit target or ratio exit, try to re-enter immediately
-        using entry_rules_reentry instead of waiting for next candle.
+        """Reference exit_logic.perform_smart_roll — scan pool, then by per-leg strike:
+        Virtual / Partial / Physical / Full-exit. Returns True (caller does not also close)."""
+        from strategies.straddle_selection import scan_pool, classify_roll
+        pos = self._position
+        if not pos:
+            return True
+        if not self._is_in_entry_window(now) or self._trades_today >= self._max_trades:
+            await self._close_position(f"full_exit_{trigger}")
+            return True
 
-        Virtual roll  — same ATM strike → refresh entry prices, keep position open
-        Physical roll — new ATM differs → close old, open new immediately
-
-        Returns True if rolled (no further action needed), False if caller should close.
-        """
-        if self._trades_today >= self._max_trades:
-            return False
-        if not self._is_in_entry_window(now):
-            return False
-
-        ss    = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
-        passed, reason = _eval_rules(rules, self._ind)
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
 
-        if not passed:
-            logger.info("SellStraddle[%s]: Smart roll REJECTED — %s [%s]", self._underlying, trigger, reason)
-            return False
+        sel = scan_pool(
+            self._strike_prem, self._spot, step, offset, ltp_target,
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
+            metric=ss.get("reentry_best_metric", "balanced_premium"),
+        )
+        ce_same = pe_same = False
+        ce_s = pe_s = ce_l = pe_l = None
+        if sel:
+            ce_s, pe_s, ce_l, pe_l = sel
+            ce_same = int(ce_s) == int(pos.ce_leg.strike)
+            pe_same = int(pe_s) == int(pos.pe_leg.strike)
 
-        step    = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        new_atm = round(self._spot / step) * step
-        pos     = self._position
+        outcome = classify_roll(ce_same, pe_same, has_candidates=bool(sel))
+        logger.info("SellStraddle[%s]: SMART ROLL (%s) → %s | cand=%s",
+                    self._underlying, trigger, outcome,
+                    f"{ce_s}/{pe_s}" if sel else "none")
 
-        if new_atm == pos.atm_at_entry:
-            # ── VIRTUAL ROLL: same strike, refresh entry prices ───────────────
-            logger.info(
-                "SellStraddle[%s]: VIRTUAL ROLL (%s) — same ATM %.0f, refreshing entry prices. "
-                "CE %.2f→%.2f PE %.2f→%.2f | [%s]",
-                self._underlying, trigger, new_atm,
-                pos.ce_leg.entry_price, self._ce_ltp,
-                pos.pe_leg.entry_price, self._pe_ltp,
-                reason,
-            )
-            pos.ce_leg.entry_price = self._ce_ltp
-            pos.pe_leg.entry_price = self._pe_ltp
-            pos.net_credit         = self._ce_ltp + self._pe_ltp
-            pos.tsl_high_lock_rs   = 0.0
-            pos.peak_profit        = 0.0
-            pos.trailing_active    = False
-            pos.open_time          = now
-            pos.session_min_vwap   = self._ind.get("vwap", float("inf"))
-        else:
-            # ── PHYSICAL ROLL: new ATM, close old and open new ────────────────
-            logger.info(
-                "SellStraddle[%s]: PHYSICAL ROLL (%s) — ATM %.0f→%.0f | [%s]",
-                self._underlying, trigger, pos.atm_at_entry, new_atm, reason,
-            )
-            # Record partial close P&L before replacing position
-            pos.realized_pnl = pos.unrealized_pnl
-            pos.close_reason  = f"physical_roll_{trigger}"
-            pos.close_time    = now
-            pos.status        = "closed"
-            logger.info(
-                "SellStraddle[%s]: Physical roll close — pnl=%.2f",
-                self._underlying, pos.realized_pnl,
-            )
-            logger.info(
-                "SellStraddle[%s]: ORDER INTENT — BUY %s%.0fCE + BUY %s%.0fPE (close)",
-                self._underlying,
-                self._underlying, pos.atm_at_entry,
-                self._underlying, pos.atm_at_entry,
-            )
-            # Open new position immediately (no cooldown for rolls)
-            self._position = StraddlePosition(
-                underlying        = self._underlying,
-                atm_at_entry      = new_atm,
-                entry_spot        = self._spot,
-                ce_leg            = StraddleLeg("CE", new_atm, self._ce_ltp, self._ce_ltp),
-                pe_leg            = StraddleLeg("PE", new_atm, self._pe_ltp, self._pe_ltp),
-                net_credit        = self._ce_ltp + self._pe_ltp,
-                open_time         = now,
-                status            = "open",
-                session_min_vwap  = self._ind.get("vwap", float("inf")),
-                entry_indicators  = dict(self._ind),
-            )
-            logger.info(
-                "SellStraddle[%s]: ORDER INTENT — SELL %s%.0fCE + SELL %s%.0fPE (roll re-entry)",
-                self._underlying,
-                self._underlying, new_atm, self._underlying, new_atm,
-            )
-
-        return True  # Rolled — caller should NOT also close
+        if outcome == "full_exit":
+            await self._close_position(f"full_exit_{trigger}")
+            return True
+        if outcome == "virtual":
+            pos.ce_leg.entry_price = ce_l
+            pos.pe_leg.entry_price = pe_l
+            pos.ce_leg.ltp = ce_l
+            pos.pe_leg.ltp = pe_l
+            pos.net_credit = ce_l + pe_l
+            pos.tsl_high_lock_rs = 0.0
+            pos.peak_profit = 0.0
+            pos.trailing_active = False
+            pos.open_time = now
+            pos.session_min_vwap = self._ind.get("vwap", float("inf"))
+            self._persist()
+            return True
+        if outcome == "partial_pe":
+            await self._single_side_roll_to("PE", pe_s, pe_l, now, trigger)
+            return True
+        if outcome == "partial_ce":
+            await self._single_side_roll_to("CE", ce_s, ce_l, now, trigger)
+            return True
+        # physical — close both, open new pair
+        await self._close_leg("CE", f"physical_roll_{trigger}", now)
+        await self._close_leg("PE", f"physical_roll_{trigger}", now)
+        self._position = StraddlePosition(
+            underlying=self._underlying, atm_at_entry=round(self._spot / step) * step,
+            entry_spot=self._spot,
+            ce_leg=StraddleLeg("CE", ce_s, ce_l, ce_l),
+            pe_leg=StraddleLeg("PE", pe_s, pe_l, pe_l),
+            net_credit=ce_l + pe_l, open_time=now, status="open",
+            session_min_vwap=self._ind.get("vwap", float("inf")),
+            entry_indicators=dict(self._ind),
+        )
+        from execution_bridge.straddle_bridge import StraddleOrderEvent
+        self._event_counter += 1
+        await self._bus.publish(Topic.ORDER_REQUEST, StraddleOrderEvent(
+            action="ENTRY", underlying=self._underlying, atm=self._position.atm_at_entry,
+            ce_strike=ce_s, pe_strike=pe_s, ce_ltp=ce_l, pe_ltp=pe_l,
+            lot_multiplier=self._lot_multiplier, lot_size=self._lot_size, spot=self._spot,
+            indicators=dict(self._ind),
+            event_id=f"{self._underlying}_PHYSROLL_{self._event_counter}",
+        ))
+        self._persist()
+        logger.info("SellStraddle[%s]: PHYSICAL ROLL → CE%s PE%s", self._underlying, ce_s, pe_s)
+        return True
 
     # ── Close ─────────────────────────────────────────────────────────────────
 
@@ -1294,6 +1288,22 @@ class SellStraddleStrategy:
         logger.warning("SellStraddle[%s]: single-side roll %s found no candidate — closing %s (0-or-2).",
                        self._underlying, side, other)
         await self._close_leg(other, f"single_side_cleanup_{reason}", now)
+        self._position = None
+        self._persist()
+
+    async def _single_side_roll_to(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
+        """Partial roll: close one side and open a pre-selected candidate strike on that side.
+        0-or-2 invariant: if ltp invalid, close the surviving leg too."""
+        other = "PE" if side == "CE" else "CE"
+        await self._close_leg(side, f"partial_roll_{reason}", now)
+        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
+        if strike and ltp and ltp >= ltp_target:
+            await self._open_leg(side, strike, ltp, now, f"partial_roll_{reason}")
+            self._persist()
+            return
+        logger.warning("SellStraddle[%s]: partial roll %s invalid candidate — closing %s (0-or-2).",
+                       self._underlying, side, other)
+        await self._close_leg(other, f"partial_cleanup_{reason}", now)
         self._position = None
         self._persist()
 
