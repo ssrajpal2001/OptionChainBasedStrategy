@@ -567,6 +567,7 @@ class TrapTradingEngine:
                 prev_low  = min(float(r["low"])  for r in day_rows)
                 self._compute_day_strikes(underlying, prev_high, prev_low, source="db-prev-day")
                 await self._ensure_subscribed_legs(underlying)
+                await self._seed_legs_from_history(underlying)
                 return
             # (2) Broker historical daily candle (last open day)
             hl = await self._fetch_prev_day_hl_upstox(underlying)
@@ -574,34 +575,32 @@ class TrapTradingEngine:
                 prev_high, prev_low = hl
                 self._compute_day_strikes(underlying, prev_high, prev_low, source="upstox-historical")
                 await self._ensure_subscribed_legs(underlying)
+                await self._seed_legs_from_history(underlying)
                 return
             logger.warning("TrapEngine[%s]: could not obtain prev open-day high/low "
                            "(no DB bars, no historical candle).", underlying)
         except Exception as exc:
             logger.warning("TrapEngine[%s]: _lock_day_strikes failed: %s", underlying, exc)
 
-    async def _fetch_prev_day_hl_upstox(self, underlying: str):
-        """Fetch the LAST open trading day's high/low from Upstox v2 historical-candle
-        (daily interval) for the underlying's instrument_key. Returns (high, low) or None."""
+    async def _upstox_candles(self, ikey: str, interval: str, days_back: int):
+        """Fetch Upstox v2 historical candles for any instrument_key. Returns the candle
+        list (newest-first) or []. Uses curl_cffi Chrome impersonation (Upstox edge 403s
+        plain urllib). Each candle: [ts, open, high, low, close, volume, oi]."""
+        if not ikey:
+            return []
         try:
             import json as _json
             import urllib.parse, urllib.request
             from datetime import timedelta
-            from data_layer.instrument_registry import REGISTRY as _REG
-            ikey = _REG.historical_instrument_key(underlying)
-            if not ikey:
-                logger.warning("TrapEngine[%s]: no historical instrument_key.", underlying)
-                return None
-            logger.info("TrapEngine[%s]: historical fetch using key=%s", underlying, ikey)
             token = ""
             if self._client_db is not None:
                 creds = await asyncio.to_thread(self._client_db.get_feeder_creds_sync, "upstox")
                 token = (creds or {}).get("access_token", "")
             today = datetime.now(IST).date()
             to_d  = today.isoformat()
-            from_d = (today - timedelta(days=10)).isoformat()
+            from_d = (today - timedelta(days=days_back)).isoformat()
             url = (f"https://api.upstox.com/v2/historical-candle/"
-                   f"{urllib.parse.quote(ikey, safe='')}/day/{to_d}/{from_d}")
+                   f"{urllib.parse.quote(ikey, safe='')}/{interval}/{to_d}/{from_d}")
             headers = {
                 "Accept": "application/json",
                 "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -612,31 +611,65 @@ class TrapTradingEngine:
                 headers["Authorization"] = f"Bearer {token}"
 
             def _get():
-                # Upstox's edge (Cloudflare) 403s plain urllib — prefer curl_cffi with
-                # a Chrome TLS fingerprint (same approach as the broker auth flow).
                 try:
                     from curl_cffi import requests as _cc
-                    resp = _cc.get(url, headers=headers, impersonate="chrome131", timeout=8)
-                    return resp.json()
+                    return _cc.get(url, headers=headers, impersonate="chrome131", timeout=8).json()
                 except ImportError:
                     req = urllib.request.Request(url, headers=headers)
                     with urllib.request.urlopen(req, timeout=8) as r:
                         return _json.loads(r.read().decode("utf-8"))
 
             data = await asyncio.to_thread(_get)
-            candles = ((data or {}).get("data") or {}).get("candles") or []
-            # Each candle: [timestamp, open, high, low, close, volume, oi]; newest first.
-            for c in candles:
-                cdate = str(c[0])[:10]
-                if cdate < to_d:   # strictly before today = last open day
-                    return float(c[2]), float(c[3])
-            if candles:  # only today's candle present — use the latest available
-                return float(candles[0][2]), float(candles[0][3])
-            return None
+            return ((data or {}).get("data") or {}).get("candles") or []
         except Exception as exc:
-            logger.warning("TrapEngine[%s]: historical fetch failed (key=%s): %s",
-                           underlying, locals().get("ikey", "?"), exc)
+            logger.warning("TrapEngine: upstox candles failed (key=%s): %s", ikey, exc)
+            return []
+
+    async def _fetch_prev_day_hl_upstox(self, underlying: str):
+        """LAST open trading day's high/low from the underlying's daily candles."""
+        from data_layer.instrument_registry import REGISTRY as _REG
+        ikey = _REG.historical_instrument_key(underlying)
+        if not ikey:
+            logger.warning("TrapEngine[%s]: no historical instrument_key.", underlying)
             return None
+        logger.info("TrapEngine[%s]: historical fetch using key=%s", underlying, ikey)
+        candles = await self._upstox_candles(ikey, "day", 10)
+        today = datetime.now(IST).date().isoformat()
+        for c in candles:                       # newest-first
+            if str(c[0])[:10] < today:          # strictly before today = last open day
+                return float(c[2]), float(c[3])
+        if candles:
+            return float(candles[0][2]), float(candles[0][3])
+        logger.warning("TrapEngine[%s]: historical returned no candles (key=%s).", underlying, ikey)
+        return None
+
+    async def _seed_legs_from_history(self, underlying: str) -> None:
+        """Seed the tracked CE/PE LTP from each option's latest historical close so the
+        panel shows a value immediately (live ticks update it once they arrive). This is
+        also where per-leg HTF/MTF seeding will hook in."""
+        from data_layer.instrument_registry import REGISTRY as _REG
+        sel = self._day_strikes.get(underlying)
+        if sel is None:
+            return
+        today = datetime.now(IST).date()
+        expiry = _REG.get_active_expiry(underlying, today)
+        if expiry is None:
+            expiry = next((e for e in _REG.all_expiries(underlying) if e >= today), None)
+        if expiry is None:
+            return
+        for strike, opt in ((sel.ce_strike, "CE"), (sel.pe_strike, "PE")):
+            okey = _REG.get_upstox_key(underlying, expiry, int(strike), opt)
+            if not okey:
+                logger.warning("TrapEngine[%s]: no upstox option key for %d%s exp=%s",
+                               underlying, strike, opt, expiry)
+                continue
+            candles = await self._upstox_candles(okey, "day", 5)
+            if candles:
+                close = float(candles[0][4])    # newest close
+                self._leg_prem[(underlying, int(strike), opt)] = close
+                self._tlog(underlying).info(
+                    "seeded %d%s LTP=%.2f from historical (live ticks will update)",
+                    strike, opt, close)
 
     def _compute_day_strikes(self, underlying: str, prev_high: float, prev_low: float,
                              source: str = "prev-day") -> None:
