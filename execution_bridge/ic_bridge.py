@@ -175,8 +175,12 @@ class ICExecutionBridge:
 
         fills: Dict[str, float] = {}
         today  = datetime.now(IST).date()
-        expiry = _REG.all_expiries(ev.underlying)
-        expiry = next((e for e in expiry if e >= today), today)
+        # Prefer the expiry chosen by the strategy (min-LTP shift); fall back to
+        # the first registry expiry >= today for legacy/older events.
+        expiry = getattr(ev, "expiry", None)
+        if not expiry:
+            expiry = _REG.all_expiries(ev.underlying)
+            expiry = next((e for e in expiry if e >= today), today)
 
         for strike, opt_type, side, fallback_ltp in legs:
             broker_sym = _REG.get_broker_symbol(ev.underlying, expiry, int(strike), opt_type, provider)

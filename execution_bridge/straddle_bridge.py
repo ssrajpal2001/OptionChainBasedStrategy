@@ -22,7 +22,7 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Optional
 
 from config.global_config import IST, Topic, order_exchange
@@ -94,6 +94,7 @@ class ICOrderEvent:
     close_reason:    str   = ""
     cumulative_pnl:  float = 0.0   # running P&L across all rolls for this IC cycle
     event_id:        str   = ""
+    expiry:          Optional[date] = None   # chosen expiry (min-LTP shift); None → bridge resolves current
 
 
 @dataclass
