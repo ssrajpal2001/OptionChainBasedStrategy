@@ -110,6 +110,10 @@ class StraddlePosition:
     # Session VWAP tracking for VWAP Rise SL
     session_min_vwap: float = float("inf")
 
+    # Total contracts per leg (lot_size × lot_multiplier) — used by the dashboard
+    # to render qty and rupee P&L. Without it the UI shows qty=0 → P&L always 0.
+    lot_size: int = 0
+
     def to_dict(self) -> dict:
         """JSON-serialisable snapshot for PositionStore."""
         def _leg(l: StraddleLeg) -> dict:
@@ -124,6 +128,7 @@ class StraddlePosition:
             "open_time": self.open_time.isoformat() if self.open_time else None,
             "realized_pnl": self.realized_pnl, "status": self.status,
             "entry_indicators": dict(self.entry_indicators),
+            "lot_size": self.lot_size,
         }
 
     @classmethod
@@ -141,6 +146,7 @@ class StraddlePosition:
             open_time=_dt.fromisoformat(d["open_time"]) if d.get("open_time") else None,
             realized_pnl=d.get("realized_pnl", 0.0), status=d.get("status", "open"),
             entry_indicators=dict(d.get("entry_indicators", {})),
+            lot_size=d.get("lot_size", 0),
         )
 
     @property
@@ -363,9 +369,12 @@ class SellStraddleStrategy:
             _saved = _ps.load(self._persist_key)
             if _saved:
                 self._position = StraddlePosition.from_dict(_saved)
+                # Heal positions persisted before lot_size was tracked (would show qty=0).
+                if not self._position.lot_size:
+                    self._position.lot_size = self._lot_size * self._lot_multiplier
                 self._trades_today = max(self._trades_today, 1)
-                logger.info("SellStraddle[%s]: restored open position from store (credit=%.2f).",
-                            self._underlying, self._position.net_credit)
+                logger.info("SellStraddle[%s]: restored open position from store (credit=%.2f, qty=%d).",
+                            self._underlying, self._position.net_credit, self._position.lot_size)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: restore failed: %s", self._underlying, exc)
         self._tasks = [
@@ -874,6 +883,7 @@ class SellStraddleStrategy:
             status            = "open",
             session_min_vwap  = self._ind.get("vwap", float("inf")),
             entry_indicators  = self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
+            lot_size          = self._lot_size * self._lot_multiplier,
         )
         self._persist()   # survive restarts
         self._trades_today  += 1
@@ -1190,6 +1200,7 @@ class SellStraddleStrategy:
             net_credit=ce_l + pe_l, open_time=now, status="open",
             session_min_vwap=self._ind.get("vwap", float("inf")),
             entry_indicators=dict(self._ind),
+            lot_size=self._lot_size * self._lot_multiplier,
         )
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         self._event_counter += 1
