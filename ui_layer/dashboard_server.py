@@ -1696,16 +1696,27 @@ class DashboardServer:
                         # Day-locked tracked strikes (prev-day ATM + DTE), shown even
                         # when there is no open position so the UI reflects scanning.
                         _legp = getattr(eng, "_leg_prem", {}) if eng else {}
+                        _states = getattr(eng, "_states", {}) if eng else {}
                         _ds = getattr(eng, "_day_strikes", {}).get(underlying) if eng else None
-                        _st = getattr(eng, "_states", {}).get(underlying) if eng else None
                         if _ds is not None:
+                            def _legview(strike, opt):
+                                lst = _states.get(f"{underlying}:{int(strike)}:{opt}")
+                                return {
+                                    "strike": int(strike),
+                                    "ltp": round(float(_legp.get((underlying, int(strike), opt), 0.0) or 0.0), 2),
+                                    "phase": getattr(getattr(lst, "phase", None), "name", "IDLE") if lst else "IDLE",
+                                    "traps": len(getattr(lst, "trap_levels", []) or []) if lst else 0,
+                                    "entry_line": round(float(getattr(lst, "ltf_entry_line", 0.0) or 0.0), 2) if lst else 0.0,
+                                }
+                            _ce = _legview(_ds.ce_strike, "CE")
+                            _pe = _legview(_ds.pe_strike, "PE")
                             tracking = {
                                 "atm": _ds.atm, "dte": _ds.dte, "offset": _ds.offset_pts,
                                 "ce_strike": _ds.ce_strike, "pe_strike": _ds.pe_strike,
-                                "ce_ltp": round(float(_legp.get((underlying, _ds.ce_strike, "CE"), 0.0) or 0.0), 2),
-                                "pe_ltp": round(float(_legp.get((underlying, _ds.pe_strike, "PE"), 0.0) or 0.0), 2),
-                                "phase": getattr(getattr(_st, "phase", None), "name", "IDLE") if _st else "IDLE",
-                                "entry_line": round(float(getattr(_st, "ltf_entry_line", 0.0) or 0.0), 2) if _st else 0.0,
+                                "ce_ltp": _ce["ltp"], "pe_ltp": _pe["ltp"],
+                                "ce": _ce, "pe": _pe,
+                                # back-compat single fields (CE leg)
+                                "phase": _ce["phase"], "entry_line": _ce["entry_line"],
                             }
                         for _tid, tup in op.items():
                             try:

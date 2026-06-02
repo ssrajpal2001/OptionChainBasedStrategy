@@ -300,6 +300,8 @@ class TrapTradingEngine:
         # Per-leg premium cache: (underlying, strike, opt_type) → last ltp.
         # Lets the engine track the SPECIFIC tracked CE/PE without the future spot.
         self._leg_prem: Dict[Tuple[str, int, str], float] = {}
+        # Per-leg live candle builders: (leg_key, timeframe) → building OHLC bucket.
+        self._leg_bars: Dict[Tuple[str, int], dict] = {}
         # Spot cache: underlying → last spot (used ONLY to pick the day's centre once)
         self._spot_cache:  Dict[str, float] = {}
 
@@ -568,6 +570,7 @@ class TrapTradingEngine:
                 self._compute_day_strikes(underlying, prev_high, prev_low, source="db-prev-day")
                 await self._ensure_subscribed_legs(underlying)
                 await self._seed_legs_from_history(underlying)
+                await self._seed_leg_detection(underlying)
                 return
             # (2) Broker historical daily candle (last open day)
             hl = await self._fetch_prev_day_hl_upstox(underlying)
@@ -576,6 +579,7 @@ class TrapTradingEngine:
                 self._compute_day_strikes(underlying, prev_high, prev_low, source="upstox-historical")
                 await self._ensure_subscribed_legs(underlying)
                 await self._seed_legs_from_history(underlying)
+                await self._seed_leg_detection(underlying)
                 return
             logger.warning("TrapEngine[%s]: could not obtain prev open-day high/low "
                            "(no DB bars, no historical candle).", underlying)
@@ -642,6 +646,62 @@ class TrapTradingEngine:
             return float(candles[0][2]), float(candles[0][3])
         logger.warning("TrapEngine[%s]: historical returned no candles (key=%s).", underlying, ikey)
         return None
+
+    @staticmethod
+    def _leg_key(underlying: str, strike: int, opt: str) -> str:
+        """Canonical per-leg detection key (state is keyed by this, not the underlying)."""
+        return f"{underlying}:{int(strike)}:{opt}"
+
+    async def _seed_leg_detection(self, underlying: str) -> None:
+        """Seed per-leg HTF/MTF trap state from each tracked option's INTRADAY 1-min
+        history (Upstox), so rolling_base / trap_levels populate immediately and the
+        HTF/MTF trap appears without waiting hours for live candles to build."""
+        from data_layer.instrument_registry import REGISTRY as _REG
+        sel = self._day_strikes.get(underlying)
+        if sel is None:
+            return
+        today = datetime.now(IST).date()
+        expiry = _REG.get_active_expiry(underlying, today)
+        if expiry is None:
+            expiry = next((e for e in _REG.all_expiries(underlying) if e >= today), None)
+        if expiry is None:
+            return
+        tc = self._cfg.trap_engine
+        import pandas as pd
+        for strike, opt in ((sel.ce_strike, "CE"), (sel.pe_strike, "PE")):
+            okey = _REG.get_upstox_key(underlying, expiry, int(strike), opt)
+            if not okey:
+                continue
+            candles = await self._upstox_candles(okey, "1minute", 3)
+            if not candles:
+                self._tlog(underlying).info("no intraday history to seed %d%s detection", strike, opt)
+                continue
+            leg_key = self._leg_key(underlying, strike, opt)
+            rows = [{"timestamp": c[0], "open": float(c[1]), "high": float(c[2]),
+                     "low": float(c[3]), "close": float(c[4]),
+                     "volume": float(c[5] or 0)} for c in reversed(candles)]  # oldest-first
+            df = pd.DataFrame(rows)
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df.set_index("timestamp").sort_index()
+            agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            _origin = df.index[0].normalize().replace(hour=9, minute=15, second=0)
+            for tf, kwargs in ((tc.HTF_MINUTES, dict(origin=_origin)), (tc.MTF_MINUTES, {})):
+                res = df.resample(f"{tf}min", closed="left", label="right", **kwargs).agg(agg).dropna()
+                for ts, r in res.iterrows():
+                    ev = CandleEvent(
+                        symbol=leg_key, timeframe=tf,
+                        timestamp=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
+                        open=float(r["open"]), high=float(r["high"]), low=float(r["low"]),
+                        close=float(r["close"]), volume=int(r["volume"]),
+                    )
+                    if tf == tc.HTF_MINUTES:
+                        self._process_htf(ev)
+                    else:
+                        self._process_mtf(ev)
+            st = self._get_state(leg_key)
+            self._tlog(underlying).info(
+                "seeded %d%s detection: phase=%s rolling_base=%.2f trap_levels=%d",
+                strike, opt, st.phase.name, st.rolling_base, len(st.trap_levels))
 
     async def _seed_legs_from_history(self, underlying: str) -> None:
         """Seed the tracked CE/PE LTP from each option's latest historical close so the
@@ -745,6 +805,15 @@ class TrapTradingEngine:
                 self._prem_cache[event.symbol] = event.ltp
                 try:
                     self._leg_prem[(event.underlying, int(event.strike), event.option_type)] = event.ltp
+                    # If this tick is one of the day's tracked legs, build its live
+                    # HTF/MTF candles so detection progresses intraday on the PREMIUM.
+                    sel = self._day_strikes.get(event.underlying)
+                    strike = int(event.strike)
+                    if sel is not None and (
+                        (strike == sel.ce_strike and event.option_type == "CE") or
+                        (strike == sel.pe_strike and event.option_type == "PE")):
+                        leg_key = self._leg_key(event.underlying, strike, event.option_type)
+                        self._feed_leg_tick(leg_key, event.timestamp, event.ltp)
                 except Exception:
                     pass
 
@@ -754,6 +823,35 @@ class TrapTradingEngine:
                     "TrapTradingEngine: option tick error [%s]: %s",
                     event.symbol, exc,
                 )
+
+    def _feed_leg_tick(self, leg_key: str, ts, ltp: float) -> None:
+        """Aggregate a tracked-leg premium tick into HTF/MTF candles; on bucket rollover
+        emit a CandleEvent into the per-leg detection (keyed by leg_key)."""
+        tc = self._cfg.trap_engine
+        try:
+            base = ts.replace(second=0, microsecond=0)
+        except Exception:
+            base = datetime.now(IST).replace(second=0, microsecond=0)
+        for tf in (tc.HTF_MINUTES, tc.MTF_MINUTES):
+            minute = base.hour * 60 + base.minute
+            floored = minute - (minute % tf)
+            bstart = base.replace(hour=floored // 60, minute=floored % 60)
+            key = (leg_key, tf)
+            cur = self._leg_bars.get(key)
+            if cur is None or cur["start"] != bstart:
+                if cur is not None:   # previous bucket closed → emit it
+                    ev = CandleEvent(symbol=leg_key, timeframe=tf, timestamp=cur["start"],
+                                     open=cur["o"], high=cur["h"], low=cur["l"],
+                                     close=cur["c"], volume=0)
+                    if tf == tc.HTF_MINUTES:
+                        self._process_htf(ev)
+                    else:
+                        self._process_mtf(ev)
+                self._leg_bars[key] = {"start": bstart, "o": ltp, "h": ltp, "l": ltp, "c": ltp}
+            else:
+                cur["h"] = max(cur["h"], ltp)
+                cur["l"] = min(cur["l"], ltp)
+                cur["c"] = ltp
 
     # ── Candle router ─────────────────────────────────────────────────────────
 
@@ -792,35 +890,27 @@ class TrapTradingEngine:
             return
         self._last_hb[symbol] = _t.monotonic()
         try:
-            st = self._get_state(symbol)   # create state if missing → log always appears
-            if st.trade_id:
-                pos = (f"IN-POSITION trade={st.trade_id} entry={st.entry_price:.2f} "
-                       f"sl={st.ltf_sl_line:.2f} target={st.target_high:.2f}")
-            elif st.phase.name in ("ARMED", "RETEST_ALERT"):
-                pos = (f"WAITING-ENTRY phase={st.phase.name} entry_origin={st.entry_origin:.2f} "
-                       f"ltf_entry={st.ltf_entry_line:.2f} target={st.target_high:.2f} "
-                       f"(buys the option whose premium retests {st.ltf_entry_line:.2f})")
-            else:
-                pos = "no-position (scanning option premium for HTF/MTF trap)"
             sel = self._day_strikes.get(symbol)
-            if sel is not None:
-                ce_ltp = self._leg_prem.get((symbol, sel.ce_strike, "CE"), 0.0)
-                pe_ltp = self._leg_prem.get((symbol, sel.pe_strike, "PE"), 0.0)
-                # CE/PE-centric: once the day's strikes are picked, the trap scans the
-                # OPTION premiums — the future spot is no longer used.
-                self._tlog(symbol).info(
-                    "heartbeat CE %d=%.2f | PE %d=%.2f | DTE=%d phase=%s "
-                    "rolling_base=%.2f trap_levels=%d pending=%d | %s",
-                    sel.ce_strike, ce_ltp, sel.pe_strike, pe_ltp, sel.dte,
-                    st.phase.name, st.rolling_base, len(st.trap_levels),
-                    len(getattr(st, "pending_levels", [])), pos,
-                )
-            else:
-                # Strikes not locked yet — show spot only because that's all we have.
-                self._tlog(symbol).info(
-                    "heartbeat (awaiting day-strikes) spot=%.2f phase=%s | %s",
-                    spot, st.phase.name, pos,
-                )
+            if sel is None:
+                self._tlog(symbol).info("heartbeat (awaiting day-strikes) spot=%.2f", spot)
+                return
+            # Per-leg view: the trap scans the CE and PE PREMIUMS independently.
+            def _leg(strike, opt):
+                ltp = self._leg_prem.get((symbol, strike, opt), 0.0)
+                lst = self._states.get(self._leg_key(symbol, strike, opt))
+                if lst is None:
+                    return f"{opt} {strike}={ltp:.2f} phase=IDLE traps=0"
+                tag = ""
+                if lst.trade_id:
+                    tag = f" IN-POSITION entry={lst.entry_price:.2f} sl={lst.ltf_sl_line:.2f} target={lst.target_high:.2f}"
+                elif lst.phase.name in ("ARMED", "RETEST_ALERT"):
+                    tag = f" WAITING-ENTRY@{lst.ltf_entry_line:.2f}"
+                return (f"{opt} {strike}={ltp:.2f} phase={lst.phase.name} "
+                        f"rolling_base={lst.rolling_base:.2f} traps={len(lst.trap_levels)}{tag}")
+            self._tlog(symbol).info(
+                "heartbeat DTE=%d | %s | %s",
+                sel.dte, _leg(sel.ce_strike, "CE"), _leg(sel.pe_strike, "PE"),
+            )
         except Exception as exc:
             self._tlog(symbol).info("heartbeat spot=%.2f (state warming up: %s)", spot, exc)
 
@@ -1060,7 +1150,16 @@ class TrapTradingEngine:
             return
 
         underlying = tick.underlying
-        st = self._get_state(underlying)
+        # Operate on the PER-LEG state when this tick is one of the day's tracked
+        # legs (CE/PE), so Stage-3/5 retest+entry use that leg's detection state.
+        state_key = underlying
+        sel = self._day_strikes.get(underlying)
+        if sel is not None:
+            _strk = int(tick.strike)
+            if (_strk == sel.ce_strike and tick.option_type == "CE") or \
+               (_strk == sel.pe_strike and tick.option_type == "PE"):
+                state_key = self._leg_key(underlying, _strk, tick.option_type)
+        st = self._get_state(state_key)
         prem = tick.ltp
 
         # Stage 3 — TRAP_LOCKED → RETEST_ALERT
