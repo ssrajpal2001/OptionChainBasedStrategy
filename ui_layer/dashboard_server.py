@@ -1520,14 +1520,46 @@ class DashboardServer:
             if b is None:
                 raise HTTPException(404, f"Binding '{binding_id}' not found.")
             new_state = not bool(b.get("is_trade_enabled", 1))
+            # Trade ON requires the broker terminal to be connected first.
+            if new_state and not b.get("terminal_connected"):
+                return {"ok": False, "binding_id": binding_id,
+                        "error": "Terminal not connected. Switch Terminal ON first."}
+
             await _srv._client_db.set_trade_enabled(cid, binding_id, new_state)
+            # Trade toggle ALSO drives the execution engine: ON → engine_active so
+            # orders actually route to this broker (the bridge gates on engine_active);
+            # OFF → engine_active off. This matches the user model: Trade = "ready to
+            # trade, orders can be sent here". Deploy only selects strategies.
+            await _srv._client_db.set_engine_active(cid, binding_id, new_state)
+
+            if new_state:
+                # Hot-apply every saved deployment for this binding so lot/squareoff
+                # are live immediately when the engine comes up.
+                try:
+                    from data_layer.deployment_store import (
+                        load_deployment_json, apply_deployment_to_runtime_config,
+                    )
+                    deployments = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+                    for dep in deployments:
+                        if dep.get("binding_id") != binding_id:
+                            continue
+                        did = f"{cid}_{binding_id}_{dep.get('strategy_name')}_{dep.get('underlying')}"
+                        dj = load_deployment_json(did)
+                        if dj:
+                            apply_deployment_to_runtime_config(dj)
+                except Exception as exc:
+                    logger.warning("set_trade: deployment apply failed for %s/%s: %s", cid, binding_id, exc)
+
             # Mirror in in-memory profile
             reg_client = _srv._registry.get(cid) if _srv._registry else None
             if reg_client:
                 for rb in reg_client.broker_bindings:
                     if rb.binding_id == binding_id:
                         rb.is_trade_enabled = new_state
-            return {"ok": True, "binding_id": binding_id, "is_trade_enabled": new_state}
+            logger.info("Dashboard: Trade toggle %s/%s → %s (engine_active=%s)",
+                        cid, binding_id, "ON" if new_state else "OFF", new_state)
+            return {"ok": True, "binding_id": binding_id, "is_trade_enabled": new_state,
+                    "engine_active": new_state}
 
         # ── CLIENT — set target index ─────────────────────────────────────────
 
