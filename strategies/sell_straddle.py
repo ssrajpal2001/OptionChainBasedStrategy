@@ -520,16 +520,18 @@ class SellStraddleStrategy:
         """Handle fill confirmation — finalize entry or exit prices."""
         if fill.action == "ENTRY":
             if self._position and self._position.status == "open":
-                # Update with actual fill prices (matters in live mode)
-                self._position.ce_leg.ltp         = fill.ce_fill
-                self._position.pe_leg.ltp         = fill.pe_fill
-                self._position.ce_leg.entry_price = fill.ce_fill
-                self._position.pe_leg.entry_price = fill.pe_fill
-                self._position.net_credit         = fill.ce_fill + fill.pe_fill
+                _legs = getattr(fill, "legs", ["CE", "PE"])
+                if "CE" in _legs:
+                    self._position.ce_leg.ltp         = fill.ce_fill
+                    self._position.ce_leg.entry_price = fill.ce_fill
+                if "PE" in _legs:
+                    self._position.pe_leg.ltp         = fill.pe_fill
+                    self._position.pe_leg.entry_price = fill.pe_fill
+                self._position.net_credit = self._position.ce_leg.entry_price + self._position.pe_leg.entry_price
                 logger.info(
-                    "SellStraddle[%s]: ENTRY confirmed — CE=%.2f PE=%.2f credit=%.2f [%s/%s]",
-                    self._underlying, fill.ce_fill, fill.pe_fill,
-                    fill.ce_fill + fill.pe_fill, fill.client_id, fill.binding_id,
+                    "SellStraddle[%s]: ENTRY confirmed — CE=%.2f PE=%.2f credit=%.2f [%s/%s] legs=%s",
+                    self._underlying, self._position.ce_leg.entry_price, self._position.pe_leg.entry_price,
+                    self._position.net_credit, fill.client_id, fill.binding_id, _legs,
                 )
             self._order_pending = False
         elif fill.action == "EXIT":
@@ -1212,6 +1214,32 @@ class SellStraddleStrategy:
         return True  # Rolled — caller should NOT also close
 
     # ── Close ─────────────────────────────────────────────────────────────────
+
+    async def _close_leg(self, side: str, reason: str, now: datetime) -> float:
+        """Close ONE leg (publish EXIT legs=[side]); book that leg's P&L into the
+        session total. Returns leg P&L (pts). Does NOT clear the position by itself —
+        the caller (single-side roll) enforces the 0-or-2 invariant."""
+        from execution_bridge.straddle_bridge import StraddleOrderEvent
+        pos = self._position
+        if not pos:
+            return 0.0
+        leg = pos.ce_leg if side == "CE" else pos.pe_leg
+        leg_pnl = leg.entry_price - leg.ltp  # short option: credit - buyback
+        self._event_counter += 1
+        order_ev = StraddleOrderEvent(
+            action="EXIT", underlying=self._underlying, atm=pos.atm_at_entry,
+            ce_strike=pos.ce_leg.strike, pe_strike=pos.pe_leg.strike,
+            ce_ltp=pos.ce_leg.ltp, pe_ltp=pos.pe_leg.ltp,
+            lot_multiplier=self._lot_multiplier, lot_size=self._lot_size,
+            spot=self._spot, close_reason=reason, realized_pnl=leg_pnl,
+            event_id=f"{self._underlying}_EXITLEG_{side}_{self._event_counter}",
+            legs=[side],
+        )
+        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        self._session_realized_pnl_pts += leg_pnl
+        logger.info("SellStraddle[%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
+                    self._underlying, side, leg.strike, leg_pnl, reason)
+        return leg_pnl
 
     async def _close_position(self, reason: str) -> None:
         if not self._position:
