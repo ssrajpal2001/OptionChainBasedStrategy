@@ -417,11 +417,11 @@ class TrapTradingEngine:
 
         import pandas as pd
 
-        # Lock each symbol's day strikes from JUST the previous trading day's high/low
-        # — independent of the full HTF/MTF replay below, so strikes are set even if
-        # there isn't enough history to rebuild trap state.
+        # Lock each symbol's day strikes from the previous open day's high/low.
+        # Run in the BACKGROUND (network/DB) so startup is never blocked waiting on
+        # the broker historical API — the web server and engine come up immediately.
         for sym in symbols:
-            await self._lock_day_strikes(sym)
+            asyncio.create_task(self._lock_day_strikes(sym))
 
         for sym in symbols:
             try:
@@ -554,7 +554,7 @@ class TrapTradingEngine:
                     "Accept": "application/json",
                     "Authorization": f"Bearer {token}" if token else "",
                 })
-                with urllib.request.urlopen(req, timeout=15) as r:
+                with urllib.request.urlopen(req, timeout=8) as r:
                     return _json.loads(r.read().decode("utf-8"))
 
             data = await asyncio.to_thread(_get)
@@ -625,7 +625,8 @@ class TrapTradingEngine:
                     self._lock_try = {}
                 if _t.monotonic() - self._lock_try.get(event.symbol, 0.0) > 60.0:
                     self._lock_try[event.symbol] = _t.monotonic()
-                    await self._lock_day_strikes(event.symbol)
+                    # Background: never block tick draining on the HTTP/DB lookup.
+                    asyncio.create_task(self._lock_day_strikes(event.symbol))
             # Live heartbeat driven by ticks (not candles), so the per-symbol log
             # is created immediately and shows what the engine sees every minute —
             # even between 5m/75m candle closes.
