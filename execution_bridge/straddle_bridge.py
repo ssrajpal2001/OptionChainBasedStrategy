@@ -180,6 +180,16 @@ class TradeLogger:
             f"{'[PAPER]' if fill.paper_mode else '[LIVE]'}\n"
         )
         self._handle(client_id, binding_id).write(line)
+        # Persist to the client trade-history (powers the dashboard History view).
+        try:
+            from data_layer import trade_history as _th
+            _th.record(
+                client_id, "sell_straddle", ev.underlying,
+                entry_ce + entry_pe, fill.ce_fill + fill.pe_fill,
+                ev.close_reason, pnl_rs, binding_id=binding_id,
+            )
+        except Exception:
+            pass
 
     def close_all(self) -> None:
         for h in self._handles.values():

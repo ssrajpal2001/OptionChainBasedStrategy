@@ -1676,19 +1676,19 @@ class DashboardServer:
         @app.get("/api/client/history", tags=["Client"])
         async def api_client_history(user: dict = Depends(_require_client)):
             cid = user.get("client_id", "")
-            # Pull from event bus log — filter fills + exits for this client
-            trades = []
-            for evt in list(reversed(_srv._event_log[-200:] if hasattr(_srv, "_event_log") else [])):
-                if evt.get("client_id") == cid and evt.get("type") in ("fill", "exit", "trade"):
-                    trades.append({
-                        "date":        evt.get("ts", ""),
-                        "strategy":    evt.get("strategy", "—"),
-                        "instrument":  evt.get("instrument", evt.get("index", "—")),
-                        "entry_price": evt.get("entry_price", "—"),
-                        "exit_price":  evt.get("exit_price", evt.get("avg_price", "—")),
-                        "exit_reason": evt.get("reason", evt.get("code", "—")),
-                        "pnl":         float(evt.get("pnl", 0)),
-                    })
+            # Persistent per-client closed-trade history (recorded by the bridges on
+            # every EXIT). Survives restarts.
+            from data_layer import trade_history as _th
+            rows = await asyncio.to_thread(_th.load, cid, 200)
+            trades = [{
+                "date":        r.get("ts", ""),
+                "strategy":    r.get("strategy", "—"),
+                "instrument":  r.get("instrument", "—"),
+                "entry_price": r.get("entry_price", "—"),
+                "exit_price":  r.get("exit_price", "—"),
+                "exit_reason": r.get("exit_reason", "—"),
+                "pnl":         float(r.get("pnl", 0)),
+            } for r in rows]
             return {"ok": True, "trades": trades}
 
         # ── CLIENT — kill broker ──────────────────────────────────────────────

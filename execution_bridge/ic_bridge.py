@@ -141,7 +141,24 @@ class ICExecutionBridge:
             ev.cumulative_pnl * ev.lot_size * ev.lot_multiplier,
             client_id,
         )
+        self._record_history(ev, client_id, binding_id, net_credit)
         await self._bus.publish(Topic.ORDER_FILL, fill)
+
+    @staticmethod
+    def _record_history(ev, client_id: str, binding_id: str, net_credit: float) -> None:
+        """Persist a closed IC trade to the client history (dashboard History view)."""
+        if ev.action != "EXIT":
+            return
+        try:
+            from data_layer import trade_history as _th
+            pnl_rs = ev.cumulative_pnl * ev.lot_size * ev.lot_multiplier
+            _th.record(
+                client_id, "iron_condor", ev.underlying,
+                net_credit, net_credit - ev.cumulative_pnl,
+                ev.close_reason or "exit", pnl_rs, binding_id=binding_id,
+            )
+        except Exception:
+            pass
 
     # ── Live fill ─────────────────────────────────────────────────────────────
 
