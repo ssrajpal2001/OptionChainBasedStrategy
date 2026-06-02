@@ -1356,6 +1356,17 @@ document.addEventListener('alpine:init', () => {
       }
       if (!this.indexConfig[idx].sell_straddle) this.indexConfig[idx].sell_straddle = this._ssDefaults();
       if (!this.indexConfig[idx].iron_condor)   this.indexConfig[idx].iron_condor   = this._icDefaults(idx);
+      if (!this.indexConfig[idx].trap_trading)  this.indexConfig[idx].trap_trading  = {};
+      { const tt = this.indexConfig[idx].trap_trading;
+        if (tt.buy_depth === undefined)     tt.buy_depth = 0;
+        if (tt.lookback_days === undefined) tt.lookback_days = 2;
+        if (tt.htf_minutes === undefined)   tt.htf_minutes = 75;
+        if (tt.mtf_minutes === undefined)   tt.mtf_minutes = 5;
+        if (tt.sl_min_minutes === undefined) tt.sl_min_minutes = 1;
+        if (tt.roundoff_step === undefined) tt.roundoff_step = 0;
+        if (!tt.dte_offset_ladder) tt.dte_offset_ladder = {"5":5,"4":4,"3":3,"2":2,"1":1};
+        if (tt.dte_ladder_text === undefined) tt.dte_ladder_text = JSON.stringify(tt.dte_offset_ladder);
+      }
       // Ensure rule arrays exist
       const ss = this.indexConfig[idx].sell_straddle;
       if (!Array.isArray(ss.entry_rules_beginning)) ss.entry_rules_beginning = [];
@@ -1390,7 +1401,7 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch(`/api/admin/strategy/config/${idx}`);
         if (r && r.ok) {
           const d = await r.json();
-          this.indexConfig[idx] = { sell_straddle: d.sell_straddle || {}, iron_condor: d.iron_condor || {} };
+          this.indexConfig[idx] = { sell_straddle: d.sell_straddle || {}, iron_condor: d.iron_condor || {}, trap_trading: d.trap_trading || {} };
         }
       } catch {}
       this._ensureIndexConfig(idx);
@@ -1402,7 +1413,13 @@ document.addEventListener('alpine:init', () => {
       this.indexConfigOk = null;
       const idx = this.adminSelectedIndex;
       try {
-        const payload = this.indexConfig[idx] || {};
+        const payload = JSON.parse(JSON.stringify(this.indexConfig[idx] || {}));
+        // Parse the editable DTE-ladder text back into the JSON object before saving.
+        if (payload.trap_trading) {
+          try { payload.trap_trading.dte_offset_ladder = JSON.parse(payload.trap_trading.dte_ladder_text || '{}'); }
+          catch (e) { this.indexConfigOk = false; this.indexConfigMsg = 'DTE ladder is not valid JSON.'; this.indexConfigSaving = false; return; }
+          delete payload.trap_trading.dte_ladder_text;
+        }
         const r = await this._fetch(`/api/admin/strategy/config/${idx}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -4033,6 +4050,34 @@ function histReplay() {
 
       <!-- ══ LIQUIDITY TRAP TRADING config ══════════════════════════════════ -->
       <div x-show="adminStrategyTab==='trap_trading'" class="p-4 flex flex-col gap-3">
+        <!-- TT v2 per-instrument settings (seller-trap nested HTF→MTF) -->
+        <div class="rounded border p-3" style="border-color:var(--t-border)" x-data>
+          <div class="font-display text-sm font-black tracking-widest mb-2" style="color:var(--t-cyan)">
+            TRAP v2 — <span x-text="adminSelectedIndex"></span> (seller-trap, per instrument)
+          </div>
+          <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].trap_trading">
+            <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">Buy depth (ATM±N steps)</span>
+                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.buy_depth"></label>
+              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">Lookback days (≥2)</span>
+                <input type="number" min="2" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.lookback_days"></label>
+              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">HTF minutes</span>
+                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.htf_minutes"></label>
+              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">MTF minutes</span>
+                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.mtf_minutes"></label>
+              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">SL min minutes</span>
+                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.sl_min_minutes"></label>
+              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">Round-off step (0=auto)</span>
+                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.roundoff_step"></label>
+              <label class="flex flex-col gap-1 col-span-2"><span style="color:var(--t-muted)">DTE offset ladder (JSON: DTE&gt;k → steps ITM)</span>
+                <input type="text" class="t-input" x-model="indexConfig[adminSelectedIndex].trap_trading.dte_ladder_text" placeholder='{"5":5,"4":4,"3":3,"2":2,"1":1}'></label>
+              <div class="col-span-2 flex items-center gap-3 mt-1">
+                <button class="t-btn" @click="saveIndexConfig()" :disabled="indexConfigSaving" x-text="indexConfigSaving?'Saving…':'Save TRAP v2'"></button>
+                <span class="text-xs" :style="`color:${indexConfigOk?'var(--t-green)':'var(--t-red)'}`" x-text="indexConfigMsg"></span>
+              </div>
+            </div>
+          </template>
+        </div>
         <div class="text-xs font-mono mb-1" style="color:var(--t-muted)">
           <span class="font-semibold" style="color:var(--t-text)">Liquidity Trap Trading</span> —
           5-stage MTF institutional liquidity sweep engine. All parameters apply globally.
@@ -6510,34 +6555,22 @@ function histReplay() {
                           · ITM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.offset"></span></span>
                         <span x-text="'phase '+csPositions[b.binding_id][dep.strategy_name].tracking.phase"></span>
                       </div>
-                      <div class="flex justify-between">
-                        <span style="color:var(--t-text)">CE <span x-text="csPositions[b.binding_id][dep.strategy_name].tracking.ce_strike"></span>
-                          <span style="color:var(--t-muted)" x-text="'· '+((csPositions[b.binding_id][dep.strategy_name].tracking.ce||{}).phase||'IDLE')+' · traps '+((csPositions[b.binding_id][dep.strategy_name].tracking.ce||{}).traps||0)"></span></span>
-                        <span>LTP <span class="price-live" style="color:var(--t-bright)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.ce_ltp"></span></span>
-                      </div>
-                      <div class="flex justify-between" x-show="((csPositions[b.binding_id][dep.strategy_name].tracking.ce||{}).entry_line||0)>0">
-                        <span style="color:var(--t-muted)">CE entry line</span>
-                        <span style="color:var(--t-amber)" x-text="(csPositions[b.binding_id][dep.strategy_name].tracking.ce||{}).entry_line"></span>
-                      </div>
-                      <div class="flex justify-between">
-                        <span style="color:var(--t-text)">PE <span x-text="csPositions[b.binding_id][dep.strategy_name].tracking.pe_strike"></span>
-                          <span style="color:var(--t-muted)" x-text="'· '+((csPositions[b.binding_id][dep.strategy_name].tracking.pe||{}).phase||'IDLE')+' · traps '+((csPositions[b.binding_id][dep.strategy_name].tracking.pe||{}).traps||0)"></span></span>
-                        <span>LTP <span class="price-live" style="color:var(--t-bright)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.pe_ltp"></span></span>
-                      </div>
-                      <div class="flex justify-between" x-show="((csPositions[b.binding_id][dep.strategy_name].tracking.pe||{}).entry_line||0)>0">
-                        <span style="color:var(--t-muted)">PE entry line</span>
-                        <span style="color:var(--t-amber)" x-text="(csPositions[b.binding_id][dep.strategy_name].tracking.pe||{}).entry_line"></span>
-                      </div>
-                      <!-- HTF trap levels per leg (origin → SL / target) -->
+                      <!-- Per-leg seller-trap detector state (HTF/MTF) + active LIFO level [L/H] -->
                       <template x-for="side in ['ce','pe']" :key="side">
-                        <div x-show="((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).htf||[]).length>0" class="mt-1">
-                          <div style="color:var(--t-muted)" x-text="side.toUpperCase()+' HTF traps:'"></div>
-                          <template x-for="(t,ti) in ((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).htf||[])" :key="ti">
-                            <div class="flex justify-between pl-2" style="color:var(--t-text)">
-                              <span x-text="'origin '+t.origin+' · SL '+t.sl"></span>
-                              <span style="color:var(--t-green)" x-text="'target '+t.target"></span>
-                            </div>
-                          </template>
+                        <div class="mt-1">
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-text)" x-text="side.toUpperCase()+' '+csPositions[b.binding_id][dep.strategy_name].tracking[side==='ce'?'ce_strike':'pe_strike']"></span>
+                            <span>LTP <span class="price-live" style="color:var(--t-bright)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking[side==='ce'?'ce_ltp':'pe_ltp']"></span></span>
+                          </div>
+                          <div class="flex justify-between pl-2" style="color:var(--t-muted)">
+                            <span>HTF <span :style="`color:${((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).htf_state==='ENTRY_READY')?'var(--t-green)':'var(--t-cyan)'}`" x-text="(csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).htf_state||'—'"></span>
+                              · MTF <span :style="`color:${((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).mtf_state==='ENTRY_READY')?'var(--t-green)':'var(--t-muted)'}`" x-text="(csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).mtf_state||'—'"></span></span>
+                            <span x-text="'levels '+((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).traps||0)"></span>
+                          </div>
+                          <div class="flex justify-between pl-2" x-show="((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).level_h||0)>0" style="color:var(--t-text)">
+                            <span>active level</span>
+                            <span x-text="'L '+(csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).level_l+' · H '+(csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).level_h"></span>
+                          </div>
                         </div>
                       </template>
                     </div>

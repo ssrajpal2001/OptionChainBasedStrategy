@@ -1750,28 +1750,23 @@ class DashboardServer:
                         # Day-locked tracked strikes (prev-day ATM + DTE), shown even
                         # when there is no open position so the UI reflects scanning.
                         _legp = getattr(eng, "_leg_prem", {}) if eng else {}
-                        _states = getattr(eng, "_states", {}) if eng else {}
+                        _htf_det = getattr(eng, "_htf_det", {}) if eng else {}
+                        _mtf_det = getattr(eng, "_mtf_det", {}) if eng else {}
                         _ds = getattr(eng, "_day_strikes", {}).get(underlying) if eng else None
                         if _ds is not None:
                             def _legview(strike, opt):
-                                lst = _states.get(f"{underlying}:{int(strike)}:{opt}")
-                                # HTF trap level values (entry origin / bears' SL / target)
-                                htf = []
-                                for lv in (getattr(lst, "trap_levels", []) or [])[:4]:
-                                    htf.append({
-                                        "origin": round(float(getattr(lv, "entry_origin", 0.0) or 0.0), 2),
-                                        "sl":     round(float(getattr(lv, "bears_sl", 0.0) or 0.0), 2),
-                                        "target": round(float(getattr(lv, "target_high", 0.0) or 0.0), 2),
-                                    })
+                                lk = f"{underlying}:{int(strike)}:{opt}"
+                                h = _htf_det.get(lk)
+                                m = _mtf_det.get(lk)
+                                hlv = getattr(h, "active_level", None)
                                 return {
                                     "strike": int(strike),
                                     "ltp": round(float(_legp.get((underlying, int(strike), opt), 0.0) or 0.0), 2),
-                                    "phase": getattr(getattr(lst, "phase", None), "name", "IDLE") if lst else "IDLE",
-                                    "traps": len(getattr(lst, "trap_levels", []) or []) if lst else 0,
-                                    "htf": htf,
-                                    "mtf_high":  round(float(getattr(lst, "mtf_bearish_high", 0.0) or 0.0), 2) if lst else 0.0,
-                                    "mtf_sweep": round(float(getattr(lst, "mtf_sweep_low", 0.0) or 0.0), 2) if lst else 0.0,
-                                    "entry_line": round(float(getattr(lst, "ltf_entry_line", 0.0) or 0.0), 2) if lst else 0.0,
+                                    "htf_state": getattr(getattr(h, "state", None), "name", "WATCH") if h else "—",
+                                    "mtf_state": getattr(getattr(m, "state", None), "name", "WATCH") if m else "—",
+                                    "level_l": round(float(getattr(hlv, "entry_l", 0.0) or 0.0), 2) if hlv else 0.0,
+                                    "level_h": round(float(getattr(hlv, "sl_h", 0.0) or 0.0), 2) if hlv else 0.0,
+                                    "traps": len(getattr(h, "_levels", []) or []) if h else 0,
                                 }
                             _ce = _legview(_ds.ce_strike, "CE")
                             _pe = _legview(_ds.pe_strike, "PE")
@@ -1781,7 +1776,7 @@ class DashboardServer:
                                 "ce_ltp": _ce["ltp"], "pe_ltp": _pe["ltp"],
                                 "ce": _ce, "pe": _pe,
                                 # back-compat single fields (CE leg)
-                                "phase": _ce["phase"], "entry_line": _ce["entry_line"],
+                                "phase": _ce["htf_state"], "entry_line": 0.0,
                             }
                         for _tid, tup in op.items():
                             try:
@@ -2645,6 +2640,7 @@ class DashboardServer:
                 "index": idx,
                 "sell_straddle": RuntimeConfig.index_section(idx, "sell_straddle"),
                 "iron_condor":   RuntimeConfig.index_section(idx, "iron_condor"),
+                "trap_trading":  RuntimeConfig.index_section(idx, "trap_trading"),
             }
 
         @app.post("/api/admin/strategy/config/{index}", tags=["Admin"])
@@ -2679,6 +2675,11 @@ class DashboardServer:
                             ic.reconfigure()
                         except Exception as exc:
                             logger.warning("reconfigure IC[%s]: %s", idx, exc)
+
+            if "trap_trading" in body:
+                # Trap engine reads settings live via RuntimeConfig.index_section, so
+                # persisting is sufficient; it applies on the next day-strike lock.
+                RuntimeConfig.set_index_section(idx, "trap_trading", body["trap_trading"])
 
             logger.info("Dashboard: per-index config saved for %s.", idx)
             return {"ok": True, "message": f"Config for {idx} saved and injected into running strategies."}
