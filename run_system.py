@@ -384,6 +384,8 @@ async def _run_live(
     # for the min-LTP expiry shift (no-op if the feature is unused).
     for _ic in _iron_condors:
         _ic.set_feeder(feeder)
+    # Trap engine subscribes its own deep-ITM tracked CE/PE strikes via the feeder.
+    trap_engine.set_feeder(feeder)
     router        = ExecutionRouter(bus, registry, cfg)
     from data_layer.client_db import ClientDB as _ClientDB
     _shared_client_db = _ClientDB()

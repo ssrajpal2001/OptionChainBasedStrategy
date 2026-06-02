@@ -303,6 +303,10 @@ class TrapTradingEngine:
         # Spot cache: underlying → last spot (used ONLY to pick the day's centre once)
         self._spot_cache:  Dict[str, float] = {}
 
+        # Feeder for subscribing the tracked CE/PE strikes (set via set_feeder()).
+        self._feeder = None
+        self._subscribed_keys: set = set()
+
         # Open positions: trade_id → (trade_id, option_symbol, entry_price, quantity)
         self._open_positions: Dict[str, Tuple[str, str, float, int]] = {}
         # Per-symbol log files (HTF/MTF/LTF stage visibility)
@@ -480,6 +484,50 @@ class TrapTradingEngine:
             except Exception as exc:
                 logger.exception("TrapTradingEngine warm_start [%s]: %s", sym, exc)
 
+    def set_feeder(self, feeder) -> None:
+        """Inject the GlobalFeeder so the trap can subscribe its tracked CE/PE strikes."""
+        self._feeder = feeder
+
+    async def _ensure_subscribed_legs(self, underlying: str) -> None:
+        """Subscribe the day's tracked CE + PE (deep-ITM by DTE) so their premiums
+        stream — these strikes are far from ATM and aren't covered by the SS/IC
+        rebalancer subscriptions, so the trap must subscribe them itself."""
+        if self._feeder is None:
+            return
+        sel = self._day_strikes.get(underlying)
+        if sel is None:
+            return
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            today = datetime.now(IST).date()
+            expiry = REGISTRY.get_active_expiry(underlying, today)
+            if expiry is None:
+                exps = REGISTRY.all_expiries(underlying)
+                expiry = next((e for e in exps if e >= today), None)
+            if expiry is None:
+                logger.warning("TrapEngine[%s]: no expiry to subscribe tracked legs.", underlying)
+                return
+            providers = ["upstox", "fyers"]
+            if hasattr(self._feeder, "active_provider"):
+                ap = self._feeder.active_provider
+                if ap in ("fyers", "upstox"):
+                    providers = [ap]
+            tokens = []
+            for strike, opt_type in ((sel.ce_strike, "CE"), (sel.pe_strike, "PE")):
+                for provider in providers:
+                    key = REGISTRY.get_broker_symbol(underlying, expiry, int(strike), opt_type, provider)
+                    if key and key not in self._subscribed_keys:
+                        tokens.append(key)
+                        self._subscribed_keys.add(key)
+            if tokens:
+                await self._feeder.subscribe_tokens(tokens)
+                self._tlog(underlying).info(
+                    "subscribed tracked legs CE=%d PE=%d exp=%s (%d tokens, providers=%s)",
+                    sel.ce_strike, sel.pe_strike, expiry, len(tokens), providers,
+                )
+        except Exception as exc:
+            logger.warning("TrapEngine[%s]: _ensure_subscribed_legs failed: %s", underlying, exc)
+
     def _dte(self, underlying: str) -> int:
         """Days-to-expiry from today to the active contract expiry (calendar days)."""
         try:
@@ -518,12 +566,14 @@ class TrapTradingEngine:
                 prev_high = max(float(r["high"]) for r in day_rows)
                 prev_low  = min(float(r["low"])  for r in day_rows)
                 self._compute_day_strikes(underlying, prev_high, prev_low, source="db-prev-day")
+                await self._ensure_subscribed_legs(underlying)
                 return
             # (2) Broker historical daily candle (last open day)
             hl = await self._fetch_prev_day_hl_upstox(underlying)
             if hl is not None:
                 prev_high, prev_low = hl
                 self._compute_day_strikes(underlying, prev_high, prev_low, source="upstox-historical")
+                await self._ensure_subscribed_legs(underlying)
                 return
             logger.warning("TrapEngine[%s]: could not obtain prev open-day high/low "
                            "(no DB bars, no historical candle).", underlying)
