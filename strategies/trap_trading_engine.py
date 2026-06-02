@@ -70,6 +70,14 @@ _MCX_MARKET_CLOSE = time(23, 30, 0)  # IST — MCX commodities trade the evening
 _MCX_SET = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
 
 
+def exec_strike(spot: float, opt_type: str, buy_depth: int, step: float) -> int:
+    """Resolve the execution BUY strike from the live spot/future. ATM = round(spot/step)*step;
+    CE goes `buy_depth` steps ITM (below spot), PE goes `buy_depth` steps ITM (above spot)."""
+    atm = round(float(spot) / step) * step
+    off = int(buy_depth) * int(step)
+    return int(atm - off) if opt_type == "CE" else int(atm + off)
+
+
 def _row_date(row: dict):
     """Extract a date from a 1m-bar row's timestamp (datetime or ISO string)."""
     ts = row.get("timestamp")
@@ -294,6 +302,8 @@ class TrapTradingEngine:
         # HTF arms the setup; MTF (gated by HTF ENTRY_READY) fires the entry signal.
         self._htf_det: Dict[str, SellerTrapDetector] = {}
         self._mtf_det: Dict[str, SellerTrapDetector] = {}
+        # v2 single live position (one leg at a time; rotation in Task 6).
+        self._v2_position: Optional[dict] = None
 
         # Day-fixed tracked strikes per underlying (prev-day ATM + DTE offset).
         # Computed once at warm-start; drives which CE/PE the trap follows.
@@ -947,14 +957,86 @@ class TrapTradingEngine:
                 cur["c"] = ltp
 
     def _on_mtf_entry_signal(self, leg_key: str, ltp: float) -> None:
-        """STUB (Task 4 implements execution). For now, log that the nested HTF→MTF
-        seller trap completed and an entry would fire for this leg."""
+        """Nested HTF→MTF seller trap completed for this leg → fire the BUY entry.
+        Scheduled as a task because order placement is async and this runs from the
+        sync tick path."""
         parts = leg_key.split(":")
         underlying = parts[0] if parts else leg_key
         opt = parts[2] if len(parts) > 2 else "?"
+        self._tlog(underlying).info("MTF ENTRY SIGNAL leg=%s type=%s ltp=%.2f", leg_key, opt, ltp)
+        try:
+            asyncio.create_task(self._fire_entry_v2(underlying, opt, float(ltp)))
+        except RuntimeError:
+            # No running loop (e.g. unit context) — caller may invoke _fire_entry_v2 directly.
+            pass
+
+    def _build_entry_payload(self, underlying: str, opt_type: str) -> Optional[dict]:
+        """Resolve the fresh ATM±buy_depth execution strike from the live spot/future.
+        Returns the order payload, or None if spot is unknown."""
+        spot = float(self._spot_cache.get(underlying, 0.0) or 0.0)
+        if spot <= 0.0:
+            return None
+        step = float(self._cfg.exchange.strike_steps.get(underlying, 50.0))
+        buy_depth = int(self._tt_cfg(underlying).get("buy_depth", 0) or 0)
+        strike = exec_strike(spot, opt_type, buy_depth, step)
+        lot = int(self._cfg.exchange.lot_sizes.get(underlying, 1) or 1)
+        return {"underlying": underlying, "side": "BUY", "opt_type": opt_type,
+                "strike": int(strike), "qty": int(lot), "spot": spot}
+
+    async def _fire_entry_v2(self, underlying: str, opt_type: str, entry_premium: float) -> None:
+        """Execute a BUY of the fresh ATM±buy_depth strike and record the position.
+        One position at a time (rotation added in Task 6)."""
+        if self._v2_position is not None:
+            return  # already in a position; rotation handled in Task 6
+        payload = self._build_entry_payload(underlying, opt_type)
+        if payload is None:
+            self._tlog(underlying).info("V2 ENTRY aborted: no live spot for %s", underlying)
+            return
+        from data_layer.instrument_registry import REGISTRY as _REG
+        today = datetime.now(IST).date()
+        expiry = _REG.get_active_expiry(underlying, today)
+        if expiry is None:
+            expiry = next((e for e in _REG.all_expiries(underlying) if e >= today), None)
+        # Subscribe + pin the execution strike so its premium streams for management.
+        try:
+            if self._feeder is not None and expiry is not None:
+                providers = ["upstox", "fyers"]
+                if hasattr(self._feeder, "active_provider") and self._feeder.active_provider in ("upstox", "fyers"):
+                    providers = [self._feeder.active_provider]
+                toks = []
+                for prov in providers:
+                    k = _REG.get_broker_symbol(underlying, expiry, payload["strike"], opt_type, prov)
+                    if k and k not in self._subscribed_keys:
+                        toks.append(k); self._subscribed_keys.add(k)
+                if toks:
+                    await self._feeder.subscribe_tokens(toks)
+                if self._rebalancer is not None:
+                    self._rebalancer.pin_strike(underlying, float(payload["strike"]))
+        except Exception as exc:
+            logger.warning("TrapEngine[%s]: v2 subscribe/pin failed: %s", underlying, exc)
+
+        # Publish the BUY signal (same SIGNAL path the engine already uses).
+        try:
+            from strategies.base_strategy import Direction, SignalPackage, StrategyID
+            sig = SignalPackage(
+                source=StrategyID.TRAP_ENGINE, direction=Direction.LONG,
+                underlying=underlying, option_type=opt_type,
+                target_strike=payload["strike"], entry_spot=payload["spot"],
+                stop_spot=0.0, target_spot=0.0, confidence=1.0,
+                timestamp=datetime.now(IST),
+                notes=f"TTv2 BUY {opt_type} {payload['strike']} qty={payload['qty']} prem={entry_premium:.2f}",
+            )
+            await self._bus.publish(Topic.SIGNAL, sig)
+        except Exception as exc:
+            logger.warning("TrapEngine[%s]: v2 signal publish failed: %s", underlying, exc)
+
+        self._v2_position = {
+            **payload, "entry_premium": float(entry_premium), "expiry": expiry,
+            "ts": datetime.now(IST),
+        }
         self._tlog(underlying).info(
-            "MTF ENTRY SIGNAL leg=%s type=%s ltp=%.2f — (execution wired in Task 4)",
-            leg_key, opt, ltp)
+            "V2 ENTRY BUY %s %d qty=%d @ prem=%.2f (spot=%.2f exp=%s)",
+            opt_type, payload["strike"], payload["qty"], entry_premium, payload["spot"], expiry)
 
     # ── Candle router ─────────────────────────────────────────────────────────
 
