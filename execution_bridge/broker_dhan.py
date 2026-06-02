@@ -158,9 +158,15 @@ class DhanBroker(BaseBroker):
             OrderType.SL_M:   "STOP_LOSS_MARKET",
             OrderType.SL_L:   "STOP_LOSS",
         }
+        # Dhan exchange segments: NSE_FNO (NFO), BSE_FNO (BFO/SENSEX), MCX_COMM (MCX).
+        # Previously MCX fell through to BSE_FNO → empty/garbage response.
+        _seg = {"NFO": "NSE_FNO", "BFO": "BSE_FNO", "MCX": "MCX_COMM"}.get(req.exchange, "NSE_FNO")
+        if req.exchange == "MCX" and security_id == req.broker_symbol:
+            logger.warning("DhanBroker [%s]: no MCX security_id for %s — order will likely reject; "
+                           "ensure the Dhan master includes MCX commodities.", self.client_id, req.broker_symbol)
         order_params = {
             "security_id":        security_id,
-            "exchange_segment":   "NSE_FNO" if req.exchange == "NFO" else "BSE_FNO",
+            "exchange_segment":   _seg,
             "transaction_type":   req.side.value,
             "quantity":           req.qty,
             "order_type":         _type_map[req.order_type],
