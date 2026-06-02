@@ -110,7 +110,10 @@ UI: a Trap section in the admin strategy editor mirroring SS/IC; values persist 
 ## Out of scope (this spec)
 - Backtesting harness changes; per-broker MCX master fixes (Dhan/Angel) — tracked separately.
 
-## Open questions to resolve during planning
-1. **Target/profit exit:** is there a profit target for the long option, or exit only on SL / rotation / EOD?
-2. **Multi-level policy** when several reference candles qualify (most-recent vs nearest-to-price).
-3. **HTF invalidation:** when does an HTF ENTRY_READY expire if MTF never triggers (time/structure)?
+## Resolved decisions (user, 2026-06-03)
+1. **Target/profit exit:** NONE. A winning trade closes only on the two-tier SL, rotation, or EOD.
+2. **Multi-level policy:** a LIFO stack of reference levels. The **most-recent** qualifying level is
+   active. If its SL is hit (invalidates), that level **disqualifies** and we fall back to the
+   **previous** still-valid trap level, which becomes the active entry-checking level. (Stack pop on invalidation.)
+3. **HTF expiry:** **until structure breaks** — the HTF ENTRY_READY setup stays armed (no time limit)
+   until the HTF level itself invalidates; then it rolls forward.
