@@ -50,6 +50,7 @@ class StraddleOrderEvent:
     close_reason:   str  = ""  # populated on EXIT
     realized_pnl:   float = 0.0  # populated on EXIT
     event_id:       str  = ""    # filled by bridge for correlation
+    legs:           list = field(default_factory=lambda: ["CE", "PE"])  # legs to act on
 
 
 @dataclass
@@ -67,6 +68,7 @@ class StraddleFillEvent:
     event_id:   str
     timestamp:  datetime = field(default_factory=lambda: datetime.now(IST))
     paper_mode: bool = True
+    legs:       list = field(default_factory=lambda: ["CE", "PE"])
 
 
 # ── Iron Condor order events ──────────────────────────────────────────────────
@@ -310,12 +312,13 @@ class StraddleExecutionBridge:
             atm        = ev.atm,
             ce_strike  = ev.ce_strike,
             pe_strike  = ev.pe_strike,
-            ce_fill    = ev.ce_ltp,
-            pe_fill    = ev.pe_ltp,
+            ce_fill    = ev.ce_ltp if "CE" in ev.legs else 0.0,
+            pe_fill    = ev.pe_ltp if "PE" in ev.legs else 0.0,
             client_id  = client_id,
             binding_id = binding_id,
             event_id   = ev.event_id,
             paper_mode = True,
+            legs       = ev.legs,
         )
 
         if ev.action == "ENTRY":
@@ -362,6 +365,8 @@ class StraddleExecutionBridge:
 
         fills = {}
         for opt_type, strike in [("CE", ev.ce_strike), ("PE", ev.pe_strike)]:
+            if opt_type not in ev.legs:
+                continue
             symbol = translator.to_broker_symbol(
                 underlying=ev.underlying,
                 strike=strike,
@@ -404,6 +409,7 @@ class StraddleExecutionBridge:
             binding_id = binding_id,
             event_id   = ev.event_id,
             paper_mode = False,
+            legs       = ev.legs,
         )
 
         if ev.action == "ENTRY":
