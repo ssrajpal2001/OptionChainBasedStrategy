@@ -78,6 +78,20 @@ def exec_strike(spot: float, opt_type: str, buy_depth: int, step: float) -> int:
     return int(atm - off) if opt_type == "CE" else int(atm + off)
 
 
+def trap_transition_msg(opt: str, strike, tf: str, new_state: str,
+                        level_l: float, level_h: float, price: float) -> str:
+    """Human-readable line for a per-leg detector state change (the Below→Above→Return
+    story), so the dry-run log shows exactly when sellers enter/get trapped/we arm."""
+    head = f"{opt} {strike} {tf} {new_state}:"
+    if new_state == "SELLERS_IN":
+        return f"{head} price {price:.2f} broke below L={level_l:.2f} (sl={level_h:.2f}) — sellers entered"
+    if new_state == "TRAPPED":
+        return f"{head} price {price:.2f} broke above H={level_h:.2f} — sellers trapped"
+    if new_state == "ENTRY_READY":
+        return f"{head} price {price:.2f} returned to L={level_l:.2f}"
+    return f"{head} price {price:.2f}"
+
+
 def should_rotate(running_side, signal_side, has_position: bool) -> bool:
     """Rotate (close the runner, open the new leg) only when a position is open and the
     new entry signal is for the OPPOSITE leg. Same-side signals are ignored."""
@@ -883,10 +897,14 @@ class TrapTradingEngine:
         mtf = self._det(leg_key, "mtf")
         htf_armed = (htf.state == _DetState.ENTRY_READY)
 
-        # Price-path detection (Below→Above→Return) on each tick.
+        # Price-path detection (Below→Above→Return) on each tick, logging transitions.
+        _p = htf.state
         htf.on_tick(ltp)
+        self._log_leg_transition(leg_key, "HTF", htf, _p, ltp)
         if htf_armed:
+            _p = mtf.state
             mtf.on_tick(ltp)
+            self._log_leg_transition(leg_key, "MTF", mtf, _p, ltp)
             if mtf.entry_ready:
                 self._on_mtf_entry_signal(leg_key, ltp)
                 mtf.consume_entry()
@@ -901,13 +919,32 @@ class TrapTradingEngine:
             cur = self._leg_bars.get(key)
             if cur is None or cur["start"] != bstart:
                 if cur is not None and ((not gated) or htf_armed):
+                    _p = det.state
                     det.on_candle({"open": cur["o"], "high": cur["h"],
                                    "low": cur["l"], "close": cur["c"]})
+                    self._log_leg_transition(leg_key, "HTF" if det is htf else "MTF",
+                                             det, _p, cur["c"])
                 self._leg_bars[key] = {"start": bstart, "o": ltp, "h": ltp, "l": ltp, "c": ltp}
             else:
                 cur["h"] = max(cur["h"], ltp)
                 cur["l"] = min(cur["l"], ltp)
                 cur["c"] = ltp
+
+    def _log_leg_transition(self, leg_key: str, tf_label: str,
+                            det: SellerTrapDetector, prev_state, price: float) -> None:
+        """Log a per-leg detector state change with the price + active level, so the
+        dry-run shows the exact Below→Above→Return moments."""
+        if det.state == prev_state:
+            return
+        parts = leg_key.split(":")
+        underlying = parts[0] if parts else leg_key
+        strike = parts[1] if len(parts) > 1 else "?"
+        opt = parts[2] if len(parts) > 2 else "?"
+        lv = det.active_level
+        l = float(lv.entry_l) if lv is not None else 0.0
+        h = float(lv.sl_h) if lv is not None else 0.0
+        self._tlog(underlying).info(
+            trap_transition_msg(opt, strike, tf_label, det.state.name, l, h, float(price)))
 
     def _on_mtf_entry_signal(self, leg_key: str, ltp: float) -> None:
         """Nested HTF→MTF seller trap completed for this leg → fire the BUY entry.
