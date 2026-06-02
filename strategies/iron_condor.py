@@ -256,24 +256,37 @@ class IronCondorStrategy:
 
     async def _ensure_subscribed(self, expiry, strikes: List[float]) -> None:
         """Subscribe the given strikes (CE+PE) for one expiry so their LTP streams.
+        Mirrors StrikeRebalancer: in dual mode build tokens in BOTH upstox + fyers
+        native formats (each feeder filters out keys it doesn't understand).
         Deduped; no-op if no feeder injected."""
         if self._feeder is None:
             return
         try:
             from data_layer.instrument_registry import REGISTRY
-            provider = getattr(self._feeder, "provider", "upstox")
+            # Determine provider format(s) from the active feeder (same as rebalancer).
+            providers: list = []
+            if hasattr(self._feeder, "active_provider"):
+                ap = self._feeder.active_provider
+                if ap == "dual":
+                    providers = ["upstox", "fyers"]
+                elif ap in ("fyers", "upstox"):
+                    providers = [ap]
+            if not providers:
+                providers = ["upstox", "fyers"]   # safe default (dual)
+
             tokens = []
             for strike in strikes:
                 for opt_type in ("CE", "PE"):
-                    key = REGISTRY.get_broker_symbol(
-                        self._underlying, expiry, int(strike), opt_type, provider)
-                    if key and key not in self._subscribed_keys:
-                        tokens.append(key)
-                        self._subscribed_keys.add(key)
+                    for provider in providers:
+                        key = REGISTRY.get_broker_symbol(
+                            self._underlying, expiry, int(strike), opt_type, provider)
+                        if key and key not in self._subscribed_keys:
+                            tokens.append(key)
+                            self._subscribed_keys.add(key)
             if tokens:
                 await self._feeder.subscribe_tokens(tokens)
-                logger.info("IronCondor[%s]: subscribed %d next-expiry keys for %s",
-                            self._underlying, len(tokens), expiry)
+                logger.info("IronCondor[%s]: subscribed %d next-expiry tokens for %s (providers=%s)",
+                            self._underlying, len(tokens), expiry, providers)
         except Exception as exc:
             logger.warning("IronCondor[%s]: _ensure_subscribed failed: %s", self._underlying, exc)
 
