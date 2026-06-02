@@ -41,7 +41,10 @@ See `2026-06-02-per-broker-positions-design.md`. Each broker card shows only wha
 **Fix:** brokers already have `get_funds()` (available/used). Poll per binding
 (throttled), expose via `/api/client/margin`, render on each broker card.
 
-## P5 — Margin-gated / margin-sized execution  ← most complex, build carefully
+## P5 — Margin-gated / margin-sized execution  ← DEFERRED to full go-live (NOT for dry run)
+> Per user (2026-06-02): build this only when moving from dry run to real-money
+> live trading. Skip during the dry run.
+
 **Problem:** Orders fire regardless of margin; want either (a) block if insufficient,
 or (b) size lots to use ≤ 80% of available margin.
 **Fix:**
