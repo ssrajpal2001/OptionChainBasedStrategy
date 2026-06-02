@@ -286,6 +286,70 @@ class TrapTradingEngine:
         self._running = False
         logger.info("TrapTradingEngine: stop requested.")
 
+    # ── Position persistence (survive restarts) ────────────────────────────────
+    # Trap is multi-symbol: one JSON per symbol that holds a LIVE trade, keyed
+    # "<SYMBOL>_trap". Only the live-trade fields needed to manage the exit are
+    # persisted; detection state (rolling_base/trap_levels) is rebuilt by
+    # warm_start() from client_db bars. MIS prior-day trades are discarded by the
+    # store (broker auto-squared at EOD) — Trap is intraday.
+
+    @staticmethod
+    def _persist_key(symbol: str) -> str:
+        return f"{symbol}_trap"
+
+    def _persist_trade(self, symbol: str) -> None:
+        try:
+            from data_layer import position_store as _ps
+            st = self._states.get(symbol)
+            if (st and st.phase == _Phase.LIVE and st.trade_id
+                    and st.trade_id in self._open_positions):
+                _, opt_sym, entry_price, qty = self._open_positions[st.trade_id]
+                _ps.save(self._persist_key(symbol), {
+                    "trade_id": st.trade_id, "option_symbol": opt_sym,
+                    "entry_price": float(entry_price), "quantity": int(qty),
+                    "ltf_sl_line": float(st.ltf_sl_line), "target_high": float(st.target_high),
+                    "entry_origin": float(st.entry_origin),
+                }, product_type="MIS")
+            else:
+                _ps.clear(self._persist_key(symbol))
+        except Exception as exc:
+            logger.warning("TrapEngine: persist failed for %s: %s", symbol, exc)
+
+    def _clear_trade(self, symbol: str) -> None:
+        try:
+            from data_layer import position_store as _ps
+            _ps.clear(self._persist_key(symbol))
+        except Exception:
+            pass
+
+    def _restore_trade(self, symbol: str) -> None:
+        """Restore a LIVE trade for one symbol from the store (called at startup)."""
+        try:
+            from data_layer import position_store as _ps
+            saved = _ps.load(self._persist_key(symbol))
+            if not saved:
+                return
+            st = self._get_state(symbol)
+            st.trade_id     = saved.get("trade_id")
+            st.entry_price  = float(saved.get("entry_price", 0.0))
+            st.quantity     = int(saved.get("quantity", 0))
+            st.ltf_sl_line  = float(saved.get("ltf_sl_line", 0.0))
+            st.target_high  = float(saved.get("target_high", 0.0))
+            st.entry_origin = float(saved.get("entry_origin", 0.0))
+            st.phase        = _Phase.LIVE
+            if st.trade_id:
+                self._open_positions[st.trade_id] = (
+                    st.trade_id, saved.get("option_symbol", ""),
+                    st.entry_price, st.quantity,
+                )
+                logger.info(
+                    "TrapEngine[%s]: restored LIVE trade %s entry=%.2f qty=%d sl=%.2f target=%.2f",
+                    symbol, st.trade_id, st.entry_price, st.quantity,
+                    st.ltf_sl_line, st.target_high,
+                )
+        except Exception as exc:
+            logger.warning("TrapEngine: restore failed for %s: %s", symbol, exc)
+
     # ── Warm start ────────────────────────────────────────────────────────────
 
     async def warm_start(self, symbols: List[str]) -> None:
@@ -293,6 +357,11 @@ class TrapTradingEngine:
         Replay historical 1-min bars from DB to restore HTF/MTF state
         without waiting for live bars to build up.
         """
+        # Restore any LIVE trade per symbol FIRST — independent of client_db, so a
+        # running Trap position survives a restart even if bar replay is skipped.
+        for sym in symbols:
+            self._restore_trade(sym)
+
         if self._client_db is None:
             logger.warning("TrapTradingEngine.warm_start: no client_db — skipping.")
             return
@@ -809,6 +878,7 @@ class TrapTradingEngine:
         self._open_positions[trade_id] = (
             trade_id, option_symbol, entry_price, total_qty
         )
+        self._persist_trade(underlying)   # survive restarts
 
         self._signals += 1
         logger.info(
@@ -889,6 +959,7 @@ class TrapTradingEngine:
             # Restore trap levels so _reset_to_next_level can use them
             self._states[underlying].trap_levels  = trap_levels
             self._states[underlying].active_level = act_level
+            self._clear_trade(underlying)   # position closed → drop persisted trade
 
         logger.info(
             "TrapTradingEngine EXIT | trade_id=%s | %s | reason=%s "
