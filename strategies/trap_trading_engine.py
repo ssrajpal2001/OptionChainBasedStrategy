@@ -492,20 +492,19 @@ class TrapTradingEngine:
         except Exception:
             return 0
 
-    async def _lock_day_strikes(self, underlying: str, fallback_spot: float = 0.0) -> None:
-        """Lock the day's tracked CE/PE strikes from the PREVIOUS trading day's high/low
-        (one day of 1m bars). If no prior-day data exists yet (e.g. instrument added
-        today), seed the ATM centre from the live spot so the trap still tracks the
-        correct strikes; real prev-day high/low takes over once it has been recorded."""
-        if self._client_db is None and fallback_spot <= 0:
-            return
+    async def _lock_day_strikes(self, underlying: str) -> None:
+        """Lock the day's tracked CE/PE strikes from the PREVIOUS open trading day's
+        high/low. Source priority: (1) recorded 1m bars in the DB, else (2) the broker's
+        HISTORICAL daily candle for the last open day (Upstox v2 historical-candle).
+        The centre = (prev_high + prev_low)/2 drives the ITM CE/PE selection."""
         try:
             from datetime import timedelta
             now   = datetime.now(IST)
             today = now.date()
+            # (1) Recorded 1m bars
             prior = []
             if self._client_db is not None:
-                start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+                start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=10)
                 rows = await asyncio.to_thread(
                     self._client_db.get_1m_bars_sync, underlying, start, now
                 )
@@ -515,14 +514,62 @@ class TrapTradingEngine:
                 day_rows = [r for r in prior if _row_date(r) == target_day]
                 prev_high = max(float(r["high"]) for r in day_rows)
                 prev_low  = min(float(r["low"])  for r in day_rows)
-                self._compute_day_strikes(underlying, prev_high, prev_low, source="prev-day")
-            elif fallback_spot > 0:
-                # No prior-day data yet — seed ATM from live spot (high=low=spot).
-                self._compute_day_strikes(underlying, fallback_spot, fallback_spot, source="live-spot")
-            else:
-                logger.warning("TrapEngine[%s]: no prev-day bars and no spot to lock day strikes.", underlying)
+                self._compute_day_strikes(underlying, prev_high, prev_low, source="db-prev-day")
+                return
+            # (2) Broker historical daily candle (last open day)
+            hl = await self._fetch_prev_day_hl_upstox(underlying)
+            if hl is not None:
+                prev_high, prev_low = hl
+                self._compute_day_strikes(underlying, prev_high, prev_low, source="upstox-historical")
+                return
+            logger.warning("TrapEngine[%s]: could not obtain prev open-day high/low "
+                           "(no DB bars, no historical candle).", underlying)
         except Exception as exc:
             logger.warning("TrapEngine[%s]: _lock_day_strikes failed: %s", underlying, exc)
+
+    async def _fetch_prev_day_hl_upstox(self, underlying: str):
+        """Fetch the LAST open trading day's high/low from Upstox v2 historical-candle
+        (daily interval) for the underlying's instrument_key. Returns (high, low) or None."""
+        try:
+            import json as _json
+            import urllib.parse, urllib.request
+            from datetime import timedelta
+            from data_layer.instrument_registry import REGISTRY as _REG
+            ikey = _REG.historical_instrument_key(underlying)
+            if not ikey:
+                logger.warning("TrapEngine[%s]: no historical instrument_key.", underlying)
+                return None
+            token = ""
+            if self._client_db is not None:
+                creds = await asyncio.to_thread(self._client_db.get_feeder_creds_sync, "upstox")
+                token = (creds or {}).get("access_token", "")
+            today = datetime.now(IST).date()
+            to_d  = today.isoformat()
+            from_d = (today - timedelta(days=10)).isoformat()
+            url = (f"https://api.upstox.com/v2/historical-candle/"
+                   f"{urllib.parse.quote(ikey, safe='')}/day/{to_d}/{from_d}")
+
+            def _get():
+                req = urllib.request.Request(url, headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {token}" if token else "",
+                })
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    return _json.loads(r.read().decode("utf-8"))
+
+            data = await asyncio.to_thread(_get)
+            candles = ((data or {}).get("data") or {}).get("candles") or []
+            # Each candle: [timestamp, open, high, low, close, volume, oi]; newest first.
+            for c in candles:
+                cdate = str(c[0])[:10]
+                if cdate < to_d:   # strictly before today = last open day
+                    return float(c[2]), float(c[3])
+            if candles:  # only today's candle present — use the latest available
+                return float(candles[0][2]), float(candles[0][3])
+            return None
+        except Exception as exc:
+            logger.warning("TrapEngine[%s]: historical fetch failed: %s", underlying, exc)
+            return None
 
     def _compute_day_strikes(self, underlying: str, prev_high: float, prev_low: float,
                              source: str = "prev-day") -> None:
@@ -570,15 +617,15 @@ class TrapTradingEngine:
                 continue
             # Store real underlying spot price (index LTP, e.g. 24500 for NIFTY)
             self._spot_cache[event.symbol] = event.ltp
-            # Lazily lock day strikes if not set yet (prev-day data, else seed from
-            # this live spot). Throttled so we don't hit the DB every tick.
+            # Lazily lock day strikes if not set yet (DB prev-day, else broker
+            # historical). Throttled so we don't hammer the API/DB every tick.
             if event.symbol not in self._day_strikes:
                 import time as _t
                 if not hasattr(self, "_lock_try"):
                     self._lock_try = {}
-                if _t.monotonic() - self._lock_try.get(event.symbol, 0.0) > 30.0:
+                if _t.monotonic() - self._lock_try.get(event.symbol, 0.0) > 60.0:
                     self._lock_try[event.symbol] = _t.monotonic()
-                    await self._lock_day_strikes(event.symbol, fallback_spot=event.ltp)
+                    await self._lock_day_strikes(event.symbol)
             # Live heartbeat driven by ticks (not candles), so the per-symbol log
             # is created immediately and shows what the engine sees every minute —
             # even between 5m/75m candle closes.

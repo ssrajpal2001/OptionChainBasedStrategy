@@ -516,6 +516,15 @@ class InstrumentRegistry:
         """Return the Upstox instrument_key for the underlying spot index."""
         return _UPSTOX_UNDERLYING_KEY.get(underlying, f"NSE_INDEX|{underlying}")
 
+    def historical_instrument_key(self, underlying: str) -> str:
+        """Upstox instrument_key to use for the underlying's HISTORICAL candles.
+        MCX commodities → the loaded near-month FUTURES key (the ATM source);
+        index underlyings → the static index key. Empty if not resolvable."""
+        u = underlying.upper()
+        if u in self._futures_upstox:
+            return self._futures_upstox[u]
+        return _UPSTOX_UNDERLYING_KEY.get(u, "")
+
     # ── Multi-broker symbol resolution ────────────────────────────────────────
 
     def get_broker_symbol(
