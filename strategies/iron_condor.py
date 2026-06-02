@@ -386,7 +386,8 @@ class IronCondorStrategy:
             if nowm - getattr(self, "_last_wait_log", 0.0) > 30.0:
                 self._last_wait_log = nowm
                 self._clog.info(
-                    "WAIT premiums — short CE[%d]=%.2f PE[%d]=%.2f net_credit=%.2f (feed not ready)",
+                    "WAIT premiums — spot=%.2f atm=%d short CE[%d]=%.2f PE[%d]=%.2f net_credit=%.2f (feed not ready)",
+                    spot, int(atm),
                     int(short_ce_strike), short_ce_ltp,
                     int(short_pe_strike), short_pe_ltp, net_credit,
                 )
