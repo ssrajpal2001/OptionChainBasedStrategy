@@ -6528,6 +6528,18 @@ function histReplay() {
                         <span style="color:var(--t-muted)">PE entry line</span>
                         <span style="color:var(--t-amber)" x-text="(csPositions[b.binding_id][dep.strategy_name].tracking.pe||{}).entry_line"></span>
                       </div>
+                      <!-- HTF trap levels per leg (origin → SL / target) -->
+                      <template x-for="side in ['ce','pe']" :key="side">
+                        <div x-show="((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).htf||[]).length>0" class="mt-1">
+                          <div style="color:var(--t-muted)" x-text="side.toUpperCase()+' HTF traps:'"></div>
+                          <template x-for="(t,ti) in ((csPositions[b.binding_id][dep.strategy_name].tracking[side]||{}).htf||[])" :key="ti">
+                            <div class="flex justify-between pl-2" style="color:var(--t-text)">
+                              <span x-text="'origin '+t.origin+' · SL '+t.sl"></span>
+                              <span style="color:var(--t-green)" x-text="'target '+t.target"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
                     </div>
                   </template>
 

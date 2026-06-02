@@ -1701,11 +1701,22 @@ class DashboardServer:
                         if _ds is not None:
                             def _legview(strike, opt):
                                 lst = _states.get(f"{underlying}:{int(strike)}:{opt}")
+                                # HTF trap level values (entry origin / bears' SL / target)
+                                htf = []
+                                for lv in (getattr(lst, "trap_levels", []) or [])[:4]:
+                                    htf.append({
+                                        "origin": round(float(getattr(lv, "entry_origin", 0.0) or 0.0), 2),
+                                        "sl":     round(float(getattr(lv, "bears_sl", 0.0) or 0.0), 2),
+                                        "target": round(float(getattr(lv, "target_high", 0.0) or 0.0), 2),
+                                    })
                                 return {
                                     "strike": int(strike),
                                     "ltp": round(float(_legp.get((underlying, int(strike), opt), 0.0) or 0.0), 2),
                                     "phase": getattr(getattr(lst, "phase", None), "name", "IDLE") if lst else "IDLE",
                                     "traps": len(getattr(lst, "trap_levels", []) or []) if lst else 0,
+                                    "htf": htf,
+                                    "mtf_high":  round(float(getattr(lst, "mtf_bearish_high", 0.0) or 0.0), 2) if lst else 0.0,
+                                    "mtf_sweep": round(float(getattr(lst, "mtf_sweep_low", 0.0) or 0.0), 2) if lst else 0.0,
                                     "entry_line": round(float(getattr(lst, "ltf_entry_line", 0.0) or 0.0), 2) if lst else 0.0,
                                 }
                             _ce = _legview(_ds.ce_strike, "CE")

@@ -435,6 +435,8 @@ async def _run_live(
 
     # ── Data-layer operational modules ────────────────────────────────────────
     rebalancer     = StrikeRebalancer(bus, cfg, feeder)
+    # Let the trap pin its deep-ITM tracked strikes so cleanup keeps them live.
+    trap_engine.set_rebalancer(rebalancer)
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 

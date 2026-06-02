@@ -307,6 +307,7 @@ class TrapTradingEngine:
 
         # Feeder for subscribing the tracked CE/PE strikes (set via set_feeder()).
         self._feeder = None
+        self._rebalancer = None   # set via set_rebalancer() — pins tracked strikes
         self._subscribed_keys: set = set()
 
         # Open positions: trade_id → (trade_id, option_symbol, entry_price, quantity)
@@ -490,6 +491,11 @@ class TrapTradingEngine:
         """Inject the GlobalFeeder so the trap can subscribe its tracked CE/PE strikes."""
         self._feeder = feeder
 
+    def set_rebalancer(self, rebalancer) -> None:
+        """Inject the StrikeRebalancer so the trap can PIN its deep-ITM tracked strikes
+        (otherwise the ATM-window cleanup unsubscribes them and their LTP freezes)."""
+        self._rebalancer = rebalancer
+
     async def _ensure_subscribed_legs(self, underlying: str) -> None:
         """Subscribe the day's tracked CE + PE (deep-ITM by DTE) so their premiums
         stream — these strikes are far from ATM and aren't covered by the SS/IC
@@ -527,6 +533,16 @@ class TrapTradingEngine:
                     "subscribed tracked legs CE=%d PE=%d exp=%s (%d tokens, providers=%s)",
                     sel.ce_strike, sel.pe_strike, expiry, len(tokens), providers,
                 )
+            # Pin both tracked strikes so the ATM-window cleanup never unsubscribes
+            # them (deep-ITM, far from ATM) — keeps their LTP live.
+            if self._rebalancer is not None:
+                try:
+                    self._rebalancer.pin_strike(underlying, float(sel.ce_strike))
+                    self._rebalancer.pin_strike(underlying, float(sel.pe_strike))
+                    self._tlog(underlying).info("pinned tracked strikes %d, %d (cleanup-protected)",
+                                                sel.ce_strike, sel.pe_strike)
+                except Exception as exc:
+                    logger.warning("TrapEngine[%s]: pin failed: %s", underlying, exc)
         except Exception as exc:
             logger.warning("TrapEngine[%s]: _ensure_subscribed_legs failed: %s", underlying, exc)
 
