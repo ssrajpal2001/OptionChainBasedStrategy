@@ -539,6 +539,7 @@ class TrapTradingEngine:
             if not ikey:
                 logger.warning("TrapEngine[%s]: no historical instrument_key.", underlying)
                 return None
+            logger.info("TrapEngine[%s]: historical fetch using key=%s", underlying, ikey)
             token = ""
             if self._client_db is not None:
                 creds = await asyncio.to_thread(self._client_db.get_feeder_creds_sync, "upstox")
@@ -580,7 +581,8 @@ class TrapTradingEngine:
                 return float(candles[0][2]), float(candles[0][3])
             return None
         except Exception as exc:
-            logger.warning("TrapEngine[%s]: historical fetch failed: %s", underlying, exc)
+            logger.warning("TrapEngine[%s]: historical fetch failed (key=%s): %s",
+                           underlying, locals().get("ikey", "?"), exc)
             return None
 
     def _compute_day_strikes(self, underlying: str, prev_high: float, prev_low: float,
