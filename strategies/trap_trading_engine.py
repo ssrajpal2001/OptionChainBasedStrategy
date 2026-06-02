@@ -297,7 +297,10 @@ class TrapTradingEngine:
 
         # Premium cache: option_symbol → last ltp
         self._prem_cache:  Dict[str, float] = {}
-        # Spot cache: underlying → last spot
+        # Per-leg premium cache: (underlying, strike, opt_type) → last ltp.
+        # Lets the engine track the SPECIFIC tracked CE/PE without the future spot.
+        self._leg_prem: Dict[Tuple[str, int, str], float] = {}
+        # Spot cache: underlying → last spot (used ONLY to pick the day's centre once)
         self._spot_cache:  Dict[str, float] = {}
 
         # Open positions: trade_id → (trade_id, option_symbol, entry_price, quantity)
@@ -657,6 +660,10 @@ class TrapTradingEngine:
             try:
                 # Update option premium cache only — spot comes from INDEX_TICK
                 self._prem_cache[event.symbol] = event.ltp
+                try:
+                    self._leg_prem[(event.underlying, int(event.strike), event.option_type)] = event.ltp
+                except Exception:
+                    pass
 
                 await self._check_touch_trigger(event)
             except Exception as exc:
@@ -713,14 +720,24 @@ class TrapTradingEngine:
             else:
                 pos = "no-position (scanning option premium for HTF/MTF trap)"
             sel = self._day_strikes.get(symbol)
-            track = (f"ATM={sel.atm} DTE={sel.dte} offset={sel.offset_pts} "
-                     f"track CE={sel.ce_strike} PE={sel.pe_strike} | "
-                     if sel is not None else "")
-            self._tlog(symbol).info(
-                "heartbeat spot=%.2f %sphase=%s rolling_base=%.2f trap_levels=%d pending=%d | %s",
-                spot, track, st.phase.name, st.rolling_base, len(st.trap_levels),
-                len(getattr(st, "pending_levels", [])), pos,
-            )
+            if sel is not None:
+                ce_ltp = self._leg_prem.get((symbol, sel.ce_strike, "CE"), 0.0)
+                pe_ltp = self._leg_prem.get((symbol, sel.pe_strike, "PE"), 0.0)
+                # CE/PE-centric: once the day's strikes are picked, the trap scans the
+                # OPTION premiums — the future spot is no longer used.
+                self._tlog(symbol).info(
+                    "heartbeat CE %d=%.2f | PE %d=%.2f | DTE=%d phase=%s "
+                    "rolling_base=%.2f trap_levels=%d pending=%d | %s",
+                    sel.ce_strike, ce_ltp, sel.pe_strike, pe_ltp, sel.dte,
+                    st.phase.name, st.rolling_base, len(st.trap_levels),
+                    len(getattr(st, "pending_levels", [])), pos,
+                )
+            else:
+                # Strikes not locked yet — show spot only because that's all we have.
+                self._tlog(symbol).info(
+                    "heartbeat (awaiting day-strikes) spot=%.2f phase=%s | %s",
+                    spot, st.phase.name, pos,
+                )
         except Exception as exc:
             self._tlog(symbol).info("heartbeat spot=%.2f (state warming up: %s)", spot, exc)
 
