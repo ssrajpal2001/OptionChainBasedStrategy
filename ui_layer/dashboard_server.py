@@ -642,6 +642,59 @@ class DashboardServer:
         _srv   = self
         bridge = self._ws_bridge
 
+        def _refresh_live_pnl() -> None:
+            """Set each client's _daily_pnl from the LIVE unrealized P&L of the
+            strategies they have deployed, so firm/client dashboards reflect open
+            positions even before broker fills (which are absent in a dry run).
+            Same source as the per-strategy positions panel."""
+            try:
+                clients = _srv._registry.all_active() if _srv._registry else []
+                sslist  = _srv._sell_straddles or []
+                iclist  = _srv._iron_condors or []
+                trap    = _srv._trap_engine
+
+                def _find(lst, u):
+                    for s in lst:
+                        if getattr(s, "_underlying", None) == u:
+                            return s
+                    return None
+
+                for c in clients:
+                    try:
+                        deps = _srv._client_db.get_deployments_sync(c.client_id)
+                    except Exception:
+                        deps = []
+                    pnl = 0.0
+                    for d in deps:
+                        sname = d.get("strategy_name", "")
+                        u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
+                        if sname == "sell_straddle":
+                            s = _find(sslist, u)
+                            p = getattr(s, "_position", None) if s else None
+                            if p and getattr(p, "status", "open") == "open":
+                                pnl += float(getattr(p, "unrealized_pnl", 0.0) or 0.0)
+                        elif sname == "iron_condor":
+                            s = _find(iclist, u)
+                            p = getattr(s, "_position", None) if s else None
+                            if p and getattr(p, "status", "open") == "open":
+                                pnl += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
+                        elif sname == "trap_trading" and trap is not None:
+                            op   = getattr(trap, "_open_positions", {}) or {}
+                            prem = getattr(trap, "_prem_cache", {}) or {}
+                            for _tid, tup in op.items():
+                                try:
+                                    _t, osym, ep, q = tup
+                                except Exception:
+                                    continue
+                                ltp = float(prem.get(osym, ep) or ep)
+                                pnl += (float(ep) - ltp) * abs(int(q))
+                    try:
+                        c._daily_pnl = round(pnl, 2)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.debug("refresh_live_pnl failed: %s", exc)
+
         # ── Auth helpers ──────────────────────────────────────────────────────
 
         _bearer = HTTPBearer(auto_error=False)
@@ -1189,6 +1242,7 @@ class DashboardServer:
 
         @app.get("/api/client/me", tags=["Client"])
         async def api_client_me(user: dict = Depends(_require_client)):
+            _refresh_live_pnl()
             cid = user.get("client_id", "")
             client = _srv._registry.get(cid) if _srv._registry else None
             if client is None:
@@ -3664,6 +3718,7 @@ class DashboardServer:
 
         @app.get("/api/admin/risk/summary", tags=["Admin"])
         async def api_risk_summary(_: dict = Depends(_require_admin)):
+            _refresh_live_pnl()
             rm = _srv._risk_manager
             if rm is None:
                 # Fallback: build summary purely from registry state
@@ -3685,6 +3740,13 @@ class DashboardServer:
             try:
                 summary = rm.risk_summary()
                 summary["risk_manager_active"] = True
+                # Overlay live firm MTM from open strategy positions — the risk
+                # manager's own states only move on broker fills (none in dry run).
+                try:
+                    _cl = _srv._registry.all_active() if _srv._registry else []
+                    summary["total_net_mtm"] = round(sum(getattr(c, "_daily_pnl", 0.0) for c in _cl), 2)
+                except Exception:
+                    pass
                 return summary
             except Exception as exc:
                 logger.warning("Dashboard: risk summary read failed: %s", exc)
@@ -4379,6 +4441,7 @@ class DashboardServer:
 
         @app.get("/api/admin/clients", tags=["Admin"])
         async def api_clients_list(_: dict = Depends(_require_admin)):
+            _refresh_live_pnl()
             import json as _json
             clients = []
 
