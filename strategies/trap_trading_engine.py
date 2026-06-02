@@ -545,8 +545,12 @@ class TrapTradingEngine:
             if st.trade_id:
                 pos = (f"IN-POSITION trade={st.trade_id} entry={st.entry_price:.2f} "
                        f"sl={st.ltf_sl_line:.2f} target={st.target_high:.2f}")
+            elif st.phase.name in ("ARMED", "RETEST_ALERT"):
+                pos = (f"WAITING-ENTRY phase={st.phase.name} entry_origin={st.entry_origin:.2f} "
+                       f"ltf_entry={st.ltf_entry_line:.2f} target={st.target_high:.2f} "
+                       f"(buys the option whose premium retests {st.ltf_entry_line:.2f})")
             else:
-                pos = "no-position (scanning for trap)"
+                pos = "no-position (scanning option premium for HTF/MTF trap)"
             self._tlog(symbol).info(
                 "heartbeat spot=%.2f phase=%s rolling_base=%.2f trap_levels=%d pending=%d | %s",
                 spot, st.phase.name, st.rolling_base, len(st.trap_levels),

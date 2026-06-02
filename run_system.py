@@ -390,6 +390,9 @@ async def _run_live(
     await _shared_client_db.initialise()
     # Share the same DB instance across bridge + dashboard so engine_active state is consistent
     router._client_db = _shared_client_db
+    # Trap engine needs the DB to warm-start historical HTF/MTF traps from 1m bars.
+    # The live construction path (above) built it without a DB — attach it here.
+    trap_engine._client_db = _shared_client_db
     straddle_bridge = StraddleExecutionBridge(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
@@ -486,6 +489,14 @@ async def _run_live(
         _ic.start()
     for _ss in _sell_straddles:
         _ss.start()
+
+    # Warm-start the trap engine: replay historical 1m bars from the DB to rebuild
+    # prior HTF/MTF trap levels so it isn't IDLE/cold at boot. Without this the
+    # engine only builds state from live candles going forward (hours to warm up).
+    try:
+        await trap_engine.warm_start(list(cfg.monitored_indices))
+    except Exception as _exc:
+        logger.warning("trap_engine.warm_start failed: %s", _exc)
 
     # Admin console runs as a detached background task — its completion or any
     # internal stream error must NOT trigger the engine shutdown.  Only the
