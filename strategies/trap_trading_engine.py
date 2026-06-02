@@ -273,6 +273,11 @@ class TrapTradingEngine:
         # Per-symbol state
         self._states: Dict[str, _TrapState] = {}
 
+        # Day-fixed tracked strikes per underlying (prev-day ATM + DTE offset).
+        # Computed once at warm-start; drives which CE/PE the trap follows.
+        from strategies.trap_strike_selection import TrapStrikes as _TS
+        self._day_strikes: Dict[str, _TS] = {}
+
         # Per-symbol MTF (5-min) OHLCV buffers — instance variable, NOT class variable
         self._mtf_bufs: Dict[str, OHLCVBuffer] = {}
 
@@ -443,6 +448,9 @@ class TrapTradingEngine:
                     )
                     self._process_mtf(fake)
 
+                # Lock the day's tracked CE/PE strikes from PREV-DAY high/low + DTE.
+                self._compute_day_strikes(sym, df)
+
                 st = self._get_state(sym)
                 logger.info(
                     "TrapTradingEngine warm_start [%s]: restored phase=%s "
@@ -451,6 +459,47 @@ class TrapTradingEngine:
                 )
             except Exception as exc:
                 logger.exception("TrapTradingEngine warm_start [%s]: %s", sym, exc)
+
+    def _dte(self, underlying: str) -> int:
+        """Days-to-expiry from today to the active contract expiry (calendar days)."""
+        try:
+            from data_layer.instrument_registry import REGISTRY as _REG
+            today = datetime.now(IST).date()
+            exp = _REG.get_active_expiry(underlying, today)
+            if exp is None:
+                exps = _REG.all_expiries(underlying)
+                exp = next((e for e in exps if e >= today), None)
+            if exp is None:
+                return 0
+            return max((exp - today).days, 0)
+        except Exception:
+            return 0
+
+    def _compute_day_strikes(self, underlying: str, df) -> None:
+        """Compute and lock the day's tracked CE/PE strikes from the PREVIOUS day's
+        high/low and days-to-expiry. df is the 1m-bar frame from warm_start."""
+        try:
+            from strategies.trap_strike_selection import select_trap_strikes
+            today = datetime.now(IST).date()
+            # Pick the most recent COMPLETE prior day in the frame (else last day).
+            day_index = df.index.normalize()
+            prior = day_index[day_index.date < today] if hasattr(day_index, "date") else None
+            target_day = (prior.max() if prior is not None and len(prior) else day_index.max())
+            mask = day_index == target_day
+            prev_high = float(df.loc[mask, "high"].max())
+            prev_low  = float(df.loc[mask, "low"].min())
+            step = float(self._cfg.exchange.strike_steps.get(underlying, 50.0))
+            dte  = self._dte(underlying)
+            sel  = select_trap_strikes(prev_high, prev_low, dte, step)
+            self._day_strikes[underlying] = sel
+            self._tlog(underlying).info(
+                "DAY STRIKES locked: prev_high=%.2f prev_low=%.2f ATM=%d DTE=%d "
+                "offset=%d (%d steps) | track CE=%d PE=%d",
+                prev_high, prev_low, sel.atm, sel.dte, sel.offset_pts,
+                sel.offset_steps, sel.ce_strike, sel.pe_strike,
+            )
+        except Exception as exc:
+            logger.warning("TrapEngine[%s]: _compute_day_strikes failed: %s", underlying, exc)
 
     # ── Event loops ───────────────────────────────────────────────────────────
 
@@ -551,9 +600,13 @@ class TrapTradingEngine:
                        f"(buys the option whose premium retests {st.ltf_entry_line:.2f})")
             else:
                 pos = "no-position (scanning option premium for HTF/MTF trap)"
+            sel = self._day_strikes.get(symbol)
+            track = (f"ATM={sel.atm} DTE={sel.dte} offset={sel.offset_pts} "
+                     f"track CE={sel.ce_strike} PE={sel.pe_strike} | "
+                     if sel is not None else "")
             self._tlog(symbol).info(
-                "heartbeat spot=%.2f phase=%s rolling_base=%.2f trap_levels=%d pending=%d | %s",
-                spot, st.phase.name, st.rolling_base, len(st.trap_levels),
+                "heartbeat spot=%.2f %sphase=%s rolling_base=%.2f trap_levels=%d pending=%d | %s",
+                spot, track, st.phase.name, st.rolling_base, len(st.trap_levels),
                 len(getattr(st, "pending_levels", [])), pos,
             )
         except Exception as exc:
@@ -1245,7 +1298,13 @@ class TrapTradingEngine:
     def _select_itm_strike(
         self, underlying: str, direction: str = "bearish"
     ) -> float:
-        """Day-of-week ITM strike selection."""
+        """ITM strike to track. Prefer the day-locked strikes from prev-day ATM +
+        DTE (CE = ITM call below ATM, PE = ITM put above ATM). Falls back to the
+        legacy live-spot weekday offset only if day strikes were not computed."""
+        sel = self._day_strikes.get(underlying)
+        if sel is not None:
+            return float(sel.pe_strike if direction == "bullish" else sel.ce_strike)
+        # Fallback (no warm-start data): legacy live-spot weekday offset
         spot = self._spot_cache.get(underlying, 0.0)
         if spot <= 0.0:
             return self._atm_strike(underlying)

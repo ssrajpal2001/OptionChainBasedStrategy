@@ -1677,6 +1677,7 @@ class DashboardServer:
                 underlying = dep.get("underlying") or dep.get("assigned_instrument") or "NIFTY"
                 by_broker.setdefault(bid, {})
                 legs = []
+                tracking = None
                 try:
                     if sname == "iron_condor":
                         strat = _find(getattr(_srv, "_iron_condors", []), underlying)
@@ -1692,6 +1693,21 @@ class DashboardServer:
                         eng = getattr(_srv, "_trap_engine", None)
                         op = getattr(eng, "_open_positions", {}) if eng else {}
                         prem = getattr(eng, "_prem_cache", {}) if eng else {}
+                        # Day-locked tracked strikes (prev-day ATM + DTE), shown even
+                        # when there is no open position so the UI reflects scanning.
+                        _ds = getattr(eng, "_day_strikes", {}).get(underlying) if eng else None
+                        _st = getattr(eng, "_states", {}).get(underlying) if eng else None
+                        if _ds is not None:
+                            _cesym = f"{underlying}{_ds.ce_strike}CE"
+                            _pesym = f"{underlying}{_ds.pe_strike}PE"
+                            tracking = {
+                                "atm": _ds.atm, "dte": _ds.dte, "offset": _ds.offset_pts,
+                                "ce_strike": _ds.ce_strike, "pe_strike": _ds.pe_strike,
+                                "ce_ltp": round(float(prem.get(_cesym, 0.0) or 0.0), 2),
+                                "pe_ltp": round(float(prem.get(_pesym, 0.0) or 0.0), 2),
+                                "phase": getattr(getattr(_st, "phase", None), "name", "IDLE") if _st else "IDLE",
+                                "entry_line": round(float(getattr(_st, "ltf_entry_line", 0.0) or 0.0), 2) if _st else 0.0,
+                            }
                         for _tid, tup in op.items():
                             try:
                                 _t, opt_sym, entry_px, qty = tup
@@ -1707,7 +1723,8 @@ class DashboardServer:
                                          "pnl": round((float(entry_px) - ltp) * abs(int(qty)), 2)})
                 except Exception as exc:
                     logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
-                by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2)}
+                by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
+                                          "tracking": tracking}
             return {"ok": True, "by_broker": by_broker}
 
         # ── CLIENT — history ──────────────────────────────────────────────────

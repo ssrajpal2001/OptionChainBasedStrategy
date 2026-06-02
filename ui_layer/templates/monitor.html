@@ -6501,6 +6501,30 @@ function histReplay() {
                     </div>
                   </div>
 
+                  <!-- Trap tracking (day-locked strikes; shown while scanning, no open position) -->
+                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.strategy_name]&&csPositions[b.binding_id][dep.strategy_name].tracking&&(csPositions[b.binding_id][dep.strategy_name].legs||[]).length===0">
+                    <div class="text-xs font-mono space-y-1 py-1" style="color:var(--t-muted)">
+                      <div class="flex justify-between">
+                        <span>ATM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.atm"></span>
+                          · DTE <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.dte"></span>
+                          · ITM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.offset"></span></span>
+                        <span x-text="'phase '+csPositions[b.binding_id][dep.strategy_name].tracking.phase"></span>
+                      </div>
+                      <div class="flex justify-between">
+                        <span style="color:var(--t-text)">CE <span x-text="csPositions[b.binding_id][dep.strategy_name].tracking.ce_strike"></span></span>
+                        <span>LTP <span class="price-live" style="color:var(--t-bright)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.ce_ltp"></span></span>
+                      </div>
+                      <div class="flex justify-between">
+                        <span style="color:var(--t-text)">PE <span x-text="csPositions[b.binding_id][dep.strategy_name].tracking.pe_strike"></span></span>
+                        <span>LTP <span class="price-live" style="color:var(--t-bright)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.pe_ltp"></span></span>
+                      </div>
+                      <div class="flex justify-between">
+                        <span>entry line</span>
+                        <span style="color:var(--t-amber)" x-text="csPositions[b.binding_id][dep.strategy_name].tracking.entry_line"></span>
+                      </div>
+                    </div>
+                  </template>
+
                   <!-- Live legs -->
                   <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.strategy_name]&&(csPositions[b.binding_id][dep.strategy_name].legs||[]).length>0">
                     <div class="space-y-1.5">
