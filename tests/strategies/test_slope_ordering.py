@@ -12,9 +12,15 @@ from strategies.sell_straddle import SellStraddleStrategy
 
 def test_pair_slope_is_inter_candle_not_zero():
     async def run():
+        import datetime as _dt
         bus = EventBus()
         s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
         s.start()
+        # Make the test time-independent: _on_candle force-exits (and skips the
+        # prev-ATP snapshot) once now >= squareoff. Pin squareoff to end-of-day and
+        # stop _load_thresholds from resetting it each candle.
+        s._load_thresholds = lambda: None
+        s._force_exit = _dt.time(23, 59)
         await asyncio.sleep(0.2)
         now = datetime.datetime.now(IST)
         exp = datetime.date.today()
