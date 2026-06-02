@@ -41,6 +41,29 @@ logger = logging.getLogger(__name__)
 _RETRY_LIMIT = 3  # max broker retries per leg on adjustment
 
 
+def _pkey(expiry, strike, opt_type: str) -> str:
+    """Expiry-aware premium-cache key so two expiries with the same strike don't
+    collide (required for the min-LTP expiry-shift)."""
+    exp = expiry.isoformat() if hasattr(expiry, "isoformat") else str(expiry)
+    return f"{exp}:{int(strike)}{opt_type}"
+
+
+def choose_expiry(premiums_by_expiry, min_ltp: float):
+    """Pick the first expiry whose BOTH short premiums are present (>0) and meet
+    the min_ltp floor. `premiums_by_expiry`: ordered iterable of
+    (expiry, short_ce_ltp, short_pe_ltp). Returns the chosen expiry or None.
+
+    min_ltp <= 0 disables the floor (first expiry with both premiums present wins).
+    """
+    for expiry, ce_ltp, pe_ltp in premiums_by_expiry:
+        if ce_ltp <= 0 or pe_ltp <= 0:
+            continue
+        if min_ltp > 0 and (ce_ltp < min_ltp or pe_ltp < min_ltp):
+            continue
+        return expiry
+    return None
+
+
 def _make_ic_logger(underlying: str) -> logging.Logger:
     name = f"client.ic.{underlying}"
     lg = logging.getLogger(name)
