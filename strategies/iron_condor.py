@@ -222,7 +222,9 @@ class IronCondorStrategy:
         self._ratio_trigger   = float(ic.get("ratio_trigger",           2.0))   # NEW: 2:1 ratio
         self._short_otm       = float(ic.get("short_leg_otm_pts",       300.0))
         self._wing_pts        = float(ic.get("long_leg_otm_pts",        150.0))
-        self._lot_size        = int(ic.get("lot_size",                   65))
+        # Per-lot exchange lot size (NIFTY 65, FINNIFTY 60, …), not a config default.
+        _exch_lots = self._cfg.exchange.lot_sizes if self._cfg else {}
+        self._lot_size        = int(_exch_lots.get(self._underlying, ic.get("lot_size", 65)))
         self._strike_step     = int(ic.get("strike_step",                50))
         self._max_adj         = int(ic.get("max_adjustments_per_side",   4))
         self._min_ltp         = float(ic.get("min_ltp",                  0.0))  # NEW: min LTP filter

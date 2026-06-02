@@ -278,7 +278,11 @@ class SellStraddleStrategy:
         self._force_exit      = _parse_time(ss.get("squareoff_time", "15:15"))
         self._max_trades      = int(ss.get("max_trades", 1))
         self._sl_cooldown_tf_mult = float(ss.get("sl_cooldown_tf_multiplier", 1.0))
-        self._lot_size        = int(ss.get("lot_size", 50))
+        # Per-lot exchange lot size (NIFTY 65, FINNIFTY 60, …) — NOT a config default
+        # of 50. lot_multiplier (set per binding) is the NUMBER OF LOTS; total
+        # contracts = lot_size × lot_multiplier.
+        _exch_lots = self._cfg.exchange.lot_sizes if self._cfg else {}
+        self._lot_size        = int(_exch_lots.get(self._underlying, ss.get("lot_size", 50)))
 
         # Trailing SL — enable/disable toggle + thresholds
         self._trail_sl_enabled = bool(ss.get("tsl_enabled", True))
