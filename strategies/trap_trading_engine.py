@@ -78,6 +78,12 @@ def exec_strike(spot: float, opt_type: str, buy_depth: int, step: float) -> int:
     return int(atm - off) if opt_type == "CE" else int(atm + off)
 
 
+def should_rotate(running_side, signal_side, has_position: bool) -> bool:
+    """Rotate (close the runner, open the new leg) only when a position is open and the
+    new entry signal is for the OPPOSITE leg. Same-side signals are ignored."""
+    return bool(has_position and running_side is not None and signal_side != running_side)
+
+
 def sl_triggered(ltp: float, sl_5m: float, sl_active) -> bool:
     """Two-tier stop: before a 1-min close breaks the 5m low, the stop is the 5m low;
     after, it is the breaching 1-min candle's low (`sl_active`). Exit when ltp < ref."""
@@ -998,9 +1004,21 @@ class TrapTradingEngine:
 
     async def _fire_entry_v2(self, underlying: str, opt_type: str, entry_premium: float) -> None:
         """Execute a BUY of the fresh ATM±buy_depth strike and record the position.
-        One position at a time (rotation added in Task 6)."""
+        One position at a time; an OPPOSITE-leg signal rotates (close runner → open new),
+        a SAME-leg signal is ignored."""
         if self._v2_position is not None:
-            return  # already in a position; rotation handled in Task 6
+            running = self._v2_position.get("opt_type")
+            if not should_rotate(running, opt_type, True):
+                return  # same side → ignore (no over-leveraging)
+            # opposite side → close the runner immediately, then fall through to enter.
+            pos = self._v2_position
+            exit_prem = float(self._leg_prem.get(
+                (pos["underlying"], pos["strike"], pos["opt_type"]), pos.get("entry_premium", 0.0)))
+            self._tlog(underlying).info(
+                "V2 ROTATION: opposite-leg signal — close %s %d (prem=%.2f), open %s",
+                pos["opt_type"], pos["strike"], exit_prem, opt_type)
+            self._v2_position = None   # clear runner + its SL state
+            await self._v2_publish_exit(pos, exit_prem, "rotation")
         payload = self._build_entry_payload(underlying, opt_type)
         if payload is None:
             self._tlog(underlying).info("V2 ENTRY aborted: no live spot for %s", underlying)
@@ -1092,7 +1110,7 @@ class TrapTradingEngine:
         try:
             from strategies.base_strategy import Direction, SignalPackage, StrategyID
             sig = SignalPackage(
-                source=StrategyID.TRAP_ENGINE, direction=Direction.EXIT,
+                source=StrategyID.TRAP_ENGINE, direction=Direction.SHORT,  # SELL to close the long
                 underlying=pos["underlying"], option_type=pos["opt_type"],
                 target_strike=pos["strike"], entry_spot=pos.get("spot", 0.0),
                 stop_spot=0.0, target_spot=0.0, confidence=1.0,
