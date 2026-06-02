@@ -380,6 +380,10 @@ async def _run_live(
     candle_cache  = CandleCache(bus, cfg)
     option_matrix = OptionMatrixEngine(bus, cfg)
     feeder        = GlobalFeeder(bus, cfg)
+    # Give each Iron Condor the feeder so it can subscribe next-expiry strikes
+    # for the min-LTP expiry shift (no-op if the feature is unused).
+    for _ic in _iron_condors:
+        _ic.set_feeder(feeder)
     router        = ExecutionRouter(bus, registry, cfg)
     from data_layer.client_db import ClientDB as _ClientDB
     _shared_client_db = _ClientDB()

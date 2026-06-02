@@ -200,9 +200,11 @@ class IronCondorStrategy:
         self._running    = False
         self._position:  Optional[IronCondorPosition] = None
         self._spot:      float = 0.0
-        self._prem_cache: Dict[str, float] = {}   # "NIFTY24500CE" → ltp
+        self._prem_cache: Dict[str, float] = {}   # _pkey(expiry,strike,type) → ltp
         self._bid_cache:  Dict[str, float] = {}   # same key → best bid
         self._ask_cache:  Dict[str, float] = {}   # same key → best ask
+        self._feeder = None                       # set via set_feeder() for next-expiry subscribe
+        self._subscribed_keys: set = set()        # broker keys already subscribed (dedupe)
         self._tasks:     list = []
         self._adjusting: bool = False  # lock to prevent re-entrant adjustments
         self._clog: logging.Logger = _make_ic_logger(underlying)
@@ -229,6 +231,51 @@ class IronCondorStrategy:
         self._load_thresholds()
         logger.info("IronCondor[%s]: reconfigured ratio_trigger=%.1f min_ltp=%.2f max_adj=%d",
                     self._underlying, self._ratio_trigger, self._min_ltp, self._max_adj)
+
+    def set_feeder(self, feeder) -> None:
+        """Inject the live feeder so the IC can subscribe next-expiry strikes
+        (for the min-LTP expiry shift). Optional — without it, only the current
+        expiry is priced and the IC behaves as before."""
+        self._feeder = feeder
+
+    # ── Expiry helpers (min-LTP expiry shift) ──────────────────────────────────
+
+    def _prem(self, expiry, strike, opt_type: str) -> float:
+        return self._prem_cache.get(_pkey(expiry, strike, opt_type), 0.0)
+
+    def _candidate_expiries(self) -> List[date]:
+        """Current + next expiry (max 2), from the registry's global expiry list."""
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            today = datetime.now(IST).date()
+            exps = [e for e in REGISTRY.all_expiries(self._underlying) if e >= today]
+            return exps[:2]
+        except Exception as exc:
+            logger.debug("IronCondor[%s]: _candidate_expiries failed: %s", self._underlying, exc)
+            return []
+
+    async def _ensure_subscribed(self, expiry, strikes: List[float]) -> None:
+        """Subscribe the given strikes (CE+PE) for one expiry so their LTP streams.
+        Deduped; no-op if no feeder injected."""
+        if self._feeder is None:
+            return
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            provider = getattr(self._feeder, "provider", "upstox")
+            tokens = []
+            for strike in strikes:
+                for opt_type in ("CE", "PE"):
+                    key = REGISTRY.get_broker_symbol(
+                        self._underlying, expiry, int(strike), opt_type, provider)
+                    if key and key not in self._subscribed_keys:
+                        tokens.append(key)
+                        self._subscribed_keys.add(key)
+            if tokens:
+                await self._feeder.subscribe_tokens(tokens)
+                logger.info("IronCondor[%s]: subscribed %d next-expiry keys for %s",
+                            self._underlying, len(tokens), expiry)
+        except Exception as exc:
+            logger.warning("IronCondor[%s]: _ensure_subscribed failed: %s", self._underlying, exc)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -330,7 +377,7 @@ class IronCondorStrategy:
             except asyncio.CancelledError:
                 break
             if tick.underlying == self._underlying:
-                key = f"{self._underlying}{int(tick.strike)}{tick.option_type}"
+                key = _pkey(tick.expiry, tick.strike, tick.option_type)
                 self._prem_cache[key] = tick.ltp
                 if tick.bid > 0:
                     self._bid_cache[key] = tick.bid
@@ -384,49 +431,57 @@ class IronCondorStrategy:
         long_ce_strike  = short_ce_strike + self._wing_pts
         long_pe_strike  = short_pe_strike - self._wing_pts
 
-        # Min LTP filter — both short legs must have meaningful premium
-        short_ce_ltp = self._prem_cache.get(f"{self._underlying}{int(short_ce_strike)}CE", 0.0)
-        short_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(short_pe_strike)}PE", 0.0)
-
-        if self._min_ltp > 0 and (short_ce_ltp < self._min_ltp or short_pe_ltp < self._min_ltp):
-            self._clog.info(
-                "BLOCK min_ltp=%.2f  short_CE[%s]=%.2f  short_PE[%s]=%.2f — leg below floor",
-                self._min_ltp,
-                f"{self._underlying}{int(short_ce_strike)}CE", short_ce_ltp,
-                f"{self._underlying}{int(short_pe_strike)}PE", short_pe_ltp,
-            )
+        # ── Expiry selection with min-LTP shift ────────────────────────────────
+        # Try the current week; if the short premiums are below min_ltp (far-OTM
+        # near expiry → ~0 premium), shift to the next weekly expiry (more time
+        # value). min_ltp <= 0 keeps the legacy behaviour (current week).
+        candidates = self._candidate_expiries()
+        if not candidates:
+            logger.warning("IronCondor[%s]: no expiries from registry, skipping — authenticate feeder first.", self._underlying)
             return
 
-        long_ce_ltp = self._prem_cache.get(f"{self._underlying}{int(long_ce_strike)}CE", 0.0)
-        long_pe_ltp = self._prem_cache.get(f"{self._underlying}{int(long_pe_strike)}PE", 0.0)
+        rows = [(e, self._prem(e, short_ce_strike, "CE"), self._prem(e, short_pe_strike, "PE"))
+                for e in candidates]
+        _expiry = choose_expiry(rows, self._min_ltp)
 
+        if _expiry is None:
+            # No expiry qualifies yet. If the current week is too cheap, make sure
+            # the NEXT expiry's strikes are streamed so it can qualify on a later tick.
+            for e in candidates[1:]:
+                await self._ensure_subscribed(
+                    e, [short_ce_strike, short_pe_strike, long_ce_strike, long_pe_strike])
+            if nowm - getattr(self, "_last_wait_log", 0.0) > 30.0:
+                self._last_wait_log = nowm
+                _cur = rows[0] if rows else (None, 0.0, 0.0)
+                self._clog.info(
+                    "WAIT expiry-shift — min_ltp=%.2f not met; current %s shorts=%.2f/%.2f | candidates=%s",
+                    self._min_ltp, candidates[0].isoformat(), _cur[1], _cur[2],
+                    [e.isoformat() for e in candidates],
+                )
+            return
+
+        short_ce_ltp = self._prem(_expiry, short_ce_strike, "CE")
+        short_pe_ltp = self._prem(_expiry, short_pe_strike, "PE")
+        long_ce_ltp  = self._prem(_expiry, long_ce_strike,  "CE")
+        long_pe_ltp  = self._prem(_expiry, long_pe_strike,  "PE")
         net_credit = (short_ce_ltp + short_pe_ltp) - (long_ce_ltp + long_pe_ltp)
 
-        # Guard 1: never fire a zero/negative-credit order. Missing premiums
-        # (option feed not yet populated for these strikes) yield net_credit<=0.
-        # Throttle this log so it doesn't spam on every tick while waiting.
+        # Guard: never fire a zero/negative-credit order (hedges not yet priced).
         if net_credit <= 0 or short_ce_ltp <= 0 or short_pe_ltp <= 0:
             if nowm - getattr(self, "_last_wait_log", 0.0) > 30.0:
                 self._last_wait_log = nowm
                 self._clog.info(
-                    "WAIT premiums — spot=%.2f atm=%d short CE[%d]=%.2f PE[%d]=%.2f net_credit=%.2f (feed not ready)",
-                    spot, int(atm),
+                    "WAIT premiums — spot=%.2f atm=%d exp=%s short CE[%d]=%.2f PE[%d]=%.2f net_credit=%.2f (feed not ready)",
+                    spot, int(atm), _expiry.isoformat(),
                     int(short_ce_strike), short_ce_ltp,
                     int(short_pe_strike), short_pe_ltp, net_credit,
                 )
             return
 
-        # Guard 2: registry/expiry must be loaded BEFORE we route any order.
-        from data_layer.instrument_registry import next_expiry as _nexp
-        _expiry = _nexp(self._underlying)
-        if not _expiry:
-            logger.warning("IronCondor[%s]: registry not loaded, skipping entry — authenticate Upstox first.", self._underlying)
-            return
-
         logger.info(
-            "IronCondor[%s]: ENTRY ATM=%.0f | short CE=%.0f(%.2f) PE=%.0f(%.2f) "
+            "IronCondor[%s]: ENTRY ATM=%.0f exp=%s | short CE=%.0f(%.2f) PE=%.0f(%.2f) "
             "| hedge CE=%.0f(%.2f) PE=%.0f(%.2f) | net_credit=%.2f",
-            self._underlying, atm,
+            self._underlying, atm, _expiry.isoformat(),
             short_ce_strike, short_ce_ltp, short_pe_strike, short_pe_ltp,
             long_ce_strike,  long_ce_ltp,  long_pe_strike,  long_pe_ltp,
             net_credit,
@@ -447,6 +502,7 @@ class IronCondorStrategy:
             long_pe_ltp     = long_pe_ltp,
             lot_size        = self._lot_size,
             event_id        = trade_id,
+            expiry          = _expiry,
         )
         await self._bus.publish(Topic.IC_ORDER_REQUEST, ev_order)
 
@@ -789,6 +845,12 @@ class IronCondorStrategy:
 
     def _update_leg_ltp(self, tick) -> None:
         if not self._position:
+            return
+        # Only price the position's legs from ticks on the position's OWN expiry —
+        # next-expiry strikes may also be streamed (expiry shift) and must not
+        # bleed into the open position's leg LTPs.
+        if getattr(tick, "expiry", None) and self._position.expiry \
+                and tick.expiry != self._position.expiry:
             return
         for leg in self._position.legs:
             if abs(leg.strike - tick.strike) < 0.01 and leg.option_type == tick.option_type:
