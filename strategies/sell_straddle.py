@@ -429,7 +429,7 @@ class SellStraddleStrategy:
             f"T:{self._guardrail_pnl_target_pts:.0f}pts SL:{self._guardrail_pnl_sl_pts:.0f}pts | "
             f"DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}%",
             f"║ DYNAMIC EXITS: {exit_rules}",
-            f"║ EXIT PRIORITY: EOD→Day%→PnLguard→LTPdecay→Ratio→ScalableTSL→ROC→VWAPrise→exit_rules",
+            f"║ EXIT PRIORITY: EOD→PnLguard→Day%→LTPdecay→Ratio→ScalableTSL→ROC→VWAPrise→exit_rules",
             f"║ LIMITS: Max Daily Trades:{self._max_trades}",
             "╚══════════════════════════════════════════════════════════════════════",
         ]
