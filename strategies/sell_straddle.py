@@ -642,14 +642,6 @@ class SellStraddleStrategy:
 
         self._recompute_indicators()
 
-        # Snapshot every cached leg's current ATP as its "previous closed" value
-        # for the next candle's per-pair slope. Only overwrite on a valid ATP so a
-        # missing tick never corrupts the slope (same discipline as the ATM path).
-        for _k, _v in self._strike_prem.items():
-            _a = _v.get("atp", 0.0)
-            if _a and _a > 0:
-                self._prev_atp_closed[_k] = _a
-
         # Force-exit
         if now.time() >= self._force_exit:
             if self._position and self._position.status == "open":
@@ -659,6 +651,16 @@ class SellStraddleStrategy:
         # Entry evaluation (no open position)
         if not self._position or self._position.status != "open":
             await self._try_entry(now)
+
+        # Snapshot every cached leg's current ATP as its "previous closed" value
+        # for the NEXT candle's per-pair slope. CRITICAL: this MUST run AFTER the
+        # entry evaluation above — otherwise prev == current within the same candle
+        # and every per-pair slope reads 0.00 (SLOPE<0 can never pass → no entries).
+        # Only overwrite on a valid ATP so a missing tick never corrupts the slope.
+        for _k, _v in self._strike_prem.items():
+            _a = _v.get("atp", 0.0)
+            if _a and _a > 0:
+                self._prev_atp_closed[_k] = _a
 
     def _recompute_indicators(self) -> None:
         closes = np.array(self._prem_closes, dtype=np.float64)
