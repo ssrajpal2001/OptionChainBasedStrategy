@@ -1637,11 +1637,13 @@ class DashboardServer:
                     ot   = getattr(leg, "option_type", "")
                     ep   = float(getattr(leg, "entry_price", 0.0) or 0.0)
                     ltp  = float(getattr(leg, "ltp", ep) or ep)
-                    qty  = int(getattr(pos, "lot_size", 0)) * (-1 if side == "sell" else 1)
+                    ls   = int(getattr(pos, "lot_size", 0) or 0)
+                    qty  = ls * (-1 if side == "sell" else 1)
                     # sell profits when price falls; buy profits when price rises
                     pnl = round((ep - ltp) * abs(qty), 2) if side == "sell" else round((ltp - ep) * abs(qty), 2)
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} {side.upper()}",
-                                "qty": qty, "entry_price": round(ep, 2),
+                                "qty": qty, "lot_size": ls, "lots": 1,
+                                "entry_price": round(ep, 2),
                                 "ltp": round(ltp, 2), "pnl": pnl})
                 return out
 
@@ -1654,9 +1656,11 @@ class DashboardServer:
                     ot = getattr(leg, "option_type", "")
                     ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
                     ltp = float(getattr(leg, "ltp", ep) or ep)
-                    qty = -int(getattr(pos, "lot_size", 0) or 0)  # straddle is short both
+                    ls = int(getattr(pos, "lot_size", 0) or 0)
+                    qty = -ls  # straddle is short both
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
-                                "qty": qty, "entry_price": round(ep, 2),
+                                "qty": qty, "lot_size": ls, "lots": 1,
+                                "entry_price": round(ep, 2),
                                 "ltp": round(ltp, 2), "pnl": round((ep - ltp) * abs(qty), 2)})
                 return out
 
@@ -1694,7 +1698,10 @@ class DashboardServer:
                             except Exception:
                                 continue
                             ltp = float(prem.get(opt_sym, entry_px) or entry_px)
+                            _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
+                            _lots = (abs(int(qty)) // _ls) if _ls else 0
                             legs.append({"symbol": opt_sym, "qty": int(qty),
+                                         "lot_size": _ls, "lots": _lots,
                                          "entry_price": round(float(entry_px), 2),
                                          "ltp": round(ltp, 2),
                                          "pnl": round((float(entry_px) - ltp) * abs(int(qty)), 2)})

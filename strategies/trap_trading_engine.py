@@ -480,6 +480,10 @@ class TrapTradingEngine:
                 continue
             # Store real underlying spot price (index LTP, e.g. 24500 for NIFTY)
             self._spot_cache[event.symbol] = event.ltp
+            # Live heartbeat driven by ticks (not candles), so the per-symbol log
+            # is created immediately and shows what the engine sees every minute —
+            # even between 5m/75m candle closes.
+            self._heartbeat(event.symbol, event.ltp)
 
     async def _option_tick_loop(self) -> None:
         while self._running:
@@ -506,22 +510,6 @@ class TrapTradingEngine:
         tc = self._cfg.trap_engine
         sym = c.symbol
 
-        # Per-minute heartbeat to the per-symbol log so you can SEE the engine is
-        # alive and where it is, without waiting for a 5m/75m close.
-        import time as _t
-        if not hasattr(self, "_last_hb"):
-            self._last_hb = {}
-        if _t.monotonic() - self._last_hb.get(sym, 0.0) > 60.0:
-            self._last_hb[sym] = _t.monotonic()
-            st = self._states.get(sym)
-            if st is not None:
-                self._tlog(sym).info(
-                    "heartbeat phase=%s rolling_base=%.2f trap_levels=%d pending=%d %s",
-                    st.phase.name, st.rolling_base, len(st.trap_levels),
-                    len(getattr(st, "pending_levels", [])),
-                    f"LIVE trade={st.trade_id}" if st.trade_id else "no-position",
-                )
-
         # EOD guard — force-exit all if market has closed
         if datetime.now(IST).time() >= _MARKET_CLOSE:
             await self._force_exit_all("EOD")
@@ -541,6 +529,31 @@ class TrapTradingEngine:
             lg = _make_trap_logger(symbol)
             self._clogs[symbol] = lg
         return lg
+
+    def _heartbeat(self, symbol: str, spot: float) -> None:
+        """Tick-driven heartbeat. Creates the per-symbol log on first tick and
+        emits one line/minute showing exactly what the engine sees — so the log
+        is never blank, even before any 5m/75m candle has closed."""
+        import time as _t
+        if not hasattr(self, "_last_hb"):
+            self._last_hb = {}
+        if _t.monotonic() - self._last_hb.get(symbol, 0.0) < 60.0:
+            return
+        self._last_hb[symbol] = _t.monotonic()
+        try:
+            st = self._get_state(symbol)   # create state if missing → log always appears
+            if st.trade_id:
+                pos = (f"IN-POSITION trade={st.trade_id} entry={st.entry_price:.2f} "
+                       f"sl={st.ltf_sl_line:.2f} target={st.target_high:.2f}")
+            else:
+                pos = "no-position (scanning for trap)"
+            self._tlog(symbol).info(
+                "heartbeat spot=%.2f phase=%s rolling_base=%.2f trap_levels=%d pending=%d | %s",
+                spot, st.phase.name, st.rolling_base, len(st.trap_levels),
+                len(getattr(st, "pending_levels", [])), pos,
+            )
+        except Exception as exc:
+            self._tlog(symbol).info("heartbeat spot=%.2f (state warming up: %s)", spot, exc)
 
     def _log_stage(self, symbol: str, tf: str, c: CandleEvent) -> None:
         """Log the full 5-stage state on each HTF/MTF close so you can follow exactly

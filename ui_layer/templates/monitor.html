@@ -6508,7 +6508,7 @@ function histReplay() {
                       <div class="flex items-center justify-between text-xs font-mono" style="color:var(--t-muted)">
                         <span>SYMBOL</span>
                         <div class="flex gap-4">
-                          <span>QTY</span><span>ENTRY</span><span>LTP</span><span>P&amp;L</span>
+                          <span>QTY</span><span>LOTS</span><span>LOT</span><span>ENTRY</span><span>LTP</span><span>P&amp;L</span>
                         </div>
                       </div>
                       <template x-for="(leg,li) in csPositions[b.binding_id][dep.strategy_name].legs||[]" :key="li">
@@ -6516,6 +6516,8 @@ function histReplay() {
                           <span style="color:var(--t-text)" x-text="leg.symbol"></span>
                           <div class="flex gap-4 text-right">
                             <span style="color:var(--t-muted)" x-text="leg.qty"></span>
+                            <span style="color:var(--t-muted)" x-text="(leg.lots!==undefined?leg.lots:'-')"></span>
+                            <span style="color:var(--t-muted)" x-text="(leg.lot_size!==undefined?leg.lot_size:'-')"></span>
                             <span style="color:var(--t-muted)" x-text="leg.entry_price"></span>
                             <span class="price-live" style="color:var(--t-bright)" x-text="leg.ltp||leg.entry_price"></span>
                             <span class="font-bold" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
