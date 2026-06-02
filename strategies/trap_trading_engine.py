@@ -64,7 +64,9 @@ def _make_trap_logger(underlying: str) -> logging.Logger:
 # Module-level constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-_MARKET_CLOSE = time(15, 30, 0)  # IST — force-exit all positions at this time
+_MARKET_CLOSE = time(15, 30, 0)      # IST — NSE/BSE force-exit time
+_MCX_MARKET_CLOSE = time(23, 30, 0)  # IST — MCX commodities trade the evening session
+_MCX_SET = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
 
 
 def _row_date(row: dict):
@@ -487,6 +489,17 @@ class TrapTradingEngine:
             except Exception as exc:
                 logger.exception("TrapTradingEngine warm_start [%s]: %s", sym, exc)
 
+    def _market_close_for(self, symbol: str):
+        """EOD force-exit time for the symbol's exchange (MCX trades the evening
+        session, so its close is ~23:30, not the NSE 15:30). `symbol` may be an
+        underlying or a leg key (UNDERLYING:STRIKE:OPT)."""
+        u = (str(symbol).split(":")[0] if symbol else "").upper()
+        try:
+            mcx = set(self._cfg.exchange.mcx_underlyings)
+        except Exception:
+            mcx = _MCX_SET
+        return _MCX_MARKET_CLOSE if u in mcx else _MARKET_CLOSE
+
     def set_feeder(self, feeder) -> None:
         """Inject the GlobalFeeder so the trap can subscribe its tracked CE/PE strikes."""
         self._feeder = feeder
@@ -875,8 +888,8 @@ class TrapTradingEngine:
         tc = self._cfg.trap_engine
         sym = c.symbol
 
-        # EOD guard — force-exit all if market has closed
-        if datetime.now(IST).time() >= _MARKET_CLOSE:
+        # EOD guard — force-exit all if market has closed (MCX-aware)
+        if datetime.now(IST).time() >= self._market_close_for(c.symbol):
             await self._force_exit_all("EOD")
             return
 
@@ -1160,8 +1173,8 @@ class TrapTradingEngine:
         Also updates the spot cache from index tick.
         Async — fires orders.
         """
-        # EOD guard
-        if datetime.now(IST).time() >= _MARKET_CLOSE:
+        # EOD guard (MCX-aware)
+        if datetime.now(IST).time() >= self._market_close_for(tick.underlying):
             await self._force_exit_all("EOD")
             return
 
@@ -1229,8 +1242,8 @@ class TrapTradingEngine:
         if st.phase != _Phase.LIVE:
             return
 
-        # EOD
-        if datetime.now(IST).time() >= _MARKET_CLOSE:
+        # EOD (MCX-aware)
+        if datetime.now(IST).time() >= self._market_close_for(c.symbol):
             await self._force_exit_all("EOD")
             return
 
