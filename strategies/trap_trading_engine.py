@@ -78,6 +78,13 @@ def exec_strike(spot: float, opt_type: str, buy_depth: int, step: float) -> int:
     return int(atm - off) if opt_type == "CE" else int(atm + off)
 
 
+def sl_triggered(ltp: float, sl_5m: float, sl_active) -> bool:
+    """Two-tier stop: before a 1-min close breaks the 5m low, the stop is the 5m low;
+    after, it is the breaching 1-min candle's low (`sl_active`). Exit when ltp < ref."""
+    ref = sl_active if sl_active is not None else sl_5m
+    return float(ltp) < float(ref)
+
+
 def _row_date(row: dict):
     """Extract a date from a 1m-bar row's timestamp (datetime or ISO string)."""
     ts = row.get("timestamp")
@@ -906,6 +913,12 @@ class TrapTradingEngine:
                         (strike == sel.pe_strike and event.option_type == "PE")):
                         leg_key = self._leg_key(event.underlying, strike, event.option_type)
                         self._feed_leg_tick(leg_key, event.timestamp, event.ltp)
+                    # If this tick is the executed position's contract, run the two-tier SL.
+                    pos = self._v2_position
+                    if (pos is not None and event.underlying == pos["underlying"]
+                            and int(event.strike) == pos["strike"]
+                            and event.option_type == pos["opt_type"]):
+                        self._v2_track_exec_tick(event.timestamp, event.ltp)
                 except Exception:
                     pass
 
@@ -1033,10 +1046,94 @@ class TrapTradingEngine:
         self._v2_position = {
             **payload, "entry_premium": float(entry_premium), "expiry": expiry,
             "ts": datetime.now(IST),
+            # SL fields: sl_5m starts at the entry premium and trails down to the entry
+            # 5m candle low while inside that bucket (see _v2_track_exec_tick); sl_active
+            # is the tier-2 1-min low once a 1m closes below sl_5m.
+            "sl_5m": float(entry_premium), "sl_active": None,
+            "entry_bucket": None, "_m1": None,
         }
         self._tlog(underlying).info(
             "V2 ENTRY BUY %s %d qty=%d @ prem=%.2f (spot=%.2f exp=%s)",
             opt_type, payload["strike"], payload["qty"], entry_premium, payload["spot"], expiry)
+
+    # ── v2 two-tier stop loss ─────────────────────────────────────────────────
+    def _v2_check_sl(self, ltp: float) -> bool:
+        pos = self._v2_position
+        if pos is None:
+            return False
+        return sl_triggered(ltp, pos.get("sl_5m", 0.0), pos.get("sl_active"))
+
+    def _v2_update_sl_on_1m_close(self, low: float, close: float) -> None:
+        """Tier-2 activation: if a 1-min candle CLOSES below the (fixed) 5m entry-candle
+        low, that 1-min candle's low becomes the active stop."""
+        pos = self._v2_position
+        if pos is None:
+            return
+        if float(close) < float(pos.get("sl_5m", 0.0)):
+            pos["sl_active"] = float(low)
+
+    def _v2_maybe_stop(self, ltp: float) -> bool:
+        """If the stop is hit, clear the position cleanly and (best-effort) publish the
+        exit. Returns True when an exit fired."""
+        pos = self._v2_position
+        if pos is None or not self._v2_check_sl(ltp):
+            return False
+        self._tlog(pos["underlying"]).info(
+            "V2 SL HIT %s %d ltp=%.2f sl_5m=%.2f sl_active=%s — EXIT",
+            pos["opt_type"], pos["strike"], ltp, pos.get("sl_5m", 0.0), pos.get("sl_active"))
+        self._v2_position = None   # clear stored position cleanly
+        try:
+            asyncio.create_task(self._v2_publish_exit(pos, ltp, "sl"))
+        except RuntimeError:
+            pass
+        return True
+
+    async def _v2_publish_exit(self, pos: dict, exit_premium: float, reason: str) -> None:
+        try:
+            from strategies.base_strategy import Direction, SignalPackage, StrategyID
+            sig = SignalPackage(
+                source=StrategyID.TRAP_ENGINE, direction=Direction.EXIT,
+                underlying=pos["underlying"], option_type=pos["opt_type"],
+                target_strike=pos["strike"], entry_spot=pos.get("spot", 0.0),
+                stop_spot=0.0, target_spot=0.0, confidence=1.0,
+                timestamp=datetime.now(IST),
+                notes=f"TTv2 EXIT {reason} {pos['opt_type']} {pos['strike']} prem={exit_premium:.2f}",
+            )
+            await self._bus.publish(Topic.SIGNAL, sig)
+        except Exception as exc:
+            logger.warning("TrapEngine: v2 exit publish failed: %s", exc)
+
+    def _v2_track_exec_tick(self, ts, ltp: float) -> None:
+        """Maintain the executed contract's entry-5m-candle low (sl_5m, frozen after the
+        entry bucket) and its 1-min candles (tier-2 activation), then evaluate the stop."""
+        pos = self._v2_position
+        if pos is None:
+            return
+        tc = self._cfg.trap_engine
+        try:
+            base = ts.replace(second=0, microsecond=0)
+        except Exception:
+            base = datetime.now(IST).replace(second=0, microsecond=0)
+        minute = base.hour * 60 + base.minute
+        # 5m entry-candle low: while still inside the entry 5m bucket, trail sl_5m down to
+        # the running low; once the bucket closes it stays frozen (the entry candle low).
+        b5 = minute - (minute % tc.MTF_MINUTES)
+        b5start = base.replace(hour=b5 // 60, minute=b5 % 60)
+        if pos.get("entry_bucket") is None:
+            pos["entry_bucket"] = b5start
+        if b5start == pos["entry_bucket"]:
+            pos["sl_5m"] = min(float(pos.get("sl_5m", ltp)), float(ltp))
+        # 1-min candle of the executed contract.
+        m1 = minute - (minute % tc.SL_MIN_MINUTES if hasattr(tc, "SL_MIN_MINUTES") else 1)
+        m1start = base.replace(hour=m1 // 60, minute=m1 % 60)
+        cur = pos.get("_m1")
+        if cur is None or cur["start"] != m1start:
+            if cur is not None:
+                self._v2_update_sl_on_1m_close(cur["l"], cur["c"])
+            pos["_m1"] = {"start": m1start, "o": ltp, "h": ltp, "l": ltp, "c": ltp}
+        else:
+            cur["h"] = max(cur["h"], ltp); cur["l"] = min(cur["l"], ltp); cur["c"] = ltp
+        self._v2_maybe_stop(ltp)
 
     # ── Candle router ─────────────────────────────────────────────────────────
 
