@@ -66,6 +66,20 @@ def _make_trap_logger(underlying: str) -> logging.Logger:
 
 _MARKET_CLOSE = time(15, 30, 0)  # IST — force-exit all positions at this time
 
+
+def _row_date(row: dict):
+    """Extract a date from a 1m-bar row's timestamp (datetime or ISO string)."""
+    ts = row.get("timestamp")
+    if ts is None:
+        return None
+    if hasattr(ts, "date"):
+        return ts.date()
+    try:
+        from datetime import datetime as _dt
+        return _dt.fromisoformat(str(ts).replace("Z", "")).date()
+    except Exception:
+        return None
+
 _DOW_OFFSET: Dict[int, int] = {
     0: 200,  # Monday
     1: 100,  # Tuesday
@@ -403,6 +417,12 @@ class TrapTradingEngine:
 
         import pandas as pd
 
+        # Lock each symbol's day strikes from JUST the previous trading day's high/low
+        # — independent of the full HTF/MTF replay below, so strikes are set even if
+        # there isn't enough history to rebuild trap state.
+        for sym in symbols:
+            await self._lock_day_strikes(sym)
+
         for sym in symbols:
             try:
                 rows = await asyncio.to_thread(
@@ -448,9 +468,6 @@ class TrapTradingEngine:
                     )
                     self._process_mtf(fake)
 
-                # Lock the day's tracked CE/PE strikes from PREV-DAY high/low + DTE.
-                self._compute_day_strikes(sym, df)
-
                 st = self._get_state(sym)
                 logger.info(
                     "TrapTradingEngine warm_start [%s]: restored phase=%s "
@@ -475,19 +492,38 @@ class TrapTradingEngine:
         except Exception:
             return 0
 
-    def _compute_day_strikes(self, underlying: str, df) -> None:
-        """Compute and lock the day's tracked CE/PE strikes from the PREVIOUS day's
-        high/low and days-to-expiry. df is the 1m-bar frame from warm_start."""
+    async def _lock_day_strikes(self, underlying: str) -> None:
+        """Fetch JUST the previous trading day's high/low (one day's worth of 1m bars)
+        and lock the day's tracked CE/PE strikes. Independent of the full warm-start
+        replay — only needs prev-day high+low to find the ATM centre."""
+        if self._client_db is None:
+            return
+        try:
+            from datetime import timedelta
+            now   = datetime.now(IST)
+            today = now.date()
+            # Look back a few calendar days to safely span weekends/holidays.
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+            rows = await asyncio.to_thread(
+                self._client_db.get_1m_bars_sync, underlying, start, now
+            )
+            # Keep only bars STRICTLY before today, then take the most recent such day.
+            prior = [r for r in (rows or []) if _row_date(r) is not None and _row_date(r) < today]
+            if not prior:
+                logger.warning("TrapEngine[%s]: no prev-day bars to lock day strikes.", underlying)
+                return
+            target_day = max(_row_date(r) for r in prior)
+            day_rows = [r for r in prior if _row_date(r) == target_day]
+            prev_high = max(float(r["high"]) for r in day_rows)
+            prev_low  = min(float(r["low"])  for r in day_rows)
+            self._compute_day_strikes(underlying, prev_high, prev_low)
+        except Exception as exc:
+            logger.warning("TrapEngine[%s]: _lock_day_strikes failed: %s", underlying, exc)
+
+    def _compute_day_strikes(self, underlying: str, prev_high: float, prev_low: float) -> None:
+        """Lock the day's tracked CE/PE strikes from the previous day's high/low and DTE."""
         try:
             from strategies.trap_strike_selection import select_trap_strikes
-            today = datetime.now(IST).date()
-            # Pick the most recent COMPLETE prior day in the frame (else last day).
-            day_index = df.index.normalize()
-            prior = day_index[day_index.date < today] if hasattr(day_index, "date") else None
-            target_day = (prior.max() if prior is not None and len(prior) else day_index.max())
-            mask = day_index == target_day
-            prev_high = float(df.loc[mask, "high"].max())
-            prev_low  = float(df.loc[mask, "low"].min())
             step = float(self._cfg.exchange.strike_steps.get(underlying, 50.0))
             dte  = self._dte(underlying)
             sel  = select_trap_strikes(prev_high, prev_low, dte, step)
