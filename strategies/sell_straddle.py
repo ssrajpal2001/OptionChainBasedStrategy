@@ -970,23 +970,16 @@ class SellStraddleStrategy:
                 await self._close_position("guardrail_pnl_sl")
                 return
 
-        # LTP Decay — close decayed leg; try smart roll first
+        # LTP Decay → single-side roll per decayed leg (reference exit_logic step 2)
         if self._ltp_decay_enabled:
-            decayed = (
-                (pos.ce_leg.ltp > 0 and pos.ce_leg.ltp < self._ltp_exit_min) or
-                (pos.pe_leg.ltp > 0 and pos.pe_leg.ltp < self._ltp_exit_min)
-            )
-            if decayed:
-                decayed_side = "CE" if pos.ce_leg.ltp < self._ltp_exit_min else "PE"
-                logger.info(
-                    "SellStraddle[%s]: LTP DECAY — %s ltp=%.2f < min=%.2f",
-                    self._underlying, decayed_side,
-                    pos.ce_leg.ltp if decayed_side == "CE" else pos.pe_leg.ltp,
-                    self._ltp_exit_min,
-                )
-                rolled = await self._try_smart_roll(now, f"ltp_decay_{decayed_side}")
-                if not rolled:
-                    await self._close_position(f"ltp_decay_{decayed_side}")
+            rolled_any = False
+            for _side, _ltp in (("CE", pos.ce_leg.ltp), ("PE", pos.pe_leg.ltp)):
+                if 0 < _ltp < self._ltp_exit_min and self._position and self._position.status == "open":
+                    logger.info("SellStraddle[%s]: LTP DECAY %s ltp=%.2f < %.2f — single-side roll",
+                                self._underlying, _side, _ltp, self._ltp_exit_min)
+                    await self._single_side_roll(_side, now, f"ltp_decay_{_side}")
+                    rolled_any = True
+            if rolled_any:
                 return
 
         # ── Exit priority below matches Option_Selling_May_2026 sell_v3 corrected order:
@@ -1240,6 +1233,69 @@ class SellStraddleStrategy:
         logger.info("SellStraddle[%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
                     self._underlying, side, leg.strike, leg_pnl, reason)
         return leg_pnl
+
+    async def _open_leg(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
+        """Open ONE leg at a new strike (publish ENTRY legs=[side]); update the leg."""
+        from execution_bridge.straddle_bridge import StraddleOrderEvent
+        pos = self._position
+        if not pos:
+            return
+        leg = pos.ce_leg if side == "CE" else pos.pe_leg
+        leg.strike = strike
+        leg.entry_price = ltp
+        leg.ltp = ltp
+        pos.net_credit = pos.ce_leg.entry_price + pos.pe_leg.entry_price
+        pos.tsl_high_lock_rs = 0.0
+        pos.open_time = now
+        self._event_counter += 1
+        order_ev = StraddleOrderEvent(
+            action="ENTRY", underlying=self._underlying, atm=pos.atm_at_entry,
+            ce_strike=pos.ce_leg.strike, pe_strike=pos.pe_leg.strike,
+            ce_ltp=pos.ce_leg.ltp, pe_ltp=pos.pe_leg.ltp,
+            lot_multiplier=self._lot_multiplier, lot_size=self._lot_size,
+            spot=self._spot, indicators=dict(self._ind),
+            event_id=f"{self._underlying}_OPENLEG_{side}_{self._event_counter}",
+            legs=[side],
+        )
+        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        logger.info("SellStraddle[%s]: OPEN LEG %s strike=%.0f @%.2f [%s]",
+                    self._underlying, side, strike, ltp, reason)
+
+    async def _single_side_roll(self, side: str, now: datetime, reason: str) -> None:
+        """Close decayed leg, re-enter that side via pool scan; enforce 0-or-2 invariant."""
+        from strategies.straddle_selection import scan_pool
+        other = "PE" if side == "CE" else "CE"
+        pos = self._position
+        if not pos:
+            return
+        await self._close_leg(side, reason, now)
+
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        rules = ss.get("entry_rules_reentry", [])
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
+
+        sel = scan_pool(
+            self._strike_prem, self._spot, step, offset, ltp_target,
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
+            metric=ss.get("reentry_best_metric", "balanced_premium"),
+        )
+        new_strike = new_ltp = None
+        if sel:
+            ce_s, pe_s, ce_l, pe_l = sel
+            new_strike, new_ltp = (ce_s, ce_l) if side == "CE" else (pe_s, pe_l)
+
+        if new_strike and new_ltp and new_ltp >= ltp_target:
+            await self._open_leg(side, new_strike, new_ltp, now, f"single_side_roll_{reason}")
+            self._persist()
+            return
+        # 0-or-2 invariant — no valid re-entry → close the surviving leg too.
+        logger.warning("SellStraddle[%s]: single-side roll %s found no candidate — closing %s (0-or-2).",
+                       self._underlying, side, other)
+        await self._close_leg(other, f"single_side_cleanup_{reason}", now)
+        self._position = None
+        self._persist()
 
     async def _close_position(self, reason: str) -> None:
         if not self._position:
