@@ -267,6 +267,17 @@ class StraddleExecutionBridge:
                 except Exception:
                     live_bindings = []
 
+            # Deployments for this client — the real source of "which strategy on
+            # which broker for which instrument". Gating on these (not the empty
+            # binding.assigned_strategy field) is what stops every strategy routing
+            # to every broker.
+            deployments: list = []
+            if db and hasattr(db, "get_deployments_sync"):
+                try:
+                    deployments = db.get_deployments_sync(client.client_id)
+                except Exception:
+                    deployments = []
+
             for live_b in live_bindings:
                 binding_id = live_b.get("binding_id", "")
 
@@ -278,14 +289,15 @@ class StraddleExecutionBridge:
                 if not live_b.get("terminal_connected"):
                     continue
 
-                # Gate 3: strategy assignment must match
-                assigned = live_b.get("assigned_strategy", "") or ""
-                if assigned and assigned != "sell_straddle":
-                    continue
-
-                # Gate 4: instrument must match
-                assigned_idx = live_b.get("assigned_instrument", "") or ""
-                if assigned_idx and assigned_idx != ev.underlying:
+                # Gate 3: this binding must have a DEPLOYMENT for sell_straddle on
+                # THIS underlying. No matching deployment → this broker does not
+                # trade this strategy/instrument → skip.
+                if not any(
+                    d.get("binding_id") == binding_id
+                    and d.get("strategy_name") == "sell_straddle"
+                    and str(d.get("underlying", "")).upper() == ev.underlying.upper()
+                    for d in deployments
+                ):
                     continue
 
                 broker = (self._router._brokers or {}).get(client.client_id, {}).get(binding_id)

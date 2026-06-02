@@ -76,6 +76,13 @@ class ICExecutionBridge:
                     live_bindings = db.get_bindings_safe_sync(client.client_id)
                 except Exception:
                     live_bindings = []
+            # Deployments = the real strategy↔broker↔instrument assignment.
+            deployments = []
+            if db and hasattr(db, "get_deployments_sync"):
+                try:
+                    deployments = db.get_deployments_sync(client.client_id)
+                except Exception:
+                    deployments = []
 
             for live_b in live_bindings:
                 binding_id = live_b.get("binding_id", "")
@@ -85,12 +92,13 @@ class ICExecutionBridge:
                 if not live_b.get("terminal_connected"):
                     continue
 
-                assigned = live_b.get("assigned_strategy", "") or ""
-                if assigned and assigned != "iron_condor":
-                    continue
-
-                assigned_idx = live_b.get("assigned_instrument", "") or ""
-                if assigned_idx and assigned_idx != ev.underlying:
+                # Must have an iron_condor deployment on THIS underlying for THIS broker.
+                if not any(
+                    d.get("binding_id") == binding_id
+                    and d.get("strategy_name") == "iron_condor"
+                    and str(d.get("underlying", "")).upper() == ev.underlying.upper()
+                    for d in deployments
+                ):
                     continue
 
                 broker = (self._router._brokers or {}).get(client.client_id, {}).get(binding_id)
