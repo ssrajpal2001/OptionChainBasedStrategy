@@ -548,14 +548,26 @@ class TrapTradingEngine:
             from_d = (today - timedelta(days=10)).isoformat()
             url = (f"https://api.upstox.com/v2/historical-candle/"
                    f"{urllib.parse.quote(ikey, safe='')}/day/{to_d}/{from_d}")
+            headers = {
+                "Accept": "application/json",
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/140.0.0.0 Safari/537.36"),
+            }
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
 
             def _get():
-                req = urllib.request.Request(url, headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {token}" if token else "",
-                })
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    return _json.loads(r.read().decode("utf-8"))
+                # Upstox's edge (Cloudflare) 403s plain urllib — prefer curl_cffi with
+                # a Chrome TLS fingerprint (same approach as the broker auth flow).
+                try:
+                    from curl_cffi import requests as _cc
+                    resp = _cc.get(url, headers=headers, impersonate="chrome131", timeout=8)
+                    return resp.json()
+                except ImportError:
+                    req = urllib.request.Request(url, headers=headers)
+                    with urllib.request.urlopen(req, timeout=8) as r:
+                        return _json.loads(r.read().decode("utf-8"))
 
             data = await asyncio.to_thread(_get)
             candles = ((data or {}).get("data") or {}).get("candles") or []
