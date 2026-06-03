@@ -158,6 +158,21 @@ class StraddlePosition:
         return self.net_credit - self.current_value
 
 
+def format_exit_eval(underlying: str, pnl_pts: float, credit: float, criteria) -> str:
+    """One EXIT-EVAL log line showing every exit criterion checked on the max-TF close.
+    `criteria`: list of (name, detail, hit:bool). Shows current-vs-threshold + ✓/✗ per
+    criterion and the overall HOLD/EXIT outcome — mirrors the entry EVAL line."""
+    parts, fired = [], []
+    for name, detail, hit in criteria:
+        parts.append(f"{name}({detail})={'✓HIT' if hit else '✗'}")
+        if hit:
+            fired.append(name)
+    pct = (pnl_pts / credit * 100.0) if credit else 0.0
+    outcome = ("EXIT:" + ",".join(fired)) if fired else "HOLD"
+    return (f"EXIT-EVAL {underlying} pnl={pnl_pts:.2f} ({pct:.1f}% of credit) | "
+            + " | ".join(parts) + f" → {outcome}")
+
+
 # ── Strategy ──────────────────────────────────────────────────────────────────
 
 class SellStraddleStrategy:
@@ -1119,29 +1134,53 @@ class SellStraddleStrategy:
                             await self._close_position("vwap_rise_sl")
                         return
 
-        # exit_rules — dynamic technical exit conditions from admin config
-        if self._exit_rules:
-            _max_tf = max((int(r.get("tf", 1)) for r in self._exit_rules), default=1)
-            _er_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _max_tf) * _max_tf:02d}"
-            if _er_bucket != self._last_exit_rules_bucket:
-                self._last_exit_rules_bucket = _er_bucket
-                _passed, _reason = _eval_rules(self._exit_rules, self._ind)
-                # Always log the exit-rule evaluation so you can see what's checked
-                # on the open ATM position each timeframe bucket.
-                self._clog.info(
-                    "EXIT-EVAL %s ATM=%.0f pnl=%.2f (credit=%.2f) | rules: %s | result=%s",
-                    self._underlying, pos.atm_at_entry, pnl, pos.net_credit,
-                    _reason, "EXIT" if _passed else "HOLD",
-                )
-                if _passed:
-                    logger.info(
-                        "SellStraddle[%s]: EXIT_RULES triggered — %s",
-                        self._underlying, _reason,
-                    )
-                    rolled = await self._try_smart_roll(now, "exit_rules")
-                    if not rolled:
-                        await self._close_position("exit_rules")
-                    return
+        # EXIT-EVAL — once per max-TF bucket, log EVERY active exit criterion's live
+        # evaluation (mirrors the entry EVAL line), then act on the dynamic exit_rules.
+        _max_tf = (max((int(r.get("tf", 1)) for r in self._exit_rules), default=1)
+                   if self._exit_rules else 5)
+        _er_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _max_tf) * _max_tf:02d}"
+        if _er_bucket != self._last_exit_rules_bucket:
+            self._last_exit_rules_bucket = _er_bucket
+            _credit = pos.net_credit or 0.0
+            _pct = (pnl / _credit * 100.0) if _credit else 0.0
+            _passed, _reason = (False, "—")
+            # Build the criteria list defensively — logging must never break the exits.
+            try:
+                _crit = []
+                _pt  = float(getattr(self, "_profit_pct", 0.0) or 0.0)
+                _slp = float(getattr(self, "_sl_pct", 0.0) or 0.0)
+                if _pt:
+                    _crit.append(("ProfitTgt", f"{_pct:.1f}% vs {_pt:.0f}%", _pct >= _pt))
+                if _slp:
+                    _crit.append(("HardSL", f"{_pct:.1f}% vs -{_slp:.0f}%", _pct <= -_slp))
+                _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
+                _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
+                if _credit and (_dpt or _dsl):
+                    _dpct = (self._session_realized_pnl_pts + pnl) / _credit * 100.0
+                    _crit.append(("Day%", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
+                                  (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
+                _ce_ltp = float(getattr(getattr(pos, "ce_leg", None), "ltp", 0) or 0)
+                _pe_ltp = float(getattr(getattr(pos, "pe_leg", None), "ltp", 0) or 0)
+                if _ce_ltp > 0 and _pe_ltp > 0:
+                    _r = max(_ce_ltp, _pe_ltp) / min(_ce_ltp, _pe_ltp)
+                    _thr = float(getattr(self, "_ratio_threshold", 0.0) or 0.0)
+                    if _thr:
+                        _crit.append(("Ratio", f"{_r:.2f} vs {_thr:.1f}x", _r >= _thr))
+                if self._exit_rules:
+                    _passed, _reason = _eval_rules(self._exit_rules, self._ind)
+                    _crit.append(("Dynamic", _reason, _passed))
+                self._clog.info(format_exit_eval(self._underlying, pnl, _credit, _crit))
+            except Exception as _exc:
+                self._clog.info("EXIT-EVAL %s (formatting error: %s)", self._underlying, _exc)
+                if self._exit_rules:
+                    _passed, _reason = _eval_rules(self._exit_rules, self._ind)
+
+            if self._exit_rules and _passed:
+                logger.info("SellStraddle[%s]: EXIT_RULES triggered — %s", self._underlying, _reason)
+                rolled = await self._try_smart_roll(now, "exit_rules")
+                if not rolled:
+                    await self._close_position("exit_rules")
+                return
 
     def _pnl_rs(self, pnl_pts: float) -> float:
         """Convert P&L in premium points to rupees."""
