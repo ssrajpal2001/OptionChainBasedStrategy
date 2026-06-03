@@ -241,7 +241,15 @@ class StraddleExecutionBridge:
                 break
             if not isinstance(ev, StraddleOrderEvent):
                 continue
-            await self._handle(ev)
+            try:
+                await self._handle(ev)
+            except Exception as exc:
+                # One bad order must NOT kill the bridge (which would silently stop ALL
+                # future routing). Log and keep serving.
+                logger.exception(
+                    "StraddleExecutionBridge: _handle error for %s %s: %s",
+                    ev.action, ev.underlying, exc,
+                )
 
     def stop(self) -> None:
         self._running = False
@@ -380,9 +388,21 @@ class StraddleExecutionBridge:
     ) -> None:
         """Place actual SELL/BUY orders via broker API."""
         from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
-        from data_layer.symbol_translator import SymbolTranslator
+        from data_layer.instrument_registry import REGISTRY as _REG
+        from config.global_config import IST as _IST
+        from datetime import datetime as _dt
 
-        translator = SymbolTranslator()
+        # Resolve the execution broker's provider + active expiry, then the broker-specific
+        # symbol via the registry (mirrors ic_bridge). SymbolTranslator has no
+        # 'to_broker_symbol' — that call was crashing the whole bridge.
+        _b = getattr(broker, "_binding", None)
+        provider = (_b.provider if _b else getattr(broker, "provider", "mock"))
+        _today = _dt.now(_IST).date()
+        expiry = getattr(ev, "expiry", None)
+        if not expiry:
+            _exps = _REG.all_expiries(ev.underlying)
+            expiry = next((e for e in _exps if e >= _today), _today)
+
         qty = ev.lot_size * ev.lot_multiplier
         side = OrderSide.SELL if ev.action == "ENTRY" else OrderSide.BUY
 
@@ -390,12 +410,13 @@ class StraddleExecutionBridge:
         for opt_type, strike in [("CE", ev.ce_strike), ("PE", ev.pe_strike)]:
             if opt_type not in ev.legs:
                 continue
-            symbol = translator.to_broker_symbol(
-                underlying=ev.underlying,
-                strike=strike,
-                option_type=opt_type,
-                provider=getattr(broker, "provider", "mock"),
-            )
+            symbol = _REG.get_broker_symbol(ev.underlying, expiry, int(strike), opt_type, provider)
+            if not symbol:
+                logger.warning(
+                    "StraddleBridge: no %s symbol for %s %d%s exp=%s — skipping leg",
+                    provider, ev.underlying, int(strike), opt_type, expiry,
+                )
+                continue
             req = OrderRequest(
                 broker_symbol=symbol,
                 exchange=order_exchange(ev.underlying),
