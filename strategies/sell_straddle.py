@@ -392,6 +392,11 @@ class SellStraddleStrategy:
                 if not self._position.lot_size:
                     self._position.lot_size = self._lot_size * self._lot_multiplier
                 self._trades_today = max(self._trades_today, 1)
+                # Restore the day-% denominator too. Without this, _initial_net_credit
+                # stays 0 → the entire Day% guardrail block (`if _initial_net_credit > 0`)
+                # is SKIPPED on a restored position → the day loss-SL never fires.
+                if self._initial_net_credit <= 0 and self._position.net_credit > 0:
+                    self._initial_net_credit = self._position.net_credit
                 logger.info("SellStraddle[%s]: restored open position from store (credit=%.2f, qty=%d).",
                             self._underlying, self._position.net_credit, self._position.lot_size)
         except Exception as exc:
@@ -985,10 +990,10 @@ class SellStraddleStrategy:
                 " exit_rules" if getattr(self, "_exit_rules", None) else "",
             ]) or " (none)"
             logger.info(
-                "SellStraddle[%s]: EXIT-CHECK pnl=%.2f pts | per-trade target=%.0f%% sl=%.0f%% | "
-                "EOD@%s | active dynamic exits:%s",
-                self._underlying, pnl, getattr(self, "_profit_pct", 0.0),
-                getattr(self, "_sl_pct", 0.0), self._force_exit.strftime("%H:%M"), _active,
+                "SellStraddle[%s]: EXIT-CHECK pnl=%.2f pts | Day%% T:%.0f%%/SL:%.0f%% (credit=%.2f) | "
+                "EOD@%s | active exits:%s",
+                self._underlying, pnl, self._day_profit_target_pct, self._day_loss_sl_pct,
+                self._initial_net_credit, self._force_exit.strftime("%H:%M"), _active,
             )
 
         # ── EOD FORCE SQUARE-OFF — highest priority, checked before all else ──────
@@ -1141,31 +1146,44 @@ class SellStraddleStrategy:
         _er_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _max_tf) * _max_tf:02d}"
         if _er_bucket != self._last_exit_rules_bucket:
             self._last_exit_rules_bucket = _er_bucket
-            _credit = pos.net_credit or 0.0
+            # Use the SAME denominator as the real Day% check (_initial_net_credit), so
+            # the log matches what actually fires.
+            _credit = self._initial_net_credit or pos.net_credit or 0.0
             _pct = (pnl / _credit * 100.0) if _credit else 0.0
             _passed, _reason = (False, "—")
             # Build the criteria list defensively — logging must never break the exits.
             try:
                 _crit = []
-                _pt  = float(getattr(self, "_profit_pct", 0.0) or 0.0)
-                _slp = float(getattr(self, "_sl_pct", 0.0) or 0.0)
-                if _pt:
-                    _crit.append(("ProfitTgt", f"{_pct:.1f}% vs {_pt:.0f}%", _pct >= _pt))
-                if _slp:
-                    _crit.append(("HardSL", f"{_pct:.1f}% vs -{_slp:.0f}%", _pct <= -_slp))
+                # Day% is the real per-position loss/target guardrail (per_day → global).
                 _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
                 _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
                 if _credit and (_dpt or _dsl):
                     _dpct = (self._session_realized_pnl_pts + pnl) / _credit * 100.0
                     _crit.append(("Day%", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
                                   (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
+                elif not _credit:
+                    _crit.append(("Day%", "SKIPPED (initial_credit=0!)", False))
                 _ce_ltp = float(getattr(getattr(pos, "ce_leg", None), "ltp", 0) or 0)
                 _pe_ltp = float(getattr(getattr(pos, "pe_leg", None), "ltp", 0) or 0)
-                if _ce_ltp > 0 and _pe_ltp > 0:
+                # LTP-decay (either leg below min)
+                if self._ltp_decay_enabled:
+                    _lo = min(_ce_ltp, _pe_ltp) if (_ce_ltp > 0 and _pe_ltp > 0) else 0.0
+                    _crit.append(("LTPdecay", f"min({_lo:.1f}) < {self._ltp_exit_min:.0f}",
+                                  _lo > 0 and _lo < self._ltp_exit_min))
+                # Ratio
+                if _ce_ltp > 0 and _pe_ltp > 0 and getattr(self, "_ratio_threshold", 0.0):
                     _r = max(_ce_ltp, _pe_ltp) / min(_ce_ltp, _pe_ltp)
-                    _thr = float(getattr(self, "_ratio_threshold", 0.0) or 0.0)
-                    if _thr:
-                        _crit.append(("Ratio", f"{_r:.2f} vs {_thr:.1f}x", _r >= _thr))
+                    _crit.append(("Ratio", f"{_r:.2f} vs {self._ratio_threshold:.1f}x", _r >= self._ratio_threshold))
+                # Scalable TSL / VWAP-rise / PnL-guard / ROC-guard — show ON/OFF (their
+                # own checks fire the close; here we surface that they ARE active).
+                if self._tsl_enabled:
+                    _crit.append(("TSL", "ON (scalable)", False))
+                if self._vwap_rise_enabled:
+                    _crit.append(("VWAPrise", f"ON {self._vwap_rise_threshold:.1f}%", False))
+                if self._guardrail_pnl_enabled:
+                    _crit.append(("PnLguard", f"T{self._guardrail_pnl_target_pts:.0f}/SL{self._guardrail_pnl_sl_pts:.0f}pts", False))
+                if self._guardrail_roc_enabled:
+                    _crit.append(("ROCguard", "ON", False))
                 if self._exit_rules:
                     _passed, _reason = _eval_rules(self._exit_rules, self._ind)
                     _crit.append(("Dynamic", _reason, _passed))
