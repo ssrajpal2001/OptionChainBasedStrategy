@@ -673,7 +673,8 @@ class SellStraddleStrategy:
         self._idx_highs.append(float(ev.high))
         self._idx_lows.append(float(ev.low))
         self._idx_closes.append(float(ev.close))
-        combined = self._ce_ltp + self._pe_ltp
+        _c, _p, _, _ = self._active_premium()
+        combined = _c + _p
         if combined > 0:
             self._prem_closes.append(combined)
             self._prem_volumes.append(float(ev.volume) if ev.volume else 1.0)
@@ -700,13 +701,27 @@ class SellStraddleStrategy:
             if _a and _a > 0:
                 self._prev_atp_closed[_k] = _a
 
+    def _active_premium(self) -> Tuple[float, float, float, float]:
+        """(ce_ltp, pe_ltp, ce_atp, pe_atp) for the indicator series. When a position is
+        OPEN, source from the POSITION's own legs (via _strike_prem) so the dynamic exit
+        tracks the position — not the live ATM straddle (which may have drifted away or
+        gone 0 after a restart, killing CLOSE/VWAP/SLOPE)."""
+        if self._position and self._position.status == "open":
+            pos = self._position
+            _ce = self._strike_prem.get((int(pos.ce_leg.strike), "CE"), {})
+            _pe = self._strike_prem.get((int(pos.pe_leg.strike), "PE"), {})
+            return (float(_ce.get("ltp", 0.0) or 0.0), float(_pe.get("ltp", 0.0) or 0.0),
+                    float(_ce.get("atp", 0.0) or 0.0), float(_pe.get("atp", 0.0) or 0.0))
+        return (self._ce_ltp, self._pe_ltp, self._ce_atp, self._pe_atp)
+
     def _recompute_indicators(self) -> None:
         closes = np.array(self._prem_closes, dtype=np.float64)
         vols   = np.array(self._prem_volumes, dtype=np.float64)
         idx_h  = np.array(self._idx_highs,   dtype=np.float64)
         idx_l  = np.array(self._idx_lows,    dtype=np.float64)
         idx_c  = np.array(self._idx_closes,  dtype=np.float64)
-        ltp = self._ce_ltp + self._pe_ltp
+        _ce_ltp, _pe_ltp, _ce_atp, _pe_atp = self._active_premium()
+        ltp = _ce_ltp + _pe_ltp
         self._ind["ltp"]   = ltp
         self._ind["close"] = ltp
         if len(closes) >= 15:
@@ -728,8 +743,8 @@ class SellStraddleStrategy:
         # fixes the intermittent VWAP=0 / slope=huge bug from the self-computed
         # VWAP. Negative slope => VWAP falling => favourable for selling.
         _cur_vwap = None
-        if self._ce_atp > 0 and self._pe_atp > 0:
-            _cur_vwap = float(self._ce_atp + self._pe_atp)
+        if _ce_atp > 0 and _pe_atp > 0:
+            _cur_vwap = float(_ce_atp + _pe_atp)
             self._ind["vwap"] = _cur_vwap
             _prev = self._prev_vwap_atp
             if _prev is not None and _prev > 0:
