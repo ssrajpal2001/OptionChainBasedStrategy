@@ -450,14 +450,18 @@ class GlobalConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     trap_engine: TrapEngineConfig = field(default_factory=TrapEngineConfig)
 
-    # Active indices to monitor (feeder subscribes to all)
+    # Active indices to monitor (feeder subscribes to all). Trimmed to keep the total
+    # WS subscription under the broker's ~50/connection cap (each index ≈ (2*chain_depth+1)*2
+    # symbols). Add back others only if the count stays under the cap (watch the
+    # "EXCEEDS the ~50/connection WS limit" warning).
     monitored_indices: List[str] = field(
-        default_factory=lambda: ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"]
+        default_factory=lambda: ["NIFTY", "SENSEX"]
     )
     active_index: str = "NIFTY"
 
-    # OTM/ITM depth for chain subscription
-    chain_depth: int = 10          # ATM ± 10 strikes
+    # OTM/ITM depth for chain subscription. ATM ± chain_depth strikes. Keep small so the
+    # WS subscription stays under the ~50/connection cap (SS pool only needs ≈ ±4).
+    chain_depth: int = 4           # ATM ± 4 strikes (9 strikes × 2 = 18 per index)
 
     # Candle timeframes (minutes)
     candle_timeframes: List[int] = field(default_factory=lambda: [1, 2, 5, 15, 75])
