@@ -13,17 +13,27 @@ def _engine():
 
 
 # ── DTE ladder (JSON string keys parsed to ints) ─────────────────────────────
+# Inclusive ladder: key k means "DTE >= k" (default ladder {5:5,4:4,3:3,2:2,1:1}).
 @pytest.mark.parametrize("dte,expected", [
-    (10, 5), (6, 5),   # > 5 -> 5
-    (5, 4),            # > 4 -> 4
-    (4, 3),            # > 3 -> 3
-    (3, 2),            # > 2 -> 2
-    (2, 1),            # > 1 -> 1
-    (1, 0), (0, 0),    # <= 1 -> 0
+    (10, 5), (6, 5), (5, 5),   # >= 5 -> 5
+    (4, 4),                    # >= 4 -> 4
+    (3, 3),                    # >= 3 -> 3
+    (2, 2),                    # >= 2 -> 2
+    (1, 1),                    # >= 1 -> 1
+    (0, 0),                    # < 1 -> 0 (expiry day = ATM)
 ])
 def test_dte_ladder_parses_string_keys(dte, expected):
     eng = _engine()
     assert eng._dte_offset_steps_from_cfg("CRUDEOIL", dte) == expected
+
+
+def test_dte_ladder_constant_offset_inclusive():
+    # User's SENSEX ladder {"1":5,...,"5":5}: DTE=1 (expiry eve) must give 5 steps.
+    import data_layer.runtime_config as _rc
+    eng = _engine()
+    eng._tt_cfg = lambda u: {"dte_offset_ladder": {"1": 5, "2": 5, "3": 5, "4": 5, "5": 5}}
+    assert eng._dte_offset_steps_from_cfg("SENSEX", 1) == 5
+    assert eng._dte_offset_steps_from_cfg("SENSEX", 0) == 0   # expiry day still ATM
 
 
 # ── Nested HTF→MTF gate contract ─────────────────────────────────────────────

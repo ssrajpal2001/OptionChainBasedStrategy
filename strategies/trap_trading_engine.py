@@ -750,8 +750,9 @@ class TrapTradingEngine:
 
     def _dte_offset_steps_from_cfg(self, underlying: str, dte: int) -> int:
         """Resolve the DTE→ITM step offset from the configured `dte_offset_ladder`
-        (JSON string keys, e.g. {"5":5,...}). Returns the value for the HIGHEST
-        threshold k where dte > k; else 0. Falls back to min(max(dte-1,0),5)."""
+        (JSON string keys, e.g. {"5":5,...}). The key is an INCLUSIVE threshold: returns
+        the value for the HIGHEST k where dte >= k; else 0. So {"1":5} → DTE 1 = 5 steps.
+        Falls back to min(max(dte-1,0),5) when no ladder is configured."""
         ladder = self._tt_cfg(underlying).get("dte_offset_ladder") or {}
         if not ladder:
             return min(max(int(dte) - 1, 0), 5)
@@ -761,7 +762,7 @@ class TrapTradingEngine:
                 thr = int(k)
             except (TypeError, ValueError):
                 continue
-            if int(dte) > thr and thr > best_k:
+            if int(dte) >= thr and thr > best_k:
                 best_k, best_v = thr, int(v)
         return best_v
 
