@@ -354,12 +354,21 @@ class RuntimeConfig:
 
     @staticmethod
     def set_index_section(index: str, strategy: str, data: Dict[str, Any]) -> None:
-        """Persist per-index strategy config."""
+        """Persist per-index strategy config.
+
+        MERGES into the existing section (does NOT wholesale-replace), so a partial save
+        from a UI form that doesn't round-trip every field (e.g. the entry/exit rule arrays)
+        can never WIPE the unsent keys. Fields present in `data` win (lists replaced);
+        keys absent from `data` are preserved from the stored config.
+        """
         global _live
         _ensure_loaded()
-        _live.setdefault("indices", {}).setdefault(index, {})[strategy] = data
+        sect = _live.setdefault("indices", {}).setdefault(index, {})
+        existing = sect.get(strategy, {})
+        sect[strategy] = _deep_merge(existing, data) if isinstance(existing, dict) else data
         _save_to_disk(_live)
-        logger.info("RuntimeConfig: index[%s][%s] saved.", index, strategy)
+        logger.info("RuntimeConfig: index[%s][%s] saved (merged %d keys).",
+                    index, strategy, len(data) if isinstance(data, dict) else 0)
 
     @staticmethod
     def set_index_config(index: str, data: Dict[str, Any]) -> None:
