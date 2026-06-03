@@ -332,13 +332,17 @@ class InstrumentRegistry:
         import json
         from urllib.request import urlopen, Request
 
-        cache_key = today.isoformat()
+        # SENSEX (and other BSE indices) options live in Upstox's BSE master, NOT the
+        # NSE master — using NSE here is why SENSEX loaded 0 BSE_FO contracts.
+        _is_bse = underlying in ("SENSEX", "BANKEX")
+        _exch = "BSE" if _is_bse else "NSE"
+        cache_key = f"{_exch}:{today.isoformat()}"
         raw_instruments = _MASTER_CACHE.get(cache_key)
 
         if raw_instruments is None:
-            url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+            url = f"https://assets.upstox.com/market-quote/instruments/exchange/{_exch}.json.gz"
             diag.append(f"Downloading master JSON: {url}")
-            logger.info("InstrumentRegistry: downloading NSE master JSON ...")
+            logger.info("InstrumentRegistry: downloading %s master JSON ...", _exch)
             try:
                 import ssl as _ssl
                 _ctx = _ssl.create_default_context()
