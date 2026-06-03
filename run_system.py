@@ -89,8 +89,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--index",
         default="NIFTY",
-        choices=["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"],
-        help="Primary index to monitor (default: NIFTY)",
+        choices=["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY",
+                 "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"],
+        help="Primary index/commodity to monitor (default: NIFTY)",
     )
     p.add_argument("--capital",   type=float, default=500_000.0, help="Client capital in INR")
     p.add_argument("--start",     default=None, help="Backtest start date YYYY-MM-DD")
