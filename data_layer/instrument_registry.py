@@ -391,18 +391,32 @@ class InstrumentRegistry:
             if not ikey or not ikey.startswith(seg_prefix):
                 continue
 
-            # Filter by trading_symbol starting with the underlying name
-            # Handles both weekly (NIFTY2660224500CE) and monthly (NIFTY26JUN24500CE)
-            if not ts.startswith(underlying):
+            # Exact underlying match — prefer the underlying_symbol/name field so
+            # 'SENSEX' does NOT also match 'SENSEX50'. Fall back to ts prefix.
+            _uns = ((inst.get("underlying_symbol") or inst.get("name") or "")
+                    if isinstance(inst, dict)
+                    else (getattr(inst, "underlying_symbol", "") or getattr(inst, "name", "")))
+            if _uns:
+                if str(_uns).upper() != underlying.upper():
+                    continue
+            elif not ts.startswith(underlying):
                 continue
 
             try:
-                expiry_date = (
-                    exp_raw.date() if isinstance(exp_raw, datetime)
-                    else exp_raw if isinstance(exp_raw, date)
-                    else date.fromisoformat(str(exp_raw)[:10])
-                )
-            except (ValueError, TypeError):
+                if isinstance(exp_raw, datetime):
+                    expiry_date = exp_raw.date()
+                elif isinstance(exp_raw, date):
+                    expiry_date = exp_raw
+                elif isinstance(exp_raw, (int, float)) or (isinstance(exp_raw, str) and str(exp_raw).strip().isdigit()):
+                    # epoch (BSE master uses milliseconds, e.g. 1781807399000)
+                    _epoch = int(exp_raw)
+                    if _epoch > 10_000_000_000:   # milliseconds → seconds
+                        _epoch //= 1000
+                    from config.global_config import IST as _IST
+                    expiry_date = datetime.fromtimestamp(_epoch, _IST).date()
+                else:
+                    expiry_date = date.fromisoformat(str(exp_raw)[:10])
+            except (ValueError, TypeError, OSError, OverflowError):
                 continue
 
             if expiry_date < today:
