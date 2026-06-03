@@ -2516,6 +2516,16 @@ class DashboardServer:
                             "trailing_active": pos.trailing_active,
                             "open_time": pos.open_time.isoformat() if pos.open_time else None,
                         }
+                    # DIAG (throttled): why a running straddle may show 'no position' in the UI.
+                    import time as _t
+                    if _t.monotonic() - getattr(_srv, "_ss_diag_t", 0.0) > 20.0:
+                        _srv._ss_diag_t = _t.monotonic()
+                        logger.info(
+                            "DIAG admin/strategies ss[%s]: has_open=%s pos_set=%s status=%s credit=%s running=%s",
+                            ss._underlying, ss.has_open_position, ss._position is not None,
+                            getattr(ss._position, "status", None),
+                            getattr(ss._position, "net_credit", None), ss._running,
+                        )
                     out.append({
                         "type":         "sell_straddle",
                         "underlying":   ss._underlying,
