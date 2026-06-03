@@ -515,18 +515,27 @@ class TrapTradingEngine:
                 if ap in ("fyers", "upstox"):
                     providers = [ap]
             tokens = []
+            new_count = 0
             for strike, opt_type in ((sel.ce_strike, "CE"), (sel.pe_strike, "PE")):
                 for provider in providers:
                     key = REGISTRY.get_broker_symbol(underlying, expiry, int(strike), opt_type, provider)
-                    if key and key not in self._subscribed_keys:
-                        tokens.append(key)
+                    if not key:
+                        continue
+                    tokens.append(key)              # ALWAYS re-send (feeder dedups its own set)
+                    if key not in self._subscribed_keys:
+                        new_count += 1
                         self._subscribed_keys.add(key)
             if tokens:
+                # Re-assert ALL tracked-leg keys every call. The previous guard skipped keys once
+                # added to self._subscribed_keys, so if a feeder swap/reconnect dropped them the
+                # trap NEVER re-subscribed → frozen LTP (ticks/min=0). The feeder skips keys it
+                # already holds and re-adds any it dropped, so this is cheap + self-healing.
                 await self._feeder.subscribe_tokens(tokens)
-                self._tlog(underlying).info(
-                    "subscribed tracked legs CE=%d PE=%d exp=%s (%d tokens, providers=%s)",
-                    sel.ce_strike, sel.pe_strike, expiry, len(tokens), providers,
-                )
+                if new_count:
+                    self._tlog(underlying).info(
+                        "subscribed tracked legs CE=%d PE=%d exp=%s (%d keys, %d new, providers=%s)",
+                        sel.ce_strike, sel.pe_strike, expiry, len(tokens), new_count, providers,
+                    )
             # Pin both tracked strikes so the ATM-window cleanup never unsubscribes
             # them (deep-ITM, far from ATM) — keeps their LTP live.
             if self._rebalancer is not None:
@@ -845,6 +854,16 @@ class TrapTradingEngine:
                     self._lock_try[event.symbol] = _t.monotonic()
                     # Background: never block tick draining on the HTTP/DB lookup.
                     asyncio.create_task(self._lock_day_strikes(event.symbol))
+            else:
+                # Periodically RE-ASSERT the tracked-leg subscription. If the mock→live feeder
+                # swap or a WS reconnect dropped these far-OTM keys, this re-adds them (the
+                # feeder dedups), un-freezing the LTP. Throttled to once/60s per symbol.
+                import time as _t
+                if not hasattr(self, "_last_resub"):
+                    self._last_resub = {}
+                if _t.monotonic() - self._last_resub.get(event.symbol, 0.0) > 60.0:
+                    self._last_resub[event.symbol] = _t.monotonic()
+                    asyncio.create_task(self._ensure_subscribed_legs(event.symbol))
             # Live heartbeat driven by ticks (not candles), so the per-symbol log
             # is created immediately and shows what the engine sees every minute —
             # even between 5m/75m candle closes.
