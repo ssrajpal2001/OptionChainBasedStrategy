@@ -455,9 +455,9 @@ class GlobalConfig:
     # symbols). Add back others only if the count stays under the cap (watch the
     # "EXCEEDS the ~50/connection WS limit" warning).
     monitored_indices: List[str] = field(
-        default_factory=lambda: ["NIFTY", "SENSEX"]
+        default_factory=lambda: ["CRUDEOIL"]
     )
-    active_index: str = "NIFTY"
+    active_index: str = "CRUDEOIL"
 
     # OTM/ITM depth for chain subscription. ATM ± chain_depth strikes. Keep small so the
     # WS subscription stays under the ~50/connection cap (SS pool only needs ≈ ±4).
