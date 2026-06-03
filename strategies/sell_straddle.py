@@ -1086,15 +1086,16 @@ class SellStraddleStrategy:
         #    LTP-decay → Ratio → Scalable TSL → ROC guardrail → VWAP-Rise → exit_rules.
         #    (No separate pct-based trailing SL — the reference uses Scalable TSL only.)
 
-        # 6. Ratio exit → smart roll first
+        # 6. Ratio exit → ROLLOVER: close the LESS-PAIN (cheaper) leg and re-sell it closer,
+        #    keeping the expensive (running) leg. Partner balanced against the running leg.
         if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
             ratio = max(pos.ce_leg.ltp, pos.pe_leg.ltp) / min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if ratio >= self._ratio_threshold:
-                blown = "CE" if pos.ce_leg.ltp > pos.pe_leg.ltp else "PE"
-                logger.info("SellStraddle[%s]: RATIO EXIT — %s ratio=%.2fx", self._underlying, blown, ratio)
-                rolled = await self._try_smart_roll(now, "ratio_exit")
-                if not rolled:
-                    await self._close_position("ratio_exit")
+                cheap = "PE" if pos.ce_leg.ltp > pos.pe_leg.ltp else "CE"   # less-pain side → roll
+                keep  = "CE" if cheap == "PE" else "PE"
+                logger.info("SellStraddle[%s]: RATIO EXIT ratio=%.2fx — roll %s (less-pain), keep %s",
+                            self._underlying, ratio, cheap, keep)
+                await self._single_side_roll(cheap, now, "ratio_exit")
                 return
 
         # 7. Scalable TSL → smart roll first, then full exit
@@ -1122,18 +1123,14 @@ class SellStraddleStrategy:
                         "SellStraddle[%s]: ROC GUARDRAIL TARGET — roc=%.2f <= target=%.2f",
                         self._underlying, _roc_val, self._guardrail_roc_target,
                     )
-                    rolled = await self._try_smart_roll(now, "guardrail_roc_target")
-                    if not rolled:
-                        await self._close_position("guardrail_roc_target")
+                    await self._close_position("guardrail_roc_target")  # full exit → fresh re-entry
                     return
                 if _roc_val is not None and self._guardrail_roc_stoploss >= 0 and _roc_val >= self._guardrail_roc_stoploss:
                     logger.info(
                         "SellStraddle[%s]: ROC GUARDRAIL SL — roc=%.2f >= sl=%.2f",
                         self._underlying, _roc_val, self._guardrail_roc_stoploss,
                     )
-                    rolled = await self._try_smart_roll(now, "guardrail_roc_sl")
-                    if not rolled:
-                        await self._close_position("guardrail_roc_sl")
+                    await self._close_position("guardrail_roc_sl")  # full exit → fresh re-entry
                     return
 
         # 9. VWAP Rise SL → smart roll first
@@ -1149,9 +1146,7 @@ class SellStraddleStrategy:
                             "SellStraddle[%s]: VWAP RISE SL — rise=%.2f%% curr=%.2f low=%.2f",
                             self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
                         )
-                        rolled = await self._try_smart_roll(now, "vwap_rise_sl")
-                        if not rolled:
-                            await self._close_position("vwap_rise_sl")
+                        await self._close_position("vwap_rise_sl")  # full exit → fresh re-entry
                         return
 
         # EXIT-EVAL — once per max-TF bucket, log EVERY active exit criterion's live
@@ -1210,9 +1205,7 @@ class SellStraddleStrategy:
 
             if self._exit_rules and _passed:
                 logger.info("SellStraddle[%s]: EXIT_RULES triggered — %s", self._underlying, _reason)
-                rolled = await self._try_smart_roll(now, "exit_rules")
-                if not rolled:
-                    await self._close_position("exit_rules")
+                await self._close_position("exit_rules")  # full exit → fresh re-entry
                 return
 
     def _pnl_rs(self, pnl_pts: float) -> float:
@@ -1394,12 +1387,19 @@ class SellStraddleStrategy:
                     self._underlying, side, strike, ltp, reason)
 
     async def _single_side_roll(self, side: str, now: datetime, reason: str) -> None:
-        """Close decayed leg, re-enter that side via pool scan; enforce 0-or-2 invariant."""
-        from strategies.straddle_selection import scan_pool
+        """Rollover one leg: close `side` (the less-pain / decayed leg) and re-sell it, KEEPING
+        the other (running) leg fixed. The new leg is picked from the ATM±offset pool BALANCED
+        against the running leg's premium. No valid partner → close all and start fresh (0-or-2)."""
+        from strategies.straddle_selection import select_partner_for
         other = "PE" if side == "CE" else "CE"
         pos = self._position
         if not pos:
             return
+        # Running (kept) leg = the OTHER side — capture its strike/premium BEFORE closing anything;
+        # the re-sold leg is balanced against it.
+        run_leg = pos.ce_leg if other == "CE" else pos.pe_leg
+        run_strike = int(run_leg.strike)
+        run_ltp = float(getattr(run_leg, "ltp", 0.0) or getattr(run_leg, "entry_price", 0.0) or 0.0)
         await self._close_leg(side, reason, now)
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
@@ -1408,22 +1408,20 @@ class SellStraddleStrategy:
         offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
 
-        sel = scan_pool(
-            self._strike_prem, self._spot, step, offset, ltp_target,
+        sel = select_partner_for(
+            self._strike_prem, side, run_strike, run_ltp,
+            self._spot, step, offset, ltp_target,
             rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
-            metric=ss.get("reentry_best_metric", "balanced_premium"),
         )
-        new_strike = new_ltp = None
         if sel:
-            ce_s, pe_s, ce_l, pe_l = sel
-            new_strike, new_ltp = (ce_s, ce_l) if side == "CE" else (pe_s, pe_l)
-
-        if new_strike and new_ltp and new_ltp >= ltp_target:
+            new_strike, new_ltp = sel
+            logger.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (balanced vs running %s%d @%.2f)",
+                        self._underlying, side, side, new_strike, new_ltp, other, run_strike, run_ltp)
             await self._open_leg(side, new_strike, new_ltp, now, f"single_side_roll_{reason}")
             self._persist()
             return
-        # 0-or-2 invariant — no valid re-entry → close the surviving leg too.
-        logger.warning("SellStraddle[%s]: single-side roll %s found no candidate — closing %s (0-or-2).",
+        # No valid partner in the pool → close all and start fresh (re-entry loop re-enters).
+        logger.warning("SellStraddle[%s]: roll %s found no partner for running %s — closing all (fresh).",
                        self._underlying, side, other)
         await self._close_leg(other, f"single_side_cleanup_{reason}", now)
         self._position = None
