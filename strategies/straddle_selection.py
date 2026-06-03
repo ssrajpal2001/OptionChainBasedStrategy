@@ -15,6 +15,31 @@ from typing import Dict, Optional, Tuple
 Key = Tuple[int, str]
 
 
+def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
+                       spot, step, offset, ltp_target, rule_pass):
+    """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
+    `roll_side` to re-sell, BALANCED against the running leg (premium closest to kept_ltp),
+    within ATM±offset, >= ltp_target, and passing rule_pass(ce_strike, pe_strike).
+    Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
+    atm = round(spot / step) * step if spot > 0 else 0
+    best = None  # (premium_diff, strike, ltp)
+    for (strike, side), v in strike_prem.items():
+        if side != roll_side:
+            continue
+        if atm and abs(strike - atm) > offset * step:
+            continue
+        ltp = float(v.get("ltp", 0.0) or 0.0)
+        if ltp < ltp_target:
+            continue
+        ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
+        if not rule_pass(ce_s, pe_s):
+            continue
+        diff = abs(ltp - float(kept_ltp))
+        if best is None or diff < best[0]:
+            best = (diff, int(strike), ltp)
+    return (best[1], best[2]) if best else None
+
+
 def strip_intrinsic(ltp: float, side: str, strike: float, spot: float) -> float:
     """Time-value-only LTP. CE intrinsic = max(0, spot-strike); PE = max(0, strike-spot)."""
     if side == "CE":
