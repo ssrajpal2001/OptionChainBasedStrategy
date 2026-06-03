@@ -509,6 +509,12 @@ class UpstoxFeeder(BaseFeeder):
             # ── Index tick ──────────────────────────────────────────────────
             internal_name = _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key) or _mcx_upstox_fut_to_internal(inst_key)
             if internal_name:
+                # Diagnostic: log the raw index value per key (throttled) so a mis-valued
+                # SENSEX/BSE index (wrong strikes) is immediately visible.
+                _dk = f"_idxlog_{internal_name}"
+                if time.monotonic() - getattr(self, _dk, 0.0) > 30.0:
+                    setattr(self, _dk, time.monotonic())
+                    logger.info("UpstoxFeeder: INDEX %s key=%s ltp=%.2f", internal_name, inst_key, ltp)
                 tick = IndexTick(
                     symbol=internal_name,
                     ltp=ltp,
@@ -784,6 +790,10 @@ class FyersFeeder(BaseFeeder):
 
         internal = _FYERS_TO_INTERNAL.get(symbol_fyers) or _mcx_fyers_fut_to_internal(symbol_fyers)
         if internal:
+            _dk = f"_idxlog_{internal}"
+            if time.monotonic() - getattr(self, _dk, 0.0) > 30.0:
+                setattr(self, _dk, time.monotonic())
+                logger.info("FyersFeeder: INDEX %s sym=%s ltp=%.2f", internal, symbol_fyers, float(ltp))
             t0 = time.monotonic()
             tick = IndexTick(
                 symbol=internal,
