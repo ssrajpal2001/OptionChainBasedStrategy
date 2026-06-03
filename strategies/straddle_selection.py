@@ -115,6 +115,22 @@ def select_balanced_pair(
     return partner_strike, anchor_strike, partner_ltp, anchor_ltp
 
 
+def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval):
+    """Diagnose why the re-entry pool produced no trade, so the log can distinguish
+    'no balanced pair exists' from 'a pair exists but the gate blocked it'.
+
+    rule_eval: callable(ce_strike, pe_strike) -> (passed: bool, reason: str)
+    Returns: {"kind": "no_pair"} | {"kind": "blocked"|"passed", ce, pe, ce_ltp, pe_ltp, reason}
+    """
+    pair = select_balanced_pair(strike_prem, spot, step, offset, ltp_target)
+    if not pair:
+        return {"kind": "no_pair"}
+    ce, pe, ce_ltp, pe_ltp = pair
+    passed, reason = rule_eval(ce, pe)
+    return {"kind": "passed" if passed else "blocked",
+            "ce": ce, "pe": pe, "ce_ltp": ce_ltp, "pe_ltp": pe_ltp, "reason": reason}
+
+
 def scan_pool(
     strike_prem: Dict[Key, dict],
     spot: float,

@@ -841,10 +841,31 @@ class SellStraddleStrategy:
             concept = "reentry"
 
         if not sel:
-            self._clog.info(
-                "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (target=%.2f offset=%d)",
-                self._underlying, rule_key, self._spot, ltp_target, offset,
-            )
+            if use_beginning:
+                self._clog.info(
+                    "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (target=%.2f offset=%d)",
+                    self._underlying, rule_key, self._spot, ltp_target, offset,
+                )
+            else:
+                # Re-entry pool returned nothing — distinguish "no balanced pair exists"
+                # from "pairs exist but all blocked by the re-entry gate" (e.g. SLOPE>0).
+                from strategies.straddle_selection import reentry_block_reason
+                diag = reentry_block_reason(
+                    self._strike_prem, self._spot, step, offset, ltp_target,
+                    rule_eval=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {}),
+                )
+                if diag["kind"] == "no_pair":
+                    self._clog.info(
+                        "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair exists (target=%.2f offset=%d)",
+                        self._underlying, rule_key, self._spot, ltp_target, offset,
+                    )
+                else:  # blocked
+                    self._clog.info(
+                        "EVAL %s [%s] BLOCK — best pair CE%d=%.2f PE%d=%.2f credit=%.2f | %s "
+                        "(pairs exist but none passed the re-entry gate)",
+                        self._underlying, rule_key, diag["ce"], diag["ce_ltp"],
+                        diag["pe"], diag["pe_ltp"], diag["ce_ltp"] + diag["pe_ltp"], diag["reason"],
+                    )
             return
 
         ce_strike, pe_strike, ce_ltp, pe_ltp = sel
