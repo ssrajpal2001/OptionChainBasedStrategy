@@ -345,6 +345,10 @@ class TrapTradingEngine:
         # Per-leg premium cache: (underlying, strike, opt_type) → last ltp.
         # Lets the engine track the SPECIFIC tracked CE/PE without the future spot.
         self._leg_prem: Dict[Tuple[str, int, str], float] = {}
+        # Diagnostic: count OPTION_TICKs received per tracked leg_key since last heartbeat.
+        # Surfaces whether live ticks are actually reaching the day-locked strikes (which sit
+        # far from ATM and depend on the trap's own subscription, not the rebalancer window).
+        self._leg_ticks: Dict[str, int] = {}
         # Per-leg live candle builders: (leg_key, timeframe) → building OHLC bucket.
         self._leg_bars: Dict[Tuple[str, int], dict] = {}
         # Spot cache: underlying → last spot (used ONLY to pick the day's centre once)
@@ -867,6 +871,7 @@ class TrapTradingEngine:
                         (strike == sel.ce_strike and event.option_type == "CE") or
                         (strike == sel.pe_strike and event.option_type == "PE")):
                         leg_key = self._leg_key(event.underlying, strike, event.option_type)
+                        self._leg_ticks[leg_key] = self._leg_ticks.get(leg_key, 0) + 1
                         self._feed_leg_tick(leg_key, event.timestamp, event.ltp)
                     # If this tick is the executed position's contract, run the two-tier SL.
                     pos = self._v2_position
@@ -1167,7 +1172,10 @@ class TrapTradingEngine:
                 lvl = ""
                 if h is not None and h.active_level is not None:
                     lvl = f" [L={h.active_level.entry_l:.2f} H={h.active_level.sl_h:.2f}]"
-                return f"{opt} {strike}={ltp:.2f} HTF={hs} MTF={ms}{lvl}"
+                # ticks/min: 0 ⇒ no live tick reaching this leg (subscription/feed problem,
+                # NOT display). Non-zero with frozen LTP ⇒ key-mismatch. Reset each heartbeat.
+                tpm = self._leg_ticks.pop(lk, 0)
+                return f"{opt} {strike}={ltp:.2f} ticks/min={tpm} HTF={hs} MTF={ms}{lvl}"
             self._tlog(symbol).info(
                 "heartbeat DTE=%d | %s | %s",
                 sel.dte, _leg(sel.ce_strike, "CE"), _leg(sel.pe_strike, "PE"),
