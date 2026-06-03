@@ -3224,7 +3224,10 @@ function histReplay() {
             <template x-if="s.type === 'sell_straddle' && s.position">
               <div class="font-mono text-xs space-y-0.5">
                 <div class="flex justify-between"><span style="color:var(--t-muted)">ATM</span><span x-text="s.position.atm||'—'"></span></div>
-                <div class="flex justify-between"><span style="color:var(--t-muted)">Unrealized P&amp;L</span><span :style="`color:${(s.position.unrealized_pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="(s.position.unrealized_pnl||0).toFixed(1)"></span></div>
+                <div class="flex justify-between"><span style="color:var(--t-muted)">Legs CE / PE</span><span style="color:var(--t-cyan)" x-text="(s.position.ce_strike||'—')+' / '+(s.position.pe_strike||'—')"></span></div>
+                <div class="flex justify-between"><span style="color:var(--t-muted)">Booked P&amp;L</span><span :style="`color:${(s.booked_pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="(s.booked_pnl||0).toFixed(1)"></span></div>
+                <div class="flex justify-between"><span style="color:var(--t-muted)">Running P&amp;L</span><span :style="`color:${(s.position.unrealized_pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="(s.position.unrealized_pnl||0).toFixed(1)"></span></div>
+                <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)"><span style="color:var(--t-muted)">Net (Booked+Running)</span><span :style="`color:${((s.booked_pnl||0)+(s.position.unrealized_pnl||0))>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((s.booked_pnl||0)+(s.position.unrealized_pnl||0)).toFixed(1)"></span></div>
                 <div class="flex justify-between"><span style="color:var(--t-muted)">Credit / Target / SL</span><span style="color:var(--t-cyan)" x-text="(s.position.net_credit||0).toFixed(1)+' / '+(s.position.profit_target||0).toFixed(1)+' / '+(s.position.stop_loss||0).toFixed(1)"></span></div>
                 <div x-show="s.position.trailing_active" class="flex justify-between"><span style="color:var(--t-amber)">Trailing SL</span><span style="color:var(--t-amber)">ACTIVE</span></div>
               </div>
@@ -6664,8 +6667,34 @@ function histReplay() {
                   <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="tr.date||tr.ts||'—'"></td>
                   <td class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="tr.strategy||'—'"></td>
                   <td class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="tr.instrument||'—'"></td>
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="tr.entry_price||'—'"></td>
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="tr.exit_price||'—'"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)">
+                    <span x-text="tr.entry_price||'—'"></span>
+                    <template x-if="tr.legs && tr.legs.length">
+                      <div class="mt-0.5 space-y-0.5">
+                        <template x-for="(lg,li) in tr.legs" :key="li">
+                          <div class="text-[10px]" style="color:var(--t-cyan)">
+                            <span x-text="lg.side+' '+lg.strike"></span>
+                            <span style="color:var(--t-muted)" x-text="'@'+(lg.entry||0).toFixed(2)"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)">
+                    <span x-text="tr.exit_price||'—'"></span>
+                    <template x-if="tr.legs && tr.legs.length">
+                      <div class="mt-0.5 space-y-0.5">
+                        <template x-for="(lg,li) in tr.legs" :key="li">
+                          <div class="text-[10px]">
+                            <span style="color:var(--t-cyan)" x-text="lg.side+' '"></span>
+                            <span style="color:var(--t-muted)" x-text="'@'+(lg.exit||0).toFixed(2)"></span>
+                            <span :style="`color:${(lg.pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                                  x-text="' ('+((lg.pnl||0)>=0?'+':'')+(lg.pnl||0).toFixed(0)+')'"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </td>
                   <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="tr.exit_reason||'—'"></td>
                   <td class="px-4 py-2 font-mono font-bold text-right"
                       :style="`color:${(tr.pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"

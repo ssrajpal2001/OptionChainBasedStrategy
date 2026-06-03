@@ -38,8 +38,14 @@ def record(
     pnl: float,
     binding_id: str = "",
     ts: Optional[str] = None,
+    legs: Optional[list] = None,
 ) -> None:
-    """Append one closed-trade record for a client (append-only, capped)."""
+    """Append one closed-trade record for a client (append-only, capped).
+
+    `legs` (optional): list of per-leg dicts so the History view can show which legs were
+    sold and at what rate, e.g.
+        [{"side":"CE","strike":24500,"entry":150.0,"exit":120.0,"pnl":900.0}, {...PE...}]
+    Older records without `legs` still render (combined entry/exit only)."""
     try:
         os.makedirs(_DIR, exist_ok=True)
         rec = {
@@ -52,6 +58,17 @@ def record(
             "exit_reason": exit_reason,
             "pnl": round(float(pnl), 2),
         }
+        if legs:
+            rec["legs"] = [
+                {
+                    "side": str(l.get("side", "")),
+                    "strike": int(l.get("strike", 0) or 0),
+                    "entry": round(float(l.get("entry", 0.0) or 0.0), 2),
+                    "exit": round(float(l.get("exit", 0.0) or 0.0), 2),
+                    "pnl": round(float(l.get("pnl", 0.0) or 0.0), 2),
+                }
+                for l in legs
+            ]
         trades = _load_raw(client_id)
         trades.append(rec)
         if len(trades) > _CAP:

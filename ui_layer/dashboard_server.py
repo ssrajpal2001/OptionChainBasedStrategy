@@ -2514,6 +2514,7 @@ class DashboardServer:
                         "running":      ss._running,
                         "has_position": ss.has_open_position,
                         "trades_today": ss.trades_today,
+                        "booked_pnl":   round(getattr(ss, "_session_realized_pnl_pts", 0.0), 2),
                         "spot":         round(ss._spot, 2),
                         "rsi":          round(ss._ind.get("rsi", 0.0), 1),
                         "adx":          round(ss._ind.get("adx", 0.0), 1),
