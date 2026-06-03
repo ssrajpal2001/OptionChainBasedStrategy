@@ -1741,6 +1741,14 @@ class DashboardServer:
                     elif sname == "sell_straddle":
                         strat = _find(getattr(_srv, "_sell_straddles", []), underlying)
                         pos = getattr(strat, "_position", None) if strat else None
+                        # DIAG: surface why a running straddle may not appear under a deployment
+                        # (usually a deployment.underlying that doesn't match the running instance).
+                        logger.info(
+                            "DIAG client/positions ss: dep.underlying=%s matched=%s pos=%s status=%s avail=%s",
+                            underlying, strat is not None, pos is not None,
+                            getattr(pos, "status", None),
+                            [getattr(s, "_underlying", "?") for s in getattr(_srv, "_sell_straddles", [])],
+                        )
                         if pos and getattr(pos, "status", "open") == "open":
                             legs = _ss_legs(pos)
                     elif sname == "trap_trading":
