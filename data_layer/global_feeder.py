@@ -208,6 +208,10 @@ class DedupBuffer:
 # UpstoxFeeder — stub for Upstox API v2 WebSocket feed
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Broker WebSocket per-connection symbol cap. Above this the broker may silently drop
+# the excess subscriptions (no ticks for those symbols). Conservative warn threshold.
+_WS_SYMBOL_LIMIT = 50
+
 _UPSTOX_INDEX_KEY_TO_INTERNAL: Dict[str, str] = {
     "NSE_INDEX|Nifty 50":        "NIFTY",
     "NSE_INDEX|Nifty Bank":      "BANKNIFTY",
@@ -351,6 +355,14 @@ class UpstoxFeeder(BaseFeeder):
             return
         for k in new_keys:
             self._subscribed_keys.append(k)
+        _total = len(self._subscribed_keys)
+        if _total > _WS_SYMBOL_LIMIT:
+            logger.warning(
+                "UpstoxFeeder: %d symbols subscribed — EXCEEDS the ~%d/connection WS limit. "
+                "The broker may SILENTLY DROP the excess (e.g. SENSEX legs subscribed last get "
+                "no ticks). Reduce the subscription set (subscribe only DEPLOYED instruments).",
+                _total, _WS_SYMBOL_LIMIT,
+            )
         if self._streamer:   # don't gate on possibly-stale _connected flag
             try:
                 # SDK signature: subscribe(instrumentKeys, mode='ltpc') — positional.
@@ -359,7 +371,8 @@ class UpstoxFeeder(BaseFeeder):
                     self._streamer.subscribe(new_keys, "full")
                 except TypeError:
                     self._streamer.subscribe(new_keys)
-                logger.info("UpstoxFeeder: subscribed %d option keys.", len(new_keys))
+                logger.info("UpstoxFeeder: subscribed %d option keys (total now %d).",
+                            len(new_keys), _total)
             except Exception as exc:
                 logger.warning("UpstoxFeeder: subscribe error: %s", exc)
 
@@ -709,6 +722,13 @@ class FyersFeeder(BaseFeeder):
         for t in mine:
             if t not in self._subscribed_tokens:
                 self._subscribed_tokens.append(t)
+        if len(self._subscribed_tokens) > _WS_SYMBOL_LIMIT:
+            logger.warning(
+                "FyersFeeder: %d symbols subscribed — EXCEEDS the ~%d/connection WS limit. "
+                "The broker may SILENTLY DROP the excess (symbols subscribed last get no ticks). "
+                "Reduce the subscription set (subscribe only DEPLOYED instruments).",
+                len(self._subscribed_tokens), _WS_SYMBOL_LIMIT,
+            )
         # Subscribe whenever the socket exists — do NOT gate on the _connected
         # flag, which can be stale (e.g. options arrive after _on_connect already
         # fired, or during DualFeeder churn) and would silently drop the tokens.
