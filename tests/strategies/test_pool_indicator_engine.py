@@ -69,6 +69,18 @@ def test_tf_le_1_delegates_to_1min():
         eng.update_tick(100, "CE", 60 + m, 60 + m); eng.update_tick(100, "PE", 40, 40); eng.commit_bar(minute=m)
     assert eng.pair_indicators_tf(100, 100, tf=1) == eng.pair_indicators(100, 100)
 
+def test_tf_keeps_just_closed_group_at_boundary():
+    # minutes 540..544 = one complete 5-min group (g=108); evaluated right at the boundary,
+    # BEFORE any minute of the next group exists. The just-closed group must be USED, not dropped.
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    for m in range(540, 545):  # 540,541,542,543,544
+        eng.update_tick(100, "CE", 60 + (m - 540), 60 + (m - 540))
+        eng.update_tick(100, "PE", 40, 40)
+        eng.commit_bar(minute=m)
+    ind = eng.pair_indicators_tf(100, 100, tf=5)
+    assert ind is not None                      # group 108 is complete -> usable
+    assert abs(ind["close"] - (64 + 40)) < 1e-9 # last 1-min bar of the group: CE=64, PE=40
+
 def test_tf_none_when_no_complete_group():
     from strategies.pool_indicator_engine import PoolIndicatorEngine
     eng = PoolIndicatorEngine()

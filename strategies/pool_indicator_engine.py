@@ -104,8 +104,12 @@ class PoolIndicatorEngine:
             groups[m // tf] = (c, a)  # last bar per group wins (iteration is ascending)
         if not groups:
             return {}
-        max_g = max(groups)
-        return {g: v for g, v in groups.items() if g < max_g}  # drop in-progress candle
+        m_max = max(mm)  # latest committed minute index
+        # A tf-group is complete once its final minute slot ((g+1)*tf-1) has been committed.
+        # (For consecutive minutes this equals "drop the in-progress max group"; but right after
+        # a boundary the just-closed group's last minute IS committed, so it is correctly KEPT
+        # instead of going one window stale.)
+        return {g: v for g, v in groups.items() if (g + 1) * tf - 1 <= m_max}
 
     def pair_indicators_tf(self, ce_strike, pe_strike, tf: int) -> Optional[Dict[str, float]]:
         """Combined indicators for (ce,pe) resampled to `tf`-minute candles.

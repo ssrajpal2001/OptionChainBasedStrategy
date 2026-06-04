@@ -222,6 +222,7 @@ class SellStraddleStrategy:
 
         self._exit_rules:            list = []
         self._last_exit_rules_bucket: str  = ""
+        self._last_entry_bucket:      str  = ""
 
         self._guardrail_pnl_enabled:    bool  = False
         self._guardrail_pnl_target_pts: float = 0.0
@@ -532,6 +533,7 @@ class SellStraddleStrategy:
         self._idx_lows.clear()
         self._idx_closes.clear()
         self._last_exit_rules_bucket = ""
+        self._last_entry_bucket      = ""
         self._last_roc_guard_bucket  = ""
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
@@ -572,6 +574,8 @@ class SellStraddleStrategy:
             self._spot = tick.ltp
             if self._position and self._position.status == "open":
                 await self._check_exits()
+            else:
+                await self._maybe_try_entry(datetime.now(IST))
 
     async def _fill_loop(self) -> None:
         """Receive fill confirmations from StraddleExecutionBridge."""
@@ -726,7 +730,7 @@ class SellStraddleStrategy:
 
         # Commit one warm bar per 1-min close for EVERY tracked strike — continuous,
         # independent of the active position (so re-entry/roll never resets the series).
-        self._pool_engine.commit_bar()
+        self._pool_engine.commit_bar(minute=ev.timestamp.hour * 60 + ev.timestamp.minute)
 
         self._recompute_indicators()
 
@@ -735,10 +739,6 @@ class SellStraddleStrategy:
             if self._position and self._position.status == "open":
                 await self._close_position("time_exit_eod")
             return
-
-        # Entry evaluation (no open position)
-        if not self._position or self._position.status != "open":
-            await self._try_entry(now)
 
         # Snapshot every cached leg's current ATP as its "previous closed" value
         # for the NEXT candle's per-pair slope. CRITICAL: this MUST run AFTER the
@@ -957,6 +957,37 @@ class SellStraddleStrategy:
             active = False
         self._term_active_cached = active
         return active
+
+    @staticmethod
+    def _at_tf_boundary(minute: int, second: int, max_tf: int) -> bool:
+        return minute % max_tf == 0 and second >= 5
+
+    async def _maybe_try_entry(self, now: datetime) -> None:
+        """Gate entry evaluation to the active rule set's MAX-timeframe boundary, +5s,
+        once per bucket (tick-driven; NO sleep). All conditions in the set are thus checked
+        together at the one moment the max-tf candle has closed."""
+        if self._position and self._position.status == "open":
+            return
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        is_beginning = (self._trades_today == 0)
+        workflow_mode = ss.get("entry_workflow_mode", "hybrid")
+        if workflow_mode == "beginning_only":
+            use_beginning = True
+        elif workflow_mode == "reentry_only":
+            use_beginning = False
+        else:
+            use_beginning = is_beginning and not self._beginning_failed
+        rule_key = "entry_rules_beginning" if use_beginning else "entry_rules_reentry"
+        rules = ss.get(rule_key, [])
+        max_tf = max((int(r.get("tf", 1)) for r in rules), default=1)
+        # Boundary + 5s, once per max-tf window.
+        if not self._at_tf_boundary(now.minute, now.second, max_tf):
+            return
+        bucket = f"{now:%Y%m%d_%H}{(now.minute // max_tf) * max_tf:02d}"
+        if bucket == self._last_entry_bucket:
+            return
+        self._last_entry_bucket = bucket
+        await self._try_entry(now)
 
     async def _try_entry(self, now: datetime) -> None:
         if self._stop_for_day:
@@ -1317,7 +1348,8 @@ class SellStraddleStrategy:
         _max_tf = (max((int(r.get("tf", 1)) for r in self._exit_rules), default=1)
                    if self._exit_rules else 5)
         _er_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _max_tf) * _max_tf:02d}"
-        if _er_bucket != self._last_exit_rules_bucket:
+        if (now.minute % _max_tf == 0 and now.second >= 5
+                and _er_bucket != self._last_exit_rules_bucket):
             self._last_exit_rules_bucket = _er_bucket
             # Use the SAME denominator as the real Day% check (_initial_net_credit), so
             # the log matches what actually fires.
