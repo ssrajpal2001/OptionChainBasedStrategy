@@ -1608,3 +1608,14 @@ def _parse_time(s: str) -> dtime:
         return dtime(int(h), int(m))
     except Exception:
         return dtime(15, 15)
+
+
+def pool_strike_set(atm: float, step: float, itm_depth: int, otm_depth: int,
+                    pinned: Optional[set] = None) -> set:
+    """Strikes to keep subscribed: ATM-itm_depth*step .. ATM+otm_depth*step (inclusive),
+    PLUS any pinned strikes (the running position's legs — never dropped even if out of range)."""
+    atm_r = round(atm / step) * step
+    out = {int(atm_r + i * step) for i in range(-itm_depth, otm_depth + 1)}
+    if pinned:
+        out |= {int(p) for p in pinned}
+    return out
