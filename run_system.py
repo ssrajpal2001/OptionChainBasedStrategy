@@ -89,9 +89,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--index",
         default="NIFTY",
-        choices=["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY",
-                 "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER"],
-        help="Primary index/commodity to monitor (default: NIFTY)",
+        help="Index/commodity to run, e.g. NIFTY or CRUDEOIL. Comma-separate to run several "
+             "at once (e.g. NIFTY,SENSEX). This drives which strategies SPAWN (monitored_indices).",
     )
     p.add_argument("--capital",   type=float, default=500_000.0, help="Client capital in INR")
     p.add_argument("--start",     default=None, help="Backtest start date YYYY-MM-DD")
@@ -341,7 +340,18 @@ async def _run_live(
     logger.info("Starting %s mode for %s%s", mode.upper(), underlying,
                 f" | Dashboard http://localhost:{ui_port}" if ui else "")
 
-    cfg.active_index = underlying
+    # --index drives which strategies actually SPAWN. Previously only the feeder primary
+    # followed --index while strategies spawned from the hardcoded cfg.monitored_indices, so
+    # launching --index NIFTY while monitored_indices=[CRUDEOIL] ran CRUDEOIL and NIFTY
+    # deployments found no running strategy. Comma-separate to run several (NIFTY,SENSEX).
+    _idxs = [s.strip().upper() for s in str(underlying).split(",") if s.strip()]
+    if _idxs:
+        cfg.monitored_indices = _idxs
+        cfg.active_index = _idxs[0]
+        if len(_idxs) > 1:
+            logger.info("Running %d indices: %s (active=%s)", len(_idxs), _idxs, _idxs[0])
+    else:
+        cfg.active_index = underlying
 
     from data_layer.base_feeder import EventBus
     from data_layer.global_feeder import GlobalFeeder
