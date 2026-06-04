@@ -328,8 +328,37 @@ class BaseFeeder(ABC):
     def raw_drop_count(self) -> int:
         return self._raw_drop_count
 
+    # Bad-tick guard: reject a phantom index value that jumps more than this fraction from the
+    # last good value in a single tick (e.g. NIFTY 24497 vs real 23425 = 4.6%). Indices never
+    # move ~3% tick-to-tick intraday, so such a jump is a feed glitch that otherwise corrupts
+    # VWAP/SLOPE and fires false exits. Self-unsticks after N consecutive rejects (real regime
+    # change / circuit) so it can never get permanently stuck on a stale value.
+    _BAD_TICK_PCT = 0.03
+    _BAD_TICK_MAX = 3
+
     async def _publish_index(self, tick: IndexTick) -> None:
         from config.global_config import Topic
+        if not hasattr(self, "_last_good_index"):
+            self._last_good_index = {}
+            self._bad_tick_count = {}
+            self._bad_tick_log = {}
+        _lg = self._last_good_index.get(tick.symbol, 0.0)
+        if _lg > 0 and tick.ltp > 0:
+            dev = abs(tick.ltp - _lg) / _lg
+            if dev > self._BAD_TICK_PCT:
+                cnt = self._bad_tick_count.get(tick.symbol, 0) + 1
+                self._bad_tick_count[tick.symbol] = cnt
+                if cnt < self._BAD_TICK_MAX:
+                    import time as _t
+                    if _t.monotonic() - self._bad_tick_log.get(tick.symbol, 0.0) > 10.0:
+                        self._bad_tick_log[tick.symbol] = _t.monotonic()
+                        logger.warning(
+                            "%s: rejecting phantom %s tick %.2f (last good %.2f, %.1f%% jump > %.0f%%)",
+                            self._provider_name, tick.symbol, tick.ltp, _lg, dev * 100, self._BAD_TICK_PCT * 100)
+                    return  # drop the glitch
+                # N consecutive at the new level → it's real; accept and reset
+            self._bad_tick_count[tick.symbol] = 0
+        self._last_good_index[tick.symbol] = tick.ltp
         if self._dedup_buffer is not None and not self._dedup_buffer.accept(tick.symbol, tick.ltp, self._provider_name):
             return
         await self._bus.publish(Topic.INDEX_TICK, tick)
