@@ -90,6 +90,7 @@ def select_balanced_pair(
     step: float,
     offset: int,
     ltp_target: float,
+    trace: Optional[list] = None,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Beginning concept (reference _get_strictly_lower_balanced_pair):
@@ -118,7 +119,17 @@ def select_balanced_pair(
     else:
         anchor_side, anchor_strike, anchor_ltp, partner_side = "PE", atm, pe_ltp, "CE"
 
+    if trace is not None:
+        trace.append(
+            f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
+            f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} "
+            f"(need>={ltp_target:.0f}); partner={partner_side} wants ltp in "
+            f"[{ltp_target:.0f}, {anchor_ltp:.2f})"
+        )
+
     if anchor_ltp < ltp_target:
+        if trace is not None:
+            trace.append(f"REJECT anchor ltp {anchor_ltp:.2f} < target {ltp_target:.0f}")
         return None
 
     best = None  # (ltp, strike)
@@ -128,16 +139,30 @@ def select_balanced_pair(
         if not leg:
             continue
         ltp = leg.get("ltp", 0.0)
+        if trace is not None:
+            _ok = ltp_target <= ltp < anchor_ltp
+            trace.append(
+                f"  cand {partner_side}{s} ltp={ltp:.2f} "
+                f"{'OK' if _ok else 'skip(out-of-band)'}"
+            )
         if ltp_target <= ltp < anchor_ltp:
             if best is None or ltp > best[0]:
                 best = (ltp, s)
     if best is None:
+        if trace is not None:
+            trace.append("NO-PARTNER")
         return None
 
     partner_ltp, partner_strike = best
     if anchor_side == "CE":
-        return anchor_strike, partner_strike, anchor_ltp, partner_ltp
-    return partner_strike, anchor_strike, partner_ltp, anchor_ltp
+        ce, pe = anchor_strike, partner_strike
+        result = (anchor_strike, partner_strike, anchor_ltp, partner_ltp)
+    else:
+        ce, pe = partner_strike, anchor_strike
+        result = (partner_strike, anchor_strike, partner_ltp, anchor_ltp)
+    if trace is not None:
+        trace.append(f"SELECTED CE{ce}/PE{pe} (beginning)")
+    return result
 
 
 def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval):
@@ -164,6 +189,7 @@ def scan_pool(
     ltp_target: float,
     rule_pass,                      # callable(ce_strike:int, pe_strike:int) -> bool
     metric: str = "balanced_premium",
+    trace: Optional[list] = None,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Re-entry concept (reference _scan_v_slope_pool, balanced_premium metric):
@@ -184,6 +210,14 @@ def scan_pool(
     pe_corr = strip_intrinsic(pe_atm.get("ltp", 0.0), "PE", atm, spot)
     ce_bias_stronger = ce_corr > pe_corr
 
+    if trace is not None:
+        trace.append(
+            f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
+            f"bias={'CE' if ce_bias_stronger else 'PE'}-stronger "
+            f"(weaker side must have lower ltp)"
+        )
+
+    skipped = 0
     strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
     best = None  # (score, ce_strike, pe_strike, ce_ltp, pe_ltp)
     for s_ce in strikes:
@@ -201,22 +235,39 @@ def scan_pool(
             if pe_ltp <= 0:
                 continue
             if ce_ltp < ltp_target or pe_ltp < ltp_target:
+                skipped += 1
                 continue
             if ce_bias_stronger:
                 if ce_ltp >= pe_ltp:
+                    skipped += 1
                     continue
             else:
                 if pe_ltp >= ce_ltp:
+                    skipped += 1
                     continue
-            if not rule_pass(s_ce, s_pe):
-                continue
             denom = ce_ltp + pe_ltp
             score = abs(ce_ltp - pe_ltp) / denom if denom > 0 else 999.0
+            _rp = rule_pass(s_ce, s_pe)
+            if trace is not None:
+                trace.append(
+                    f"  cand CE{s_ce}({ce_ltp:.2f})/PE{s_pe}({pe_ltp:.2f}) "
+                    f"score={score:.4f} rule={'PASS' if _rp else 'BLOCK'}"
+                )
+            if not _rp:
+                continue
             if best is None or score < best[0]:
                 best = (score, s_ce, s_pe, ce_ltp, pe_ltp)
+    if trace is not None:
+        trace.append(f"  ({skipped} candidates skipped: below target or wrong bias)")
     if best is None:
+        if trace is not None:
+            trace.append("NO-PAIR")
         return None
     _, s_ce, s_pe, ce_ltp, pe_ltp = best
+    if trace is not None:
+        trace.append(
+            f"SELECTED CE{s_ce}/PE{s_pe} score={best[0]:.4f} (reentry, most-balanced)"
+        )
     return s_ce, s_pe, ce_ltp, pe_ltp
 
 

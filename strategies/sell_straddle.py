@@ -995,16 +995,23 @@ class SellStraddleStrategy:
 
         from strategies.straddle_selection import select_balanced_pair, scan_pool
 
+        _trace: list = []
         if use_beginning:
-            sel = select_balanced_pair(self._strike_prem, self._spot, step, offset, ltp_target)
+            sel = select_balanced_pair(
+                self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace
+            )
             concept = "beginning"
         else:
             sel = scan_pool(
                 self._strike_prem, self._spot, step, offset, ltp_target,
                 rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
                 metric=ss.get("reentry_best_metric", "balanced_premium"),
+                trace=_trace,
             )
             concept = "reentry"
+
+        for _ln in _trace:
+            self._clog.info("SELECT %s | %s", self._underlying, _ln)
 
         if not sel:
             if use_beginning:
