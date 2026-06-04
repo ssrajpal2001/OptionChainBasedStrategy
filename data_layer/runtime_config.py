@@ -43,6 +43,8 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     # Set trail_lock_pct = 0 to disable. Values are percentages (divided by 100 in strategy).
     "trail_lock_pct":        20.0,
     "trail_floor_pct":       10.0,
+    "pool_itm_depth":        4,
+    "pool_otm_depth":        4,
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],

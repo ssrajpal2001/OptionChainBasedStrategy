@@ -410,6 +410,43 @@ class SellStraddleStrategy:
             asyncio.create_task(self._option_loop(), name=f"ss_{self._underlying}_opt"),
             asyncio.create_task(self._fill_loop(),   name=f"ss_{self._underlying}_fill"),
         ]
+        async def _seed_pool():
+            try:
+                from data_layer.historical_candles import fetch_upstox_warm_1m
+                from data_layer.instrument_registry import REGISTRY
+                from data_layer.client_db import ClientDB
+                import asyncio as _aio
+                # wait briefly for the first spot tick so we know ATM
+                for _ in range(30):
+                    if self._spot > 0:
+                        break
+                    await _aio.sleep(2)
+                creds = await _aio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+                token = (creds or {}).get("access_token", "")
+                if not token or self._spot <= 0:
+                    logger.info("SellStraddle[%s]: pool seed skipped (no token/spot).", self._underlying)
+                    return
+                step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+                ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+                itm = int(ss.get("pool_itm_depth", 4)); otm = int(ss.get("pool_otm_depth", 4))
+                strikes = pool_strike_set(self._spot, step, itm, otm)
+                exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
+                seeded = 0
+                for stk in strikes:
+                    for side in ("CE", "PE"):
+                        ikey = REGISTRY.get_broker_symbol(self._underlying, exp, int(stk), side, "upstox")
+                        if not ikey:
+                            continue
+                        bars = await fetch_upstox_warm_1m(ikey, token)
+                        if bars:
+                            closes = [b["close"] for b in bars]
+                            self._pool_engine.seed_strike(int(stk), side, closes, closes)
+                            seeded += 1
+                logger.info("SellStraddle[%s]: pool engine seeded %d legs (warm RSI/ROC).",
+                            self._underlying, seeded)
+            except Exception as exc:
+                logger.warning("SellStraddle[%s]: pool seed failed: %s", self._underlying, exc)
+        asyncio.create_task(_seed_pool())
         logger.info("SellStraddleStrategy[%s]: started.", self._underlying)
         try:
             self._log_settings_banner()
