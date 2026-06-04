@@ -251,6 +251,9 @@ class SellStraddleStrategy:
         self._prem_closes:  deque = deque(maxlen=_BUF)
         self._prem_volumes: deque = deque(maxlen=_BUF)
 
+        from strategies.pool_indicator_engine import PoolIndicatorEngine
+        self._pool_engine = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+
         # Index candle buffer for ADX
         self._idx_highs:  deque = deque(maxlen=_BUF)
         self._idx_lows:   deque = deque(maxlen=_BUF)
@@ -615,6 +618,10 @@ class SellStraddleStrategy:
                     entry["ltp"] = float(tick.ltp)
                     if _a > 0:
                         entry["atp"] = _a
+                _eng_atp = float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
+                self._pool_engine.update_tick(
+                    int(tick.strike), tick.option_type,
+                    ltp=float(tick.ltp), atp=_eng_atp)
             if atm > 0 and tick.ltp > 0 and abs(tick.strike - atm) < step / 2:
                 _atp = float(getattr(tick, "atp", 0.0) or 0.0)  # broker VWAP for this leg
                 if tick.option_type == "CE":
@@ -679,6 +686,10 @@ class SellStraddleStrategy:
             self._prem_closes.append(combined)
             self._prem_volumes.append(float(ev.volume) if ev.volume else 1.0)
 
+        # Commit one warm bar per 1-min close for EVERY tracked strike — continuous,
+        # independent of the active position (so re-entry/roll never resets the series).
+        self._pool_engine.commit_bar()
+
         self._recompute_indicators()
 
         # Force-exit
@@ -724,6 +735,18 @@ class SellStraddleStrategy:
         ltp = _ce_ltp + _pe_ltp
         self._ind["ltp"]   = ltp
         self._ind["close"] = ltp
+        # When a position is OPEN, the WARM pool engine is the source of truth for the
+        # active pair's indicators — it never resets on re-entry/roll (unlike the
+        # active-series buffers above), so it cannot produce false exits.
+        if self._position and self._position.status == "open":
+            _pe = self._pool_engine.pair_indicators(
+                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike))
+            if _pe and "rsi" in _pe:
+                for _k in ("rsi", "roc", "slope", "vwap", "close"):
+                    if _k in _pe:
+                        self._ind[_k] = _pe[_k]
+                self._ind["ltp"] = ltp
+                return   # warm engine data is the source of truth for the active pair
         if len(closes) >= 15:
             self._ind["rsi"] = rsi(closes)
         if len(closes) >= 9:
@@ -762,7 +785,11 @@ class SellStraddleStrategy:
                 self._ind["roc"] = float((closes[-1] - _ref) / _ref * 100.0)
 
     def _pair_indicators(self, ce_strike: int, pe_strike: int) -> Optional[Dict[str, float]]:
-        """Per-pair {close, vwap, slope} from the feed cache (broker ATP). None if not ready."""
+        """Per-pair {close, vwap, slope, rsi, roc}. Prefer the WARM pool engine (continuous
+        per-strike series); fall back to the feed-only cache computation when not yet warm."""
+        ind = self._pool_engine.pair_indicators(int(ce_strike), int(pe_strike))
+        if ind is not None and "rsi" in ind:
+            return ind
         from strategies.straddle_selection import pair_indicators
         return pair_indicators(self._strike_prem, self._prev_atp_closed, ce_strike, pe_strike)
 
