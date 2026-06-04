@@ -783,7 +783,26 @@ class SellStraddleStrategy:
                     if _k in _pe:
                         self._ind[_k] = _pe[_k]
                 self._ind["ltp"] = ltp
+                # Throttled marker so the shared log PROVES the warm engine is feeding the
+                # active pair (sane RSI/SLOPE after re-entry, vs the old reset garbage).
+                import time as _t
+                if _t.monotonic() - getattr(self, "_ind_src_log", 0.0) > 60.0:
+                    self._ind_src_log = _t.monotonic()
+                    logger.info(
+                        "SellStraddle[%s]: INDICATORS src=WARM-POOL-ENGINE CE%d/PE%d | "
+                        "close=%.2f vwap=%.2f slope=%.2f rsi=%.1f roc=%.2f",
+                        self._underlying, int(self._position.ce_leg.strike),
+                        int(self._position.pe_leg.strike), _pe.get("close", 0.0),
+                        _pe.get("vwap", 0.0), _pe.get("slope", 0.0),
+                        _pe.get("rsi", 0.0), _pe.get("roc", 0.0))
                 return   # warm engine data is the source of truth for the active pair
+            else:
+                import time as _t
+                if _t.monotonic() - getattr(self, "_ind_src_log", 0.0) > 60.0:
+                    self._ind_src_log = _t.monotonic()
+                    logger.info("SellStraddle[%s]: INDICATORS src=FALLBACK-ACTIVE-SERIES "
+                                "(pool engine not warm yet for CE%d/PE%d)", self._underlying,
+                                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike))
         if len(closes) >= 15:
             self._ind["rsi"] = rsi(closes)
         if len(closes) >= 9:
