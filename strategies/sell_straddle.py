@@ -855,6 +855,25 @@ class SellStraddleStrategy:
         from strategies.straddle_selection import pair_indicators
         return pair_indicators(self._strike_prem, self._prev_atp_closed, ce_strike, pe_strike)
 
+    def _ind_by_tf(self, ce_strike: int, pe_strike: int, *rule_lists) -> dict:
+        """Map each tf used by the given rule list(s) -> that pair's indicators resampled to that tf.
+        Always includes tf=1. Missing/None -> empty dict (rule operands become unavailable -> not-met)."""
+        tfs = {1}
+        for rl in rule_lists:
+            for r in (rl or []):
+                try:
+                    tfs.add(int(r.get("tf", 1)))
+                except Exception:
+                    tfs.add(1)
+        out = {}
+        for tf in tfs:
+            if tf <= 1:
+                # tf=1: prefer pool engine, else fall back to feed-only cache (pre-warm).
+                out[tf] = self._pair_indicators(int(ce_strike), int(pe_strike)) or {}
+            else:
+                out[tf] = self._pool_engine.pair_indicators_tf(int(ce_strike), int(pe_strike), tf) or {}
+        return out
+
     # ── Priming wait ──────────────────────────────────────────────────────────
 
     def _priming_wait_minutes(self, rules: List[dict]) -> int:
@@ -1009,7 +1028,7 @@ class SellStraddleStrategy:
         else:
             sel = scan_pool(
                 self._strike_prem, self._spot, step, offset, ltp_target,
-                rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
+                rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
                 metric=ss.get("reentry_best_metric", "balanced_premium"),
                 trace=_trace,
             )
@@ -1030,7 +1049,7 @@ class SellStraddleStrategy:
                 from strategies.straddle_selection import reentry_block_reason
                 diag = reentry_block_reason(
                     self._strike_prem, self._spot, step, offset, ltp_target,
-                    rule_eval=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {}),
+                    rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
                 )
                 if diag["kind"] == "no_pair":
                     self._clog.info(
@@ -1047,8 +1066,9 @@ class SellStraddleStrategy:
             return
 
         ce_strike, pe_strike, ce_ltp, pe_ltp = sel
-        ind = self._pair_indicators(ce_strike, pe_strike) or dict(self._ind)
-        passed, reason = _eval_rules(rules, ind)
+        ind_by_tf = self._ind_by_tf(ce_strike, pe_strike, rules)
+        passed, reason = _eval_rules(rules, ind_by_tf)
+        ind = ind_by_tf.get(1) or (self._pair_indicators(ce_strike, pe_strike) or dict(self._ind))
         self._clog.info(
             "EVAL %s [%s/%s] sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind=%s",
             self._underlying, rule_key, concept,
@@ -1338,13 +1358,19 @@ class SellStraddleStrategy:
                 if self._guardrail_roc_enabled:
                     _crit.append(("ROCguard", "ON", False))
                 if self._exit_rules:
-                    _passed, _reason = _eval_rules(self._exit_rules, self._ind)
+                    _passed, _reason = _eval_rules(
+                        self._exit_rules,
+                        self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules),
+                    )
                     _crit.append(("Dynamic", _reason, _passed))
                 self._clog.info(format_exit_eval(self._underlying, pnl, _credit, _crit))
             except Exception as _exc:
                 self._clog.info("EXIT-EVAL %s (formatting error: %s)", self._underlying, _exc)
                 if self._exit_rules:
-                    _passed, _reason = _eval_rules(self._exit_rules, self._ind)
+                    _passed, _reason = _eval_rules(
+                        self._exit_rules,
+                        self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules),
+                    )
 
             if self._exit_rules and _passed:
                 logger.info("SellStraddle[%s]: EXIT_RULES triggered — %s", self._underlying, _reason)
@@ -1411,7 +1437,7 @@ class SellStraddleStrategy:
 
         sel = scan_pool(
             self._strike_prem, self._spot, step, offset, ltp_target,
-            rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
             metric=ss.get("reentry_best_metric", "balanced_premium"),
         )
         ce_same = pe_same = False
@@ -1554,7 +1580,7 @@ class SellStraddleStrategy:
         sel = select_partner_for(
             self._strike_prem, side, run_strike, run_ltp,
             self._spot, step, offset, ltp_target,
-            rule_pass=lambda cs, ps: _eval_rules(rules, self._pair_indicators(cs, ps) or {})[0],
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
         )
         if sel:
             new_strike, new_ltp = sel
@@ -1687,19 +1713,35 @@ def _compare(v1: float, v2: float, sym: str) -> bool:
     return False
 
 
-def _eval_rules(rules: List[dict], ind: Dict[str, float]) -> Tuple[bool, str]:
+def _eval_rules(rules: List[dict], ind_by_tf: Dict[int, Dict[str, float]]) -> Tuple[bool, str]:
     """
-    Evaluate admin rule-builder rules against current indicator values.
+    Evaluate admin rule-builder rules against per-timeframe indicator values.
     Supports AND/OR with brackets — identical to old Rust-bridge token evaluator,
     but implemented in pure Python.
+
+    ``ind_by_tf`` maps {tf:int -> {operand:value}}. Each rule is evaluated against
+    the indicators resampled to THAT rule's ``tf`` (falling back to tf=1).
+
+    Backward compat: if a flat single-tf dict {operand:value} is passed, it is
+    wrapped as {1: ind} so old callers keep working.
     """
     if not rules:
         return True, "No rules — always allowed"
+
+    # Backward-compat: flat {operand:value} dict -> treat as tf=1
+    if ind_by_tf and not isinstance(next(iter(ind_by_tf.values())), dict):
+        ind_by_tf = {1: ind_by_tf}
 
     tokens:  List[str] = []
     reasons: List[str] = []
 
     for i, rule in enumerate(rules):
+        try:
+            _tf = int(rule.get("tf", 1))
+        except Exception:
+            _tf = 1
+        ind = ind_by_tf.get(_tf) or ind_by_tf.get(1, {})
+
         indicator = (rule.get("indicator") or "").lower()
         op_sym    = rule.get("operator_sym", "<")
         passed    = False
