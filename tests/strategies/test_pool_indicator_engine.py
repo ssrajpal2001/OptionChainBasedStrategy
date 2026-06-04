@@ -45,3 +45,33 @@ def test_commit_bar_forward_fills_all_strikes():
     eng.commit_bar()                      # PE forward-fills 10
     ind = eng.pair_indicators(100, 100)
     assert ind["close"] == 55 + 10        # PE held at 10
+
+def test_tf_resample_close_and_vwap_5min():
+    from strategies.pool_indicator_engine import PoolIndicatorEngine
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    # 12 one-min bars (minutes 0..11). CE close = 100+min, PE close = 50 (flat). atp = close-1.
+    for m in range(12):
+        eng.update_tick(100, "CE", 100 + m, 100 + m - 1)
+        eng.update_tick(100, "PE", 50, 49)
+        eng.commit_bar(minute=m)
+    ind = eng.pair_indicators_tf(100, 100, tf=5)
+    # groups: 0->mins0-4 (last min4: CE104), 1->mins5-9 (last min9: CE109), 2->mins10-11 INCOMPLETE(dropped)
+    # last complete group = 1 -> CE109 + PE50 = 159 close ; vwap = 108 + 49 = 157
+    assert ind["close"] == 159
+    assert ind["vwap"] == 157
+    # slope = group1 vwap (108+49) - group0 vwap (103+49) = 157 - 152 = 5
+    assert round(ind["slope"], 6) == 5.0
+
+def test_tf_le_1_delegates_to_1min():
+    from strategies.pool_indicator_engine import PoolIndicatorEngine
+    eng = PoolIndicatorEngine()
+    for m in range(3):
+        eng.update_tick(100, "CE", 60 + m, 60 + m); eng.update_tick(100, "PE", 40, 40); eng.commit_bar(minute=m)
+    assert eng.pair_indicators_tf(100, 100, tf=1) == eng.pair_indicators(100, 100)
+
+def test_tf_none_when_no_complete_group():
+    from strategies.pool_indicator_engine import PoolIndicatorEngine
+    eng = PoolIndicatorEngine()
+    for m in range(3):  # only 3 bars, tf=5 -> group 0 is incomplete -> dropped -> None
+        eng.update_tick(100, "CE", 60, 60); eng.update_tick(100, "PE", 40, 40); eng.commit_bar(minute=m)
+    assert eng.pair_indicators_tf(100, 100, tf=5) is None
