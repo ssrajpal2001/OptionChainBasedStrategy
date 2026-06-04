@@ -1732,6 +1732,7 @@ class DashboardServer:
                 by_broker.setdefault(bid, {})
                 legs = []
                 tracking = None
+                booked = 0.0   # session realized P&L (₹) — straddle re-entries/rolls booked today
                 try:
                     if sname == "iron_condor":
                         strat = _find(getattr(_srv, "_iron_condors", []), underlying)
@@ -1741,6 +1742,10 @@ class DashboardServer:
                     elif sname == "sell_straddle":
                         strat = _find(getattr(_srv, "_sell_straddles", []), underlying)
                         pos = getattr(strat, "_position", None) if strat else None
+                        # Booked = session realized P&L (pts) × lot size → ₹ (closed re-entries/rolls).
+                        if strat is not None:
+                            _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
+                            booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
                         # DIAG: surface why a running straddle may not appear under a deployment
                         # (usually a deployment.underlying that doesn't match the running instance).
                         logger.info(
@@ -1802,7 +1807,7 @@ class DashboardServer:
                 except Exception as exc:
                     logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
                 by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
-                                          "tracking": tracking}
+                                          "booked": booked, "tracking": tracking}
             return {"ok": True, "by_broker": by_broker}
 
         # ── CLIENT — history ──────────────────────────────────────────────────
