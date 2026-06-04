@@ -20,7 +20,6 @@ class PoolIndicatorEngine:
         self._roc_len = roc_len
         self._maxlen = maxlen
         self._latest: Dict[Key, Tuple[float, float]] = {}
-        self._dirty: set[Key] = set()
         self._closes: Dict[Key, deque] = {}
         self._atps:   Dict[Key, deque] = {}
 
@@ -30,16 +29,15 @@ class PoolIndicatorEngine:
     def update_tick(self, strike: int, side: str, ltp: float, atp: float) -> None:
         k = self._key(strike, side)
         self._latest[k] = (float(ltp), float(atp))
-        self._dirty.add(k)
 
     def commit_bar(self) -> None:
-        # Only flush bars for keys that received a tick since the last commit, so a
-        # quiet side is not padded with stale repeats while another side is fed.
-        for k in self._dirty:
-            ltp, atp = self._latest[k]
+        # Forward-fill EVERY tracked key once per minute so all per-strike series stay
+        # minute-aligned (same deque index == same minute). A quiet leg holds its last
+        # ltp/atp; without this, CE and PE deques would drift in length and combined
+        # close/vwap/slope/rsi would sum bars from different minutes.
+        for k, (ltp, atp) in self._latest.items():
             self._closes.setdefault(k, deque(maxlen=self._maxlen)).append(ltp)
             self._atps.setdefault(k, deque(maxlen=self._maxlen)).append(atp)
-        self._dirty.clear()
 
     def is_warm(self, strike: int, side: str) -> bool:
         k = self._key(strike, side)
