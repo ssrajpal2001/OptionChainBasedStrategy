@@ -39,6 +39,15 @@ class PoolIndicatorEngine:
             self._closes.setdefault(k, deque(maxlen=self._maxlen)).append(ltp)
             self._atps.setdefault(k, deque(maxlen=self._maxlen)).append(atp)
 
+    def seed_strike(self, strike: int, side: str, closes: list, atps: list) -> None:
+        """Prefill the rolling series from historical bars (oldest-first) so RSI/ROC are valid
+        immediately. VWAP/ATP are intraday-fresh so seeding atps only keeps lengths aligned."""
+        k = self._key(strike, side)
+        cd = self._closes.setdefault(k, deque(maxlen=self._maxlen))
+        ad = self._atps.setdefault(k, deque(maxlen=self._maxlen))
+        for c, a in zip(closes, atps):
+            cd.append(float(c)); ad.append(float(a))
+
     def is_warm(self, strike: int, side: str) -> bool:
         k = self._key(strike, side)
         return len(self._closes.get(k, ())) >= max(self._rsi_len + 1, self._roc_len + 1)

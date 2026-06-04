@@ -25,6 +25,16 @@ def test_pair_rsi_roc_present_when_enough_bars():
     assert "rsi" in ind and "roc" in ind
     assert ind["rsi"] > 50
 
+def test_seed_prefills_series_for_rsi():
+    from strategies.pool_indicator_engine import PoolIndicatorEngine
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    eng.seed_strike(100, "CE", closes=list(range(50, 70)), atps=list(range(49, 69)))
+    eng.seed_strike(100, "PE", closes=[10] * 20, atps=[10] * 20)
+    eng.update_tick(100, "CE", 70, 69); eng.update_tick(100, "PE", 10, 10)
+    assert eng.is_warm(100, "CE")
+    ind = eng.pair_indicators(100, 100)
+    assert "rsi" in ind and "roc" in ind
+
 def test_commit_bar_forward_fills_all_strikes():
     # a strike that ticked once keeps advancing on later commits (minute-aligned)
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
