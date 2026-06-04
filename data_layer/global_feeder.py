@@ -299,6 +299,19 @@ class UpstoxFeeder(BaseFeeder):
 
         def _on_open() -> None:
             self._connected = True
+            # Re-assert ALL keys in "full" mode. Keys passed to the streamer CONSTRUCTOR
+            # (instrumentKeys=, e.g. the trap's pre-connect day-locked strikes) were not
+            # reliably streaming option data — only keys added AFTER connect via an explicit
+            # subscribe(keys, "full") ticked. This explicit on-connect re-subscribe makes the
+            # pre-connect keys (trap legs) stream too → fixes frozen trap LTP (ticks/min=0).
+            try:
+                if self._subscribed_keys:
+                    try:
+                        self._streamer.subscribe(self._subscribed_keys, "full")
+                    except TypeError:
+                        self._streamer.subscribe(self._subscribed_keys)
+            except Exception as exc:
+                logger.warning("UpstoxFeeder: on_open full re-subscribe failed: %s", exc)
             logger.info(
                 "UpstoxFeeder: WebSocket connected — subscribed to %d keys (%d index, %d option).",
                 len(self._subscribed_keys),
