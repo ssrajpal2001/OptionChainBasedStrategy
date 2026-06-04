@@ -1319,6 +1319,7 @@ document.addEventListener('alpine:init', () => {
       return {
         entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
         entry_workflow_mode: 'hybrid', ltp_target: 0, lot_size: 1,
+        pool_itm_depth: 4, pool_otm_depth: 4, product_type: 'MIS',
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
         tsl_scalable:  { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
@@ -1342,7 +1343,7 @@ document.addEventListener('alpine:init', () => {
       const d = strikes[idx] || {s:200,w:200};
       return {
         enabled: true, start_time: '09:16', squareoff_time: '15:15',
-        entry_day: 'daily', product_type: 'MIS',
+        entry_day: 'daily', product_type: 'NRML',
         lot_size: 65, strike_step: 50,
         max_adjustments_per_side: 3, roll_step_pts: 5,
         profit_target_inr: 5000, stoploss_inr: 2000,
@@ -1382,6 +1383,11 @@ document.addEventListener('alpine:init', () => {
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
       if (ss.sl_cooldown_tf_multiplier === undefined) ss.sl_cooldown_tf_multiplier = 1.0;
       if (ss.ltp_target === undefined) ss.ltp_target = 0;
+      if (ss.pool_itm_depth === undefined) ss.pool_itm_depth = 4;
+      if (ss.pool_otm_depth === undefined) ss.pool_otm_depth = 4;
+      if (ss.product_type === undefined) ss.product_type = 'MIS';
+      const ic = this.indexConfig[idx].iron_condor;
+      if (ic && ic.product_type === undefined) ic.product_type = 'NRML';
       const _dayDef = () => ({ enabled: false, profit_target_pct: 0, loss_sl_pct: 0 });
       if (!ss.per_day) ss.per_day = { monday:_dayDef(), tuesday:_dayDef(), wednesday:_dayDef(), thursday:_dayDef(), friday:_dayDef() };
       for (const d of ['monday','tuesday','wednesday','thursday','friday']) {
@@ -3431,6 +3437,29 @@ function histReplay() {
                    x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.lot_size">
             <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
               Lots per entry (1 lot = exchange lot size for index).
+            </p>
+          </div>
+          <div>
+            <label class="sec-label">POOL ITM DEPTH</label>
+            <input type="number" min="0" step="1" class="t-input mt-0.5" placeholder="4"
+                   title="Number of in-the-money strikes to keep in the candidate pool."
+                   x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.pool_itm_depth">
+          </div>
+          <div>
+            <label class="sec-label">POOL OTM DEPTH</label>
+            <input type="number" min="0" step="1" class="t-input mt-0.5" placeholder="4"
+                   title="Number of out-of-the-money strikes to keep in the candidate pool."
+                   x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.pool_otm_depth">
+          </div>
+          <div>
+            <label class="sec-label">PRODUCT TYPE</label>
+            <select class="t-input mt-0.5"
+                    x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.product_type">
+              <option value="MIS">MIS</option>
+              <option value="NRML">NRML</option>
+            </select>
+            <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+              Strategy-specific; overrides broker default.
             </p>
           </div>
         </div>
@@ -6363,7 +6392,7 @@ function histReplay() {
             </div>
           </div>
           <div>
-            <div class="sec-label mb-1">PRODUCT TYPE</div>
+            <div class="sec-label mb-1">DEFAULT PRODUCT (strategies override)</div>
             <div class="flex gap-2">
               <button class="flex-1 py-1.5 text-xs font-mono rounded border transition-all"
                       :style="(portalBroker.product_type||'MIS')==='MIS'
@@ -6378,6 +6407,7 @@ function histReplay() {
                       @click="portalBroker.product_type='NRML'"
                       title="Carry forward overnight">NRML</button>
             </div>
+            <p class="text-[10px] mt-1" style="color:var(--t-muted)">Each strategy sets its own MIS/NRML; this is only the fallback.</p>
           </div>
         </div>
 
