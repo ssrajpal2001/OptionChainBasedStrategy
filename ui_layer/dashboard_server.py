@@ -1746,14 +1746,6 @@ class DashboardServer:
                         if strat is not None:
                             _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
                             booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
-                        # DIAG: surface why a running straddle may not appear under a deployment
-                        # (usually a deployment.underlying that doesn't match the running instance).
-                        logger.info(
-                            "DIAG client/positions ss: dep.underlying=%s matched=%s pos=%s status=%s avail=%s",
-                            underlying, strat is not None, pos is not None,
-                            getattr(pos, "status", None),
-                            [getattr(s, "_underlying", "?") for s in getattr(_srv, "_sell_straddles", [])],
-                        )
                         if pos and getattr(pos, "status", "open") == "open":
                             legs = _ss_legs(pos)
                     elif sname == "trap_trading":
@@ -2521,16 +2513,6 @@ class DashboardServer:
                             "trailing_active": pos.trailing_active,
                             "open_time": pos.open_time.isoformat() if pos.open_time else None,
                         }
-                    # DIAG (throttled): why a running straddle may show 'no position' in the UI.
-                    import time as _t
-                    if _t.monotonic() - getattr(_srv, "_ss_diag_t", 0.0) > 20.0:
-                        _srv._ss_diag_t = _t.monotonic()
-                        logger.info(
-                            "DIAG admin/strategies ss[%s]: has_open=%s pos_set=%s status=%s credit=%s running=%s",
-                            ss._underlying, ss.has_open_position, ss._position is not None,
-                            getattr(ss._position, "status", None),
-                            getattr(ss._position, "net_credit", None), ss._running,
-                        )
                     out.append({
                         "type":         "sell_straddle",
                         "underlying":   ss._underlying,
