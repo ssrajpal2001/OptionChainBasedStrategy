@@ -38,3 +38,4 @@ config/client_profiles.json
 # OS
 .DS_Store
 Thumbs.db
+data/strategy_config.json
