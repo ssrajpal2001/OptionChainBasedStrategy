@@ -28,7 +28,14 @@ class PoolIndicatorEngine:
 
     def update_tick(self, strike: int, side: str, ltp: float, atp: float) -> None:
         k = self._key(strike, side)
-        self._latest[k] = (float(ltp), float(atp))
+        # Keep the last GOOD value when a tick reports 0 (no-trade ltp or a momentary missing
+        # atp from the feed). Without this, a single atp=0 makes pair_indicators() return None
+        # for the active pair, the strategy falls back to the legacy active-series path, and on a
+        # re-entry that path produces a garbage SLOPE (e.g. -258) from a stale prev-pair VWAP.
+        _pl, _pa = self._latest.get(k, (0.0, 0.0))
+        _l = float(ltp) if ltp and ltp > 0 else _pl
+        _a = float(atp) if atp and atp > 0 else _pa
+        self._latest[k] = (_l, _a)
 
     def commit_bar(self) -> None:
         # Forward-fill EVERY tracked key once per minute so all per-strike series stay
