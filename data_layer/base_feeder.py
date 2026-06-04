@@ -363,12 +363,46 @@ class BaseFeeder(ABC):
             return
         await self._bus.publish(Topic.INDEX_TICK, tick)
 
+    # Option bad-tick guard: reject a phantom option LTP that jumps more than _OPT_BAD_TICK_PCT
+    # AND more than _OPT_BAD_TICK_ABS points from the last good value in a SINGLE tick. Real option
+    # premiums crawl tick-to-tick; a single-tick 2x jump (e.g. 262 -> 600) is a feed glitch that
+    # would set the position leg's LTP directly and fire a FALSE stop-loss. Both thresholds must be
+    # exceeded so cheap options (small abs moves) aren't filtered. Self-unsticks after N in a row.
+    _OPT_BAD_TICK_PCT = 0.60
+    _OPT_BAD_TICK_ABS = 50.0
+    _OPT_BAD_TICK_MAX = 3
+
+    def _option_key(self, tick: "OptionTick") -> str:
+        return f"{tick.underlying}:{tick.expiry}:{int(tick.strike)}:{tick.option_type}"
+
     async def _publish_option(self, tick: OptionTick) -> None:
         from config.global_config import Topic
+        if not hasattr(self, "_last_good_opt"):
+            self._last_good_opt = {}
+            self._opt_bad_count = {}
+            self._opt_bad_log = {}
+        _ok = self._option_key(tick)
+        _lg = self._last_good_opt.get(_ok, 0.0)
+        if _lg > 0 and tick.ltp > 0:
+            _chg = abs(tick.ltp - _lg)
+            if _chg > self._OPT_BAD_TICK_ABS and (_chg / _lg) > self._OPT_BAD_TICK_PCT:
+                cnt = self._opt_bad_count.get(_ok, 0) + 1
+                self._opt_bad_count[_ok] = cnt
+                if cnt < self._OPT_BAD_TICK_MAX:
+                    import time as _t
+                    if _t.monotonic() - self._opt_bad_log.get(_ok, 0.0) > 10.0:
+                        self._opt_bad_log[_ok] = _t.monotonic()
+                        logger.warning("%s: rejecting phantom option tick %s %.2f (last good %.2f, "
+                                       "%.0f%% jump) — would have fired a false SL.",
+                                       self._provider_name, _ok, tick.ltp, _lg, (_chg / _lg) * 100)
+                    return  # drop the glitch
+                # N consecutive at the new level → real regime, accept
+            self._opt_bad_count[_ok] = 0
+        self._last_good_opt[_ok] = tick.ltp
         if self._dedup_buffer is not None:
             # Canonical key — Upstox & Fyers use different symbol strings for the
             # same contract, so dedup on the contract identity, not the raw symbol.
-            dedup_key = f"{tick.underlying}:{tick.expiry}:{int(tick.strike)}:{tick.option_type}"
+            dedup_key = self._option_key(tick)
             if not self._dedup_buffer.accept(dedup_key, tick.ltp, self._provider_name):
                 return
         await self._bus.publish(Topic.OPTION_TICK, tick)
