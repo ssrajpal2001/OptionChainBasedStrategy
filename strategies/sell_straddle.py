@@ -1493,8 +1493,12 @@ class SellStraddleStrategy:
 
         self._position = None
         self._persist()   # clears the stored position
-        if reason == "stop_loss":
-            self._apply_sl_cooldown()
+        # Apply the configured re-entry cooldown after EVERY full exit (was: only stop_loss).
+        # vwap_rise_sl / guardrail_roc / exit_rules now FULL-exit + re-enter, and with no cooldown
+        # they re-entered the same candle → exit → re-enter → order CHURN (many rejected broker
+        # orders). The cooldown (sl_cooldown_tf_multiplier, set in the UI) gives a one-candle
+        # breather before re-entry. EOD/day-stop already block re-entry, so it's a no-op there.
+        self._apply_sl_cooldown()
 
     def _apply_sl_cooldown(self) -> None:
         ss    = RuntimeConfig.index_section(self._underlying, "sell_straddle")
@@ -1504,7 +1508,8 @@ class SellStraddleStrategy:
         cooldown_min = int(max_tf * self._sl_cooldown_tf_mult)
         if cooldown_min > 0:
             self._sl_cooldown_until = datetime.now(IST) + timedelta(minutes=cooldown_min)
-            logger.info("SellStraddle[%s]: SL cooldown %d min.", self._underlying, cooldown_min)
+            logger.info("SellStraddle[%s]: re-entry cooldown %d min (no re-entry until %s).",
+                        self._underlying, cooldown_min, self._sl_cooldown_until.strftime("%H:%M"))
 
     def _is_in_entry_window(self, now: datetime) -> bool:
         return self._entry_start <= now.time() < self._entry_cutoff
