@@ -779,7 +779,12 @@ class SellStraddleStrategy:
         if self._position and self._position.status == "open":
             _pe = self._pool_engine.pair_indicators(
                 int(self._position.ce_leg.strike), int(self._position.pe_leg.strike))
-            if _pe and "rsi" in _pe:
+            # Use the engine whenever it returns ANY data (close/vwap always present; slope/rsi/roc
+            # when enough bars). Requiring "rsi" before let the code fall through to the legacy
+            # active-series path, which produced inconsistent CLOSE (ATM, not the position) and a
+            # garbage VWAP/SLOPE after re-entry → a FALSE vwap_rise_sl. The engine is the position
+            # pair's source of truth; missing rsi/roc just stay N/A (rule treats as not-met).
+            if _pe:
                 for _k in ("rsi", "roc", "slope", "vwap", "close"):
                     if _k in _pe:
                         self._ind[_k] = _pe[_k]
