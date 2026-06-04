@@ -431,6 +431,13 @@ class IronCondorStrategy:
         if self._entry_day != "daily":
             day_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
             if day_names[now.weekday()] != self._entry_day:
+                # Throttled so the log isn't silent — explains an idle IC (a very common
+                # "IC not working" confusion when entry_day != today).
+                import time as _t
+                if _t.monotonic() - getattr(self, "_day_gate_log", 0.0) > 300.0:
+                    self._day_gate_log = _t.monotonic()
+                    self._clog.info("WAIT  entry_day=%s but today=%s — IC idle today (set entry_day=daily to trade every day)",
+                                    self._entry_day, day_names[now.weekday()])
                 return
 
         # Don't re-enter while position is open
