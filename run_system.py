@@ -503,6 +503,7 @@ async def _run_live(
     for _ic in _iron_condors:
         _ic.start()
     for _ss in _sell_straddles:
+        _ss.set_client_db(_shared_client_db)
         _ss.start()
 
     # Warm-start the trap engine: replay historical 1m bars from the DB to rebuild

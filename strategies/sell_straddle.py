@@ -189,6 +189,7 @@ class SellStraddleStrategy:
         self._underlying     = underlying
         self._lot_multiplier = lot_multiplier
         self._running        = False
+        self._client_db      = None
 
         self._position: Optional[StraddlePosition] = None
         self._trades_today: int = 0
@@ -894,9 +895,56 @@ class SellStraddleStrategy:
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
+    def set_client_db(self, db) -> None:
+        """Inject the shared ClientDB so entry can be gated on terminal+trade activation."""
+        self._client_db = db
+
+    def _any_active_terminal(self) -> bool:
+        """True if at least one client has a binding with terminal_connected AND engine_active,
+        deployed to sell_straddle for this underlying. Fail-OPEN when no DB is wired (tests/dev)
+        so unit tests and headless runs are unaffected; production injects the DB via run_system."""
+        db = self._client_db
+        if db is None:
+            return True
+        import time as _t
+        _now = _t.monotonic()
+        if _now - getattr(self, "_term_check_t", 0.0) < 5.0:
+            return getattr(self, "_term_active_cached", False)
+        self._term_check_t = _now
+        active = False
+        try:
+            for _client in db.get_all_clients_sync():
+                _cid = _client.get("client_id", "")
+                if not _cid:
+                    continue
+                _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(_cid)}
+                for _dep in db.get_deployments_sync(_cid):
+                    _sn = str(_dep.get("strategy_name", "")).lower()
+                    _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
+                    if _sn == "sell_straddle" and _ul == self._underlying.upper():
+                        _b = _binds.get(_dep.get("binding_id"))
+                        if _b and _b.get("engine_active") and _b.get("terminal_connected"):
+                            active = True
+                            break
+                if active:
+                    break
+        except Exception as _exc:
+            logger.debug("SellStraddle[%s]: terminal-active check error: %s", self._underlying, _exc)
+            active = False
+        self._term_active_cached = active
+        return active
+
     async def _try_entry(self, now: datetime) -> None:
         if self._stop_for_day:
             return  # Day profit-target or day-loss-SL already hit today
+        if not self._any_active_terminal():
+            import time as _t
+            if _t.monotonic() - getattr(self, "_no_term_log", 0.0) > 60.0:
+                self._no_term_log = _t.monotonic()
+                logger.info("SellStraddle[%s]: WAITING — no terminal+trade active "
+                            "(feeder running; entry starts when a client turns Terminal ON + Trade ON).",
+                            self._underlying)
+            return
         if not (self._entry_start <= now.time() < self._entry_cutoff):
             return
         if self._trades_today >= self._max_trades:
