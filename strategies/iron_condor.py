@@ -228,6 +228,10 @@ class IronCondorStrategy:
         self._strike_step     = int(ic.get("strike_step",                50))
         self._max_adj         = int(ic.get("max_adjustments_per_side",   4))
         self._min_ltp         = float(ic.get("min_ltp",                  0.0))  # NEW: min LTP filter
+        # Min seconds between adjustments — without this, a breached IC re-adjusts on EVERY tick
+        # (esp. in dry-run where orders reject so the position stays breached) → hundreds of
+        # rejected broker orders/min. One adjustment per candle (60s) is plenty.
+        self._adjust_cooldown_s = float(ic.get("adjustment_cooldown_s", 60.0))
 
     def reconfigure(self) -> None:
         self._load_thresholds()
@@ -630,8 +634,14 @@ class IronCondorStrategy:
     async def _check_adjustment_criteria(self) -> None:
         if self._adjusting:
             return
+        # Throttle: never adjust more than once per _adjust_cooldown_s. Stops the per-tick
+        # adjustment storm (a breached/dry-run IC otherwise re-rolls every few ms → order spam).
+        import time as _t
+        if _t.monotonic() - getattr(self, "_last_adjust_t", 0.0) < self._adjust_cooldown_s:
+            return
         side = self.check_adjustment_criteria()
         if side:
+            self._last_adjust_t = _t.monotonic()
             await self.adjust_iron_condor(side)
 
     def _exec_price(self, key: str, side: str) -> float:
