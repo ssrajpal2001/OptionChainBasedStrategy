@@ -222,7 +222,8 @@ class SellStraddleStrategy:
 
         self._exit_rules:            list = []
         self._last_exit_rules_bucket: str  = ""
-        self._last_entry_bucket:      str  = ""
+        self._last_entry_bucket_b:    str  = ""   # beginning rule-set max-tf bucket
+        self._last_entry_bucket_r:    str  = ""   # reentry rule-set max-tf bucket
 
         self._guardrail_pnl_enabled:    bool  = False
         self._guardrail_pnl_target_pts: float = 0.0
@@ -533,7 +534,8 @@ class SellStraddleStrategy:
         self._idx_lows.clear()
         self._idx_closes.clear()
         self._last_exit_rules_bucket = ""
-        self._last_entry_bucket      = ""
+        self._last_entry_bucket_b    = ""
+        self._last_entry_bucket_r    = ""
         self._last_roc_guard_bucket  = ""
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
@@ -963,33 +965,42 @@ class SellStraddleStrategy:
         return minute % max_tf == 0 and second >= 5
 
     async def _maybe_try_entry(self, now: datetime) -> None:
-        """Gate entry evaluation to the active rule set's MAX-timeframe boundary, +5s,
-        once per bucket (tick-driven; NO sleep). All conditions in the set are thus checked
-        together at the one moment the max-tf candle has closed."""
+        """For each applicable rule set, fire only at ITS OWN max-tf boundary (+5s), once per
+        bucket. Hybrid first-trade evaluates beginning AND reentry (each on its own cadence) until
+        a position opens — no permanent flip, no dead gap."""
         if self._position and self._position.status == "open":
             return
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        workflow = ss.get("entry_workflow_mode", "hybrid")
         is_beginning = (self._trades_today == 0)
-        workflow_mode = ss.get("entry_workflow_mode", "hybrid")
-        if workflow_mode == "beginning_only":
-            use_beginning = True
-        elif workflow_mode == "reentry_only":
-            use_beginning = False
-        else:
-            use_beginning = is_beginning and not self._beginning_failed
-        rule_key = "entry_rules_beginning" if use_beginning else "entry_rules_reentry"
-        rules = ss.get(rule_key, [])
-        max_tf = max((int(r.get("tf", 1)) for r in rules), default=1)
-        # Boundary + 5s, once per max-tf window.
-        if not self._at_tf_boundary(now.minute, now.second, max_tf):
-            return
-        bucket = f"{now:%Y%m%d_%H}{(now.minute // max_tf) * max_tf:02d}"
-        if bucket == self._last_entry_bucket:
-            return
-        self._last_entry_bucket = bucket
-        await self._try_entry(now)
 
-    async def _try_entry(self, now: datetime) -> None:
+        want_beg = (workflow == "beginning_only") or (workflow == "hybrid" and is_beginning)
+        want_re  = (workflow == "reentry_only") or (workflow == "hybrid")
+
+        due_beg = False
+        if want_beg:
+            rb = ss.get("entry_rules_beginning", [])
+            mtf = max((int(r.get("tf", 1)) for r in rb), default=1)
+            if self._at_tf_boundary(now.minute, now.second, mtf):
+                bkt = f"{now:%Y%m%d_%H}{(now.minute // mtf) * mtf:02d}"
+                if bkt != self._last_entry_bucket_b:
+                    self._last_entry_bucket_b = bkt
+                    due_beg = True
+        due_re = False
+        if want_re:
+            rr = ss.get("entry_rules_reentry", [])
+            mtf = max((int(r.get("tf", 1)) for r in rr), default=1)
+            if self._at_tf_boundary(now.minute, now.second, mtf):
+                bkt = f"{now:%Y%m%d_%H}{(now.minute // mtf) * mtf:02d}"
+                if bkt != self._last_entry_bucket_r:
+                    self._last_entry_bucket_r = bkt
+                    due_re = True
+
+        if due_beg or due_re:
+            await self._try_entry(now, due_beg, due_re)
+
+    async def _try_entry(self, now: datetime, due_beginning: bool = True,
+                         due_reentry: bool = True) -> None:
         if self._stop_for_day:
             return  # Day profit-target or day-loss-SL already hit today
         if not self._any_active_terminal():
@@ -1023,20 +1034,30 @@ class SellStraddleStrategy:
         # wait above already guarantees ATM ticks exist, which selection needs.
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
-        is_beginning = (self._trades_today == 0)
-
-        # Workflow mode: hybrid (default) → beginning concept first trade, else pool.
-        # _beginning_failed flips a hybrid first-trade pulse to the pool scan.
         workflow_mode = ss.get("entry_workflow_mode", "hybrid")
+        is_beginning = (self._trades_today == 0)
         if workflow_mode == "beginning_only":
-            use_beginning = True
-        elif workflow_mode == "reentry_only":
-            use_beginning = False
-        else:  # hybrid
-            use_beginning = is_beginning and not self._beginning_failed
+            if due_beginning:
+                await self._eval_ruleset(now, "entry_rules_beginning", use_beginning_sel=True)
+            return
+        if workflow_mode == "reentry_only":
+            if due_reentry:
+                await self._eval_ruleset(now, "entry_rules_reentry", use_beginning_sel=False)
+            return
+        # hybrid: first trade tries beginning at its boundary; if it does NOT enter, the reentry
+        # pool is tried at its own boundary (same pulse when both are due). Both run until a
+        # position opens — no permanent flip.
+        if is_beginning and due_beginning:
+            await self._eval_ruleset(now, "entry_rules_beginning", use_beginning_sel=True)
+            if self._position and self._position.status == "open":
+                return
+        if due_reentry:
+            await self._eval_ruleset(now, "entry_rules_reentry", use_beginning_sel=False)
 
-        rule_key = "entry_rules_beginning" if use_beginning else "entry_rules_reentry"
-        rules    = ss.get(rule_key, [])
+    async def _eval_ruleset(self, now: datetime, rule_key: str, use_beginning_sel: bool) -> None:
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        rules = ss.get(rule_key, [])
+        concept = "beginning" if use_beginning_sel else "reentry"
 
         if not self._is_primed(now, rules):
             self._clog.info(
@@ -1051,11 +1072,10 @@ class SellStraddleStrategy:
         from strategies.straddle_selection import select_balanced_pair, scan_pool
 
         _trace: list = []
-        if use_beginning:
+        if use_beginning_sel:
             sel = select_balanced_pair(
                 self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace
             )
-            concept = "beginning"
         else:
             sel = scan_pool(
                 self._strike_prem, self._spot, step, offset, ltp_target,
@@ -1063,13 +1083,12 @@ class SellStraddleStrategy:
                 metric=ss.get("reentry_best_metric", "balanced_premium"),
                 trace=_trace,
             )
-            concept = "reentry"
 
         for _ln in _trace:
             self._clog.info("SELECT %s | %s", self._underlying, _ln)
 
         if not sel:
-            if use_beginning:
+            if use_beginning_sel:
                 self._clog.info(
                     "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (target=%.2f offset=%d)",
                     self._underlying, rule_key, self._spot, ltp_target, offset,
@@ -1099,18 +1118,13 @@ class SellStraddleStrategy:
         ce_strike, pe_strike, ce_ltp, pe_ltp = sel
         ind_by_tf = self._ind_by_tf(ce_strike, pe_strike, rules)
         passed, reason = _eval_rules(rules, ind_by_tf)
-        ind = ind_by_tf.get(1) or (self._pair_indicators(ce_strike, pe_strike) or dict(self._ind))
+        _dump = {tf: {k: round(v, 2) for k, v in (d or {}).items()} for tf, d in ind_by_tf.items()}
         self._clog.info(
-            "EVAL %s [%s/%s] sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind=%s",
-            self._underlying, rule_key, concept,
-            ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
-            reason, "PASS" if passed else "BLOCK",
-            {k: round(v, 2) for k, v in ind.items()},
+            "EVAL %s [%s/%s] sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind_by_tf=%s",
+            self._underlying, rule_key, concept, ce_strike, ce_ltp, pe_strike, pe_ltp,
+            ce_ltp + pe_ltp, reason, "PASS" if passed else "BLOCK", _dump,
         )
         if not passed:
-            # Hybrid: beginning concept failed its gate → next pulse uses the pool scan.
-            if use_beginning and workflow_mode == "hybrid":
-                self._beginning_failed = True
             return
 
         self._clog.info(
@@ -1389,13 +1403,16 @@ class SellStraddleStrategy:
                     _crit.append(("PnLguard", f"T{self._guardrail_pnl_target_pts:.0f}/SL{self._guardrail_pnl_sl_pts:.0f}pts", False))
                 if self._guardrail_roc_enabled:
                     _crit.append(("ROCguard", "ON", False))
+                _exit_dump = None
                 if self._exit_rules:
-                    _passed, _reason = _eval_rules(
-                        self._exit_rules,
-                        self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules),
-                    )
+                    _exit_ind_by_tf = self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules)
+                    _passed, _reason = _eval_rules(self._exit_rules, _exit_ind_by_tf)
                     _crit.append(("Dynamic", _reason, _passed))
+                    _exit_dump = {tf: {k: round(v, 2) for k, v in (d or {}).items()}
+                                  for tf, d in _exit_ind_by_tf.items()}
                 self._clog.info(format_exit_eval(self._underlying, pnl, _credit, _crit))
+                if _exit_dump is not None:
+                    self._clog.info("EXIT-EVAL %s exit_ind_by_tf=%s", self._underlying, _exit_dump)
             except Exception as _exc:
                 self._clog.info("EXIT-EVAL %s (formatting error: %s)", self._underlying, _exc)
                 if self._exit_rules:

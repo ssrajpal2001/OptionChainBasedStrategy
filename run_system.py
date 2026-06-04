@@ -108,6 +108,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip dependency checks (faster startup if you know packages are present)",
     )
+    p.add_argument(
+        "--strategies",
+        default="sell_straddle,iron_condor,trap",
+        help="Comma-list of strategies to RUN. Others are constructed but never started. "
+             "e.g. --strategies sell_straddle (run only the sell-straddle).",
+    )
     return p.parse_args()
 
 
@@ -335,6 +341,7 @@ async def _run_live(
     ui: bool = False,
     ui_host: str = "0.0.0.0",
     ui_port: int = 5000,
+    strategies: str = "sell_straddle,iron_condor,trap",
 ) -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting %s mode for %s%s", mode.upper(), underlying,
@@ -373,6 +380,9 @@ async def _run_live(
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
     from management.risk_manager import RiskManager
+
+    _enabled_strats = {s.strip().lower() for s in (strategies or "").split(",") if s.strip()}
+    logger.info("run_system: enabled strategies = %s", sorted(_enabled_strats) or "ALL")
 
     bus = EventBus()
     strategies = [StrategyA_OIZone(cfg), StrategyB_Trap(cfg), StrategyC_Panic(cfg)]
@@ -500,19 +510,22 @@ async def _run_live(
     await router.start()
     await feeder.start()
 
-    for _ic in _iron_condors:
-        _ic.start()
-    for _ss in _sell_straddles:
-        _ss.set_client_db(_shared_client_db)
-        _ss.start()
+    if "iron_condor" in _enabled_strats:
+        for _ic in _iron_condors:
+            _ic.start()
+    if "sell_straddle" in _enabled_strats:
+        for _ss in _sell_straddles:
+            _ss.set_client_db(_shared_client_db)
+            _ss.start()
 
     # Warm-start the trap engine: replay historical 1m bars from the DB to rebuild
     # prior HTF/MTF trap levels so it isn't IDLE/cold at boot. Without this the
     # engine only builds state from live candles going forward (hours to warm up).
-    try:
-        await trap_engine.warm_start(list(cfg.monitored_indices))
-    except Exception as _exc:
-        logger.warning("trap_engine.warm_start failed: %s", _exc)
+    if "trap" in _enabled_strats:
+        try:
+            await trap_engine.warm_start(list(cfg.monitored_indices))
+        except Exception as _exc:
+            logger.warning("trap_engine.warm_start failed: %s", _exc)
 
     # Admin console runs as a detached background task — its completion or any
     # internal stream error must NOT trigger the engine shutdown.  Only the
@@ -522,8 +535,11 @@ async def _run_live(
     tasks = [
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
         asyncio.create_task(option_matrix.run(),        name="option_matrix"),
-        asyncio.create_task(confluence.run(),           name="confluence"),
-        asyncio.create_task(trap_engine.run(),          name="trap_engine"),
+    ]
+    if "trap" in _enabled_strats:
+        tasks.append(asyncio.create_task(confluence.run(),    name="confluence"))
+        tasks.append(asyncio.create_task(trap_engine.run(),   name="trap_engine"))
+    tasks += [
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
         asyncio.create_task(ic_bridge.run(),            name="ic_bridge"),
@@ -552,10 +568,12 @@ async def _run_live(
                 logger.warning("Task '%s' completed normally — triggered shutdown.", name)
 
     logger.info("Shutting down…")
-    confluence.stop()
-    trap_engine.stop()
-    for _ic in _iron_condors:
-        _ic.stop()
+    if "trap" in _enabled_strats:
+        confluence.stop()
+        trap_engine.stop()
+    if "iron_condor" in _enabled_strats:
+        for _ic in _iron_condors:
+            _ic.stop()
     for _ss in _sell_straddles:
         _ss.stop()
     risk_mgr.stop()
@@ -655,6 +673,7 @@ def main() -> None:
                 ui=args.ui,
                 ui_host=args.host,
                 ui_port=args.port,
+                strategies=args.strategies,
             )
         )
 

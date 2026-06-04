@@ -41,7 +41,7 @@ echo "   positions: $(ls -1 data/positions/ 2>/dev/null | wc -l) | history: $(ls
 
 # 5. restart clean (delete first so args/env are fresh)
 pm2 delete algo 2>/dev/null || true
-pm2 start run_system.py --name algo --interpreter python3 -- --mode live --ui --port 5000 --index "$INDEX"
+pm2 start run_system.py --name algo --interpreter python3 -- --mode live --ui --port 5000 --index "$INDEX" --strategies sell_straddle
 pm2 save
 
 echo "== fresh start complete on $INDEX. Watch: pm2 logs algo =="
