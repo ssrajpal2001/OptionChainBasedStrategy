@@ -120,6 +120,9 @@ class ZerodhaBroker(BaseBroker):
         mode = getattr(creds, "trading_mode", "intraday").lower()
         self._trading_mode_raw = "live" if mode == "live" else "paper"
         pt   = getattr(creds, "product_type", "").strip().upper()
+        # Did the CLIENT explicitly choose a product on this binding (the deployment screen)?
+        # If so it is AUTHORITATIVE — it wins over any strategy-section default (req.product).
+        self._product_explicit = pt in ("MIS", "NRML", "INTRADAY", "NORMAL", "DELIVERY")
         if pt in ("MIS", "NRML"):
             self._product = pt
         elif pt == "INTRADAY":
@@ -150,11 +153,18 @@ class ZerodhaBroker(BaseBroker):
         transaction = (kite.TRANSACTION_TYPE_BUY
                        if req.side == OrderSide.BUY
                        else kite.TRANSACTION_TYPE_SELL)
-        # Strategy-wise product: honour the ORDER's product (set per-strategy by the bridge)
-        # if it's a valid MIS/NRML; otherwise fall back to the binding-level default. Lets
-        # sell_straddle run MIS while iron_condor runs NRML on the SAME broker.
+        # Product precedence (per client requirement — deployment-driven):
+        #   1. The CLIENT's explicit choice on THIS binding (deployment screen) — AUTHORITATIVE.
+        #   2. Else the ORDER's product (per-strategy default from the bridge), if valid MIS/NRML.
+        #   3. Else the binding's inferred default.
+        # So the client picks MIS/NRML/carry per deployment, and that drives the order.
         _req_prod = (getattr(req, "product", "") or "").strip().upper()
-        _prod_str = _req_prod if _req_prod in ("MIS", "NRML") else self._product
+        if getattr(self, "_product_explicit", False):
+            _prod_str = self._product
+        elif _req_prod in ("MIS", "NRML"):
+            _prod_str = _req_prod
+        else:
+            _prod_str = self._product
         product = kite.PRODUCT_NRML if _prod_str == "NRML" else kite.PRODUCT_MIS
 
         order_type, price = self._resolve_order_type(req, kite)
