@@ -150,7 +150,12 @@ class ZerodhaBroker(BaseBroker):
         transaction = (kite.TRANSACTION_TYPE_BUY
                        if req.side == OrderSide.BUY
                        else kite.TRANSACTION_TYPE_SELL)
-        product = kite.PRODUCT_NRML if self._product == "NRML" else kite.PRODUCT_MIS
+        # Strategy-wise product: honour the ORDER's product (set per-strategy by the bridge)
+        # if it's a valid MIS/NRML; otherwise fall back to the binding-level default. Lets
+        # sell_straddle run MIS while iron_condor runs NRML on the SAME broker.
+        _req_prod = (getattr(req, "product", "") or "").strip().upper()
+        _prod_str = _req_prod if _req_prod in ("MIS", "NRML") else self._product
+        product = kite.PRODUCT_NRML if _prod_str == "NRML" else kite.PRODUCT_MIS
 
         order_type, price = self._resolve_order_type(req, kite)
 
@@ -174,7 +179,7 @@ class ZerodhaBroker(BaseBroker):
         logger.info(
             "ZerodhaBroker[%s]: placing %s %s x %s | type=%s price=%.2f product=%s",
             self.client_id, req.side.value, req.qty, req.broker_symbol,
-            order_type, price, self._product,
+            order_type, price, _prod_str,
         )
 
         order_id = await asyncio.to_thread(kite.place_order, **params)

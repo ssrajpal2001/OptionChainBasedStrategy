@@ -412,6 +412,15 @@ class StraddleExecutionBridge:
 
         qty = ev.lot_size * ev.lot_multiplier
         side = OrderSide.SELL if ev.action == "ENTRY" else OrderSide.BUY
+        # Strategy-wise product (MIS/NRML) from the sell_straddle config — was hardcoded
+        # INTRADAY (ignored by the broker, which used the binding default). Now per-strategy.
+        try:
+            from data_layer.runtime_config import RuntimeConfig as _RC
+            _ss_product = str(_RC.index_section(ev.underlying, "sell_straddle").get("product_type", "MIS")).upper()
+        except Exception:
+            _ss_product = "MIS"
+        if _ss_product not in ("MIS", "NRML"):
+            _ss_product = "MIS"
 
         fills = {}
         for opt_type, strike in [("CE", ev.ce_strike), ("PE", ev.pe_strike)]:
@@ -430,7 +439,7 @@ class StraddleExecutionBridge:
                 side=side,
                 qty=qty,
                 order_type=OrderType.MARKET,
-                product="INTRADAY",
+                product=_ss_product,
                 tag=f"SS_{ev.underlying}_{ev.action}",
                 client_id=client_id,
             )

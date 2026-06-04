@@ -180,6 +180,15 @@ class ICExecutionBridge:
         qty      = ev.lot_size * ev.lot_multiplier
         provider = getattr(broker, "_binding", None)
         provider = provider.provider if provider else getattr(broker, "provider", "mock")
+        # Strategy-wise product (MIS/NRML) from the iron_condor config (IC is positional → NRML
+        # default), independent of the broker binding. Broker honours req.product if MIS/NRML.
+        try:
+            from data_layer.runtime_config import RuntimeConfig as _RC
+            _ic_product = str(_RC.index_section(ev.underlying, "iron_condor").get("product_type", "NRML")).upper()
+        except Exception:
+            _ic_product = "NRML"
+        if _ic_product not in ("MIS", "NRML"):
+            _ic_product = "NRML"
 
         # On ENTRY: SELL short legs, BUY long legs
         # On EXIT:  BUY short legs (close), SELL long legs (close)
