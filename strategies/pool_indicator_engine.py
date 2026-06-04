@@ -78,9 +78,16 @@ class PoolIndicatorEngine:
         if min(ce_ltp, pe_ltp, ce_atp, pe_atp) <= 0:
             return None
         ind: Dict[str, float] = {"close": ce_ltp + pe_ltp, "vwap": ce_atp + pe_atp}
+        # SLOPE (VWAP delta) is INTRADAY — it must use LIVE bars only. Seed bars carry prev-day
+        # ATP; mixing seed→live makes the first live slope a huge jump across the day boundary
+        # (a false SLOPE, and a contaminated session_min_vwap → false vwap_rise_sl). Seeds are for
+        # RSI/ROC closes only. Live bars have minute index >= 0; seeds use negative indices.
         ca, pa = self._atps.get(ce), self._atps.get(pe)
-        if ca and pa and len(ca) >= 2 and len(pa) >= 2:
-            ind["slope"] = (ca[-1] + pa[-1]) - (ca[-2] + pa[-2])
+        cm, pm = self._mins.get(ce), self._mins.get(pe)
+        ca_live = [a for a, m in zip(ca, cm) if m >= 0] if (ca and cm) else []
+        pa_live = [a for a, m in zip(pa, pm) if m >= 0] if (pa and pm) else []
+        if len(ca_live) >= 2 and len(pa_live) >= 2:
+            ind["slope"] = (ca_live[-1] + pa_live[-1]) - (ca_live[-2] + pa_live[-2])
         cc, pc = self._closes.get(ce), self._closes.get(pe)
         if cc and pc:
             n = min(len(cc), len(pc))
@@ -126,9 +133,17 @@ class PoolIndicatorEngine:
         common = sorted(set(cg) & set(pg))
         if not common:
             return None
+        # RSI/ROC use the FULL series (seed + live closes) for warmth.
         closes = [cg[g][0] + pg[g][0] for g in common]
-        vwaps  = [cg[g][1] + pg[g][1] for g in common]
-        close, vwap = closes[-1], vwaps[-1]
+        # CLOSE / VWAP / SLOPE are INTRADAY — LIVE groups only (g >= 0). Seed groups (negative
+        # minute index → negative group) carry prev-day ATP and would corrupt VWAP/SLOPE across
+        # the day boundary (false SLOPE + false vwap_rise_sl). See pair_indicators() note.
+        live = [g for g in common if g >= 0]
+        if not live:
+            return None
+        vwaps = [cg[g][1] + pg[g][1] for g in live]
+        close = cg[live[-1]][0] + pg[live[-1]][0]   # last LIVE tf candle's close, pairs with vwap
+        vwap  = vwaps[-1]
         if close <= 0 or vwap <= 0:
             return None
         ind: Dict[str, float] = {"close": close, "vwap": vwap}

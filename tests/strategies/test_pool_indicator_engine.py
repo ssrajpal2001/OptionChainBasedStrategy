@@ -87,3 +87,42 @@ def test_tf_none_when_no_complete_group():
     for m in range(3):  # only 3 bars, tf=5 -> group 0 is incomplete -> dropped -> None
         eng.update_tick(100, "CE", 60, 60); eng.update_tick(100, "PE", 40, 40); eng.commit_bar(minute=m)
     assert eng.pair_indicators_tf(100, 100, tf=5) is None
+
+
+def test_slope_and_vwap_ignore_seed_atp_contamination():
+    # Seeds carry prev-day ATP (here a very different scale). SLOPE/VWAP are intraday and must
+    # use LIVE bars only — otherwise the first live slope is a huge seed->live jump (false SLOPE,
+    # and a contaminated session_min_vwap -> false vwap_rise_sl). RSI/ROC still use seed warmth.
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    eng.seed_strike(100, "CE", closes=[60] * 20, atps=[1000] * 20)
+    eng.seed_strike(100, "PE", closes=[40] * 20, atps=[1000] * 20)
+    # one LIVE bar -> slope unavailable (only 1 live atp), NOT a seed->live jump
+    eng.update_tick(100, "CE", 60, 50); eng.update_tick(100, "PE", 40, 50)
+    eng.commit_bar(minute=540)
+    ind1 = eng.pair_indicators(100, 100)
+    assert "slope" not in ind1
+    # second LIVE bar -> slope from LIVE atps only
+    eng.update_tick(100, "CE", 61, 52); eng.update_tick(100, "PE", 41, 52)
+    eng.commit_bar(minute=541)
+    ind2 = eng.pair_indicators(100, 100)
+    assert "slope" in ind2
+    assert abs(ind2["slope"] - ((52 + 52) - (50 + 50))) < 1e-9   # = 4, not ~ -1900
+    assert "rsi" in ind2   # seeds still warm RSI
+
+
+def test_tf_vwap_slope_live_only_rsi_seeded():
+    # tf resampling: VWAP/SLOPE from live tf groups only; RSI/ROC keep seed+live closes.
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    eng.seed_strike(100, "CE", closes=[60] * 30, atps=[1000] * 30)
+    eng.seed_strike(100, "PE", closes=[40] * 30, atps=[1000] * 30)
+    # 6 live 1-min bars (minutes 540..545) -> two complete 2-min groups (270,271); 272 in-progress
+    for i, m in enumerate(range(540, 546)):
+        eng.update_tick(100, "CE", 60 + i, 50 + i)
+        eng.update_tick(100, "PE", 40, 50)
+        eng.commit_bar(minute=m)
+    ind = eng.pair_indicators_tf(100, 100, tf=2)
+    assert ind is not None
+    # vwap from live atp only (~ 50s), NOT ~2000 from seeds
+    assert ind["vwap"] < 200
+    assert "slope" in ind and abs(ind["slope"]) < 50   # small live delta, not a seed jump
+    assert "rsi" in ind                                # seed-warmed
