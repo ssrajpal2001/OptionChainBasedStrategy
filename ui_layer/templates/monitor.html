@@ -556,7 +556,8 @@ document.addEventListener('alpine:init', () => {
     /* ── Client positions / history ─────────────────────────────────── */
     csActiveBrokerTab: '',   // binding_id of the selected broker in positions view
     csPositions: {},         // keyed by binding_id → [{strategy, instrument, legs, pnl}]
-    csHistory: [],           // trade history rows
+    csHistory: [],           // trade history rows (raw, per-trade)
+    csHistoryFlat: [],       // flattened — ONE ROW PER STRIKE (leg)
     csHistoryLoading: false,
     csKillBroker: {},        // {binding_id: {armed:false, countdown:5, timer:null}}
     csPosBrokerLoading: false,
@@ -2048,6 +2049,33 @@ document.addEventListener('alpine:init', () => {
         if (r && r.ok) {
           const d = await r.json();
           this.csHistory = d.trades || [];
+          // Flatten to ONE ROW PER STRIKE: each leg (CE / PE) becomes its own row.
+          const flat = [];
+          for (const tr of this.csHistory) {
+            const legs = (tr.legs && tr.legs.length) ? tr.legs : null;
+            if (legs) {
+              for (const lg of legs) {
+                flat.push({
+                  date: tr.date || tr.ts || '—',
+                  strategy: tr.strategy || '—',
+                  instrument: tr.instrument || '—',
+                  side: lg.side || '', strike: lg.strike || '',
+                  entry: (lg.entry != null ? lg.entry : null),
+                  exit:  (lg.exit  != null ? lg.exit  : null),
+                  pnl:   (lg.pnl   != null ? lg.pnl   : 0),
+                  reason: tr.exit_reason || '—',
+                });
+              }
+            } else {
+              flat.push({
+                date: tr.date || tr.ts || '—', strategy: tr.strategy || '—',
+                instrument: tr.instrument || '—', side: '', strike: '',
+                entry: tr.entry_price, exit: tr.exit_price, pnl: tr.pnl || 0,
+                reason: tr.exit_reason || '—',
+              });
+            }
+          }
+          this.csHistoryFlat = flat;
         }
       } catch {} finally { this.csHistoryLoading = false; }
     },
@@ -6686,61 +6714,41 @@ function histReplay() {
           </button>
         </div>
 
-        <div x-show="csHistory.length === 0 && !csHistoryLoading" class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
+        <div x-show="csHistoryFlat.length === 0 && !csHistoryLoading" class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
           No trade history yet.
         </div>
 
-        <div x-show="csHistory.length > 0" class="overflow-x-auto">
+        <div x-show="csHistoryFlat.length > 0" class="overflow-x-auto">
           <table class="w-full text-xs">
             <thead>
               <tr class="border-b" style="border-color:var(--t-border);background:var(--t-surface)">
-                <th class="px-4 py-2 text-left sec-label">DATE</th>
+                <th class="px-4 py-2 text-left sec-label">TIME</th>
                 <th class="px-4 py-2 text-left sec-label">STRATEGY</th>
                 <th class="px-4 py-2 text-left sec-label">INSTRUMENT</th>
-                <th class="px-4 py-2 text-left sec-label">ENTRY</th>
-                <th class="px-4 py-2 text-left sec-label">EXIT</th>
-                <th class="px-4 py-2 text-left sec-label">REASON</th>
+                <th class="px-4 py-2 text-left sec-label">STRIKE</th>
+                <th class="px-4 py-2 text-right sec-label">ENTRY</th>
+                <th class="px-4 py-2 text-right sec-label">EXIT</th>
                 <th class="px-4 py-2 text-right sec-label">P&amp;L</th>
+                <th class="px-4 py-2 text-left sec-label">REASON</th>
               </tr>
             </thead>
             <tbody>
-              <template x-for="(tr,i) in csHistory" :key="i">
+              <template x-for="(rw,i) in csHistoryFlat" :key="i">
                 <tr class="border-b last:border-b-0 hover:bg-[var(--t-surface)] transition-colors" style="border-color:var(--t-border)">
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="tr.date||tr.ts||'—'"></td>
-                  <td class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="tr.strategy||'—'"></td>
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="tr.instrument||'—'"></td>
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)">
-                    <span x-text="tr.entry_price||'—'"></span>
-                    <template x-if="tr.legs && tr.legs.length">
-                      <div class="mt-0.5 space-y-0.5">
-                        <template x-for="(lg,li) in tr.legs" :key="li">
-                          <div class="text-[10px]" style="color:var(--t-cyan)">
-                            <span x-text="lg.side+' '+lg.strike"></span>
-                            <span style="color:var(--t-muted)" x-text="'@'+(lg.entry||0).toFixed(2)"></span>
-                          </div>
-                        </template>
-                      </div>
-                    </template>
-                  </td>
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)">
-                    <span x-text="tr.exit_price||'—'"></span>
-                    <template x-if="tr.legs && tr.legs.length">
-                      <div class="mt-0.5 space-y-0.5">
-                        <template x-for="(lg,li) in tr.legs" :key="li">
-                          <div class="text-[10px]">
-                            <span style="color:var(--t-cyan)" x-text="lg.side+' '"></span>
-                            <span style="color:var(--t-muted)" x-text="'@'+(lg.exit||0).toFixed(2)"></span>
-                            <span :style="`color:${(lg.pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                                  x-text="' ('+((lg.pnl||0)>=0?'+':'')+(lg.pnl||0).toFixed(0)+')'"></span>
-                          </div>
-                        </template>
-                      </div>
-                    </template>
-                  </td>
-                  <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="tr.exit_reason||'—'"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="rw.date"></td>
+                  <td class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="rw.strategy"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="rw.instrument"></td>
+                  <td class="px-4 py-2 font-mono font-semibold"
+                      :style="`color:${rw.side==='CE'?'var(--t-green)':rw.side==='PE'?'var(--t-amber)':'var(--t-text)'}`"
+                      x-text="(rw.side?rw.side+' ':'')+(rw.strike||'')"></td>
+                  <td class="px-4 py-2 font-mono text-right" style="color:var(--t-muted)"
+                      x-text="rw.entry!=null?Number(rw.entry).toFixed(2):'—'"></td>
+                  <td class="px-4 py-2 font-mono text-right" style="color:var(--t-muted)"
+                      x-text="rw.exit!=null?Number(rw.exit).toFixed(2):'—'"></td>
                   <td class="px-4 py-2 font-mono font-bold text-right"
-                      :style="`color:${(tr.pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                      x-text="((tr.pnl||0)>=0?'+':'')+'₹'+(tr.pnl||0).toFixed(0)"></td>
+                      :style="`color:${(rw.pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                      x-text="((rw.pnl||0)>=0?'+':'')+'₹'+(rw.pnl||0).toFixed(0)"></td>
+                  <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="rw.reason"></td>
                 </tr>
               </template>
             </tbody>
