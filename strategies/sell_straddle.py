@@ -1536,7 +1536,7 @@ class SellStraddleStrategy:
             pos.peak_profit = 0.0
             pos.trailing_active = False
             pos.open_time = now
-            pos.session_min_vwap = self._ind.get("vwap", float("inf"))
+            pos.session_min_vwap = float("inf")   # re-baseline vs the NEW pair (avoid instant false vwap_rise)
             self._persist()
             return True
         if outcome == "partial_pe":
@@ -1554,7 +1554,7 @@ class SellStraddleStrategy:
             ce_leg=StraddleLeg("CE", ce_s, ce_l, ce_l),
             pe_leg=StraddleLeg("PE", pe_s, pe_l, pe_l),
             net_credit=ce_l + pe_l, open_time=now, status="open",
-            session_min_vwap=self._ind.get("vwap", float("inf")),
+            session_min_vwap=float("inf"),   # re-baseline vs the NEW pair (avoid instant false vwap_rise)
             entry_indicators=dict(self._ind),
             lot_size=self._lot_size * self._lot_multiplier,
         )
@@ -1658,6 +1658,10 @@ class SellStraddleStrategy:
             logger.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (balanced vs running %s%d @%.2f)",
                         self._underlying, side, side, new_strike, new_ltp, other, run_strike, run_ltp)
             await self._open_leg(side, new_strike, new_ltp, now, f"single_side_roll_{reason}")
+            # Re-baseline vwap-rise vs the NEW combined pair — a rolled leg shifts the combined VWAP,
+            # and comparing the new pair against the OLD session low instantly re-fires vwap_rise.
+            if self._position:
+                self._position.session_min_vwap = float("inf")
             self._persist()
             return
         # No valid partner in the pool → close all and start fresh (re-entry loop re-enters).
@@ -1675,6 +1679,8 @@ class SellStraddleStrategy:
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         if strike and ltp and ltp >= ltp_target:
             await self._open_leg(side, strike, ltp, now, f"partial_roll_{reason}")
+            if self._position:
+                self._position.session_min_vwap = float("inf")   # re-baseline vs NEW pair (avoid false vwap_rise)
             self._persist()
             return
         logger.warning("SellStraddle[%s]: partial roll %s invalid candidate — closing %s (0-or-2).",
