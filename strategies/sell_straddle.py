@@ -1164,7 +1164,10 @@ class SellStraddleStrategy:
             net_credit        = ce_ltp + pe_ltp,
             open_time         = now,
             status            = "open",
-            session_min_vwap  = self._ind.get("vwap", float("inf")),
+            # inf -> the first tick re-captures THIS pair's VWAP as the low (rise starts at 0).
+            # Using self._ind here would seed the OLD pair's VWAP (it lags one candle) and could
+            # fire a false vwap_rise on a fresh entry right after a full close.
+            session_min_vwap  = float("inf"),
             entry_indicators  = self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
             lot_size          = self._lot_size * self._lot_multiplier,
         )
@@ -1640,7 +1643,7 @@ class SellStraddleStrategy:
         run_leg = pos.ce_leg if other == "CE" else pos.pe_leg
         run_strike = int(run_leg.strike)
         run_ltp = float(getattr(run_leg, "ltp", 0.0) or getattr(run_leg, "entry_price", 0.0) or 0.0)
-        await self._close_leg(side, reason, now)
+        orig_strike = int((pos.ce_leg if side == "CE" else pos.pe_leg).strike)
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
@@ -1648,20 +1651,33 @@ class SellStraddleStrategy:
         offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
 
+        # SELECT THE REPLACEMENT BEFORE CLOSING — so a same-strike / no-op roll fires NO orders.
+        # (Previously we closed first, then if selection returned the SAME strike we'd re-sell it:
+        #  a buy-to-close + re-sell on the identical strike — a pointless wash + 2 broker orders.)
         sel = select_partner_for(
             self._strike_prem, side, run_strike, run_ltp,
             self._spot, step, offset, ltp_target,
             rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
         )
+        if sel and int(sel[0]) == orig_strike:
+            logger.info("SellStraddle[%s]: roll %s SKIPPED — best partner is the SAME strike %d "
+                        "(no-op, no orders sent).", self._underlying, side, orig_strike)
+            return
+
+        await self._close_leg(side, reason, now)
         if sel:
             new_strike, new_ltp = sel
             logger.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (balanced vs running %s%d @%.2f)",
                         self._underlying, side, side, new_strike, new_ltp, other, run_strike, run_ltp)
             await self._open_leg(side, new_strike, new_ltp, now, f"single_side_roll_{reason}")
-            # Re-baseline vwap-rise vs the NEW combined pair — a rolled leg shifts the combined VWAP,
-            # and comparing the new pair against the OLD session low instantly re-fires vwap_rise.
+            # Re-baseline the per-position trackers vs the NEW combined pair: a rolled leg shifts the
+            # combined VWAP (else vwap_rise re-fires vs the OLD low) and the credit (else the scalable
+            # TSL stays anchored to the old peak).
             if self._position:
-                self._position.session_min_vwap = float("inf")
+                self._position.session_min_vwap  = float("inf")
+                self._position.peak_profit        = 0.0
+                self._position.tsl_high_lock_rs   = 0.0
+                self._position.trailing_active    = False
             self._persist()
             return
         # No valid partner in the pool → close all and start fresh (re-entry loop re-enters).
@@ -1679,8 +1695,11 @@ class SellStraddleStrategy:
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         if strike and ltp and ltp >= ltp_target:
             await self._open_leg(side, strike, ltp, now, f"partial_roll_{reason}")
-            if self._position:
-                self._position.session_min_vwap = float("inf")   # re-baseline vs NEW pair (avoid false vwap_rise)
+            if self._position:   # re-baseline vwap-rise + scalable-TSL vs the NEW pair
+                self._position.session_min_vwap  = float("inf")
+                self._position.peak_profit        = 0.0
+                self._position.tsl_high_lock_rs   = 0.0
+                self._position.trailing_active    = False
             self._persist()
             return
         logger.warning("SellStraddle[%s]: partial roll %s invalid candidate — closing %s (0-or-2).",
