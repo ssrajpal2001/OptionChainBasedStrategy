@@ -27,6 +27,9 @@ from typing import Dict, List, Optional
 
 from config.global_config import IST, Topic, order_exchange
 from data_layer.base_feeder import EventBus
+from data_layer.instrument_registry import REGISTRY as _REG
+from data_layer.runtime_config import RuntimeConfig as _RC
+from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,11 @@ class TradeLogger:
         except Exception:
             pass
 
+    def log_event(self, client_id: str, binding_id: str, message: str) -> None:
+        """Generic per-client-broker line writer (square-offs, order placements/rejections)."""
+        ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+        self._handle(client_id, binding_id).write(f"{ts}  {message}\n")
+
     def close_all(self) -> None:
         for h in self._handles.values():
             try:
@@ -336,6 +344,60 @@ class StraddleExecutionBridge:
                 ev.action, ev.underlying,
             )
 
+    async def square_off_binding(self, client_id: str, binding_id: str, strategies) -> int:
+        """Square off (buy-to-close) the open sell-straddle legs for ONE binding's broker ONLY.
+        Does NOT modify the strategy's logical position or any other client's broker. Returns the
+        number of legs squared off. No-op (returns 0) if the broker or position is absent."""
+        router = self._router
+        broker = ((getattr(router, "_brokers", None) or {}).get(client_id, {}) or {}).get(binding_id)
+        if broker is None:
+            return 0
+        _b = getattr(broker, "_binding", None)
+        provider = (_b.provider if _b else getattr(broker, "provider", "mock"))
+        from datetime import datetime as _dt
+        from config.global_config import IST as _IST
+        legs_closed = 0
+        for ss in (strategies or []):
+            pos = getattr(ss, "_position", None)
+            if not pos or getattr(pos, "status", "") != "open":
+                continue
+            underlying = ss._underlying
+            try:
+                product = str(_RC.index_section(underlying, "sell_straddle").get("product_type", "MIS")).upper()
+            except Exception:
+                product = "MIS"
+            if product not in ("MIS", "NRML"):
+                product = "MIS"
+            _today = _dt.now(_IST).date()
+            try:
+                _exps = _REG.all_expiries(underlying)
+                expiry = next((e for e in _exps if e >= _today), _today)
+            except Exception:
+                expiry = _today
+            qty = int(getattr(pos, "lot_size", 0) or (ss._lot_size * ss._lot_multiplier))
+            for opt_type, strike in (("CE", pos.ce_leg.strike), ("PE", pos.pe_leg.strike)):
+                symbol = _REG.get_broker_symbol(underlying, expiry, int(strike), opt_type, provider)
+                if not symbol:
+                    continue
+                req = OrderRequest(
+                    broker_symbol=symbol, exchange=order_exchange(underlying),
+                    side=OrderSide.BUY, qty=qty, order_type=OrderType.MARKET,
+                    product=product, tag=f"SQUAREOFF_{binding_id}"[:20], client_id=client_id,
+                )
+                try:
+                    await broker.place_order(req)
+                    legs_closed += 1
+                    logger.info("StraddleBridge: SQUARE-OFF %s %s%d for %s/%s (toggle OFF)",
+                                underlying, opt_type, int(strike), client_id, binding_id)
+                    self._trade_log.log_event(client_id, binding_id,
+                        f"SQUARE-OFF (toggle OFF) {underlying} {opt_type}{int(strike)} qty={qty} product={product}")
+                except Exception as exc:
+                    logger.error("StraddleBridge: SQUARE-OFF FAILED %s %s%d for %s/%s: %s",
+                                 underlying, opt_type, int(strike), client_id, binding_id, exc)
+                    self._trade_log.log_event(client_id, binding_id,
+                        f"SQUARE-OFF FAILED {underlying} {opt_type}{int(strike)}: {exc}")
+        return legs_closed
+
     async def _paper_fill(
         self,
         ev:         StraddleOrderEvent,
@@ -450,11 +512,15 @@ class StraddleExecutionBridge:
                     "[LIVE] %s %s %s order placed — %s@%.2f | client=%s",
                     ev.action, ev.underlying, opt_type, symbol, fills[opt_type], client_id,
                 )
+                self._trade_log.log_event(client_id, binding_id,
+                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} placed @ {fills[opt_type]:.2f}")
             except Exception as exc:
                 logger.error(
                     "[LIVE] %s %s %s order FAILED: %s — falling back to LTP",
                     ev.action, ev.underlying, opt_type, exc,
                 )
+                self._trade_log.log_event(client_id, binding_id,
+                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} ORDER FAILED: {exc}")
                 fills[opt_type] = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
 
         fill_ev = StraddleFillEvent(

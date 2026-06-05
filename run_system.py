@@ -483,6 +483,7 @@ async def _run_live(
                 risk_manager=risk_mgr,
                 iron_condors=_iron_condors,
                 sell_straddles=_sell_straddles,
+                straddle_bridge=straddle_bridge,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)

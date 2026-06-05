@@ -581,6 +581,7 @@ class DashboardServer:
         risk_manager=None, # RiskManager — optional, for firm risk summary + kill-all
         iron_condors=None,  # List[IronCondorStrategy]
         sell_straddles=None, # List[SellStraddleStrategy]
+        straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -592,6 +593,7 @@ class DashboardServer:
         self._risk_manager = risk_manager
         self._iron_condors: list = iron_condors or []
         self._sell_straddles: list = sell_straddles or []
+        self._straddle_bridge = straddle_bridge
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -1586,6 +1588,13 @@ class DashboardServer:
             # trade, orders can be sent here". Deploy only selects strategies.
             await _srv._client_db.set_engine_active(cid, binding_id, new_state)
 
+            if not new_state and _srv._straddle_bridge is not None:
+                try:
+                    n = await _srv._straddle_bridge.square_off_binding(cid, binding_id, _srv._sell_straddles)
+                    logger.info("Dashboard: Trade OFF %s/%s — squared off %d leg(s).", cid, binding_id, n)
+                except Exception as exc:
+                    logger.error("Dashboard: square-off on Trade OFF failed for %s/%s: %s", cid, binding_id, exc)
+
             if new_state:
                 # Hot-apply every saved deployment for this binding so lot/squareoff
                 # are live immediately when the engine comes up.
@@ -2028,6 +2037,12 @@ class DashboardServer:
             await _srv._client_db.set_terminal_connected(cid, binding_id, False)
             await _srv._client_db.set_engine_active(cid, binding_id, False)
             await _srv._client_db.set_trade_enabled(cid, binding_id, False)
+            if _srv._straddle_bridge is not None:
+                try:
+                    n = await _srv._straddle_bridge.square_off_binding(cid, binding_id, _srv._sell_straddles)
+                    logger.info("Dashboard: Terminal OFF %s/%s — squared off %d leg(s).", cid, binding_id, n)
+                except Exception as exc:
+                    logger.error("Dashboard: square-off on Terminal OFF failed for %s/%s: %s", cid, binding_id, exc)
             logger.info(
                 "Terminal disconnect: [%s/%s] disconnected — terminal + engine + trade cleared.",
                 cid, binding_id,
