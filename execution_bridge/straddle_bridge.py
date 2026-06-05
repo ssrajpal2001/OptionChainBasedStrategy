@@ -186,18 +186,24 @@ class TradeLogger:
         # Persist to the client trade-history (powers the dashboard History view).
         try:
             from data_layer import trade_history as _th
-            # Short straddle: per-leg P&L = (sell entry − buy-back exit) × qty.
-            _legs = [
+            # Record ONLY the legs actually in this event. A single-side roll/cleanup publishes
+            # legs=[ "CE" ] or [ "PE" ]; recording both legs every time produced duplicate history
+            # rows (the same pair logged once per leg-close, and twice for a physical roll).
+            _sides = set(getattr(ev, "legs", None) or ["CE", "PE"])
+            _all = [
                 {"side": "CE", "strike": ev.ce_strike, "entry": entry_ce,
                  "exit": fill.ce_fill, "pnl": (entry_ce - fill.ce_fill) * qty},
                 {"side": "PE", "strike": ev.pe_strike, "entry": entry_pe,
                  "exit": fill.pe_fill, "pnl": (entry_pe - fill.pe_fill) * qty},
             ]
-            _th.record(
-                client_id, "sell_straddle", ev.underlying,
-                entry_ce + entry_pe, fill.ce_fill + fill.pe_fill,
-                ev.close_reason, pnl_rs, binding_id=binding_id, legs=_legs,
-            )
+            _legs = [l for l in _all if l["side"] in _sides]
+            if _legs:
+                _th.record(
+                    client_id, "sell_straddle", ev.underlying,
+                    sum(l["entry"] for l in _legs), sum(l["exit"] for l in _legs),
+                    ev.close_reason, sum(l["pnl"] for l in _legs),
+                    binding_id=binding_id, legs=_legs,
+                )
         except Exception:
             pass
 
