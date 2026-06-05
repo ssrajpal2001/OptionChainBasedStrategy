@@ -12,6 +12,13 @@ when the market stays calm and those options lose value (**time decay**). We **a
 leg when the market drifts, and **fully exit** on a strong adverse move, a profit/loss target, or
 end of day.
 
+> ⚙️ **Everything in the strategy is dynamic.** The entry conditions, the exit conditions, the
+> indicators, the operators, the comparison values, **and the timeframe of each rule** are all
+> chosen from dropdowns in the dashboard **before you start the terminal**. The specific rules,
+> timeframes, and percentages shown in this guide are **one example configuration** — they are not
+> hard-coded. Read every "1-min", "2-min", "< 0", "+20%", "4×", etc. below as *"whatever you
+> configured for that rule."*
+
 ---
 
 ## Before anything — the gate
@@ -28,28 +35,35 @@ Trading only starts when **all** of these are true:
 
 ## ENTRY — when do we sell?
 
-We watch the **combined premium** (Call price + Put price) against its own **average (VWAP)** and
-its **trend (slope)**. We sell **only when premium is BELOW its average AND FALLING** — the best
-moment to sell a premium that is already weakening.
+The strategy evaluates a set of **entry conditions you build from dropdowns**. Each condition picks:
+an **indicator** (the combined premium's `CLOSE`, `VWAP`, `SLOPE`, `RSI`, or `ROC`), an **operator**
+(`<`, `>`, …), a **value/operand**, and a **timeframe** (1m / 2m / 5m / …). You can use one condition
+or several combined with AND. There are two independent rule sets — one for the **first trade of the
+day** and one for **re-entries** — each with its own conditions and timeframes.
 
-| Stage | Checked | Condition | Pair chosen |
-|-------|---------|-----------|-------------|
-| **Beginning** (first trade of the day) | every **2 min** | `CLOSE < VWAP (1-min)` **AND** `SLOPE < 0 (2-min)` | balanced near-ATM Call + Put |
-| **Re-entry** (every trade after) | every **5 min** | `CLOSE < VWAP (5-min)` **AND** `SLOPE < 0 (2-min)` | most-balanced pair from ATM ±4 strikes |
+**Example configuration** (what you might pick — all of this is editable in the UI):
 
-When the condition is true → **SELL** the pair → position is open.
+| Stage | Checked every | Example condition (configurable) | Pair chosen |
+|-------|---------------|----------------------------------|-------------|
+| **Beginning** (first trade of the day) | its max timeframe | e.g. `CLOSE < VWAP (1-min)` **AND** `SLOPE < 0 (2-min)` | balanced near-ATM Call + Put |
+| **Re-entry** (every trade after) | its max timeframe | e.g. `CLOSE < VWAP (5-min)` **AND** `SLOPE < 0 (2-min)` | most-balanced pair from ATM ± offset strikes |
 
-> Each rule is checked on its own timeframe at the candle close **+5 seconds** (so the broker's
-> data for that candle has actually arrived). The whole set is evaluated together at the slowest
-> rule's boundary.
+When all configured conditions are true → **SELL** the pair → position is open.
+
+> **Timing:** each condition is read on **its own** configured timeframe, at that candle's close
+> **+5 seconds** (so the broker's data for that candle has arrived). The whole set is evaluated
+> together once per the **slowest** condition's timeframe — so a 1-min and a 5-min condition are
+> only judged true at the same moment when the 5-min candle closes.
 
 ---
 
 ## MANAGING the position — exit ladder (top wins)
 
-Checked continuously while a position is open. The first matching rule acts.
+Checked continuously while a position is open. The first matching rule acts. **Each exit is
+individually enabled/disabled and its thresholds, timeframes, and the rule-builder conditions are
+all set from the dashboard** — the values below are an example, not fixed.
 
-| # | Trigger | Plain meaning | Action |
+| # | Trigger (example values — configurable) | Plain meaning | Action |
 |---|---------|---------------|--------|
 | 1 | **3:15 PM** | end of day | **Close all** |
 | 2 | **Day +20%** | day profit target | **Close + stop for the day** |
