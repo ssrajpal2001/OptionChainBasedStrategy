@@ -974,7 +974,11 @@ class SellStraddleStrategy:
         workflow = ss.get("entry_workflow_mode", "hybrid")
         is_beginning = (self._trades_today == 0)
 
-        want_beg = (workflow == "beginning_only") or (workflow == "hybrid" and is_beginning)
+        # BEGINNING is a first-trade-of-day concept. Once it has had its first WARM evaluation and
+        # failed (_beginning_failed), the rest of the day uses the re-entry pool only — beginning is
+        # NOT re-checked every 2 min. It re-arms only via reset_session / a fresh first trade.
+        want_beg = (workflow == "beginning_only") or (
+            workflow == "hybrid" and is_beginning and not self._beginning_failed)
         want_re  = (workflow == "reentry_only") or (workflow == "hybrid")
 
         due_beg = False
@@ -1125,6 +1129,12 @@ class SellStraddleStrategy:
             ce_ltp + pe_ltp, reason, "PASS" if passed else "BLOCK", _dump,
         )
         if not passed:
+            # Hybrid: a WARM beginning BLOCK flips this cycle to the re-entry pool for the rest of
+            # the day (beginning is first-trade-of-day only). Flip ONLY when the rules were genuinely
+            # evaluable (all operands present) — never on a warming/'N/A' block, so we don't skip
+            # beginning before its slow-tf indicators are ready.
+            if use_beginning_sel and "N/A" not in reason:
+                self._beginning_failed = True
             return
 
         self._clog.info(
@@ -1350,11 +1360,23 @@ class SellStraddleStrategy:
                 if pos.session_min_vwap < float("inf"):
                     rise_pct = (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100
                     if rise_pct >= self._vwap_rise_threshold:
+                        # ROLLOVER (not full exit): close the LESS-BURNING (most-decayed/profitable)
+                        # leg and re-sell it balanced against the running (burning) leg. For a short
+                        # leg, pnl = entry - ltp; the higher pnl is the less-burning side.
+                        _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
+                        _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
+                        _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
                         logger.info(
-                            "SellStraddle[%s]: VWAP RISE SL — rise=%.2f%% curr=%.2f low=%.2f",
+                            "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → roll "
+                            "less-burning %s (CE pnl=%.2f PE pnl=%.2f)",
                             self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
+                            _less_burning, _ce_pnl, _pe_pnl,
                         )
-                        await self._close_position("vwap_rise_sl")  # full exit → fresh re-entry
+                        await self._single_side_roll(_less_burning, now, "vwap_rise_roll")
+                        # Re-baseline the VWAP-rise low against the new (rolled) position so it does
+                        # not immediately re-trigger every tick (natural cooldown until it rises again).
+                        if self._position and self._position.status == "open":
+                            self._position.session_min_vwap = float("inf")
                         return
 
         # EXIT-EVAL — once per max-TF bucket, log EVERY active exit criterion's live
