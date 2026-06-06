@@ -2064,9 +2064,10 @@ document.addEventListener('alpine:init', () => {
                             exit_ts: (tr.date || tr.ts || null) }];
             const strat = tr.strategy || '—', inst = tr.instrument || '—';
             const _sk = (lg) => (lg.side ? lg.side + ' ' : '') + (lg.strike || '');
-            // OPEN rows (sold to open) — newest trade first, opens before closes.
+            // OPEN rows (sold to open). `_ts` = raw timestamp used for chronological sort.
             for (const lg of legs) {
               flat.push({
+                _ts: lg.entry_ts || '',
                 time: this.fmtHMS(lg.entry_ts),
                 action: 'SELL', side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
@@ -2076,8 +2077,10 @@ document.addEventListener('alpine:init', () => {
             }
             // CLOSE rows (bought to close).
             for (const lg of legs) {
+              const _x = lg.exit_ts || tr.date || tr.ts || '';
               flat.push({
-                time: this.fmtHMS(lg.exit_ts || tr.date || tr.ts),
+                _ts: _x,
+                time: this.fmtHMS(_x),
                 action: 'BUY', side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
                 price: (lg.exit != null ? lg.exit : null),
@@ -2085,6 +2088,14 @@ document.addEventListener('alpine:init', () => {
               });
             }
           }
+          // Strict time order — newest event first (like a broker order book). Rows with no
+          // timestamp (pre-fix opens not yet backfilled) sink to the bottom.
+          flat.sort((a, b) => {
+            if (!a._ts && !b._ts) return 0;
+            if (!a._ts) return 1;
+            if (!b._ts) return -1;
+            return String(b._ts).localeCompare(String(a._ts));
+          });
           this.csHistoryFlat = flat;
           this.csHistPage = 1;   // reset to first page on (re)load
         }
