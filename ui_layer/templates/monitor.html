@@ -2049,32 +2049,37 @@ document.addEventListener('alpine:init', () => {
         if (r && r.ok) {
           const d = await r.json();
           this.csHistory = d.trades || [];
-          // Flatten to ONE ROW PER STRIKE: each leg (CE / PE) becomes its own row.
+          // EVENT LEDGER (order-book style): each leg becomes TWO rows —
+          //   a SELL (sold-to-open) row with the OPEN time + entry price, and
+          //   a BUY (bought-to-close) row with the CLOSE time + exit price + P&L.
+          // Per trade we list the open rows, then the close rows. So a CE+PE
+          // straddle that opened and closed = 4 rows.
           const flat = [];
           for (const tr of this.csHistory) {
-            const legs = (tr.legs && tr.legs.length) ? tr.legs : null;
-            if (legs) {
-              for (const lg of legs) {
-                flat.push({
-                  date: tr.date || tr.ts || '—',
-                  strategy: tr.strategy || '—',
-                  instrument: tr.instrument || '—',
-                  side: lg.side || '', strike: lg.strike || '',
-                  entry: (lg.entry != null ? lg.entry : null),
-                  exit:  (lg.exit  != null ? lg.exit  : null),
-                  pnl:   (lg.pnl   != null ? lg.pnl   : 0),
-                  reason: tr.exit_reason || '—',
-                  entry_ts: lg.entry_ts || null,
-                  exit_ts: (lg.exit_ts || tr.date || tr.ts || null),
-                });
-              }
-            } else {
+            const legs = (tr.legs && tr.legs.length) ? tr.legs
+                       : [{ side: '', strike: '', entry: tr.entry_price,
+                            exit: tr.exit_price, pnl: tr.pnl, entry_ts: null,
+                            exit_ts: (tr.date || tr.ts || null) }];
+            const strat = tr.strategy || '—', inst = tr.instrument || '—';
+            const _sk = (lg) => (lg.side ? lg.side + ' ' : '') + (lg.strike || '');
+            // OPEN rows (sold to open) — newest trade first, opens before closes.
+            for (const lg of legs) {
               flat.push({
-                date: tr.date || tr.ts || '—', strategy: tr.strategy || '—',
-                instrument: tr.instrument || '—', side: '', strike: '',
-                entry: tr.entry_price, exit: tr.exit_price, pnl: tr.pnl || 0,
-                reason: tr.exit_reason || '—',
-                entry_ts: null, exit_ts: (tr.date || tr.ts || null),
+                time: this.fmtHMS(lg.entry_ts),
+                action: 'SELL', side: lg.side || '',
+                strategy: strat, instrument: inst, strike: _sk(lg),
+                price: (lg.entry != null ? lg.entry : null),
+                pnl: null, reason: 'entry',
+              });
+            }
+            // CLOSE rows (bought to close).
+            for (const lg of legs) {
+              flat.push({
+                time: this.fmtHMS(lg.exit_ts || tr.date || tr.ts),
+                action: 'BUY', side: lg.side || '',
+                strategy: strat, instrument: inst, strike: _sk(lg),
+                price: (lg.exit != null ? lg.exit : null),
+                pnl: (lg.pnl != null ? lg.pnl : 0), reason: tr.exit_reason || '—',
               });
             }
           }
@@ -6737,13 +6742,12 @@ function histReplay() {
           <table class="w-full text-xs">
             <thead>
               <tr class="border-b" style="border-color:var(--t-border);background:var(--t-surface)">
-                <th class="px-4 py-2 text-left sec-label">OPENED</th>
-                <th class="px-4 py-2 text-left sec-label">CLOSED</th>
+                <th class="px-4 py-2 text-left sec-label">TIME</th>
+                <th class="px-4 py-2 text-left sec-label">ACTION</th>
                 <th class="px-4 py-2 text-left sec-label">STRATEGY</th>
                 <th class="px-4 py-2 text-left sec-label">INSTRUMENT</th>
                 <th class="px-4 py-2 text-left sec-label">STRIKE</th>
-                <th class="px-4 py-2 text-right sec-label">ENTRY</th>
-                <th class="px-4 py-2 text-right sec-label">EXIT</th>
+                <th class="px-4 py-2 text-right sec-label">PRICE</th>
                 <th class="px-4 py-2 text-right sec-label">P&amp;L</th>
                 <th class="px-4 py-2 text-left sec-label">REASON</th>
               </tr>
@@ -6751,20 +6755,20 @@ function histReplay() {
             <tbody>
               <template x-for="(rw,i) in csHistoryFlat" :key="i">
                 <tr class="border-b last:border-b-0 hover:bg-[var(--t-surface)] transition-colors" style="border-color:var(--t-border)">
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="fmtHMS(rw.entry_ts)"></td>
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="fmtHMS(rw.exit_ts)"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="rw.time"></td>
+                  <td class="px-4 py-2 font-mono font-bold"
+                      :style="`color:${rw.action==='SELL'?'var(--t-green)':'var(--t-red)'}`"
+                      x-text="rw.action"></td>
                   <td class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="rw.strategy"></td>
                   <td class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="rw.instrument"></td>
                   <td class="px-4 py-2 font-mono font-semibold"
                       :style="`color:${rw.side==='CE'?'var(--t-green)':rw.side==='PE'?'var(--t-amber)':'var(--t-text)'}`"
-                      x-text="(rw.side?rw.side+' ':'')+(rw.strike||'')"></td>
-                  <td class="px-4 py-2 font-mono text-right" style="color:var(--t-muted)"
-                      x-text="rw.entry!=null?Number(rw.entry).toFixed(2):'—'"></td>
-                  <td class="px-4 py-2 font-mono text-right" style="color:var(--t-muted)"
-                      x-text="rw.exit!=null?Number(rw.exit).toFixed(2):'—'"></td>
+                      x-text="rw.strike"></td>
+                  <td class="px-4 py-2 font-mono text-right" style="color:var(--t-text)"
+                      x-text="rw.price!=null?Number(rw.price).toFixed(2):'—'"></td>
                   <td class="px-4 py-2 font-mono font-bold text-right"
-                      :style="`color:${(rw.pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                      x-text="((rw.pnl||0)>=0?'+':'')+'₹'+(rw.pnl||0).toFixed(0)"></td>
+                      :style="`color:${rw.pnl==null?'var(--t-muted)':((rw.pnl||0)>=0?'var(--t-green)':'var(--t-red)')}`"
+                      x-text="rw.pnl==null?'—':(((rw.pnl||0)>=0?'+':'')+'₹'+(rw.pnl||0).toFixed(0))"></td>
                   <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="rw.reason"></td>
                 </tr>
               </template>
