@@ -2064,6 +2064,8 @@ document.addEventListener('alpine:init', () => {
                   exit:  (lg.exit  != null ? lg.exit  : null),
                   pnl:   (lg.pnl   != null ? lg.pnl   : 0),
                   reason: tr.exit_reason || '—',
+                  entry_ts: lg.entry_ts || null,
+                  exit_ts: (lg.exit_ts || tr.date || tr.ts || null),
                 });
               }
             } else {
@@ -2072,12 +2074,25 @@ document.addEventListener('alpine:init', () => {
                 instrument: tr.instrument || '—', side: '', strike: '',
                 entry: tr.entry_price, exit: tr.exit_price, pnl: tr.pnl || 0,
                 reason: tr.exit_reason || '—',
+                entry_ts: null, exit_ts: (tr.date || tr.ts || null),
               });
             }
           }
           this.csHistoryFlat = flat;
         }
       } catch {} finally { this.csHistoryLoading = false; }
+    },
+
+    // Format an ISO/empty timestamp to HH:MM:SS (or '—').
+    fmtHMS(v) {
+      if (!v) return '—';
+      const d = new Date(v);
+      if (!isNaN(d.getTime())) {
+        return d.toLocaleTimeString('en-GB', { hour12: false });
+      }
+      // Fallback: pull a HH:MM:SS substring if present in the raw string.
+      const m = String(v).match(/(\d{2}:\d{2}:\d{2})/);
+      return m ? m[1] : String(v);
     },
 
     /* ── Per-broker kill switch ─────────────────────────────────────────── */
@@ -6722,7 +6737,8 @@ function histReplay() {
           <table class="w-full text-xs">
             <thead>
               <tr class="border-b" style="border-color:var(--t-border);background:var(--t-surface)">
-                <th class="px-4 py-2 text-left sec-label">TIME</th>
+                <th class="px-4 py-2 text-left sec-label">OPENED</th>
+                <th class="px-4 py-2 text-left sec-label">CLOSED</th>
                 <th class="px-4 py-2 text-left sec-label">STRATEGY</th>
                 <th class="px-4 py-2 text-left sec-label">INSTRUMENT</th>
                 <th class="px-4 py-2 text-left sec-label">STRIKE</th>
@@ -6735,7 +6751,8 @@ function histReplay() {
             <tbody>
               <template x-for="(rw,i) in csHistoryFlat" :key="i">
                 <tr class="border-b last:border-b-0 hover:bg-[var(--t-surface)] transition-colors" style="border-color:var(--t-border)">
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="rw.date"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="fmtHMS(rw.entry_ts)"></td>
+                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="fmtHMS(rw.exit_ts)"></td>
                   <td class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="rw.strategy"></td>
                   <td class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="rw.instrument"></td>
                   <td class="px-4 py-2 font-mono font-semibold"
