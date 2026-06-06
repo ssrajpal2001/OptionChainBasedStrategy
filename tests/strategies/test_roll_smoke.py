@@ -60,7 +60,7 @@ def test_single_side_roll_skips_when_best_partner_is_same_strike():
             pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
             net_credit=160.0, status="open",
         )
-        s._strike_prem[(23500, "CE")] = {"ltp": 75.0, "atp": 80.0}
+        s._strike_prem[(23500, "CE")] = {"ltp": 70.0, "atp": 80.0}   # ==kept PE(70): eligible (<=70) & closest → picked (same strike → skip)
         s._strike_prem[(23500, "PE")] = {"ltp": 60.0, "atp": 65.0}
         for k in (23450, 23550):
             s._strike_prem[(k, "CE")] = {"ltp": 60.0, "atp": 65.0}

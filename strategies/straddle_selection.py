@@ -18,8 +18,10 @@ Key = Tuple[int, str]
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        spot, step, offset, ltp_target, rule_pass):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
-    `roll_side` to re-sell, BALANCED against the running leg (premium closest to kept_ltp),
-    within ATM±offset, >= ltp_target, and passing rule_pass(ce_strike, pe_strike).
+    `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target,
+    with premium STRICTLY <= the kept leg's premium (never roll into a leg richer than the leg we
+    keep), and passing rule_pass(ce_strike, pe_strike). Among the eligible (<= kept_ltp) strikes it
+    picks the one CLOSEST to kept_ltp (most balanced from below).
     Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
     atm = round(spot / step) * step if spot > 0 else 0
     best = None  # (premium_diff, strike, ltp)
@@ -31,6 +33,8 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
         ltp = float(v.get("ltp", 0.0) or 0.0)
         if ltp < ltp_target:
             continue
+        if kept_ltp and ltp > float(kept_ltp):
+            continue   # strict: partner must NOT be richer than the kept (losing) leg
         ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
         if not rule_pass(ce_s, pe_s):
             continue
