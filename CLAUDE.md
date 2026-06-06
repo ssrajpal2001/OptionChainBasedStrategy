@@ -176,6 +176,35 @@ Dual-timeframe institutional trap detection.
 - **Entry**: On trap confirmation candle close.
 - **Exit**: Opposite trap signal, time-based, or stop loss.
 
+> ⚠️ The bullet list above is the original **v1** skeleton (5-stage `_Phase` machine, index-candle driven). **Live behaviour is v2 — per-leg seller-trap detectors driven off the OPTION PREMIUM.** v1's `_on_candle`/`_check_touch_trigger` are gutted to an EOD guard only. See below.
+
+### TrapTrading — v2 current behavior, knowledge graph & workflow (AUTHORITATIVE)
+
+**Two codebases in one file.** v1 (`_TrapState`/`_Phase`, `_fire_entry`, `_force_exit_all`, `telemetry_snapshot`, rolling-base, trap-levels) is the legacy 5-stage machine and is *no longer the trading path*. **v2** (per-leg `SellerTrapDetector` HTF+MTF on the premium) is what trades.
+
+**Detector (`strategies/trap_seller_detection.py`, pure/side-effect-free):** models a seller trap on a premium series against the **newest** reference candle (LIFO; `active_level` = last `on_candle`). `WATCH →(price < candle low)→ SELLERS_IN →(price > candle high)→ TRAPPED →(price returns ≤ low)→ ENTRY_READY`. `consume_entry()` clears only the `entry_ready` flag (state stays); `invalidate_active()` pops the level (**never called in v2** — see gaps).
+
+**v2 workflow (NIFTY etc., per instrument):**
+1. **Day-strike lock** (`_lock_day_strikes`→`_compute_day_strikes`, warm-start bg task): `ATM=round((prev_open_day_high+prev_low)/2, step)`; DTE→ITM offset via `dte_offset_ladder` config (fallback `min(max(dte-1,0),5)` steps). Track **CE=ATM−offset**, **PE=ATM+offset** (ITM, day-fixed). Source: DB 1m bars → else Upstox historical daily (`_fetch_prev_day_hl_upstox`). Strike math in pure `strategies/trap_strike_selection.py`.
+2. **Subscribe+pin** (`_ensure_subscribed_legs`): tracked CE/PE are deep-ITM (outside rebalancer ATM window) → engine subscribes + **pins** them; re-asserted every 60s on index tick (survives feeder swap/reconnect → no frozen LTP). `ticks/min=0` in the heartbeat = subscription/feed problem.
+3. **Seed** (`_seed_leg_detection`): replays each leg's intraday 1m Upstox history → HTF candles into the HTF detector so trap state is warm at startup. `_seed_legs_from_history` seeds LTP for the panel.
+4. **Detect** (`_feed_leg_tick`, per option tick of a tracked leg): advances HTF detector every tick + builds HTF(75m)/MTF(5m) premium candles; **MTF detector only advances while HTF is `ENTRY_READY`** (nested gate). MTF `entry_ready` → `_on_mtf_entry_signal`.
+5. **Entry** (`_fire_entry_v2`): execution strike resolved from **LIVE spot** = `exec_strike(spot, ATM±buy_depth ITM)` — *distinct from the detection strike*. Publishes `LONG` `SignalPackage`; subscribes/pins exec contract; stores `self._v2_position`. **One position at a time**: opposite-leg signal **rotates** (`should_rotate` → close runner, open new); same-leg ignored.
+6. **Exit — two-tier SL only** (`_v2_track_exec_tick`/`_v2_maybe_stop`): `sl_5m` starts at entry premium, trails **down** to the entry 5m candle low while in-bucket then freezes; once a **1m closes below sl_5m**, that 1m low becomes `sl_active`. Exit `ltp < ref`. Rotation/SL exit → `_v2_publish_exit` (SHORT to close).
+
+**Config** (`config/global_config.py` `trap_engine`): `HTF_MINUTES=75`, `MTF_MINUTES=5`, `SL_MODE` (dynamic|structural), `SL_PCT=2.0`, `SL_BUFFER_PCT=0.3`, `ENTRY_CUTOFF_TIME=14:45`. Per-index UI overrides via `RuntimeConfig.index_section(idx,"trap_trading")`: `dte_offset_ladder`, `buy_depth`, `lookback_days`. EOD: NSE 15:30 / MCX 23:30 (`_market_close_for`).
+
+**Knowledge graph (file connections):**
+`run_system.py` → `TrapTradingEngine(bus,cfg,client_db)` + `set_feeder`/`set_rebalancer` + `warm_start`. Engine ← `Topic.INDEX_TICK` (spot cache, lazy day-lock, 60s re-subscribe, heartbeat), `Topic.OPTION_TICK` (premium cache, `_feed_leg_tick`, exec-tick SL), `Topic.CANDLE_CLOSE` (EOD guard only). Engine → `Topic.SIGNAL` (`SignalPackage` LONG/SHORT) → `execution_router`. Pure helpers: `trap_seller_detection.py` (state machine), `trap_strike_selection.py` (strikes). Persistence: `data_layer/position_store` (v1 only). Logs: `logs/clients/tt_{UND}_{date}.log` (per-symbol heartbeat + Below→Above→Return transitions).
+
+**⚠️ Known gaps in v2 (the lifecycle was never re-wired to `self._v2_position`):**
+1. **EOD does NOT square off a v2 trade** — `_force_exit_all` iterates v1 `_states`/`_open_positions` only; `_v2_position` rides through 15:30. *(critical)*
+2. **No profit-target/MITIGATE exit** — v2 exits only on SL / rotation / (intended) EOD.
+3. **No v2 persistence** — `_v2_position` is in-memory; a restart loses the live trade (no SL, no square-off).
+4. **`ENTRY_CUTOFF_TIME` not enforced in v2** — `_fire_entry_v2` has no cutoff (v1 `_fire_entry` did).
+5. **Dashboard `telemetry_snapshot()` shows v1 only** — live v2 position is invisible.
+6. **Detector level lifecycle incomplete** — `invalidate_active()` never called; HTF stays `ENTRY_READY` forever, no v2 equivalent of v1 `_reset_to_next_level` re-arming.
+
 ### IronCondorStrategy (`strategies/iron_condor.py`)
 Neutral market premium collection via 4-leg spread.
 - **Trigger**: CANDLE_CLOSE (checks once per candle)
