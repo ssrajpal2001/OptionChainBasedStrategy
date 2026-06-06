@@ -87,7 +87,10 @@ class PoolIndicatorEngine:
         ca_live = [a for a, m in zip(ca, cm) if m >= 0] if (ca and cm) else []
         pa_live = [a for a, m in zip(pa, pm) if m >= 0] if (pa and pm) else []
         if len(ca_live) >= 2 and len(pa_live) >= 2:
-            ind["slope"] = (ca_live[-1] + pa_live[-1]) - (ca_live[-2] + pa_live[-2])
+            _curr = ca_live[-1] + pa_live[-1]
+            _prev = ca_live[-2] + pa_live[-2]
+            ind["slope"] = _curr - _prev
+            ind["vwap_prev"] = _prev   # exposed so logs can show prev->curr VWAP (verify slope)
         cc, pc = self._closes.get(ce), self._closes.get(pe)
         if cc and pc:
             n = min(len(cc), len(pc))
@@ -149,6 +152,7 @@ class PoolIndicatorEngine:
         ind: Dict[str, float] = {"close": close, "vwap": vwap}
         if len(vwaps) >= 2:
             ind["slope"] = vwaps[-1] - vwaps[-2]
+            ind["vwap_prev"] = vwaps[-2]   # exposed so logs can show prev->curr VWAP (verify slope)
         n = len(closes)
         if n >= self._rsi_len + 1:
             ind["rsi"] = float(_rsi(np.array(closes, dtype=np.float64)))

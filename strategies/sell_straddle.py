@@ -801,7 +801,7 @@ class SellStraddleStrategy:
             # garbage VWAP/SLOPE after re-entry → a FALSE vwap_rise_sl. The engine is the position
             # pair's source of truth; missing rsi/roc just stay N/A (rule treats as not-met).
             if _pe:
-                for _k in ("rsi", "roc", "slope", "vwap", "close"):
+                for _k in ("rsi", "roc", "slope", "vwap", "vwap_prev", "close"):
                     if _k in _pe:
                         self._ind[_k] = _pe[_k]
                 self._ind["ltp"] = ltp
@@ -812,10 +812,10 @@ class SellStraddleStrategy:
                     self._ind_src_log = _t.monotonic()
                     logger.info(
                         "SellStraddle[%s]: INDICATORS src=WARM-POOL-ENGINE CE%d/PE%d | "
-                        "close=%.2f vwap=%.2f slope=%.2f rsi=%.1f roc=%.2f",
+                        "close=%.2f vwap=%.2f (prev=%.2f) slope=%.2f rsi=%.1f roc=%.2f",
                         self._underlying, int(self._position.ce_leg.strike),
                         int(self._position.pe_leg.strike), _pe.get("close", 0.0),
-                        _pe.get("vwap", 0.0), _pe.get("slope", 0.0),
+                        _pe.get("vwap", 0.0), _pe.get("vwap_prev", 0.0), _pe.get("slope", 0.0),
                         _pe.get("rsi", 0.0), _pe.get("roc", 0.0))
                 return   # warm engine data is the source of truth for the active pair
             else:
