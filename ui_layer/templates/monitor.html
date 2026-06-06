@@ -2119,8 +2119,9 @@ document.addEventListener('alpine:init', () => {
     reasonLabel(r) {
       if (r == null || r === '') return '—';
       const s = String(r);
-      if (s === 'entry' || s === 'beginning') return 'Beginning entry';
+      if (s === 'beginning') return 'Beginning entry';
       if (s === 'reentry') return 'Re-entry';
+      if (s === 'entry') return 'Open (sold)';   // generic fallback — open reason not recorded (pre-fix data)
       if (s.startsWith('single_side_cleanup_')) return 'No pair → closed all (fresh)';
       if (s.indexOf('vwap_rise_roll') !== -1) return 'VWAP-rise: rolled leg';
       if (s.indexOf('ltp_decay') !== -1) return 'LTP-decay: rolled leg';
