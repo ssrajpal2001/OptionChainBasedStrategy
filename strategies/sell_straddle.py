@@ -1569,11 +1569,14 @@ class SellStraddleStrategy:
             pos.session_min_vwap = float("inf")   # re-baseline vs the NEW pair (avoid instant false vwap_rise)
             self._persist()
             return True
+        # Partial roll = keep one leg, roll the other → use the CAPPED single-side roller
+        # (select_partner_for: partner <= kept leg's LTP, balanced, rule-passing) so the
+        # "<= kept leg" rollover rule applies here too, not just the scan_pool pick.
         if outcome == "partial_pe":
-            await self._single_side_roll_to("PE", pe_s, pe_l, now, trigger)
+            await self._single_side_roll("PE", now, trigger)
             return True
         if outcome == "partial_ce":
-            await self._single_side_roll_to("CE", ce_s, ce_l, now, trigger)
+            await self._single_side_roll("CE", now, trigger)
             return True
         # physical — close both, open new pair
         await self._close_leg("CE", f"physical_roll_{trigger}", now)
