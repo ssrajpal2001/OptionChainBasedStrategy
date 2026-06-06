@@ -2065,25 +2065,29 @@ document.addEventListener('alpine:init', () => {
             const strat = tr.strategy || '—', inst = tr.instrument || '—';
             const _sk = (lg) => (lg.side ? lg.side + ' ' : '') + (lg.strike || '');
             // OPEN rows (sold to open). `_ts` = raw timestamp used for chronological sort.
+            // Skip junk rows whose price is 0/missing — these are rejected-order / dry fills
+            // (no real broker price was ever captured) and only clutter the ledger.
             for (const lg of legs) {
+              if (!(lg.entry > 0)) continue;
               flat.push({
                 _ts: lg.entry_ts || '',
                 time: this.fmtHMS(lg.entry_ts),
                 action: 'SELL', side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
-                price: (lg.entry != null ? lg.entry : null),
+                price: lg.entry,
                 pnl: null, reason: 'entry',
               });
             }
             // CLOSE rows (bought to close).
             for (const lg of legs) {
+              if (!(lg.exit > 0)) continue;
               const _x = lg.exit_ts || tr.date || tr.ts || '';
               flat.push({
                 _ts: _x,
                 time: this.fmtHMS(_x),
                 action: 'BUY', side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
-                price: (lg.exit != null ? lg.exit : null),
+                price: lg.exit,
                 pnl: (lg.pnl != null ? lg.pnl : 0), reason: tr.exit_reason || '—',
               });
             }
