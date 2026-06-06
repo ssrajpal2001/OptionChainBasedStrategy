@@ -557,7 +557,9 @@ document.addEventListener('alpine:init', () => {
     csActiveBrokerTab: '',   // binding_id of the selected broker in positions view
     csPositions: {},         // keyed by binding_id → [{strategy, instrument, legs, pnl}]
     csHistory: [],           // trade history rows (raw, per-trade)
-    csHistoryFlat: [],       // flattened — ONE ROW PER STRIKE (leg)
+    csHistoryFlat: [],       // flattened — event ledger rows (open + close per leg)
+    csHistPage: 1,           // history pagination — current page
+    csHistPerPage: 10,       // history pagination — rows per page
     csHistoryLoading: false,
     csKillBroker: {},        // {binding_id: {armed:false, countdown:5, timer:null}}
     csPosBrokerLoading: false,
@@ -2084,9 +2086,19 @@ document.addEventListener('alpine:init', () => {
             }
           }
           this.csHistoryFlat = flat;
+          this.csHistPage = 1;   // reset to first page on (re)load
         }
       } catch {} finally { this.csHistoryLoading = false; }
     },
+
+    // ── History pagination (10 rows/page) ──
+    histTotalPages() { return Math.max(1, Math.ceil(this.csHistoryFlat.length / this.csHistPerPage)); },
+    histPageRows() {
+      const start = (this.csHistPage - 1) * this.csHistPerPage;
+      return this.csHistoryFlat.slice(start, start + this.csHistPerPage);
+    },
+    histPrev() { if (this.csHistPage > 1) this.csHistPage--; },
+    histNext() { if (this.csHistPage < this.histTotalPages()) this.csHistPage++; },
 
     // Format an ISO/empty timestamp to HH:MM:SS (or '—').
     fmtHMS(v) {
@@ -6753,7 +6765,7 @@ function histReplay() {
               </tr>
             </thead>
             <tbody>
-              <template x-for="(rw,i) in csHistoryFlat" :key="i">
+              <template x-for="(rw,i) in histPageRows()" :key="((csHistPage-1)*csHistPerPage)+i">
                 <tr class="border-b last:border-b-0 hover:bg-[var(--t-surface)] transition-colors" style="border-color:var(--t-border)">
                   <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="rw.time"></td>
                   <td class="px-4 py-2 font-mono font-bold"
@@ -6774,6 +6786,19 @@ function histReplay() {
               </template>
             </tbody>
           </table>
+          <!-- Pagination: 10 rows per page -->
+          <div class="flex items-center justify-between px-4 py-2 border-t" style="border-color:var(--t-border)">
+            <span class="font-mono text-xs" style="color:var(--t-muted)"
+                  x-text="'Page '+csHistPage+' of '+histTotalPages()+'  ('+csHistoryFlat.length+' rows)'"></span>
+            <div class="flex items-center gap-2">
+              <button class="btn-action" style="width:auto;padding:4px 12px"
+                      @click="histPrev()" :disabled="csHistPage<=1"
+                      :style="csHistPage<=1?'opacity:0.4;cursor:not-allowed':''">‹ Prev</button>
+              <button class="btn-action" style="width:auto;padding:4px 12px"
+                      @click="histNext()" :disabled="csHistPage>=histTotalPages()"
+                      :style="csHistPage>=histTotalPages()?'opacity:0.4;cursor:not-allowed':''">Next ›</button>
+            </div>
+          </div>
         </div>
       </div>
 
