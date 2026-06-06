@@ -1354,10 +1354,20 @@ class SellStraddleStrategy:
                     await self._close_position("guardrail_roc_sl")  # full exit → fresh re-entry
                     return
 
-        # 9. VWAP Rise SL → smart roll first
+        # 9. VWAP Rise SL → smart roll first.
+        # VWAP comes STRICTLY from the pool engine's continuous per-strike broker ATP for the EXACT
+        # current pair — NOT the ATM/fallback path. Right after a roll the fallback can read a stale
+        # or single-leg ATP and produce a corrupted-LOW VWAP that poisons session_min_vwap and fires
+        # a FALSE vwap_rise (the cause of the constant vwap_rise churn). The pool engine stores every
+        # subscribed pool strike's real-time ATP, so a rolled-to strike (always from the pool) is
+        # already warm and gives the exact combined VWAP immediately. If a leg isn't warm yet, _vp is
+        # None → skip this tick. Also reject a reading absurdly below the live combined premium
+        # (close): combined ATP can never be ~half of combined LTP, so <60% of close is corruption.
         if self._vwap_rise_enabled:
-            curr_vwap = self._ind.get("vwap", 0)
-            if curr_vwap > 0:
+            _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+            curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
+            _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
+            if curr_vwap > 0 and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
                 if curr_vwap < pos.session_min_vwap:
                     pos.session_min_vwap = curr_vwap
                 if pos.session_min_vwap < float("inf"):
