@@ -55,6 +55,7 @@ class StraddleOrderEvent:
     event_id:       str  = ""    # filled by bridge for correlation
     legs:           list = field(default_factory=lambda: ["CE", "PE"])  # legs to act on
     leg_open_times: dict = field(default_factory=dict)  # "CE"/"PE" -> ISO open_time (for history)
+    leg_open_reasons: dict = field(default_factory=dict)  # "CE"/"PE" -> open reason code (for history)
 
 
 @dataclass
@@ -192,14 +193,17 @@ class TradeLogger:
             # rows (the same pair logged once per leg-close, and twice for a physical roll).
             _sides = set(getattr(ev, "legs", None) or ["CE", "PE"])
             _open_ts = getattr(ev, "leg_open_times", None) or {}
+            _open_rs = getattr(ev, "leg_open_reasons", None) or {}
             _exit_ts = datetime.now(IST).isoformat(timespec="seconds")
             _all = [
                 {"side": "CE", "strike": ev.ce_strike, "entry": entry_ce,
                  "exit": fill.ce_fill, "pnl": (entry_ce - fill.ce_fill) * qty,
-                 "entry_ts": _open_ts.get("CE"), "exit_ts": _exit_ts},
+                 "entry_ts": _open_ts.get("CE"), "exit_ts": _exit_ts,
+                 "entry_reason": _open_rs.get("CE", "")},
                 {"side": "PE", "strike": ev.pe_strike, "entry": entry_pe,
                  "exit": fill.pe_fill, "pnl": (entry_pe - fill.pe_fill) * qty,
-                 "entry_ts": _open_ts.get("PE"), "exit_ts": _exit_ts},
+                 "entry_ts": _open_ts.get("PE"), "exit_ts": _exit_ts,
+                 "entry_reason": _open_rs.get("PE", "")},
             ]
             _legs = [l for l in _all if l["side"] in _sides]
             if _legs:

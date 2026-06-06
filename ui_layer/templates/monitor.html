@@ -2075,7 +2075,7 @@ document.addEventListener('alpine:init', () => {
                 action: 'SELL', side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
                 price: lg.entry,
-                pnl: null, reason: 'entry',
+                pnl: null, reason: (lg.entry_reason || 'entry'),
               });
             }
             // CLOSE rows (bought to close).
@@ -2114,6 +2114,27 @@ document.addEventListener('alpine:init', () => {
     },
     histPrev() { if (this.csHistPage > 1) this.csHistPage--; },
     histNext() { if (this.csHistPage < this.histTotalPages()) this.csHistPage++; },
+
+    // Map an open/close reason code to human-readable remark text for the ledger.
+    reasonLabel(r) {
+      if (r == null || r === '') return '—';
+      const s = String(r);
+      if (s === 'entry' || s === 'beginning') return 'Beginning entry';
+      if (s === 'reentry') return 'Re-entry';
+      if (s.startsWith('single_side_cleanup_')) return 'No pair → closed all (fresh)';
+      if (s.indexOf('vwap_rise_roll') !== -1) return 'VWAP-rise: rolled leg';
+      if (s.indexOf('ltp_decay') !== -1) return 'LTP-decay: rolled leg';
+      if (s.indexOf('ratio') !== -1) return 'Ratio: rolled leg';
+      if (s.startsWith('physical_roll_') || s.indexOf('physical') !== -1) return 'Physical roll';
+      if (s.startsWith('partial_roll_') || s.startsWith('single_side_roll_')) return 'Roll-in (new leg)';
+      if (s === 'eod_squareoff') return 'EOD square-off';
+      if (s === 'day_loss_sl') return 'Day loss SL';
+      if (s === 'day_profit_target') return 'Day profit target';
+      if (s === 'exit_rules') return 'Exit rules hit';
+      if (s === 'guardrail_pnl_sl') return 'PnL guardrail SL';
+      if (s.startsWith('guardrail_roc')) return 'ROC guardrail';
+      return s;
+    },
 
     // Format an ISO/empty timestamp to HH:MM:SS (or '—').
     fmtHMS(v) {
@@ -6796,7 +6817,7 @@ function histReplay() {
                   <td class="px-4 py-2 font-mono font-bold text-right"
                       :style="`color:${rw.pnl==null?'var(--t-muted)':((rw.pnl||0)>=0?'var(--t-green)':'var(--t-red)')}`"
                       x-text="rw.pnl==null?'—':(((rw.pnl||0)>=0?'+':'')+'₹'+(rw.pnl||0).toFixed(0))"></td>
-                  <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="rw.reason"></td>
+                  <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="reasonLabel(rw.reason)"></td>
                 </tr>
               </template>
             </tbody>

@@ -68,6 +68,7 @@ def record(
                     "pnl": round(float(l.get("pnl", 0.0) or 0.0), 2),
                     "entry_ts": l.get("entry_ts"),
                     "exit_ts": l.get("exit_ts"),
+                    "entry_reason": str(l.get("entry_reason", "") or ""),
                 }
                 for l in legs
             ]

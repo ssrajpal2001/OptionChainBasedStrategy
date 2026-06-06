@@ -86,6 +86,7 @@ class StraddleLeg:
     ltp: float = 0.0
     open_time: Optional[datetime] = None
     close_time: Optional[datetime] = None
+    open_reason: str = ""
 
 
 @dataclass
@@ -122,7 +123,8 @@ class StraddlePosition:
             return {"option_type": l.option_type, "strike": l.strike,
                     "entry_price": l.entry_price, "ltp": l.ltp,
                     "open_time": l.open_time.isoformat() if l.open_time else None,
-                    "close_time": l.close_time.isoformat() if l.close_time else None}
+                    "close_time": l.close_time.isoformat() if l.close_time else None,
+                    "open_reason": l.open_reason}
         return {
             "underlying": self.underlying, "atm_at_entry": self.atm_at_entry,
             "entry_spot": self.entry_spot,
@@ -142,7 +144,8 @@ class StraddlePosition:
             return StraddleLeg(option_type=x["option_type"], strike=x["strike"],
                                entry_price=x["entry_price"], ltp=x.get("ltp", 0.0),
                                open_time=_dt.fromisoformat(x["open_time"]) if x.get("open_time") else None,
-                               close_time=_dt.fromisoformat(x["close_time"]) if x.get("close_time") else None)
+                               close_time=_dt.fromisoformat(x["close_time"]) if x.get("close_time") else None,
+                               open_reason=x.get("open_reason", ""))
         return cls(
             underlying=d["underlying"], atm_at_entry=d.get("atm_at_entry", 0.0),
             entry_spot=d.get("entry_spot", 0.0),
@@ -1160,13 +1163,16 @@ class SellStraddleStrategy:
         self._event_counter += 1
         event_id = f"{self._underlying}_ENTRY_{self._event_counter}"
 
+        # Per-leg open reason: first trade of the day = "beginning", else "reentry".
+        _open_reason = "beginning" if rule_key == "entry_rules_beginning" else "reentry"
+
         # Create position immediately (paper fill will update entry prices)
         self._position = StraddlePosition(
             underlying        = self._underlying,
             atm_at_entry      = atm,
             entry_spot        = self._spot,
-            ce_leg            = StraddleLeg("CE", ce_strike, ce_ltp, ce_ltp, open_time=now),
-            pe_leg            = StraddleLeg("PE", pe_strike, pe_ltp, pe_ltp, open_time=now),
+            ce_leg            = StraddleLeg("CE", ce_strike, ce_ltp, ce_ltp, open_time=now, open_reason=_open_reason),
+            pe_leg            = StraddleLeg("PE", pe_strike, pe_ltp, pe_ltp, open_time=now, open_reason=_open_reason),
             net_credit        = ce_ltp + pe_ltp,
             open_time         = now,
             status            = "open",
@@ -1570,8 +1576,8 @@ class SellStraddleStrategy:
         self._position = StraddlePosition(
             underlying=self._underlying, atm_at_entry=round(self._spot / step) * step,
             entry_spot=self._spot,
-            ce_leg=StraddleLeg("CE", ce_s, ce_l, ce_l, open_time=now),
-            pe_leg=StraddleLeg("PE", pe_s, pe_l, pe_l, open_time=now),
+            ce_leg=StraddleLeg("CE", ce_s, ce_l, ce_l, open_time=now, open_reason=f"physical_roll_{trigger}"),
+            pe_leg=StraddleLeg("PE", pe_s, pe_l, pe_l, open_time=now, open_reason=f"physical_roll_{trigger}"),
             net_credit=ce_l + pe_l, open_time=now, status="open",
             session_min_vwap=float("inf"),   # re-baseline vs the NEW pair (avoid instant false vwap_rise)
             entry_indicators=dict(self._ind),
@@ -1613,6 +1619,7 @@ class SellStraddleStrategy:
             event_id=f"{self._underlying}_EXITLEG_{side}_{self._event_counter}",
             legs=[side],
             leg_open_times={side: leg.open_time.isoformat() if leg.open_time else None},
+            leg_open_reasons={side: leg.open_reason},
         )
         await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
         self._session_realized_pnl_pts += leg_pnl
@@ -1631,6 +1638,7 @@ class SellStraddleStrategy:
         leg.entry_price = ltp
         leg.ltp = ltp
         leg.open_time = now          # per-leg source of truth (kept leg keeps its original open_time)
+        leg.open_reason = reason
         leg.close_time = None
         pos.net_credit = pos.ce_leg.entry_price + pos.pe_leg.entry_price
         pos.tsl_high_lock_rs = 0.0
@@ -1767,6 +1775,10 @@ class SellStraddleStrategy:
             leg_open_times = {
                 "CE": pos.ce_leg.open_time.isoformat() if pos.ce_leg.open_time else None,
                 "PE": pos.pe_leg.open_time.isoformat() if pos.pe_leg.open_time else None,
+            },
+            leg_open_reasons = {
+                "CE": pos.ce_leg.open_reason,
+                "PE": pos.pe_leg.open_reason,
             },
         )
         await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
