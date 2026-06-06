@@ -2088,7 +2088,10 @@ document.addEventListener('alpine:init', () => {
                 action: 'BUY', side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
                 price: lg.exit,
-                pnl: (lg.pnl != null ? lg.pnl : 0), reason: tr.exit_reason || '—',
+                // If the leg's entry was lost (<=0) the recorded P&L is a phantom (e.g. -32360) —
+                // show '—' instead of a garbage number.
+                pnl: (lg.entry > 0 ? (lg.pnl != null ? lg.pnl : 0) : null),
+                reason: tr.exit_reason || '—',
               });
             }
           }
