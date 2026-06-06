@@ -610,13 +610,18 @@ class SellStraddleStrategy:
         if fill.action == "ENTRY":
             if self._position and self._position.status == "open":
                 _legs = getattr(fill, "legs", ["CE", "PE"])
-                if "CE" in _legs:
+                # GUARD: only adopt a fill price that is POSITIVE. A 0/missing fill (e.g. a
+                # single-side roll where the other leg's fill comes back 0, or a glitched fill)
+                # must never overwrite a real entry_price with 0 — that later books a phantom
+                # -32360 loss and can falsely trip day_loss_sl.
+                if "CE" in _legs and fill.ce_fill and fill.ce_fill > 0:
                     self._position.ce_leg.ltp         = fill.ce_fill
                     self._position.ce_leg.entry_price = fill.ce_fill
-                if "PE" in _legs:
+                if "PE" in _legs and fill.pe_fill and fill.pe_fill > 0:
                     self._position.pe_leg.ltp         = fill.pe_fill
                     self._position.pe_leg.entry_price = fill.pe_fill
                 self._position.net_credit = self._position.ce_leg.entry_price + self._position.pe_leg.entry_price
+                self._persist()   # re-persist confirmed entry so it survives a restart
                 logger.info(
                     "SellStraddle[%s]: ENTRY confirmed — CE=%.2f PE=%.2f credit=%.2f [%s/%s] legs=%s",
                     self._underlying, self._position.ce_leg.entry_price, self._position.pe_leg.entry_price,
@@ -1607,7 +1612,16 @@ class SellStraddleStrategy:
         if not pos:
             return 0.0
         leg = pos.ce_leg if side == "CE" else pos.pe_leg
-        leg_pnl = leg.entry_price - leg.ltp  # short option: credit - buyback
+        # GUARD: a leg whose entry_price was lost (0/negative) would book a garbage P&L like
+        # (0 - 323.60)*qty = -32360 and could falsely trip day_loss_sl. Treat unknown entry as
+        # break-even (pnl=0) and log loudly instead of recording a phantom loss.
+        if leg.entry_price and leg.entry_price > 0:
+            leg_pnl = leg.entry_price - leg.ltp  # short option: credit - buyback
+        else:
+            leg_pnl = 0.0
+            logger.error("SellStraddle[%s]: %s%d entry_price=%.2f invalid at close — booking pnl=0 "
+                         "(NOT a real loss; entry was lost). reason=%s",
+                         self._underlying, side, int(leg.strike), float(leg.entry_price or 0.0), reason)
         leg.close_time = now
         self._event_counter += 1
         order_ev = StraddleOrderEvent(
