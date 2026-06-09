@@ -146,6 +146,7 @@ class Topic:
     IC_ORDER_REQUEST = "ic_order_request"
     ORDER_FILL       = "order_fill"
     SYSTEM_EVENT     = "system_event"
+    EXIT_AUDIT       = "exit_audit"    # per-tick exit-criteria validation stream (granular UI)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
     is_trade_enabled    INTEGER DEFAULT 1,
     lot_multiplier      REAL    DEFAULT 1.0,
     enabled             INTEGER DEFAULT 1,
+    show_granular_ticks INTEGER DEFAULT 0,
     created_at          TEXT    NOT NULL,
     UNIQUE(client_id, binding_id)
 );
@@ -493,6 +494,18 @@ class ClientDB:
             (1 if active else 0, client_id, binding_id),
         )
 
+    async def set_show_granular_ticks(
+        self, client_id: str, binding_id: str, enabled: bool
+    ) -> None:
+        """Toggle per-client tick-by-tick exit-audit streaming for this binding."""
+        logger.info("[DB] set_show_granular_ticks [%s/%s] → %s", client_id, binding_id, enabled)
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET show_granular_ticks=? "
+            "WHERE client_id=? AND binding_id=?",
+            (1 if enabled else 0, client_id, binding_id),
+        )
+
     # ── Strategy Deployments ──────────────────────────────────────────────────
 
     async def save_deployment(
@@ -598,7 +611,8 @@ class ClientDB:
                                   assigned_strategy, assigned_instrument,
                                   trading_mode, product_type,
                                   is_trade_enabled, lot_multiplier, enabled,
-                                  terminal_connected, terminal_connected_at, engine_active
+                                  terminal_connected, terminal_connected_at, engine_active,
+                                  show_granular_ticks
                            FROM broker_bindings WHERE client_id=? ORDER BY created_at""",
                         (client_id,),
                     ).fetchall()]
@@ -1014,6 +1028,7 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN engine_active INTEGER DEFAULT 0",
             "ALTER TABLE clients ADD COLUMN trap_instruments TEXT DEFAULT '[]'",
             "ALTER TABLE broker_bindings ADD COLUMN product_type TEXT DEFAULT 'MIS'",
+            "ALTER TABLE broker_bindings ADD COLUMN show_granular_ticks INTEGER DEFAULT 0",
         ):
             try:
                 con.execute(migration)

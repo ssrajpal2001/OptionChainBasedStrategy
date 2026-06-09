@@ -279,6 +279,9 @@ class SellStraddleStrategy:
         # Combined CE+PE premium candle buffer
         self._prem_closes:  deque = deque(maxlen=_BUF)
         self._prem_volumes: deque = deque(maxlen=_BUF)
+        # Timestamped 1-min chart series (combined premium + VWAP/RSI/SLOPE) for the
+        # client-side chart endpoint. One point per 1-min candle close.
+        self._chart_series: deque = deque(maxlen=375)   # ~one full trading day of 1-min bars
 
         from strategies.pool_indicator_engine import PoolIndicatorEngine
         self._pool_engine = PoolIndicatorEngine(rsi_len=14, roc_len=10)
@@ -564,6 +567,7 @@ class SellStraddleStrategy:
         self._stop_for_day              = False
         self._prem_closes.clear()
         self._prem_volumes.clear()
+        self._chart_series.clear()
         self._idx_highs.clear()
         self._idx_lows.clear()
         self._idx_closes.clear()
@@ -775,6 +779,19 @@ class SellStraddleStrategy:
 
         self._recompute_indicators()
 
+        # Record one timestamped chart point per 1-min close (combined premium + the
+        # broker-VWAP / RSI / SLOPE the strategy actually trades on). Client chart only.
+        _ce_l, _pe_l, _, _ = self._active_premium()
+        self._chart_series.append({
+            "ts":       ev.timestamp.timestamp(),
+            "combined": round(float(_ce_l + _pe_l), 2),
+            "ce_ltp":   round(float(_ce_l), 2),
+            "pe_ltp":   round(float(_pe_l), 2),
+            "vwap":     round(float(self._ind.get("vwap", 0.0) or 0.0), 2),
+            "rsi":      round(float(self._ind.get("rsi", 0.0) or 0.0), 2),
+            "slope":    round(float(self._ind.get("slope", 0.0) or 0.0), 2),
+        })
+
         # Force-exit
         if now.time() >= self._force_exit:
             if self._position and self._position.status == "open":
@@ -964,6 +981,11 @@ class SellStraddleStrategy:
         """Inject the shared ClientDB so entry can be gated on terminal+trade activation."""
         self._client_db = db
 
+    def get_premium_series(self) -> list:
+        """Timestamped 1-min combined-premium chart series with VWAP/RSI/SLOPE overlays.
+        Consumed by the client-side chart endpoint. Returns a shallow copy (newest last)."""
+        return list(self._chart_series)
+
     def _any_active_terminal(self) -> bool:
         """True if at least one client has a binding with terminal_connected AND engine_active,
         deployed to sell_straddle for this underlying. Fail-OPEN when no DB is wired (tests/dev)
@@ -998,6 +1020,38 @@ class SellStraddleStrategy:
             active = False
         self._term_active_cached = active
         return active
+
+    def _granular_audit_clients(self) -> list:
+        """Return [(client_id, binding_id), …] for bindings that (a) are deployed to
+        sell_straddle for this underlying AND (b) have show_granular_ticks ON. Cached 5s
+        so the per-tick EXIT-EVAL gate is cheap. Empty list ⇒ suppress the audit payload."""
+        db = self._client_db
+        if db is None:
+            return []
+        import time as _t
+        _now = _t.monotonic()
+        if _now - getattr(self, "_gran_check_t", 0.0) < 5.0:
+            return getattr(self, "_gran_cached", [])
+        self._gran_check_t = _now
+        out: list = []
+        try:
+            for _client in db.get_all_clients_sync():
+                _cid = _client.get("client_id", "")
+                if not _cid:
+                    continue
+                _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(_cid)}
+                for _dep in db.get_deployments_sync(_cid):
+                    _sn = str(_dep.get("strategy_name", "")).lower()
+                    _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
+                    if _sn == "sell_straddle" and _ul == self._underlying.upper():
+                        _b = _binds.get(_dep.get("binding_id"))
+                        if _b and _b.get("show_granular_ticks"):
+                            out.append((_cid, _b.get("binding_id")))
+        except Exception as _exc:
+            logger.debug("SellStraddle[%s]: granular-audit check error: %s", self._underlying, _exc)
+            out = []
+        self._gran_cached = out
+        return out
 
     @staticmethod
     def _at_tf_boundary(minute: int, second: int, max_tf: int) -> bool:
@@ -1515,6 +1569,24 @@ class SellStraddleStrategy:
                 self._clog.info(format_exit_eval(self._underlying, pnl, _credit, _crit))
                 if _exit_dump is not None:
                     self._clog.info("EXIT-EVAL %s exit_ind_by_tf=%s", self._underlying, _exit_dump)
+                # Granular tick-by-tick exit audit → client UI. Only built/published when an
+                # admin has enabled it for at least one client bound to this straddle (gate to
+                # avoid per-bucket overhead in the common case where it's off).
+                _audit_clients = self._granular_audit_clients()
+                if _audit_clients:
+                    _criteria = [{"name": _n, "detail": _d, "hit": bool(_h)} for (_n, _d, _h) in _crit]
+                    for _cid, _bid in _audit_clients:
+                        await self._bus.publish(Topic.EXIT_AUDIT, {
+                            "type":       "exit_audit",
+                            "client_id":  _cid,
+                            "binding_id": _bid,
+                            "underlying": self._underlying,
+                            "pnl":        round(pnl, 2),
+                            "credit":     round(_credit, 2),
+                            "criteria":   _criteria,
+                            "ind_by_tf":  _exit_dump or {},
+                            "ts":         now.timestamp(),
+                        })
             except Exception as _exc:
                 self._clog.info("EXIT-EVAL %s (formatting error: %s)", self._underlying, _exc)
                 if self._exit_rules:

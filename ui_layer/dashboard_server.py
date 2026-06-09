@@ -1624,6 +1624,39 @@ class DashboardServer:
             return {"ok": True, "binding_id": binding_id, "is_trade_enabled": new_state,
                     "engine_active": new_state}
 
+        # ── ADMIN — toggle per-client granular tick-by-tick exit audit ────────
+        @app.post("/api/admin/client/{client_id}/binding/{binding_id}/granular_ticks",
+                  tags=["Admin"])
+        async def api_admin_set_granular_ticks(
+            client_id: str, binding_id: str, _: dict = Depends(_require_admin),
+        ):
+            bindings = _srv._client_db.get_bindings_safe_sync(client_id)
+            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+            if b is None:
+                raise HTTPException(404, f"Binding '{binding_id}' not found.")
+            new_state = not bool(b.get("show_granular_ticks", 0))
+            await _srv._client_db.set_show_granular_ticks(client_id, binding_id, new_state)
+            logger.info("Dashboard: granular-ticks toggle %s/%s → %s",
+                        client_id, binding_id, "ON" if new_state else "OFF")
+            return {"ok": True, "client_id": client_id, "binding_id": binding_id,
+                    "show_granular_ticks": new_state}
+
+        # ── CLIENT — 1-min combined-premium chart series (VWAP/RSI/SLOPE) ─────
+        @app.get("/api/client/strategy/{deploy_id}/premium_series", tags=["Client"])
+        async def api_client_premium_series(
+            deploy_id: str, _: dict = Depends(_require_client),
+        ):
+            """1-min combined CE+PE premium series with broker-VWAP/RSI/SLOPE overlays for
+            the client straddle chart. deploy_id = {client}_{binding}_{strategy}_{underlying};
+            the underlying (last token) selects the per-underlying strategy instance."""
+            underlying = deploy_id.rsplit("_", 1)[-1].upper()
+            strat = next((s for s in (getattr(_srv, "_sell_straddles", []) or [])
+                          if str(getattr(s, "_underlying", "")).upper() == underlying), None)
+            if strat is None or not hasattr(strat, "get_premium_series"):
+                return {"ok": True, "deploy_id": deploy_id, "underlying": underlying, "series": []}
+            return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
+                    "series": strat.get_premium_series()}
+
         # ── CLIENT — set target index ─────────────────────────────────────────
 
         @app.post("/api/client/set_index", tags=["Client"])

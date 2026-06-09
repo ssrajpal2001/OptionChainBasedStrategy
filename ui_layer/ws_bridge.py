@@ -69,6 +69,7 @@ class WsBridge:
         self._fill_q   = bus.subscribe(Topic.ORDER_FILL)
         self._sys_q    = bus.subscribe(Topic.SYSTEM_EVENT)
         self._option_q = bus.subscribe(Topic.OPTION_TICK)
+        self._audit_q  = bus.subscribe(Topic.EXIT_AUDIT)
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
@@ -122,6 +123,7 @@ class WsBridge:
                 self._sys_loop(),
                 self._heartbeat_loop(),
                 self._option_loop(),
+                self._exit_audit_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -268,6 +270,21 @@ class WsBridge:
                 self._option_cache[key] = row
             except Exception as exc:
                 logger.debug("WsBridge._option_loop: %s", exc)
+
+    async def _exit_audit_loop(self) -> None:
+        """Forward per-tick exit-criteria audit payloads (granular UI) verbatim. The
+        strategy only publishes these when an admin has enabled show_granular_ticks for a
+        client, so this loop is idle in the common case. The frontend filters by client_id."""
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(self._audit_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                if isinstance(ev, dict):
+                    await self.broadcast(ev)
+            except Exception as exc:
+                logger.debug("WsBridge._exit_audit_loop: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
         """Broadcast worker stats and client summaries every HEARTBEAT_INTERVAL seconds."""
