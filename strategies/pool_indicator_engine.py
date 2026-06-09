@@ -4,6 +4,7 @@ on demand — independent of the active position. Pure + unit-testable; the stra
 ticks/bars and (later) seeds prev-day history."""
 from __future__ import annotations
 
+import time
 from collections import deque
 from typing import Dict, Optional, Tuple
 
@@ -20,6 +21,10 @@ class PoolIndicatorEngine:
         self._roc_len = roc_len
         self._maxlen = maxlen
         self._latest: Dict[Key, Tuple[float, float]] = {}
+        # Wall-clock time of the last LIVE (atp>0) tick per key. Used to detect a frozen/stale leg
+        # (e.g. illiquid CRUDEOIL PE) whose ATP is being held by keep-last-good / forward-fill but
+        # is no longer fresh — a stale single-leg ATP can poison session_min_vwap → false vwap_rise.
+        self._last_atp_ts: Dict[Key, float] = {}
         self._closes: Dict[Key, deque] = {}
         self._atps:   Dict[Key, deque] = {}
         self._mins:   Dict[Key, deque] = {}
@@ -37,6 +42,10 @@ class PoolIndicatorEngine:
         _l = float(ltp) if ltp and ltp > 0 else _pl
         _a = float(atp) if atp and atp > 0 else _pa
         self._latest[k] = (_l, _a)
+        # Stamp freshness ONLY on a real (atp>0) tick — a kept-last-good 0 must NOT refresh it,
+        # otherwise a frozen leg would look perpetually fresh.
+        if atp and atp > 0:
+            self._last_atp_ts[k] = time.time()
 
     def commit_bar(self, minute: int = None) -> None:
         # Forward-fill EVERY tracked key once per minute so all per-strike series stay
@@ -69,7 +78,21 @@ class PoolIndicatorEngine:
         k = self._key(strike, side)
         return len(self._closes.get(k, ())) >= max(self._rsi_len + 1, self._roc_len + 1)
 
-    def pair_indicators(self, ce_strike: int, pe_strike: int) -> Optional[Dict[str, float]]:
+    def pair_atp_fresh(self, ce_strike: int, pe_strike: int, max_sec: float) -> bool:
+        """True only if BOTH legs received a real (atp>0) tick within `max_sec` seconds. A missing
+        timestamp (never ticked) counts as stale. `max_sec <= 0` disables the check (always fresh)."""
+        if max_sec is None or max_sec <= 0:
+            return True
+        ce, pe = self._key(ce_strike, "CE"), self._key(pe_strike, "PE")
+        now = time.time()
+        for k in (ce, pe):
+            ts = self._last_atp_ts.get(k)
+            if ts is None or (now - ts) > max_sec:
+                return False
+        return True
+
+    def pair_indicators(self, ce_strike: int, pe_strike: int,
+                        stale_sec: float = 0.0) -> Optional[Dict[str, float]]:
         ce, pe = self._key(ce_strike, "CE"), self._key(pe_strike, "PE")
         if ce not in self._latest or pe not in self._latest:
             return None
@@ -78,6 +101,8 @@ class PoolIndicatorEngine:
         if min(ce_ltp, pe_ltp, ce_atp, pe_atp) <= 0:
             return None
         ind: Dict[str, float] = {"close": ce_ltp + pe_ltp, "vwap": ce_atp + pe_atp}
+        # Freshness flag for callers/logs (diagnoses TF1/TF2 divergence & frozen illiquid legs).
+        ind["stale_atp"] = 0.0 if self.pair_atp_fresh(ce_strike, pe_strike, stale_sec) else 1.0
         # SLOPE (VWAP delta) is INTRADAY — it must use LIVE bars only. Seed bars carry prev-day
         # ATP; mixing seed→live makes the first live slope a huge jump across the day boundary
         # (a false SLOPE, and a contaminated session_min_vwap → false vwap_rise_sl). Seeds are for

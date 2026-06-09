@@ -14,6 +14,30 @@ def test_pair_indicators_combined_close_and_vwap():
     assert ind["vwap"] == 51 + 41
     assert round(ind["slope"], 6) == round((51 + 41) - (50 + 40), 6)
 
+def test_pair_atp_fresh_true_when_both_recent():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    eng.update_tick(100, "CE", 50, 49)
+    eng.update_tick(100, "PE", 40, 39)
+    assert eng.pair_atp_fresh(100, 100, max_sec=90) is True
+    assert eng.pair_atp_fresh(100, 100, max_sec=0) is True   # disabled → always fresh
+
+
+def test_pair_atp_fresh_false_when_one_leg_stale():
+    import time
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    eng.update_tick(100, "CE", 50, 49)
+    eng.update_tick(100, "PE", 40, 39)
+    # Age the PE leg's last-good ATP beyond the window (simulate a frozen illiquid leg).
+    eng._last_atp_ts[(100, "PE")] = time.time() - 200
+    assert eng.pair_atp_fresh(100, 100, max_sec=90) is False
+    # A kept-last-good 0 tick must NOT refresh freshness.
+    eng.update_tick(100, "PE", 40, 0)
+    assert eng.pair_atp_fresh(100, 100, max_sec=90) is False
+    # stale_atp flag is surfaced in pair_indicators when stale_sec is passed.
+    ind = eng.pair_indicators(100, 100, stale_sec=90)
+    assert ind["stale_atp"] == 1.0
+
+
 def test_pair_rsi_roc_present_when_enough_bars():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
     ce_closes = list(range(50, 70))   # 20 ascending

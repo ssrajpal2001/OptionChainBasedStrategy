@@ -323,6 +323,10 @@ class SellStraddleStrategy:
         _vwap_sl = ss.get("vwap_rise_sl", {})
         self._vwap_rise_enabled   = bool(_vwap_sl.get("enabled", ss.get("vwap_rise_sl_enabled", False)))
         self._vwap_rise_threshold = float(_vwap_sl.get("threshold", ss.get("vwap_rise_sl_threshold_pct", 1.0)))
+        # Skip vwap_rise (and session_min_vwap updates) when either leg's broker ATP is stale — a
+        # frozen illiquid leg (e.g. CRUDEOIL PE) must not poison the baseline → false vwap_rise.
+        # 0/negative disables the freshness check. Per-index overridable like other params.
+        self._vwap_stale_sec = float(_vwap_sl.get("stale_sec", ss.get("vwap_stale_sec", 90.0)))
 
         # Ratio exit — UI saves as nested {"enabled": bool, "threshold": float}
         _ratio = ss.get("ratio_exit", {})
@@ -1380,7 +1384,12 @@ class SellStraddleStrategy:
         # already warm and gives the exact combined VWAP immediately. If a leg isn't warm yet, _vp is
         # None → skip this tick. Also reject a reading absurdly below the live combined premium
         # (close): combined ATP can never be ~half of combined LTP, so <60% of close is corruption.
-        if self._vwap_rise_enabled:
+        # STALENESS GUARD: if either leg's broker ATP hasn't ticked within _vwap_stale_sec, the
+        # combined VWAP is built on a frozen leg (illiquid CRUDEOIL PE forward-filled). Skip the
+        # whole vwap_rise step — do NOT read/update session_min_vwap — so a stale read can't set a
+        # low baseline that later normal reads "rise" above (the false vwap_rise churn).
+        if self._vwap_rise_enabled and self._pool_engine.pair_atp_fresh(
+                int(pos.ce_leg.strike), int(pos.pe_leg.strike), self._vwap_stale_sec):
             _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
             curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
             _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
@@ -1450,7 +1459,10 @@ class SellStraddleStrategy:
                 if self._tsl_enabled:
                     _crit.append(("TSL", "ON (scalable)", False))
                 if self._vwap_rise_enabled:
-                    _crit.append(("VWAPrise", f"ON {self._vwap_rise_threshold:.1f}%", False))
+                    _stale = not self._pool_engine.pair_atp_fresh(
+                        pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec)
+                    _crit.append(("VWAPrise",
+                                  f"ON {self._vwap_rise_threshold:.1f}%{' STALE-skip' if _stale else ''}", False))
                 if self._guardrail_pnl_enabled:
                     _crit.append(("PnLguard", f"T{self._guardrail_pnl_target_pts:.0f}/SL{self._guardrail_pnl_sl_pts:.0f}pts", False))
                 if self._guardrail_roc_enabled:
@@ -1462,6 +1474,10 @@ class SellStraddleStrategy:
                     _crit.append(("Dynamic", _reason, _passed))
                     _exit_dump = {tf: {k: round(v, 2) for k, v in (d or {}).items()}
                                   for tf, d in _exit_ind_by_tf.items()}
+                    # Tag tf=1 with leg-ATP staleness so a TF1/TF2 vwap divergence is explainable.
+                    if 1 in _exit_dump:
+                        _exit_dump[1]["stale"] = (0.0 if self._pool_engine.pair_atp_fresh(
+                            pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec) else 1.0)
                 self._clog.info(format_exit_eval(self._underlying, pnl, _credit, _crit))
                 if _exit_dump is not None:
                     self._clog.info("EXIT-EVAL %s exit_ind_by_tf=%s", self._underlying, _exit_dump)
