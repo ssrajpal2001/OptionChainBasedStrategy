@@ -810,7 +810,8 @@ document.addEventListener('alpine:init', () => {
       this._chartInst[deployId] = inst;
     },
 
-    // Latest granular exit-audit payload for an underlying (any client). null if none.
+    /* ── Init ────────────────────────────────────────────────────────── */
+    init() {
       this._startClock();
       const saved = localStorage.getItem('terminus_theme') || 'light_pro';
       this.applyTheme(saved, false);
