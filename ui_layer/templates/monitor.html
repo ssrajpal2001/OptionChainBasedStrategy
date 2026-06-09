@@ -6927,6 +6927,30 @@ function histReplay() {
                     </div>
                   </template>
 
+                  <!-- ── Tick-by-tick EXIT AUDIT (admin-gated per client) — sell_straddle only ── -->
+                  <template x-if="dep.strategy_name==='sell_straddle' && _auditFor(dep.underlying)">
+                    <div class="mt-3 pt-2 border-t" style="border-color:var(--t-border)">
+                      <div class="flex items-center justify-between cursor-pointer"
+                           @click="auditOpen[dep.underlying] = !auditOpen[dep.underlying]">
+                        <span class="sec-label" style="color:var(--t-cyan)">EXIT AUDIT · tick-by-tick
+                          <span style="color:var(--t-muted);font-weight:400"
+                                x-text="'P&L '+(_auditFor(dep.underlying).pnl||0).toFixed(1)+' / credit '+(_auditFor(dep.underlying).credit||0).toFixed(1)"></span>
+                        </span>
+                        <span class="font-mono text-xs" style="color:var(--t-muted)"
+                              x-text="auditOpen[dep.underlying] ? '▾' : '▸'"></span>
+                      </div>
+                      <div x-show="auditOpen[dep.underlying]" class="mt-1 space-y-0.5">
+                        <template x-for="c in (_auditFor(dep.underlying).criteria||[])" :key="c.name">
+                          <div class="flex justify-between font-mono text-xs">
+                            <span :style="`color:${c.hit?'var(--t-red)':'var(--t-muted)'}`"
+                                  x-text="(c.hit?'✗ ':'· ')+c.name"></span>
+                            <span style="color:var(--t-text)" x-text="c.detail"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+
                   <!-- ── 1-min combined-premium chart (VWAP/RSI/SLOPE) — sell_straddle only ── -->
                   <template x-if="dep.strategy_name==='sell_straddle'">
                     <div class="mt-3 pt-2 border-t" style="border-color:var(--t-border)">
