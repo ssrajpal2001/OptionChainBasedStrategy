@@ -113,6 +113,10 @@ class StraddlePosition:
     # Session VWAP tracking for VWAP Rise SL
     session_min_vwap: float = float("inf")
 
+    # Day-wise THETA exit: combined option TIME VALUE (extrinsic) captured at entry. The
+    # theta-based day exit measures how far the live combined time value has decayed from this.
+    entry_time_value: float = 0.0
+
     # Total contracts per leg (lot_size × lot_multiplier) — used by the dashboard
     # to render qty and rupee P&L. Without it the UI shows qty=0 → P&L always 0.
     lot_size: int = 0
@@ -135,6 +139,7 @@ class StraddlePosition:
             "realized_pnl": self.realized_pnl, "status": self.status,
             "entry_indicators": dict(self.entry_indicators),
             "lot_size": self.lot_size,
+            "entry_time_value": self.entry_time_value,
         }
 
     @classmethod
@@ -156,6 +161,7 @@ class StraddlePosition:
             realized_pnl=d.get("realized_pnl", 0.0), status=d.get("status", "open"),
             entry_indicators=dict(d.get("entry_indicators", {})),
             lot_size=d.get("lot_size", 0),
+            entry_time_value=d.get("entry_time_value", 0.0),
         )
 
     @property
@@ -165,6 +171,17 @@ class StraddlePosition:
     @property
     def unrealized_pnl(self) -> float:
         return self.net_credit - self.current_value
+
+    def current_time_value(self, spot: float) -> float:
+        """Live combined option time value (extrinsic) at the given spot — for theta-based exit."""
+        from strategies.theta_calc import combined_time_value
+        return combined_time_value(self.ce_leg.strike, self.pe_leg.strike, spot,
+                                   self.ce_leg.ltp, self.pe_leg.ltp)
+
+    def theta_decay_pct(self, spot: float) -> float:
+        """Signed % the combined time value has decayed since entry (positive = profit)."""
+        from strategies.theta_calc import theta_decay_pct as _tdp
+        return _tdp(self.entry_time_value, self.current_time_value(spot))
 
 
 def format_exit_eval(underlying: str, pnl_pts: float, credit: float, criteria) -> str:
@@ -348,6 +365,10 @@ class SellStraddleStrategy:
         self._day_profit_target_pct = _pt if _pt > 0 else float(ss.get("profit_target_pct", 0))
         _ls     = float(_day.get("loss_sl_pct", 0)) if _day_on else 0.0
         self._day_loss_sl_pct       = _ls if _ls > 0 else float(ss.get("loss_sl_pct", 0))
+        # Day-wise exit BASIS — per-weekday choice of how the day target/SL % is measured:
+        #   "ltp"   → (realized + running LTP P&L) / entry credit × 100   (default, legacy)
+        #   "theta" → combined option TIME-VALUE decay % since entry (simple intrinsic-based theta)
+        self._day_exit_basis = str(_day.get("exit_basis", ss.get("exit_basis", "ltp"))).lower()
 
         # min_ltp / ltp_target — minimum combined premium floor for entry
         # Config saves as "ltp_target" or "min_ltp" or "ltp_min" — try all three
@@ -1192,6 +1213,9 @@ class SellStraddleStrategy:
             entry_indicators  = self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
             lot_size          = self._lot_size * self._lot_multiplier,
         )
+        # Capture combined TIME VALUE at entry for the theta-based day exit (intrinsic from entry spot).
+        from strategies.theta_calc import combined_time_value as _ctv
+        self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
         self._persist()   # survive restarts
         self._trades_today  += 1
         self._beginning_failed = False
@@ -1283,17 +1307,26 @@ class SellStraddleStrategy:
                 return
 
         # ── DAY-LEVEL % GUARDRAILS (stops trading for the day) ──
-        # total_day_pct = (all closed trades + running P&L) / initial credit × 100
+        # Metric depends on the per-weekday basis:
+        #   "ltp"   → (all closed trades + running LTP P&L) / initial credit × 100  (legacy)
+        #   "theta" → combined TIME-VALUE decay % of the live position since entry
+        # Both use the same per-day target/SL thresholds; positive = profit in either basis.
         if self._initial_net_credit > 0:
             total_day_pts = self._session_realized_pnl_pts + pnl
-            total_day_pct = total_day_pts / self._initial_net_credit * 100
+            if self._day_exit_basis == "theta":
+                total_day_pct = pos.theta_decay_pct(self._spot)
+                _basis_lbl = "theta-decay"
+            else:
+                total_day_pct = total_day_pts / self._initial_net_credit * 100
+                _basis_lbl = "ltp"
 
             if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
                 logger.info(
-                    "SellStraddle[%s]: DAY PROFIT TARGET — day=%.1f%% (≥%.1f%%) | "
-                    "closed=%.2f running=%.2f credit=%.2f",
-                    self._underlying, total_day_pct, self._day_profit_target_pct,
+                    "SellStraddle[%s]: DAY PROFIT TARGET [%s] — day=%.1f%% (≥%.1f%%) | "
+                    "closed=%.2f running=%.2f credit=%.2f tv(entry=%.2f cur=%.2f)",
+                    self._underlying, _basis_lbl, total_day_pct, self._day_profit_target_pct,
                     self._session_realized_pnl_pts, pnl, self._initial_net_credit,
+                    pos.entry_time_value, pos.current_time_value(self._spot),
                 )
                 await self._close_position("day_profit_target")
                 self._stop_for_day = True
@@ -1302,10 +1335,11 @@ class SellStraddleStrategy:
 
             if self._day_loss_sl_pct > 0 and total_day_pct <= -self._day_loss_sl_pct:
                 logger.info(
-                    "SellStraddle[%s]: DAY LOSS SL — day=%.1f%% (≤-%.1f%%) | "
-                    "closed=%.2f running=%.2f credit=%.2f",
-                    self._underlying, total_day_pct, self._day_loss_sl_pct,
+                    "SellStraddle[%s]: DAY LOSS SL [%s] — day=%.1f%% (≤-%.1f%%) | "
+                    "closed=%.2f running=%.2f credit=%.2f tv(entry=%.2f cur=%.2f)",
+                    self._underlying, _basis_lbl, total_day_pct, self._day_loss_sl_pct,
                     self._session_realized_pnl_pts, pnl, self._initial_net_credit,
+                    pos.entry_time_value, pos.current_time_value(self._spot),
                 )
                 await self._close_position("day_loss_sl")
                 self._stop_for_day = True
