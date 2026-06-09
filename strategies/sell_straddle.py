@@ -1166,6 +1166,28 @@ class SellStraddleStrategy:
         offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
 
+        # Granular-audit heartbeat: when admin has AUDIT on for a client AND there is NO
+        # open position, surface the live entry-scan status so the client UI panel appears
+        # immediately (otherwise it stays hidden until the first exit-eval of an open trade).
+        if (self._position is None or self._position.status != "open"):
+            _audit_clients = self._granular_audit_clients()
+            if _audit_clients:
+                try:
+                    _atm = round(self._spot / step) * step if self._spot else 0
+                    _crit_h = [
+                        {"name": "Status", "detail": f"no open position — {concept} scan", "hit": False},
+                        {"name": "Spot/ATM", "detail": f"{self._spot:.2f} / {int(_atm)}", "hit": False},
+                        {"name": "Target/Offset", "detail": f"ltp≥{ltp_target:.0f}, ±{offset}", "hit": False},
+                    ]
+                    for _cid, _bid in _audit_clients:
+                        await self._bus.publish(Topic.EXIT_AUDIT, {
+                            "type": "exit_audit", "client_id": _cid, "binding_id": _bid,
+                            "underlying": self._underlying, "pnl": 0.0, "credit": 0.0,
+                            "criteria": _crit_h, "ind_by_tf": {}, "ts": now.timestamp(),
+                        })
+                except Exception:
+                    pass
+
         from strategies.straddle_selection import select_balanced_pair, scan_pool
 
         _trace: list = []
