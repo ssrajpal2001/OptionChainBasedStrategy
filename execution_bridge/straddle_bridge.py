@@ -510,22 +510,37 @@ class StraddleExecutionBridge:
                     provider, ev.underlying, int(strike), opt_type, expiry,
                 )
                 continue
+            _fallback_ltp = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
             req = OrderRequest(
                 broker_symbol=symbol,
                 exchange=order_exchange(ev.underlying),
                 side=side,
                 qty=qty,
                 order_type=OrderType.MARKET,
+                # Pass the live LTP as the order price. Live brokers ignore it for MARKET
+                # orders (Zerodha uses market_protection / a LTP-derived LIMIT internally),
+                # but MockBroker fills at req.price — so paper/demo fills the real premium
+                # instead of the hardcoded 100.0 default.
+                price=_fallback_ltp,
                 product=_ss_product,
                 tag=f"SS_{ev.underlying}_{ev.action}",
                 client_id=client_id,
             )
             try:
-                fill = await broker.place_order(req)
-                fills[opt_type] = fill.avg_price if fill else (ev.ce_ltp if opt_type == "CE" else ev.pe_ltp)
+                # place_order returns the broker ORDER-ID (a str), NOT a fill object.
+                # The real average fill price must be fetched via get_order_status — doing
+                # `order_id.avg_price` was raising "'str' object has no attribute 'avg_price'"
+                # on EVERY live leg, so the bridge silently fell back to the strategy LTP and
+                # recorded that as the fill (→ history P&L diverged from the broker order book).
+                order_id = await broker.place_order(req)
+                order_fill = await broker.get_order_status(order_id)
+                _avg = float(getattr(order_fill, "avg_price", 0.0) or 0.0) if order_fill else 0.0
+                # A just-placed market order may not show an avg yet; only trust a real >0 fill,
+                # else fall back to the strategy LTP (entry-price integrity guard, c729394).
+                fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
                 logger.info(
-                    "[LIVE] %s %s %s order placed — %s@%.2f | client=%s",
-                    ev.action, ev.underlying, opt_type, symbol, fills[opt_type], client_id,
+                    "[LIVE] %s %s %s order placed — %s@%.2f (order_id=%s, avg=%.2f) | client=%s",
+                    ev.action, ev.underlying, opt_type, symbol, fills[opt_type], order_id, _avg, client_id,
                 )
                 self._trade_log.log_event(client_id, binding_id,
                     f"{ev.action} {ev.underlying} {opt_type}{int(strike)} placed @ {fills[opt_type]:.2f}")
@@ -536,7 +551,7 @@ class StraddleExecutionBridge:
                 )
                 self._trade_log.log_event(client_id, binding_id,
                     f"{ev.action} {ev.underlying} {opt_type}{int(strike)} ORDER FAILED: {exc}")
-                fills[opt_type] = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
+                fills[opt_type] = _fallback_ltp
 
         fill_ev = StraddleFillEvent(
             action     = ev.action,
