@@ -183,6 +183,19 @@ class StraddlePosition:
         from strategies.theta_calc import theta_decay_pct as _tdp
         return _tdp(self.entry_time_value, self.current_time_value(spot))
 
+    def premium_decay_pct(self) -> float:
+        """CLEAN theta% (user spec 2026-06-10): the decay tracked against the TOTAL THETA
+        RECEIVED AT ENTRY. = (entry premium − current premium) / entry_time_value × 100, where
+        entry_time_value is the combined TIME VALUE captured at entry ('total theta received';
+        for an ATM straddle it equals the entry premium). The numerator is the premium decay
+        (= running P&L in pts). Because the denominator is fixed at entry, the absolute profit/SL
+        thresholds (entry_theta × day%) are known at the start. Positive = decayed = profit; it
+        tracks P&L and rises cleanly (no spot-driven oscillation)."""
+        base = float(getattr(self, "entry_time_value", 0.0) or 0.0) or float(self.net_credit or 0.0)
+        if base <= 0:
+            return 0.0
+        return (self.net_credit - self.current_value) / base * 100.0
+
 
 def format_exit_eval(underlying: str, pnl_pts: float, credit: float, criteria) -> str:
     """One EXIT-EVAL log line showing every exit criterion checked on the max-TF close.
@@ -1389,7 +1402,7 @@ class SellStraddleStrategy:
             _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
             if credit and (_dpt or _dsl):
                 if self._day_exit_basis == "theta":
-                    _dpct = pos.theta_decay_pct(self._spot)
+                    _dpct = pos.premium_decay_pct()
                     _crit.append(("Day%(θ)", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
                                   (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
                 else:
@@ -1533,13 +1546,15 @@ class SellStraddleStrategy:
         # ── DAY-LEVEL % GUARDRAILS (stops trading for the day) ──
         # Metric depends on the per-weekday basis:
         #   "ltp"   → (all closed trades + running LTP P&L) / initial credit × 100  (legacy)
-        #   "theta" → combined TIME-VALUE decay % of the live position since entry
+        #   "theta" → % of the TOTAL PREMIUM SOLD that has decayed for the live position
+        #             = (entry premium − current premium)/entry premium × 100  (clean, premium-
+        #             based; chosen 2026-06-10 — tracks P&L, doesn't oscillate with spot).
         # Both use the same per-day target/SL thresholds; positive = profit in either basis.
         if self._initial_net_credit > 0:
             total_day_pts = self._session_realized_pnl_pts + pnl
             if self._day_exit_basis == "theta":
-                total_day_pct = pos.theta_decay_pct(self._spot)
-                _basis_lbl = "theta-decay"
+                total_day_pct = pos.premium_decay_pct()
+                _basis_lbl = "theta-premium-decay"
             else:
                 total_day_pct = total_day_pts / self._initial_net_credit * 100
                 _basis_lbl = "ltp"
@@ -1547,10 +1562,10 @@ class SellStraddleStrategy:
             if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
                 logger.info(
                     "SellStraddle[%s]: DAY PROFIT TARGET [%s] — day=%.1f%% (≥%.1f%%) | "
-                    "closed=%.2f running=%.2f credit=%.2f tv(entry=%.2f cur=%.2f)",
+                    "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
                     self._underlying, _basis_lbl, total_day_pct, self._day_profit_target_pct,
                     self._session_realized_pnl_pts, pnl, self._initial_net_credit,
-                    pos.entry_time_value, pos.current_time_value(self._spot),
+                    pos.net_credit, pos.current_value,
                 )
                 await self._close_position("day_profit_target")
                 self._stop_for_day = True
@@ -1560,10 +1575,10 @@ class SellStraddleStrategy:
             if self._day_loss_sl_pct > 0 and total_day_pct <= -self._day_loss_sl_pct:
                 logger.info(
                     "SellStraddle[%s]: DAY LOSS SL [%s] — day=%.1f%% (≤-%.1f%%) | "
-                    "closed=%.2f running=%.2f credit=%.2f tv(entry=%.2f cur=%.2f)",
+                    "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
                     self._underlying, _basis_lbl, total_day_pct, self._day_loss_sl_pct,
                     self._session_realized_pnl_pts, pnl, self._initial_net_credit,
-                    pos.entry_time_value, pos.current_time_value(self._spot),
+                    pos.net_credit, pos.current_value,
                 )
                 await self._close_position("day_loss_sl")
                 self._stop_for_day = True

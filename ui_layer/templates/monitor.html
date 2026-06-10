@@ -7001,9 +7001,11 @@ function histReplay() {
                              :style="ss.exit_basis==='theta'
                                ? 'background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.25)'
                                : 'background:var(--t-surface);border:1px solid var(--t-border)'">
-                          <div class="flex justify-between"><span style="color:var(--t-muted)">Theta — Entry (time value)</span><span style="color:var(--t-text)" x-text="(ss.theta.entry||0).toFixed(2)"></span></div>
-                          <div class="flex justify-between"><span style="color:var(--t-muted)">Theta — Current</span><span class="price-live" style="color:var(--t-bright)" x-text="(ss.theta.current||0).toFixed(2)"></span></div>
-                          <div class="flex justify-between"><span style="color:var(--t-muted)">Theta — % checking (decay)</span><span :style="`color:${(ss.theta.pct||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((ss.theta.pct||0)>=0?'+':'')+(ss.theta.pct||0).toFixed(2)+'%'"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">Total Theta Received</span><span style="color:var(--t-text)" x-text="(ss.theta.entry||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">Profit Target <span style="color:var(--t-dim)" x-text="'('+(ss.day_target_pct||0).toFixed(0)+'% = '+(ss.theta.target_amt||0).toFixed(2)+' pts)'"></span></span><span style="color:var(--t-green)" x-text="'exit ≤ '+(ss.theta.exit_profit_at||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">Loss SL <span style="color:var(--t-dim)" x-text="'('+(ss.day_sl_pct||0).toFixed(0)+'% = '+(ss.theta.sl_amt||0).toFixed(2)+' pts)'"></span></span><span style="color:var(--t-red)" x-text="'exit ≥ '+(ss.theta.exit_loss_at||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)"><span style="color:var(--t-muted)">Current Premium</span><span class="price-live" style="color:var(--t-bright)" x-text="(ss.theta.current||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">% Decayed (tracking)</span><span :style="`color:${(ss.theta.pct||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((ss.theta.pct||0)>=0?'+':'')+(ss.theta.pct||0).toFixed(2)+'%'"></span></div>
                         </div>
                       </template>
                     </div>

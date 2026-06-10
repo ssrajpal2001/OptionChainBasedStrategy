@@ -1809,16 +1809,28 @@ class DashboardServer:
                                 _real   = float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0)
                                 _ltp_pct = ((_real + _run) / _credit * 100.0) if _credit else 0.0
                                 try:
-                                    _eTV = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
-                                    _cTV = float(pos.current_time_value(_spot))
-                                    _tPct = float(pos.theta_decay_pct(_spot))
+                                    # Theta basis (user spec): baseline = TOTAL THETA RECEIVED at
+                                    # entry (entry_time_value; == premium for an ATM straddle).
+                                    # Fixed thresholds = entry_theta × day%. Track premium decay.
+                                    _eTV = float(getattr(pos, "entry_time_value", 0.0) or 0.0) or float(pos.net_credit or 0.0)
+                                    _cTV = float(pos.current_value)
+                                    _tPct = float(pos.premium_decay_pct())
                                 except Exception:
                                     _eTV = _cTV = _tPct = 0.0
                                 straddle_info["total_value_sold"] = round(_entryC, 2)
                                 straddle_info["ltp"] = {"total_sold": round(_entryC, 2),
                                                         "current": round(_curC, 2), "pct": round(_ltp_pct, 2)}
-                                straddle_info["theta"] = {"entry": round(_eTV, 2),
-                                                          "current": round(_cTV, 2), "pct": round(_tPct, 2)}
+                                # Fixed exit levels known AT ENTRY: total premium × day% (user spec).
+                                #   profit: premium decays by _eTV×target% → exit when current ≤ this
+                                #   loss:   premium rises  by _eTV×sl%     → exit when current ≥ this
+                                _tgt_amt = round(_eTV * _dpt / 100.0, 2)
+                                _sl_amt  = round(_eTV * _dsl / 100.0, 2)
+                                straddle_info["theta"] = {
+                                    "entry": round(_eTV, 2), "current": round(_cTV, 2), "pct": round(_tPct, 2),
+                                    "target_amt": _tgt_amt, "sl_amt": _sl_amt,
+                                    "exit_profit_at": round(_eTV - _tgt_amt, 2),
+                                    "exit_loss_at":   round(_eTV + _sl_amt, 2),
+                                }
                     elif sname == "trap_trading":
                         eng = getattr(_srv, "_trap_engine", None)
                         op = getattr(eng, "_open_positions", {}) if eng else {}
