@@ -47,25 +47,28 @@
   </script>
 
   <style>
-    /* ── CSS custom properties — light professional defaults ──────── */
+    /* ── CSS custom properties — Kite "Daylight" defaults (Zerodha palette) ──────
+       Calm white surface, near-black text, Kite signature blue accent, buy-green /
+       sell-orange-red. Mirrors the kite.zerodha.com look so it feels familiar to
+       clients. The JS theme system overrides these at runtime; these are first-paint. */
     :root {
-      --t-bg:       #f1f5f9;
-      --t-surface:  #e8edf3;
+      --t-bg:       #ffffff;
+      --t-surface:  #f9f9f9;
       --t-card:     #ffffff;
-      --t-border:   #dde3ec;
-      --t-dim:      #cbd5e1;
-      --t-cyan:     #2563eb;
-      --t-green:    #16a34a;
-      --t-red:      #dc2626;
-      --t-amber:    #d97706;
-      --t-muted:    #94a3b8;
-      --t-text:     #334155;
-      --t-bright:   #0f172a;
+      --t-border:   #e9e9ed;
+      --t-dim:      #d8d8dd;
+      --t-cyan:     #387ED1;   /* Kite blue (accent) */
+      --t-green:    #4CA64C;   /* buy / profit */
+      --t-red:      #FF5722;   /* sell / loss (Kite orange-red) */
+      --t-amber:    #F5A623;
+      --t-muted:    #9b9b9b;
+      --t-text:     #3c3c3c;
+      --t-bright:   #1a1a1a;
       /* RGB components for alpha variants */
-      --t-cyan-rgb:  37, 99, 235;
-      --t-green-rgb: 22, 163, 74;
-      --t-red-rgb:   220, 38, 38;
-      --t-amber-rgb: 217, 119, 6;
+      --t-cyan-rgb:  56, 126, 209;
+      --t-green-rgb: 76, 166, 76;
+      --t-red-rgb:   255, 87, 34;
+      --t-amber-rgb: 245, 166, 35;
     }
 
     [x-cloak] { display: none !important; }
@@ -520,10 +523,16 @@ document.addEventListener('alpine:init', () => {
     loginLoading: false,
 
     /* ── Theme ──────────────────────────────────────────────────────── */
-    currentTheme: 'light_pro',
+    currentTheme: 'daylight',
     showThemeMenu: false,
 
     _themes: {
+      daylight: {   // Zerodha / Kite look — calm white, Kite blue, buy-green / sell-orange-red
+        bg:'#ffffff', surface:'#f9f9f9', card:'#ffffff', border:'#e9e9ed', dim:'#d8d8dd',
+        cyan:'#387ED1', green:'#4CA64C', red:'#FF5722', amber:'#F5A623',
+        muted:'#9b9b9b', text:'#3c3c3c', bright:'#1a1a1a',
+        cyanRgb:'56,126,209', greenRgb:'76,166,76', redRgb:'255,87,34', amberRgb:'245,166,35',
+      },
       light_pro: {
         bg:'#f1f5f9', surface:'#e8edf3', card:'#ffffff', border:'#dde3ec', dim:'#cbd5e1',
         cyan:'#2563eb', green:'#16a34a', red:'#dc2626', amber:'#d97706',
@@ -894,7 +903,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Init ────────────────────────────────────────────────────────── */
     init() {
       this._startClock();
-      const saved = localStorage.getItem('terminus_theme') || 'light_pro';
+      const saved = localStorage.getItem('terminus_theme') || 'daylight';
       this.applyTheme(saved, false);
       // Restore session from localStorage so page reload doesn't force re-login
       const savedToken = localStorage.getItem('terminus_token');
@@ -1219,7 +1228,7 @@ document.addEventListener('alpine:init', () => {
       if (evt.code === 'CONNECTED')                      return 'var(--t-cyan)';
       return 'var(--t-muted)';
     },
-    themeLabel(k) { return { light_pro:'LIGHT', midnight:'DARK', matrix:'MATRIX', cyberpunk:'CYBER' }[k] || k; },
+    themeLabel(k) { return { daylight:'DAYLIGHT', light_pro:'LIGHT', midnight:'DARK', matrix:'MATRIX', cyberpunk:'CYBER' }[k] || k; },
 
     /* ── Auth alerts ─────────────────────────────────────────────────────── */
     async loadAuthAlerts() {
@@ -2765,8 +2774,8 @@ function histReplay() {
     </div>
 
     <!-- Theme switcher on login screen -->
-    <div class="flex justify-center gap-2 mt-4">
-      <template x-for="k in ['light_pro','midnight','matrix','cyberpunk']" :key="k">
+    <div class="flex flex-wrap justify-center gap-2 mt-4">
+      <template x-for="k in ['daylight','light_pro','midnight','matrix','cyberpunk']" :key="k">
         <button class="theme-tab" :class="{ active: currentTheme===k }" @click="applyTheme(k)" x-text="themeLabel(k)"></button>
       </template>
     </div>
@@ -2818,7 +2827,7 @@ function histReplay() {
       <div x-show="showThemeMenu" @click.outside="showThemeMenu=false"
            class="absolute right-0 top-8 z-50 rounded border p-1 space-y-0.5 min-w-[120px]"
            style="background:var(--t-card); border-color:var(--t-border)">
-        <template x-for="k in ['light_pro','midnight','matrix','cyberpunk']" :key="k">
+        <template x-for="k in ['daylight','light_pro','midnight','matrix','cyberpunk']" :key="k">
           <button @click="applyTheme(k)"
                   class="block w-full text-left font-mono text-xs px-3 py-1.5 rounded"
                   :style="currentTheme===k ? 'color:var(--t-cyan); background:rgba(var(--t-cyan-rgb),0.08)' : 'color:var(--t-muted)'"
