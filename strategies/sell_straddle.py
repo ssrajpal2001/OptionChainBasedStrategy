@@ -272,6 +272,12 @@ class SellStraddleStrategy:
         self._initial_net_credit: float = 0.0         # credit from first trade — fixed denominator for day %
         self._stop_for_day: bool = False               # True after day-profit-target or day-loss-SL fires
 
+        # Post-restore warm-up: hold P&L exits until a restored position's legs tick fresh.
+        self._post_restore_warmup: bool = False
+        self._post_restore_at:     float = 0.0
+        self._ce_ltp_fresh:        bool = True
+        self._pe_ltp_fresh:        bool = True
+
         self._tasks: list = []
         self._sl_cooldown_until: Optional[datetime] = None
         self._event_counter: int = 0
@@ -440,7 +446,18 @@ class SellStraddleStrategy:
                 # is SKIPPED on a restored position → the day loss-SL never fires.
                 if self._initial_net_credit <= 0 and self._position.net_credit > 0:
                     self._initial_net_credit = self._position.net_credit
-                logger.info("SellStraddle[%s]: restored open position from store (credit=%.2f, qty=%d).",
+                # WARM-UP GUARD: the persisted leg LTPs are from the LAST structural event
+                # (entry/roll), NOT the latest tick — so running P&L computed off them right
+                # after restore is stale and can FALSELY trip the Day-loss-SL (closing a
+                # position the user wanted kept). Hold P&L-based exits until BOTH legs receive a
+                # fresh live option tick (or a short timeout), so exits judge real prices only.
+                import time as _t
+                self._post_restore_warmup = True
+                self._post_restore_at     = _t.monotonic()
+                self._ce_ltp_fresh = False
+                self._pe_ltp_fresh = False
+                logger.info("SellStraddle[%s]: restored open position from store (credit=%.2f, qty=%d) "
+                            "— exits HELD until fresh LTPs arrive.",
                             self._underlying, self._position.net_credit, self._position.lot_size)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: restore failed: %s", self._underlying, exc)
@@ -748,8 +765,10 @@ class SellStraddleStrategy:
                 pos = self._position
                 if tick.option_type == "CE" and abs(tick.strike - pos.ce_leg.strike) < 0.01:
                     pos.ce_leg.ltp = tick.ltp
+                    self._ce_ltp_fresh = True
                 elif tick.option_type == "PE" and abs(tick.strike - pos.pe_leg.strike) < 0.01:
                     pos.pe_leg.ltp = tick.ltp
+                    self._pe_ltp_fresh = True
 
     # ── Candle processing ─────────────────────────────────────────────────────
 
@@ -1475,6 +1494,20 @@ class SellStraddleStrategy:
                 await self._close_position("eod_squareoff")
                 self._stop_for_day = True
             return
+
+        # ── POST-RESTORE WARM-UP GUARD ────────────────────────────────────────────
+        # A just-restored position carries STALE persisted leg LTPs (saved at the last
+        # entry/roll, not per tick). Computing running P&L off them can FALSELY trip the
+        # Day-loss-SL and close a position the user wanted kept. Hold ALL P&L-based exits
+        # (EOD above still runs) until both legs tick fresh, or a 20s safety timeout.
+        if self._post_restore_warmup:
+            if (self._ce_ltp_fresh and self._pe_ltp_fresh) or (_t.monotonic() - self._post_restore_at > 20.0):
+                self._post_restore_warmup = False
+                logger.info("SellStraddle[%s]: post-restore warm-up complete — exits armed "
+                            "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
+                            self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
+            else:
+                return   # hold exits until real prices arrive
 
         # ── MANDATORY GLOBAL GUARDRAILS (first — reference exit_logic order) ──────
         # guardrail_pnl — cumulative session premium points target / SL.
