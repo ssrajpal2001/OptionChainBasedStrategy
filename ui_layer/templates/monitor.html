@@ -2887,8 +2887,8 @@ function histReplay() {
     </div>
     <!-- Index tabs — ADMIN only. Clients pick the index inside the Positions section
          (the SPOT/ATM card), so showing them in the navbar too is redundant clutter. -->
-    <div class="w-px h-6" style="background:var(--t-border)" x-show="authRole==='admin'"></div>
-    <div class="mobile-track gap-1" x-show="authRole==='admin'">
+    <div class="w-px h-6 hide-on-mobile" style="background:var(--t-border)" x-show="authRole==='admin'"></div>
+    <div class="mobile-track hide-on-mobile gap-1" x-show="authRole==='admin'">
       <template x-for="idx in indices" :key="idx">
         <button class="idx-tab shrink-0" :class="{ active: activeIndex===idx }" @click="activeIndex=idx" x-text="idx"></button>
       </template>
@@ -3019,6 +3019,23 @@ function histReplay() {
           <span x-text="m.label"></span>
         </button>
       </template>
+    </div>
+  </template>
+
+  <!-- ADMIN active-index selector (moved out of the cramped header) -->
+  <template x-if="authRole==='admin'">
+    <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
+      <div class="sec-label mb-2">Active Index</div>
+      <div class="grid grid-cols-2 gap-1.5">
+        <template x-for="idx in indices" :key="idx">
+          <button @click="activeIndex=idx; mobileNav=false"
+                  class="font-mono text-xs px-3 py-2 rounded border text-left"
+                  :style="activeIndex===idx
+                    ? 'color:var(--t-cyan); border-color:rgba(var(--t-cyan-rgb),0.4); background:rgba(var(--t-cyan-rgb),0.08)'
+                    : 'color:var(--t-muted); border-color:var(--t-border); background:transparent'"
+                  x-text="idx"></button>
+        </template>
+      </div>
     </div>
   </template>
 
