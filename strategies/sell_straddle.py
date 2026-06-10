@@ -601,7 +601,10 @@ class SellStraddleStrategy:
 
     async def _tick_loop(self) -> None:
         from data_layer.base_feeder import IndexTick
+        import time as _t
         q = self._bus.subscribe(Topic.INDEX_TICK)
+        _idx_count = 0
+        _last_hb = 0.0
         while self._running:
             try:
                 tick: IndexTick = await asyncio.wait_for(q.get(), timeout=1.0)
@@ -612,10 +615,32 @@ class SellStraddleStrategy:
             if tick.symbol != self._underlying:
                 continue
             self._spot = tick.ltp
-            if self._position and self._position.status == "open":
-                await self._check_exits()
-            else:
-                await self._maybe_try_entry(datetime.now(IST))
+            _idx_count += 1
+            # Heartbeat (once/60s): prove the INDEX-tick engine is alive and show the
+            # entry/exit gate state even when nothing fires — so a silent stall (e.g. no
+            # index feed, terminal off, stop_for_day) is diagnosable instead of invisible.
+            _now_m = _t.monotonic()
+            if _now_m - _last_hb >= 60.0:
+                _last_hb = _now_m
+                if self._position and self._position.status == "open":
+                    _state = "position OPEN — exit-checking"
+                else:
+                    _state = (f"no position — entry path (trades_today={self._trades_today} "
+                              f"stop_for_day={self._stop_for_day} term={self._any_active_terminal()})")
+                self._clog.info("IDX_TICKS: %d index ticks/60s spot=%.2f | %s",
+                                _idx_count, self._spot, _state)
+                _idx_count = 0
+            # GUARD: an exception in _check_exits/_maybe_try_entry previously propagated and
+            # KILLED this task — entry+exit went permanently silent while OPT_TICKS kept
+            # logging from the separate option loop. Recover per-tick instead.
+            try:
+                if self._position and self._position.status == "open":
+                    await self._check_exits()
+                else:
+                    await self._maybe_try_entry(datetime.now(IST))
+            except Exception as _exc:
+                logger.exception("SellStraddle[%s]: tick-handler error (recovered, engine alive): %s",
+                                 self._underlying, _exc)
 
     async def _fill_loop(self) -> None:
         """Receive fill confirmations from StraddleExecutionBridge."""
