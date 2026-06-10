@@ -434,6 +434,15 @@
       header.navbar-h { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
       header.navbar-h .text-xl { font-size: 1.05rem; }   /* shrink the IST clock */
 
+      /* Right-side cluster (theme · role · clock · LIVE · logout): allow it to wrap
+         and tighten the spacing so it never pushes the page past the viewport. */
+      header.navbar-h > div:last-child { gap: 8px; flex-wrap: wrap; row-gap: 6px; }
+      header.navbar-h > div:last-child .w-px { display: none; }  /* drop divider bars on phones */
+
+      /* Client top bar (name · TODAY'S P&L · status · start/stop) stacks cleanly */
+      .client-topbar { gap: 10px !important; }
+      .client-topbar > * { min-width: 0; }
+
       /* Tab rows → independent horizontal scroll, never widen the container */
       .mobile-track {
         flex-wrap: nowrap; overflow-x: auto; white-space: nowrap;
@@ -2756,9 +2765,10 @@ function histReplay() {
         <span class="font-display text-xs tracking-widest ml-1" style="color:var(--t-muted)">v6</span>
       </div>
     </div>
-    <div class="w-px h-6" style="background:var(--t-border)"></div>
-    <!-- Index tabs (horizontally scrollable on mobile so they never widen the view) -->
-    <div class="mobile-track gap-1">
+    <!-- Index tabs — ADMIN only. Clients pick the index inside the Positions section
+         (the SPOT/ATM card), so showing them in the navbar too is redundant clutter. -->
+    <div class="w-px h-6" style="background:var(--t-border)" x-show="authRole==='admin'"></div>
+    <div class="mobile-track gap-1" x-show="authRole==='admin'">
       <template x-for="idx in indices" :key="idx">
         <button class="idx-tab shrink-0" :class="{ active: activeIndex===idx }" @click="activeIndex=idx" x-text="idx"></button>
       </template>
@@ -6222,7 +6232,7 @@ function histReplay() {
   <div x-show="clientPhase === 'active'" class="slide-in">
 
     <!-- ── Client top bar: name + status + bot toggle ── -->
-    <div class="t-card rounded mb-4 px-5 py-3 flex flex-wrap items-center gap-4">
+    <div class="client-topbar t-card rounded mb-4 px-5 py-3 flex flex-wrap items-center gap-4">
       <div class="flex-1 min-w-0">
         <div class="font-ui font-bold text-lg leading-tight" style="color:var(--t-bright)" x-text="(clientStatus&&clientStatus.name)||authClientId"></div>
         <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="authClientId + ' · ' + (wsConnected ? 'Feed LIVE' : 'Feed OFFLINE')"></div>

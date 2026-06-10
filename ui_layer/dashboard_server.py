@@ -672,6 +672,11 @@ class DashboardServer:
                         u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
                         if sname == "sell_straddle":
                             s = _find(sslist, u)
+                            if s:
+                                # Booked P&L for the day (sum of all closed trades) so the
+                                # number survives after a position exits — without it TODAY'S
+                                # P&L snaps back to 0 the moment the trade books out.
+                                pnl += float(getattr(s, "_session_realized_pnl_pts", 0.0) or 0.0)
                             p = getattr(s, "_position", None) if s else None
                             if p and getattr(p, "status", "open") == "open":
                                 pnl += float(getattr(p, "unrealized_pnl", 0.0) or 0.0)
@@ -1388,6 +1393,10 @@ class DashboardServer:
             # Check registry first
             reg_client = _srv._registry.get(cid) if _srv._registry else None
             if reg_client is not None:
+                # Refresh live P&L here too — the client's own header polls this endpoint,
+                # not the firm dashboard, so without this _daily_pnl stays stale at 0 even
+                # while a position runs (booked + unrealized).
+                _refresh_live_pnl()
                 bindings = _srv._client_db.get_bindings_safe_sync(cid)
                 return {
                     "phase":               "active",
