@@ -781,15 +781,24 @@ class SellStraddleStrategy:
 
         # Record one timestamped chart point per 1-min close (combined premium + the
         # broker-VWAP / RSI / SLOPE the strategy actually trades on). Client chart only.
+        # When a position is open, pull VWAP/RSI/SLOPE from the WARM pool engine for the
+        # exact open pair (the 1-min completed-bar series) — self._ind's live-TF1 values
+        # often lack enough bars to form RSI/SLOPE, which logged 0 on the chart.
         _ce_l, _pe_l, _, _ = self._active_premium()
+        _ci = self._ind
+        if self._position and self._position.status == "open":
+            _pi = self._pool_engine.pair_indicators_tf(
+                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike), 1) or {}
+            if _pi:
+                _ci = {**self._ind, **_pi}   # pool engine wins for vwap/rsi/slope when present
         self._chart_series.append({
             "ts":       ev.timestamp.timestamp(),
             "combined": round(float(_ce_l + _pe_l), 2),
             "ce_ltp":   round(float(_ce_l), 2),
             "pe_ltp":   round(float(_pe_l), 2),
-            "vwap":     round(float(self._ind.get("vwap", 0.0) or 0.0), 2),
-            "rsi":      round(float(self._ind.get("rsi", 0.0) or 0.0), 2),
-            "slope":    round(float(self._ind.get("slope", 0.0) or 0.0), 2),
+            "vwap":     round(float(_ci.get("vwap", 0.0) or 0.0), 2),
+            "rsi":      round(float(_ci.get("rsi", 0.0) or 0.0), 2),
+            "slope":    round(float(_ci.get("slope", 0.0) or 0.0), 2),
         })
 
         # Force-exit
@@ -1325,12 +1334,93 @@ class SellStraddleStrategy:
 
     # ── Exit ─────────────────────────────────────────────────────────────────
 
+    def _build_exit_criteria(self, pos, pnl: float, credit: float):
+        """Build the live exit-criteria list (and per-tf indicator dump) for logging AND the
+        granular client audit. Pure read — never mutates state, never raises. Tick-level rows
+        (Day%/LTPdecay/Ratio/P&L) reflect the current tick; TF-based rows (Dynamic) reflect
+        their own timeframe bucket. Returns (crit_list, exit_dump_or_None)."""
+        _crit = []
+        try:
+            _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
+            _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
+            if credit and (_dpt or _dsl):
+                if self._day_exit_basis == "theta":
+                    _dpct = pos.theta_decay_pct(self._spot)
+                    _crit.append(("Day%(θ)", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
+                                  (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
+                else:
+                    _dpct = (self._session_realized_pnl_pts + pnl) / credit * 100.0
+                    _crit.append(("Day%", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
+                                  (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
+            elif not credit:
+                _crit.append(("Day%", "SKIPPED (initial_credit=0!)", False))
+            _ce_ltp = float(getattr(getattr(pos, "ce_leg", None), "ltp", 0) or 0)
+            _pe_ltp = float(getattr(getattr(pos, "pe_leg", None), "ltp", 0) or 0)
+            if self._ltp_decay_enabled:
+                _lo = min(_ce_ltp, _pe_ltp) if (_ce_ltp > 0 and _pe_ltp > 0) else 0.0
+                _crit.append(("LTPdecay", f"min({_lo:.1f}) < {self._ltp_exit_min:.0f}",
+                              _lo > 0 and _lo < self._ltp_exit_min))
+            if _ce_ltp > 0 and _pe_ltp > 0 and getattr(self, "_ratio_threshold", 0.0):
+                _r = max(_ce_ltp, _pe_ltp) / min(_ce_ltp, _pe_ltp)
+                _crit.append(("Ratio", f"{_r:.2f} vs {self._ratio_threshold:.1f}x", _r >= self._ratio_threshold))
+            if self._tsl_enabled:
+                _crit.append(("TSL", "ON (scalable)", False))
+            if self._vwap_rise_enabled:
+                _stale = not self._pool_engine.pair_atp_fresh(
+                    pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec)
+                _crit.append(("VWAPrise",
+                              f"ON {self._vwap_rise_threshold:.1f}%{' STALE-skip' if _stale else ''}", False))
+            if self._guardrail_pnl_enabled:
+                _crit.append(("PnLguard", f"T{self._guardrail_pnl_target_pts:.0f}/SL{self._guardrail_pnl_sl_pts:.0f}pts", False))
+            if self._guardrail_roc_enabled:
+                _crit.append(("ROCguard", "ON", False))
+            _exit_dump = None
+            if self._exit_rules:
+                _exit_ind_by_tf = self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules)
+                _passed, _reason = _eval_rules(self._exit_rules, _exit_ind_by_tf)
+                _crit.append(("Dynamic", _reason, _passed))
+                _exit_dump = {tf: {k: round(v, 2) for k, v in (d or {}).items()}
+                              for tf, d in _exit_ind_by_tf.items()}
+                if 1 in _exit_dump:
+                    _exit_dump[1]["stale"] = (0.0 if self._pool_engine.pair_atp_fresh(
+                        pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec) else 1.0)
+            return _crit, _exit_dump
+        except Exception:
+            return _crit, None
+
+    async def _publish_exit_audit(self, pos, pnl: float, now: datetime) -> None:
+        """Publish the live exit-criteria to enabled client UIs, throttled to ~3s so the
+        panel updates on EVERY tick's data (P&L/Day%/LTPdecay/Ratio move live) — not only
+        once per max-TF bucket like the log line."""
+        _audit_clients = self._granular_audit_clients()
+        if not _audit_clients:
+            return
+        import time as _t
+        if _t.monotonic() - getattr(self, "_last_audit_pub", 0.0) < 3.0:
+            return
+        self._last_audit_pub = _t.monotonic()
+        _credit = self._initial_net_credit or pos.net_credit or 0.0
+        _crit, _exit_dump = self._build_exit_criteria(pos, pnl, _credit)
+        _criteria = [{"name": _n, "detail": _d, "hit": bool(_h)} for (_n, _d, _h) in _crit]
+        for _cid, _bid in _audit_clients:
+            await self._bus.publish(Topic.EXIT_AUDIT, {
+                "type": "exit_audit", "client_id": _cid, "binding_id": _bid,
+                "underlying": self._underlying, "pnl": round(pnl, 2),
+                "credit": round(_credit, 2), "criteria": _criteria,
+                "ind_by_tf": _exit_dump or {}, "ts": now.timestamp(),
+            })
+
     async def _check_exits(self) -> None:
         pos = self._position
         if not pos:
             return
         now = datetime.now(IST)
         pnl = pos.unrealized_pnl
+
+        # Live granular exit audit → client UI, every tick (self-throttled to ~3s). This is
+        # what makes the panel MOVE — the per-bucket EXIT-EVAL log below only refreshes once
+        # per max-TF boundary, but tick-level rows (P&L/Day%/LTPdecay/Ratio) change each tick.
+        await self._publish_exit_audit(pos, pnl, now)
 
         # ── Visibility: SHOW that exits are being evaluated each candle, with the
         #    live P&L vs the active thresholds (throttled to once/min, not per tick).
@@ -1539,76 +1629,19 @@ class SellStraddleStrategy:
             # Use the SAME denominator as the real Day% check (_initial_net_credit), so
             # the log matches what actually fires.
             _credit = self._initial_net_credit or pos.net_credit or 0.0
-            _pct = (pnl / _credit * 100.0) if _credit else 0.0
             _passed, _reason = (False, "—")
             # Build the criteria list defensively — logging must never break the exits.
+            # (The client audit is published per-tick via _publish_exit_audit; here we only
+            #  log the per-bucket EXIT-EVAL line + extract the dynamic pass/reason.)
             try:
-                _crit = []
-                # Day% is the real per-position loss/target guardrail (per_day → global).
-                _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
-                _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
-                if _credit and (_dpt or _dsl):
-                    _dpct = (self._session_realized_pnl_pts + pnl) / _credit * 100.0
-                    _crit.append(("Day%", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
-                                  (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
-                elif not _credit:
-                    _crit.append(("Day%", "SKIPPED (initial_credit=0!)", False))
-                _ce_ltp = float(getattr(getattr(pos, "ce_leg", None), "ltp", 0) or 0)
-                _pe_ltp = float(getattr(getattr(pos, "pe_leg", None), "ltp", 0) or 0)
-                # LTP-decay (either leg below min)
-                if self._ltp_decay_enabled:
-                    _lo = min(_ce_ltp, _pe_ltp) if (_ce_ltp > 0 and _pe_ltp > 0) else 0.0
-                    _crit.append(("LTPdecay", f"min({_lo:.1f}) < {self._ltp_exit_min:.0f}",
-                                  _lo > 0 and _lo < self._ltp_exit_min))
-                # Ratio
-                if _ce_ltp > 0 and _pe_ltp > 0 and getattr(self, "_ratio_threshold", 0.0):
-                    _r = max(_ce_ltp, _pe_ltp) / min(_ce_ltp, _pe_ltp)
-                    _crit.append(("Ratio", f"{_r:.2f} vs {self._ratio_threshold:.1f}x", _r >= self._ratio_threshold))
-                # Scalable TSL / VWAP-rise / PnL-guard / ROC-guard — show ON/OFF (their
-                # own checks fire the close; here we surface that they ARE active).
-                if self._tsl_enabled:
-                    _crit.append(("TSL", "ON (scalable)", False))
-                if self._vwap_rise_enabled:
-                    _stale = not self._pool_engine.pair_atp_fresh(
-                        pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec)
-                    _crit.append(("VWAPrise",
-                                  f"ON {self._vwap_rise_threshold:.1f}%{' STALE-skip' if _stale else ''}", False))
-                if self._guardrail_pnl_enabled:
-                    _crit.append(("PnLguard", f"T{self._guardrail_pnl_target_pts:.0f}/SL{self._guardrail_pnl_sl_pts:.0f}pts", False))
-                if self._guardrail_roc_enabled:
-                    _crit.append(("ROCguard", "ON", False))
-                _exit_dump = None
-                if self._exit_rules:
-                    _exit_ind_by_tf = self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules)
-                    _passed, _reason = _eval_rules(self._exit_rules, _exit_ind_by_tf)
-                    _crit.append(("Dynamic", _reason, _passed))
-                    _exit_dump = {tf: {k: round(v, 2) for k, v in (d or {}).items()}
-                                  for tf, d in _exit_ind_by_tf.items()}
-                    # Tag tf=1 with leg-ATP staleness so a TF1/TF2 vwap divergence is explainable.
-                    if 1 in _exit_dump:
-                        _exit_dump[1]["stale"] = (0.0 if self._pool_engine.pair_atp_fresh(
-                            pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec) else 1.0)
+                _crit, _exit_dump = self._build_exit_criteria(pos, pnl, _credit)
                 self._clog.info(format_exit_eval(self._underlying, pnl, _credit, _crit))
                 if _exit_dump is not None:
                     self._clog.info("EXIT-EVAL %s exit_ind_by_tf=%s", self._underlying, _exit_dump)
-                # Granular tick-by-tick exit audit → client UI. Only built/published when an
-                # admin has enabled it for at least one client bound to this straddle (gate to
-                # avoid per-bucket overhead in the common case where it's off).
-                _audit_clients = self._granular_audit_clients()
-                if _audit_clients:
-                    _criteria = [{"name": _n, "detail": _d, "hit": bool(_h)} for (_n, _d, _h) in _crit]
-                    for _cid, _bid in _audit_clients:
-                        await self._bus.publish(Topic.EXIT_AUDIT, {
-                            "type":       "exit_audit",
-                            "client_id":  _cid,
-                            "binding_id": _bid,
-                            "underlying": self._underlying,
-                            "pnl":        round(pnl, 2),
-                            "credit":     round(_credit, 2),
-                            "criteria":   _criteria,
-                            "ind_by_tf":  _exit_dump or {},
-                            "ts":         now.timestamp(),
-                        })
+                for _n, _d, _h in _crit:
+                    if _n == "Dynamic":
+                        _passed, _reason = bool(_h), _d
+                        break
             except Exception as _exc:
                 self._clog.info("EXIT-EVAL %s (formatting error: %s)", self._underlying, _exc)
                 if self._exit_rules:
