@@ -463,8 +463,10 @@
       header.navbar-h { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
       header.navbar-h .text-xl { font-size: 1.05rem; }   /* shrink the IST clock */
 
-      /* On phones the whole right-side cluster moves into the hamburger drawer. */
+      /* On phones the whole right-side cluster + the horizontal sub-navs move into
+         the hamburger drawer (single clean navigation surface, professional look). */
       .navbar-right { display: none !important; }
+      .hide-on-mobile { display: none !important; }
       .navbar-burger { display: inline-flex; align-items: center; justify-content: center; }
       .mobile-drawer { display: flex; }
       .mobile-drawer-backdrop { display: block; }
@@ -667,7 +669,7 @@ document.addEventListener('alpine:init', () => {
     clientStatus:  null,    // full /api/client/status response
     clientDeployments: [],  // all active deployments for this client
     clientPhase:   'onboarding', // 'onboarding' | 'pending' | 'active'
-    clientMenu:    'strategies', // 'strategies' | 'brokers' | 'positions' | 'history'
+    clientMenu:    'dashboard', // 'dashboard' | 'strategies' | 'brokers' | 'positions' | 'history'
     botLoading:    false, botMsg: '', botOk: null,
     setIndexMsg:   '', setIndexOk: null,
 
@@ -1867,6 +1869,8 @@ document.addEventListener('alpine:init', () => {
             if (!this.csActiveBrokerTab && this.csBindings.length > 0) {
               this.csActiveBrokerTab = this.csBindings[0].binding_id;
             }
+            // Dashboard is the landing tab — load positions so per-broker P&L is populated.
+            this.loadClientPositions();
           }
         }
       } catch {}
@@ -2359,6 +2363,18 @@ document.addEventListener('alpine:init', () => {
           this.csHistPage = 1;   // reset to first page on (re)load
         }
       } catch {} finally { this.csHistoryLoading = false; }
+    },
+
+    // Day P&L for one broker binding = sum of running + booked across its deployed strategies.
+    brokerDayPnl(bid) {
+      const byStrat = this.csPositions[bid];
+      if (!byStrat) return 0;
+      let pnl = 0;
+      for (const k in byStrat) {
+        const s = byStrat[k] || {};
+        pnl += (s.pnl || 0) + (s.booked || 0);
+      }
+      return pnl;
     },
 
     // ── History GROUPED by script (instrument) + day ──
@@ -2968,6 +2984,44 @@ function histReplay() {
     </div>
   </div>
 
+  <!-- CLIENT navigation -->
+  <template x-if="authRole!=='admin' && clientPhase==='active'">
+    <div class="py-2 border-b" style="border-color:var(--t-border)">
+      <template x-for="m in [
+          {id:'dashboard',label:'Dashboard',icon:'▦'},
+          {id:'strategies',label:'Strategies',icon:'◈'},
+          {id:'brokers',label:'Brokers',icon:'▤'},
+          {id:'positions',label:'Positions',icon:'▥'},
+          {id:'history',label:'Orders / History',icon:'☰'}]" :key="m.id">
+        <button class="w-full flex items-center gap-3 px-4 py-3 text-left font-ui text-sm"
+                :style="clientMenu===m.id ? 'color:var(--t-cyan); background:rgba(var(--t-cyan-rgb),0.08); font-weight:700' : 'color:var(--t-text)'"
+                @click="clientMenu=m.id; mobileNav=false;
+                        m.id==='positions'&&loadClientPositions();
+                        m.id==='history'&&loadClientHistory();
+                        m.id==='dashboard'&&loadClientPositions()">
+          <span class="font-mono" style="width:18px;color:var(--t-muted)" x-text="m.icon"></span>
+          <span x-text="m.label"></span>
+        </button>
+      </template>
+    </div>
+  </template>
+
+  <!-- ADMIN navigation -->
+  <template x-if="authRole==='admin'">
+    <div class="py-2 border-b" style="border-color:var(--t-border)">
+      <template x-for="m in [
+          {id:'dashboard',label:'Dashboard'},{id:'strategies',label:'Strategy Admin'},
+          {id:'feeder',label:'Data Feeder'},{id:'trap',label:'Trap Engine'},
+          {id:'clients',label:'Client Profiles'}]" :key="m.id">
+        <button class="w-full flex items-center gap-3 px-4 py-3 text-left font-ui text-sm"
+                :style="adminTab===m.id ? 'color:var(--t-cyan); background:rgba(var(--t-cyan-rgb),0.08); font-weight:700' : 'color:var(--t-text)'"
+                @click="adminTab=m.id; mobileNav=false">
+          <span x-text="m.label"></span>
+        </button>
+      </template>
+    </div>
+  </template>
+
   <!-- Theme picker -->
   <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
     <div class="sec-label mb-2">Theme</div>
@@ -2983,19 +3037,20 @@ function histReplay() {
     </div>
   </div>
 
-  <!-- Logout pinned to bottom -->
-  <div class="mt-auto px-4 py-4 border-t" style="border-color:var(--t-border)">
+  <!-- Logout — right after theme so it's always reachable (not under the iOS toolbar) -->
+  <div class="px-4 py-4">
     <button @click="logout(); mobileNav=false"
             class="w-full font-ui text-sm font-semibold px-3 py-2.5 border rounded-md"
             style="color:var(--t-red); border-color:rgba(var(--t-red-rgb),0.3); background:rgba(var(--t-red-rgb),0.05)">
       LOGOUT
     </button>
   </div>
+  <div style="height:env(safe-area-inset-bottom)"></div>
 </aside>
 
 <!-- ── ADMIN SUB-NAV ───────────────────────────────────────────────────────── -->
 <div x-show="screen === 'admin'" x-cloak
-     class="admin-subnav sticky z-40 flex items-center border-b shrink-0"
+     class="admin-subnav hide-on-mobile sticky z-40 flex items-center border-b shrink-0"
      style="top:52px; background:var(--t-surface); border-color:var(--t-border)">
   <div class="flex px-3 shrink-0">
     <button class="admin-tab" :class="{active: adminTab==='dashboard'}"
@@ -6423,13 +6478,86 @@ function histReplay() {
            x-text="botMsg"></div>
     </div>
 
-    <!-- ── Client sub-nav (scrolls horizontally on phones, never overflows) ── -->
-    <div class="mobile-track border-b mb-4" style="border-color:var(--t-border)">
-      <template x-for="m in [{id:'strategies',label:'Strategies'},{id:'brokers',label:'Brokers'},{id:'positions',label:'Positions'},{id:'history',label:'History'}]" :key="m.id">
+    <!-- ── Client sub-nav (desktop only — phones navigate via the hamburger drawer) ── -->
+    <div class="mobile-track hide-on-mobile border-b mb-4" style="border-color:var(--t-border)">
+      <template x-for="m in [{id:'dashboard',label:'Dashboard'},{id:'strategies',label:'Strategies'},{id:'brokers',label:'Brokers'},{id:'positions',label:'Positions'},{id:'history',label:'History'}]" :key="m.id">
         <button class="admin-tab" :class="{active: clientMenu===m.id}"
                 @click="clientMenu=m.id; m.id==='positions'&&loadClientPositions(); m.id==='history'&&loadClientHistory()"
                 x-text="m.label"></button>
       </template>
+    </div>
+
+    <!-- ════ MENU: DASHBOARD ═══════════════════════════════════════════════════ -->
+    <div x-show="clientMenu === 'dashboard'" class="space-y-4">
+      <!-- P&L + bot summary -->
+      <div class="grid grid-cols-3 gap-3">
+        <div class="t-card rounded p-4">
+          <div class="sec-label mb-1">Today's P&amp;L</div>
+          <div class="font-mono text-2xl font-bold" :class="pnlClass(clientStatus&&clientStatus.daily_pnl||0)"
+               x-text="clientStatus ? (clientStatus.daily_pnl>=0?'+':'')+'₹'+fmt(clientStatus.daily_pnl) : '—'"></div>
+        </div>
+        <div class="t-card rounded p-4">
+          <div class="sec-label mb-1">Bot</div>
+          <div class="font-ui text-lg font-bold" :style="`color:${csBotActive?'var(--t-green)':'var(--t-red)'}`"
+               x-text="csBotActive ? 'ACTIVE' : 'STOPPED'"></div>
+        </div>
+        <div class="t-card rounded p-4">
+          <div class="sec-label mb-1">Brokers</div>
+          <div class="font-mono text-2xl font-bold" style="color:var(--t-bright)" x-text="csBindings.length"></div>
+        </div>
+      </div>
+
+      <!-- Broker details + per-broker P&L -->
+      <div class="t-card rounded">
+        <div class="flex items-center justify-between px-5 py-3 border-b" style="border-color:var(--t-border)">
+          <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Broker Accounts</div>
+          <button class="btn-action" style="width:auto;padding:5px 14px" @click="loadClientPositions()">↻ Refresh</button>
+        </div>
+        <div x-show="csBindings.length===0" class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
+          No brokers connected yet — add one in the Brokers tab.
+        </div>
+        <template x-for="b in csBindings" :key="b.binding_id">
+          <div class="px-5 py-4 border-b last:border-b-0" style="border-color:var(--t-border)">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="flex items-center gap-3 min-w-0">
+                <div class="w-2.5 h-2.5 rounded-full shrink-0 mt-1"
+                     :style="b.engine_active ? 'background:var(--t-green);box-shadow:0 0 6px var(--t-green)'
+                           : b.terminal_connected ? 'background:var(--t-amber)' : 'background:var(--t-muted)'"></div>
+                <div class="min-w-0">
+                  <div class="font-mono text-sm font-bold" style="color:var(--t-bright)" x-text="b.binding_id"></div>
+                  <div class="text-xs mt-0.5 flex flex-wrap items-center gap-1.5" style="color:var(--t-muted)">
+                    <span x-text="(b.provider||'').toUpperCase()"></span>
+                    <span class="px-1.5 py-0.5 rounded font-mono font-bold"
+                          :style="(b.trading_mode||'paper')==='live' ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green)' : 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan)'"
+                          x-text="(b.trading_mode||'paper').toUpperCase()"></span>
+                    <span class="px-1.5 py-0.5 rounded font-mono"
+                          :style="(b.product_type||'MIS')==='NRML' ? 'background:rgba(var(--t-cyan-rgb),0.08);color:var(--t-cyan)' : 'background:rgba(var(--t-amber-rgb),0.08);color:var(--t-amber)'"
+                          x-text="(b.product_type||'MIS')"></span>
+                    <span class="px-1.5 py-0.5 rounded font-mono"
+                          :style="b.access_token ? 'background:rgba(var(--t-green-rgb),0.08);color:var(--t-green)' : 'background:rgba(var(--t-red-rgb),0.08);color:var(--t-red)'"
+                          x-text="b.access_token ? '● Token OK' : '○ No Token'"></span>
+                  </div>
+                  <div class="mt-1.5 flex flex-wrap gap-1">
+                    <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
+                      <span class="text-xs px-2 py-0.5 rounded font-mono"
+                            style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                            x-text="(dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT')+' · '+dep.underlying"></span>
+                    </template>
+                    <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
+                          class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
+                  </div>
+                </div>
+              </div>
+              <!-- Per-broker day P&L -->
+              <div class="text-right shrink-0">
+                <div class="sec-label" style="font-size:9px">P&amp;L</div>
+                <div class="font-mono text-base font-bold" :class="pnlClass(brokerDayPnl(b.binding_id))"
+                     x-text="(brokerDayPnl(b.binding_id)>=0?'+':'')+'₹'+fmt(brokerDayPnl(b.binding_id))"></div>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
     </div>
 
     <!-- ════ MENU: STRATEGIES ══════════════════════════════════════════════════ -->
