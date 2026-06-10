@@ -412,6 +412,47 @@
       overflow-y: auto; padding: 24px; position: relative;
       box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.07);
     }
+
+    /* ── Horizontal scroll track (tab rows that must never break layout width) ── */
+    .mobile-track { display: flex; }
+    .mobile-track::-webkit-scrollbar { height: 0; display: none; }
+
+    /* ─────────────────────────────────────────────────────────────────────
+       MOBILE / SMALL-SCREEN LAYOUT  (≤768px)
+       Root causes of the clipped/half-blank dashboard on phones:
+         1) the navbar is one rigid row → its right-side cluster (clock/badges)
+            pushes the page wider than the viewport,
+         2) the index-tab row and admin sub-nav don't wrap or scroll,
+         3) rigid grid-cols-2/3/4 force min-content children wider than 320px.
+       Fixes here are ADDITIVE and only apply ≤768px — desktop is untouched.
+       ───────────────────────────────────────────────────────────────────── */
+    @media (max-width: 768px) {
+      html, body { overflow-x: hidden; }            /* kill horizontal clipping */
+
+      /* Navbar: wrap into rows instead of overflowing; auto height */
+      .navbar-h { height: auto; min-height: 52px; }
+      header.navbar-h { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+      header.navbar-h .text-xl { font-size: 1.05rem; }   /* shrink the IST clock */
+
+      /* Tab rows → independent horizontal scroll, never widen the container */
+      .mobile-track {
+        flex-wrap: nowrap; overflow-x: auto; white-space: nowrap;
+        -webkit-overflow-scrolling: touch; scrollbar-width: none; max-width: 100%;
+      }
+
+      /* Admin sub-nav: let the whole bar scroll, keep the right-side pills inline */
+      .admin-subnav { overflow-x: auto; scrollbar-width: none; }
+      .admin-subnav::-webkit-scrollbar { display: none; }
+
+      /* Collapse rigid multi-column grids to a single column on phones.
+         (Responsive utilities like `grid-cols-1 lg:grid-cols-2` are unaffected —
+         their base class is already grid-cols-1; only the bare desktop grids fold.) */
+      .grid-cols-2, .grid-cols-3, .grid-cols-4 { grid-template-columns: 1fr !important; }
+
+      /* Full-width content + tighter padding so cards fit a 320px viewport */
+      main { padding: 12px !important; }
+      .max-w-\[1800px\] { max-width: 100% !important; }
+    }
   </style>
 </head>
 
@@ -2716,10 +2757,10 @@ function histReplay() {
       </div>
     </div>
     <div class="w-px h-6" style="background:var(--t-border)"></div>
-    <!-- Index tabs -->
-    <div class="flex gap-1">
+    <!-- Index tabs (horizontally scrollable on mobile so they never widen the view) -->
+    <div class="mobile-track gap-1">
       <template x-for="idx in indices" :key="idx">
-        <button class="idx-tab" :class="{ active: activeIndex===idx }" @click="activeIndex=idx" x-text="idx"></button>
+        <button class="idx-tab shrink-0" :class="{ active: activeIndex===idx }" @click="activeIndex=idx" x-text="idx"></button>
       </template>
     </div>
   </div>
@@ -2783,9 +2824,9 @@ function histReplay() {
 
 <!-- ── ADMIN SUB-NAV ───────────────────────────────────────────────────────── -->
 <div x-show="screen === 'admin'" x-cloak
-     class="sticky z-40 flex items-center border-b shrink-0"
+     class="admin-subnav sticky z-40 flex items-center border-b shrink-0"
      style="top:52px; background:var(--t-surface); border-color:var(--t-border)">
-  <div class="flex px-3">
+  <div class="flex px-3 shrink-0">
     <button class="admin-tab" :class="{active: adminTab==='dashboard'}"
             @click="adminTab='dashboard'">DASHBOARD</button>
     <button class="admin-tab" :class="{active: adminTab==='strategies'}"
