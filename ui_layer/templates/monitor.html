@@ -665,6 +665,8 @@ document.addEventListener('alpine:init', () => {
     csHistPage: 1,           // history pagination — current page
     csHistPerPage: 10,       // history pagination — rows per page
     csHistoryLoading: false,
+    histView: 'grouped',     // 'grouped' (by script+day) | 'ledger' (flat order-book)
+    histGroupOpen: {},       // {groupKey: bool} — expanded state per day/script group
     csKillBroker: {},        // {binding_id: {armed:false, countdown:5, timer:null}}
     csPosBrokerLoading: false,
 
@@ -2334,7 +2336,33 @@ document.addEventListener('alpine:init', () => {
       } catch {} finally { this.csHistoryLoading = false; }
     },
 
-    // ── History pagination (10 rows/page) ──
+    // ── History GROUPED by script (instrument) + day ──
+    // Each group = one trading day for one instrument; header shows the transaction
+    // counts (buys/sells) and the group's total P&L. Newest day first.
+    histGroups() {
+      const groups = {};
+      for (const r of this.csHistoryFlat) {
+        const day = (r._ts && String(r._ts).slice(0, 10)) || 'undated';
+        const key = day + '|' + (r.strategy || '—') + '|' + (r.instrument || '—');
+        if (!groups[key]) groups[key] = {
+          key, day, strategy: r.strategy || '—', instrument: r.instrument || '—',
+          rows: [], buys: 0, sells: 0, pnl: 0, _sort: r._ts || '',
+        };
+        const g = groups[key];
+        g.rows.push(r);
+        if (r.action === 'BUY') g.buys++; else if (r.action === 'SELL') g.sells++;
+        if (r.pnl != null) g.pnl += r.pnl;
+        if ((r._ts || '') > g._sort) g._sort = r._ts || '';
+      }
+      return Object.values(groups).sort((a, b) => String(b._sort).localeCompare(String(a._sort)));
+    },
+    histDayLabel(day) {
+      if (day === 'undated') return 'Undated';
+      const d = new Date(day + 'T00:00:00');
+      return isNaN(d) ? day : d.toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+    },
+
+    // ── History pagination (10 rows/page) — used by the flat ledger fallback ──
     histTotalPages() { return Math.max(1, Math.ceil(this.csHistoryFlat.length / this.csHistPerPage)); },
     histPageRows() {
       const start = (this.csHistPage - 1) * this.csHistPerPage;
@@ -7142,18 +7170,95 @@ function histReplay() {
     <div x-show="clientMenu === 'history'" class="space-y-4">
 
       <div class="t-card rounded">
-        <div class="flex items-center justify-between px-5 py-3 border-b" style="border-color:var(--t-border)">
+        <div class="flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-b" style="border-color:var(--t-border)">
           <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Trade History</div>
-          <button class="btn-action" style="width:auto;padding:5px 14px" @click="loadClientHistory()" :disabled="csHistoryLoading">
-            <span x-show="!csHistoryLoading">↻ Refresh</span><span x-show="csHistoryLoading">Loading…</span>
-          </button>
+          <div class="flex items-center gap-2">
+            <!-- View toggle: grouped by script+day vs flat order-book ledger -->
+            <div class="flex rounded border overflow-hidden" style="border-color:var(--t-border)">
+              <button class="px-3 py-1 text-xs font-mono" @click="histView='grouped'"
+                      :style="histView==='grouped' ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan)' : 'color:var(--t-muted)'">Grouped</button>
+              <button class="px-3 py-1 text-xs font-mono border-l" style="border-color:var(--t-border)" @click="histView='ledger'"
+                      :style="histView==='ledger' ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan)' : 'color:var(--t-muted)'">Ledger</button>
+            </div>
+            <button class="btn-action" style="width:auto;padding:5px 14px" @click="loadClientHistory()" :disabled="csHistoryLoading">
+              <span x-show="!csHistoryLoading">↻ Refresh</span><span x-show="csHistoryLoading">Loading…</span>
+            </button>
+          </div>
         </div>
 
         <div x-show="csHistoryFlat.length === 0 && !csHistoryLoading" class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
           No trade history yet.
         </div>
 
-        <div x-show="csHistoryFlat.length > 0" class="overflow-x-auto">
+        <!-- ═══ GROUPED VIEW — by script (instrument) + day ═══ -->
+        <div x-show="csHistoryFlat.length > 0 && histView==='grouped'" class="p-3 space-y-3">
+          <template x-for="g in histGroups()" :key="g.key">
+            <div class="rounded border" style="border-color:var(--t-border)">
+              <!-- Group header: day · instrument · txn counts · total P&L (click to expand) -->
+              <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 cursor-pointer"
+                   style="background:var(--t-surface)"
+                   @click="histGroupOpen[g.key] = !(histGroupOpen[g.key]===undefined?true:histGroupOpen[g.key])">
+                <div class="flex items-center gap-3 min-w-0">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)"
+                        x-text="(histGroupOpen[g.key]===undefined?true:histGroupOpen[g.key]) ? '▾' : '▸'"></span>
+                  <div class="min-w-0">
+                    <div class="font-ui font-bold text-sm truncate" style="color:var(--t-bright)" x-text="g.instrument"></div>
+                    <div class="font-mono text-xs" style="color:var(--t-muted)">
+                      <span x-text="histDayLabel(g.day)"></span> ·
+                      <span style="color:var(--t-dim)" x-text="g.strategy"></span>
+                    </div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-3 shrink-0">
+                  <span class="font-mono text-xs px-2 py-0.5 rounded" style="border:1px solid var(--t-border);color:var(--t-muted)"
+                        x-text="g.rows.length + ' txn · ' + g.sells + 'S/' + g.buys + 'B'"></span>
+                  <div class="text-right">
+                    <div class="sec-label" style="font-size:9px">TOTAL P&amp;L</div>
+                    <div class="font-mono text-sm font-bold"
+                         :style="`color:${g.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
+                         x-text="(g.pnl>=0?'+':'')+'₹'+g.pnl.toFixed(0)"></div>
+                  </div>
+                </div>
+              </div>
+              <!-- Group rows -->
+              <div x-show="histGroupOpen[g.key]===undefined?true:histGroupOpen[g.key]" class="overflow-x-auto">
+                <table class="t-table w-full text-xs">
+                  <thead>
+                    <tr class="border-b" style="border-color:var(--t-border)">
+                      <th class="px-4 py-2 text-left sec-label">TIME</th>
+                      <th class="px-4 py-2 text-left sec-label">ACTION</th>
+                      <th class="px-4 py-2 text-left sec-label">STRIKE</th>
+                      <th class="px-4 py-2 text-right sec-label">PRICE</th>
+                      <th class="px-4 py-2 text-right sec-label">P&amp;L</th>
+                      <th class="px-4 py-2 text-left sec-label">REASON</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="(rw,i) in g.rows" :key="g.key+'_'+i">
+                      <tr class="border-b last:border-b-0" style="border-color:var(--t-border)">
+                        <td data-label="Time" class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="rw.time"></td>
+                        <td data-label="Action" class="px-4 py-2 font-mono font-bold"
+                            :style="`color:${rw.action==='SELL'?'var(--t-green)':'var(--t-red)'}`" x-text="rw.action"></td>
+                        <td data-label="Strike" class="px-4 py-2 font-mono font-semibold"
+                            :style="`color:${rw.side==='CE'?'var(--t-green)':rw.side==='PE'?'var(--t-amber)':'var(--t-text)'}`"
+                            x-text="rw.strike"></td>
+                        <td data-label="Price" class="px-4 py-2 font-mono text-right" style="color:var(--t-text)"
+                            x-text="rw.price!=null?Number(rw.price).toFixed(2):'—'"></td>
+                        <td data-label="P&amp;L" class="px-4 py-2 font-mono font-bold text-right"
+                            :style="`color:${rw.pnl==null?'var(--t-muted)':((rw.pnl||0)>=0?'var(--t-green)':'var(--t-red)')}`"
+                            x-text="rw.pnl==null?'—':(((rw.pnl||0)>=0?'+':'')+'₹'+(rw.pnl||0).toFixed(0))"></td>
+                        <td data-label="Reason" class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="reasonLabel(rw.reason)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- ═══ LEDGER VIEW — flat order-book (paginated) ═══ -->
+        <div x-show="csHistoryFlat.length > 0 && histView==='ledger'" class="overflow-x-auto">
           <table class="t-table w-full text-xs">
             <thead>
               <tr class="border-b" style="border-color:var(--t-border);background:var(--t-surface)">
