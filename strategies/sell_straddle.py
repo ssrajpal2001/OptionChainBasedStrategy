@@ -1359,6 +1359,9 @@ class SellStraddleStrategy:
         from strategies.theta_calc import combined_time_value as _ctv
         self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
         self._persist()   # survive restarts
+        # Warm the EXACT selected strikes' RSI/ROC from REST history so the Dynamic exit isn't
+        # 'RSI(N/A)' for ~30 min after entry (background — never blocks the entry path).
+        asyncio.create_task(self._seed_exec_legs(int(ce_strike), int(pe_strike)))
         self._trades_today  += 1
         self._beginning_failed = False
         self._order_pending  = True
@@ -1390,6 +1393,39 @@ class SellStraddleStrategy:
         await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
 
     # ── Exit ─────────────────────────────────────────────────────────────────
+
+    async def _seed_exec_legs(self, ce_strike: int, pe_strike: int) -> None:
+        """At strike selection (entry), warm the EXACT exec strikes' RSI/ROC from REST 1m history
+        so the Dynamic exit (RSI/ROC read at its timeframe) is available from the first exit-eval —
+        instead of 'RSI(N/A)' for ~30 min while live tf-bars accumulate. Prepend-safe seed; skips
+        legs already warm at the max exit-rule timeframe. Background task — never blocks entry."""
+        try:
+            from data_layer.historical_candles import fetch_upstox_warm_1m
+            from data_layer.instrument_registry import REGISTRY
+            from data_layer.client_db import ClientDB
+            import asyncio as _aio
+            _max_tf = max((int(r.get("tf", 1)) for r in (self._exit_rules or [])), default=2)
+            if self._pool_engine.warm_tf(ce_strike, pe_strike, _max_tf):
+                return   # startup seed already covered it
+            creds = await _aio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return
+            exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
+            _need = self._pool_engine._rsi_len * max(_max_tf, 1) + 5
+            for stk, side in ((ce_strike, "CE"), (pe_strike, "PE")):
+                ikey = REGISTRY.get_broker_symbol(self._underlying, exp, int(stk), side, "upstox")
+                if not ikey:
+                    continue
+                bars = await fetch_upstox_warm_1m(ikey, token, min_bars=_need)
+                if bars:
+                    closes = [b["close"] for b in bars]
+                    self._pool_engine.seed_strike(int(stk), side, closes, closes)
+            logger.info("SellStraddle[%s]: entry-seeded exec legs CE%d/PE%d from REST "
+                        "(warm RSI/ROC up to tf=%d).", self._underlying, int(ce_strike),
+                        int(pe_strike), _max_tf)
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: entry-seed exec legs failed: %s", self._underlying, exc)
 
     def _build_exit_criteria(self, pos, pnl: float, credit: float):
         """Build the live exit-criteria list (and per-tf indicator dump) for logging AND the

@@ -63,16 +63,31 @@ class PoolIndicatorEngine:
 
     def seed_strike(self, strike: int, side: str, closes: list, atps: list) -> None:
         """Prefill the rolling series from historical bars (oldest-first) so RSI/ROC are valid
-        immediately. VWAP/ATP are intraday-fresh so seeding atps only keeps lengths aligned."""
+        immediately. VWAP/ATP are intraday-fresh so seeding atps only keeps lengths aligned.
+        PREPEND-safe: seeds are inserted BEFORE any existing bars with strictly-smaller (negative)
+        minute indices, so this can be called at ENTRY (after some live bars already exist) to warm
+        a freshly-selected strike without corrupting the seed→live ordering _tf_groups relies on."""
         k = self._key(strike, side)
         cd = self._closes.setdefault(k, deque(maxlen=self._maxlen))
         ad = self._atps.setdefault(k, deque(maxlen=self._maxlen))
         md = self._mins.setdefault(k, deque(maxlen=self._maxlen))
-        # Negative, increasing minute indices so seeded bars precede live bars (which start at 0)
         n = len(closes)
-        start = -n
-        for i, (c, a) in enumerate(zip(closes, atps)):
-            cd.append(float(c)); ad.append(float(a)); md.append(start + i)
+        if n == 0:
+            return
+        # Base index must be below any existing minute AND below 0 (seeds are pre-session).
+        existing_min = md[0] if md else 0
+        base = min(int(existing_min), 0) - n
+        # Prepend in reverse so the final left-to-right order stays oldest-first (ascending minute).
+        for i in range(n - 1, -1, -1):
+            cd.appendleft(float(closes[i]))
+            ad.appendleft(float(atps[i]))
+            md.appendleft(base + i)
+
+    def warm_tf(self, ce_strike: int, pe_strike: int, tf: int) -> bool:
+        """True if the (ce,pe) pair has enough completed tf-groups to form RSI at that timeframe."""
+        cg = self._tf_groups(self._key(ce_strike, "CE"), max(tf, 1))
+        pg = self._tf_groups(self._key(pe_strike, "PE"), max(tf, 1))
+        return len(set(cg) & set(pg)) >= self._rsi_len + 1
 
     def is_warm(self, strike: int, side: str) -> bool:
         k = self._key(strike, side)
