@@ -346,7 +346,12 @@ class SellStraddleStrategy:
         self._entry_cutoff    = _parse_time(ss.get("entry_end",      "15:15"))
         self._force_exit      = _parse_time(ss.get("squareoff_time", "15:15"))
         self._max_trades      = int(ss.get("max_trades", 1))
-        self._sl_cooldown_tf_mult = float(ss.get("sl_cooldown_tf_multiplier", 1.0))
+        # Re-entry cooldown after a FULL exit, in MINUTES (direct). Enter 5 → 5-minute
+        # cooldown. Falls back to the legacy tf-multiplier × 5 for configs saved before
+        # this became a direct-minutes field.
+        self._sl_cooldown_minutes = float(
+            ss.get("sl_cooldown_minutes", ss.get("sl_cooldown_tf_multiplier", 1.0) * 5.0)
+        )
         # Per-lot exchange lot size (NIFTY 65, FINNIFTY 60, …) — NOT a config default
         # of 50. lot_multiplier (set per binding) is the NUMBER OF LOTS; total
         # contracts = lot_size × lot_multiplier.
@@ -2013,11 +2018,13 @@ class SellStraddleStrategy:
             self._persist()
             return
         # No valid partner in the pool → close all and start fresh (re-entry loop re-enters).
+        # This is a FULL exit, so the re-entry cooldown applies (same as _close_position).
         logger.warning("SellStraddle[%s]: roll %s found no partner for running %s — closing all (fresh).",
                        self._underlying, side, other)
         await self._close_leg(other, f"single_side_cleanup_{reason}", now)
         self._position = None
         self._persist()
+        self._apply_sl_cooldown()
 
     async def _single_side_roll_to(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Partial roll: close one side and open a pre-selected candidate strike on that side.
@@ -2132,11 +2139,8 @@ class SellStraddleStrategy:
         self._apply_sl_cooldown()
 
     def _apply_sl_cooldown(self) -> None:
-        ss    = RuntimeConfig.index_section(self._underlying, "sell_straddle")
-        rules = ss.get("entry_rules_beginning", []) + ss.get("entry_rules_reentry", [])
-        tfs   = [int(r.get("tf", 5)) for r in rules if r.get("tf")]
-        max_tf = max(tfs) if tfs else 5
-        cooldown_min = int(max_tf * self._sl_cooldown_tf_mult)
+        """Block re-entry for the configured number of MINUTES after a full exit."""
+        cooldown_min = int(self._sl_cooldown_minutes)
         if cooldown_min > 0:
             self._sl_cooldown_until = datetime.now(IST) + timedelta(minutes=cooldown_min)
             logger.info("SellStraddle[%s]: re-entry cooldown %d min (no re-entry until %s).",

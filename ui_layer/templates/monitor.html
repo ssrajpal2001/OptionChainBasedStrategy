@@ -1553,7 +1553,7 @@ document.addEventListener('alpine:init', () => {
         ratio_exit:    { enabled: false, threshold: 3.0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
-        sl_cooldown_tf_multiplier: 1.0,
+        sl_cooldown_minutes: 5,
         max_trades: 1,
         per_day: {
           monday:    { enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' },
@@ -1607,7 +1607,9 @@ document.addEventListener('alpine:init', () => {
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
-      if (ss.sl_cooldown_tf_multiplier === undefined) ss.sl_cooldown_tf_multiplier = 1.0;
+      // Migrate legacy tf-multiplier → direct minutes (× 5) if the new field is absent.
+      if (ss.sl_cooldown_minutes === undefined)
+        ss.sl_cooldown_minutes = (ss.sl_cooldown_tf_multiplier !== undefined ? ss.sl_cooldown_tf_multiplier * 5 : 5);
       if (ss.ltp_target === undefined) ss.ltp_target = 0;
       if (ss.pool_itm_depth === undefined) ss.pool_itm_depth = 4;
       if (ss.pool_otm_depth === undefined) ss.pool_otm_depth = 4;
@@ -4318,15 +4320,15 @@ function histReplay() {
               <!-- SL Cooldown -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">SL COOLDOWN BY TF</span>
-                  <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">After SL hit, block re-entry for (max TF in entry rules × multiplier) minutes. E.g., 5-min TF × 1.0 = 5-min cooldown.</p>
+                  <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">RE-ENTRY COOLDOWN (MINUTES)</span>
+                  <p class="font-mono text-xs mt-1" style="color:var(--t-muted)">After any FULL exit (stop-loss, day-loss, or a roll that finds no pair → closes all), block re-entry for this many minutes. E.g., 5 = 5-minute cooldown.</p>
                 </div>
                 <div class="flex items-center gap-3 flex-wrap">
                   <div class="flex items-center gap-2">
-                    <label class="sec-label">TF Multiplier</label>
-                    <input type="number" step="0.5" min="0" class="t-input" style="width:70px"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.sl_cooldown_tf_multiplier"
-                           title="Multiplier applied to max TF from entry rules">
+                    <label class="sec-label">Minutes</label>
+                    <input type="number" step="1" min="0" class="t-input" style="width:70px"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.sl_cooldown_minutes"
+                           title="Cooldown in minutes after a full exit">
                   </div>
                   <span class="font-mono text-xs" style="color:var(--t-muted)">0 = disabled</span>
                 </div>
