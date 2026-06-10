@@ -6968,6 +6968,47 @@ function histReplay() {
                     </div>
                   </template>
 
+                  <!-- ── Straddle summary: total sold, exit basis, LTP/Theta triplets ── -->
+                  <template x-if="dep.strategy_name==='sell_straddle' && csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] && csPositions[b.binding_id][dep.strategy_name].straddle">
+                    <div class="mt-3 pt-2 border-t font-mono text-xs space-y-1" style="border-color:var(--t-border)"
+                         x-data="{ get ss(){ return csPositions[b.binding_id][dep.strategy_name].straddle } }">
+                      <div class="flex justify-between">
+                        <span style="color:var(--t-muted)">Total Straddle Sold</span>
+                        <span style="color:var(--t-bright);font-weight:700" x-text="(ss.total_value_sold||0).toFixed(2)"></span>
+                      </div>
+                      <div class="flex justify-between items-center">
+                        <span style="color:var(--t-muted)">Day Exit Basis</span>
+                        <span class="px-2 py-0.5 rounded font-bold"
+                              :style="ss.exit_basis==='theta'
+                                ? 'color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.4)'
+                                : 'color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.4)'"
+                              x-text="(ss.exit_basis==='theta'?'THETA-BASED':'LTP-BASED')+' · T'+(ss.day_target_pct||0).toFixed(0)+'% / SL'+(ss.day_sl_pct||0).toFixed(0)+'%'"></span>
+                      </div>
+                      <!-- LTP triplet (highlighted when LTP basis is active) -->
+                      <template x-if="ss.ltp">
+                        <div class="rounded p-1.5 space-y-0.5"
+                             :style="ss.exit_basis!=='theta'
+                               ? 'background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.25)'
+                               : 'background:var(--t-surface);border:1px solid var(--t-border)'">
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">LTP — Total Sold</span><span style="color:var(--t-text)" x-text="(ss.ltp.total_sold||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">LTP — Current</span><span class="price-live" style="color:var(--t-bright)" x-text="(ss.ltp.current||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">LTP — % checking</span><span :style="`color:${(ss.ltp.pct||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((ss.ltp.pct||0)>=0?'+':'')+(ss.ltp.pct||0).toFixed(2)+'%'"></span></div>
+                        </div>
+                      </template>
+                      <!-- Theta triplet (highlighted when Theta basis is active) -->
+                      <template x-if="ss.theta">
+                        <div class="rounded p-1.5 space-y-0.5"
+                             :style="ss.exit_basis==='theta'
+                               ? 'background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.25)'
+                               : 'background:var(--t-surface);border:1px solid var(--t-border)'">
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">Theta — Entry (time value)</span><span style="color:var(--t-text)" x-text="(ss.theta.entry||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">Theta — Current</span><span class="price-live" style="color:var(--t-bright)" x-text="(ss.theta.current||0).toFixed(2)"></span></div>
+                          <div class="flex justify-between"><span style="color:var(--t-muted)">Theta — % checking (decay)</span><span :style="`color:${(ss.theta.pct||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((ss.theta.pct||0)>=0?'+':'')+(ss.theta.pct||0).toFixed(2)+'%'"></span></div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
                   <!-- ── Tick-by-tick EXIT AUDIT (admin-gated per client) — sell_straddle only ── -->
                   <template x-if="dep.strategy_name==='sell_straddle' && _auditFor(dep.underlying)">
                     <div class="mt-3 pt-2 border-t" style="border-color:var(--t-border)">

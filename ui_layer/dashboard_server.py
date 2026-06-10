@@ -1774,6 +1774,7 @@ class DashboardServer:
                 by_broker.setdefault(bid, {})
                 legs = []
                 tracking = None
+                straddle_info = None   # sell_straddle: total sold, exit-basis, LTP/Theta triplets
                 booked = 0.0   # session realized P&L (₹) — straddle re-entries/rolls booked today
                 try:
                     if sname == "iron_condor":
@@ -1790,6 +1791,34 @@ class DashboardServer:
                             booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
                         if pos and getattr(pos, "status", "open") == "open":
                             legs = _ss_legs(pos)
+                        # Always surface today's exit basis; add LTP/Theta triplets when open.
+                        if strat is not None:
+                            _basis = str(getattr(strat, "_day_exit_basis", "ltp")).lower()
+                            _dpt = float(getattr(strat, "_day_profit_target_pct", 0.0) or 0.0)
+                            _dsl = float(getattr(strat, "_day_loss_sl_pct", 0.0) or 0.0)
+                            straddle_info = {"exit_basis": _basis, "day_target_pct": _dpt,
+                                             "day_sl_pct": _dsl, "total_value_sold": 0.0,
+                                             "ltp": None, "theta": None}
+                            if pos and getattr(pos, "status", "open") == "open":
+                                _spot   = float(getattr(strat, "_spot", 0.0) or 0.0)
+                                _entryC = float(pos.ce_leg.entry_price + pos.pe_leg.entry_price)
+                                _curC   = float((getattr(pos.ce_leg, "ltp", 0) or 0) +
+                                                (getattr(pos.pe_leg, "ltp", 0) or 0))
+                                _credit = float(getattr(strat, "_initial_net_credit", 0.0) or pos.net_credit or 0.0)
+                                _run    = float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+                                _real   = float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0)
+                                _ltp_pct = ((_real + _run) / _credit * 100.0) if _credit else 0.0
+                                try:
+                                    _eTV = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+                                    _cTV = float(pos.current_time_value(_spot))
+                                    _tPct = float(pos.theta_decay_pct(_spot))
+                                except Exception:
+                                    _eTV = _cTV = _tPct = 0.0
+                                straddle_info["total_value_sold"] = round(_entryC, 2)
+                                straddle_info["ltp"] = {"total_sold": round(_entryC, 2),
+                                                        "current": round(_curC, 2), "pct": round(_ltp_pct, 2)}
+                                straddle_info["theta"] = {"entry": round(_eTV, 2),
+                                                          "current": round(_cTV, 2), "pct": round(_tPct, 2)}
                     elif sname == "trap_trading":
                         eng = getattr(_srv, "_trap_engine", None)
                         op = getattr(eng, "_open_positions", {}) if eng else {}
@@ -1841,7 +1870,8 @@ class DashboardServer:
                 except Exception as exc:
                     logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
                 by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
-                                          "booked": booked, "tracking": tracking}
+                                          "booked": booked, "tracking": tracking,
+                                          "straddle": straddle_info}
             return {"ok": True, "by_broker": by_broker}
 
         # ── CLIENT — history ──────────────────────────────────────────────────
