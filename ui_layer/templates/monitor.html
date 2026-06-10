@@ -420,6 +420,26 @@
     .mobile-track { display: flex; }
     .mobile-track::-webkit-scrollbar { height: 0; display: none; }
 
+    /* ── Mobile hamburger + slide-out drawer ────────────────────────────────
+       Both the burger and the drawer are display:none on desktop (the drawer
+       would otherwise sit off-screen-right and create a horizontal scrollbar).
+       The ≤768px media query enables them. */
+    .navbar-burger { display: none; }
+    .mobile-drawer-backdrop, .mobile-drawer { display: none; }
+    .mobile-drawer-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 60;
+      opacity: 0; pointer-events: none; transition: opacity .2s ease;
+    }
+    .mobile-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+    .mobile-drawer {
+      position: fixed; top: 0; right: 0; height: 100vh; width: min(300px, 86vw);
+      background: var(--t-card); border-left: 1px solid var(--t-border); z-index: 61;
+      transform: translateX(100%); transition: transform .25s cubic-bezier(.4,0,.2,1);
+      box-shadow: -8px 0 28px rgba(0,0,0,0.12); overflow-y: auto;
+      flex-direction: column;
+    }
+    .mobile-drawer.open { transform: translateX(0); }
+
     /* ── Position leg matrix: scrolls as a unit on narrow screens (header+rows aligned) ── */
     .pos-legs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
     .pos-legs::-webkit-scrollbar { height: 4px; }
@@ -443,15 +463,11 @@
       header.navbar-h { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
       header.navbar-h .text-xl { font-size: 1.05rem; }   /* shrink the IST clock */
 
-      /* Right-side cluster (theme · role · clock · LIVE · logout): allow it to wrap
-         and tighten the spacing so it never pushes the page past the viewport. */
-      header.navbar-h > div:last-child { gap: 8px; flex-wrap: wrap; row-gap: 6px; }
-      header.navbar-h > div:last-child .w-px { display: none; }  /* drop divider bars on phones */
-      /* Role badge can be a long client name — cap + ellipsis so it never widens the bar */
-      .badge-role-admin, .badge-role-client { max-width: 38vw; overflow: hidden;
-        text-overflow: ellipsis; white-space: nowrap; }
-      /* Shrink the big IST clock further on phones */
-      header.navbar-h .text-xl { font-size: 0.95rem !important; }
+      /* On phones the whole right-side cluster moves into the hamburger drawer. */
+      .navbar-right { display: none !important; }
+      .navbar-burger { display: inline-flex; align-items: center; justify-content: center; }
+      .mobile-drawer { display: flex; }
+      .mobile-drawer-backdrop { display: block; }
 
       /* Client top bar (name · TODAY'S P&L · status · start/stop) stacks cleanly */
       .client-topbar { gap: 10px !important; }
@@ -536,6 +552,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Theme ──────────────────────────────────────────────────────── */
     currentTheme: 'daylight',
     showThemeMenu: false,
+    mobileNav: false,        // mobile hamburger drawer open/closed
 
     _themes: {
       daylight: {   // Zerodha / Kite look — calm white, Kite blue, buy-green / sell-orange-red
@@ -2854,8 +2871,17 @@ function histReplay() {
     </div>
   </div>
 
-  <!-- Right: theme + role + IST + WS + logout -->
-  <div class="flex items-center gap-3">
+  <!-- Mobile hamburger — opens the drawer (desktop: hidden via CSS) -->
+  <button class="navbar-burger w-9 h-9 rounded-md border" @click="mobileNav = true"
+          style="border-color:var(--t-border); background:var(--t-surface); color:var(--t-text)"
+          aria-label="Open menu">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+    </svg>
+  </button>
+
+  <!-- Right: theme + role + IST + WS + logout (hidden on mobile → moved into drawer) -->
+  <div class="navbar-right flex items-center gap-3">
     <!-- Theme switcher -->
     <div class="relative">
       <button @click="showThemeMenu = !showThemeMenu"
@@ -2910,6 +2936,54 @@ function histReplay() {
     </button>
   </div>
 </header>
+
+<!-- ── MOBILE NAV DRAWER (slide-out from right; phones only) ─────────────────── -->
+<div class="mobile-drawer-backdrop" :class="{open: mobileNav}" @click="mobileNav=false"></div>
+<aside class="mobile-drawer" :class="{open: mobileNav}">
+  <!-- Header -->
+  <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--t-border)">
+    <span class="font-display font-extrabold tracking-tight" style="color:var(--t-cyan)">MENU</span>
+    <button @click="mobileNav=false" class="w-8 h-8 rounded-md border flex items-center justify-center"
+            style="border-color:var(--t-border); color:var(--t-muted)" aria-label="Close menu">✕</button>
+  </div>
+
+  <!-- Identity + live status -->
+  <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
+    <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
+         x-text="authRole==='admin' ? 'ADMIN' : (authClientName || authClientId)"></div>
+    <div class="flex items-center gap-2 mt-1.5">
+      <div class="w-2 h-2 rounded-full" :class="wsConnected ? 'conn-live' : ''"
+           :style="`background:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"></div>
+      <span class="font-mono text-xs" :style="`color:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"
+            x-text="wsConnected ? 'FEED LIVE' : 'OFFLINE'"></span>
+      <span class="font-mono text-xs ml-auto" style="color:var(--t-muted)" x-text="istTime + ' IST'"></span>
+    </div>
+  </div>
+
+  <!-- Theme picker -->
+  <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
+    <div class="sec-label mb-2">Theme</div>
+    <div class="grid grid-cols-2 gap-1.5">
+      <template x-for="k in ['daylight','light_pro','midnight','matrix','cyberpunk']" :key="k">
+        <button @click="applyTheme(k)"
+                class="font-mono text-xs px-3 py-2 rounded border text-left"
+                :style="currentTheme===k
+                  ? 'color:var(--t-cyan); border-color:rgba(var(--t-cyan-rgb),0.4); background:rgba(var(--t-cyan-rgb),0.08)'
+                  : 'color:var(--t-muted); border-color:var(--t-border); background:transparent'"
+                x-text="themeLabel(k)"></button>
+      </template>
+    </div>
+  </div>
+
+  <!-- Logout pinned to bottom -->
+  <div class="mt-auto px-4 py-4 border-t" style="border-color:var(--t-border)">
+    <button @click="logout(); mobileNav=false"
+            class="w-full font-ui text-sm font-semibold px-3 py-2.5 border rounded-md"
+            style="color:var(--t-red); border-color:rgba(var(--t-red-rgb),0.3); background:rgba(var(--t-red-rgb),0.05)">
+      LOGOUT
+    </button>
+  </div>
+</aside>
 
 <!-- ── ADMIN SUB-NAV ───────────────────────────────────────────────────────── -->
 <div x-show="screen === 'admin'" x-cloak
