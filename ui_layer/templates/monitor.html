@@ -459,14 +459,39 @@
       .admin-subnav { overflow-x: auto; scrollbar-width: none; }
       .admin-subnav::-webkit-scrollbar { display: none; }
 
-      /* Collapse rigid multi-column grids to a single column on phones.
+      /* Collapse rigid multi-column grids on phones. grid-cols-3/4 → 2-up (denser,
+         Kite-like tiles, less endless scrolling); grid-cols-2 stays 2-up.
          (Responsive utilities like `grid-cols-1 lg:grid-cols-2` are unaffected —
          their base class is already grid-cols-1; only the bare desktop grids fold.) */
-      .grid-cols-2, .grid-cols-3, .grid-cols-4 { grid-template-columns: 1fr !important; }
+      .grid-cols-3, .grid-cols-4 { grid-template-columns: repeat(2, minmax(0,1fr)) !important; }
 
       /* Full-width content + tighter padding so cards fit a 320px viewport */
       main { padding: 12px !important; }
       .max-w-\[1800px\] { max-width: 100% !important; }
+
+      /* ── Responsive table → stacked cards (Kite-style) ──────────────────────
+         Any <table class="t-table"> with data-label on each <td>: on phones the
+         header row is hidden and every row becomes a label↔value card. No sideways
+         scrolling, every column stays readable. Desktop renders as a normal table. */
+      table.t-table { display: block; }
+      table.t-table thead { position: absolute; width: 1px; height: 1px;
+        overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }   /* a11y-hide header */
+      table.t-table tbody { display: block; }
+      table.t-table tbody tr {
+        display: block; border: 1px solid var(--t-border) !important; border-radius: 8px;
+        margin-bottom: 8px; padding: 6px 12px; background: var(--t-card);
+      }
+      table.t-table tbody td {
+        display: flex; align-items: baseline; justify-content: space-between; gap: 14px;
+        padding: 4px 0 !important; border: 0 !important; text-align: right !important;
+        white-space: normal; word-break: break-word;
+      }
+      table.t-table tbody td::before {
+        content: attr(data-label); flex-shrink: 0; text-align: left;
+        color: var(--t-muted); font-weight: 600; font-size: 10px; letter-spacing: .04em;
+        text-transform: uppercase; font-family: var(--t-mono, monospace);
+      }
+      table.t-table tbody td[data-label=""]::before { content: none; }
     }
   </style>
 </head>
@@ -7109,7 +7134,7 @@ function histReplay() {
         </div>
 
         <div x-show="csHistoryFlat.length > 0" class="overflow-x-auto">
-          <table class="w-full text-xs">
+          <table class="t-table w-full text-xs">
             <thead>
               <tr class="border-b" style="border-color:var(--t-border);background:var(--t-surface)">
                 <th class="px-4 py-2 text-left sec-label">TIME</th>
@@ -7125,21 +7150,21 @@ function histReplay() {
             <tbody>
               <template x-for="(rw,i) in histPageRows()" :key="((csHistPage-1)*csHistPerPage)+i">
                 <tr class="border-b last:border-b-0 hover:bg-[var(--t-surface)] transition-colors" style="border-color:var(--t-border)">
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="rw.time"></td>
-                  <td class="px-4 py-2 font-mono font-bold"
+                  <td data-label="Time" class="px-4 py-2 font-mono" style="color:var(--t-muted)" x-text="rw.time"></td>
+                  <td data-label="Action" class="px-4 py-2 font-mono font-bold"
                       :style="`color:${rw.action==='SELL'?'var(--t-green)':'var(--t-red)'}`"
                       x-text="rw.action"></td>
-                  <td class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="rw.strategy"></td>
-                  <td class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="rw.instrument"></td>
-                  <td class="px-4 py-2 font-mono font-semibold"
+                  <td data-label="Strategy" class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="rw.strategy"></td>
+                  <td data-label="Instrument" class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="rw.instrument"></td>
+                  <td data-label="Strike" class="px-4 py-2 font-mono font-semibold"
                       :style="`color:${rw.side==='CE'?'var(--t-green)':rw.side==='PE'?'var(--t-amber)':'var(--t-text)'}`"
                       x-text="rw.strike"></td>
-                  <td class="px-4 py-2 font-mono text-right" style="color:var(--t-text)"
+                  <td data-label="Price" class="px-4 py-2 font-mono text-right" style="color:var(--t-text)"
                       x-text="rw.price!=null?Number(rw.price).toFixed(2):'—'"></td>
-                  <td class="px-4 py-2 font-mono font-bold text-right"
+                  <td data-label="P&amp;L" class="px-4 py-2 font-mono font-bold text-right"
                       :style="`color:${rw.pnl==null?'var(--t-muted)':((rw.pnl||0)>=0?'var(--t-green)':'var(--t-red)')}`"
                       x-text="rw.pnl==null?'—':(((rw.pnl||0)>=0?'+':'')+'₹'+(rw.pnl||0).toFixed(0))"></td>
-                  <td class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="reasonLabel(rw.reason)"></td>
+                  <td data-label="Reason" class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="reasonLabel(rw.reason)"></td>
                 </tr>
               </template>
             </tbody>
