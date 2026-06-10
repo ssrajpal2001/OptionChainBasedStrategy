@@ -417,6 +417,12 @@
     .mobile-track { display: flex; }
     .mobile-track::-webkit-scrollbar { height: 0; display: none; }
 
+    /* ── Position leg matrix: scrolls as a unit on narrow screens (header+rows aligned) ── */
+    .pos-legs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+    .pos-legs::-webkit-scrollbar { height: 4px; }
+    .pos-legs::-webkit-scrollbar-thumb { background: var(--t-border); border-radius: 2px; }
+    .pos-legs-inner { min-width: 340px; }
+
     /* ─────────────────────────────────────────────────────────────────────
        MOBILE / SMALL-SCREEN LAYOUT  (≤768px)
        Root causes of the clipped/half-blank dashboard on phones:
@@ -6930,6 +6936,10 @@ function histReplay() {
                   <!-- Live legs -->
                   <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.strategy_name]&&(csPositions[b.binding_id][dep.strategy_name].legs||[]).length>0">
                     <div class="space-y-1.5">
+                      <!-- Scroll the leg matrix as a UNIT on narrow screens: header + rows share
+                           a min-width so columns stay aligned and never widen the card. -->
+                      <div class="pos-legs">
+                      <div class="pos-legs-inner space-y-1.5">
                       <!-- Column headers -->
                       <div class="flex items-center justify-between text-xs font-mono" style="color:var(--t-muted)">
                         <span>SYMBOL</span>
@@ -6951,6 +6961,8 @@ function histReplay() {
                           </div>
                         </div>
                       </template>
+                      </div>
+                      </div>
                       <!-- Booked (closed re-entries today) / Running (open legs) / Net -->
                       <div class="pt-2 border-t font-mono space-y-1" style="border-color:var(--t-border)">
                         <div class="flex justify-between" x-show="csPositions[b.binding_id][dep.strategy_name].booked!==undefined">
