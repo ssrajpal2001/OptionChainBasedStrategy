@@ -489,6 +489,14 @@
          their base class is already grid-cols-1; only the bare desktop grids fold.) */
       .grid-cols-3, .grid-cols-4 { grid-template-columns: repeat(2, minmax(0,1fr)) !important; }
 
+      /* FORM grids → single column: any grid that holds inputs/selects becomes one
+         full-width field per row (standard mobile form UX, like Kite). Targets only
+         grids containing a .t-input, so stat-tile grids (no inputs) stay 2-up. */
+      .grid:has(.t-input) { grid-template-columns: 1fr !important; }
+      /* Never let a fixed min-width input/select push past the viewport on phones. */
+      input, select, textarea, .t-input { max-width: 100% !important; }
+      [class*="min-w-["] { min-width: 0 !important; }
+
       /* Full-width content + tighter padding so cards fit a 320px viewport */
       main { padding: 12px !important; }
       .max-w-\[1800px\] { max-width: 100% !important; }
