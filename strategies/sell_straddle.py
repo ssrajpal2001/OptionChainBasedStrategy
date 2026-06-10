@@ -659,6 +659,14 @@ class SellStraddleStrategy:
                 _last_hb = _now_m
                 if self._position and self._position.status == "open":
                     _state = "position OPEN — exit-checking"
+                elif self._sl_cooldown_until and datetime.now(IST) < self._sl_cooldown_until:
+                    # Cooldown active: entry is blocked, but the pool engine keeps building
+                    # per-strike VWAP/SLOPE/RSI so re-entry can fire instantly when it lifts.
+                    _left = int((self._sl_cooldown_until - datetime.now(IST)).total_seconds())
+                    _strikes = len(getattr(self._pool_engine, "_closes", {}) or {})
+                    _state = (f"COOLDOWN active — re-entry at "
+                              f"{self._sl_cooldown_until.strftime('%H:%M:%S')} ({_left}s left) | "
+                              f"data flowing: {_strikes} pool strikes tracked")
                 else:
                     _state = (f"no position — entry path (trades_today={self._trades_today} "
                               f"stop_for_day={self._stop_for_day} term={self._any_active_terminal()})")

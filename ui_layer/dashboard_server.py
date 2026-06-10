@@ -1807,7 +1807,23 @@ class DashboardServer:
                             _dsl = float(getattr(strat, "_day_loss_sl_pct", 0.0) or 0.0)
                             straddle_info = {"exit_basis": _basis, "day_target_pct": _dpt,
                                              "day_sl_pct": _dsl, "total_value_sold": 0.0,
-                                             "ltp": None, "theta": None}
+                                             "ltp": None, "theta": None, "cooldown": None}
+                            # Re-entry cooldown after a full exit: surface the lift time + seconds
+                            # left so the client can see entry is paused while data keeps flowing.
+                            try:
+                                _cd = getattr(strat, "_sl_cooldown_until", None)
+                                if _cd is not None:
+                                    from config.global_config import IST as _IST
+                                    _nowi = datetime.now(_IST)
+                                    if _cd > _nowi:
+                                        _strikes = len(getattr(getattr(strat, "_pool_engine", None), "_closes", {}) or {})
+                                        straddle_info["cooldown"] = {
+                                            "until": _cd.strftime("%H:%M:%S"),
+                                            "secs_left": int((_cd - _nowi).total_seconds()),
+                                            "strikes_tracked": _strikes,
+                                        }
+                            except Exception:
+                                pass
                             if pos and getattr(pos, "status", "open") == "open":
                                 _spot   = float(getattr(strat, "_spot", 0.0) or 0.0)
                                 _entryC = float(pos.ce_leg.entry_price + pos.pe_leg.entry_price)

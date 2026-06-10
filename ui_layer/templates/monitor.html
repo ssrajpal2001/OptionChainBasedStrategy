@@ -7292,6 +7292,21 @@ function histReplay() {
                     </div>
                   </template>
 
+                  <!-- Re-entry cooldown banner: entry paused after a full exit; data still flowing -->
+                  <template x-if="dep.strategy_name==='sell_straddle' && csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] && csPositions[b.binding_id][dep.strategy_name].straddle && csPositions[b.binding_id][dep.strategy_name].straddle.cooldown">
+                    <div class="mt-2 rounded px-3 py-2 font-mono text-xs"
+                         style="background:rgba(var(--t-amber-rgb),0.08);border:1px solid rgba(var(--t-amber-rgb),0.3)"
+                         x-data="{ get cd(){ return csPositions[b.binding_id][dep.strategy_name].straddle.cooldown } }">
+                      <div class="flex items-center justify-between">
+                        <span style="color:var(--t-amber);font-weight:700">⏸ COOLDOWN — re-entry at <span x-text="cd.until"></span></span>
+                        <span style="color:var(--t-muted)" x-text="cd.secs_left + 's left'"></span>
+                      </div>
+                      <div class="mt-0.5" style="color:var(--t-muted)">
+                        Entry paused. Data still flowing — <span style="color:var(--t-green)" x-text="cd.strikes_tracked + ' strikes'"></span> warming VWAP/SLOPE/RSI for instant re-entry.
+                      </div>
+                    </div>
+                  </template>
+
                   <!-- ── Straddle summary: total sold, exit basis, LTP/Theta triplets ── -->
                   <template x-if="dep.strategy_name==='sell_straddle' && csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] && csPositions[b.binding_id][dep.strategy_name].straddle">
                     <div class="mt-3 pt-2 border-t font-mono text-xs space-y-1" style="border-color:var(--t-border)"
