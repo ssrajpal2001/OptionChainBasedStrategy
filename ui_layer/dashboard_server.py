@@ -2015,6 +2015,44 @@ class DashboardServer:
 
             if ok:
                 await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                # CRITICAL: refresh the cached ORDER-ROUTING broker with the just-refreshed
+                # token. The execution broker in _router._brokers is authenticated ONCE at
+                # ExecutionRouter.start(); if the process booted before today's token was
+                # generated, it holds a stale/expired token and live orders fail with
+                # "Incorrect api_key or access_token" even though the terminal shows CONNECTED
+                # with a fresh "Token OK". Re-create + re-auth it here so order routing uses
+                # the new token without needing a full bot restart.
+                try:
+                    _fresh = await asyncio.to_thread(_srv._client_db.get_bindings_sync, cid)
+                    _row = next((x for x in _fresh if x.get("binding_id") == binding_id), None)
+                    if _row is not None and _srv._router is not None:
+                        from config.client_profiles import BrokerBinding as _BB
+                        from execution_bridge.base_broker import create_broker
+                        _bb = _BB(
+                            binding_id=binding_id, provider=provider,
+                            label=_row.get("label", ""), user_id=_row.get("user_id", ""),
+                            api_key=_row.get("api_key", ""), api_secret=_row.get("api_secret", ""),
+                            access_token=_row.get("access_token", ""),
+                            is_trade_enabled=bool(_row.get("is_trade_enabled", 1)),
+                            lot_multiplier=float(_row.get("lot_multiplier", 1.0) or 1.0),
+                            product_type=(_row.get("product_type", "") or "MIS"),
+                            trading_mode=(_row.get("trading_mode", "paper") or "paper"),
+                        )
+                        _nb = create_broker(_bb, cid)
+                        if await _nb.authenticate():
+                            _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
+                            try:
+                                _srv._router._pool.add_broker_to_worker(cid, binding_id, _nb, provider)
+                            except Exception:
+                                pass
+                            logger.info("[Terminal] [%s/%s] execution broker refreshed with new token.",
+                                        cid, binding_id)
+                        else:
+                            logger.warning("[Terminal] [%s/%s] execution broker re-auth returned False "
+                                           "(orders may still fail — restart the bot).", cid, binding_id)
+                except Exception as _re:
+                    logger.warning("[Terminal] [%s/%s] execution broker refresh error: %s",
+                                   cid, binding_id, _re)
                 logger.info(
                     "[Terminal] [%s/%s] CONNECTED instantly — cached token valid (%.1fms)",
                     cid, binding_id, (_time.monotonic()-t0)*1000,
@@ -2464,6 +2502,33 @@ class DashboardServer:
                         now = datetime.now(IST).isoformat()
                         await _srv._client_db.update_access_token(client_id, binding_id, clean_token, now, _ist_eod())
                         await _srv._client_db.set_terminal_connected(client_id, binding_id, True)
+                        # Refresh the cached order-routing broker with the fresh OAuth token
+                        # (same stale-token issue as the terminal-connect path).
+                        try:
+                            if _srv._router is not None:
+                                from config.client_profiles import BrokerBinding as _BB
+                                from execution_bridge.base_broker import create_broker
+                                _bb = _BB(
+                                    binding_id=binding_id, provider=provider,
+                                    label=b.get("label", ""), user_id=b.get("user_id", ""),
+                                    api_key=api_key, api_secret=api_secret, access_token=clean_token,
+                                    is_trade_enabled=bool(b.get("is_trade_enabled", 1)),
+                                    lot_multiplier=float(b.get("lot_multiplier", 1.0) or 1.0),
+                                    product_type=(b.get("product_type", "") or "MIS"),
+                                    trading_mode=(b.get("trading_mode", "paper") or "paper"),
+                                )
+                                _nb = create_broker(_bb, client_id)
+                                if await _nb.authenticate():
+                                    _srv._router._brokers.setdefault(client_id, {})[binding_id] = _nb
+                                    try:
+                                        _srv._router._pool.add_broker_to_worker(client_id, binding_id, _nb, provider)
+                                    except Exception:
+                                        pass
+                                    logger.info("[Callback] [%s/%s] execution broker refreshed with new token.",
+                                                client_id, binding_id)
+                        except Exception as _re:
+                            logger.warning("[Callback] [%s/%s] execution broker refresh error: %s",
+                                           client_id, binding_id, _re)
                         _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": client_id, "binding_id": binding_id, "provider": provider, "ok": True})
                         logger.info("[Callback] Client [%s/%s] %s token stored, terminal=ON in %.1fms",
                                     client_id, binding_id, provider.upper(), elapsed)
