@@ -52,6 +52,12 @@ class StraddleOrderEvent:
     indicators:     dict = field(default_factory=dict)
     close_reason:   str  = ""  # populated on EXIT
     realized_pnl:   float = 0.0  # populated on EXIT
+    # True per-leg ENTRY (sold) prices, carried on EXIT events. The bridge used to read these
+    # from its in-memory `_last_entry`, which is EMPTY after a restart → history recorded the
+    # sold rate as 0.00 and a garbage P&L when EOD squared off a restored position. The strategy
+    # knows the real entry prices (on the restored position) and passes them here.
+    ce_entry:       float = 0.0
+    pe_entry:       float = 0.0
     event_id:       str  = ""    # filled by bridge for correlation
     legs:           list = field(default_factory=lambda: ["CE", "PE"])  # legs to act on
     leg_open_times: dict = field(default_factory=dict)  # "CE"/"PE" -> ISO open_time (for history)
@@ -487,9 +493,11 @@ class StraddleExecutionBridge:
             )
             self._trade_log.log_entry(client_id, binding_id, ev, fill)
         else:
+            # Prefer the real entry prices carried on the EXIT event (survive restarts);
+            # fall back to the in-memory last-entry only if the event didn't carry them.
             entry_ev = self._last_entry.get(ev.underlying)
-            entry_ce = entry_ev.ce_ltp if entry_ev else 0.0
-            entry_pe = entry_ev.pe_ltp if entry_ev else 0.0
+            entry_ce = ev.ce_entry if getattr(ev, "ce_entry", 0.0) else (entry_ev.ce_ltp if entry_ev else 0.0)
+            entry_pe = ev.pe_entry if getattr(ev, "pe_entry", 0.0) else (entry_ev.pe_ltp if entry_ev else 0.0)
             logger.info(
                 "[PAPER] %s %s EXIT | CE@%.2f PE@%.2f PnL=%.2fpts ₹%.0f | reason=%s | client=%s broker=%s",
                 ev.underlying, ev.atm,
@@ -611,9 +619,11 @@ class StraddleExecutionBridge:
             self._last_entry[ev.underlying] = ev
             self._trade_log.log_entry(client_id, binding_id, ev, fill_ev)
         else:
+            # Prefer real entry prices on the EXIT event (survive restarts); fall back to
+            # in-memory last-entry only if absent.
             entry_ev = self._last_entry.get(ev.underlying)
-            entry_ce = entry_ev.ce_ltp if entry_ev else 0.0
-            entry_pe = entry_ev.pe_ltp if entry_ev else 0.0
+            entry_ce = ev.ce_entry if getattr(ev, "ce_entry", 0.0) else (entry_ev.ce_ltp if entry_ev else 0.0)
+            entry_pe = ev.pe_entry if getattr(ev, "pe_entry", 0.0) else (entry_ev.pe_ltp if entry_ev else 0.0)
             self._trade_log.log_exit(client_id, binding_id, ev, fill_ev, entry_ce, entry_pe)
 
         await self._bus.publish(Topic.ORDER_FILL, fill_ev)

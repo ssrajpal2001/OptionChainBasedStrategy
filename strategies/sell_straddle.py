@@ -1919,6 +1919,7 @@ class SellStraddleStrategy:
             ce_ltp=pos.ce_leg.ltp, pe_ltp=pos.pe_leg.ltp,
             lot_multiplier=self._lot_multiplier, lot_size=self._lot_size,
             spot=self._spot, close_reason=reason, realized_pnl=leg_pnl,
+            ce_entry=pos.ce_leg.entry_price, pe_entry=pos.pe_leg.entry_price,
             event_id=f"{self._underlying}_EXITLEG_{side}_{self._event_counter}",
             legs=[side],
             leg_open_times={side: leg.open_time.isoformat() if leg.open_time else None},
@@ -2094,6 +2095,10 @@ class SellStraddleStrategy:
             spot           = self._spot,
             close_reason   = reason,
             realized_pnl   = pos.realized_pnl,
+            # Real per-leg ENTRY (sold) prices — carried so history records the true sold rate
+            # and P&L even when the bridge's in-memory last-entry is gone (after a restart).
+            ce_entry       = pos.ce_leg.entry_price,
+            pe_entry       = pos.pe_leg.entry_price,
             event_id       = f"{self._underlying}_EXIT_{self._event_counter}",
             leg_open_times = {
                 "CE": pos.ce_leg.open_time.isoformat() if pos.ce_leg.open_time else None,
