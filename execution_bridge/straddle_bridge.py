@@ -359,10 +359,40 @@ class StraddleExecutionBridge:
                 ev.action, ev.underlying,
             )
 
+    def _other_active_broker_for(self, underlying: str, excl_client: str, excl_binding: str) -> bool:
+        """True if some OTHER client-broker (not excl_client/excl_binding) is still engine-active
+        + terminal-connected AND deployed to sell_straddle on this underlying. Used to decide
+        whether squaring off this binding leaves the strategy with no broker → safe to discard the
+        logical position so a restart doesn't restore a ghost."""
+        db = getattr(self._router, "_client_db", None) or getattr(self._router, "_db", None)
+        if db is None:
+            return False
+        try:
+            for _client in db.get_all_clients_sync():
+                _cid = _client.get("client_id", "")
+                if not _cid:
+                    continue
+                _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(_cid)}
+                for _dep in db.get_deployments_sync(_cid):
+                    if str(_dep.get("strategy_name", "")).lower() != "sell_straddle":
+                        continue
+                    _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
+                    if _ul != underlying.upper():
+                        continue
+                    _bid = _dep.get("binding_id")
+                    if _cid == excl_client and _bid == excl_binding:
+                        continue
+                    _b = _binds.get(_bid)
+                    if _b and _b.get("engine_active") and _b.get("terminal_connected"):
+                        return True
+        except Exception as _exc:
+            logger.debug("StraddleBridge._other_active_broker_for(%s): %s", underlying, _exc)
+        return False
+
     async def square_off_binding(self, client_id: str, binding_id: str, strategies) -> int:
-        """Square off (buy-to-close) the open sell-straddle legs for ONE binding's broker ONLY.
-        Does NOT modify the strategy's logical position or any other client's broker. Returns the
-        number of legs squared off. No-op (returns 0) if the broker or position is absent."""
+        """Square off (buy-to-close) the open sell-straddle legs for ONE binding's broker. When NO
+        other active broker remains for the strategy, ALSO discards the strategy's logical + persisted
+        position (no extra orders) so a restart won't restore a ghost. Returns legs squared off."""
         router = self._router
         broker = ((getattr(router, "_brokers", None) or {}).get(client_id, {}) or {}).get(binding_id)
         if broker is None:
@@ -411,6 +441,15 @@ class StraddleExecutionBridge:
                                  underlying, opt_type, int(strike), client_id, binding_id, exc)
                     self._trade_log.log_event(client_id, binding_id,
                         f"SQUARE-OFF FAILED {underlying} {opt_type}{int(strike)}: {exc}")
+            # If this was the LAST active broker for the strategy, forget the logical position so a
+            # restart does not restore a ghost (the broker legs are now flat). Other active brokers
+            # still holding it → keep managing the position for them.
+            if not self._other_active_broker_for(underlying, client_id, binding_id):
+                try:
+                    ss.discard_position_after_squareoff(f"toggle_off_{client_id}_{binding_id}")
+                except Exception as exc:
+                    logger.error("StraddleBridge: discard logical position failed for %s: %s",
+                                 underlying, exc)
         return legs_closed
 
     async def _paper_fill(

@@ -1955,6 +1955,26 @@ class SellStraddleStrategy:
         self._position = None
         self._persist()
 
+    def discard_position_after_squareoff(self, reason: str) -> None:
+        """Clear the in-memory + persisted position WITHOUT sending any exit orders. Used when an
+        EXTERNAL square-off (Trade/Terminal OFF for the last active broker) has already flattened
+        the broker legs — so the bot must forget the logical position too, otherwise start()
+        restores a GHOST position on the next restart and tries to manage/exit a position that no
+        longer exists at the broker. Books the running P&L into the session for day-% consistency."""
+        if not self._position:
+            return
+        pos = self._position
+        pos.realized_pnl = pos.unrealized_pnl
+        pos.status = "closed"
+        self._session_realized_pnl_pts += pos.realized_pnl
+        logger.info(
+            "SellStraddle[%s]: position DISCARDED after external square-off (%s) — pnl=%.2f pts; "
+            "cleared persisted store so it will NOT restore on restart.",
+            self._underlying, reason, pos.realized_pnl,
+        )
+        self._position = None
+        self._persist()   # no open position → clears data/positions/<key>.json
+
     async def _close_position(self, reason: str) -> None:
         if not self._position:
             return
