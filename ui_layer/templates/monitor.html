@@ -447,6 +447,11 @@
          and tighten the spacing so it never pushes the page past the viewport. */
       header.navbar-h > div:last-child { gap: 8px; flex-wrap: wrap; row-gap: 6px; }
       header.navbar-h > div:last-child .w-px { display: none; }  /* drop divider bars on phones */
+      /* Role badge can be a long client name — cap + ellipsis so it never widens the bar */
+      .badge-role-admin, .badge-role-client { max-width: 38vw; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; }
+      /* Shrink the big IST clock further on phones */
+      header.navbar-h .text-xl { font-size: 0.95rem !important; }
 
       /* Client top bar (name · TODAY'S P&L · status · start/stop) stacks cleanly */
       .client-topbar { gap: 10px !important; }
@@ -495,6 +500,12 @@
         text-transform: uppercase; font-family: var(--t-mono, monospace);
       }
       table.t-table tbody td[data-label=""]::before { content: none; }
+      /* tfoot (totals) → a single emphasized row card */
+      table.t-table tfoot { display: block; }
+      table.t-table tfoot tr { display: flex; justify-content: space-between; gap: 14px;
+        padding: 8px 12px; margin-top: 4px; border-top: 2px solid var(--t-border); }
+      table.t-table tfoot td { padding: 0 !important; border: 0 !important; }
+      table.t-table tfoot td:empty { display: none; }
     }
   </style>
 </head>
@@ -3301,7 +3312,7 @@ function histReplay() {
       <div x-show="positions.length === 0" class="font-mono text-xs py-4 px-4 text-center" style="color:var(--t-muted)">
         No open positions — click Refresh to fetch from brokers
       </div>
-      <table x-show="positions.length > 0" class="w-full text-xs font-mono">
+      <table x-show="positions.length > 0" class="t-table w-full text-xs font-mono">
         <thead>
           <tr class="border-b" style="border-color:var(--t-border)">
             <th class="px-3 py-1.5 text-left sec-label font-normal">Symbol</th>
@@ -3314,12 +3325,12 @@ function histReplay() {
         <tbody>
           <template x-for="(p,i) in positions" :key="i">
             <tr class="border-b last:border-b-0" style="border-color:rgba(var(--t-border),0.4)">
-              <td class="px-3 py-1.5" style="color:var(--t-bright)" x-text="p.symbol"></td>
-              <td class="px-3 py-1.5 text-right" :style="`color:${p.qty<0?'var(--t-red)':'var(--t-green)'}`" x-text="p.qty"></td>
-              <td class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="p.avg_price.toFixed(2)"></td>
-              <td class="px-3 py-1.5 text-right font-bold" :class="pnlClass(p.pnl)"
+              <td data-label="Symbol" class="px-3 py-1.5" style="color:var(--t-bright)" x-text="p.symbol"></td>
+              <td data-label="Qty" class="px-3 py-1.5 text-right" :style="`color:${p.qty<0?'var(--t-red)':'var(--t-green)'}`" x-text="p.qty"></td>
+              <td data-label="Avg" class="px-3 py-1.5 text-right" style="color:var(--t-text)" x-text="p.avg_price.toFixed(2)"></td>
+              <td data-label="P&amp;L" class="px-3 py-1.5 text-right font-bold" :class="pnlClass(p.pnl)"
                   x-text="(p.pnl>=0?'+':'')+'₹'+fmt(p.pnl)"></td>
-              <td class="px-3 py-1.5 text-xs" style="color:var(--t-muted)" x-text="p.client_id+'/'+p.binding_id"></td>
+              <td data-label="Client" class="px-3 py-1.5 text-xs" style="color:var(--t-muted)" x-text="p.client_id+'/'+p.binding_id"></td>
             </tr>
           </template>
         </tbody>
@@ -5839,7 +5850,7 @@ function histReplay() {
       No client profiles registered — use the provisioning form below to add the first account.
     </div>
     <div x-show="clientProfiles.length > 0" class="overflow-x-auto">
-      <table class="w-full text-xs font-mono" style="border-collapse:collapse">
+      <table class="t-table w-full text-xs font-mono" style="border-collapse:collapse">
         <thead>
           <tr style="background:var(--t-surface)">
             <th class="px-3 py-2.5 text-left sec-label">CLIENT ID</th>
@@ -5855,23 +5866,23 @@ function histReplay() {
         <tbody>
           <template x-for="c in clientProfiles" :key="c.client_id">
             <tr :style="`border-bottom:1px solid var(--t-border);${c.halted?'background:rgba(var(--t-red-rgb),0.03)':c.tradeable?'':'background:rgba(var(--t-amber-rgb),0.03)'}`">
-              <td class="px-3 py-2 font-bold" style="color:var(--t-bright)" x-text="c.client_id"></td>
-              <td class="px-3 py-2" style="color:var(--t-text)" x-text="c.name || '—'"></td>
-              <td class="px-3 py-2 text-right" style="color:var(--t-muted)" x-text="'&#8377;' + fmt(c.capital, 0)"></td>
-              <td class="px-3 py-2 text-right font-bold"
+              <td data-label="Client ID" class="px-3 py-2 font-bold" style="color:var(--t-bright)" x-text="c.client_id"></td>
+              <td data-label="Name" class="px-3 py-2" style="color:var(--t-text)" x-text="c.name || '—'"></td>
+              <td data-label="Capital" class="px-3 py-2 text-right" style="color:var(--t-muted)" x-text="'&#8377;' + fmt(c.capital, 0)"></td>
+              <td data-label="Lot Mul" class="px-3 py-2 text-right font-bold"
                   :style="`color:${c.lot_multiplier>1?'var(--t-amber)':c.lot_multiplier<1?'var(--t-muted)':'var(--t-text)'}`"
                   x-text="c.lot_multiplier + 'x'"></td>
-              <td class="px-3 py-2 text-right font-bold"
+              <td data-label="Daily MTM" class="px-3 py-2 text-right font-bold"
                   :class="(c.daily_pnl||0) >= 0 ? 'text-t-green' : 'text-t-red'"
                   x-text="((c.daily_pnl||0)>=0?'+':'')+'&#8377;'+fmt(c.daily_pnl||0)"></td>
-              <td class="px-3 py-2" style="color:var(--t-cyan)"
+              <td data-label="Broker" class="px-3 py-2" style="color:var(--t-cyan)"
                   x-text="(c.brokers||[]).join(', ') || '—'"></td>
-              <td class="px-3 py-2 text-center">
+              <td data-label="Status" class="px-3 py-2 text-center">
                 <span :class="c.tradeable ? 'badge-live' : 'badge-halted'"
                       x-text="c.halted ? 'HALTED' : c.tradeable ? 'LIVE' : 'BLOCKED'"></span>
               </td>
-              <td class="px-3 py-2">
-                <div class="flex items-center justify-center gap-1.5">
+              <td data-label="Actions" class="px-3 py-2">
+                <div class="flex items-center justify-center gap-1.5 flex-wrap">
                   <button x-show="c.tradeable"  class="btn-halt"   @click="haltClient(c.client_id); loadClientProfiles()">HALT</button>
                   <button x-show="!c.tradeable" class="btn-resume" @click="resumeClient(c.client_id); loadClientProfiles()">RESUME</button>
                   <button class="font-ui font-bold text-xs px-2 py-1 rounded border cursor-pointer"
@@ -6302,8 +6313,8 @@ function histReplay() {
            x-text="botMsg"></div>
     </div>
 
-    <!-- ── Client sub-nav ── -->
-    <div class="flex border-b mb-4" style="border-color:var(--t-border)">
+    <!-- ── Client sub-nav (scrolls horizontally on phones, never overflows) ── -->
+    <div class="mobile-track border-b mb-4" style="border-color:var(--t-border)">
       <template x-for="m in [{id:'strategies',label:'Strategies'},{id:'brokers',label:'Brokers'},{id:'positions',label:'Positions'},{id:'history',label:'History'}]" :key="m.id">
         <button class="admin-tab" :class="{active: clientMenu===m.id}"
                 @click="clientMenu=m.id; m.id==='positions'&&loadClientPositions(); m.id==='history'&&loadClientHistory()"
