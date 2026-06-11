@@ -1603,9 +1603,12 @@ class DashboardServer:
             deploy_id: str, body: _RunSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
+            logger.info("[StrategyRun] request cid=%s deploy_id=%s running=%s", cid, deploy_id, body.running)
             deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
             dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
             if dep is None:
+                logger.warning("[StrategyRun] deploy_id NOT FOUND for cid=%s — available=%s",
+                               cid, [d.get("deploy_id") for d in deps])
                 raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
             bid   = dep.get("binding_id", "")
             strat = dep.get("strategy_name", "")
@@ -2531,7 +2534,7 @@ class DashboardServer:
                         provider, access_token,
                         generated_at=datetime.now(IST).isoformat(), expiry_at=_ist_eod(),
                     )
-                    _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
                     logger.info("[Callback] Dhan feeder token stored in %.1fms", elapsed)
                     return HTMLResponse(_callback_page("success", provider, "Dhan data feeder connected!"))
                 else:
@@ -2539,7 +2542,7 @@ class DashboardServer:
                     bid = match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, access_token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
-                    _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] Dhan [%s/%s] token stored, terminal=ON in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, f"Dhan broker connected!"))
 
@@ -2574,13 +2577,13 @@ class DashboardServer:
 
                 if match["scope"] == "feeder":
                     await _srv._client_db.update_feeder_token(provider, token, datetime.now(IST).isoformat(), _ist_eod())
-                    _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
                     return HTMLResponse(_callback_page("success", provider, "AliceBlue feeder connected!"))
                 else:
                     cid, bid = match["client_id"], match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
-                    _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] AliceBlue [%s/%s] token stored in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, "AliceBlue broker connected!"))
 
@@ -2624,7 +2627,7 @@ class DashboardServer:
                         # Start the live feed stream immediately after token is stored
                         api_key = db_row.get("api_key", "")
                         await _start_feeder_stream(_srv._feeder, provider, api_key, token)
-                        _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                        await _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
                         logger.info("[Callback] Admin %s token stored + stream started in %.1fms", provider.upper(), elapsed)
                         return HTMLResponse(_callback_page("success", provider, "Data feeder connected and streaming!"))
                     logger.error("[Callback] Admin %s exchange failed: %s", provider, msg)
@@ -2674,7 +2677,7 @@ class DashboardServer:
                         except Exception as _re:
                             logger.warning("[Callback] [%s/%s] execution broker refresh error: %s",
                                            client_id, binding_id, _re)
-                        _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": client_id, "binding_id": binding_id, "provider": provider, "ok": True})
+                        await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": client_id, "binding_id": binding_id, "provider": provider, "ok": True})
                         logger.info("[Callback] Client [%s/%s] %s token stored, terminal=ON in %.1fms",
                                     client_id, binding_id, provider.upper(), elapsed)
                         return HTMLResponse(_callback_page("success", provider,
