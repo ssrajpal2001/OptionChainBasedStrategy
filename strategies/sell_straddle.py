@@ -445,11 +445,42 @@ class SellStraddleStrategy:
                 _ps.clear(self._persist_key)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: persist failed: %s", self._underlying, exc)
+        self._persist_session()
+
+    def _persist_session(self) -> None:
+        """Persist the day's session aggregates (booked P&L, trades, stop-for-day) so a
+        same-day restart keeps the correct Booked P&L instead of resetting it to 0. Stamped
+        as MIS so the store auto-discards it on a NEW day (session resets daily)."""
+        try:
+            from data_layer import position_store as _ps
+            _ps.save(self._persist_key + "_session", {
+                "session_realized_pnl_pts": self._session_realized_pnl_pts,
+                "trades_today":             self._trades_today,
+                "stop_for_day":             self._stop_for_day,
+            }, product_type="MIS")
+        except Exception as exc:
+            logger.debug("SellStraddle[%s]: session persist failed: %s", self._underlying, exc)
+
+    def _restore_session(self) -> None:
+        """Restore the day's booked P&L / trade count on a same-day restart (the store discards
+        a prior-day MIS file, so a new day starts fresh) — keeps Booked P&L from resetting to 0."""
+        try:
+            from data_layer import position_store as _ps
+            _sess = _ps.load(self._persist_key + "_session")
+            if _sess:
+                self._session_realized_pnl_pts = float(_sess.get("session_realized_pnl_pts", 0.0) or 0.0)
+                self._trades_today = max(self._trades_today, int(_sess.get("trades_today", 0) or 0))
+                self._stop_for_day = bool(_sess.get("stop_for_day", False))
+                logger.info("SellStraddle[%s]: restored session — booked=%.2f pts trades=%d stop_for_day=%s",
+                            self._underlying, self._session_realized_pnl_pts, self._trades_today, self._stop_for_day)
+        except Exception as exc:
+            logger.debug("SellStraddle[%s]: session restore failed: %s", self._underlying, exc)
 
     def start(self) -> None:
         self._running = True
         # Restore an open position across restarts (MIS prior-day positions are
         # discarded by the store — broker squared them off at EOD).
+        self._restore_session()
         try:
             from data_layer import position_store as _ps
             _saved = _ps.load(self._persist_key)
