@@ -64,9 +64,28 @@ active-active so one provider lagging doesn't stall the app.
   ONLY the stamped binding (empty = legacy mirror). Commit `d7742ab`, tests in
   `tests/execution/test_straddle_targeted_routing.py`.
 - [ ] P2 shared per-index context
-- [ ] P3 per-binding spawn at startup
+- [x] **P3a per-binding book identity** — `SellStraddleStrategy(client_id, binding_id)`: own
+  persist key, `_emit_order` stamps tags, `_any_active_terminal` gates on own binding only.
+  Commit `9dd4853`, tests `tests/strategies/test_per_binding_identity.py`.
+- [ ] **P3b spawn per-binding instances in run_system** ← NEXT (the make-it-work piece)
 - [ ] P4 dynamic spawn/stop on deploy
 - [ ] P5 UI/P&L per binding
+
+## P3b — spawn per-binding instances (next focused step, the make-it-work piece)
+`run_system.py` lines ~395-399 currently: one `SellStraddleStrategy` per `cfg.monitored_indices`.
+Change to: **one instance per (client, binding) sell_straddle deployment**, each constructed with
+`client_id=`/`binding_id=`, wired (`set_feeder`/`set_rebalancer`/`set_client_db`) and started like
+today. Key edits:
+- Read deployments at startup (`client_db.get_all_clients_sync` → `get_deployments_sync`) and build
+  the instance list keyed `(client, binding, underlying)`.
+- `_sell_straddles` becomes that list; everything that iterates it (bridge square-off, UI `_find`)
+  must match on `(client_id, binding_id, underlying)` not just underlying.
+- UI `api_client_positions` `_find`: locate the instance for THIS deployment's `(cid, bid, und)`.
+- Dry-test MVP keeps each instance's OWN pool engine (duplicated) — fine for ~10 clients; the
+  shared-per-index context (P2) is a later optimisation, not needed to dry-test.
+- P4 (dynamic spawn on deploy) and P5 (UI) follow.
+**Risk note:** this is the piece that turns the tested primitives into a running system; do it with
+full focus + a paper/dry run before any funded live use.
 
 ## Phase 2 — precise starting point (handoff)
 **Goal:** one shared market context per index; books read from it (books do NOT subscribe to the feed).
