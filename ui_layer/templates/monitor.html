@@ -617,6 +617,8 @@ document.addEventListener('alpine:init', () => {
     killArmed:     false,
     killCountdown: 5,
     _killTimer:    null,
+    killConfirm:   false,   // FORCE KILL SWITCH 2-click confirm (was undefined → ReferenceError)
+    killConfirmTs: 0,
     rebalIdx:      'NIFTY',
     lotCid:        '',
     lotBid:        '',
@@ -1223,6 +1225,11 @@ document.addEventListener('alpine:init', () => {
         this.killCountdown--;
         if (this.killCountdown <= 0) { clearInterval(this._killTimer); this.killArmed = false; }
       }, 1000);
+    },
+
+    async triggerKillSwitch() {   // FORCE KILL SWITCH confirm-click (was undefined → ReferenceError)
+      try { await this._fetch('/api/kill_switch', { method:'POST' }); } catch {}
+      this.killConfirm = false;
     },
 
     async rebalance() { await this._fetch(`/api/rebalance/${this.rebalIdx}`, { method:'POST' }); },
@@ -2642,7 +2649,8 @@ function clientTrapInstruments() {
         const clientsData  = await clientsRes.json();
         const instrData    = await instrumentsRes.json();
         const instrMap     = instrData.ok ? instrData.instruments : {};
-        const list = clientsData.clients || clientsData || [];
+        const list = Array.isArray(clientsData.clients) ? clientsData.clients
+                   : (Array.isArray(clientsData) ? clientsData : []);   // 403/non-array safe
         this.clients = list.map(c => ({
           ...c,
           trap_instruments: instrMap[c.client_id] || [],
