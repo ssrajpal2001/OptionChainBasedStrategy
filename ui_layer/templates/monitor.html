@@ -1937,13 +1937,18 @@ document.addEventListener('alpine:init', () => {
         return;
       }
       dep._runLoading = true;
+      // deploy_id should come from the DB row; reconstruct as a fallback so a missing field
+      // can't silently no-op the toggle.
+      const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
       try {
-        const r = await this._fetch(`/api/client/deployment/${encodeURIComponent(dep.deploy_id)}/run`,
+        const r = await this._fetch(`/api/client/deployment/${encodeURIComponent(did)}/run`,
                                     { json: { running: want } });
         if (!r) return;
-        const d = await r.json();
+        let d = {}; try { d = await r.json(); } catch {}
         this.botOk = r.ok;
-        this.botMsg = d.error || (r.ok ? (want ? 'Strategy started.' : `Strategy stopped${d.squared_off?` — squared off ${d.squared_off} leg(s)`:''}.`) : 'Failed.');
+        this.botMsg = d.error || d.detail
+                    || (r.ok ? (want ? 'Strategy started.' : `Strategy stopped${d.squared_off?` — squared off ${d.squared_off} leg(s)`:''}.`)
+                             : `Failed (HTTP ${r.status}) for ${did}`);
         if (r.ok) { dep.is_running = want ? 1 : 0; await this._loadAllDeployments(); }
       } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
       finally   { dep._runLoading = false; }
