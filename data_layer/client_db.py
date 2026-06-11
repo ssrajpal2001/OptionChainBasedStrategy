@@ -147,6 +147,8 @@ CREATE TABLE IF NOT EXISTS broker_bindings (
     lot_multiplier      REAL    DEFAULT 1.0,
     enabled             INTEGER DEFAULT 1,
     show_granular_ticks INTEGER DEFAULT 0,
+    source_ip           TEXT    DEFAULT '',
+    whitelist_ip        TEXT    DEFAULT '',
     created_at          TEXT    NOT NULL,
     UNIQUE(client_id, binding_id)
 );
@@ -366,6 +368,7 @@ class ClientDB:
         product_type: str = "MIS",
         assigned_strategy: str = "",
         assigned_instrument: str = "NIFTY",
+        source_ip: str = "",
         # Deprecated — accepted for backward compat but NOT stored
         password: str = "",
         totp_secret: str = "",
@@ -388,8 +391,8 @@ class ClientDB:
                (client_id, binding_id, provider, label,
                 user_id_enc, api_key_enc, api_secret_enc,
                 access_token, lot_multiplier, trading_mode, product_type,
-                assigned_strategy, assigned_instrument, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                assigned_strategy, assigned_instrument, source_ip, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(client_id, binding_id) DO UPDATE SET
                  provider            = excluded.provider,
                  label               = excluded.label,
@@ -400,6 +403,7 @@ class ClientDB:
                  lot_multiplier      = excluded.lot_multiplier,
                  trading_mode        = excluded.trading_mode,
                  product_type        = excluded.product_type,
+                 source_ip           = excluded.source_ip,
                  assigned_strategy   = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_strategy ELSE assigned_strategy END,
                  assigned_instrument = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_instrument ELSE assigned_instrument END""",
             (
@@ -413,6 +417,7 @@ class ClientDB:
                 product_type,
                 assigned_strategy,
                 assigned_instrument,
+                source_ip,
                 now,
             ),
         )
@@ -504,6 +509,20 @@ class ClientDB:
             "UPDATE broker_bindings SET show_granular_ticks=? "
             "WHERE client_id=? AND binding_id=?",
             (1 if enabled else 0, client_id, binding_id),
+        )
+
+    async def set_binding_ips(
+        self, client_id: str, binding_id: str, source_ip: str, whitelist_ip: str
+    ) -> None:
+        """Admin assigns this binding's egress IPs: source_ip (LOCAL/private — the bot binds
+        orders to it) and whitelist_ip (PUBLIC — what the client whitelists in their broker)."""
+        logger.info("[DB] set_binding_ips [%s/%s] source=%s whitelist=%s",
+                    client_id, binding_id, source_ip, whitelist_ip)
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET source_ip=?, whitelist_ip=? "
+            "WHERE client_id=? AND binding_id=?",
+            (source_ip.strip(), whitelist_ip.strip(), client_id, binding_id),
         )
 
     # ── Strategy Deployments ──────────────────────────────────────────────────
@@ -612,7 +631,7 @@ class ClientDB:
                                   trading_mode, product_type,
                                   is_trade_enabled, lot_multiplier, enabled,
                                   terminal_connected, terminal_connected_at, engine_active,
-                                  show_granular_ticks
+                                  show_granular_ticks, source_ip, whitelist_ip
                            FROM broker_bindings WHERE client_id=? ORDER BY created_at""",
                         (client_id,),
                     ).fetchall()]
@@ -882,6 +901,9 @@ class ClientDB:
                     is_trade_enabled=bool(b.get("is_trade_enabled", 1)),
                     token_generated_at=b.get("token_generated_at", ""),
                     token_expiry_at=b.get("token_expiry_at", ""),
+                    product_type=b.get("product_type", "MIS"),
+                    trading_mode=b.get("trading_mode", "paper"),
+                    source_ip=b.get("source_ip", ""),
                 ))
             profiles.append(profile)
             logger.info(
@@ -1029,6 +1051,8 @@ class ClientDB:
             "ALTER TABLE clients ADD COLUMN trap_instruments TEXT DEFAULT '[]'",
             "ALTER TABLE broker_bindings ADD COLUMN product_type TEXT DEFAULT 'MIS'",
             "ALTER TABLE broker_bindings ADD COLUMN show_granular_ticks INTEGER DEFAULT 0",
+            "ALTER TABLE broker_bindings ADD COLUMN source_ip TEXT DEFAULT ''",
+            "ALTER TABLE broker_bindings ADD COLUMN whitelist_ip TEXT DEFAULT ''",
         ):
             try:
                 con.execute(migration)

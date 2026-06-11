@@ -47,6 +47,33 @@ _EXCHANGE_BFO = "BFO"
 _EXCHANGE_MCX = "MCX"
 
 
+def _bind_session_source_ip(kite, source_ip: str) -> None:
+    """Bind a KiteConnect instance's HTTP session so all API calls egress from `source_ip`
+    (a LOCAL/private interface address). Used for multi-client Zerodha static-IP whitelisting:
+    each client's orders leave from the EIP mapped to their bound private IP."""
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.poolmanager import PoolManager
+
+    class _SourceIPAdapter(HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **kw):
+            self.poolmanager = PoolManager(
+                num_pools=connections, maxsize=maxsize, block=block,
+                source_address=(source_ip, 0), **kw)
+
+    adapter = _SourceIPAdapter()
+    # pykiteconnect keeps its requests.Session on `reqsession`; fall back to creating one.
+    sess = getattr(kite, "reqsession", None)
+    if sess is None or not isinstance(sess, requests.Session):
+        sess = requests.Session()
+        try:
+            kite.reqsession = sess
+        except Exception:
+            pass
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+
+
 def _resolve_exchange(req_exchange: str) -> str:
     """Map an OrderRequest exchange string to a Zerodha exchange constant."""
     e = (req_exchange or "").upper()
@@ -113,6 +140,20 @@ class ZerodhaBroker(BaseBroker):
 
         self._kite = KiteConnect(api_key=self._api_key)
         self._kite.set_access_token(self._token)
+
+        # Per-binding source-IP binding: Zerodha Kite whitelists a GLOBALLY-UNIQUE static IP
+        # per app, so multiple clients on one server must each egress from their own IP. When
+        # source_ip is set (the LOCAL/private IP whose EIP is whitelisted for this app), bind
+        # KiteConnect's HTTP session to it so orders leave from the right public IP.
+        _src = (getattr(creds, "source_ip", "") or "").strip()
+        if _src:
+            try:
+                _bind_session_source_ip(self._kite, _src)
+                logger.info("ZerodhaBroker[%s]: bound API egress to source IP %s",
+                            self.client_id, _src)
+            except Exception as exc:
+                logger.error("ZerodhaBroker[%s]: source-IP bind to %s FAILED: %s "
+                             "(orders will use the default IP).", self.client_id, _src, exc)
 
         # Determine product type:
         # 1. Explicit product_type field on binding ("MIS" or "NRML") — highest priority

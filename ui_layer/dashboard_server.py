@@ -298,9 +298,14 @@ try:
         product_type:        str   = "MIS"    # "MIS" intraday | "NRML" carry-forward
         assigned_strategy:   str   = ""
         assigned_instrument: str   = "NIFTY"
+        source_ip:           str   = ""        # bind API egress to this local IP (static-IP brokers)
 
     class _BrokerModeSchema(_PydanticBase):
         mode: str  # "paper" | "live"
+
+    class _BindingIPSchema(_PydanticBase):
+        source_ip:    str = ""   # LOCAL/private IP the bot binds order egress to
+        whitelist_ip: str = ""   # PUBLIC IP the client whitelists in their broker
 
     class _FyersAuthCodeSchema(_PydanticBase):
         auth_code: str
@@ -1478,6 +1483,7 @@ class DashboardServer:
                     product_type=body.product_type,
                     assigned_strategy=body.assigned_strategy,
                     assigned_instrument=body.assigned_instrument,
+                    source_ip=body.source_ip,
                 )
                 # Only a BRAND-NEW broker starts with trade OFF. Editing an
                 # existing binding (e.g. changing product to NRML) must NOT
@@ -1649,6 +1655,33 @@ class DashboardServer:
                         client_id, binding_id, "ON" if new_state else "OFF")
             return {"ok": True, "client_id": client_id, "binding_id": binding_id,
                     "show_granular_ticks": new_state}
+
+        @app.post("/api/admin/client/{client_id}/binding/{binding_id}/source_ip",
+                  tags=["Admin"])
+        async def api_admin_set_binding_ips(
+            client_id: str, binding_id: str, body: _BindingIPSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            """Admin assigns a dedicated egress IP to a client's broker binding.
+            source_ip = LOCAL/private interface IP the bot binds orders to;
+            whitelist_ip = PUBLIC IP shown to the client to add to their broker whitelist."""
+            bindings = _srv._client_db.get_bindings_safe_sync(client_id)
+            b = next((x for x in bindings if x["binding_id"] == binding_id), None)
+            if b is None:
+                raise HTTPException(404, f"Binding '{binding_id}' not found.")
+            await _srv._client_db.set_binding_ips(
+                client_id, binding_id, body.source_ip, body.whitelist_ip)
+            # Hot-swap the live broker's egress binding if it's already authenticated.
+            try:
+                brk = (_srv._router._brokers.get(client_id) or {}).get(binding_id) if _srv._router else None
+                if brk is not None and hasattr(brk, "_binding"):
+                    brk._binding.source_ip = body.source_ip.strip()
+            except Exception:
+                pass
+            logger.info("Dashboard: set binding IPs %s/%s source=%s whitelist=%s",
+                        client_id, binding_id, body.source_ip, body.whitelist_ip)
+            return {"ok": True, "client_id": client_id, "binding_id": binding_id,
+                    "source_ip": body.source_ip.strip(), "whitelist_ip": body.whitelist_ip.strip()}
 
         # ── CLIENT — 1-min combined-premium chart series (VWAP/RSI/SLOPE) ─────
         @app.get("/api/client/strategy/{deploy_id}/premium_series", tags=["Client"])

@@ -52,6 +52,10 @@ class BrokerBinding:
     product_type: str = "MIS"           # "MIS" = intraday auto-sqoff | "NRML" = carry-forward
     trading_mode: str = "paper"         # "paper" | "live"
     enabled: bool = True
+    # Outbound source IP binding (multi-client static-IP brokers like Zerodha Kite, whose
+    # whitelisted IP is globally unique per app). When set, this broker's API calls bind to
+    # this LOCAL/private IP so they egress from the EIP mapped to it. Empty = OS default.
+    source_ip: str = ""
 
     @classmethod
     def from_env(cls, binding_id: str, provider: str, prefix: str) -> "BrokerBinding":

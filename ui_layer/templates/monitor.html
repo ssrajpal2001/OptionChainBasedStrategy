@@ -654,6 +654,9 @@ document.addEventListener('alpine:init', () => {
     /* ── Client Profiles ─────────────────────────────────────────────── */
     clientProfiles: [],
     granularState: {},   // client_id → bool (any straddle binding has show_granular_ticks on)
+    // Admin dedicated egress IP assignment
+    ipAssign: { client_id:'', binding_id:'', source_ip:'', whitelist_ip:'', msg:'', ok:null },
+    ipAssignBindings: [],
     clientRegLoading: false, clientRegMsg: '', clientRegOk: null,
     newClient: {
       client_id: '', name: '', capital: 500000, provider: 'mock',
@@ -1773,6 +1776,35 @@ document.addEventListener('alpine:init', () => {
         const on = (d.bindings || []).some(b => b.show_granular_ticks);
         this.granularState = { ...this.granularState, [cid]: on };
       } catch {}
+    },
+
+    // ── Admin: dedicated egress IP assignment ──
+    async loadIpAssignBindings() {
+      this.ipAssignBindings = []; this.ipAssign.binding_id = '';
+      this.ipAssign.source_ip = ''; this.ipAssign.whitelist_ip = ''; this.ipAssign.msg = '';
+      if (!this.ipAssign.client_id) return;
+      try {
+        const r = await this._fetch(`/api/admin/clients/${encodeURIComponent(this.ipAssign.client_id)}/bindings`);
+        if (r && r.ok) { const d = await r.json(); this.ipAssignBindings = d.bindings || []; }
+      } catch {}
+    },
+    prefillIpAssign() {
+      const b = this.ipAssignBindings.find(x => x.binding_id === this.ipAssign.binding_id);
+      this.ipAssign.source_ip = (b && b.source_ip) || '';
+      this.ipAssign.whitelist_ip = (b && b.whitelist_ip) || '';
+      this.ipAssign.msg = '';
+    },
+    async saveBindingIps() {
+      this.ipAssign.msg = ''; this.ipAssign.ok = null;
+      try {
+        const r = await this._fetch(
+          `/api/admin/client/${encodeURIComponent(this.ipAssign.client_id)}/binding/${encodeURIComponent(this.ipAssign.binding_id)}/source_ip`,
+          { json: { source_ip: this.ipAssign.source_ip.trim(), whitelist_ip: this.ipAssign.whitelist_ip.trim() } });
+        const d = r ? await r.json() : {};
+        this.ipAssign.ok = !!(r && r.ok);
+        this.ipAssign.msg = this.ipAssign.ok ? 'Assigned. Client will see the whitelist IP in their terminal.' : (d.error || d.detail || 'Failed.');
+        if (this.ipAssign.ok) this.loadIpAssignBindings();
+      } catch { this.ipAssign.ok = false; this.ipAssign.msg = 'Network error.'; }
     },
 
     // Admin toggle: flip tick-by-tick exit audit for every binding of this client.
@@ -6089,6 +6121,50 @@ function histReplay() {
     </div>
   </div>
 
+  <!-- ══ BLOCK A2: DEDICATED EGRESS IP ASSIGNMENT ═════════════════════════════ -->
+  <div class="t-card rounded p-4 fade-up-2" style="border-color:rgba(var(--t-cyan-rgb),0.2)">
+    <div class="sec-label mb-0.5">Static-IP Brokers</div>
+    <div class="font-display text-sm font-black tracking-widest mb-1" style="color:var(--t-cyan)">DEDICATED EGRESS IP ASSIGNMENT</div>
+    <p class="font-mono text-xs mb-3" style="color:var(--t-muted)">
+      Zerodha Kite whitelists a globally-unique static IP per app, so each client needs their own egress IP.
+      Assign the LOCAL/private IP (the bot binds orders to it) + the PUBLIC IP (the client whitelists in their broker).
+    </p>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <div>
+        <div class="sec-label mb-1">CLIENT</div>
+        <select class="t-input" x-model="ipAssign.client_id" @change="loadIpAssignBindings()">
+          <option value="">— select client —</option>
+          <template x-for="c in clientProfiles" :key="c.client_id">
+            <option :value="c.client_id" x-text="(c.name||c.client_id)+' ('+c.client_id+')'"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <div class="sec-label mb-1">BROKER BINDING</div>
+        <select class="t-input" x-model="ipAssign.binding_id" @change="prefillIpAssign()">
+          <option value="">— select binding —</option>
+          <template x-for="b in ipAssignBindings" :key="b.binding_id">
+            <option :value="b.binding_id" x-text="b.binding_id+' · '+(b.provider||'').toUpperCase()"></option>
+          </template>
+        </select>
+      </div>
+      <div>
+        <div class="sec-label mb-1">SOURCE IP (private, e.g. 172.31.16.130)</div>
+        <input class="t-input font-mono" type="text" x-model="ipAssign.source_ip" placeholder="172.31.16.130"/>
+      </div>
+      <div>
+        <div class="sec-label mb-1">WHITELIST IP (public, e.g. 13.127.2.68)</div>
+        <input class="t-input font-mono" type="text" x-model="ipAssign.whitelist_ip" placeholder="13.127.2.68"/>
+      </div>
+    </div>
+    <div class="flex items-center gap-3 mt-3">
+      <button class="btn-primary" style="max-width:200px" @click="saveBindingIps()"
+              :disabled="!ipAssign.client_id || !ipAssign.binding_id">Assign IP</button>
+      <span x-show="ipAssign.msg" class="text-xs font-mono"
+            :style="ipAssign.ok ? 'color:var(--t-green)' : 'color:var(--t-red)'" x-text="ipAssign.msg"></span>
+    </div>
+  </div>
+
   <!-- ══ BLOCK B: CLIENT ACCOUNT PROVISIONING FORM ════════════════════════════ -->
   <div class="t-card rounded p-4 fade-up-2"
        style="border-color:rgba(var(--t-green-rgb),0.2);background:linear-gradient(135deg,var(--t-card) 0%,rgba(var(--t-green-rgb),0.02) 100%)">
@@ -6719,6 +6795,23 @@ function histReplay() {
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
                   </div>
+                  <!-- Dedicated egress IP to whitelist (Zerodha etc. require a unique static IP) -->
+                  <template x-if="b.whitelist_ip">
+                    <div class="mt-2 rounded px-3 py-2" style="background:rgba(var(--t-green-rgb),0.06);border:1px solid rgba(var(--t-green-rgb),0.25)">
+                      <div class="font-mono text-xs" style="color:var(--t-green)">
+                        ● Whitelist this IP in your broker:
+                        <span class="font-bold" style="color:var(--t-bright)" x-text="b.whitelist_ip"></span>
+                        <button class="ml-1 underline" style="color:var(--t-cyan)"
+                                @click="navigator.clipboard&&navigator.clipboard.writeText(b.whitelist_ip)">copy</button>
+                      </div>
+                      <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Add it to your Kite app's allowed IPs, then generate your token.</div>
+                    </div>
+                  </template>
+                  <template x-if="!b.whitelist_ip">
+                    <div class="mt-2 rounded px-3 py-2" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.25)">
+                      <div class="font-mono text-xs" style="color:var(--t-amber)">⚠ No dedicated IP assigned yet — please contact the admin to get your IP address to whitelist in your broker.</div>
+                    </div>
+                  </template>
                 </div>
               </div>
 
