@@ -222,6 +222,8 @@ class SellStraddleStrategy:
         cfg=None,
         underlying: str = "NIFTY",
         lot_multiplier: int = 1,
+        client_id: str = "",
+        binding_id: str = "",
     ) -> None:
         self._bus            = bus
         self._cfg            = cfg
@@ -229,6 +231,12 @@ class SellStraddleStrategy:
         self._lot_multiplier = lot_multiplier
         self._running        = False
         self._client_db      = None
+        # Per-binding refactor: when set, this is an INDEPENDENT book for exactly one
+        # (client, broker-binding). It tags its orders so the bridge routes to only that broker,
+        # gates on only that binding's Terminal+Trade, and persists under a per-binding key.
+        # Empty = legacy per-index engine (mirrors to all eligible brokers).
+        self._client_id      = client_id
+        self._binding_id     = binding_id
 
         self._position: Optional[StraddlePosition] = None
         self._trades_today: int = 0
@@ -433,7 +441,17 @@ class SellStraddleStrategy:
 
     @property
     def _persist_key(self) -> str:
+        # Per-binding books persist independently so each restores its OWN position.
+        if self._client_id and self._binding_id:
+            return f"{self._client_id}_{self._binding_id}_{self._underlying}_sell_straddle"
         return f"{self._underlying}_sell_straddle"
+
+    async def _emit_order(self, ev) -> None:
+        """Stamp this book's identity on every order so the bridge routes to ONLY this binding
+        (no mirror), then publish. Legacy per-index engine leaves the tags empty → route-to-all."""
+        ev.client_id  = self._client_id
+        ev.binding_id = self._binding_id
+        await self._bus.publish(Topic.ORDER_REQUEST, ev)
 
     def _persist(self) -> None:
         try:
@@ -1125,21 +1143,35 @@ class SellStraddleStrategy:
         self._term_check_t = _now
         active = False
         try:
-            for _client in db.get_all_clients_sync():
-                _cid = _client.get("client_id", "")
-                if not _cid:
-                    continue
-                _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(_cid)}
-                for _dep in db.get_deployments_sync(_cid):
-                    _sn = str(_dep.get("strategy_name", "")).lower()
-                    _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
-                    if _sn == "sell_straddle" and _ul == self._underlying.upper():
-                        _b = _binds.get(_dep.get("binding_id"))
-                        if _b and _b.get("engine_active") and _b.get("terminal_connected"):
-                            active = True
-                            break
-                if active:
-                    break
+            if self._client_id and self._binding_id:
+                # PER-BINDING book: gate ONLY on THIS binding's Terminal+Trade. Other clients'
+                # state is irrelevant — this book trades fully independently.
+                _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(self._client_id)}
+                _deps  = db.get_deployments_sync(self._client_id)
+                _has_dep = any(
+                    str(d.get("strategy_name", "")).lower() == "sell_straddle"
+                    and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper() == self._underlying.upper()
+                    and d.get("binding_id") == self._binding_id
+                    for d in _deps
+                )
+                _b = _binds.get(self._binding_id)
+                active = bool(_has_dep and _b and _b.get("engine_active") and _b.get("terminal_connected"))
+            else:
+                for _client in db.get_all_clients_sync():
+                    _cid = _client.get("client_id", "")
+                    if not _cid:
+                        continue
+                    _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(_cid)}
+                    for _dep in db.get_deployments_sync(_cid):
+                        _sn = str(_dep.get("strategy_name", "")).lower()
+                        _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
+                        if _sn == "sell_straddle" and _ul == self._underlying.upper():
+                            _b = _binds.get(_dep.get("binding_id"))
+                            if _b and _b.get("engine_active") and _b.get("terminal_connected"):
+                                active = True
+                                break
+                    if active:
+                        break
         except Exception as _exc:
             logger.debug("SellStraddle[%s]: terminal-active check error: %s", self._underlying, _exc)
             active = False
@@ -1449,7 +1481,7 @@ class SellStraddleStrategy:
             indicators     = dict(self._ind),
             event_id       = event_id,
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
 
     # ── Exit ─────────────────────────────────────────────────────────────────
 
@@ -1940,7 +1972,7 @@ class SellStraddleStrategy:
         )
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         self._event_counter += 1
-        await self._bus.publish(Topic.ORDER_REQUEST, StraddleOrderEvent(
+        await self._emit_order(StraddleOrderEvent(
             action="ENTRY", underlying=self._underlying, atm=self._position.atm_at_entry,
             ce_strike=ce_s, pe_strike=pe_s, ce_ltp=ce_l, pe_ltp=pe_l,
             lot_multiplier=self._lot_multiplier, lot_size=self._lot_size, spot=self._spot,
@@ -1986,7 +2018,7 @@ class SellStraddleStrategy:
             leg_open_times={side: leg.open_time.isoformat() if leg.open_time else None},
             leg_open_reasons={side: leg.open_reason},
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
         self._session_realized_pnl_pts += leg_pnl
         logger.info("SellStraddle[%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
                     self._underlying, side, leg.strike, leg_pnl, reason)
@@ -2018,7 +2050,7 @@ class SellStraddleStrategy:
             event_id=f"{self._underlying}_OPENLEG_{side}_{self._event_counter}",
             legs=[side],
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
         logger.info("SellStraddle[%s]: OPEN LEG %s strike=%.0f @%.2f [%s]",
                     self._underlying, side, strike, ltp, reason)
 
@@ -2175,7 +2207,7 @@ class SellStraddleStrategy:
                 "PE": pos.pe_leg.open_reason,
             },
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
 
         # Accumulate session realized P&L (in premium points)
         self._session_realized_pnl_pts += pos.realized_pnl
