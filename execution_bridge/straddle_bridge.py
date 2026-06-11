@@ -340,23 +340,26 @@ class StraddleExecutionBridge:
                 if _target and binding_id != _target[1]:
                     continue
 
-                # Gate 1: engine must be active for this broker
-                if not live_b.get("engine_active"):
-                    continue
-
-                # Gate 2: terminal must be connected
+                # Gate: terminal must be connected (broker authenticated).
                 if not live_b.get("terminal_connected"):
                     continue
 
-                # Gate 3: this binding must have a DEPLOYMENT for sell_straddle on
-                # THIS underlying. No matching deployment → this broker does not
-                # trade this strategy/instrument → skip.
-                if not any(
-                    d.get("binding_id") == binding_id
+                # Gate: this binding must have a RUNNING sell_straddle deployment on THIS
+                # underlying. The per-strategy Run toggle (is_running) is the authority now —
+                # not the binding-level engine_active (legacy events without tags still honour
+                # engine_active for back-compat).
+                _matching = [
+                    d for d in deployments
+                    if d.get("binding_id") == binding_id
                     and d.get("strategy_name") == "sell_straddle"
                     and str(d.get("underlying", "")).upper() == ev.underlying.upper()
-                    for d in deployments
-                ):
+                ]
+                if not _matching:
+                    continue
+                if _target:
+                    if not any(int(d.get("is_running", 0) or 0) == 1 for d in _matching):
+                        continue
+                elif not live_b.get("engine_active"):
                     continue
 
                 broker = (self._router._brokers or {}).get(client.client_id, {}).get(binding_id)
@@ -410,7 +413,8 @@ class StraddleExecutionBridge:
             logger.debug("StraddleBridge._other_active_broker_for(%s): %s", underlying, _exc)
         return False
 
-    async def square_off_binding(self, client_id: str, binding_id: str, strategies) -> int:
+    async def square_off_binding(self, client_id: str, binding_id: str, strategies,
+                                 underlying: str = "") -> int:
         """Square off (buy-to-close) the open sell-straddle legs for ONE binding's broker. When NO
         other active broker remains for the strategy, ALSO discards the strategy's logical + persisted
         position (no extra orders) so a restart won't restore a ghost. Returns legs squared off."""
@@ -429,6 +433,9 @@ class StraddleExecutionBridge:
             if getattr(ss, "_client_id", "") and (
                 ss._client_id != client_id or ss._binding_id != binding_id
             ):
+                continue
+            # Per-strategy square-off: restrict to one underlying when given.
+            if underlying and str(getattr(ss, "_underlying", "")).upper() != underlying.upper():
                 continue
             pos = getattr(ss, "_position", None)
             if not pos or getattr(pos, "status", "") != "open":

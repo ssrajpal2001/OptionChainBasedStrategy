@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS strategy_deployments (
     max_sl_rs          REAL NOT NULL DEFAULT 0.0,
     squareoff_time     TEXT NOT NULL DEFAULT '15:15',
     is_active          INTEGER DEFAULT 1,
+    is_running         INTEGER DEFAULT 0,   -- per-strategy Start/Stop toggle (0 = deployed but stopped)
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
 );
@@ -587,6 +588,22 @@ class ClientDB:
             (deploy_id, client_id),
         )
 
+    async def set_deployment_running(self, deploy_id: str, client_id: str, running: bool) -> None:
+        """Per-strategy Start/Stop toggle. is_running gates whether the deployment's book trades."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET is_running=? WHERE deploy_id=? AND client_id=?",
+            (1 if running else 0, deploy_id, client_id),
+        )
+
+    async def stop_all_deployments(self, client_id: str) -> None:
+        """Global STOP — turn every deployment's run toggle OFF for a client."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET is_running=0 WHERE client_id=?",
+            (client_id,),
+        )
+
     async def delete_binding(self, client_id: str, binding_id: str) -> None:
         """Permanently remove a broker binding (credentials + config) from the DB."""
         await asyncio.to_thread(
@@ -1053,6 +1070,7 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN show_granular_ticks INTEGER DEFAULT 0",
             "ALTER TABLE broker_bindings ADD COLUMN source_ip TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN whitelist_ip TEXT DEFAULT ''",
+            "ALTER TABLE strategy_deployments ADD COLUMN is_running INTEGER DEFAULT 0",
         ):
             try:
                 con.execute(migration)

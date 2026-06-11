@@ -310,6 +310,9 @@ try:
     class _OIWindowSchema(_PydanticBase):
         n: int = 0   # strikes each side of ATM for the OI panel (0 = all pool strikes)
 
+    class _RunSchema(_PydanticBase):
+        running: bool = False   # per-strategy Start/Stop toggle
+
     class _FyersAuthCodeSchema(_PydanticBase):
         auth_code: str
 
@@ -1594,6 +1597,65 @@ class DashboardServer:
             return {"ok": True, "binding_id": binding_id, "is_trade_enabled": new_state,
                     "engine_active": new_state}
 
+        # ── CLIENT — per-strategy Start/Stop toggle (the new control surface) ──
+        @app.post("/api/client/deployment/{deploy_id}/run", tags=["Client"])
+        async def api_client_deployment_run(
+            deploy_id: str, body: _RunSchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
+            if dep is None:
+                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
+            bid   = dep.get("binding_id", "")
+            strat = dep.get("strategy_name", "")
+            und   = str(dep.get("underlying", "") or "NIFTY")
+            running = bool(body.running)
+            # Start requires the broker terminal to be connected (app authenticated to broker).
+            if running:
+                binds = _srv._client_db.get_bindings_safe_sync(cid)
+                b = next((x for x in binds if x["binding_id"] == bid), None)
+                if not b or not b.get("terminal_connected"):
+                    return {"ok": False, "deploy_id": deploy_id,
+                            "error": "Terminal not connected. Switch the broker's Terminal ON first."}
+                # Hot-apply this deployment's saved config so lot/squareoff are live immediately.
+                try:
+                    from data_layer.deployment_store import load_deployment_json, apply_deployment_to_runtime_config
+                    dj = load_deployment_json(deploy_id)
+                    if dj:
+                        apply_deployment_to_runtime_config(dj)
+                except Exception as exc:
+                    logger.warning("deployment_run apply failed for %s: %s", deploy_id, exc)
+            await _srv._client_db.set_deployment_running(deploy_id, cid, running)
+            # Stop → square off THIS strategy on THIS broker only.
+            squared = 0
+            if not running and strat == "sell_straddle" and _srv._straddle_bridge is not None:
+                try:
+                    squared = await _srv._straddle_bridge.square_off_binding(
+                        cid, bid, _srv._sell_straddles, underlying=und)
+                except Exception as exc:
+                    logger.error("deployment_run square-off failed for %s: %s", deploy_id, exc)
+            logger.info("Dashboard: strategy RUN %s → %s (squared=%d)",
+                        deploy_id, "ON" if running else "OFF", squared)
+            return {"ok": True, "deploy_id": deploy_id, "running": running, "squared_off": squared}
+
+        # ── CLIENT — global STOP & SQUARE-OFF (flatten the whole client) ──────
+        @app.post("/api/client/stop_squareoff", tags=["Client"])
+        async def api_client_stop_squareoff(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            await _srv._client_db.stop_all_deployments(cid)          # all run toggles OFF
+            squared = 0
+            if _srv._straddle_bridge is not None:
+                try:
+                    for b in _srv._client_db.get_bindings_safe_sync(cid):
+                        squared += await _srv._straddle_bridge.square_off_binding(
+                            cid, b.get("binding_id", ""), _srv._sell_straddles)
+                except Exception as exc:
+                    logger.error("stop_squareoff failed for %s: %s", cid, exc)
+            logger.info("Dashboard: STOP & SQUARE-OFF %s — squared %d leg(s) across all brokers.",
+                        cid, squared)
+            return {"ok": True, "squared_off": squared}
+
         # ── ADMIN — toggle per-client granular tick-by-tick exit audit ────────
         @app.post("/api/admin/client/{client_id}/binding/{binding_id}/granular_ticks",
                   tags=["Admin"])
@@ -2183,6 +2245,14 @@ class DashboardServer:
             await _srv._client_db.set_terminal_connected(cid, binding_id, False)
             await _srv._client_db.set_engine_active(cid, binding_id, False)
             await _srv._client_db.set_trade_enabled(cid, binding_id, False)
+            # Terminal OFF = broker disconnected → STOP every strategy on this broker (run toggles
+            # OFF) so no book re-enters, then square off all its open legs.
+            try:
+                for d in _srv._client_db.get_deployments_sync(cid):
+                    if d.get("binding_id") == binding_id:
+                        await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            except Exception:
+                pass
             if _srv._straddle_bridge is not None:
                 try:
                     n = await _srv._straddle_bridge.square_off_binding(cid, binding_id, _srv._sell_straddles)

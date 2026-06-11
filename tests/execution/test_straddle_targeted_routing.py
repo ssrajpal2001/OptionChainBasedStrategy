@@ -22,7 +22,8 @@ class _DB:
         return [{"binding_id": f"{cid}_b1", "engine_active": True,
                  "terminal_connected": True, "trading_mode": "paper"}]
     def get_deployments_sync(self, cid):
-        return [{"binding_id": f"{cid}_b1", "strategy_name": "sell_straddle", "underlying": "NIFTY"}]
+        return [{"binding_id": f"{cid}_b1", "strategy_name": "sell_straddle",
+                 "underlying": "NIFTY", "is_running": 1}]
 
 
 class _Router:

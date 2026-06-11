@@ -30,10 +30,10 @@ class _DB:
     def get_all_clients_sync(self): return [{"client_id": "C1"}, {"client_id": "C2"}]
     def get_bindings_safe_sync(self, cid):
         return [{"binding_id": ("Z1" if cid == "C1" else "Z9"),
-                 "engine_active": True, "terminal_connected": True}]
+                 "terminal_connected": True}]
     def get_deployments_sync(self, cid):
         return [{"strategy_name": "sell_straddle", "underlying": "NIFTY",
-                 "binding_id": ("Z1" if cid == "C1" else "Z9")}]
+                 "binding_id": ("Z1" if cid == "C1" else "Z9"), "is_running": 1}]
 
 
 def test_gate_is_own_binding_only():

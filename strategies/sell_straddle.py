@@ -1149,18 +1149,19 @@ class SellStraddleStrategy:
         active = False
         try:
             if self._client_id and self._binding_id:
-                # PER-BINDING book: gate ONLY on THIS binding's Terminal+Trade. Other clients'
-                # state is irrelevant — this book trades fully independently.
+                # PER-BINDING book: gate on THIS binding's Terminal (broker connected) AND THIS
+                # deployment's per-strategy Run toggle (is_running). Other clients are irrelevant.
                 _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(self._client_id)}
                 _deps  = db.get_deployments_sync(self._client_id)
-                _has_dep = any(
+                _dep_running = any(
                     str(d.get("strategy_name", "")).lower() == "sell_straddle"
                     and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper() == self._underlying.upper()
                     and d.get("binding_id") == self._binding_id
+                    and int(d.get("is_running", 0) or 0) == 1
                     for d in _deps
                 )
                 _b = _binds.get(self._binding_id)
-                active = bool(_has_dep and _b and _b.get("engine_active") and _b.get("terminal_connected"))
+                active = bool(_dep_running and _b and _b.get("terminal_connected"))
             else:
                 for _client in db.get_all_clients_sync():
                     _cid = _client.get("client_id", "")
