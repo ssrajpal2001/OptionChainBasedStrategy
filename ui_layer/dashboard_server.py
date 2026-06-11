@@ -655,62 +655,10 @@ class DashboardServer:
         bridge = self._ws_bridge
 
         def _refresh_live_pnl() -> None:
-            """Set each client's _daily_pnl from the LIVE unrealized P&L of the
-            strategies they have deployed, so firm/client dashboards reflect open
-            positions even before broker fills (which are absent in a dry run).
-            Same source as the per-strategy positions panel."""
-            try:
-                clients = _srv._registry.all_active() if _srv._registry else []
-                sslist  = _srv._sell_straddles or []
-                iclist  = _srv._iron_condors or []
-                trap    = _srv._trap_engine
-
-                def _find(lst, u):
-                    for s in lst:
-                        if getattr(s, "_underlying", None) == u:
-                            return s
-                    return None
-
-                for c in clients:
-                    try:
-                        deps = _srv._client_db.get_deployments_sync(c.client_id)
-                    except Exception:
-                        deps = []
-                    pnl = 0.0
-                    for d in deps:
-                        sname = d.get("strategy_name", "")
-                        u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
-                        if sname == "sell_straddle":
-                            s = _find(sslist, u)
-                            if s:
-                                # Booked P&L for the day (sum of all closed trades) so the
-                                # number survives after a position exits — without it TODAY'S
-                                # P&L snaps back to 0 the moment the trade books out.
-                                pnl += float(getattr(s, "_session_realized_pnl_pts", 0.0) or 0.0)
-                            p = getattr(s, "_position", None) if s else None
-                            if p and getattr(p, "status", "open") == "open":
-                                pnl += float(getattr(p, "unrealized_pnl", 0.0) or 0.0)
-                        elif sname == "iron_condor":
-                            s = _find(iclist, u)
-                            p = getattr(s, "_position", None) if s else None
-                            if p and getattr(p, "status", "open") == "open":
-                                pnl += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
-                        elif sname == "trap_trading" and trap is not None:
-                            op   = getattr(trap, "_open_positions", {}) or {}
-                            prem = getattr(trap, "_prem_cache", {}) or {}
-                            for _tid, tup in op.items():
-                                try:
-                                    _t, osym, ep, q = tup
-                                except Exception:
-                                    continue
-                                ltp = float(prem.get(osym, ep) or ep)
-                                pnl += (float(ep) - ltp) * abs(int(q))
-                    try:
-                        c._daily_pnl = round(pnl, 2)
-                    except Exception:
-                        pass
-            except Exception as exc:
-                logger.debug("refresh_live_pnl failed: %s", exc)
+            """Refresh each client's _daily_pnl in REAL RUPEES (booked from History + running
+            unrealized × lot). Delegates to the single source of truth so the header, admin
+            dashboard and position panel all agree with the History tab."""
+            _srv._compute_live_pnls()
 
         # ── Auth helpers ──────────────────────────────────────────────────────
 
@@ -5058,14 +5006,17 @@ class DashboardServer:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _compute_live_pnls(self) -> None:
-        """Set each active client's _daily_pnl from live booked + unrealized P&L of their
-        deployed strategies. Mirrors the route-local _refresh_live_pnl so the WS heartbeat
-        (admin dashboard) shows fresh client-wise P&L, not a stale value."""
+        """Set each active client's _daily_pnl in REAL RUPEES = booked (today's closed trades
+        from the History ledger) + running (unrealized of open positions × lot size). This is
+        the single source of truth so the header, admin dashboard and position panel all agree
+        with the History tab (no more points-vs-rupees mismatch)."""
         try:
             clients = self._registry.all_active() if self._registry else []
             sslist  = self._sell_straddles or []
             iclist  = self._iron_condors or []
             trap    = self._trap_engine
+            from data_layer import trade_history as _th
+            _today = datetime.now(IST).date().isoformat()
 
             def _find(lst, u):
                 for s in lst:
@@ -5073,27 +5024,36 @@ class DashboardServer:
                         return s
                 return None
 
+            def _lot(u):
+                return int(self._cfg.exchange.lot_sizes.get(u, 0) or 0) if self._cfg else 0
+
             for c in clients:
+                # Booked (₹) — today's closed trades from History (the source of truth).
+                try:
+                    _recs = _th.load(c.client_id, 500)
+                    booked = sum(float(r.get("pnl", 0) or 0) for r in _recs
+                                 if str(r.get("ts", ""))[:10] == _today)
+                except Exception:
+                    booked = 0.0
+                # Running (₹) — unrealized of open positions across this client's deployments.
                 try:
                     deps = self._client_db.get_deployments_sync(c.client_id)
                 except Exception:
                     deps = []
-                pnl = 0.0
+                running = 0.0
                 for d in deps:
                     sname = d.get("strategy_name", "")
                     u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
                     if sname == "sell_straddle":
                         s = _find(sslist, u)
-                        if s:
-                            pnl += float(getattr(s, "_session_realized_pnl_pts", 0.0) or 0.0)
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
-                            pnl += float(getattr(p, "unrealized_pnl", 0.0) or 0.0)
+                            running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
                     elif sname == "iron_condor":
                         s = _find(iclist, u)
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
-                            pnl += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
+                            running += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
                     elif sname == "trap_trading" and trap is not None:
                         op   = getattr(trap, "_open_positions", {}) or {}
                         prem = getattr(trap, "_prem_cache", {}) or {}
@@ -5103,9 +5063,9 @@ class DashboardServer:
                             except Exception:
                                 continue
                             ltp = float(prem.get(osym, ep) or ep)
-                            pnl += (float(ep) - ltp) * abs(int(q))
+                            running += (float(ep) - ltp) * abs(int(q))
                 try:
-                    c._daily_pnl = round(pnl, 2)
+                    c._daily_pnl = round(booked + running, 2)
                 except Exception:
                     pass
         except Exception as exc:
