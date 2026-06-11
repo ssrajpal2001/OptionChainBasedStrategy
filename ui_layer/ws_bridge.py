@@ -23,8 +23,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Set
+
+import numpy as np
 
 from config.global_config import IST, Topic
 from data_layer.base_feeder import EventBus, IndexTick, OptionTick
@@ -76,6 +79,12 @@ class WsBridge:
         # OI panel: number of strikes EACH SIDE of ATM to include in PCR / max-OI.
         # 0 = use ALL subscribed pool strikes. Admin-settable; follows ATM dynamically.
         self._oi_window: int = 0
+        # Live INDEX indicators computed from the spot tick stream (1-min OHLC). The legacy
+        # CandleCache path effectively never publishes (index ticks carry no volume, so its
+        # volume-based VWAP/ADX path stalls). We build 1-min bars here and compute RSI/EMA/
+        # ADX/DI directly so the Indicators panel shows live, changing values.
+        self._idx_bars: Dict[str, deque] = {}    # sym -> deque[(high, low, close)]
+        self._idx_cur:  Dict[str, list] = {}     # sym -> [minute_of_day, high, low, close]
         # Option chain cache: key = "{underlying}_{strike}", value = row dict for IV matrix
         self._option_cache: Dict[str, dict] = {}
 
@@ -152,8 +161,58 @@ class WsBridge:
                     "atm":  atm,
                     "ts":   datetime.now(IST).strftime("%H:%M:%S IST"),
                 })
+                # Live index indicators (RSI/EMA/ADX/DI) from the 1-min spot OHLC.
+                snap = self._roll_index_minute(tick.symbol, float(tick.ltp))
+                if snap:
+                    await self.broadcast(snap)
             except Exception as exc:
                 logger.debug("WsBridge._tick_loop: %s", exc)
+
+    def _roll_index_minute(self, sym: str, ltp: float) -> Optional[dict]:
+        """Aggregate spot ticks into 1-min OHLC; on each minute boundary compute index
+        RSI-14 / EMA(9,21) / ADX / DI and return a 'snapshot' broadcast payload (or None).
+        VWAP is left blank — the index carries no traded volume to compute it from."""
+        if ltp <= 0:
+            return None
+        now = datetime.now(IST)
+        minute = now.hour * 60 + now.minute
+        cur = self._idx_cur.get(sym)
+        if cur is None:
+            self._idx_cur[sym] = [minute, ltp, ltp, ltp]   # minute, high, low, close
+            return None
+        if minute == cur[0]:
+            cur[1] = max(cur[1], ltp); cur[2] = min(cur[2], ltp); cur[3] = ltp
+            return None
+        # Minute rolled over → close the prior bar.
+        bars = self._idx_bars.setdefault(sym, deque(maxlen=300))
+        bars.append((cur[1], cur[2], cur[3]))
+        self._idx_cur[sym] = [minute, ltp, ltp, ltp]
+        if len(bars) < 15:                                  # need RSI-14 warmup
+            return None
+        try:
+            from matrix_engine.indicators import rsi as _rsi, ema as _ema, adx as _adx
+            highs  = np.array([b[0] for b in bars], dtype=np.float64)
+            lows   = np.array([b[1] for b in bars], dtype=np.float64)
+            closes = np.array([b[2] for b in bars], dtype=np.float64)
+            try:
+                adx_v, pdi, mdi = _adx(highs, lows, closes)
+            except Exception:
+                adx_v = pdi = mdi = 0.0
+            return {
+                "type": "snapshot", "sym": sym, "tf": 1,
+                "rsi":      round(float(_rsi(closes)), 2),
+                "ema_fast": round(float(_ema(closes, 9)), 2),
+                "ema_slow": round(float(_ema(closes, 21)), 2),
+                "adx":      round(float(adx_v or 0), 2),
+                "plus_di":  round(float(pdi or 0), 2),
+                "minus_di": round(float(mdi or 0), 2),
+                "vwap":     0,   # not computable on the index (no volume)
+                "ltp":      round(ltp, 2),
+                "ts":       now.strftime("%H:%M:%S IST"),
+            }
+        except Exception as exc:
+            logger.debug("WsBridge._roll_index_minute[%s]: %s", sym, exc)
+            return None
 
     async def _snapshot_loop(self) -> None:
         while self._running:
