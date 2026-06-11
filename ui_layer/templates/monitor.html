@@ -1939,12 +1939,9 @@ document.addEventListener('alpine:init', () => {
       console.log('[toggleStrategyRun] fired — deploy_id=', dep && dep.deploy_id,
                   'binding=', b && b.binding_id, 'terminal=', b && b.terminal_connected, 'want=', want);
       this.botOk = null; this.botMsg = 'Working…';   // immediate feedback so a fired click is visible
-      // Starting needs the broker Terminal connected — give clear feedback instead of a dead click.
-      if (want && b && !b.terminal_connected) {
-        this.botOk = false;
-        this.botMsg = `Turn the ${b.binding_id} Terminal ON first, then start the strategy.`;
-        return;
-      }
+      // NOTE: do NOT gate on the UI's terminal flag — it can be stale after connect. Always send
+      // the request; the SERVER holds the authoritative terminal state and returns a clear error
+      // ("Terminal not connected…") if it truly isn't connected.
       dep._runLoading = true;
       // deploy_id should come from the DB row; reconstruct as a fallback so a missing field
       // can't silently no-op the toggle.
@@ -6967,16 +6964,14 @@ function histReplay() {
                     <button @click="toggleStrategyRun(dep, b)"
                             :disabled="dep._runLoading"
                             class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all"
-                            :title="!b.terminal_connected ? 'Turn Terminal ON first, then start' : (depRunning(dep) ? 'Stop + square off this strategy on this broker' : 'Start this strategy on this broker')"
-                            :style="!b.terminal_connected
-                              ? 'opacity:0.55;border-color:var(--t-border);color:var(--t-muted)'
-                              : depRunning(dep)
+                            :title="depRunning(dep) ? 'Stop + square off this strategy on this broker' : 'Start this strategy on this broker'"
+                            :style="depRunning(dep)
                                 ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
-                                : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
+                                : 'background:transparent;color:var(--t-text);border-color:var(--t-border)'">
                       <span class="w-7 h-3.5 rounded-full relative transition-all shrink-0"
-                            :style="depRunning(dep) && b.terminal_connected?'background:var(--t-green)':'background:var(--t-dim)'">
+                            :style="depRunning(dep)?'background:var(--t-green)':'background:var(--t-dim)'">
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
-                              :style="depRunning(dep) && b.terminal_connected?'left:16px':'left:2px'"></span>
+                              :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
                       <span x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap')+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
