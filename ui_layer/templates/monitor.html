@@ -1937,16 +1937,18 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      alert('TOGGLE CLICK\ndeploy_id=' + did + '\nwant=' + want + '\nterminal=' + (b && b.terminal_connected));  // TEMP diagnostic
-      console.log('[toggleStrategyRun] fired — deploy_id=', did, 'want=', want);
+      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap')+' · '+dep.underlying;
+      const ok = want
+        ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
+        : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
+      if (!ok) return;
       this.botOk = null; this.botMsg = 'Working…';
       dep._runLoading = true;
       try {
         const r = await this._fetch(`/api/client/deployment/${encodeURIComponent(did)}/run`,
                                     { json: { running: want } });
-        if (!r) { alert('TOGGLE: no response (logged out?)'); return; }
+        if (!r) return;
         let d = {}; try { d = await r.json(); } catch {}
-        alert('TOGGLE RESPONSE\nHTTP ' + r.status + '\nok=' + r.ok + '\n' + JSON.stringify(d));  // TEMP diagnostic
         this.botOk = r.ok;
         this.botMsg = d.error || d.detail
                     || (r.ok ? (want ? 'Strategy started.' : `Strategy stopped${d.squared_off?` — squared off ${d.squared_off} leg(s)`:''}.`)
@@ -1958,6 +1960,7 @@ document.addEventListener('alpine:init', () => {
 
     // Global STOP & SQUARE-OFF — flatten the whole client.
     async stopAndSquareoff() {
+      if (!confirm('STOP & SQUARE-OFF — are you sure?\n\nThis stops EVERY strategy on ALL your brokers and squares off ALL open positions for this client.')) return;
       this.botMsg = ''; this.botOk = null; this.botLoading = true;
       try {
         const r = await this._fetch('/api/client/stop_squareoff', { method: 'POST' });
@@ -2078,6 +2081,12 @@ document.addEventListener('alpine:init', () => {
 
     async toggleTerminal(b) {
       const bid = b.binding_id;
+      // Confirm both directions — connecting authenticates the broker; disconnecting stops + flattens.
+      if (b.terminal_connected) {
+        if (!confirm(`Disconnect Terminal for ${bid}?\n\nThis STOPS every strategy on this broker and squares off all its open positions.`)) return;
+      } else {
+        if (!confirm(`Connect Terminal for ${bid}?\n\nThis authenticates the app with your broker so it can place orders.`)) return;
+      }
       this._initBrokerOp(bid);
       const op = this.csBrokerOp[bid];
 
