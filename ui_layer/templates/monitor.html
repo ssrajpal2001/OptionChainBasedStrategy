@@ -1929,7 +1929,9 @@ document.addEventListener('alpine:init', () => {
     // Per-strategy Start/Stop toggle for one deployment on one broker.
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
-      this.botMsg = ''; this.botOk = null;
+      console.log('[toggleStrategyRun] fired — deploy_id=', dep && dep.deploy_id,
+                  'binding=', b && b.binding_id, 'terminal=', b && b.terminal_connected, 'want=', want);
+      this.botOk = null; this.botMsg = 'Working…';   // immediate feedback so a fired click is visible
       // Starting needs the broker Terminal connected — give clear feedback instead of a dead click.
       if (want && b && !b.terminal_connected) {
         this.botOk = false;
