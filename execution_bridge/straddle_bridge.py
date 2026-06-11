@@ -424,6 +424,12 @@ class StraddleExecutionBridge:
         from config.global_config import IST as _IST
         legs_closed = 0
         for ss in (strategies or []):
+            # Per-binding books: only square off the book that belongs to THIS (client,binding).
+            # (Legacy per-index engines have empty identity → keep old behaviour.)
+            if getattr(ss, "_client_id", "") and (
+                ss._client_id != client_id or ss._binding_id != binding_id
+            ):
+                continue
             pos = getattr(ss, "_position", None)
             if not pos or getattr(pos, "status", "") != "open":
                 continue

@@ -1,0 +1,88 @@
+It looks like Claude is completely aligned with the architectural design and is preparing to output the complete multi-file, production-grade framework.
+
+When Claude finishes generating those 7 files (`config.py`, `data_provider.py`, `matrix_engine.py`, `strategies.py`, `execution.py`, `backtester.py`, and `main.py`), you will have the raw software blueprint.
+
+Once it outputs the code, paste it back here so we can review it together. We will check the following implementation details:
+
+* Verify that **RSI is strictly computed on the last 14 candles**, **VWAP on the last 500 candles**, and **ADX on the latest 20 candles**.
+* Confirm that the **Rolling Base** dynamic logic shifts perfectly whenever a candle closes below its predecessor.
+* Ensure the **Trap Reversal** logic correctly tracks the lifting of the void state when the price pulls back precisely to the entry level.
+* Validate the thread safety of the async websockets when compiling the real-time matrix dataframes.
+
+Let Claude run its generation, and pass the code over when you are ready!
+
+
+
+https://github.com/ssrajpal2001/OptionChainBasedStrategy--
+please go through the repo and create a prompt for Claude to create a modular approach with every strategy in diff files and break the application into smaller modules for readability and also try to make the application fast with no use of sleep as i cannot afford a nanosecond gap in checking 
+
+
+
+also tell Claude it should be a generic when ever we change the 
+
+broker it shoudl smoothly integrate with that specific broker
+
+That measn applciation should have diff brokers code style and symbol creation style 
+
+but also note all brokers do not provide free api and also some brokers do not provide free historical data 
+
+so tell teh claude to think wisely and select teh data feeder(global) brokers not 1 but more tahn one to fetch teh data and all oteh rbrokers will share teh same data and when tarde is triggered other N no of brokers will execute teh trade in their rbroker
+
+also tell cluase to use client management asd well also admin management 
+
+where client can create n no of brokers and can attach to teh applciation 
+
+all brokers will sdhare same global dat afeeder for data manupulation but will have their own broekr for execution purpose
+
+
+
+if u think anythink i have missed in this disucssion please eleborate 
+
+speciually teh management part
+
+
+
+also tell claude to use asia time zone 
+
+also suggest claude for back tets do v ned to save all teh datas of spot and options as well????
+
+also prompt claude to create md files for everythink 
+developer base md fiel adn client based md file 
+with knowledhe graph ad workflow adn conenction with each file 
+
+
+
+change lot size to 
+"NIFTY": 65,
+"BANKNIFTY": 30,
+"FINNIFTY": 60,
+"SENSEX": 20,
+"MIDCPNIFTY": 120,
+
+also implement upstox broker connection as well 
+    
+also check all this and after completing the full code please push the entire code base to repo
+
+https://github.com/ssrajpal2001/OptionChainBasedStrategy
+
+
+The Event Bus Bottleneck (data_layer/base_feeder.py): Ensure it doesn't wrap the event dispatcher loop in any heavy blocking synchronous parsing logic. The parsing of the raw incoming WebSocket binary/JSON must be handled by independent worker tasks so the WebSocket connection thread remains unblocked.
+
+Indicator Strictness (matrix_engine/indicators.py):
+When it writes the numpy/ta-lib wrappers, double check that it strictly uses exactly 14 for RSI, 500 for VWAP, and 20 for ADX.
+
+The Multi-Broker Execution Fan-Out (execution_bridge/execution_router.py):
+Ensure that when an order request event hits the router, it fires the execution requests using asyncio.gather(*tasks) or a thread pool executor. If it loops through the accounts sequentially (Client 1, then Client 2, then Client 3) using a standard for loop, it will introduce a critical execution latency gap between accounts. It must push them completely in parallel.
+
+
+
+
+
+
+-----------------------------------------
+System Prompt: Phase 3 Operational Hardening & Edge-Case ProtectionObjective Act  as a Principal Quantitative Risk Officer and System Site Reliability Engineer (SRE). Refactor and expand the existing multi-module architecture to introduce advanced live-market execution guardrails. You must eliminate network stream overhead from inactive strikes, manage volatile market open gap transitions smoothly, and protect individual client execution queues from broker API rate limit breaches.All structural updates must remain completely non-blocking, asynchronous, and pinned to the Asia/Kolkata timezone.
+
+
+
+
+1. System Refinements & Protective FeaturesImplement and integrate the following functional updates across your sub-package directories:A. Data Stream Optimization: data_layer/strike_cleanup.pyCreate a background maintenance task managed alongside the StrikeRebalancer.When a client position closes (receives an ORDER_FILL event marking a full exit, target hit, or cancellation), cross-reference that contract's strike against the current active $\pm 10$ ATM matrix window.Stream Optimization: If the contract is no longer tied to an open position, a trailing target, or the active matrix window, trigger an asynchronous unsubscribe request to free up your global data feed's network bandwidth. check if that specific contract's strike falls outside the active $\pm 10$ ATM matrix window.Stream Optimization: If the contract is no longer needed for live tracking or active trades, trigger an asynchronous unsubscribe request to free up network bandwidth on the global data feeder.B. Market Open Validation: matrix_engine/gap_handler.pyModify the system startup behavior inside admin_console.py or your main market loop.At exactly 09:15:01 AM IST, run a validation check comparing the current index spot price with the pre-open reference price captured at 09:08:00 AM.If the spot price has drifted by more than 1%, clear the baseline configuration, recalculate the true market-open ATM level, and reset the indicator windows (RSI-14, VWAP-500, ADX-20) using the opening data to prevent invalid breakout signals on your charts.C. Execution Rate Limiting: execution_bridge/rate_limiter.pyIntegrate an asynchronous token-bucket algorithm directly into the ClientExecutionWorker loop within parallel_worker_pool.py.Ensure each broker adapter profile enforces a maximum limit on outgoing API requests (e.g., a hard ceiling of 10 requests per second).If a strategy signal fires while multiple trailing order adjustments are being processed, queue the requests locally using millisecond delays rather than sending them all at once, avoiding API rate-limit errors from the broker.2. Technical Quality ChecklistEnsure your modifications align precisely with the core system rules:Indicator Memory Rules: Confirm that your index caching mechanisms maintain strict data limits: RSI is calculated strictly on the last 14 candles, VWAP tracks exactly 500 candles, and ADX tracks exactly 20 candles.Strategy B Validation: Ensure that Strategy B's void_lift checks (candle.low <= htf_entry_level) function correctly when running alongside the new morning gap-handling filters.Zero Synchronous Operations: Do not use time.sleep or blocking I/O calls anywhere in the cleanup or rate-limiting routines.3. Documentation UpdatesReflect these final stability updates in your project documentation:DEVELOPER_ARCHITECTURE.md: Document the stream cleanup lifecycle and the request rate-limiting logic used by the parallel worker queues.CLIENT_USER_GUIDE.md: Explain how the system automatically handles large market gap openings and how to adjust the rate-limiting thresholds for different brokers if needed.

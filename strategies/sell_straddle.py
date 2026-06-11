@@ -528,11 +528,13 @@ class SellStraddleStrategy:
                             self._underlying, self._position.net_credit, self._position.lot_size)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: restore failed: %s", self._underlying, exc)
+        _tag = f"{self._underlying}" + (f"_{self._client_id}_{self._binding_id}"
+                                        if self._client_id and self._binding_id else "")
         self._tasks = [
-            asyncio.create_task(self._candle_loop(), name=f"ss_{self._underlying}_candle"),
-            asyncio.create_task(self._tick_loop(),   name=f"ss_{self._underlying}_tick"),
-            asyncio.create_task(self._option_loop(), name=f"ss_{self._underlying}_opt"),
-            asyncio.create_task(self._fill_loop(),   name=f"ss_{self._underlying}_fill"),
+            asyncio.create_task(self._candle_loop(), name=f"ss_{_tag}_candle"),
+            asyncio.create_task(self._tick_loop(),   name=f"ss_{_tag}_tick"),
+            asyncio.create_task(self._option_loop(), name=f"ss_{_tag}_opt"),
+            asyncio.create_task(self._fill_loop(),   name=f"ss_{_tag}_fill"),
         ]
         async def _seed_pool():
             try:

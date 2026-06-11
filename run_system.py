@@ -394,10 +394,10 @@ async def _run_live(
         IronCondorStrategy(bus, cfg, underlying=idx)
         for idx in cfg.monitored_indices
     ]
-    _sell_straddles: List[SellStraddleStrategy] = [
-        SellStraddleStrategy(bus, cfg, underlying=idx)
-        for idx in cfg.monitored_indices
-    ]
+    # SellStraddle is now PER-BINDING: one independent book per (client, binding, index)
+    # deployment, spawned/managed by StraddleBookManager (auto-start on deploy). Created below,
+    # after the shared ClientDB exists. The dashboard/bridge read the live list via the manager.
+    straddle_manager = None  # set after _shared_client_db
     candle_cache  = CandleCache(bus, cfg)
     option_matrix = OptionMatrixEngine(bus, cfg)
     feeder        = GlobalFeeder(bus, cfg)
@@ -413,6 +413,9 @@ async def _run_live(
     await _shared_client_db.initialise()
     # Share the same DB instance across bridge + dashboard so engine_active state is consistent
     router._client_db = _shared_client_db
+    # Now the DB exists → build the per-binding SellStraddle book manager.
+    from strategies.straddle_book_manager import StraddleBookManager
+    straddle_manager = StraddleBookManager(bus, cfg, _shared_client_db, cfg.monitored_indices)
     # Trap engine needs the DB to warm-start historical HTF/MTF traps from 1m bars.
     # The live construction path (above) built it without a DB — attach it here.
     trap_engine._client_db = _shared_client_db
@@ -482,7 +485,7 @@ async def _run_live(
                 trap_engine=trap_engine,
                 risk_manager=risk_mgr,
                 iron_condors=_iron_condors,
-                sell_straddles=_sell_straddles,
+                straddle_manager=straddle_manager,
                 straddle_bridge=straddle_bridge,
             )
         except ImportError as exc:
@@ -514,10 +517,8 @@ async def _run_live(
     if "iron_condor" in _enabled_strats:
         for _ic in _iron_condors:
             _ic.start()
-    if "sell_straddle" in _enabled_strats:
-        for _ss in _sell_straddles:
-            _ss.set_client_db(_shared_client_db)
-            _ss.start()
+    # SellStraddle: the book manager spawns/starts one independent book per (client,binding,index)
+    # deployment and keeps reconciling (auto-start on deploy). Started as a task below.
 
     # Warm-start the trap engine: replay historical 1m bars from the DB to rebuild
     # prior HTF/MTF trap levels so it isn't IDLE/cold at boot. Without this the
@@ -540,6 +541,8 @@ async def _run_live(
     if "trap" in _enabled_strats:
         tasks.append(asyncio.create_task(confluence.run(),    name="confluence"))
         tasks.append(asyncio.create_task(trap_engine.run(),   name="trap_engine"))
+    if "sell_straddle" in _enabled_strats and straddle_manager is not None:
+        tasks.append(asyncio.create_task(straddle_manager.run(), name="straddle_books"))
     tasks += [
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
@@ -575,8 +578,8 @@ async def _run_live(
     if "iron_condor" in _enabled_strats:
         for _ic in _iron_condors:
             _ic.stop()
-    for _ss in _sell_straddles:
-        _ss.stop()
+    if straddle_manager is not None:
+        straddle_manager.stop()   # stops every per-binding book
     risk_mgr.stop()
     rebalancer.stop()
     strike_cleanup.stop()

@@ -588,7 +588,8 @@ class DashboardServer:
         trap_engine=None, # TrapTradingEngine — optional, for strategy telemetry
         risk_manager=None, # RiskManager — optional, for firm risk summary + kill-all
         iron_condors=None,  # List[IronCondorStrategy]
-        sell_straddles=None, # List[SellStraddleStrategy]
+        sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
+        straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
     ) -> None:
         self._bus = bus
@@ -600,7 +601,8 @@ class DashboardServer:
         self._trap_engine = trap_engine
         self._risk_manager = risk_manager
         self._iron_condors: list = iron_condors or []
-        self._sell_straddles: list = sell_straddles or []
+        self._straddle_manager = straddle_manager
+        self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -1785,7 +1787,7 @@ class DashboardServer:
                         if pos and getattr(pos, "status", "open") == "open":
                             legs = _ic_legs(pos)
                     elif sname == "sell_straddle":
-                        strat = _find(getattr(_srv, "_sell_straddles", []), underlying)
+                        strat = _srv._find_ss_book(cid, bid, underlying)
                         pos = getattr(strat, "_position", None) if strat else None
                         # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
                         # source of truth shown in the History tab; survives restarts). Falls back
@@ -4998,6 +5000,28 @@ class DashboardServer:
         except Exception as exc:
             logger.warning("DashboardServer: _boot_feeder_auto_connect error: %s", exc)
 
+    @property
+    def _sell_straddles(self) -> list:
+        """Live list of SellStraddle books — per-binding from the manager, else legacy static."""
+        if self._straddle_manager is not None:
+            return self._straddle_manager.books
+        return self._sell_straddles_static
+
+    def _find_ss_book(self, client_id: str, binding_id: str, underlying: str):
+        """Locate the per-binding book for this deployment; fall back to per-underlying match."""
+        if self._straddle_manager is not None:
+            b = self._straddle_manager.find(client_id, binding_id, underlying)
+            if b is not None:
+                return b
+        u = str(underlying).upper()
+        for s in self._sell_straddles:
+            if getattr(s, "_underlying", None) == u and (
+                not getattr(s, "_client_id", "") or
+                (s._client_id == client_id and s._binding_id == binding_id)
+            ):
+                return s
+        return None
+
     def stop(self) -> None:
         self._ws_bridge.stop()
         if self._uvicorn_server is not None:
@@ -5045,7 +5069,7 @@ class DashboardServer:
                     sname = d.get("strategy_name", "")
                     u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
                     if sname == "sell_straddle":
-                        s = _find(sslist, u)
+                        s = self._find_ss_book(c.client_id, d.get("binding_id", ""), u)
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
