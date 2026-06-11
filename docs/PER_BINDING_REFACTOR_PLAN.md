@@ -67,9 +67,21 @@ active-active so one provider lagging doesn't stall the app.
 - [x] **P3a per-binding book identity** — `SellStraddleStrategy(client_id, binding_id)`: own
   persist key, `_emit_order` stamps tags, `_any_active_terminal` gates on own binding only.
   Commit `9dd4853`, tests `tests/strategies/test_per_binding_identity.py`.
-- [ ] **P3b spawn per-binding instances in run_system** ← NEXT (the make-it-work piece)
-- [ ] P4 dynamic spawn/stop on deploy
-- [ ] P5 UI/P&L per binding
+- [x] **P3b/P4/P5 — book manager** (`strategies/straddle_book_manager.py`): one independent book
+  per (client,binding,index) deployment, reconciled every 5s (auto-spawn on deploy, stop on
+  remove). run_system uses it; dashboard `_find_ss_book` + `_sell_straddles` property read the live
+  books; bridge `square_off_binding` filters to the binding. Commit `7d6ec4e`, tests
+  `tests/strategies/test_straddle_book_manager.py`. 194 pass.
+- [~] **P2 shared per-index context — DEFERRED.** Each book keeps its OWN pool engine (duplicated
+  per binding). Correct + fine for ~10 clients (feeder load is unchanged — books read the same
+  shared EventBus ticks; only indicator CPU duplicates). Extract to a shared per-index context
+  when scaling past ~20–30 bindings. Not needed for the dry test.
+
+## STATUS: functionally complete — independent per-(client,binding) straddles.
+Dry-test checklist: launch with `--index NIFTY,... --strategies sell_straddle`; deploy each client's
+binding; each book spawns within ~5s and trades its OWN entry when ITS terminal+trade is ON. Verify
+in logs `StraddleBookManager: spawned book <cid>/<bid>/<und>` and per-broker order routing. PAPER /
+no-funds dry run before any funded live use.
 
 ## P3b — spawn per-binding instances (next focused step, the make-it-work piece)
 `run_system.py` lines ~395-399 currently: one `SellStraddleStrategy` per `cfg.monitored_indices`.
