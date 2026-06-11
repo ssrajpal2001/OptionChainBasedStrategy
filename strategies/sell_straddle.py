@@ -57,9 +57,12 @@ _BUF             = 600    # ring-buffer depth ≥ VWAP_WINDOW(500)
 _MARKET_OPEN     = dtime(9, 15)   # NSE session start
 
 
-def _make_strategy_logger(underlying: str) -> logging.Logger:
-    """Write per-strategy evaluation log to logs/clients/ss_{underlying}_YYYYMMDD.log"""
-    name = f"client.ss.{underlying}"
+def _make_strategy_logger(underlying: str, client_id: str = "", binding_id: str = "") -> logging.Logger:
+    """Per-strategy evaluation log. Per-binding books get their OWN file so each client's run is
+    readable in isolation: logs/clients/ss_{UND}_{client}_{binding}_{date}.log (legacy per-index
+    engine → ss_{UND}_{date}.log)."""
+    tag = f"{underlying}" + (f"_{client_id}_{binding_id}" if client_id and binding_id else "")
+    name = f"client.ss.{tag}"
     lg = logging.getLogger(name)
     if lg.handlers:
         return lg
@@ -68,7 +71,7 @@ def _make_strategy_logger(underlying: str) -> logging.Logger:
     os.makedirs(log_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
     fh = logging.FileHandler(
-        os.path.join(log_dir, f"ss_{underlying}_{date_str}.log"), encoding="utf-8"
+        os.path.join(log_dir, f"ss_{tag}_{date_str}.log"), encoding="utf-8"
     )
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
     lg.addHandler(fh)
@@ -326,7 +329,7 @@ class SellStraddleStrategy:
             "ltp": 0.0,  "close": 0.0,
         }
 
-        self._clog: logging.Logger = _make_strategy_logger(underlying)
+        self._clog: logging.Logger = _make_strategy_logger(underlying, client_id, binding_id)
         self._load_thresholds()
 
     # ── Config ────────────────────────────────────────────────────────────────
