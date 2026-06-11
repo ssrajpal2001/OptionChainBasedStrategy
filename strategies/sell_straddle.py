@@ -603,6 +603,7 @@ class SellStraddleStrategy:
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()
+        self._chart_last_min = None
         self._idx_highs.clear()
         self._idx_lows.clear()
         self._idx_closes.clear()
@@ -651,6 +652,12 @@ class SellStraddleStrategy:
                 continue
             self._spot = tick.ltp
             _idx_count += 1
+            # Keep the client premium chart filling from the index-tick stream (always flowing),
+            # independent of CandleCache which can stall (no traded volume on the index).
+            try:
+                self._append_chart_point(datetime.now(IST))
+            except Exception:
+                pass
             # Heartbeat (once/60s): prove the INDEX-tick engine is alive and show the
             # entry/exit gate state even when nothing fires — so a silent stall (e.g. no
             # index feed, terminal off, stop_for_day) is diagnosable instead of invisible.
@@ -849,27 +856,8 @@ class SellStraddleStrategy:
 
         self._recompute_indicators()
 
-        # Record one timestamped chart point per 1-min close (combined premium + the
-        # broker-VWAP / RSI / SLOPE the strategy actually trades on). Client chart only.
-        # When a position is open, pull VWAP/RSI/SLOPE from the WARM pool engine for the
-        # exact open pair (the 1-min completed-bar series) — self._ind's live-TF1 values
-        # often lack enough bars to form RSI/SLOPE, which logged 0 on the chart.
-        _ce_l, _pe_l, _, _ = self._active_premium()
-        _ci = self._ind
-        if self._position and self._position.status == "open":
-            _pi = self._pool_engine.pair_indicators_tf(
-                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike), 1) or {}
-            if _pi:
-                _ci = {**self._ind, **_pi}   # pool engine wins for vwap/rsi/slope when present
-        self._chart_series.append({
-            "ts":       ev.timestamp.timestamp(),
-            "combined": round(float(_ce_l + _pe_l), 2),
-            "ce_ltp":   round(float(_ce_l), 2),
-            "pe_ltp":   round(float(_pe_l), 2),
-            "vwap":     round(float(_ci.get("vwap", 0.0) or 0.0), 2),
-            "rsi":      round(float(_ci.get("rsi", 0.0) or 0.0), 2),
-            "slope":    round(float(_ci.get("slope", 0.0) or 0.0), 2),
-        })
+        # Record one timestamped chart point per 1-min close (combined premium + indicators).
+        self._append_chart_point(ev.timestamp)
 
         # Force-exit
         if now.time() >= self._force_exit:
@@ -1064,6 +1052,33 @@ class SellStraddleStrategy:
         """Timestamped 1-min combined-premium chart series with VWAP/RSI/SLOPE overlays.
         Consumed by the client-side chart endpoint. Returns a shallow copy (newest last)."""
         return list(self._chart_series)
+
+    def _append_chart_point(self, ts: datetime) -> None:
+        """Append ONE chart point for the given minute (idempotent per minute). Called from
+        the CANDLE_CLOSE handler AND the index-tick loop, so the client premium chart keeps
+        filling even if CandleCache stalls (it depends on no traded volume on the index)."""
+        _m = ts.hour * 60 + ts.minute
+        if getattr(self, "_chart_last_min", None) == _m:
+            return
+        self._chart_last_min = _m
+        # Combined premium + the broker-VWAP/RSI/SLOPE the strategy trades on. With a position
+        # open, pull VWAP/RSI/SLOPE from the WARM pool engine for the exact open pair.
+        _ce_l, _pe_l, _, _ = self._active_premium()
+        _ci = self._ind
+        if self._position and self._position.status == "open":
+            _pi = self._pool_engine.pair_indicators_tf(
+                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike), 1) or {}
+            if _pi:
+                _ci = {**self._ind, **_pi}
+        self._chart_series.append({
+            "ts":       ts.timestamp(),
+            "combined": round(float(_ce_l + _pe_l), 2),
+            "ce_ltp":   round(float(_ce_l), 2),
+            "pe_ltp":   round(float(_pe_l), 2),
+            "vwap":     round(float(_ci.get("vwap", 0.0) or 0.0), 2),
+            "rsi":      round(float(_ci.get("rsi", 0.0) or 0.0), 2),
+            "slope":    round(float(_ci.get("slope", 0.0) or 0.0), 2),
+        })
 
     def _any_active_terminal(self) -> bool:
         """True if at least one client has a binding with terminal_connected AND engine_active,
