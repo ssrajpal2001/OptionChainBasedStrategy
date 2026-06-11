@@ -1839,9 +1839,22 @@ class DashboardServer:
                     elif sname == "sell_straddle":
                         strat = _find(getattr(_srv, "_sell_straddles", []), underlying)
                         pos = getattr(strat, "_position", None) if strat else None
-                        # Booked = session realized P&L (pts) × lot size → ₹ (closed re-entries/rolls).
-                        if strat is not None:
-                            _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
+                        # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
+                        # source of truth shown in the History tab; survives restarts). Falls back
+                        # to the in-memory session counter only if History is unavailable.
+                        _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
+                        try:
+                            from data_layer import trade_history as _th
+                            _today = datetime.now(IST).date().isoformat()
+                            _recs = _th.load(cid, 500)
+                            booked = round(sum(
+                                float(r.get("pnl", 0) or 0) for r in _recs
+                                if str(r.get("ts", ""))[:10] == _today
+                                and r.get("strategy") == "sell_straddle"
+                                and str(r.get("instrument", "")).upper() == str(underlying).upper()
+                                and str(r.get("binding_id", "")) == bid
+                            ), 2)
+                        except Exception:
                             booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
                         if pos and getattr(pos, "status", "open") == "open":
                             legs = _ss_legs(pos)
