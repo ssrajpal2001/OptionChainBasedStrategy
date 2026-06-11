@@ -608,6 +608,8 @@ document.addEventListener('alpine:init', () => {
     workers:      [],
     brokers:      [],
     oiData:       {},   // per-underlying PCR + max-OI (from WS 'oi' stats)
+    oiWindow:     0,    // strikes ±ATM for the OI panel (0 = all pool strikes)
+    oiWindowMsg:  '',
     events:       [],
     istTime:      '--:--:--',
 
@@ -1219,6 +1221,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     async rebalance() { await this._fetch(`/api/rebalance/${this.rebalIdx}`, { method:'POST' }); },
+    async saveOiWindow() {
+      this.oiWindowMsg = '';
+      try {
+        const r = await this._fetch('/api/admin/oi_window', { json: { n: this.oiWindow || 0 } });
+        if (r && r.ok) { this.oiWindowMsg = '✓'; setTimeout(()=>this.oiWindowMsg='', 2000); }
+      } catch {}
+    },
 
     async setLots() {
       if (!this.lotCid || !this.lotBid) return;
@@ -3276,7 +3285,15 @@ function histReplay() {
     <div class="t-card rounded p-4 fade-up-2" x-data="{ get oi(){ return oiData[activeIndex] || {} } }">
       <div class="flex items-center justify-between mb-3">
         <div class="sec-label">Option OI · <span x-text="activeIndex"></span></div>
-        <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="(oi.strikes||0)+' strikes'"></span>
+        <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="(oi.strikes||0)+' strikes used'"></span>
+      </div>
+      <!-- Strikes ±ATM to include (0 = all subscribed pool strikes); follows ATM dynamically -->
+      <div class="flex items-center gap-2 mb-3">
+        <span class="sec-label">Strikes ±ATM</span>
+        <input type="number" min="0" step="1" class="t-input font-mono" style="width:64px"
+               x-model.number="oiWindow" title="0 = all subscribed pool strikes"/>
+        <button class="btn-action" style="width:auto;padding:4px 12px" @click="saveOiWindow()">Apply</button>
+        <span x-show="oiWindowMsg" class="font-mono text-xs" style="color:var(--t-green)" x-text="oiWindowMsg"></span>
       </div>
       <!-- PCR -->
       <div class="mb-3">

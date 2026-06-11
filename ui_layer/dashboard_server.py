@@ -307,6 +307,9 @@ try:
         source_ip:    str = ""   # LOCAL/private IP the bot binds order egress to
         whitelist_ip: str = ""   # PUBLIC IP the client whitelists in their broker
 
+    class _OIWindowSchema(_PydanticBase):
+        n: int = 0   # strikes each side of ATM for the OI panel (0 = all pool strikes)
+
     class _FyersAuthCodeSchema(_PydanticBase):
         auth_code: str
 
@@ -1684,6 +1687,13 @@ class DashboardServer:
                         client_id, binding_id, body.source_ip, body.whitelist_ip)
             return {"ok": True, "client_id": client_id, "binding_id": binding_id,
                     "source_ip": body.source_ip.strip(), "whitelist_ip": body.whitelist_ip.strip()}
+
+        @app.post("/api/admin/oi_window", tags=["Admin"])
+        async def api_admin_set_oi_window(body: _OIWindowSchema, _: dict = Depends(_require_admin)):
+            """Set the OI panel window = strikes each side of ATM (0 = all pool strikes)."""
+            _srv._ws_bridge.set_oi_window(body.n)
+            logger.info("Dashboard: OI window set to ±%d strikes", int(body.n))
+            return {"ok": True, "window": int(max(0, body.n))}
 
         # ── CLIENT — 1-min combined-premium chart series (VWAP/RSI/SLOPE) ─────
         @app.get("/api/client/strategy/{deploy_id}/premium_series", tags=["Client"])

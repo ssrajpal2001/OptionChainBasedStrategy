@@ -73,6 +73,9 @@ class WsBridge:
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
+        # OI panel: number of strikes EACH SIDE of ATM to include in PCR / max-OI.
+        # 0 = use ALL subscribed pool strikes. Admin-settable; follows ATM dynamically.
+        self._oi_window: int = 0
         # Option chain cache: key = "{underlying}_{strike}", value = row dict for IV matrix
         self._option_cache: Dict[str, dict] = {}
 
@@ -275,9 +278,18 @@ class WsBridge:
         """Per-underlying Put/Call Ratio + max-OI strikes, computed from the live option
         cache (the subscribed POOL strikes — zero extra feed load). PCR = ΣPE-OI / ΣCE-OI.
         Max-OI strikes = the strike carrying the highest CE / PE open interest in the pool."""
+        win = int(self._oi_window or 0)
         agg: Dict[str, dict] = {}
         for key, row in list(self._option_cache.items()):
             und = key.rsplit("_", 1)[0]
+            # Optional ±N-strikes-around-ATM window (follows ATM dynamically via spot).
+            if win > 0:
+                spot = self._spot_cache.get(und, 0.0)
+                step = (self._cfg.exchange.strike_steps.get(und, 50.0) if self._cfg else 50.0)
+                if spot > 0 and step > 0:
+                    atm = _round_to_step(spot, step)
+                    if abs(int(row.get("strike", 0)) - int(atm)) > win * step:
+                        continue
             a = agg.setdefault(und, {"ce": 0, "pe": 0, "max_ce": None, "max_pe": None, "n": 0})
             ce = int(row.get("call_oi", 0) or 0)
             pe = int(row.get("put_oi", 0) or 0)
@@ -300,8 +312,13 @@ class WsBridge:
                 "max_pe_strike": (a["max_pe"] or {}).get("strike"),
                 "max_pe_oi":     (a["max_pe"] or {}).get("oi", 0),
                 "strikes":       a["n"],
+                "window":        win,
             }
         return out
+
+    def set_oi_window(self, n: int) -> None:
+        """Set the OI panel window = strikes each side of ATM (0 = all pool strikes)."""
+        self._oi_window = max(0, int(n))
 
     async def _exit_audit_loop(self) -> None:
         """Forward per-tick exit-criteria audit payloads (granular UI) verbatim. The
