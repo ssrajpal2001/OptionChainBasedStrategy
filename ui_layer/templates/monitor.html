@@ -1968,13 +1968,16 @@ document.addEventListener('alpine:init', () => {
 
     async setClientIndex(idx) {
       this.setIndexMsg = ''; this.setIndexOk = null;
+      // Switch the VIEW immediately so spot/ATM show for the picked index (e.g. CRUDEOIL while
+      // NSE is shut) — viewing must never depend on the persist call succeeding.
+      this.activeIndex = idx;
       try {
         const r = await this._fetch('/api/client/set_index', { json: { index: idx } });
         if (!r) return;
         const d = await r.json();
         this.setIndexOk  = r.ok;
         this.setIndexMsg = r.ok ? '' : (d.detail || 'Failed.');
-        if (r.ok) { this.activeIndex = idx; await this.loadClientStatus(); }
+        if (r.ok) { await this.loadClientStatus(); }
       } catch { this.setIndexOk = false; this.setIndexMsg = 'Request failed.'; }
     },
 

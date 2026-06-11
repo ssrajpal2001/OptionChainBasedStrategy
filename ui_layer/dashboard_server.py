@@ -1666,7 +1666,7 @@ class DashboardServer:
             body: _SetIndexSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"}
             idx = body.index.upper()
             if idx not in allowed:
                 raise HTTPException(400, f"Invalid index. Allowed: {sorted(allowed)}")
