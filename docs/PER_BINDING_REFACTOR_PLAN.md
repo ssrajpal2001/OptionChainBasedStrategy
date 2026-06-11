@@ -60,8 +60,28 @@ active-active so one provider lagging doesn't stall the app.
   evaluated per book.
 
 ## Status
-- [ ] P1 order tagging + routing
+- [x] **P1 order tagging + routing** — `StraddleOrderEvent.client_id/binding_id`; bridge routes to
+  ONLY the stamped binding (empty = legacy mirror). Commit `d7742ab`, tests in
+  `tests/execution/test_straddle_targeted_routing.py`.
 - [ ] P2 shared per-index context
 - [ ] P3 per-binding spawn at startup
 - [ ] P4 dynamic spawn/stop on deploy
 - [ ] P5 UI/P&L per binding
+
+## Phase 2 — precise starting point (handoff)
+**Goal:** one shared market context per index; books read from it (books do NOT subscribe to the feed).
+1. New class e.g. `strategies/straddle_market_context.py` `StraddleIndexContext(underlying)` owning:
+   - the `PoolIndicatorEngine` (today `SellStraddleStrategy._pool_engine`),
+   - the per-strike `_strike_prem` cache + `_spot` + `_ce_ltp/_pe_ltp` ATM caches,
+   - the option/index tick draining (one subscriber per index) + `commit_bar` per 1-min,
+   - the strike subscription/pin/rebalance hooks.
+2. It exposes read methods books call: `pair_indicators_tf(ce,pe,tf)`, `strike_prem`, `spot`,
+   `atm`, `active_premium(ce,pe)`, warm/seed helpers.
+3. `SellStraddleStrategy` keeps ONLY per-book state (position, entry timing, rolls, exits, day
+   targets, cooldown, chart series) and takes a `ctx: StraddleIndexContext` instead of owning the
+   pool engine / tick loops. Its `_tick_loop`/option handling delegates market reads to `ctx`.
+4. Keep behaviour identical for a single book first (one ctx + one book per index) → run full
+   suite → only THEN move to many books per index (P3).
+
+**Invariant check during P2:** VWAP=broker ATP, live-bars-only SLOPE, seed-warm RSI/ROC must be
+byte-for-byte the same (the pool-engine moves wholesale into ctx; do not change its logic).
