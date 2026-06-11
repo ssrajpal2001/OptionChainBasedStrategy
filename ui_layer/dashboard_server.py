@@ -4999,12 +4999,77 @@ class DashboardServer:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def _compute_live_pnls(self) -> None:
+        """Set each active client's _daily_pnl from live booked + unrealized P&L of their
+        deployed strategies. Mirrors the route-local _refresh_live_pnl so the WS heartbeat
+        (admin dashboard) shows fresh client-wise P&L, not a stale value."""
+        try:
+            clients = self._registry.all_active() if self._registry else []
+            sslist  = self._sell_straddles or []
+            iclist  = self._iron_condors or []
+            trap    = self._trap_engine
+
+            def _find(lst, u):
+                for s in lst:
+                    if getattr(s, "_underlying", None) == u:
+                        return s
+                return None
+
+            for c in clients:
+                try:
+                    deps = self._client_db.get_deployments_sync(c.client_id)
+                except Exception:
+                    deps = []
+                pnl = 0.0
+                for d in deps:
+                    sname = d.get("strategy_name", "")
+                    u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
+                    if sname == "sell_straddle":
+                        s = _find(sslist, u)
+                        if s:
+                            pnl += float(getattr(s, "_session_realized_pnl_pts", 0.0) or 0.0)
+                        p = getattr(s, "_position", None) if s else None
+                        if p and getattr(p, "status", "open") == "open":
+                            pnl += float(getattr(p, "unrealized_pnl", 0.0) or 0.0)
+                    elif sname == "iron_condor":
+                        s = _find(iclist, u)
+                        p = getattr(s, "_position", None) if s else None
+                        if p and getattr(p, "status", "open") == "open":
+                            pnl += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
+                    elif sname == "trap_trading" and trap is not None:
+                        op   = getattr(trap, "_open_positions", {}) or {}
+                        prem = getattr(trap, "_prem_cache", {}) or {}
+                        for _tid, tup in op.items():
+                            try:
+                                _t, osym, ep, q = tup
+                            except Exception:
+                                continue
+                            ltp = float(prem.get(osym, ep) or ep)
+                            pnl += (float(ep) - ltp) * abs(int(q))
+                try:
+                    c._daily_pnl = round(pnl, 2)
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("_compute_live_pnls failed: %s", exc)
+
     def _client_summary(self) -> List[dict]:
         if self._registry is None:
             return []
+        self._compute_live_pnls()   # fresh client-wise P&L for the admin dashboard
+        import json as _json
         result = []
         for c in self._registry.all_active():
-            result.append(_build_client_dict(c))
+            d = _build_client_dict(c)
+            # The admin Client Portfolio reads strategy_selections (not enabled_strategies),
+            # so include it from the DB — otherwise it always renders "None selected".
+            try:
+                row = self._client_db.get_client_sync(c.client_id)
+                raw = (row or {}).get("strategy_selections", "[]") or "[]"
+                d["strategy_selections"] = _json.loads(raw)
+            except Exception:
+                d["strategy_selections"] = []
+            result.append(d)
         return result
 
     def _broker_summary(self) -> List[dict]:
