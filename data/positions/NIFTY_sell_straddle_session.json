@@ -1,9 +1,0 @@
-{
-  "date": "2026-06-11",
-  "product_type": "MIS",
-  "position": {
-    "session_realized_pnl_pts": 80.0,
-    "trades_today": 0,
-    "stop_for_day": false
-  }
-}

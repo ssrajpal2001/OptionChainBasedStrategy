@@ -1,4 +1,0 @@
-So any AI/tool inherits the full picture, I wrote it in two places:
-
-In-repo CLAUDE.md (travels with the code to any AI/tool): a new authoritative "SellStraddle — Current behavior & ops (2026-06)" section — dynamic rule-builder, pool-engine VWAP, per-tf evaluation, vwap_rise-roll robustness, multi-tenant square-off, history event-ledger, and every ops footgun (MCX squareoff 23:25, lot 75, fresh_start vs pm2 restart, HTTPS setup).
-Memory graph (this machine): a master-index memory project_sellstraddle_current_state.md linking all the detailed memories, plus the index line in MEMORY.md.
