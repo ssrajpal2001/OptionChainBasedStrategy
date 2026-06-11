@@ -1936,21 +1936,17 @@ document.addEventListener('alpine:init', () => {
     // Per-strategy Start/Stop toggle for one deployment on one broker.
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
-      console.log('[toggleStrategyRun] fired — deploy_id=', dep && dep.deploy_id,
-                  'binding=', b && b.binding_id, 'terminal=', b && b.terminal_connected, 'want=', want);
-      this.botOk = null; this.botMsg = 'Working…';   // immediate feedback so a fired click is visible
-      // NOTE: do NOT gate on the UI's terminal flag — it can be stale after connect. Always send
-      // the request; the SERVER holds the authoritative terminal state and returns a clear error
-      // ("Terminal not connected…") if it truly isn't connected.
-      dep._runLoading = true;
-      // deploy_id should come from the DB row; reconstruct as a fallback so a missing field
-      // can't silently no-op the toggle.
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
+      alert('TOGGLE CLICK\ndeploy_id=' + did + '\nwant=' + want + '\nterminal=' + (b && b.terminal_connected));  // TEMP diagnostic
+      console.log('[toggleStrategyRun] fired — deploy_id=', did, 'want=', want);
+      this.botOk = null; this.botMsg = 'Working…';
+      dep._runLoading = true;
       try {
         const r = await this._fetch(`/api/client/deployment/${encodeURIComponent(did)}/run`,
                                     { json: { running: want } });
-        if (!r) return;
+        if (!r) { alert('TOGGLE: no response (logged out?)'); return; }
         let d = {}; try { d = await r.json(); } catch {}
+        alert('TOGGLE RESPONSE\nHTTP ' + r.status + '\nok=' + r.ok + '\n' + JSON.stringify(d));  // TEMP diagnostic
         this.botOk = r.ok;
         this.botMsg = d.error || d.detail
                     || (r.ok ? (want ? 'Strategy started.' : `Strategy stopped${d.squared_off?` — squared off ${d.squared_off} leg(s)`:''}.`)
