@@ -1708,13 +1708,15 @@ class SellStraddleStrategy:
                 await self._single_side_roll(cheap, now, "ratio_exit")
                 return
 
-        # 7. Scalable TSL → smart roll first, then full exit
+        # 7. Scalable TSL → SINGLE-SIDE roll (keep the losing/expensive leg, roll only the
+        #    decayed/cheaper leg) — same rule as ltp_decay/ratio/vwap_rise. _single_side_roll
+        #    re-pairs near ATM and closes both only if no valid partner exists.
         if self._tsl_enabled:
             if self._check_scalable_tsl(pos, pnl):
                 logger.info("SellStraddle[%s]: SCALABLE TSL — locked=₹%.0f pnl=₹%.0f", self._underlying, pos.tsl_high_lock_rs, self._pnl_rs(pnl))
-                rolled = await self._try_smart_roll(now, "scalable_tsl")
-                if not rolled:
-                    await self._close_position("scalable_tsl")
+                # Roll the cheaper (decayed) leg; keep the richer (losing) leg.
+                _roll_side = "CE" if pos.ce_leg.ltp <= pos.pe_leg.ltp else "PE"
+                await self._single_side_roll(_roll_side, now, "scalable_tsl")
                 return
 
         # 8. guardrail_roc — TF-boundary ROC of combined premium → smart roll first
@@ -2041,6 +2043,8 @@ class SellStraddleStrategy:
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
+        # Keep rolled re-entries near ATM (real straddle) — cap how deep ITM the new leg may be.
+        max_itm = int(ss.get("roll_max_itm_steps", 2))
 
         # SELECT THE REPLACEMENT BEFORE CLOSING — so a same-strike / no-op roll fires NO orders.
         # (Previously we closed first, then if selection returned the SAME strike we'd re-sell it:
@@ -2049,6 +2053,7 @@ class SellStraddleStrategy:
             self._strike_prem, side, run_strike, run_ltp,
             self._spot, step, offset, ltp_target,
             rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
+            max_itm_steps=max_itm,
         )
         if sel and int(sel[0]) == orig_strike:
             logger.info("SellStraddle[%s]: roll %s SKIPPED — best partner is the SAME strike %d "

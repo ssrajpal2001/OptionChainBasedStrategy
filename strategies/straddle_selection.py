@@ -16,12 +16,14 @@ Key = Tuple[int, str]
 
 
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
-                       spot, step, offset, ltp_target, rule_pass):
+                       spot, step, offset, ltp_target, rule_pass, max_itm_steps=None):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
     `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target,
     with premium STRICTLY <= the kept leg's premium (never roll into a leg richer than the leg we
     keep), and passing rule_pass(ce_strike, pe_strike). Among the eligible (<= kept_ltp) strikes it
     picks the one CLOSEST to kept_ltp (most balanced from below).
+    `max_itm_steps` (optional): cap how deep ITM the re-sold leg may be (in strike steps) so the
+    roll stays near ATM (a real straddle) instead of selling a deep-ITM strike.
     Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
     atm = round(spot / step) * step if spot > 0 else 0
     best = None  # (premium_diff, strike, ltp)
@@ -30,6 +32,11 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
             continue
         if atm and abs(strike - atm) > offset * step:
             continue
+        # Keep the re-sold leg near ATM: skip strikes deeper ITM than max_itm_steps.
+        if max_itm_steps is not None and spot > 0 and step > 0:
+            itm_pts = (spot - strike) if roll_side == "CE" else (strike - spot)  # >0 = ITM
+            if itm_pts > max_itm_steps * step:
+                continue
         ltp = float(v.get("ltp", 0.0) or 0.0)
         if ltp < ltp_target:
             continue
