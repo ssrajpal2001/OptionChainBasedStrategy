@@ -271,6 +271,38 @@ class WsBridge:
             except Exception as exc:
                 logger.debug("WsBridge._option_loop: %s", exc)
 
+    def oi_summary(self) -> dict:
+        """Per-underlying Put/Call Ratio + max-OI strikes, computed from the live option
+        cache (the subscribed POOL strikes — zero extra feed load). PCR = ΣPE-OI / ΣCE-OI.
+        Max-OI strikes = the strike carrying the highest CE / PE open interest in the pool."""
+        agg: Dict[str, dict] = {}
+        for key, row in list(self._option_cache.items()):
+            und = key.rsplit("_", 1)[0]
+            a = agg.setdefault(und, {"ce": 0, "pe": 0, "max_ce": None, "max_pe": None, "n": 0})
+            ce = int(row.get("call_oi", 0) or 0)
+            pe = int(row.get("put_oi", 0) or 0)
+            strike = int(row.get("strike", 0) or 0)
+            a["ce"] += ce
+            a["pe"] += pe
+            a["n"] += 1
+            if ce > 0 and (a["max_ce"] is None or ce > a["max_ce"]["oi"]):
+                a["max_ce"] = {"strike": strike, "oi": ce}
+            if pe > 0 and (a["max_pe"] is None or pe > a["max_pe"]["oi"]):
+                a["max_pe"] = {"strike": strike, "oi": pe}
+        out: Dict[str, dict] = {}
+        for und, a in agg.items():
+            out[und] = {
+                "pcr":           round(a["pe"] / a["ce"], 2) if a["ce"] > 0 else 0.0,
+                "total_ce_oi":   a["ce"],
+                "total_pe_oi":   a["pe"],
+                "max_ce_strike": (a["max_ce"] or {}).get("strike"),
+                "max_ce_oi":     (a["max_ce"] or {}).get("oi", 0),
+                "max_pe_strike": (a["max_pe"] or {}).get("strike"),
+                "max_pe_oi":     (a["max_pe"] or {}).get("oi", 0),
+                "strikes":       a["n"],
+            }
+        return out
+
     async def _exit_audit_loop(self) -> None:
         """Forward per-tick exit-criteria audit payloads (granular UI) verbatim. The
         strategy only publishes these when an admin has enabled show_granular_ticks for a

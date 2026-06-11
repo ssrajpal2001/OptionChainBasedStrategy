@@ -611,6 +611,8 @@ class DashboardServer:
 
         # Register heartbeat providers
         self._ws_bridge.register_stats_provider("clients", self._client_summary)
+        # PCR + max-OI over the subscribed pool strikes (computed from the WS option cache)
+        self._ws_bridge.register_stats_provider("oi", self._ws_bridge.oi_summary)
         if router is not None:
             self._ws_bridge.register_stats_provider(
                 "workers",

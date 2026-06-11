@@ -607,6 +607,7 @@ document.addEventListener('alpine:init', () => {
     clients:      [],
     workers:      [],
     brokers:      [],
+    oiData:       {},   // per-underlying PCR + max-OI (from WS 'oi' stats)
     events:       [],
     istTime:      '--:--:--',
 
@@ -1155,6 +1156,7 @@ document.addEventListener('alpine:init', () => {
         if (msg.name === 'clients') this.clients = msg.data || [];
         if (msg.name === 'workers') this.workers = msg.data || [];
         if (msg.name === 'brokers') this.brokers = msg.data || [];
+        if (msg.name === 'oi') this.oiData = msg.data || {};
       } else if (msg.type === 'terminal_connected') {
         // OAuth callback fired — instantly refresh bindings and flip toggle message
         this.loadClientStatus();
@@ -3266,6 +3268,43 @@ function histReplay() {
         <div class="flex gap-6 text-xs font-mono">
           <span style="color:var(--t-green)">+DI <span x-text="plusDI ? fmt(plusDI,1) : '—'"></span></span>
           <span style="color:var(--t-red)">−DI <span x-text="minusDI ? fmt(minusDI,1) : '—'"></span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Option-chain OI: PCR + Max OI build (over subscribed pool strikes) -->
+    <div class="t-card rounded p-4 fade-up-2" x-data="{ get oi(){ return oiData[activeIndex] || {} } }">
+      <div class="flex items-center justify-between mb-3">
+        <div class="sec-label">Option OI · <span x-text="activeIndex"></span></div>
+        <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="(oi.strikes||0)+' strikes'"></span>
+      </div>
+      <!-- PCR -->
+      <div class="mb-3">
+        <div class="flex justify-between items-baseline mb-1">
+          <span class="sec-label">PUT/CALL RATIO</span>
+          <span class="font-mono text-2xl font-bold"
+                :style="`color:${(oi.pcr||0)>=1.3?'var(--t-green)':(oi.pcr||0)<=0.7&&(oi.pcr||0)>0?'var(--t-red)':'var(--t-cyan)'}`"
+                x-text="oi.pcr ? oi.pcr.toFixed(2) : '—'"></span>
+        </div>
+        <div class="font-mono text-xs" style="color:var(--t-muted)"
+             x-text="(oi.pcr>=1.3?'Bullish bias (puts heavy)':oi.pcr>0&&oi.pcr<=0.7?'Bearish bias (calls heavy)':oi.pcr?'Neutral':'waiting for OI…')"></div>
+        <div class="flex justify-between mt-1.5 font-mono text-xs" style="color:var(--t-muted)">
+          <span>ΣCE OI <span style="color:var(--t-text)" x-text="oi.total_ce_oi?fmt(oi.total_ce_oi,0):'—'"></span></span>
+          <span>ΣPE OI <span style="color:var(--t-text)" x-text="oi.total_pe_oi?fmt(oi.total_pe_oi,0):'—'"></span></span>
+        </div>
+      </div>
+      <div class="h-px my-2" style="background:var(--t-border)"></div>
+      <!-- Max OI build -->
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <div class="sec-label mb-1">MAX CE OI <span style="color:var(--t-dim)">(resistance)</span></div>
+          <div class="font-mono text-lg font-bold" style="color:var(--t-red)" x-text="oi.max_ce_strike||'—'"></div>
+          <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="oi.max_ce_oi?fmt(oi.max_ce_oi,0)+' OI':''"></div>
+        </div>
+        <div>
+          <div class="sec-label mb-1">MAX PE OI <span style="color:var(--t-dim)">(support)</span></div>
+          <div class="font-mono text-lg font-bold" style="color:var(--t-green)" x-text="oi.max_pe_strike||'—'"></div>
+          <div class="font-mono text-xs" style="color:var(--t-muted)" x-text="oi.max_pe_oi?fmt(oi.max_pe_oi,0)+' OI':''"></div>
         </div>
       </div>
     </div>
