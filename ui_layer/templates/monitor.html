@@ -1927,9 +1927,15 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Per-strategy Start/Stop toggle for one deployment on one broker.
-    async toggleStrategyRun(dep) {
+    async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       this.botMsg = ''; this.botOk = null;
+      // Starting needs the broker Terminal connected — give clear feedback instead of a dead click.
+      if (want && b && !b.terminal_connected) {
+        this.botOk = false;
+        this.botMsg = `Turn the ${b.binding_id} Terminal ON first, then start the strategy.`;
+        return;
+      }
       dep._runLoading = true;
       try {
         const r = await this._fetch(`/api/client/deployment/${encodeURIComponent(dep.deploy_id)}/run`,
@@ -6943,12 +6949,12 @@ function histReplay() {
                      single Trade toggle. -->
                 <div class="flex flex-col gap-1.5 min-w-0">
                   <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
-                    <button @click="toggleStrategyRun(dep)"
-                            :disabled="!b.terminal_connected || dep._runLoading"
+                    <button @click="toggleStrategyRun(dep, b)"
+                            :disabled="dep._runLoading"
                             class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all"
-                            :title="!b.terminal_connected ? 'Connect Terminal first' : (depRunning(dep) ? 'Stop + square off this strategy on this broker' : 'Start this strategy on this broker')"
+                            :title="!b.terminal_connected ? 'Turn Terminal ON first, then start' : (depRunning(dep) ? 'Stop + square off this strategy on this broker' : 'Start this strategy on this broker')"
                             :style="!b.terminal_connected
-                              ? 'opacity:0.35;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
+                              ? 'opacity:0.55;border-color:var(--t-border);color:var(--t-muted)'
                               : depRunning(dep)
                                 ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
                                 : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
