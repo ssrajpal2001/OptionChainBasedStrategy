@@ -7487,7 +7487,7 @@ function histReplay() {
                   <!-- ── Straddle summary: total sold, exit basis, LTP/Theta triplets ── -->
                   <template x-if="dep.strategy_name==='sell_straddle' && csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] && csPositions[b.binding_id][dep.strategy_name].straddle">
                     <div class="mt-3 pt-2 border-t font-mono text-xs space-y-1" style="border-color:var(--t-border)"
-                         x-data="{ get ss(){ return csPositions[b.binding_id][dep.strategy_name].straddle } }">
+                         x-data="{ get ss(){ return ((csPositions[b.binding_id]||{})[dep.strategy_name]||{}).straddle || {} } }">
                       <div class="flex justify-between">
                         <span style="color:var(--t-muted)">Total Straddle Sold</span>
                         <span style="color:var(--t-bright);font-weight:700" x-text="(ss.total_value_sold||0).toFixed(2)"></span>
