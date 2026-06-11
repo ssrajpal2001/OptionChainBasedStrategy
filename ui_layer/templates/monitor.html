@@ -6956,10 +6956,10 @@ function histReplay() {
                      that strategy on this broker. No deployment → no toggle. Replaces the old
                      single Trade toggle. -->
                 <div class="flex flex-col gap-1.5 min-w-0">
-                  <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
-                    <button @click="toggleStrategyRun(dep, b)"
-                            :disabled="dep._runLoading"
-                            class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all"
+                  <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)"
+                            :key="dep.deploy_id || (b.binding_id+'_'+dep.strategy_name+'_'+dep.underlying)">
+                    <button type="button" @click.stop="toggleStrategyRun(dep, b)"
+                            class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all cursor-pointer"
                             :title="depRunning(dep) ? 'Stop + square off this strategy on this broker' : 'Start this strategy on this broker'"
                             :style="depRunning(dep)
                                 ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
