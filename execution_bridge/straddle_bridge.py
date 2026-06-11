@@ -62,6 +62,11 @@ class StraddleOrderEvent:
     legs:           list = field(default_factory=lambda: ["CE", "PE"])  # legs to act on
     leg_open_times: dict = field(default_factory=dict)  # "CE"/"PE" -> ISO open_time (for history)
     leg_open_reasons: dict = field(default_factory=dict)  # "CE"/"PE" -> open reason code (for history)
+    # Per-binding refactor: when a per-(client,binding) book emits an order it stamps its OWN
+    # identity here, so the bridge routes to EXACTLY that broker (no mirror-to-all). Empty =
+    # legacy per-index engine → bridge keeps the old behaviour (route to all eligible brokers).
+    client_id:      str  = ""
+    binding_id:     str  = ""
 
 
 @dataclass
@@ -300,8 +305,14 @@ class StraddleExecutionBridge:
             logger.warning("StraddleExecutionBridge: no active clients for %s %s", ev.action, ev.underlying)
             return
 
+        # Per-binding TARGETED routing: if the event is stamped with a client+binding (emitted by
+        # a per-binding book), route to ONLY that broker — never mirror to others.
+        _target = (ev.client_id, ev.binding_id) if (ev.client_id and ev.binding_id) else None
+
         routed = 0
         for client in clients:
+            if _target and client.client_id != _target[0]:
+                continue
             # Fetch live DB state for this client's bindings (checks engine_active)
             db = getattr(self._router, "_client_db", None) or getattr(self._router, "_db", None)
             live_bindings: list = []
@@ -324,6 +335,10 @@ class StraddleExecutionBridge:
 
             for live_b in live_bindings:
                 binding_id = live_b.get("binding_id", "")
+
+                # Targeted routing: skip every binding except the stamped one.
+                if _target and binding_id != _target[1]:
+                    continue
 
                 # Gate 1: engine must be active for this broker
                 if not live_b.get("engine_active"):
