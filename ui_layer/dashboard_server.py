@@ -2018,12 +2018,25 @@ class DashboardServer:
             worker = getattr(reg_client, "workers", {}).get(binding_id)
             if worker is None:
                 raise HTTPException(404, f"Binding '{binding_id}' not found.")
+            # Kill = square off ALL app-pushed trades on this broker FIRST (close-own-legs only),
+            # stop its strategies, THEN halt the worker / disconnect.
+            squared = 0
+            for d in _srv._client_db.get_deployments_sync(cid):
+                if d.get("binding_id") == binding_id:
+                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            if _srv._straddle_bridge is not None:
+                try:
+                    squared = await _srv._straddle_bridge.square_off_binding(
+                        cid, binding_id, _srv._sell_straddles)
+                except Exception as exc:
+                    logger.error("kill_broker square-off failed for %s/%s: %s", cid, binding_id, exc)
             if hasattr(worker, "halt"):
                 await worker.halt()
             elif hasattr(worker, "stop"):
                 await worker.stop()
             await _srv._client_db.upsert_client(cid, **{f"trade_enabled_{binding_id}": False})
-            return {"ok": True, "message": f"Broker '{binding_id}' halted."}
+            return {"ok": True, "squared": squared,
+                    "message": f"Broker '{binding_id}' killed — squared off {squared} leg(s) & halted."}
 
         # ── CLIENT — delete broker binding ───────────────────────────────────
 
@@ -2110,7 +2123,23 @@ class DashboardServer:
             if body.mode not in ("paper", "live"):
                 raise HTTPException(400, "mode must be 'paper' or 'live'.")
             await _srv._client_db.set_trading_mode(cid, binding_id, body.mode)
-            return {"ok": True, "mode": body.mode, "message": f"Mode set to {body.mode.upper()}."}
+            # Hot-swap the LIVE broker's in-memory mode so the change takes effect WITHOUT a
+            # terminal restart (order routing reads DB trading_mode per-order, but keep the broker
+            # object consistent for any broker-internal mode/product logic).
+            try:
+                broker = ((getattr(_srv._router, "_brokers", None) or {}).get(cid, {}) or {}).get(binding_id)
+                if broker is not None:
+                    broker._trading_mode_raw = "live" if body.mode == "live" else "paper"
+                    _bind = getattr(broker, "_binding", None) or getattr(broker, "_b", None)
+                    if _bind is not None:
+                        try:
+                            _bind.trading_mode = body.mode
+                        except Exception:
+                            pass
+            except Exception as exc:
+                logger.debug("mode hot-swap for %s/%s: %s", cid, binding_id, exc)
+            return {"ok": True, "mode": body.mode,
+                    "message": f"Mode set to {body.mode.upper()} (live — no restart needed)."}
 
         # ── CLIENT — Terminal toggle: Interactive OAuth Flow ─────────────────────
 

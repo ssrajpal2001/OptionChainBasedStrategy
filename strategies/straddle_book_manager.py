@@ -56,8 +56,13 @@ class StraddleBookManager:
             except asyncio.CancelledError:
                 break
 
-    def _wanted_keys(self) -> set:
-        wanted: set = set()
+    def _wanted(self) -> Dict[Key, int]:
+        """Map of (client,binding,underlying) → lot_multiplier for every sell_straddle
+        deployment that is RUNNING (is_running=1). A deployed-but-stopped strategy is NOT
+        wanted — its book only spawns when the Run toggle is ON, so a re-selected/already-
+        ticked deployment with is_running=0 never silently trades, and toggling OFF stops it.
+        """
+        wanted: Dict[Key, int] = {}
         try:
             clients = self._db.get_all_clients_sync()
         except Exception:
@@ -73,36 +78,60 @@ class StraddleBookManager:
             for d in deps:
                 if str(d.get("strategy_name", "")).lower() != "sell_straddle":
                     continue
+                if int(d.get("is_running", 0) or 0) != 1:
+                    continue           # deployed but Run toggle OFF → do not spawn/trade
                 und = str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
                 if self._indices and und not in self._indices:
                     continue           # only spawn books for indices the feeder actually subscribes
                 bid = d.get("binding_id", "")
                 if bid:
-                    wanted.add((cid, bid, und))
+                    try:
+                        lots = max(1, int(round(float(d.get("lot_multiplier", 1) or 1))))
+                    except Exception:
+                        lots = 1
+                    wanted[(cid, bid, und)] = lots
         return wanted
 
     def _reconcile(self) -> None:
-        wanted = self._wanted_keys()
-        # Spawn books for new deployments (auto-start-on-deploy).
-        for key in wanted - set(self._books):
+        wanted = self._wanted()
+        # Spawn books for newly-RUNNING deployments (auto-start on Run-toggle ON).
+        for key in set(wanted) - set(self._books):
             cid, bid, und = key
             try:
                 book = SellStraddleStrategy(self._bus, self._cfg, underlying=und,
+                                            lot_multiplier=wanted[key],
                                             client_id=cid, binding_id=bid)
                 book.set_client_db(self._db)
                 book.start()
                 self._books[key] = book
-                logger.info("StraddleBookManager: spawned book %s/%s/%s", cid, bid, und)
+                logger.info("StraddleBookManager: spawned book %s/%s/%s (lots=%d)",
+                            cid, bid, und, wanted[key])
             except Exception as exc:
                 logger.warning("StraddleBookManager: spawn %s failed: %s", key, exc)
-        # Stop books whose deployment was removed.
-        for key in set(self._books) - wanted:
+        # Stop books whose deployment was removed OR toggled OFF (is_running=0).
+        for key in set(self._books) - set(wanted):
             book = self._books.pop(key)
             try:
                 book.stop()
             except Exception:
                 pass
             logger.info("StraddleBookManager: stopped book %s/%s/%s", *key)
+        # Re-spawn a running book if its lot_multiplier changed in the deployment (so a
+        # client-side LOT MULTIPLIER edit takes effect — drives both qty and scalable-TSL scaling).
+        for key, lots in wanted.items():
+            book = self._books.get(key)
+            if book is not None and getattr(book, "_lot_multiplier", 1) != lots and book._position is None:
+                try:
+                    book.stop()
+                    nb = SellStraddleStrategy(self._bus, self._cfg, underlying=key[2],
+                                              lot_multiplier=lots,
+                                              client_id=key[0], binding_id=key[1])
+                    nb.set_client_db(self._db)
+                    nb.start()
+                    self._books[key] = nb
+                    logger.info("StraddleBookManager: re-spawned %s/%s/%s lots→%d", *key, lots)
+                except Exception as exc:
+                    logger.warning("StraddleBookManager: re-spawn %s failed: %s", key, exc)
 
     def stop(self) -> None:
         self._running = False

@@ -5,8 +5,10 @@ from strategies.straddle_book_manager import StraddleBookManager
 
 
 class _FakeBook:
-    def __init__(self, bus, cfg, underlying="NIFTY", client_id="", binding_id=""):
+    def __init__(self, bus, cfg, underlying="NIFTY", lot_multiplier=1, client_id="", binding_id=""):
         self._underlying = underlying; self._client_id = client_id; self._binding_id = binding_id
+        self._lot_multiplier = lot_multiplier
+        self._position = None
         self.started = False; self.stopped = False
     def set_client_db(self, db): self._db = db
     def start(self): self.started = True
@@ -25,8 +27,27 @@ def _mgr(monkeypatch, deps):
                                monitored_indices=["NIFTY", "BANKNIFTY"])
 
 
-def _dep(bid, und="NIFTY", strat="sell_straddle"):
-    return {"binding_id": bid, "strategy_name": strat, "underlying": und}
+def _dep(bid, und="NIFTY", strat="sell_straddle", is_running=1, lot_multiplier=1):
+    return {"binding_id": bid, "strategy_name": strat, "underlying": und,
+            "is_running": is_running, "lot_multiplier": lot_multiplier}
+
+
+def test_only_running_deployments_spawn(monkeypatch):
+    # is_running=0 → deployed but Run toggle OFF → no book; toggling ON spawns it.
+    db = _DB({"C1": [_dep("Z1", is_running=0)]})
+    monkeypatch.setattr(bm_mod, "SellStraddleStrategy", _FakeBook)
+    m = StraddleBookManager(None, None, db, ["NIFTY"])
+    m._reconcile()
+    assert m.books == []
+    db._deps["C1"][0]["is_running"] = 1
+    m._reconcile()
+    assert len(m.books) == 1
+
+
+def test_lot_multiplier_propagates(monkeypatch):
+    m = _mgr(monkeypatch, {"C1": [_dep("Z1", lot_multiplier=3)]})
+    m._reconcile()
+    assert m.find("C1", "Z1", "NIFTY")._lot_multiplier == 3
 
 
 def test_spawns_one_book_per_binding(monkeypatch):

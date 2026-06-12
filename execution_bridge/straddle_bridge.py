@@ -267,6 +267,9 @@ class StraddleExecutionBridge:
         self._q         = bus.subscribe(Topic.ORDER_REQUEST)
         # Track last ENTRY event per underlying for exit price correlation
         self._last_entry: Dict[str, StraddleOrderEvent] = {}
+        # Broker order_ids per (client, binding, underlying) → {"CE": id, "PE": id} so a
+        # later close can reference the exact orders the app opened (close-own-legs only).
+        self._order_ids: Dict[tuple, Dict[str, str]] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -370,10 +373,16 @@ class StraddleExecutionBridge:
                     ev.action, ev.underlying, client.client_id, binding_id, mode,
                 )
 
-                if mode == "paper" or broker is None:
+                if broker is None:
+                    # No broker object at all → pure local simulation.
                     await self._paper_fill(ev, client.client_id, binding_id, broker)
                 else:
-                    await self._live_fill(ev, client.client_id, binding_id, broker)
+                    # PAPER and LIVE both send a REAL order to the broker (verifies
+                    # routing / IP-whitelist / token). PAPER books a local simulated fill at
+                    # the strategy LTP (the order is expected to reject for no-fund); LIVE books
+                    # the real broker fill and tracks the order_id for close-via-order-id.
+                    await self._live_fill(ev, client.client_id, binding_id, broker,
+                                          paper=(mode == "paper"))
                 routed += 1
 
         if routed == 0:
@@ -428,11 +437,11 @@ class StraddleExecutionBridge:
         from config.global_config import IST as _IST
         legs_closed = 0
         for ss in (strategies or []):
-            # Per-binding books: only square off the book that belongs to THIS (client,binding).
-            # (Legacy per-index engines have empty identity → keep old behaviour.)
-            if getattr(ss, "_client_id", "") and (
-                ss._client_id != client_id or ss._binding_id != binding_id
-            ):
+            # STRICT per-binding identity: square off ONLY the book that belongs to exactly THIS
+            # (client, binding). Every book now carries identity; a book without it is never a
+            # per-binding trading book and must not be flattened by another binding's square-off.
+            if (getattr(ss, "_client_id", "") != client_id
+                    or getattr(ss, "_binding_id", "") != binding_id):
                 continue
             # Per-strategy square-off: restrict to one underlying when given.
             if underlying and str(getattr(ss, "_underlying", "")).upper() != underlying.upper():
@@ -544,8 +553,14 @@ class StraddleExecutionBridge:
         client_id:  str,
         binding_id: str,
         broker,
+        paper:      bool = False,
     ) -> None:
-        """Place actual SELL/BUY orders via broker API."""
+        """Place actual SELL/BUY orders via broker API.
+
+        paper=True → STILL sends the real order (so the client can verify the order routes to
+        their broker from the whitelisted IP), but books a LOCAL simulated fill at the strategy
+        LTP regardless of the broker's response (the order is expected to reject for no-fund).
+        paper=False → books the real broker average fill and keeps the order_id."""
         from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
         from data_layer.instrument_registry import REGISTRY as _REG
         from config.global_config import IST as _IST
@@ -586,6 +601,7 @@ class StraddleExecutionBridge:
                 )
                 continue
             _fallback_ltp = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
+            _mtag = "PAPER" if paper else "LIVE"
             req = OrderRequest(
                 broker_symbol=symbol,
                 exchange=order_exchange(ev.underlying),
@@ -608,24 +624,43 @@ class StraddleExecutionBridge:
                 # on EVERY live leg, so the bridge silently fell back to the strategy LTP and
                 # recorded that as the fill (→ history P&L diverged from the broker order book).
                 order_id = await broker.place_order(req)
-                order_fill = await broker.get_order_status(order_id)
-                _avg = float(getattr(order_fill, "avg_price", 0.0) or 0.0) if order_fill else 0.0
-                # A just-placed market order may not show an avg yet; only trust a real >0 fill,
-                # else fall back to the strategy LTP (entry-price integrity guard, c729394).
-                fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
-                logger.info(
-                    "[LIVE] %s %s %s order placed — %s@%.2f (order_id=%s, avg=%.2f) | client=%s",
-                    ev.action, ev.underlying, opt_type, symbol, fills[opt_type], order_id, _avg, client_id,
-                )
-                self._trade_log.log_event(client_id, binding_id,
-                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} placed @ {fills[opt_type]:.2f}")
+                if paper:
+                    # PAPER: the order went to the broker (routing/IP verified). Book a LOCAL
+                    # sim fill at the strategy LTP — do not depend on a real fill/funds.
+                    fills[opt_type] = _fallback_ltp
+                    self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(order_id)
+                    logger.info(
+                        "[PAPER] %s %s %s order routed to broker — %s@%.2f (order_id=%s, sim-fill) | client=%s",
+                        ev.action, ev.underlying, opt_type, symbol, _fallback_ltp, order_id, client_id,
+                    )
+                    self._trade_log.log_event(client_id, binding_id,
+                        f"PAPER {ev.action} {ev.underlying} {opt_type}{int(strike)} routed (order_id={order_id}) sim@{_fallback_ltp:.2f}")
+                else:
+                    order_fill = await broker.get_order_status(order_id)
+                    _avg = float(getattr(order_fill, "avg_price", 0.0) or 0.0) if order_fill else 0.0
+                    # A just-placed market order may not show an avg yet; only trust a real >0 fill,
+                    # else fall back to the strategy LTP (entry-price integrity guard, c729394).
+                    fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
+                    # Track the real broker order_id per leg so a later close references it.
+                    self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(order_id)
+                    logger.info(
+                        "[LIVE] %s %s %s order placed — %s@%.2f (order_id=%s, avg=%.2f) | client=%s",
+                        ev.action, ev.underlying, opt_type, symbol, fills[opt_type], order_id, _avg, client_id,
+                    )
+                    self._trade_log.log_event(client_id, binding_id,
+                        f"{ev.action} {ev.underlying} {opt_type}{int(strike)} placed @ {fills[opt_type]:.2f} (order_id={order_id})")
             except Exception as exc:
-                logger.error(
-                    "[LIVE] %s %s %s order FAILED: %s — falling back to LTP",
-                    ev.action, ev.underlying, opt_type, exc,
+                # PAPER: a no-fund rejection is EXPECTED — book the sim fill and continue.
+                # LIVE: order genuinely failed — fall back to LTP (entry-price integrity guard).
+                logger.log(
+                    logging.INFO if paper else logging.ERROR,
+                    "[%s] %s %s %s order rejected/failed: %s — %s",
+                    _mtag, ev.action, ev.underlying, opt_type, exc,
+                    "sim-fill (paper, expected no-fund)" if paper else "falling back to LTP",
                 )
                 self._trade_log.log_event(client_id, binding_id,
-                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} ORDER FAILED: {exc}")
+                    f"{_mtag} {ev.action} {ev.underlying} {opt_type}{int(strike)} "
+                    f"{'rejected (paper sim-fill)' if paper else 'ORDER FAILED'}: {exc}")
                 fills[opt_type] = _fallback_ltp
 
         fill_ev = StraddleFillEvent(
@@ -639,7 +674,7 @@ class StraddleExecutionBridge:
             client_id  = client_id,
             binding_id = binding_id,
             event_id   = ev.event_id,
-            paper_mode = False,
+            paper_mode = paper,
             legs       = ev.legs,
         )
 

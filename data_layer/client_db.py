@@ -404,9 +404,9 @@ class ClientDB:
                  lot_multiplier      = excluded.lot_multiplier,
                  trading_mode        = excluded.trading_mode,
                  product_type        = excluded.product_type,
-                 source_ip           = excluded.source_ip,
+                 source_ip           = CASE WHEN excluded.source_ip != '' THEN excluded.source_ip ELSE source_ip END,
                  assigned_strategy   = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_strategy ELSE assigned_strategy END,
-                 assigned_instrument = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_instrument ELSE assigned_instrument END""",
+                 assigned_instrument = CASE WHEN excluded.assigned_instrument != '' THEN excluded.assigned_instrument ELSE assigned_instrument END""",
             (
                 client_id, binding_id, provider, label,
                 _encode_cred(user_id),
