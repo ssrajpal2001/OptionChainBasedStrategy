@@ -387,16 +387,15 @@ class StraddleExecutionBridge:
                     ev.action, ev.underlying, client.client_id, binding_id, mode,
                 )
 
-                if broker is None:
-                    # No broker object at all → pure local simulation.
+                if broker is None or mode == "paper":
+                    # PAPER = PURE LOCAL SIMULATION — never send a real order. On a FUNDED exchange
+                    # (e.g. Delta) a "paper" order can partially fill (the cheap leg) and a later
+                    # paper-close BUY fills too, leaving a real phantom position. Paper must stay
+                    # entirely in-app; use LIVE mode for real order placement.
                     await self._paper_fill(ev, client.client_id, binding_id, broker)
                 else:
-                    # PAPER and LIVE both send a REAL order to the broker (verifies
-                    # routing / IP-whitelist / token). PAPER books a local simulated fill at
-                    # the strategy LTP (the order is expected to reject for no-fund); LIVE books
-                    # the real broker fill and tracks the order_id for close-via-order-id.
-                    await self._live_fill(ev, client.client_id, binding_id, broker,
-                                          paper=(mode == "paper"))
+                    # LIVE: real broker order + real fill, order_id tracked for close-via-order-id.
+                    await self._live_fill(ev, client.client_id, binding_id, broker, paper=False)
                 routed += 1
 
         if routed == 0:
@@ -447,6 +446,10 @@ class StraddleExecutionBridge:
             return 0
         _b = getattr(broker, "_binding", None)
         provider = (_b.provider if _b else getattr(broker, "provider", "mock"))
+        # PAPER bindings hold only a LOCAL sim position — NEVER place a real closing order (on a
+        # funded exchange a real BUY-to-close would fill and create a phantom position). Just discard
+        # the logical position below.
+        _paper = str(getattr(_b, "trading_mode", "paper") or "paper").lower() == "paper"
         from datetime import datetime as _dt
         from config.global_config import IST as _IST
         legs_closed = 0
@@ -477,6 +480,17 @@ class StraddleExecutionBridge:
             except Exception:
                 expiry = _today
             qty = int(getattr(pos, "lot_size", 0) or (ss._lot_size * ss._lot_multiplier))
+            if _paper:
+                # Paper: close the LOCAL sim position only — no real orders.
+                legs_closed += 2
+                self._trade_log.log_event(client_id, binding_id,
+                    f"SQUARE-OFF (paper, sim-only) {underlying} — no real order placed")
+                if not self._other_active_broker_for(underlying, client_id, binding_id):
+                    try:
+                        ss.discard_position_after_squareoff(f"paper_toggle_off_{client_id}_{binding_id}")
+                    except Exception:
+                        pass
+                continue
             for opt_type, strike in (("CE", pos.ce_leg.strike), ("PE", pos.pe_leg.strike)):
                 symbol = _resolve_option_symbol(underlying, expiry, int(strike), opt_type, provider)
                 if not symbol:

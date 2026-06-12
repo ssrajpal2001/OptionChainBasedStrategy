@@ -7,7 +7,7 @@ from data_layer.base_feeder import EventBus
 class _FakeBroker:
     def __init__(self):
         self.orders = []
-        self._binding = type("B", (), {"provider": "zerodha"})()
+        self._binding = type("B", (), {"provider": "zerodha", "trading_mode": "live"})()
 
     async def place_order(self, req):
         self.orders.append(req)
