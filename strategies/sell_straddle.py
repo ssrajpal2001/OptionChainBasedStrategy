@@ -385,7 +385,10 @@ class SellStraddleStrategy:
         # Skip vwap_rise (and session_min_vwap updates) when either leg's broker ATP is stale — a
         # frozen illiquid leg (e.g. CRUDEOIL PE) must not poison the baseline → false vwap_rise.
         # 0/negative disables the freshness check. Per-index overridable like other params.
-        self._vwap_stale_sec = float(_vwap_sl.get("stale_sec", ss.get("vwap_stale_sec", 90.0)))
+        # DEFAULT is index-aware: illiquid MCX commodities (e.g. CRUDEOIL) forward-fill ATP for
+        # longer than the 90s liquid-index default, so they need a wider freshness window.
+        _stale_default = 150.0 if str(self._underlying).upper() in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER") else 90.0
+        self._vwap_stale_sec = float(_vwap_sl.get("stale_sec", ss.get("vwap_stale_sec", _stale_default)))
 
         # Ratio exit — UI saves as nested {"enabled": bool, "threshold": float}
         _ratio = ss.get("ratio_exit", {})
