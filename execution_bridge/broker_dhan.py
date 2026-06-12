@@ -59,6 +59,16 @@ class DhanBroker(BaseBroker):
                 return False
 
             self._dhan = dhanhq(dhan_client_id, self._b.access_token)
+            # SEBI static-IP: bind API egress to this binding's whitelisted IP (if set).
+            _src = (getattr(self._b, "source_ip", "") or "").strip()
+            if _src:
+                try:
+                    from execution_bridge.ip_bind import bind_source_ip
+                    bound = bind_source_ip(self._dhan, _src)
+                    logger.info("DhanBroker[%s]: source-IP bind to %s (%s)",
+                                self.client_id, _src, "ok" if bound else "no session found")
+                except Exception as exc:
+                    logger.error("DhanBroker[%s]: source-IP bind to %s FAILED: %s", self.client_id, _src, exc)
             # Verify by fetching fund limits — method name varies across dhanhq versions
             _fund_method = (
                 getattr(self._dhan, "get_fund_limits", None) or

@@ -124,6 +124,23 @@ class UpstoxBroker(BaseBroker):
             config.access_token = self._b.access_token
             self._api_client = upstox_client.ApiClient(configuration=config)
 
+            # SEBI static-IP: upstox-client is urllib3-based — rebuild its PoolManager bound to
+            # this binding's source IP so API orders egress from the whitelisted public IP.
+            _src = (getattr(self._b, "source_ip", "") or "").strip()
+            if _src:
+                try:
+                    import urllib3
+                    _rest = getattr(self._api_client, "rest_client", None)
+                    if _rest is not None and hasattr(_rest, "pool_manager"):
+                        _old = _rest.pool_manager
+                        _num = getattr(_old, "connection_pool_kw", {}) or {}
+                        _rest.pool_manager = urllib3.PoolManager(source_address=(_src, 0), **_num)
+                        logger.info("UpstoxBroker[%s]: source-IP bind to %s (ok)", self.client_id, _src)
+                    else:
+                        logger.warning("UpstoxBroker[%s]: source-IP bind to %s — no pool_manager found", self.client_id, _src)
+                except Exception as exc:
+                    logger.error("UpstoxBroker[%s]: source-IP bind to %s FAILED: %s", self.client_id, _src, exc)
+
             self._order_api     = upstox_client.OrderApi(self._api_client)
             self._portfolio_api = upstox_client.PortfolioApi(self._api_client)
             self._user_api      = upstox_client.UserApi(self._api_client)
