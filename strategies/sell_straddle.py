@@ -913,17 +913,19 @@ class SellStraddleStrategy:
         now = datetime.now(IST)
         self._load_thresholds()
 
-        # New trading day — wipe all intraday state (sell_straddle is intraday only)
-        if self._market_open_dt is not None and self._market_open_dt.date() != now.date():
+        # New trading day — wipe all intraday state (sell_straddle is intraday only). The "day" for
+        # crypto is the Delta contract lifecycle (rolls at 17:30 IST), NOT calendar midnight — so a
+        # BTC session (18:30→16:30, crossing midnight) is ONE day and resets only at the 17:30 expiry.
+        if self._market_open_dt is not None and self._session_day(self._market_open_dt) != self._session_day(now):
             logger.info(
-                "SellStraddle[%s]: new day detected (%s→%s) — resetting session state.",
-                self._underlying,
-                self._market_open_dt.date(), now.date(),
+                "SellStraddle[%s]: new %s detected (%s→%s) — resetting session state.",
+                self._underlying, "expiry-day (17:30 IST)" if self._is_crypto else "day",
+                self._session_day(self._market_open_dt), self._session_day(now),
             )
             self.reset_session()
 
         # Record market-open for this session (first candle of the day)
-        if self._market_open_dt is None or self._market_open_dt.date() != now.date():
+        if self._market_open_dt is None or self._session_day(self._market_open_dt) != self._session_day(now):
             # Session open is instrument-specific: MCX commodities (CRUDEOIL…) open
             # 09:00, NSE/BSE indices 09:15. Using the wrong open mis-times priming
             # (e.g. CRUDEOIL showing 'ready at 09:17' instead of 09:02).
@@ -2324,6 +2326,15 @@ class SellStraddleStrategy:
             self._sl_cooldown_until = datetime.now(IST) + timedelta(minutes=cooldown_min)
             logger.info("SellStraddle[%s]: re-entry cooldown %d min (no re-entry until %s).",
                         self._underlying, cooldown_min, self._sl_cooldown_until.strftime("%H:%M"))
+
+    def _session_day(self, when: datetime):
+        """The 'trading day' key for daily-reset. NSE/MCX → calendar date. Crypto → the Delta active
+        DAILY-EXPIRY date (rolls at 17:30 IST), so a BTC session 18:30→16:30 (crossing midnight) is
+        ONE day and the reset fires at the 17:30 expiry (when we're already flat), not at midnight."""
+        if self._is_crypto:
+            from data_layer.universal_option_mapper import UniversalOptionMapper as _M
+            return _M.active_daily_expiry(when)
+        return when.date()
 
     def _is_in_entry_window(self, now: datetime) -> bool:
         t = now.time()
