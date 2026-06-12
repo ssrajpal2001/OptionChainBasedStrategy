@@ -124,6 +124,10 @@ class StraddlePosition:
     # profit% seen; once it crosses lock%, exit when profit drops floor% below this peak.
     trail_peak_pct: float = 0.0
 
+    # Last ACCEPTED combined VWAP (dropout filter for vwap_rise): a sudden crater vs this (one
+    # leg's ATP dropping out) is rejected so it can't poison session_min_vwap → false vwap_rise.
+    vwap_last_good: float = 0.0
+
     # Day-wise THETA exit: combined option TIME VALUE (extrinsic) captured at entry. The
     # theta-based day exit measures how far the live combined time value has decayed from this.
     entry_time_value: float = 0.0
@@ -1867,7 +1871,14 @@ class SellStraddleStrategy:
             _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
             curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
             _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
-            if curr_vwap > 0 and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
+            # DROPOUT FILTER: a combined VWAP that suddenly craters >20% vs the last accepted
+            # reading is a single-leg ATP dropout (seen on illiquid CRUDEOIL — VWAP 435→98→435).
+            # Accepting it would set session_min to an absurd low and fire false vwap_rise on every
+            # normal tick thereafter. Skip the whole step on such a glitch (don't read/update min).
+            _glitch = (pos.vwap_last_good > 0 and curr_vwap > 0
+                       and curr_vwap < 0.80 * pos.vwap_last_good)
+            if curr_vwap > 0 and not _glitch and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
+                pos.vwap_last_good = curr_vwap
                 if curr_vwap < pos.session_min_vwap:
                     pos.session_min_vwap = curr_vwap
                 if pos.session_min_vwap < float("inf"):
