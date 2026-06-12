@@ -636,7 +636,7 @@ class SellStraddleStrategy:
             return " ".join(parts)
 
         workflow   = ss.get("entry_workflow_mode", "hybrid")
-        offset     = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        offset     = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         beg        = _render(ss.get("entry_rules_beginning", []))
         ren        = _render(ss.get("entry_rules_reentry", []))
         exit_rules = _render(ss.get("exit_rules", []))
@@ -1367,7 +1367,7 @@ class SellStraddleStrategy:
             return
 
         step   = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
 
         # Granular-audit heartbeat: when admin has AUDIT on for a client AND there is NO
@@ -1999,7 +1999,7 @@ class SellStraddleStrategy:
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
 
         sel = scan_pool(
@@ -2161,7 +2161,7 @@ class SellStraddleStrategy:
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        offset = int(ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         # Keep rolled re-entries near ATM (real straddle) — cap how deep ITM the new leg may be.
         max_itm = int(ss.get("roll_max_itm_steps", 2))
