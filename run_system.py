@@ -416,6 +416,15 @@ async def _run_live(
     # Now the DB exists → build the per-binding SellStraddle book manager.
     from strategies.straddle_book_manager import StraddleBookManager
     straddle_manager = StraddleBookManager(bus, cfg, _shared_client_db, cfg.monitored_indices)
+    # Crypto (Delta) feed: for any BTC/ETH in monitored_indices, run a DeltaChainManager that
+    # drives a DeltaFeeder (spot + ATM±N strikes for the active daily expiry + 17:30 rollover) onto
+    # the SAME EventBus the sell-straddle books consume. Runs alongside the NSE GlobalFeeder.
+    delta_chain = None
+    _crypto_idx = [u for u in cfg.monitored_indices if cfg.exchange.is_crypto(u)]
+    if _crypto_idx:
+        from data_layer.delta_chain_manager import DeltaChainManager
+        delta_chain = DeltaChainManager(bus, cfg, _crypto_idx)
+        logger.info("Delta crypto feed enabled for %s.", _crypto_idx)
     # Trap engine needs the DB to warm-start historical HTF/MTF traps from 1m bars.
     # The live construction path (above) built it without a DB — attach it here.
     trap_engine._client_db = _shared_client_db
@@ -543,6 +552,8 @@ async def _run_live(
         tasks.append(asyncio.create_task(trap_engine.run(),   name="trap_engine"))
     if "sell_straddle" in _enabled_strats and straddle_manager is not None:
         tasks.append(asyncio.create_task(straddle_manager.run(), name="straddle_books"))
+    if delta_chain is not None:
+        tasks.append(asyncio.create_task(delta_chain.run(), name="delta_chain"))
     tasks += [
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),

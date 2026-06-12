@@ -34,6 +34,20 @@ from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
 logger = logging.getLogger(__name__)
 
 
+def _resolve_option_symbol(underlying, expiry, strike, opt_type, provider):
+    """Broker option symbol. Crypto (Delta) → 'C-BTC-60000-130626' via UniversalOptionMapper using
+    the ACTIVE daily expiry (ignores the NSE registry expiry); else the NSE instrument registry."""
+    if order_exchange(underlying) == "DELTA" or str(provider).lower() == "delta":
+        from data_layer.universal_option_mapper import UniversalOptionMapper as _M
+        from data_layer.symbol_translator import InternalSymbol
+        return _M.to_delta_symbol(InternalSymbol(
+            underlying=str(underlying).upper(), strike=float(strike),
+            option_type="CE" if str(opt_type).upper().startswith("C") else "PE",
+            expiry=_M.active_daily_expiry(),
+        ))
+    return _REG.get_broker_symbol(underlying, expiry, int(strike), opt_type, provider)
+
+
 # ── Events ────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -464,7 +478,7 @@ class StraddleExecutionBridge:
                 expiry = _today
             qty = int(getattr(pos, "lot_size", 0) or (ss._lot_size * ss._lot_multiplier))
             for opt_type, strike in (("CE", pos.ce_leg.strike), ("PE", pos.pe_leg.strike)):
-                symbol = _REG.get_broker_symbol(underlying, expiry, int(strike), opt_type, provider)
+                symbol = _resolve_option_symbol(underlying, expiry, int(strike), opt_type, provider)
                 if not symbol:
                     continue
                 req = OrderRequest(
@@ -593,7 +607,7 @@ class StraddleExecutionBridge:
         for opt_type, strike in [("CE", ev.ce_strike), ("PE", ev.pe_strike)]:
             if opt_type not in ev.legs:
                 continue
-            symbol = _REG.get_broker_symbol(ev.underlying, expiry, int(strike), opt_type, provider)
+            symbol = _resolve_option_symbol(ev.underlying, expiry, int(strike), opt_type, provider)
             if not symbol:
                 logger.warning(
                     "StraddleBridge: no %s symbol for %s %d%s exp=%s — skipping leg",
