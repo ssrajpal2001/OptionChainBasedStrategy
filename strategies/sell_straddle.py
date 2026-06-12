@@ -641,20 +641,28 @@ class SellStraddleStrategy:
             "╠══════════════════════════════════════════════════════════════════════",
             f"║ TIMING: Start:{self._entry_start.strftime('%H:%M')} | EntryEnd:{self._entry_cutoff.strftime('%H:%M')} | "
             f"SquareOff:{self._force_exit.strftime('%H:%M')} | Lot:{self._lot_size} x{self._lot_multiplier}",
-            f"║ SELECTION: workflow={workflow} | pool_offset=±{offset} | Target LTP(floor):{self._ltp_target:.0f}",
+            f"║ SELECTION: workflow={workflow} | pool_offset=±{offset} | "
+            f"ENTRY BASIS:{self._entry_basis.upper()} | "
+            f"floor:{(self._theta_target if self._entry_basis=='theta' else self._ltp_target):.0f}"
+            f"({'theta' if self._entry_basis=='theta' else 'ltp'})",
             f"║ BEGINNING ENTRY: {beg}",
             f"║ RE-ENTRY GATES:  {ren}",
             f"║ ROLLOVERS: Decay:{'ON' if decay_on else 'OFF'}({self._ltp_exit_min:.0f}) | "
             f"Ratio:{'ON' if ratio_on else 'OFF'}({self._ratio_threshold:.1f}x) | SmartRoll:ON",
+            f"║ TRAILING SL: {'ON' if self._trail_sl_enabled else 'OFF'} "
+            f"Lock:{self._trail_lock_pct*100:.1f}% Floor:{self._trail_floor_pct*100:.1f}% "
+            f"BASIS:{self._trail_basis.upper()}",
             f"║ SCALABLE TSL: {'ON' if self._tsl_enabled else 'OFF'} "
             f"Base:{self._tsl_base_profit_rs:.0f}/{self._tsl_base_lock_rs:.0f} "
-            f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} (₹)",
+            f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} (₹) "
+            f"BASIS:{self._tsl_basis.upper()}",
             f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%) | "
             f"ROC GUARDRAIL: {'ON' if self._guardrail_roc_enabled else 'OFF'}"
             f"({self._guardrail_roc_tf}m T:{self._guardrail_roc_target}/SL:{self._guardrail_roc_stoploss})",
             f"║ PNL GUARDRAIL: {'ON' if self._guardrail_pnl_enabled else 'OFF'} "
             f"T:{self._guardrail_pnl_target_pts:.0f}pts SL:{self._guardrail_pnl_sl_pts:.0f}pts | "
-            f"DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}%",
+            f"DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
+            f"BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
             f"║ EXIT PRIORITY: EOD→PnLguard→Day%→LTPdecay→Ratio→ScalableTSL→ROC→VWAPrise→exit_rules",
             f"║ LIMITS: Max Daily Trades:{self._max_trades}",

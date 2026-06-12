@@ -148,8 +148,8 @@ def select_balanced_pair(
         trace.append(
             f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
             f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} "
-            f"(need>={ltp_target:.0f}); partner={partner_side} wants ltp in "
-            f"[{ltp_target:.0f}, {anchor_ltp:.2f})"
+            f"(basis={_basis} need {_basis}>={_floor:.0f}); partner={partner_side} "
+            f"wants {_basis}>={_floor:.0f} and ltp<{anchor_ltp:.2f}"
         )
 
     anchor_val = leg_entry_value(anchor_side, anchor_strike, anchor_ltp, spot, _basis)
