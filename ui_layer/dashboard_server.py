@@ -1792,7 +1792,7 @@ class DashboardServer:
             except Exception:
                 deployments = []
 
-            def _ic_legs(pos):
+            def _ic_legs(pos, product="NRML"):
                 out = []
                 for leg in (pos.short_ce, pos.short_pe, pos.long_ce, pos.long_pe):
                     strike = int(getattr(leg, "strike", 0))
@@ -1807,12 +1807,16 @@ class DashboardServer:
                     # sell profits when price falls; buy profits when price rises
                     pnl = round((ep - ltp) * abs(qty), 2) if side == "sell" else round((ltp - ep) * abs(qty), 2)
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} {side.upper()}",
+                                "instrument": f"{pos.underlying} {strike} {ot}",
+                                "type": product, "side": side.upper(),
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
-                                "ltp": round(ltp, 2), "pnl": pnl})
+                                "sell_avg": round(ep, 2) if side == "sell" else 0.0,
+                                "buy_avg":  round(ep, 2) if side != "sell" else 0.0,
+                                "ltp": round(ltp, 2), "pnl": pnl, "mtm": pnl})
                 return out
 
-            def _ss_legs(pos):
+            def _ss_legs(pos, product="MIS"):
                 out = []
                 for leg in (pos.ce_leg, pos.pe_leg):
                     strike = int(getattr(leg, "strike", 0))
@@ -1823,10 +1827,14 @@ class DashboardServer:
                     ltp = float(getattr(leg, "ltp", ep) or ep)
                     ls = int(getattr(pos, "lot_size", 0) or 0)
                     qty = -ls  # straddle is short both
+                    _pnl = round((ep - ltp) * abs(qty), 2)
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
+                                "instrument": f"{pos.underlying} {strike} {ot}",
+                                "type": product, "side": "SELL",
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
-                                "ltp": round(ltp, 2), "pnl": round((ep - ltp) * abs(qty), 2)})
+                                "sell_avg": round(ep, 2), "buy_avg": 0.0,
+                                "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl})
                 return out
 
             def _find(strategies, underlying):
@@ -1850,7 +1858,12 @@ class DashboardServer:
                         strat = _find(getattr(_srv, "_iron_condors", []), underlying)
                         pos = getattr(strat, "_position", None) if strat else None
                         if pos and getattr(pos, "status", "open") == "open":
-                            legs = _ic_legs(pos)
+                            try:
+                                from data_layer.runtime_config import RuntimeConfig as _RC2
+                                _icp = str(_RC2.index_section(underlying, "iron_condor").get("product_type", "NRML")).upper()
+                            except Exception:
+                                _icp = "NRML"
+                            legs = _ic_legs(pos, product=_icp if _icp in ("MIS", "NRML") else "NRML")
                     elif sname == "sell_straddle":
                         strat = _srv._find_ss_book(cid, bid, underlying)
                         pos = getattr(strat, "_position", None) if strat else None
@@ -1872,7 +1885,12 @@ class DashboardServer:
                         except Exception:
                             booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
                         if pos and getattr(pos, "status", "open") == "open":
-                            legs = _ss_legs(pos)
+                            try:
+                                from data_layer.runtime_config import RuntimeConfig as _RC2
+                                _ssp = str(_RC2.index_section(underlying, "sell_straddle").get("product_type", "MIS")).upper()
+                            except Exception:
+                                _ssp = "MIS"
+                            legs = _ss_legs(pos, product=_ssp if _ssp in ("MIS", "NRML") else "MIS")
                         # Always surface today's exit basis; add LTP/Theta triplets when open.
                         if strat is not None:
                             _basis = str(getattr(strat, "_day_exit_basis", "ltp")).lower()

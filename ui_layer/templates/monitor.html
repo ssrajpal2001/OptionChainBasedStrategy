@@ -444,7 +444,7 @@
     .pos-legs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
     .pos-legs::-webkit-scrollbar { height: 4px; }
     .pos-legs::-webkit-scrollbar-thumb { background: var(--t-border); border-radius: 2px; }
-    .pos-legs-inner { min-width: 340px; }
+    .pos-legs-inner { min-width: 460px; }
 
     /* ─────────────────────────────────────────────────────────────────────
        MOBILE / SMALL-SCREEN LAYOUT  (≤768px)
@@ -7537,27 +7537,35 @@ function histReplay() {
                            a min-width so columns stay aligned and never widen the card. -->
                       <div class="pos-legs">
                       <div class="pos-legs-inner space-y-1.5">
-                      <!-- Column headers -->
-                      <div class="flex items-center justify-between text-xs font-mono" style="color:var(--t-muted)">
-                        <span>SYMBOL</span>
-                        <div class="flex gap-4">
-                          <span>QTY</span><span>LOTS</span><span>LOT</span><span>ENTRY</span><span>LTP</span><span>P&amp;L</span>
-                        </div>
+                      <!-- Column headers (broker-style ledger) -->
+                      <div class="grid items-center text-xs font-mono" style="color:var(--t-muted);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
+                        <span>INSTRUMENT</span><span class="text-center">TYPE</span><span class="text-right">QTY</span>
+                        <span class="text-right">SELL</span><span class="text-right">BUY</span><span class="text-right">LTP</span>
+                        <span class="text-right">P&amp;L</span><span class="text-right">MTM</span>
                       </div>
                       <template x-for="(leg,li) in csPositions[b.binding_id][dep.strategy_name].legs||[]" :key="li">
-                        <div class="flex items-center justify-between py-1 border-t text-xs font-mono" style="border-color:var(--t-border)">
-                          <span style="color:var(--t-text)" x-text="leg.symbol"></span>
-                          <div class="flex gap-4 text-right">
-                            <span style="color:var(--t-muted)" x-text="leg.qty"></span>
-                            <span style="color:var(--t-muted)" x-text="(leg.lots!==undefined?leg.lots:'-')"></span>
-                            <span style="color:var(--t-muted)" x-text="(leg.lot_size!==undefined?leg.lot_size:'-')"></span>
-                            <span style="color:var(--t-muted)" x-text="leg.entry_price"></span>
-                            <span class="price-live" style="color:var(--t-bright)" x-text="leg.ltp||leg.entry_price"></span>
-                            <span class="font-bold" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
-                                  x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
-                          </div>
+                        <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
+                          <span style="color:var(--t-text)" x-text="leg.instrument||leg.symbol"></span>
+                          <span class="text-center px-1 rounded" style="color:var(--t-muted);border:1px solid var(--t-border)"
+                                x-text="leg.type||'—'"></span>
+                          <span class="text-right" :style="`color:${(leg.qty||0)<0?'var(--t-red)':'var(--t-green)'}`" x-text="leg.qty"></span>
+                          <span class="text-right" style="color:var(--t-muted)" x-text="(leg.sell_avg||0)>0?leg.sell_avg.toFixed(2):'—'"></span>
+                          <span class="text-right" style="color:var(--t-muted)" x-text="(leg.buy_avg||0)>0?leg.buy_avg.toFixed(2):'—'"></span>
+                          <span class="text-right price-live" style="color:var(--t-bright)" x-text="(leg.ltp||leg.entry_price)"></span>
+                          <span class="text-right font-bold" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
+                                x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
+                          <span class="text-right font-bold" :style="`color:${(leg.mtm!==undefined?leg.mtm:leg.pnl)>=0?'var(--t-green)':'var(--t-red)'}`"
+                                x-text="(((leg.mtm!==undefined?leg.mtm:leg.pnl))>=0?'+':'')+(leg.mtm!==undefined?leg.mtm:leg.pnl).toFixed(0)"></span>
                         </div>
                       </template>
+                      <!-- Totals row -->
+                      <div class="grid items-center pt-1 border-t text-xs font-mono font-bold" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
+                        <span style="color:var(--t-muted)">TOTAL</span><span></span><span></span><span></span><span></span><span></span>
+                        <span class="text-right" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
+                        <span class="text-right" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
+                      </div>
                       </div>
                       </div>
                       <!-- Booked (closed re-entries today) / Running (open legs) / Net -->
