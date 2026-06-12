@@ -2270,6 +2270,40 @@ class DashboardServer:
                 cid, binding_id, provider.upper(), bool(api_key), bool(user_id), (_time.monotonic()-t0)*1000,
             )
 
+            # Delta (crypto) authenticates DIRECTLY with the API key/secret — NO OAuth URL. Build the
+            # broker, authenticate() (signed /v2/wallet/balances from the box's whitelisted IP), and
+            # on success mark terminal connected + register the execution broker.
+            if provider == "delta":
+                try:
+                    from config.client_profiles import BrokerBinding as _BB
+                    from execution_bridge.base_broker import create_broker
+                    _bb = _BB(
+                        binding_id=binding_id, provider="delta", label=b.get("label", ""),
+                        user_id=user_id, api_key=api_key, api_secret=api_secret, access_token="",
+                        is_trade_enabled=bool(b.get("is_trade_enabled", 1)),
+                        lot_multiplier=float(b.get("lot_multiplier", 1.0) or 1.0),
+                        product_type=(b.get("product_type", "") or "MIS"),
+                        trading_mode=(b.get("trading_mode", "paper") or "paper"),
+                        source_ip=(b.get("source_ip", "") or ""),
+                    )
+                    _nb = create_broker(_bb, cid)
+                    if await _nb.authenticate():
+                        await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                        if _srv._router is not None:
+                            _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
+                            try:
+                                _srv._router._pool.add_broker_to_worker(cid, binding_id, _nb, "delta")
+                            except Exception:
+                                pass
+                        logger.info("[Terminal] [%s/%s] DELTA connected (api-key auth).", cid, binding_id)
+                        return {"ok": True, "connected": True, "message": "Delta Exchange connected.",
+                                "flow": "apikey"}
+                    return {"ok": False, "error": "Delta auth failed — check the API key/secret and that "
+                            "this server's IP is whitelisted on the Delta API key."}
+                except Exception as exc:
+                    logger.error("[Terminal] [%s/%s] Delta connect error: %s", cid, binding_id, exc)
+                    return {"ok": False, "error": f"Delta connect error: {exc}"}
+
             ok, msg, token = await _he.authenticate_binding(b, cid, _srv._client_db)
 
             if ok:
