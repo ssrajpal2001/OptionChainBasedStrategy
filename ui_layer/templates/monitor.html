@@ -798,6 +798,7 @@ document.addEventListener('alpine:init', () => {
     },
     // Per-broker start/stop state
     csBrokerOp: {},  // binding_id -> {loading, termLoading, engLoading, termStep, msg, ok}
+    csAccount: {},   // binding_id -> {loading, ok, profile, funds, leverage, leverage_supported}
     // Granular tick-by-tick exit audit (admin-gated) — key `${client_id}_${underlying}` → payload
     exitAudit: {},
     auditOpen: {},   // underlying → collapsible open/closed
@@ -1947,6 +1948,31 @@ document.addEventListener('alpine:init', () => {
         if (r.ok) await this.loadClientStatus();
       } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
       finally   { this.botLoading = false; }
+    },
+
+    async loadBrokerAccount(b) {
+      const bid = b.binding_id;
+      if (!this.csAccount[bid]) this.csAccount[bid] = {};
+      this.csAccount[bid].loading = true;
+      try {
+        const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/account`);
+        if (!r) return;
+        const d = await r.json();
+        this.csAccount[bid] = Object.assign({ loading:false }, d);
+      } catch (e) { this.csAccount[bid] = { loading:false, ok:false, error:'Request failed.' }; }
+    },
+
+    async setBrokerLeverage(b, lev) {
+      const bid = b.binding_id;
+      const acc = this.csAccount[bid] || {};
+      const pid = acc.product_id || (acc.leverage_product_id);  // optional default product
+      try {
+        const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/leverage`, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ product_id: pid, leverage: Number(lev) })
+        });
+        if (r) { const d = await r.json(); if (d.ok) { (this.csAccount[bid]=this.csAccount[bid]||{}).leverage = Number(lev); } }
+      } catch (e) {}
     },
 
     async toggleTrade(b) {
@@ -6961,6 +6987,35 @@ function histReplay() {
                 <div x-show="(csBrokerOp[b.binding_id]||{}).msg" class="text-xs font-mono text-right max-w-[240px]"
                      :style="(csBrokerOp[b.binding_id]||{}).ok===false ? 'color:var(--t-red)' : 'color:var(--t-green)'"
                      x-text="(csBrokerOp[b.binding_id]||{}).msg"></div>
+
+                <!-- ── Broker-side account panel (name / funds / leverage on connect) ── -->
+                <div x-show="b.terminal_connected" x-init="$watch('b.terminal_connected', v=>{ if(v) loadBrokerAccount(b) }); if(b.terminal_connected) loadBrokerAccount(b)"
+                     class="mt-1 p-2 rounded font-mono text-xs" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <template x-if="(csAccount[b.binding_id]||{}).loading">
+                    <span style="color:var(--t-muted)">Loading account…</span>
+                  </template>
+                  <template x-if="!(csAccount[b.binding_id]||{}).loading && (csAccount[b.binding_id]||{}).ok">
+                    <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <span style="color:var(--t-muted)">Account:
+                        <span style="color:var(--t-text)" x-text="((csAccount[b.binding_id]||{}).profile||{}).name || ((csAccount[b.binding_id]||{}).profile||{}).email || '—'"></span></span>
+                      <span style="color:var(--t-muted)">Available:
+                        <span style="color:var(--t-green)" x-text="'₹'+(((csAccount[b.binding_id]||{}).funds||{}).available||0).toLocaleString()"></span></span>
+                      <span style="color:var(--t-muted)">Used:
+                        <span style="color:var(--t-text)" x-text="'₹'+(((csAccount[b.binding_id]||{}).funds||{}).used||0).toLocaleString()"></span></span>
+                      <template x-if="(csAccount[b.binding_id]||{}).leverage_supported">
+                        <span style="color:var(--t-muted)">Leverage:
+                          <input type="number" min="1" step="1" class="t-input" style="width:60px;display:inline-block"
+                                 :value="(csAccount[b.binding_id]||{}).leverage||1"
+                                 @change="setBrokerLeverage(b, $event.target.value)">x</span>
+                      </template>
+                      <button class="text-xs px-2 py-0.5 rounded border" style="border-color:var(--t-border);color:var(--t-muted)"
+                              @click="loadBrokerAccount(b)" title="Refresh">↻</button>
+                    </div>
+                  </template>
+                  <template x-if="!(csAccount[b.binding_id]||{}).loading && (csAccount[b.binding_id]||{}).ok===false">
+                    <span style="color:var(--t-muted)" x-text="(csAccount[b.binding_id]||{}).error||'No account info.'"></span>
+                  </template>
+                </div>
 
                 <!-- ── Action buttons row ──────────────────────────────────── -->
                 <div class="flex items-center gap-1.5 mt-0.5">
