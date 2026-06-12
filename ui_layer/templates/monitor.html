@@ -6271,35 +6271,34 @@ function histReplay() {
       <button @click="obOpen=!obOpen" type="button"
               class="w-full flex items-center justify-between px-4 py-2.5 font-mono text-xs font-bold"
               style="color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06)">
-        <span>📋 NEW-CLIENT SETUP STEPS (all brokers) + Zerodha static-IP section</span>
+        <span>📋 NEW-CLIENT SETUP STEPS — onboarding + SEBI static-IP whitelist (ALL brokers)</span>
         <span x-text="obOpen ? '▾' : '▸'"></span>
       </button>
       <div x-show="obOpen" x-cloak class="px-4 py-3 font-mono text-xs leading-relaxed space-y-3" style="color:var(--t-text)">
         <div>
-          <div class="font-bold mb-1" style="color:var(--t-green)">1. GENERIC — every broker (Zerodha, AngelOne, Dhan, Shoonya, Upstox…)</div>
+          <div class="font-bold mb-1" style="color:var(--t-green)">1. ONBOARDING — every broker (Zerodha, AngelOne, Dhan, Upstox, Shoonya…)</div>
           a. Create the client account below.<br>
           b. Add the client's <strong>broker</strong> with its API credentials (api_key / api_secret / etc. per provider).<br>
           c. Redirect/postback URL (OAuth brokers): <strong>https://&lt;your-server&gt;/callback/&lt;provider&gt;</strong>.<br>
           d. Client clicks <strong>Terminal ON</strong> → logs in → token stored.<br>
-          e. Client opens <strong>Deploy</strong>, picks the strategy + index, then flips that strategy's <strong>Run</strong> toggle to start.<br>
-          <span style="color:var(--t-muted)">Most brokers stop here — no IP setup needed.</span>
+          e. Client opens <strong>Deploy</strong>, picks the strategy + index, then flips that strategy's <strong>Run</strong> toggle to start.
         </div>
         <div class="pt-2 border-t" style="border-color:var(--t-border)">
-          <div class="font-bold mb-1" style="color:var(--t-amber)">2. ZERODHA ONLY — static-IP whitelisting (Kite requires a UNIQUE public IP per app)</div>
-          <div style="color:var(--t-amber)" class="mb-1">⚠ source_ip = PRIVATE 172.31.x.x · whitelist/Kite = PUBLIC 13.x.x.x. One unique public IP per Zerodha app.</div>
-          <strong>AWS/EC2 (system admin), once per Zerodha binding:</strong><br>
+          <div class="font-bold mb-1" style="color:var(--t-amber)">2. STATIC-IP WHITELIST — REQUIRED FOR ALL BROKERS (SEBI mandate, enforced 01-Apr-2026)</div>
+          <div style="color:var(--t-amber)" class="mb-1">⚠ Per SEBI, every broker now rejects API orders from non-whitelisted IPs. Each broker app needs a static IP. source_ip = PRIVATE 172.31.x.x · whitelist/broker console = PUBLIC 13.x.x.x. (Zerodha additionally requires the IP be globally UNIQUE per app — so a separate IP per Zerodha app.)</div>
+          <strong>AWS/EC2 (system admin), once per broker binding:</strong><br>
           A1. EC2 → Elastic IPs → <strong>Allocate</strong> a new EIP (public 13.x.x.x).<br>
           A2. EC2 → Instance → Networking → ENI → Manage IP addresses → <strong>Assign new IPv4</strong> (private 172.31.x.x).<br>
           A3. Elastic IPs → the new EIP → <strong>Associate</strong> → choose the new private IP.<br>
           A4. Verify: <span style="color:var(--t-green)">curl --interface 172.31.x.x https://ifconfig.me</span> → must print the new EIP.<br>
           <strong class="block mt-1">In the app (admin):</strong>
-          A5. Set the Zerodha binding's <strong>source_ip = PRIVATE IP</strong>, <strong>whitelist_ip = PUBLIC EIP</strong>.<br>
-          <strong class="block mt-1">Client (Kite developer console):</strong>
-          A6. <strong>Whitelist the PUBLIC EIP (13.x.x.x)</strong> in the Kite app's Allowed IPs. ← the only IP the client enters.<br>
+          A5. Set the broker binding's <strong>source_ip = PRIVATE IP</strong>, <strong>whitelist_ip = PUBLIC EIP</strong>.<br>
+          <strong class="block mt-1">Client (broker developer console):</strong>
+          A6. <strong>Whitelist the PUBLIC EIP (13.x.x.x)</strong> in the broker app's Allowed/Static IPs. ← the only IP the client enters.<br>
           <strong class="block mt-1">Finish:</strong>
           A7. <strong>Terminal OFF → ON</strong> → confirm <span style="color:var(--t-green)">pm2 logs algo | grep "source IP"</span> shows <em>bound API egress to source IP 172.31.x.x</em>. Orders now leave from the whitelisted EIP.
         </div>
-        <div style="color:var(--t-muted)">AWS limits: secondary private IPs per ENI depend on instance type; EIPs default 5/region (request increase to scale many Zerodha clients).</div>
+        <div style="color:var(--t-muted)">Non-Zerodha brokers may share one static IP across clients (only Zerodha needs a unique IP per app). AWS limits: secondary private IPs per ENI depend on instance type; EIPs default 5/region (request increase to scale).</div>
       </div>
     </div>
 
