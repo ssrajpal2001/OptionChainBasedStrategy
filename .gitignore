@@ -39,3 +39,8 @@ config/client_profiles.json
 .DS_Store
 Thumbs.db
 data/strategy_config.json
+Images/
+discussion.txt
+knowledge_graph_imp
+data/positions/
+data/history/

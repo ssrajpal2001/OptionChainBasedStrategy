@@ -60,6 +60,15 @@ def strip_intrinsic(ltp: float, side: str, strike: float, spot: float) -> float:
     return ltp - intrinsic
 
 
+def leg_entry_value(side: str, strike: float, ltp: float, spot: float, basis: str) -> float:
+    """The per-leg metric the ENTRY threshold filters on. basis='theta' → time value
+    (intrinsic-stripped, never negative); anything else → raw LTP. Balancing always stays on
+    LTP; only the MIN floor switches metric, so basis='ltp' is byte-identical to the old path."""
+    if str(basis).lower() == "theta":
+        return max(0.0, strip_intrinsic(float(ltp), side, float(strike), float(spot)))
+    return float(ltp)
+
+
 def pair_indicators(
     strike_prem: Dict[Key, dict],
     prev_atp_closed: Dict[Key, float],
@@ -102,6 +111,8 @@ def select_balanced_pair(
     offset: int,
     ltp_target: float,
     trace: Optional[list] = None,
+    entry_basis: str = "ltp",
+    theta_target: float = 0.0,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Beginning concept (reference _get_strictly_lower_balanced_pair):
@@ -125,6 +136,9 @@ def select_balanced_pair(
     ce_corr = strip_intrinsic(ce_ltp, "CE", atm, spot)
     pe_corr = strip_intrinsic(pe_ltp, "PE", atm, spot)
 
+    _basis = str(entry_basis).lower()
+    _floor = float(theta_target) if _basis == "theta" else float(ltp_target)
+
     if ce_corr < pe_corr:
         anchor_side, anchor_strike, anchor_ltp, partner_side = "CE", atm, ce_ltp, "PE"
     else:
@@ -134,13 +148,14 @@ def select_balanced_pair(
         trace.append(
             f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
             f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} "
-            f"(need>={ltp_target:.0f}); partner={partner_side} wants ltp in "
-            f"[{ltp_target:.0f}, {anchor_ltp:.2f})"
+            f"(basis={_basis} need {_basis}>={_floor:.0f}); partner={partner_side} "
+            f"wants {_basis}>={_floor:.0f} and ltp<{anchor_ltp:.2f}"
         )
 
-    if anchor_ltp < ltp_target:
+    anchor_val = leg_entry_value(anchor_side, anchor_strike, anchor_ltp, spot, _basis)
+    if anchor_val < _floor:
         if trace is not None:
-            trace.append(f"REJECT anchor ltp {anchor_ltp:.2f} < target {ltp_target:.0f}")
+            trace.append(f"REJECT anchor {_basis} {anchor_val:.2f} < target {_floor:.0f}")
         return None
 
     best = None  # (ltp, strike)
@@ -150,13 +165,15 @@ def select_balanced_pair(
         if not leg:
             continue
         ltp = leg.get("ltp", 0.0)
+        # Floor on the chosen metric (ltp or time value); balance on LTP (< anchor_ltp).
+        val = leg_entry_value(partner_side, s, ltp, spot, _basis)
+        _ok = (val >= _floor) and (ltp < anchor_ltp)
         if trace is not None:
-            _ok = ltp_target <= ltp < anchor_ltp
             trace.append(
-                f"  cand {partner_side}{s} ltp={ltp:.2f} "
+                f"  cand {partner_side}{s} ltp={ltp:.2f} {_basis}={val:.2f} "
                 f"{'OK' if _ok else 'skip(out-of-band)'}"
             )
-        if ltp_target <= ltp < anchor_ltp:
+        if _ok:
             if best is None or ltp > best[0]:
                 best = (ltp, s)
     if best is None:
@@ -201,6 +218,8 @@ def scan_pool(
     rule_pass,                      # callable(ce_strike:int, pe_strike:int) -> bool
     metric: str = "balanced_premium",
     trace: Optional[list] = None,
+    entry_basis: str = "ltp",
+    theta_target: float = 0.0,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Re-entry concept (reference _scan_v_slope_pool, balanced_premium metric):
@@ -220,6 +239,8 @@ def scan_pool(
     ce_corr = strip_intrinsic(ce_atm.get("ltp", 0.0), "CE", atm, spot)
     pe_corr = strip_intrinsic(pe_atm.get("ltp", 0.0), "PE", atm, spot)
     ce_bias_stronger = ce_corr > pe_corr
+    _basis = str(entry_basis).lower()
+    _floor = float(theta_target) if _basis == "theta" else float(ltp_target)
 
     if trace is not None:
         trace.append(
@@ -245,7 +266,10 @@ def scan_pool(
             pe_ltp = pe.get("ltp", 0.0)
             if pe_ltp <= 0:
                 continue
-            if ce_ltp < ltp_target or pe_ltp < ltp_target:
+            # Floor each leg on the chosen metric (raw LTP, or time value when basis=theta).
+            ce_val = leg_entry_value("CE", s_ce, ce_ltp, spot, _basis)
+            pe_val = leg_entry_value("PE", s_pe, pe_ltp, spot, _basis)
+            if ce_val < _floor or pe_val < _floor:
                 skipped += 1
                 continue
             if ce_bias_stronger:

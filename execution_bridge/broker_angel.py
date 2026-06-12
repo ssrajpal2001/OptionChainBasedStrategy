@@ -41,6 +41,17 @@ class AngelBroker(BaseBroker):
         try:
             self._smartapi = SmartConnect(api_key=self._b.api_key)
 
+            # SEBI static-IP: bind this binding's API egress to its whitelisted IP (if set).
+            _src = (getattr(self._b, "source_ip", "") or "").strip()
+            if _src:
+                try:
+                    from execution_bridge.ip_bind import bind_source_ip
+                    bound = bind_source_ip(self._smartapi, _src)
+                    logger.info("AngelBroker[%s]: source-IP bind to %s (%s)",
+                                self.client_id, _src, "ok" if bound else "no session found")
+                except Exception as exc:
+                    logger.error("AngelBroker[%s]: source-IP bind to %s FAILED: %s", self.client_id, _src, exc)
+
             # Path 1 — OAuth access_token already stored (from /callback/angelone)
             if self._b.access_token:
                 # Strip "Bearer " prefix if present — SmartAPI expects the raw JWT

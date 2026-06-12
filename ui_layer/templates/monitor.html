@@ -444,7 +444,7 @@
     .pos-legs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
     .pos-legs::-webkit-scrollbar { height: 4px; }
     .pos-legs::-webkit-scrollbar-thumb { background: var(--t-border); border-radius: 2px; }
-    .pos-legs-inner { min-width: 340px; }
+    .pos-legs-inner { min-width: 460px; }
 
     /* ─────────────────────────────────────────────────────────────────────
        MOBILE / SMALL-SCREEN LAYOUT  (≤768px)
@@ -617,6 +617,8 @@ document.addEventListener('alpine:init', () => {
     killArmed:     false,
     killCountdown: 5,
     _killTimer:    null,
+    killConfirm:   false,   // FORCE KILL SWITCH 2-click confirm (was undefined → ReferenceError)
+    killConfirmTs: 0,
     rebalIdx:      'NIFTY',
     lotCid:        '',
     lotBid:        '',
@@ -856,6 +858,11 @@ document.addEventListener('alpine:init', () => {
     get csBotActive() {
       return this.clientStatus ? !!this.clientStatus.is_client_bot_active : false;
     },
+    // RUNNING if any deployed strategy's Run toggle is ON (per-strategy control model).
+    get csAnyStrategyRunning() {
+      return (this.clientDeployments || []).some(d => Number(d.is_running) === 1);
+    },
+    depRunning(dep) { return Number(dep && dep.is_running) === 1; },
     get csTargetIndex() {
       return (this.clientStatus && this.clientStatus.target_index) || 'NIFTY';
     },
@@ -1223,6 +1230,11 @@ document.addEventListener('alpine:init', () => {
       }, 1000);
     },
 
+    async triggerKillSwitch() {   // FORCE KILL SWITCH confirm-click (was undefined → ReferenceError)
+      try { await this._fetch('/api/kill_switch', { method:'POST' }); } catch {}
+      this.killConfirm = false;
+    },
+
     async rebalance() { await this._fetch(`/api/rebalance/${this.rebalIdx}`, { method:'POST' }); },
     async saveOiWindow() {
       this.oiWindowMsg = '';
@@ -1562,10 +1574,11 @@ document.addEventListener('alpine:init', () => {
       return {
         entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
         entry_workflow_mode: 'hybrid', ltp_target: 0, lot_size: 1,
+        entry_basis: 'ltp', theta_target: 0,
         pool_itm_depth: 4, pool_otm_depth: 4, product_type: 'MIS',
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
-        tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
-        tsl_scalable:  { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
+        tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
+        tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
         ratio_exit:    { enabled: false, threshold: 3.0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
@@ -1619,7 +1632,11 @@ document.addEventListener('alpine:init', () => {
       if (ss.tsl_enabled     === undefined) ss.tsl_enabled     = true;
       if (ss.trail_lock_pct  === undefined) ss.trail_lock_pct  = 20.0;
       if (ss.trail_floor_pct === undefined) ss.trail_floor_pct = 10.0;
-      if (!ss.tsl_scalable)  ss.tsl_scalable  = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
+      if (!ss.tsl_scalable)  ss.tsl_scalable  = { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
+      if (ss.tsl_scalable.basis === undefined) ss.tsl_scalable.basis = 'ltp';
+      if (ss.entry_basis  === undefined) ss.entry_basis  = 'ltp';
+      if (ss.theta_target === undefined) ss.theta_target = 0;
+      if (ss.trail_basis  === undefined) ss.trail_basis  = 'ltp';
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
@@ -1924,30 +1941,63 @@ document.addEventListener('alpine:init', () => {
       } catch {}
     },
 
-    async startBot() {
+    // Per-strategy Start/Stop toggle for one deployment on one broker.
+    async toggleStrategyRun(dep, b) {
+      const want = !this.depRunning(dep);
+      const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
+      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap')+' · '+dep.underlying;
+      const ok = want
+        ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
+        : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
+      if (!ok) return;
+      this.botOk = null; this.botMsg = 'Working…';
+      dep._runLoading = true;
+      try {
+        const r = await this._fetch(`/api/client/deployment/${encodeURIComponent(did)}/run`,
+                                    { json: { running: want } });
+        if (!r) return;
+        let d = {}; try { d = await r.json(); } catch {}
+        this.botOk = r.ok;
+        this.botMsg = d.error || d.detail
+                    || (r.ok ? (want ? 'Strategy started.' : `Strategy stopped${d.squared_off?` — squared off ${d.squared_off} leg(s)`:''}.`)
+                             : `Failed (HTTP ${r.status}) for ${did}`);
+        if (r.ok) { dep.is_running = want ? 1 : 0; await this._loadAllDeployments(); }
+      } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
+      finally   { dep._runLoading = false; }
+    },
+
+    // Global STOP & SQUARE-OFF — flatten the whole client.
+    async stopAndSquareoff() {
+      if (!confirm('STOP & SQUARE-OFF — are you sure?\n\nThis stops EVERY strategy on ALL your brokers and squares off ALL open positions for this client.')) return;
       this.botMsg = ''; this.botOk = null; this.botLoading = true;
       try {
-        const r = await this._fetch('/api/client/start_bot', { method: 'POST' });
+        const r = await this._fetch('/api/client/stop_squareoff', { method: 'POST' });
         if (!r) return;
         const d = await r.json();
         this.botOk  = r.ok;
-        this.botMsg = d.message || d.detail || (r.ok ? 'Bot activated.' : 'Start failed.');
-        if (r.ok) await this.loadClientStatus();
+        this.botMsg = r.ok ? `Stopped all strategies — squared off ${d.squared_off||0} leg(s).`
+                           : (d.detail || 'Failed.');
+        if (r.ok) { await this._loadAllDeployments(); await this.loadClientStatus(); }
       } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
       finally   { this.botLoading = false; }
     },
 
-    async stopBot() {
-      this.botMsg = ''; this.botOk = null; this.botLoading = true;
+    // Broker-specific square-off — flatten only THIS broker's app legs, keep terminal connected.
+    async squareOffBroker(b) {
+      const bid = b.binding_id;
+      if (!confirm(`Square off broker '${bid}'?\n\nThis closes ONLY this broker's app-pushed positions and stops its strategies. Other brokers are untouched. Terminal stays connected.`)) return;
+      this._initBrokerOp(bid);
+      const op = this.csBrokerOp[bid];
+      op.loading = true;
       try {
-        const r = await this._fetch('/api/client/stop_bot', { method: 'POST' });
+        const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/squareoff`, { method: 'POST' });
         if (!r) return;
         const d = await r.json();
-        this.botOk  = r.ok;
-        this.botMsg = d.message || d.detail || 'Bot deactivated.';
-        if (r.ok) await this.loadClientStatus();
-      } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
-      finally   { this.botLoading = false; }
+        op.ok  = d.ok;
+        op.msg = d.ok ? `✓ Squared off ${d.squared||0} leg(s).` : (d.error || d.detail || 'Failed.');
+        if (d.ok) { await this._loadAllDeployments(); await this.loadClientStatus(); }
+      } catch (e) { op.ok = false; op.msg = 'Request failed.'; }
+      finally { op.loading = false; }
     },
 
     async loadBrokerAccount(b) {
@@ -2082,6 +2132,12 @@ document.addEventListener('alpine:init', () => {
 
     async toggleTerminal(b) {
       const bid = b.binding_id;
+      // Confirm both directions — connecting authenticates the broker; disconnecting stops + flattens.
+      if (b.terminal_connected) {
+        if (!confirm(`Disconnect Terminal for ${bid}?\n\nThis STOPS every strategy on this broker and squares off all its open positions.`)) return;
+      } else {
+        if (!confirm(`Connect Terminal for ${bid}?\n\nThis authenticates the app with your broker so it can place orders.`)) return;
+      }
       this._initBrokerOp(bid);
       const op = this.csBrokerOp[bid];
 
@@ -2646,7 +2702,8 @@ function clientTrapInstruments() {
         const clientsData  = await clientsRes.json();
         const instrData    = await instrumentsRes.json();
         const instrMap     = instrData.ok ? instrData.instruments : {};
-        const list = clientsData.clients || clientsData || [];
+        const list = Array.isArray(clientsData.clients) ? clientsData.clients
+                   : (Array.isArray(clientsData) ? clientsData : []);   // 403/non-array safe
         this.clients = list.map(c => ({
           ...c,
           trap_instruments: instrMap[c.client_id] || [],
@@ -4076,10 +4133,33 @@ function histReplay() {
                    x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.max_trades">
           </div>
           <div>
-            <label class="sec-label">Min LTP (CE &amp; PE)</label>
+            <label class="sec-label">Entry Threshold Basis</label>
+            <div class="flex gap-2 mt-0.5 h-[34px]"
+                 x-data="{ get _eb(){ return ((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis)||'ltp'; } }">
+              <template x-for="opt in [['ltp','LTP'],['theta','THETA']]" :key="opt[0]">
+                <button type="button"
+                        class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                        :style="_eb===opt[0]
+                          ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                          : 'color:var(--t-muted);border-color:var(--t-border)'"
+                        @click="indexConfig[adminSelectedIndex].sell_straddle.entry_basis = opt[0]"
+                        x-text="opt[1]"></button>
+              </template>
+            </div>
+            <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+              How the MIN floor is measured: raw LTP or option THETA (time value).
+            </p>
+          </div>
+          <div>
+            <label class="sec-label" x-text="((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis==='theta')?'Min THETA (CE &amp; PE)':'Min LTP (CE &amp; PE)'"></label>
             <input type="number" min="0" step="5" class="t-input mt-0.5" placeholder="0 = disabled"
+                   x-show="((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis||'ltp')!=='theta'"
                    title="Both CE and PE must individually be above this value before entry is considered. Set 0 to disable."
                    x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.ltp_target">
+            <input type="number" min="0" step="5" class="t-input mt-0.5" placeholder="0 = disabled"
+                   x-show="((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis||'ltp')==='theta'"
+                   title="Both CE and PE time value (intrinsic-stripped) must be above this before entry. Set 0 to disable."
+                   x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.theta_target">
             <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
               First filter — both legs must be ≥ this. 0 = off.
             </p>
@@ -4107,11 +4187,20 @@ function histReplay() {
           </div>
           <div>
             <label class="sec-label">PRODUCT TYPE</label>
-            <select class="t-input mt-0.5"
-                    x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.product_type">
-              <option value="MIS">MIS</option>
-              <option value="NRML">NRML</option>
-            </select>
+            <!-- Toggle buttons (not a native <select>) so MIS/NRML stay readable & selectable on
+                 dark themes where the browser's native option list renders dark-on-dark. -->
+            <div class="flex gap-2 mt-0.5 h-[34px]"
+                 x-data="{ get _pt(){ return ((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.product_type)||'MIS'; } }">
+              <template x-for="opt in ['MIS','NRML']" :key="opt">
+                <button type="button"
+                        class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                        :style="_pt===opt
+                          ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                          : 'color:var(--t-muted);border-color:var(--t-border)'"
+                        @click="indexConfig[adminSelectedIndex].sell_straddle.product_type = opt"
+                        x-text="opt"></button>
+              </template>
+            </div>
             <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
               Strategy-specific; overrides broker default.
             </p>
@@ -4137,7 +4226,7 @@ function histReplay() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[])" :key="i">
-                  <div x-data="{}" class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div x-data="{}" class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic">
                       <option>AND</option><option>OR</option>
                     </select>
@@ -4208,7 +4297,7 @@ function histReplay() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[])" :key="i">
-                  <div class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
@@ -4275,7 +4364,7 @@ function histReplay() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[])" :key="i">
-                  <div class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
@@ -4479,8 +4568,23 @@ function histReplay() {
                   </label>
                 </div>
                 <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">
-                  Activates once profit reaches Lock %. Exits if profit drops to (peak &minus; Floor %) of credit.
+                  Activates once profit reaches Lock %. Exits if profit drops to (peak &minus; Floor %).
                 </p>
+                <div class="mb-2">
+                  <label class="sec-label">Basis <span style="color:var(--t-muted)">— how profit % is measured</span></label>
+                  <div class="flex gap-2 mt-0.5 h-[32px]"
+                       x-data="{ get _trb(){ return (indexConfig[adminSelectedIndex].sell_straddle.trail_basis)||'ltp'; } }">
+                    <template x-for="opt in [['ltp','LTP %'],['theta','THETA %']]" :key="opt[0]">
+                      <button type="button"
+                              class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                              :style="_trb===opt[0]
+                                ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                                : 'color:var(--t-muted);border-color:var(--t-border)'"
+                              @click="indexConfig[adminSelectedIndex].sell_straddle.trail_basis = opt[0]"
+                              x-text="opt[1]"></button>
+                    </template>
+                  </div>
+                </div>
                 <div class="grid grid-cols-2 gap-2">
                   <div>
                     <label class="sec-label">Lock at % profit</label>
@@ -4510,6 +4614,21 @@ function histReplay() {
                           x-text="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.enabled?'ENABLED':'DISABLED'"
                           :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.enabled?'var(--t-cyan)':'var(--t-muted)'}`"></span>
                   </label>
+                </div>
+                <div class="mb-2">
+                  <label class="sec-label">Basis <span style="color:var(--t-muted)">— how profit is measured</span></label>
+                  <div class="flex gap-2 mt-0.5 h-[32px]"
+                       x-data="{ get _tb(){ return (indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.basis)||'ltp'; } }">
+                    <template x-for="opt in [['ltp','LTP P&L'],['theta','THETA decay']]" :key="opt[0]">
+                      <button type="button"
+                              class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                              :style="_tb===opt[0]
+                                ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                                : 'color:var(--t-muted);border-color:var(--t-border)'"
+                              @click="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.basis = opt[0]"
+                              x-text="opt[1]"></button>
+                    </template>
+                  </div>
                 </div>
                 <div class="grid grid-cols-2 gap-2">
                   <div>
@@ -6260,6 +6379,42 @@ function histReplay() {
     <div class="sec-label mb-0.5">Onboarding</div>
     <div class="font-display text-sm font-black tracking-widest mb-4" style="color:var(--t-green)">NEW CLIENT ACCOUNT PROVISIONING</div>
 
+    <!-- ── New-client onboarding runbook (IP + whitelist steps) ── -->
+    <div class="mb-4 rounded border" style="border-color:rgba(var(--t-cyan-rgb),0.3)" x-data="{ obOpen:false }">
+      <button @click="obOpen=!obOpen" type="button"
+              class="w-full flex items-center justify-between px-4 py-2.5 font-mono text-xs font-bold"
+              style="color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06)">
+        <span>📋 NEW-CLIENT SETUP STEPS — onboarding + SEBI static-IP whitelist (ALL brokers)</span>
+        <span x-text="obOpen ? '▾' : '▸'"></span>
+      </button>
+      <div x-show="obOpen" x-cloak class="px-4 py-3 font-mono text-xs leading-relaxed space-y-3" style="color:var(--t-text)">
+        <div>
+          <div class="font-bold mb-1" style="color:var(--t-green)">1. ONBOARDING — every broker (Zerodha, AngelOne, Dhan, Upstox, Shoonya…)</div>
+          a. Create the client account below.<br>
+          b. Add the client's <strong>broker</strong> with its API credentials (api_key / api_secret / etc. per provider).<br>
+          c. Redirect/postback URL (OAuth brokers): <strong>https://&lt;your-server&gt;/callback/&lt;provider&gt;</strong>.<br>
+          d. Client clicks <strong>Terminal ON</strong> → logs in → token stored.<br>
+          e. Client opens <strong>Deploy</strong>, picks the strategy + index, then flips that strategy's <strong>Run</strong> toggle to start.
+        </div>
+        <div class="pt-2 border-t" style="border-color:var(--t-border)">
+          <div class="font-bold mb-1" style="color:var(--t-amber)">2. STATIC-IP WHITELIST — REQUIRED FOR ALL BROKERS (SEBI mandate, enforced 01-Apr-2026)</div>
+          <div style="color:var(--t-amber)" class="mb-1">⚠ Per SEBI, every broker now rejects API orders from non-whitelisted IPs. Each broker app needs a static IP. source_ip = PRIVATE 172.31.x.x · whitelist/broker console = PUBLIC 13.x.x.x. (Zerodha additionally requires the IP be globally UNIQUE per app — so a separate IP per Zerodha app.)</div>
+          <strong>AWS/EC2 (system admin), once per broker binding:</strong><br>
+          A1. EC2 → Elastic IPs → <strong>Allocate</strong> a new EIP (public 13.x.x.x).<br>
+          A2. EC2 → Instance → Networking → ENI → Manage IP addresses → <strong>Assign new IPv4</strong> (private 172.31.x.x).<br>
+          A3. Elastic IPs → the new EIP → <strong>Associate</strong> → choose the new private IP.<br>
+          A4. Verify: <span style="color:var(--t-green)">curl --interface 172.31.x.x https://ifconfig.me</span> → must print the new EIP.<br>
+          <strong class="block mt-1">In the app (admin):</strong>
+          A5. Set the broker binding's <strong>source_ip = PRIVATE IP</strong>, <strong>whitelist_ip = PUBLIC EIP</strong>.<br>
+          <strong class="block mt-1">Client (broker developer console):</strong>
+          A6. <strong>Whitelist the PUBLIC EIP (13.x.x.x)</strong> in the broker app's Allowed/Static IPs. ← the only IP the client enters.<br>
+          <strong class="block mt-1">Finish:</strong>
+          A7. <strong>Terminal OFF → ON</strong> → confirm <span style="color:var(--t-green)">pm2 logs algo | grep "source IP"</span> shows <em>bound API egress to source IP 172.31.x.x</em>. Orders now leave from the whitelisted EIP.
+        </div>
+        <div style="color:var(--t-muted)">Non-Zerodha brokers may share one static IP across clients (only Zerodha needs a unique IP per app). AWS limits: secondary private IPs per ENI depend on instance type; EIPs default 5/region (request increase to scale).</div>
+      </div>
+    </div>
+
     <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
 
       <!-- Left: identity + capital -->
@@ -6641,22 +6796,24 @@ function histReplay() {
         <div class="font-mono text-xl font-bold" :class="pnlClass(clientStatus&&clientStatus.daily_pnl||0)"
              x-text="clientStatus ? (clientStatus.daily_pnl>=0?'+':'')+'₹'+fmt(clientStatus.daily_pnl) : '—'"></div>
       </div>
-      <!-- Live status -->
+      <!-- Live status: running if any strategy is started -->
       <div class="flex items-center gap-2">
-        <div class="w-2.5 h-2.5 rounded-full" :class="csBotActive?'conn-live':''"
-             :style="`background:${csBotActive?'var(--t-green)':'var(--t-red)'}`"></div>
-        <span :class="csBotActive ? 'badge-live' : 'badge-halted'" x-text="csBotActive ? 'BOT ACTIVE' : 'BOT STOPPED'"></span>
+        <div class="w-2.5 h-2.5 rounded-full" :class="csAnyStrategyRunning?'conn-live':''"
+             :style="`background:${csAnyStrategyRunning?'var(--t-green)':'var(--t-muted)'}`"></div>
+        <span :class="csAnyStrategyRunning ? 'badge-live' : 'badge-halted'"
+              x-text="csAnyStrategyRunning ? 'RUNNING' : 'IDLE'"></span>
       </div>
-      <!-- Start / Stop -->
+      <!-- Global STOP & SQUARE-OFF — flattens the whole client across all brokers/strategies -->
       <div class="flex gap-2">
-        <button class="btn-resume px-5" @click="startBot()" :disabled="botLoading||csBotActive">
-          <span x-show="!botLoading">▶ START</span><span x-show="botLoading">…</span>
+        <button class="btn-halt px-5" @click="stopAndSquareoff()" :disabled="botLoading"
+                title="Stop every strategy on every broker for this client and square off all open positions">
+          <span x-show="!botLoading">■ STOP &amp; SQUARE-OFF</span><span x-show="botLoading">…</span>
         </button>
-        <button class="btn-halt px-5" @click="stopBot()" :disabled="botLoading||!csBotActive">■ STOP</button>
       </div>
-      <!-- Auth failure inline -->
-      <div x-show="botOk === false && botMsg" x-cloak class="w-full font-mono text-xs px-3 py-1.5 rounded"
-           style="background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.3);color:var(--t-red)"
+      <!-- Action result inline -->
+      <div x-show="botMsg" x-cloak class="w-full font-mono text-xs px-3 py-1.5 rounded"
+           :style="botOk===false ? 'background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.3);color:var(--t-red)'
+                                 : 'background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.3);color:var(--t-green)'"
            x-text="botMsg"></div>
     </div>
 
@@ -6679,9 +6836,9 @@ function histReplay() {
                x-text="clientStatus ? (clientStatus.daily_pnl>=0?'+':'')+'₹'+fmt(clientStatus.daily_pnl) : '—'"></div>
         </div>
         <div class="t-card rounded p-4">
-          <div class="sec-label mb-1">Bot</div>
-          <div class="font-ui text-lg font-bold" :style="`color:${csBotActive?'var(--t-green)':'var(--t-red)'}`"
-               x-text="csBotActive ? 'ACTIVE' : 'STOPPED'"></div>
+          <div class="sec-label mb-1">Strategies</div>
+          <div class="font-ui text-lg font-bold" :style="`color:${csAnyStrategyRunning?'var(--t-green)':'var(--t-muted)'}`"
+               x-text="(clientDeployments||[]).filter(d=>Number(d.is_running)===1).length + ' running'"></div>
         </div>
         <div class="t-card rounded p-4">
           <div class="sec-label mb-1">Brokers</div>
@@ -6951,37 +7108,31 @@ function histReplay() {
                   "></span>
                 </button>
 
-                <!-- ── TRADE TOGGLE ────────────────────────────────────────────
-                     ON = orders route to this broker. Only enabled when Terminal is ON.
-                     Terminal OFF auto-clears this toggle via disconnect endpoint. -->
-                <button @click="toggleTrade(b)"
-                        :disabled="!b.terminal_connected || (csBrokerOp[b.binding_id]||{}).tradeLoading"
-                        class="flex items-center gap-2 px-4 py-2 rounded-lg border font-mono text-sm font-bold transition-all"
-                        :title="!b.terminal_connected ? 'Connect Terminal first' : (b.is_trade_enabled ? 'Disable order routing' : 'Enable order routing')"
-                        :style="!b.terminal_connected
-                          ? 'opacity:0.35;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
-                          : (csBrokerOp[b.binding_id]||{}).tradeLoading
-                            ? 'border-color:var(--t-border);color:var(--t-muted);cursor:wait'
-                            : b.is_trade_enabled
-                              ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
-                              : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'">
-                  <template x-if="(csBrokerOp[b.binding_id]||{}).tradeLoading">
-                    <span style="display:inline-block;width:14px;height:14px;border:2px solid var(--t-muted);border-top-color:var(--t-green);border-radius:50%;animation:spin 0.7s linear infinite"></span>
+                <!-- ── PER-STRATEGY RUN TOGGLES ──────────────────────────────────
+                     One Start/Stop toggle per strategy DEPLOYED on this broker. ON = that
+                     strategy trades on this broker (needs Terminal ON); OFF = stop + square off
+                     that strategy on this broker. No deployment → no toggle. Replaces the old
+                     single Trade toggle. -->
+                <div class="flex flex-col gap-1.5 min-w-0">
+                  <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)"
+                            :key="dep.deploy_id || (b.binding_id+'_'+dep.strategy_name+'_'+dep.underlying)">
+                    <button type="button" @click.stop="toggleStrategyRun(dep, b)"
+                            class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all cursor-pointer"
+                            :title="depRunning(dep) ? 'Stop + square off this strategy on this broker' : 'Start this strategy on this broker'"
+                            :style="depRunning(dep)
+                                ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
+                                : 'background:transparent;color:var(--t-text);border-color:var(--t-border)'">
+                      <span class="w-7 h-3.5 rounded-full relative transition-all shrink-0"
+                            :style="depRunning(dep)?'background:var(--t-green)':'background:var(--t-dim)'">
+                        <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
+                              :style="depRunning(dep)?'left:16px':'left:2px'"></span>
+                      </span>
+                      <span x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap')+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                    </button>
                   </template>
-                  <template x-if="!(csBrokerOp[b.binding_id]||{}).tradeLoading">
-                    <span class="w-8 h-4 rounded-full relative transition-all"
-                          :style="b.is_trade_enabled && b.terminal_connected?'background:var(--t-green)':'background:var(--t-dim)'">
-                      <span class="absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-all"
-                            :style="b.is_trade_enabled && b.terminal_connected?'left:18px':'left:2px'"></span>
-                    </span>
-                  </template>
-                  <span x-text="
-                    (csBrokerOp[b.binding_id]||{}).tradeLoading ? 'Updating…'
-                    : (b.is_trade_enabled && b.terminal_connected ? 'Trade ON' : 'Trade OFF')
-                  "></span>
-                </button>
-
-                <!-- Engine toggle removed — execution engine is auto-managed by Trade toggle -->
+                  <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
+                        class="text-xs font-mono" style="color:var(--t-muted)">No strategies deployed — use Deploy.</span>
+                </div>
 
                 <!-- Status / error message -->
                 <div x-show="(csBrokerOp[b.binding_id]||{}).msg" class="text-xs font-mono text-right max-w-[240px]"
@@ -7028,6 +7179,14 @@ function histReplay() {
                             ? 'opacity:0.4;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
                             : 'border-color:rgba(var(--t-cyan-rgb),0.35);color:var(--t-cyan)'">
                     ⚡ Deploy
+                  </button>
+                  <!-- Broker-specific Square Off (flatten only THIS broker's app legs) -->
+                  <button @click="squareOffBroker(b)"
+                          :disabled="(csBrokerOp[b.binding_id]||{}).loading"
+                          class="text-xs px-3 py-1 rounded border font-mono transition-all"
+                          title="Square off ONLY this broker's app-pushed positions (close-own-legs) and stop its strategies. Terminal stays connected."
+                          style="border-color:rgba(var(--t-amber-rgb,245,158,11),0.4);color:var(--t-amber,#f59e0b)">
+                    ⊗ Square Off
                   </button>
                   <!-- Edit credentials -->
                   <button @click="editBroker(b)"
@@ -7451,27 +7610,35 @@ function histReplay() {
                            a min-width so columns stay aligned and never widen the card. -->
                       <div class="pos-legs">
                       <div class="pos-legs-inner space-y-1.5">
-                      <!-- Column headers -->
-                      <div class="flex items-center justify-between text-xs font-mono" style="color:var(--t-muted)">
-                        <span>SYMBOL</span>
-                        <div class="flex gap-4">
-                          <span>QTY</span><span>LOTS</span><span>LOT</span><span>ENTRY</span><span>LTP</span><span>P&amp;L</span>
-                        </div>
+                      <!-- Column headers (broker-style ledger) -->
+                      <div class="grid items-center text-xs font-mono" style="color:var(--t-muted);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
+                        <span>INSTRUMENT</span><span class="text-center">TYPE</span><span class="text-right">QTY</span>
+                        <span class="text-right">SELL</span><span class="text-right">BUY</span><span class="text-right">LTP</span>
+                        <span class="text-right">P&amp;L</span><span class="text-right">MTM</span>
                       </div>
                       <template x-for="(leg,li) in csPositions[b.binding_id][dep.strategy_name].legs||[]" :key="li">
-                        <div class="flex items-center justify-between py-1 border-t text-xs font-mono" style="border-color:var(--t-border)">
-                          <span style="color:var(--t-text)" x-text="leg.symbol"></span>
-                          <div class="flex gap-4 text-right">
-                            <span style="color:var(--t-muted)" x-text="leg.qty"></span>
-                            <span style="color:var(--t-muted)" x-text="(leg.lots!==undefined?leg.lots:'-')"></span>
-                            <span style="color:var(--t-muted)" x-text="(leg.lot_size!==undefined?leg.lot_size:'-')"></span>
-                            <span style="color:var(--t-muted)" x-text="leg.entry_price"></span>
-                            <span class="price-live" style="color:var(--t-bright)" x-text="leg.ltp||leg.entry_price"></span>
-                            <span class="font-bold" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
-                                  x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
-                          </div>
+                        <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
+                          <span style="color:var(--t-text)" x-text="leg.instrument||leg.symbol"></span>
+                          <span class="text-center px-1 rounded" style="color:var(--t-muted);border:1px solid var(--t-border)"
+                                x-text="leg.type||'—'"></span>
+                          <span class="text-right" :style="`color:${(leg.qty||0)<0?'var(--t-red)':'var(--t-green)'}`" x-text="leg.qty"></span>
+                          <span class="text-right" style="color:var(--t-muted)" x-text="(leg.sell_avg||0)>0?leg.sell_avg.toFixed(2):'—'"></span>
+                          <span class="text-right" style="color:var(--t-muted)" x-text="(leg.buy_avg||0)>0?leg.buy_avg.toFixed(2):'—'"></span>
+                          <span class="text-right price-live" style="color:var(--t-bright)" x-text="(leg.ltp||leg.entry_price)"></span>
+                          <span class="text-right font-bold" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
+                                x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
+                          <span class="text-right font-bold" :style="`color:${(leg.mtm!==undefined?leg.mtm:leg.pnl)>=0?'var(--t-green)':'var(--t-red)'}`"
+                                x-text="(((leg.mtm!==undefined?leg.mtm:leg.pnl))>=0?'+':'')+(leg.mtm!==undefined?leg.mtm:leg.pnl).toFixed(0)"></span>
                         </div>
                       </template>
+                      <!-- Totals row -->
+                      <div class="grid items-center pt-1 border-t text-xs font-mono font-bold" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
+                        <span style="color:var(--t-muted)">TOTAL</span><span></span><span></span><span></span><span></span><span></span>
+                        <span class="text-right" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
+                        <span class="text-right" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
+                      </div>
                       </div>
                       </div>
                       <!-- Booked (closed re-entries today) / Running (open legs) / Net -->
@@ -7519,7 +7686,7 @@ function histReplay() {
                   <!-- ── Straddle summary: total sold, exit basis, LTP/Theta triplets ── -->
                   <template x-if="dep.strategy_name==='sell_straddle' && csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] && csPositions[b.binding_id][dep.strategy_name].straddle">
                     <div class="mt-3 pt-2 border-t font-mono text-xs space-y-1" style="border-color:var(--t-border)"
-                         x-data="{ get ss(){ return csPositions[b.binding_id][dep.strategy_name].straddle } }">
+                         x-data="{ get ss(){ return ((csPositions[b.binding_id]||{})[dep.strategy_name]||{}).straddle || {} } }">
                       <div class="flex justify-between">
                         <span style="color:var(--t-muted)">Total Straddle Sold</span>
                         <span style="color:var(--t-bright);font-weight:700" x-text="(ss.total_value_sold||0).toFixed(2)"></span>

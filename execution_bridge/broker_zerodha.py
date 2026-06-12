@@ -146,9 +146,12 @@ class ZerodhaBroker(BaseBroker):
         # source_ip is set (the LOCAL/private IP whose EIP is whitelisted for this app), bind
         # KiteConnect's HTTP session to it so orders leave from the right public IP.
         _src = (getattr(creds, "source_ip", "") or "").strip()
+        self.egress_ip = _src
+        self.egress_bound = False
         if _src:
             try:
                 _bind_session_source_ip(self._kite, _src)
+                self.egress_bound = True
                 logger.info("ZerodhaBroker[%s]: bound API egress to source IP %s",
                             self.client_id, _src)
             except Exception as exc:

@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS strategy_deployments (
     max_sl_rs          REAL NOT NULL DEFAULT 0.0,
     squareoff_time     TEXT NOT NULL DEFAULT '15:15',
     is_active          INTEGER DEFAULT 1,
+    is_running         INTEGER DEFAULT 0,   -- per-strategy Start/Stop toggle (0 = deployed but stopped)
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
 );
@@ -403,9 +404,9 @@ class ClientDB:
                  lot_multiplier      = excluded.lot_multiplier,
                  trading_mode        = excluded.trading_mode,
                  product_type        = excluded.product_type,
-                 source_ip           = excluded.source_ip,
+                 source_ip           = CASE WHEN excluded.source_ip != '' THEN excluded.source_ip ELSE source_ip END,
                  assigned_strategy   = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_strategy ELSE assigned_strategy END,
-                 assigned_instrument = CASE WHEN excluded.assigned_strategy != '' THEN excluded.assigned_instrument ELSE assigned_instrument END""",
+                 assigned_instrument = CASE WHEN excluded.assigned_instrument != '' THEN excluded.assigned_instrument ELSE assigned_instrument END""",
             (
                 client_id, binding_id, provider, label,
                 _encode_cred(user_id),
@@ -585,6 +586,22 @@ class ClientDB:
             self._exec,
             "UPDATE strategy_deployments SET is_active=0 WHERE deploy_id=? AND client_id=?",
             (deploy_id, client_id),
+        )
+
+    async def set_deployment_running(self, deploy_id: str, client_id: str, running: bool) -> None:
+        """Per-strategy Start/Stop toggle. is_running gates whether the deployment's book trades."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET is_running=? WHERE deploy_id=? AND client_id=?",
+            (1 if running else 0, deploy_id, client_id),
+        )
+
+    async def stop_all_deployments(self, client_id: str) -> None:
+        """Global STOP — turn every deployment's run toggle OFF for a client."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET is_running=0 WHERE client_id=?",
+            (client_id,),
         )
 
     async def delete_binding(self, client_id: str, binding_id: str) -> None:
@@ -1053,6 +1070,7 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN show_granular_ticks INTEGER DEFAULT 0",
             "ALTER TABLE broker_bindings ADD COLUMN source_ip TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN whitelist_ip TEXT DEFAULT ''",
+            "ALTER TABLE strategy_deployments ADD COLUMN is_running INTEGER DEFAULT 0",
         ):
             try:
                 con.execute(migration)

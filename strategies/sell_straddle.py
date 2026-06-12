@@ -57,9 +57,12 @@ _BUF             = 600    # ring-buffer depth ≥ VWAP_WINDOW(500)
 _MARKET_OPEN     = dtime(9, 15)   # NSE session start
 
 
-def _make_strategy_logger(underlying: str) -> logging.Logger:
-    """Write per-strategy evaluation log to logs/clients/ss_{underlying}_YYYYMMDD.log"""
-    name = f"client.ss.{underlying}"
+def _make_strategy_logger(underlying: str, client_id: str = "", binding_id: str = "") -> logging.Logger:
+    """Per-strategy evaluation log. Per-binding books get their OWN file so each client's run is
+    readable in isolation: logs/clients/ss_{UND}_{client}_{binding}_{date}.log (legacy per-index
+    engine → ss_{UND}_{date}.log)."""
+    tag = f"{underlying}" + (f"_{client_id}_{binding_id}" if client_id and binding_id else "")
+    name = f"client.ss.{tag}"
     lg = logging.getLogger(name)
     if lg.handlers:
         return lg
@@ -67,8 +70,12 @@ def _make_strategy_logger(underlying: str) -> logging.Logger:
     log_dir = os.path.join("logs", "clients")
     os.makedirs(log_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    fh = logging.FileHandler(
-        os.path.join(log_dir, f"ss_{underlying}_{date_str}.log"), encoding="utf-8"
+    # RotatingFileHandler so a single book's log can't grow unbounded and fill the disk:
+    # 10 MB/file × 3 backups = 40 MB cap per book per day (auto-rolls, oldest dropped).
+    from logging.handlers import RotatingFileHandler
+    fh = RotatingFileHandler(
+        os.path.join(log_dir, f"ss_{tag}_{date_str}.log"), encoding="utf-8",
+        maxBytes=10 * 1024 * 1024, backupCount=3,
     )
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
     lg.addHandler(fh)
@@ -112,6 +119,14 @@ class StraddlePosition:
 
     # Session VWAP tracking for VWAP Rise SL
     session_min_vwap: float = float("inf")
+
+    # Trailing-SL (lock-%/floor-%) peak profit % since entry (basis ltp or theta). Highest
+    # profit% seen; once it crosses lock%, exit when profit drops floor% below this peak.
+    trail_peak_pct: float = 0.0
+
+    # Last ACCEPTED combined VWAP (dropout filter for vwap_rise): a sudden crater vs this (one
+    # leg's ATP dropping out) is rejected so it can't poison session_min_vwap → false vwap_rise.
+    vwap_last_good: float = 0.0
 
     # Day-wise THETA exit: combined option TIME VALUE (extrinsic) captured at entry. The
     # theta-based day exit measures how far the live combined time value has decayed from this.
@@ -222,6 +237,8 @@ class SellStraddleStrategy:
         cfg=None,
         underlying: str = "NIFTY",
         lot_multiplier: int = 1,
+        client_id: str = "",
+        binding_id: str = "",
     ) -> None:
         self._bus            = bus
         self._cfg            = cfg
@@ -229,6 +246,12 @@ class SellStraddleStrategy:
         self._lot_multiplier = lot_multiplier
         self._running        = False
         self._client_db      = None
+        # Per-binding refactor: when set, this is an INDEPENDENT book for exactly one
+        # (client, broker-binding). It tags its orders so the bridge routes to only that broker,
+        # gates on only that binding's Terminal+Trade, and persists under a per-binding key.
+        # Empty = legacy per-index engine (mirrors to all eligible brokers).
+        self._client_id      = client_id
+        self._binding_id     = binding_id
 
         self._position: Optional[StraddlePosition] = None
         self._trades_today: int = 0
@@ -318,7 +341,7 @@ class SellStraddleStrategy:
             "ltp": 0.0,  "close": 0.0,
         }
 
-        self._clog: logging.Logger = _make_strategy_logger(underlying)
+        self._clog: logging.Logger = _make_strategy_logger(underlying, client_id, binding_id)
         self._load_thresholds()
 
     # ── Config ────────────────────────────────────────────────────────────────
@@ -362,6 +385,9 @@ class SellStraddleStrategy:
         self._trail_sl_enabled = bool(ss.get("tsl_enabled", True))
         self._trail_lock_pct   = float(ss.get("trail_lock_pct",  20.0)) / 100.0
         self._trail_floor_pct  = float(ss.get("trail_floor_pct", 10.0)) / 100.0
+        # Trailing-SL BASIS: "ltp" → profit% = running LTP P&L / entry credit × 100 (legacy);
+        # "theta" → profit% = combined time-value decay % (pos.premium_decay_pct()).
+        self._trail_basis      = str(ss.get("trail_basis", "ltp")).lower()
 
         # VWAP Rise SL — UI saves as nested {"enabled": bool, "threshold": float}
         _vwap_sl = ss.get("vwap_rise_sl", {})
@@ -370,7 +396,10 @@ class SellStraddleStrategy:
         # Skip vwap_rise (and session_min_vwap updates) when either leg's broker ATP is stale — a
         # frozen illiquid leg (e.g. CRUDEOIL PE) must not poison the baseline → false vwap_rise.
         # 0/negative disables the freshness check. Per-index overridable like other params.
-        self._vwap_stale_sec = float(_vwap_sl.get("stale_sec", ss.get("vwap_stale_sec", 90.0)))
+        # DEFAULT is index-aware: illiquid MCX commodities (e.g. CRUDEOIL) forward-fill ATP for
+        # longer than the 90s liquid-index default, so they need a wider freshness window.
+        _stale_default = 150.0 if str(self._underlying).upper() in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER") else 90.0
+        self._vwap_stale_sec = float(_vwap_sl.get("stale_sec", ss.get("vwap_stale_sec", _stale_default)))
 
         # Ratio exit — UI saves as nested {"enabled": bool, "threshold": float}
         _ratio = ss.get("ratio_exit", {})
@@ -383,6 +412,9 @@ class SellStraddleStrategy:
         self._tsl_base_lock_rs   = float(_tsl.get("base_lock",   ss.get("tsl_base_lock_rs",   250.0)))
         self._tsl_step_profit_rs = float(_tsl.get("step_profit", ss.get("tsl_step_profit_rs",  250.0)))
         self._tsl_step_lock_rs   = float(_tsl.get("step_lock",   ss.get("tsl_step_lock_rs",    250.0)))
+        # Trailing-SL BASIS: "ltp" → profit measured from LTP P&L (legacy); "theta" → profit
+        # measured as combined TIME-VALUE decay (points). Lets the staircase trail theta decay.
+        self._tsl_basis          = str(_tsl.get("basis", ss.get("tsl_basis", "ltp"))).lower()
 
         # Day-level % guardrails — per_day[today] overrides global; enabled flag respected
         now_day = datetime.now(IST).strftime("%A").lower()
@@ -401,6 +433,14 @@ class SellStraddleStrategy:
         # Config saves as "ltp_target" or "min_ltp" or "ltp_min" — try all three
         self._ltp_target = float(
             ss.get("ltp_target") or ss.get("min_ltp") or ss.get("ltp_min") or 0.0
+        )
+        # Entry threshold BASIS — the MIN-LTP filter can instead floor on per-leg THETA
+        #   "ltp"   → each leg's raw LTP must be ≥ ltp_target (default, legacy)
+        #   "theta" → each leg's TIME VALUE must be ≥ theta_target (intrinsic-stripped)
+        # Per-day override falls back to the global sell_straddle setting.
+        self._entry_basis = str(_day.get("entry_basis", ss.get("entry_basis", "ltp"))).lower()
+        self._theta_target = float(
+            _day.get("theta_target", ss.get("theta_target") or ss.get("entry_theta_target") or 0.0)
         )
 
         # LTP Decay — fires when either CE or PE LTP falls below threshold
@@ -433,7 +473,17 @@ class SellStraddleStrategy:
 
     @property
     def _persist_key(self) -> str:
+        # Per-binding books persist independently so each restores its OWN position.
+        if self._client_id and self._binding_id:
+            return f"{self._client_id}_{self._binding_id}_{self._underlying}_sell_straddle"
         return f"{self._underlying}_sell_straddle"
+
+    async def _emit_order(self, ev) -> None:
+        """Stamp this book's identity on every order so the bridge routes to ONLY this binding
+        (no mirror), then publish. Legacy per-index engine leaves the tags empty → route-to-all."""
+        ev.client_id  = self._client_id
+        ev.binding_id = self._binding_id
+        await self._bus.publish(Topic.ORDER_REQUEST, ev)
 
     def _persist(self) -> None:
         try:
@@ -510,11 +560,13 @@ class SellStraddleStrategy:
                             self._underlying, self._position.net_credit, self._position.lot_size)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: restore failed: %s", self._underlying, exc)
+        _tag = f"{self._underlying}" + (f"_{self._client_id}_{self._binding_id}"
+                                        if self._client_id and self._binding_id else "")
         self._tasks = [
-            asyncio.create_task(self._candle_loop(), name=f"ss_{self._underlying}_candle"),
-            asyncio.create_task(self._tick_loop(),   name=f"ss_{self._underlying}_tick"),
-            asyncio.create_task(self._option_loop(), name=f"ss_{self._underlying}_opt"),
-            asyncio.create_task(self._fill_loop(),   name=f"ss_{self._underlying}_fill"),
+            asyncio.create_task(self._candle_loop(), name=f"ss_{_tag}_candle"),
+            asyncio.create_task(self._tick_loop(),   name=f"ss_{_tag}_tick"),
+            asyncio.create_task(self._option_loop(), name=f"ss_{_tag}_opt"),
+            asyncio.create_task(self._fill_loop(),   name=f"ss_{_tag}_fill"),
         ]
         async def _seed_pool():
             try:
@@ -593,20 +645,28 @@ class SellStraddleStrategy:
             "╠══════════════════════════════════════════════════════════════════════",
             f"║ TIMING: Start:{self._entry_start.strftime('%H:%M')} | EntryEnd:{self._entry_cutoff.strftime('%H:%M')} | "
             f"SquareOff:{self._force_exit.strftime('%H:%M')} | Lot:{self._lot_size} x{self._lot_multiplier}",
-            f"║ SELECTION: workflow={workflow} | pool_offset=±{offset} | Target LTP(floor):{self._ltp_target:.0f}",
+            f"║ SELECTION: workflow={workflow} | pool_offset=±{offset} | "
+            f"ENTRY BASIS:{self._entry_basis.upper()} | "
+            f"floor:{(self._theta_target if self._entry_basis=='theta' else self._ltp_target):.0f}"
+            f"({'theta' if self._entry_basis=='theta' else 'ltp'})",
             f"║ BEGINNING ENTRY: {beg}",
             f"║ RE-ENTRY GATES:  {ren}",
             f"║ ROLLOVERS: Decay:{'ON' if decay_on else 'OFF'}({self._ltp_exit_min:.0f}) | "
             f"Ratio:{'ON' if ratio_on else 'OFF'}({self._ratio_threshold:.1f}x) | SmartRoll:ON",
+            f"║ TRAILING SL: {'ON' if self._trail_sl_enabled else 'OFF'} "
+            f"Lock:{self._trail_lock_pct*100:.1f}% Floor:{self._trail_floor_pct*100:.1f}% "
+            f"BASIS:{self._trail_basis.upper()}",
             f"║ SCALABLE TSL: {'ON' if self._tsl_enabled else 'OFF'} "
             f"Base:{self._tsl_base_profit_rs:.0f}/{self._tsl_base_lock_rs:.0f} "
-            f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} (₹)",
+            f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} (₹) "
+            f"BASIS:{self._tsl_basis.upper()}",
             f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%) | "
             f"ROC GUARDRAIL: {'ON' if self._guardrail_roc_enabled else 'OFF'}"
             f"({self._guardrail_roc_tf}m T:{self._guardrail_roc_target}/SL:{self._guardrail_roc_stoploss})",
             f"║ PNL GUARDRAIL: {'ON' if self._guardrail_pnl_enabled else 'OFF'} "
             f"T:{self._guardrail_pnl_target_pts:.0f}pts SL:{self._guardrail_pnl_sl_pts:.0f}pts | "
-            f"DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}%",
+            f"DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
+            f"BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
             f"║ EXIT PRIORITY: EOD→PnLguard→Day%→LTPdecay→Ratio→ScalableTSL→ROC→VWAPrise→exit_rules",
             f"║ LIMITS: Max Daily Trades:{self._max_trades}",
@@ -1125,21 +1185,36 @@ class SellStraddleStrategy:
         self._term_check_t = _now
         active = False
         try:
-            for _client in db.get_all_clients_sync():
-                _cid = _client.get("client_id", "")
-                if not _cid:
-                    continue
-                _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(_cid)}
-                for _dep in db.get_deployments_sync(_cid):
-                    _sn = str(_dep.get("strategy_name", "")).lower()
-                    _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
-                    if _sn == "sell_straddle" and _ul == self._underlying.upper():
-                        _b = _binds.get(_dep.get("binding_id"))
-                        if _b and _b.get("engine_active") and _b.get("terminal_connected"):
-                            active = True
-                            break
-                if active:
-                    break
+            if self._client_id and self._binding_id:
+                # PER-BINDING book: gate on THIS binding's Terminal (broker connected) AND THIS
+                # deployment's per-strategy Run toggle (is_running). Other clients are irrelevant.
+                _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(self._client_id)}
+                _deps  = db.get_deployments_sync(self._client_id)
+                _dep_running = any(
+                    str(d.get("strategy_name", "")).lower() == "sell_straddle"
+                    and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper() == self._underlying.upper()
+                    and d.get("binding_id") == self._binding_id
+                    and int(d.get("is_running", 0) or 0) == 1
+                    for d in _deps
+                )
+                _b = _binds.get(self._binding_id)
+                active = bool(_dep_running and _b and _b.get("terminal_connected"))
+            else:
+                for _client in db.get_all_clients_sync():
+                    _cid = _client.get("client_id", "")
+                    if not _cid:
+                        continue
+                    _binds = {b.get("binding_id"): b for b in db.get_bindings_safe_sync(_cid)}
+                    for _dep in db.get_deployments_sync(_cid):
+                        _sn = str(_dep.get("strategy_name", "")).lower()
+                        _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
+                        if _sn == "sell_straddle" and _ul == self._underlying.upper():
+                            _b = _binds.get(_dep.get("binding_id"))
+                            if _b and _b.get("engine_active") and _b.get("terminal_connected"):
+                                active = True
+                                break
+                    if active:
+                        break
         except Exception as _exc:
             logger.debug("SellStraddle[%s]: terminal-active check error: %s", self._underlying, _exc)
             active = False
@@ -1318,7 +1393,8 @@ class SellStraddleStrategy:
         _trace: list = []
         if use_beginning_sel:
             sel = select_balanced_pair(
-                self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace
+                self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace,
+                entry_basis=self._entry_basis, theta_target=self._theta_target,
             )
         else:
             sel = scan_pool(
@@ -1326,6 +1402,7 @@ class SellStraddleStrategy:
                 rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
                 metric=ss.get("reentry_best_metric", "balanced_premium"),
                 trace=_trace,
+                entry_basis=self._entry_basis, theta_target=self._theta_target,
             )
 
         for _ln in _trace:
@@ -1449,7 +1526,7 @@ class SellStraddleStrategy:
             indicators     = dict(self._ind),
             event_id       = event_id,
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
 
     # ── Exit ─────────────────────────────────────────────────────────────────
 
@@ -1680,6 +1757,29 @@ class SellStraddleStrategy:
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 
+        # ── TRAILING SL (lock-%/floor-%-below-peak) — basis ltp | theta ──
+        # Activates once profit% crosses lock%; then exits (full) if profit drops floor%
+        # (percentage points) below the running peak. profit% measured per _trail_basis.
+        if self._trail_sl_enabled:
+            if self._trail_basis == "theta":
+                _profit_pct = pos.premium_decay_pct()
+            elif pos.net_credit > 0:
+                _profit_pct = pnl / pos.net_credit * 100.0
+            else:
+                _profit_pct = None
+            if _profit_pct is not None:
+                if _profit_pct > pos.trail_peak_pct:
+                    pos.trail_peak_pct = _profit_pct
+                _lock_pts  = self._trail_lock_pct  * 100.0
+                _floor_pts = self._trail_floor_pct * 100.0
+                if pos.trail_peak_pct >= _lock_pts and _profit_pct <= (pos.trail_peak_pct - _floor_pts):
+                    logger.info(
+                        "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → full exit",
+                        self._underlying, self._trail_basis, _profit_pct, pos.trail_peak_pct, _floor_pts,
+                    )
+                    await self._close_position(f"trailing_sl_{self._trail_basis}")
+                    return
+
         # LTP Decay → single-side roll per decayed leg (reference exit_logic step 2)
         if self._ltp_decay_enabled:
             rolled_any = False
@@ -1693,8 +1793,8 @@ class SellStraddleStrategy:
                 return
 
         # ── Exit priority below matches Option_Selling_May_2026 sell_v3 corrected order:
-        #    LTP-decay → Ratio → Scalable TSL → ROC guardrail → VWAP-Rise → exit_rules.
-        #    (No separate pct-based trailing SL — the reference uses Scalable TSL only.)
+        #    Trailing-SL (lock/floor, ltp|theta) → LTP-decay → Ratio → Scalable TSL →
+        #    ROC guardrail → VWAP-Rise → exit_rules.
 
         # 6. Ratio exit → ROLLOVER: close the LESS-PAIN (cheaper) leg and re-sell it closer,
         #    keeping the expensive (running) leg. Partner balanced against the running leg.
@@ -1712,8 +1812,16 @@ class SellStraddleStrategy:
         #    decayed/cheaper leg) — same rule as ltp_decay/ratio/vwap_rise. _single_side_roll
         #    re-pairs near ATM and closes both only if no valid partner exists.
         if self._tsl_enabled:
-            if self._check_scalable_tsl(pos, pnl):
-                logger.info("SellStraddle[%s]: SCALABLE TSL — locked=₹%.0f pnl=₹%.0f", self._underlying, pos.tsl_high_lock_rs, self._pnl_rs(pnl))
+            # Profit fed to the TSL staircase: LTP P&L (default) or combined time-value decay
+            # (points) when tsl_basis="theta" — so the trail measures theta decay, not LTP.
+            _tsl_pnl = pnl
+            if self._tsl_basis == "theta":
+                _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+                if _etv > 0:
+                    _tsl_pnl = _etv - pos.current_time_value(self._spot)
+            if self._check_scalable_tsl(pos, _tsl_pnl):
+                logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=₹%.0f pnl=₹%.0f",
+                            self._underlying, self._tsl_basis, pos.tsl_high_lock_rs, self._pnl_rs(_tsl_pnl))
                 # Roll the cheaper (decayed) leg; keep the richer (losing) leg.
                 _roll_side = "CE" if pos.ce_leg.ltp <= pos.pe_leg.ltp else "PE"
                 await self._single_side_roll(_roll_side, now, "scalable_tsl")
@@ -1763,7 +1871,14 @@ class SellStraddleStrategy:
             _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
             curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
             _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
-            if curr_vwap > 0 and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
+            # DROPOUT FILTER: a combined VWAP that suddenly craters >20% vs the last accepted
+            # reading is a single-leg ATP dropout (seen on illiquid CRUDEOIL — VWAP 435→98→435).
+            # Accepting it would set session_min to an absurd low and fire false vwap_rise on every
+            # normal tick thereafter. Skip the whole step on such a glitch (don't read/update min).
+            _glitch = (pos.vwap_last_good > 0 and curr_vwap > 0
+                       and curr_vwap < 0.80 * pos.vwap_last_good)
+            if curr_vwap > 0 and not _glitch and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
+                pos.vwap_last_good = curr_vwap
                 if curr_vwap < pos.session_min_vwap:
                     pos.session_min_vwap = curr_vwap
                 if pos.session_min_vwap < float("inf"):
@@ -1887,6 +2002,7 @@ class SellStraddleStrategy:
             self._strike_prem, self._spot, step, offset, ltp_target,
             rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
             metric=ss.get("reentry_best_metric", "balanced_premium"),
+            entry_basis=self._entry_basis, theta_target=self._theta_target,
         )
         ce_same = pe_same = False
         ce_s = pe_s = ce_l = pe_l = None
@@ -1940,7 +2056,7 @@ class SellStraddleStrategy:
         )
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         self._event_counter += 1
-        await self._bus.publish(Topic.ORDER_REQUEST, StraddleOrderEvent(
+        await self._emit_order(StraddleOrderEvent(
             action="ENTRY", underlying=self._underlying, atm=self._position.atm_at_entry,
             ce_strike=ce_s, pe_strike=pe_s, ce_ltp=ce_l, pe_ltp=pe_l,
             lot_multiplier=self._lot_multiplier, lot_size=self._lot_size, spot=self._spot,
@@ -1986,7 +2102,7 @@ class SellStraddleStrategy:
             leg_open_times={side: leg.open_time.isoformat() if leg.open_time else None},
             leg_open_reasons={side: leg.open_reason},
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
         self._session_realized_pnl_pts += leg_pnl
         logger.info("SellStraddle[%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
                     self._underlying, side, leg.strike, leg_pnl, reason)
@@ -2018,7 +2134,7 @@ class SellStraddleStrategy:
             event_id=f"{self._underlying}_OPENLEG_{side}_{self._event_counter}",
             legs=[side],
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
         logger.info("SellStraddle[%s]: OPEN LEG %s strike=%.0f @%.2f [%s]",
                     self._underlying, side, strike, ltp, reason)
 
@@ -2175,7 +2291,7 @@ class SellStraddleStrategy:
                 "PE": pos.pe_leg.open_reason,
             },
         )
-        await self._bus.publish(Topic.ORDER_REQUEST, order_ev)
+        await self._emit_order(order_ev)
 
         # Accumulate session realized P&L (in premium points)
         self._session_realized_pnl_pts += pos.realized_pnl

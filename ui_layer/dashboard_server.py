@@ -310,6 +310,9 @@ try:
     class _OIWindowSchema(_PydanticBase):
         n: int = 0   # strikes each side of ATM for the OI panel (0 = all pool strikes)
 
+    class _RunSchema(_PydanticBase):
+        running: bool = False   # per-strategy Start/Stop toggle
+
     class _FyersAuthCodeSchema(_PydanticBase):
         auth_code: str
 
@@ -588,7 +591,8 @@ class DashboardServer:
         trap_engine=None, # TrapTradingEngine — optional, for strategy telemetry
         risk_manager=None, # RiskManager — optional, for firm risk summary + kill-all
         iron_condors=None,  # List[IronCondorStrategy]
-        sell_straddles=None, # List[SellStraddleStrategy]
+        sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
+        straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
     ) -> None:
         self._bus = bus
@@ -600,7 +604,8 @@ class DashboardServer:
         self._trap_engine = trap_engine
         self._risk_manager = risk_manager
         self._iron_condors: list = iron_condors or []
-        self._sell_straddles: list = sell_straddles or []
+        self._straddle_manager = straddle_manager
+        self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -1642,6 +1647,68 @@ class DashboardServer:
             return {"ok": True, "binding_id": binding_id, "is_trade_enabled": new_state,
                     "engine_active": new_state}
 
+        # ── CLIENT — per-strategy Start/Stop toggle (the new control surface) ──
+        @app.post("/api/client/deployment/{deploy_id}/run", tags=["Client"])
+        async def api_client_deployment_run(
+            deploy_id: str, body: _RunSchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            logger.info("[StrategyRun] request cid=%s deploy_id=%s running=%s", cid, deploy_id, body.running)
+            deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
+            if dep is None:
+                logger.warning("[StrategyRun] deploy_id NOT FOUND for cid=%s — available=%s",
+                               cid, [d.get("deploy_id") for d in deps])
+                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
+            bid   = dep.get("binding_id", "")
+            strat = dep.get("strategy_name", "")
+            und   = str(dep.get("underlying", "") or "NIFTY")
+            running = bool(body.running)
+            # Start requires the broker terminal to be connected (app authenticated to broker).
+            if running:
+                binds = _srv._client_db.get_bindings_safe_sync(cid)
+                b = next((x for x in binds if x["binding_id"] == bid), None)
+                if not b or not b.get("terminal_connected"):
+                    return {"ok": False, "deploy_id": deploy_id,
+                            "error": "Terminal not connected. Switch the broker's Terminal ON first."}
+                # Hot-apply this deployment's saved config so lot/squareoff are live immediately.
+                try:
+                    from data_layer.deployment_store import load_deployment_json, apply_deployment_to_runtime_config
+                    dj = load_deployment_json(deploy_id)
+                    if dj:
+                        apply_deployment_to_runtime_config(dj)
+                except Exception as exc:
+                    logger.warning("deployment_run apply failed for %s: %s", deploy_id, exc)
+            await _srv._client_db.set_deployment_running(deploy_id, cid, running)
+            # Stop → square off THIS strategy on THIS broker only.
+            squared = 0
+            if not running and strat == "sell_straddle" and _srv._straddle_bridge is not None:
+                try:
+                    squared = await _srv._straddle_bridge.square_off_binding(
+                        cid, bid, _srv._sell_straddles, underlying=und)
+                except Exception as exc:
+                    logger.error("deployment_run square-off failed for %s: %s", deploy_id, exc)
+            logger.info("Dashboard: strategy RUN %s → %s (squared=%d)",
+                        deploy_id, "ON" if running else "OFF", squared)
+            return {"ok": True, "deploy_id": deploy_id, "running": running, "squared_off": squared}
+
+        # ── CLIENT — global STOP & SQUARE-OFF (flatten the whole client) ──────
+        @app.post("/api/client/stop_squareoff", tags=["Client"])
+        async def api_client_stop_squareoff(user: dict = Depends(_require_client)):
+            cid = user.get("client_id", "")
+            await _srv._client_db.stop_all_deployments(cid)          # all run toggles OFF
+            squared = 0
+            if _srv._straddle_bridge is not None:
+                try:
+                    for b in _srv._client_db.get_bindings_safe_sync(cid):
+                        squared += await _srv._straddle_bridge.square_off_binding(
+                            cid, b.get("binding_id", ""), _srv._sell_straddles)
+                except Exception as exc:
+                    logger.error("stop_squareoff failed for %s: %s", cid, exc)
+            logger.info("Dashboard: STOP & SQUARE-OFF %s — squared %d leg(s) across all brokers.",
+                        cid, squared)
+            return {"ok": True, "squared_off": squared}
+
         # ── ADMIN — toggle per-client granular tick-by-tick exit audit ────────
         @app.post("/api/admin/client/{client_id}/binding/{binding_id}/granular_ticks",
                   tags=["Admin"])
@@ -1775,7 +1842,7 @@ class DashboardServer:
             except Exception:
                 deployments = []
 
-            def _ic_legs(pos):
+            def _ic_legs(pos, product="NRML"):
                 out = []
                 for leg in (pos.short_ce, pos.short_pe, pos.long_ce, pos.long_pe):
                     strike = int(getattr(leg, "strike", 0))
@@ -1790,12 +1857,16 @@ class DashboardServer:
                     # sell profits when price falls; buy profits when price rises
                     pnl = round((ep - ltp) * abs(qty), 2) if side == "sell" else round((ltp - ep) * abs(qty), 2)
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} {side.upper()}",
+                                "instrument": f"{pos.underlying} {strike} {ot}",
+                                "type": product, "side": side.upper(),
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
-                                "ltp": round(ltp, 2), "pnl": pnl})
+                                "sell_avg": round(ep, 2) if side == "sell" else 0.0,
+                                "buy_avg":  round(ep, 2) if side != "sell" else 0.0,
+                                "ltp": round(ltp, 2), "pnl": pnl, "mtm": pnl})
                 return out
 
-            def _ss_legs(pos):
+            def _ss_legs(pos, product="MIS"):
                 out = []
                 for leg in (pos.ce_leg, pos.pe_leg):
                     strike = int(getattr(leg, "strike", 0))
@@ -1806,10 +1877,14 @@ class DashboardServer:
                     ltp = float(getattr(leg, "ltp", ep) or ep)
                     ls = int(getattr(pos, "lot_size", 0) or 0)
                     qty = -ls  # straddle is short both
+                    _pnl = round((ep - ltp) * abs(qty), 2)
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
+                                "instrument": f"{pos.underlying} {strike} {ot}",
+                                "type": product, "side": "SELL",
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
-                                "ltp": round(ltp, 2), "pnl": round((ep - ltp) * abs(qty), 2)})
+                                "sell_avg": round(ep, 2), "buy_avg": 0.0,
+                                "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl})
                 return out
 
             def _find(strategies, underlying):
@@ -1833,9 +1908,14 @@ class DashboardServer:
                         strat = _find(getattr(_srv, "_iron_condors", []), underlying)
                         pos = getattr(strat, "_position", None) if strat else None
                         if pos and getattr(pos, "status", "open") == "open":
-                            legs = _ic_legs(pos)
+                            try:
+                                from data_layer.runtime_config import RuntimeConfig as _RC2
+                                _icp = str(_RC2.index_section(underlying, "iron_condor").get("product_type", "NRML")).upper()
+                            except Exception:
+                                _icp = "NRML"
+                            legs = _ic_legs(pos, product=_icp if _icp in ("MIS", "NRML") else "NRML")
                     elif sname == "sell_straddle":
-                        strat = _find(getattr(_srv, "_sell_straddles", []), underlying)
+                        strat = _srv._find_ss_book(cid, bid, underlying)
                         pos = getattr(strat, "_position", None) if strat else None
                         # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
                         # source of truth shown in the History tab; survives restarts). Falls back
@@ -1855,7 +1935,12 @@ class DashboardServer:
                         except Exception:
                             booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
                         if pos and getattr(pos, "status", "open") == "open":
-                            legs = _ss_legs(pos)
+                            try:
+                                from data_layer.runtime_config import RuntimeConfig as _RC2
+                                _ssp = str(_RC2.index_section(underlying, "sell_straddle").get("product_type", "MIS")).upper()
+                            except Exception:
+                                _ssp = "MIS"
+                            legs = _ss_legs(pos, product=_ssp if _ssp in ("MIS", "NRML") else "MIS")
                         # Always surface today's exit basis; add LTP/Theta triplets when open.
                         if strat is not None:
                             _basis = str(getattr(strat, "_day_exit_basis", "ltp")).lower()
@@ -2001,12 +2086,25 @@ class DashboardServer:
             worker = getattr(reg_client, "workers", {}).get(binding_id)
             if worker is None:
                 raise HTTPException(404, f"Binding '{binding_id}' not found.")
+            # Kill = square off ALL app-pushed trades on this broker FIRST (close-own-legs only),
+            # stop its strategies, THEN halt the worker / disconnect.
+            squared = 0
+            for d in _srv._client_db.get_deployments_sync(cid):
+                if d.get("binding_id") == binding_id:
+                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            if _srv._straddle_bridge is not None:
+                try:
+                    squared = await _srv._straddle_bridge.square_off_binding(
+                        cid, binding_id, _srv._sell_straddles)
+                except Exception as exc:
+                    logger.error("kill_broker square-off failed for %s/%s: %s", cid, binding_id, exc)
             if hasattr(worker, "halt"):
                 await worker.halt()
             elif hasattr(worker, "stop"):
                 await worker.stop()
             await _srv._client_db.upsert_client(cid, **{f"trade_enabled_{binding_id}": False})
-            return {"ok": True, "message": f"Broker '{binding_id}' halted."}
+            return {"ok": True, "squared": squared,
+                    "message": f"Broker '{binding_id}' killed — squared off {squared} leg(s) & halted."}
 
         # ── CLIENT — delete broker binding ───────────────────────────────────
 
@@ -2085,6 +2183,28 @@ class DashboardServer:
             logger.info("Dashboard: broker %s/%s stopped.", cid, binding_id)
             return {"ok": True, "message": f"Broker '{binding_id}' stopped — trading disabled."}
 
+        @app.post("/api/client/broker/{binding_id}/squareoff", tags=["Client"])
+        async def api_client_broker_squareoff(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """BROKER-SPECIFIC square-off: flatten ONLY this broker's app-pushed legs (close-own-legs)
+            and stop its strategies — terminal stays connected. Distinct from the global
+            STOP & SQUARE-OFF (/api/client/stop_squareoff) which flattens every broker."""
+            cid = user.get("client_id", "")
+            for d in _srv._client_db.get_deployments_sync(cid):
+                if d.get("binding_id") == binding_id:
+                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            squared = 0
+            if _srv._straddle_bridge is not None:
+                try:
+                    squared = await _srv._straddle_bridge.square_off_binding(
+                        cid, binding_id, _srv._sell_straddles)
+                except Exception as exc:
+                    logger.error("broker squareoff failed for %s/%s: %s", cid, binding_id, exc)
+            logger.info("Dashboard: broker square-off %s/%s — %d leg(s).", cid, binding_id, squared)
+            return {"ok": True, "squared": squared,
+                    "message": f"Squared off {squared} leg(s) on '{binding_id}'."}
+
         @app.post("/api/client/broker/{binding_id}/mode", tags=["Client"])
         async def api_client_broker_mode(
             binding_id: str, body: _BrokerModeSchema, user: dict = Depends(_require_client),
@@ -2093,7 +2213,23 @@ class DashboardServer:
             if body.mode not in ("paper", "live"):
                 raise HTTPException(400, "mode must be 'paper' or 'live'.")
             await _srv._client_db.set_trading_mode(cid, binding_id, body.mode)
-            return {"ok": True, "mode": body.mode, "message": f"Mode set to {body.mode.upper()}."}
+            # Hot-swap the LIVE broker's in-memory mode so the change takes effect WITHOUT a
+            # terminal restart (order routing reads DB trading_mode per-order, but keep the broker
+            # object consistent for any broker-internal mode/product logic).
+            try:
+                broker = ((getattr(_srv._router, "_brokers", None) or {}).get(cid, {}) or {}).get(binding_id)
+                if broker is not None:
+                    broker._trading_mode_raw = "live" if body.mode == "live" else "paper"
+                    _bind = getattr(broker, "_binding", None) or getattr(broker, "_b", None)
+                    if _bind is not None:
+                        try:
+                            _bind.trading_mode = body.mode
+                        except Exception:
+                            pass
+            except Exception as exc:
+                logger.debug("mode hot-swap for %s/%s: %s", cid, binding_id, exc)
+            return {"ok": True, "mode": body.mode,
+                    "message": f"Mode set to {body.mode.upper()} (live — no restart needed)."}
 
         # ── CLIENT — Terminal toggle: Interactive OAuth Flow ─────────────────────
 
@@ -2160,6 +2296,7 @@ class DashboardServer:
                             lot_multiplier=float(_row.get("lot_multiplier", 1.0) or 1.0),
                             product_type=(_row.get("product_type", "") or "MIS"),
                             trading_mode=(_row.get("trading_mode", "paper") or "paper"),
+                            source_ip=(_row.get("source_ip", "") or ""),
                         )
                         _nb = create_broker(_bb, cid)
                         if await _nb.authenticate():
@@ -2231,6 +2368,14 @@ class DashboardServer:
             await _srv._client_db.set_terminal_connected(cid, binding_id, False)
             await _srv._client_db.set_engine_active(cid, binding_id, False)
             await _srv._client_db.set_trade_enabled(cid, binding_id, False)
+            # Terminal OFF = broker disconnected → STOP every strategy on this broker (run toggles
+            # OFF) so no book re-enters, then square off all its open legs.
+            try:
+                for d in _srv._client_db.get_deployments_sync(cid):
+                    if d.get("binding_id") == binding_id:
+                        await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            except Exception:
+                pass
             if _srv._straddle_bridge is not None:
                 try:
                     n = await _srv._straddle_bridge.square_off_binding(cid, binding_id, _srv._sell_straddles)
@@ -2509,7 +2654,7 @@ class DashboardServer:
                         provider, access_token,
                         generated_at=datetime.now(IST).isoformat(), expiry_at=_ist_eod(),
                     )
-                    _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
                     logger.info("[Callback] Dhan feeder token stored in %.1fms", elapsed)
                     return HTMLResponse(_callback_page("success", provider, "Dhan data feeder connected!"))
                 else:
@@ -2517,7 +2662,7 @@ class DashboardServer:
                     bid = match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, access_token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
-                    _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] Dhan [%s/%s] token stored, terminal=ON in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, f"Dhan broker connected!"))
 
@@ -2552,13 +2697,13 @@ class DashboardServer:
 
                 if match["scope"] == "feeder":
                     await _srv._client_db.update_feeder_token(provider, token, datetime.now(IST).isoformat(), _ist_eod())
-                    _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
                     return HTMLResponse(_callback_page("success", provider, "AliceBlue feeder connected!"))
                 else:
                     cid, bid = match["client_id"], match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
-                    _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
+                    await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] AliceBlue [%s/%s] token stored in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, "AliceBlue broker connected!"))
 
@@ -2602,7 +2747,7 @@ class DashboardServer:
                         # Start the live feed stream immediately after token is stored
                         api_key = db_row.get("api_key", "")
                         await _start_feeder_stream(_srv._feeder, provider, api_key, token)
-                        _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
+                        await _srv._bus.publish("system_event", {"type": "feeder_token_updated", "provider": provider, "ok": True})
                         logger.info("[Callback] Admin %s token stored + stream started in %.1fms", provider.upper(), elapsed)
                         return HTMLResponse(_callback_page("success", provider, "Data feeder connected and streaming!"))
                     logger.error("[Callback] Admin %s exchange failed: %s", provider, msg)
@@ -2639,6 +2784,7 @@ class DashboardServer:
                                     lot_multiplier=float(b.get("lot_multiplier", 1.0) or 1.0),
                                     product_type=(b.get("product_type", "") or "MIS"),
                                     trading_mode=(b.get("trading_mode", "paper") or "paper"),
+                                    source_ip=(b.get("source_ip", "") or ""),
                                 )
                                 _nb = create_broker(_bb, client_id)
                                 if await _nb.authenticate():
@@ -2652,7 +2798,7 @@ class DashboardServer:
                         except Exception as _re:
                             logger.warning("[Callback] [%s/%s] execution broker refresh error: %s",
                                            client_id, binding_id, _re)
-                        _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": client_id, "binding_id": binding_id, "provider": provider, "ok": True})
+                        await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": client_id, "binding_id": binding_id, "provider": provider, "ok": True})
                         logger.info("[Callback] Client [%s/%s] %s token stored, terminal=ON in %.1fms",
                                     client_id, binding_id, provider.upper(), elapsed)
                         return HTMLResponse(_callback_page("success", provider,
@@ -5048,6 +5194,28 @@ class DashboardServer:
         except Exception as exc:
             logger.warning("DashboardServer: _boot_feeder_auto_connect error: %s", exc)
 
+    @property
+    def _sell_straddles(self) -> list:
+        """Live list of SellStraddle books — per-binding from the manager, else legacy static."""
+        if self._straddle_manager is not None:
+            return self._straddle_manager.books
+        return self._sell_straddles_static
+
+    def _find_ss_book(self, client_id: str, binding_id: str, underlying: str):
+        """Locate the per-binding book for this deployment; fall back to per-underlying match."""
+        if self._straddle_manager is not None:
+            b = self._straddle_manager.find(client_id, binding_id, underlying)
+            if b is not None:
+                return b
+        u = str(underlying).upper()
+        for s in self._sell_straddles:
+            if getattr(s, "_underlying", None) == u and (
+                not getattr(s, "_client_id", "") or
+                (s._client_id == client_id and s._binding_id == binding_id)
+            ):
+                return s
+        return None
+
     def stop(self) -> None:
         self._ws_bridge.stop()
         if self._uvicorn_server is not None:
@@ -5095,7 +5263,7 @@ class DashboardServer:
                     sname = d.get("strategy_name", "")
                     u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
                     if sname == "sell_straddle":
-                        s = _find(sslist, u)
+                        s = self._find_ss_book(c.client_id, d.get("binding_id", ""), u)
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)

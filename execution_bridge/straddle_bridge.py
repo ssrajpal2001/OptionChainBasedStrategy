@@ -62,6 +62,11 @@ class StraddleOrderEvent:
     legs:           list = field(default_factory=lambda: ["CE", "PE"])  # legs to act on
     leg_open_times: dict = field(default_factory=dict)  # "CE"/"PE" -> ISO open_time (for history)
     leg_open_reasons: dict = field(default_factory=dict)  # "CE"/"PE" -> open reason code (for history)
+    # Per-binding refactor: when a per-(client,binding) book emits an order it stamps its OWN
+    # identity here, so the bridge routes to EXACTLY that broker (no mirror-to-all). Empty =
+    # legacy per-index engine → bridge keeps the old behaviour (route to all eligible brokers).
+    client_id:      str  = ""
+    binding_id:     str  = ""
 
 
 @dataclass
@@ -262,6 +267,9 @@ class StraddleExecutionBridge:
         self._q         = bus.subscribe(Topic.ORDER_REQUEST)
         # Track last ENTRY event per underlying for exit price correlation
         self._last_entry: Dict[str, StraddleOrderEvent] = {}
+        # Broker order_ids per (client, binding, underlying) → {"CE": id, "PE": id} so a
+        # later close can reference the exact orders the app opened (close-own-legs only).
+        self._order_ids: Dict[tuple, Dict[str, str]] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -300,8 +308,14 @@ class StraddleExecutionBridge:
             logger.warning("StraddleExecutionBridge: no active clients for %s %s", ev.action, ev.underlying)
             return
 
+        # Per-binding TARGETED routing: if the event is stamped with a client+binding (emitted by
+        # a per-binding book), route to ONLY that broker — never mirror to others.
+        _target = (ev.client_id, ev.binding_id) if (ev.client_id and ev.binding_id) else None
+
         routed = 0
         for client in clients:
+            if _target and client.client_id != _target[0]:
+                continue
             # Fetch live DB state for this client's bindings (checks engine_active)
             db = getattr(self._router, "_client_db", None) or getattr(self._router, "_db", None)
             live_bindings: list = []
@@ -325,23 +339,30 @@ class StraddleExecutionBridge:
             for live_b in live_bindings:
                 binding_id = live_b.get("binding_id", "")
 
-                # Gate 1: engine must be active for this broker
-                if not live_b.get("engine_active"):
+                # Targeted routing: skip every binding except the stamped one.
+                if _target and binding_id != _target[1]:
                     continue
 
-                # Gate 2: terminal must be connected
+                # Gate: terminal must be connected (broker authenticated).
                 if not live_b.get("terminal_connected"):
                     continue
 
-                # Gate 3: this binding must have a DEPLOYMENT for sell_straddle on
-                # THIS underlying. No matching deployment → this broker does not
-                # trade this strategy/instrument → skip.
-                if not any(
-                    d.get("binding_id") == binding_id
+                # Gate: this binding must have a RUNNING sell_straddle deployment on THIS
+                # underlying. The per-strategy Run toggle (is_running) is the authority now —
+                # not the binding-level engine_active (legacy events without tags still honour
+                # engine_active for back-compat).
+                _matching = [
+                    d for d in deployments
+                    if d.get("binding_id") == binding_id
                     and d.get("strategy_name") == "sell_straddle"
                     and str(d.get("underlying", "")).upper() == ev.underlying.upper()
-                    for d in deployments
-                ):
+                ]
+                if not _matching:
+                    continue
+                if _target:
+                    if not any(int(d.get("is_running", 0) or 0) == 1 for d in _matching):
+                        continue
+                elif not live_b.get("engine_active"):
                     continue
 
                 broker = (self._router._brokers or {}).get(client.client_id, {}).get(binding_id)
@@ -352,10 +373,16 @@ class StraddleExecutionBridge:
                     ev.action, ev.underlying, client.client_id, binding_id, mode,
                 )
 
-                if mode == "paper" or broker is None:
+                if broker is None:
+                    # No broker object at all → pure local simulation.
                     await self._paper_fill(ev, client.client_id, binding_id, broker)
                 else:
-                    await self._live_fill(ev, client.client_id, binding_id, broker)
+                    # PAPER and LIVE both send a REAL order to the broker (verifies
+                    # routing / IP-whitelist / token). PAPER books a local simulated fill at
+                    # the strategy LTP (the order is expected to reject for no-fund); LIVE books
+                    # the real broker fill and tracks the order_id for close-via-order-id.
+                    await self._live_fill(ev, client.client_id, binding_id, broker,
+                                          paper=(mode == "paper"))
                 routed += 1
 
         if routed == 0:
@@ -395,7 +422,8 @@ class StraddleExecutionBridge:
             logger.debug("StraddleBridge._other_active_broker_for(%s): %s", underlying, _exc)
         return False
 
-    async def square_off_binding(self, client_id: str, binding_id: str, strategies) -> int:
+    async def square_off_binding(self, client_id: str, binding_id: str, strategies,
+                                 underlying: str = "") -> int:
         """Square off (buy-to-close) the open sell-straddle legs for ONE binding's broker. When NO
         other active broker remains for the strategy, ALSO discards the strategy's logical + persisted
         position (no extra orders) so a restart won't restore a ghost. Returns legs squared off."""
@@ -409,6 +437,15 @@ class StraddleExecutionBridge:
         from config.global_config import IST as _IST
         legs_closed = 0
         for ss in (strategies or []):
+            # STRICT per-binding identity: square off ONLY the book that belongs to exactly THIS
+            # (client, binding). Every book now carries identity; a book without it is never a
+            # per-binding trading book and must not be flattened by another binding's square-off.
+            if (getattr(ss, "_client_id", "") != client_id
+                    or getattr(ss, "_binding_id", "") != binding_id):
+                continue
+            # Per-strategy square-off: restrict to one underlying when given.
+            if underlying and str(getattr(ss, "_underlying", "")).upper() != underlying.upper():
+                continue
             pos = getattr(ss, "_position", None)
             if not pos or getattr(pos, "status", "") != "open":
                 continue
@@ -516,8 +553,14 @@ class StraddleExecutionBridge:
         client_id:  str,
         binding_id: str,
         broker,
+        paper:      bool = False,
     ) -> None:
-        """Place actual SELL/BUY orders via broker API."""
+        """Place actual SELL/BUY orders via broker API.
+
+        paper=True → STILL sends the real order (so the client can verify the order routes to
+        their broker from the whitelisted IP), but books a LOCAL simulated fill at the strategy
+        LTP regardless of the broker's response (the order is expected to reject for no-fund).
+        paper=False → books the real broker average fill and keeps the order_id."""
         from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
         from data_layer.instrument_registry import REGISTRY as _REG
         from config.global_config import IST as _IST
@@ -558,6 +601,7 @@ class StraddleExecutionBridge:
                 )
                 continue
             _fallback_ltp = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
+            _mtag = "PAPER" if paper else "LIVE"
             req = OrderRequest(
                 broker_symbol=symbol,
                 exchange=order_exchange(ev.underlying),
@@ -580,24 +624,43 @@ class StraddleExecutionBridge:
                 # on EVERY live leg, so the bridge silently fell back to the strategy LTP and
                 # recorded that as the fill (→ history P&L diverged from the broker order book).
                 order_id = await broker.place_order(req)
-                order_fill = await broker.get_order_status(order_id)
-                _avg = float(getattr(order_fill, "avg_price", 0.0) or 0.0) if order_fill else 0.0
-                # A just-placed market order may not show an avg yet; only trust a real >0 fill,
-                # else fall back to the strategy LTP (entry-price integrity guard, c729394).
-                fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
-                logger.info(
-                    "[LIVE] %s %s %s order placed — %s@%.2f (order_id=%s, avg=%.2f) | client=%s",
-                    ev.action, ev.underlying, opt_type, symbol, fills[opt_type], order_id, _avg, client_id,
-                )
-                self._trade_log.log_event(client_id, binding_id,
-                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} placed @ {fills[opt_type]:.2f}")
+                if paper:
+                    # PAPER: the order went to the broker (routing/IP verified). Book a LOCAL
+                    # sim fill at the strategy LTP — do not depend on a real fill/funds.
+                    fills[opt_type] = _fallback_ltp
+                    self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(order_id)
+                    logger.info(
+                        "[PAPER] %s %s %s order routed to broker — %s@%.2f (order_id=%s, sim-fill) | client=%s",
+                        ev.action, ev.underlying, opt_type, symbol, _fallback_ltp, order_id, client_id,
+                    )
+                    self._trade_log.log_event(client_id, binding_id,
+                        f"PAPER {ev.action} {ev.underlying} {opt_type}{int(strike)} routed (order_id={order_id}) sim@{_fallback_ltp:.2f}")
+                else:
+                    order_fill = await broker.get_order_status(order_id)
+                    _avg = float(getattr(order_fill, "avg_price", 0.0) or 0.0) if order_fill else 0.0
+                    # A just-placed market order may not show an avg yet; only trust a real >0 fill,
+                    # else fall back to the strategy LTP (entry-price integrity guard, c729394).
+                    fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
+                    # Track the real broker order_id per leg so a later close references it.
+                    self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(order_id)
+                    logger.info(
+                        "[LIVE] %s %s %s order placed — %s@%.2f (order_id=%s, avg=%.2f) | client=%s",
+                        ev.action, ev.underlying, opt_type, symbol, fills[opt_type], order_id, _avg, client_id,
+                    )
+                    self._trade_log.log_event(client_id, binding_id,
+                        f"{ev.action} {ev.underlying} {opt_type}{int(strike)} placed @ {fills[opt_type]:.2f} (order_id={order_id})")
             except Exception as exc:
-                logger.error(
-                    "[LIVE] %s %s %s order FAILED: %s — falling back to LTP",
-                    ev.action, ev.underlying, opt_type, exc,
+                # PAPER: a no-fund rejection is EXPECTED — book the sim fill and continue.
+                # LIVE: order genuinely failed — fall back to LTP (entry-price integrity guard).
+                logger.log(
+                    logging.INFO if paper else logging.ERROR,
+                    "[%s] %s %s %s order rejected/failed: %s — %s",
+                    _mtag, ev.action, ev.underlying, opt_type, exc,
+                    "sim-fill (paper, expected no-fund)" if paper else "falling back to LTP",
                 )
                 self._trade_log.log_event(client_id, binding_id,
-                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} ORDER FAILED: {exc}")
+                    f"{_mtag} {ev.action} {ev.underlying} {opt_type}{int(strike)} "
+                    f"{'rejected (paper sim-fill)' if paper else 'ORDER FAILED'}: {exc}")
                 fills[opt_type] = _fallback_ltp
 
         fill_ev = StraddleFillEvent(
@@ -611,7 +674,7 @@ class StraddleExecutionBridge:
             client_id  = client_id,
             binding_id = binding_id,
             event_id   = ev.event_id,
-            paper_mode = False,
+            paper_mode = paper,
             legs       = ev.legs,
         )
 
