@@ -768,7 +768,7 @@ document.addEventListener('alpine:init', () => {
       user_id:'', api_key:'', api_secret:'',
       lot_multiplier: 1.0,
     },
-    brokerProviders: ['fyers','upstox','zerodha','dhan','angelone','aliceblue','mock'],
+    brokerProviders: ['fyers','upstox','zerodha','dhan','angelone','aliceblue','delta','mock'],
     brokerAddMsg:    '',
     brokerAddOk:     null,
     brokerAddLoading: false,
@@ -782,6 +782,7 @@ document.addEventListener('alpine:init', () => {
       dhan:      { user_id:true,  api_key:true,  api_secret:true,  label:'Dhan',         oauth:true  },
       angelone:  { user_id:false, api_key:true,  api_secret:false, label:'Angel One',    oauth:true  },
       aliceblue: { user_id:true,  api_key:true,  api_secret:true,  label:'AliceBlue',    oauth:true  },
+      delta:     { user_id:false, api_key:true,  api_secret:true,  label:'Delta Exchange (Crypto)', oauth:false },
       mock:      { user_id:false, api_key:false, api_secret:false, label:'Paper/Mock',   oauth:false },
     },
     // Per-provider human-readable field label overrides
@@ -792,6 +793,7 @@ document.addEventListener('alpine:init', () => {
       dhan:      { user_id:'CLIENT ID',           api_key:'APP ID',           api_secret:'APP SECRET'   },
       angelone:  { user_id:'CLIENT ID (optional)',api_key:'API KEY',          api_secret:'(not needed)' },
       aliceblue: { user_id:'USER ID (AliceBlue)', api_key:'APP CODE',         api_secret:'API SECRET'   },
+      delta:     { user_id:'(not needed)',        api_key:'DELTA API KEY',    api_secret:'DELTA API SECRET' },
       mock:      { user_id:'USER ID',             api_key:'API KEY',          api_secret:'API SECRET'   },
     },
     // Per-broker start/stop state
@@ -6274,7 +6276,7 @@ function histReplay() {
           <div>
             <div class="sec-label mb-1">INITIAL BROKER PROVIDER</div>
             <select class="t-input" x-model="newClient.provider">
-              <template x-for="p in ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue']" :key="p">
+              <template x-for="p in ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue','delta']" :key="p">
                 <option :value="p" x-text="p.toUpperCase()"></option>
               </template>
             </select>
