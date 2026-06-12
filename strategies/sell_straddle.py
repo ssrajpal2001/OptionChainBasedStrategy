@@ -368,6 +368,10 @@ class SellStraddleStrategy:
         self._entry_start     = _parse_time(ss.get("entry_start",    "09:20"))
         self._entry_cutoff    = _parse_time(ss.get("entry_end",      "15:15"))
         self._force_exit      = _parse_time(ss.get("squareoff_time", "15:15"))
+        # Crypto (Delta) is 24/7 with a DAILY expiry at 17:30 IST. The trading window WRAPS the day
+        # and excludes an expiry GAP [entry_cutoff, entry_start] (e.g. squareoff 16:30 → resume
+        # 18:30 on the fresh contract). NSE/MCX keep the simple same-day start<cutoff window.
+        self._is_crypto = bool(self._cfg and self._cfg.exchange.is_crypto(self._underlying))
         self._max_trades      = int(ss.get("max_trades", 1))
         # Re-entry cooldown after a FULL exit, in MINUTES (direct). Enter 5 → 5-minute
         # cooldown. Falls back to the legacy tf-multiplier × 5 for configs saved before
@@ -951,7 +955,7 @@ class SellStraddleStrategy:
         self._append_chart_point(ev.timestamp)
 
         # Force-exit
-        if now.time() >= self._force_exit:
+        if self._past_squareoff(now):
             if self._position and self._position.status == "open":
                 await self._close_position("time_exit_eod")
             return
@@ -1308,7 +1312,7 @@ class SellStraddleStrategy:
                             "(feeder running; entry starts when a client turns Terminal ON + Trade ON).",
                             self._underlying)
             return
-        if not (self._entry_start <= now.time() < self._entry_cutoff):
+        if not self._is_in_entry_window(now):
             return
         if self._trades_today >= self._max_trades:
             return
@@ -1673,7 +1677,7 @@ class SellStraddleStrategy:
             )
 
         # ── EOD FORCE SQUARE-OFF — highest priority, checked before all else ──────
-        if now.time() >= self._force_exit:
+        if self._past_squareoff(now):
             if self._position and self._position.status == "open":
                 logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
                 await self._close_position("eod_squareoff")
@@ -2322,7 +2326,19 @@ class SellStraddleStrategy:
                         self._underlying, cooldown_min, self._sl_cooldown_until.strftime("%H:%M"))
 
     def _is_in_entry_window(self, now: datetime) -> bool:
-        return self._entry_start <= now.time() < self._entry_cutoff
+        t = now.time()
+        if self._is_crypto:
+            # 24/7: allowed EXCEPT the expiry gap [entry_cutoff, entry_start] (e.g. 16:30→18:30).
+            return not (self._entry_cutoff <= t < self._entry_start)
+        return self._entry_start <= t < self._entry_cutoff
+
+    def _past_squareoff(self, now: datetime) -> bool:
+        """True when the book must be FLAT. NSE/MCX: now ≥ squareoff. Crypto: inside the daily
+        expiry gap [squareoff, entry_start] (square off before the 17:30 expiry, resume after)."""
+        t = now.time()
+        if self._is_crypto:
+            return self._force_exit <= t < self._entry_start
+        return t >= self._force_exit
 
     # ── Public accessors ─────────────────────────────────────────────────────
 
