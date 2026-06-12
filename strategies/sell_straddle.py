@@ -70,8 +70,12 @@ def _make_strategy_logger(underlying: str, client_id: str = "", binding_id: str 
     log_dir = os.path.join("logs", "clients")
     os.makedirs(log_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    fh = logging.FileHandler(
-        os.path.join(log_dir, f"ss_{tag}_{date_str}.log"), encoding="utf-8"
+    # RotatingFileHandler so a single book's log can't grow unbounded and fill the disk:
+    # 10 MB/file × 3 backups = 40 MB cap per book per day (auto-rolls, oldest dropped).
+    from logging.handlers import RotatingFileHandler
+    fh = RotatingFileHandler(
+        os.path.join(log_dir, f"ss_{tag}_{date_str}.log"), encoding="utf-8",
+        maxBytes=10 * 1024 * 1024, backupCount=3,
     )
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
     lg.addHandler(fh)
