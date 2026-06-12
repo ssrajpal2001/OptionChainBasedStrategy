@@ -398,6 +398,9 @@ class SellStraddleStrategy:
         self._tsl_base_lock_rs   = float(_tsl.get("base_lock",   ss.get("tsl_base_lock_rs",   250.0)))
         self._tsl_step_profit_rs = float(_tsl.get("step_profit", ss.get("tsl_step_profit_rs",  250.0)))
         self._tsl_step_lock_rs   = float(_tsl.get("step_lock",   ss.get("tsl_step_lock_rs",    250.0)))
+        # Trailing-SL BASIS: "ltp" → profit measured from LTP P&L (legacy); "theta" → profit
+        # measured as combined TIME-VALUE decay (points). Lets the staircase trail theta decay.
+        self._tsl_basis          = str(_tsl.get("basis", ss.get("tsl_basis", "ltp"))).lower()
 
         # Day-level % guardrails — per_day[today] overrides global; enabled flag respected
         now_day = datetime.now(IST).strftime("%A").lower()
@@ -416,6 +419,14 @@ class SellStraddleStrategy:
         # Config saves as "ltp_target" or "min_ltp" or "ltp_min" — try all three
         self._ltp_target = float(
             ss.get("ltp_target") or ss.get("min_ltp") or ss.get("ltp_min") or 0.0
+        )
+        # Entry threshold BASIS — the MIN-LTP filter can instead floor on per-leg THETA
+        #   "ltp"   → each leg's raw LTP must be ≥ ltp_target (default, legacy)
+        #   "theta" → each leg's TIME VALUE must be ≥ theta_target (intrinsic-stripped)
+        # Per-day override falls back to the global sell_straddle setting.
+        self._entry_basis = str(_day.get("entry_basis", ss.get("entry_basis", "ltp"))).lower()
+        self._theta_target = float(
+            _day.get("theta_target", ss.get("theta_target") or ss.get("entry_theta_target") or 0.0)
         )
 
         # LTP Decay — fires when either CE or PE LTP falls below threshold
@@ -1360,7 +1371,8 @@ class SellStraddleStrategy:
         _trace: list = []
         if use_beginning_sel:
             sel = select_balanced_pair(
-                self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace
+                self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace,
+                entry_basis=self._entry_basis, theta_target=self._theta_target,
             )
         else:
             sel = scan_pool(
@@ -1368,6 +1380,7 @@ class SellStraddleStrategy:
                 rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
                 metric=ss.get("reentry_best_metric", "balanced_premium"),
                 trace=_trace,
+                entry_basis=self._entry_basis, theta_target=self._theta_target,
             )
 
         for _ln in _trace:
@@ -1754,8 +1767,16 @@ class SellStraddleStrategy:
         #    decayed/cheaper leg) — same rule as ltp_decay/ratio/vwap_rise. _single_side_roll
         #    re-pairs near ATM and closes both only if no valid partner exists.
         if self._tsl_enabled:
-            if self._check_scalable_tsl(pos, pnl):
-                logger.info("SellStraddle[%s]: SCALABLE TSL — locked=₹%.0f pnl=₹%.0f", self._underlying, pos.tsl_high_lock_rs, self._pnl_rs(pnl))
+            # Profit fed to the TSL staircase: LTP P&L (default) or combined time-value decay
+            # (points) when tsl_basis="theta" — so the trail measures theta decay, not LTP.
+            _tsl_pnl = pnl
+            if self._tsl_basis == "theta":
+                _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+                if _etv > 0:
+                    _tsl_pnl = _etv - pos.current_time_value(self._spot)
+            if self._check_scalable_tsl(pos, _tsl_pnl):
+                logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=₹%.0f pnl=₹%.0f",
+                            self._underlying, self._tsl_basis, pos.tsl_high_lock_rs, self._pnl_rs(_tsl_pnl))
                 # Roll the cheaper (decayed) leg; keep the richer (losing) leg.
                 _roll_side = "CE" if pos.ce_leg.ltp <= pos.pe_leg.ltp else "PE"
                 await self._single_side_roll(_roll_side, now, "scalable_tsl")
@@ -1929,6 +1950,7 @@ class SellStraddleStrategy:
             self._strike_prem, self._spot, step, offset, ltp_target,
             rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
             metric=ss.get("reentry_best_metric", "balanced_premium"),
+            entry_basis=self._entry_basis, theta_target=self._theta_target,
         )
         ce_same = pe_same = False
         ce_s = pe_s = ce_l = pe_l = None
