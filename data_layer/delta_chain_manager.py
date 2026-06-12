@@ -95,9 +95,19 @@ class DeltaChainManager:
         if not self._unds:
             return
         self._running = True
-        ok = await self._feeder.connect()
-        if not ok:
-            logger.error("DeltaChain: feeder connect failed — crypto feed unavailable."); return
+        # Retry the WS connect forever — a feed hiccup must NOT return (run_system treats a finished
+        # task as a shutdown trigger). Keep the app alive and reconnect.
+        ok = False
+        while self._running and not ok:
+            ok = await self._feeder.connect()
+            if not ok:
+                logger.warning("DeltaChain: feeder connect failed — retrying in 10s.")
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    return
+        if not self._running:
+            return
         asyncio.create_task(self._feeder.run(), name="delta_feeder_run")
         asyncio.create_task(self._track_spot(), name="delta_spot_track")
         # rollover → re-discover + re-subscribe

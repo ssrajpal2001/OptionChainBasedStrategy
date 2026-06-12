@@ -34,7 +34,7 @@ from data_layer.universal_option_mapper import UniversalOptionMapper
 
 logger = logging.getLogger(__name__)
 
-WS_URL = "wss://api.india.delta.exchange/v2/l2updates"   # v2_ticker rides the same socket
+WS_URL = "wss://socket.india.delta.exchange"   # Delta India market-data socket (v2/ticker channel)
 
 
 class DeltaFeeder(BaseFeeder):
@@ -81,12 +81,11 @@ class DeltaFeeder(BaseFeeder):
             pass
 
     async def _heartbeat_loop(self) -> None:
-        while self._connected and self._ws is not None:
-            try:
-                await self._ws.send_json({"type": "ping"})
-            except Exception:
-                break
-            await asyncio.sleep(25)
+        # Delta keepalive: enable server heartbeats once; aiohttp's ws heartbeat=30 sends WS pings.
+        try:
+            await self._ws.send_json({"type": "enable_heartbeat"})
+        except Exception:
+            pass
 
     # ── subscription ──────────────────────────────────────────────────────────
     async def subscribe_tokens(self, tokens: List[str]) -> None:
@@ -95,7 +94,7 @@ class DeltaFeeder(BaseFeeder):
             return
         await self._ws.send_json({
             "type": "subscribe",
-            "payload": {"channels": [{"name": "v2_ticker", "symbols": list(tokens)}]},
+            "payload": {"channels": [{"name": "v2/ticker", "symbols": list(tokens)}]},
         })
         logger.info("DeltaFeeder: subscribed %d symbols.", len(tokens))
 
@@ -105,7 +104,7 @@ class DeltaFeeder(BaseFeeder):
             return
         await self._ws.send_json({
             "type": "unsubscribe",
-            "payload": {"channels": [{"name": "v2_ticker", "symbols": list(tokens)}]},
+            "payload": {"channels": [{"name": "v2/ticker", "symbols": list(tokens)}]},
         })
 
     # ── ws loop + parse (BaseFeeder two-stage pipeline) ───────────────────────
@@ -127,7 +126,7 @@ class DeltaFeeder(BaseFeeder):
             d = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
         except Exception:
             return
-        if d.get("type") != "v2_ticker":
+        if d.get("type") != "v2/ticker":
             return
         sym = str(d.get("symbol", "")).upper()
         if not sym or sym[0] not in ("C", "P"):
