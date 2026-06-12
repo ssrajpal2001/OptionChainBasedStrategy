@@ -2115,6 +2115,28 @@ class DashboardServer:
             logger.info("Dashboard: broker %s/%s stopped.", cid, binding_id)
             return {"ok": True, "message": f"Broker '{binding_id}' stopped — trading disabled."}
 
+        @app.post("/api/client/broker/{binding_id}/squareoff", tags=["Client"])
+        async def api_client_broker_squareoff(
+            binding_id: str, user: dict = Depends(_require_client),
+        ):
+            """BROKER-SPECIFIC square-off: flatten ONLY this broker's app-pushed legs (close-own-legs)
+            and stop its strategies — terminal stays connected. Distinct from the global
+            STOP & SQUARE-OFF (/api/client/stop_squareoff) which flattens every broker."""
+            cid = user.get("client_id", "")
+            for d in _srv._client_db.get_deployments_sync(cid):
+                if d.get("binding_id") == binding_id:
+                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            squared = 0
+            if _srv._straddle_bridge is not None:
+                try:
+                    squared = await _srv._straddle_bridge.square_off_binding(
+                        cid, binding_id, _srv._sell_straddles)
+                except Exception as exc:
+                    logger.error("broker squareoff failed for %s/%s: %s", cid, binding_id, exc)
+            logger.info("Dashboard: broker square-off %s/%s — %d leg(s).", cid, binding_id, squared)
+            return {"ok": True, "squared": squared,
+                    "message": f"Squared off {squared} leg(s) on '{binding_id}'."}
+
         @app.post("/api/client/broker/{binding_id}/mode", tags=["Client"])
         async def api_client_broker_mode(
             binding_id: str, body: _BrokerModeSchema, user: dict = Depends(_require_client),

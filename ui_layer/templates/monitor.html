@@ -1571,10 +1571,11 @@ document.addEventListener('alpine:init', () => {
       return {
         entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
         entry_workflow_mode: 'hybrid', ltp_target: 0, lot_size: 1,
+        entry_basis: 'ltp', theta_target: 0,
         pool_itm_depth: 4, pool_otm_depth: 4, product_type: 'MIS',
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
-        tsl_scalable:  { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
+        tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
         ratio_exit:    { enabled: false, threshold: 3.0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
@@ -1628,7 +1629,10 @@ document.addEventListener('alpine:init', () => {
       if (ss.tsl_enabled     === undefined) ss.tsl_enabled     = true;
       if (ss.trail_lock_pct  === undefined) ss.trail_lock_pct  = 20.0;
       if (ss.trail_floor_pct === undefined) ss.trail_floor_pct = 10.0;
-      if (!ss.tsl_scalable)  ss.tsl_scalable  = { enabled: false, base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
+      if (!ss.tsl_scalable)  ss.tsl_scalable  = { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 };
+      if (ss.tsl_scalable.basis === undefined) ss.tsl_scalable.basis = 'ltp';
+      if (ss.entry_basis  === undefined) ss.entry_basis  = 'ltp';
+      if (ss.theta_target === undefined) ss.theta_target = 0;
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
@@ -1972,6 +1976,24 @@ document.addEventListener('alpine:init', () => {
         if (r.ok) { await this._loadAllDeployments(); await this.loadClientStatus(); }
       } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
       finally   { this.botLoading = false; }
+    },
+
+    // Broker-specific square-off — flatten only THIS broker's app legs, keep terminal connected.
+    async squareOffBroker(b) {
+      const bid = b.binding_id;
+      if (!confirm(`Square off broker '${bid}'?\n\nThis closes ONLY this broker's app-pushed positions and stops its strategies. Other brokers are untouched. Terminal stays connected.`)) return;
+      this._initBrokerOp(bid);
+      const op = this.csBrokerOp[bid];
+      op.loading = true;
+      try {
+        const r = await this._fetch(`/api/client/broker/${encodeURIComponent(bid)}/squareoff`, { method: 'POST' });
+        if (!r) return;
+        const d = await r.json();
+        op.ok  = d.ok;
+        op.msg = d.ok ? `✓ Squared off ${d.squared||0} leg(s).` : (d.error || d.detail || 'Failed.');
+        if (d.ok) { await this._loadAllDeployments(); await this.loadClientStatus(); }
+      } catch (e) { op.ok = false; op.msg = 'Request failed.'; }
+      finally { op.loading = false; }
     },
 
     async toggleTrade(b) {
@@ -4082,10 +4104,33 @@ function histReplay() {
                    x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.max_trades">
           </div>
           <div>
-            <label class="sec-label">Min LTP (CE &amp; PE)</label>
+            <label class="sec-label">Entry Threshold Basis</label>
+            <div class="flex gap-2 mt-0.5 h-[34px]"
+                 x-data="{ get _eb(){ return ((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis)||'ltp'; } }">
+              <template x-for="opt in [['ltp','LTP'],['theta','THETA']]" :key="opt[0]">
+                <button type="button"
+                        class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                        :style="_eb===opt[0]
+                          ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                          : 'color:var(--t-muted);border-color:var(--t-border)'"
+                        @click="indexConfig[adminSelectedIndex].sell_straddle.entry_basis = opt[0]"
+                        x-text="opt[1]"></button>
+              </template>
+            </div>
+            <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+              How the MIN floor is measured: raw LTP or option THETA (time value).
+            </p>
+          </div>
+          <div>
+            <label class="sec-label" x-text="((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis==='theta')?'Min THETA (CE &amp; PE)':'Min LTP (CE &amp; PE)'"></label>
             <input type="number" min="0" step="5" class="t-input mt-0.5" placeholder="0 = disabled"
+                   x-show="((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis||'ltp')!=='theta'"
                    title="Both CE and PE must individually be above this value before entry is considered. Set 0 to disable."
                    x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.ltp_target">
+            <input type="number" min="0" step="5" class="t-input mt-0.5" placeholder="0 = disabled"
+                   x-show="((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.entry_basis||'ltp')==='theta'"
+                   title="Both CE and PE time value (intrinsic-stripped) must be above this before entry. Set 0 to disable."
+                   x-model.number="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.theta_target">
             <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
               First filter — both legs must be ≥ this. 0 = off.
             </p>
@@ -4113,11 +4158,20 @@ function histReplay() {
           </div>
           <div>
             <label class="sec-label">PRODUCT TYPE</label>
-            <select class="t-input mt-0.5"
-                    x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.product_type">
-              <option value="MIS">MIS</option>
-              <option value="NRML">NRML</option>
-            </select>
+            <!-- Toggle buttons (not a native <select>) so MIS/NRML stay readable & selectable on
+                 dark themes where the browser's native option list renders dark-on-dark. -->
+            <div class="flex gap-2 mt-0.5 h-[34px]"
+                 x-data="{ get _pt(){ return ((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.product_type)||'MIS'; } }">
+              <template x-for="opt in ['MIS','NRML']" :key="opt">
+                <button type="button"
+                        class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                        :style="_pt===opt
+                          ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                          : 'color:var(--t-muted);border-color:var(--t-border)'"
+                        @click="indexConfig[adminSelectedIndex].sell_straddle.product_type = opt"
+                        x-text="opt"></button>
+              </template>
+            </div>
             <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
               Strategy-specific; overrides broker default.
             </p>
@@ -4143,7 +4197,7 @@ function histReplay() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[])" :key="i">
-                  <div x-data="{}" class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div x-data="{}" class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic">
                       <option>AND</option><option>OR</option>
                     </select>
@@ -4214,7 +4268,7 @@ function histReplay() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[])" :key="i">
-                  <div class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
@@ -4281,7 +4335,7 @@ function histReplay() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[])" :key="i">
-                  <div class="flex flex-wrap md:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
@@ -4516,6 +4570,21 @@ function histReplay() {
                           x-text="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.enabled?'ENABLED':'DISABLED'"
                           :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.enabled?'var(--t-cyan)':'var(--t-muted)'}`"></span>
                   </label>
+                </div>
+                <div class="mb-2">
+                  <label class="sec-label">Basis <span style="color:var(--t-muted)">— how profit is measured</span></label>
+                  <div class="flex gap-2 mt-0.5 h-[32px]"
+                       x-data="{ get _tb(){ return (indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.basis)||'ltp'; } }">
+                    <template x-for="opt in [['ltp','LTP P&L'],['theta','THETA decay']]" :key="opt[0]">
+                      <button type="button"
+                              class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                              :style="_tb===opt[0]
+                                ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                                : 'color:var(--t-muted);border-color:var(--t-border)'"
+                              @click="indexConfig[adminSelectedIndex].sell_straddle.tsl_scalable.basis = opt[0]"
+                              x-text="opt[1]"></button>
+                    </template>
+                  </div>
                 </div>
                 <div class="grid grid-cols-2 gap-2">
                   <div>
@@ -7037,6 +7106,14 @@ function histReplay() {
                             ? 'opacity:0.4;cursor:not-allowed;border-color:var(--t-border);color:var(--t-muted)'
                             : 'border-color:rgba(var(--t-cyan-rgb),0.35);color:var(--t-cyan)'">
                     ⚡ Deploy
+                  </button>
+                  <!-- Broker-specific Square Off (flatten only THIS broker's app legs) -->
+                  <button @click="squareOffBroker(b)"
+                          :disabled="(csBrokerOp[b.binding_id]||{}).loading"
+                          class="text-xs px-3 py-1 rounded border font-mono transition-all"
+                          title="Square off ONLY this broker's app-pushed positions (close-own-legs) and stop its strategies. Terminal stays connected."
+                          style="border-color:rgba(var(--t-amber-rgb,245,158,11),0.4);color:var(--t-amber,#f59e0b)">
+                    ⊗ Square Off
                   </button>
                   <!-- Edit credentials -->
                   <button @click="editBroker(b)"
