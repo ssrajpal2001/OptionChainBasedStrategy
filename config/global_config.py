@@ -43,7 +43,12 @@ class ExchangeConfig:
     # Underlyings that trade on MCX (commodity segment, futures-driven ATM)
     mcx_underlyings: tuple = ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER")
 
-    # Strike granularity per index (points)
+    # Crypto (Delta Exchange) underlyings — DAILY options, 24/7, expire 17:30 IST.
+    crypto_underlyings: tuple = ("BTC", "ETH")
+
+    # Strike granularity per index (points). CRYPTO defaults are a FALLBACK ONLY — Delta strike
+    # steps are non-uniform (BTC ~200 near ATM, 400/600 wings) so the live step is discovered from
+    # DeltaBroker.discover_chain() per expiry and overrides these.
     strike_steps: Dict[str, float] = field(default_factory=lambda: {
         "NIFTY": 50.0,
         "BANKNIFTY": 100.0,
@@ -54,6 +59,9 @@ class ExchangeConfig:
         "CRUDEOIL": 100.0,
         "CRUDEOILM": 100.0,
         "NATURALGAS": 5.0,
+        # Crypto (Delta) — fallback near-ATM step; discover_chain overrides live
+        "BTC": 200.0,
+        "ETH": 20.0,
     })
 
     # Standard lot sizes (NSE/BSE current values + MCX commodity lots)
@@ -67,25 +75,38 @@ class ExchangeConfig:
         "CRUDEOIL": 100,        # 100 barrels
         "CRUDEOILM": 10,        # mini = 10 barrels
         "NATURALGAS": 1250,
+        # Crypto (Delta) — order size is in CONTRACTS (1 = min). lot_multiplier scales it.
+        "BTC": 1,
+        "ETH": 1,
     })
 
     def is_mcx(self, underlying: str) -> bool:
         """True if this underlying trades on MCX (commodity session + segment)."""
         return underlying.upper() in self.mcx_underlyings
 
+    def is_crypto(self, underlying: str) -> bool:
+        """True if this underlying trades on Delta Exchange (crypto daily options, 24/7)."""
+        return underlying.upper() in self.crypto_underlyings
+
     def session_close(self, underlying: str) -> time:
-        """Return the force-exit/close time appropriate for this underlying's exchange."""
+        """Force-exit/close time per exchange. Crypto daily options expire 17:30 IST (the rollover
+        boundary) — that's the natural square-off; MCX ~23:30; NSE 15:30."""
+        if self.is_crypto(underlying):
+            return time(17, 30, 0)
         return self.mcx_market_close if self.is_mcx(underlying) else self.market_close
 
 
 # Module-level set + helper so execution bridges can pick the order exchange
 # without threading a config object through (kept in sync with ExchangeConfig).
 _MCX_UNDERLYINGS = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
+_CRYPTO_UNDERLYINGS = {"BTC", "ETH"}
 
 
 def order_exchange(underlying: str) -> str:
-    """Zerodha/broker order exchange for an underlying: MCX (commodity), BFO (SENSEX), else NFO."""
+    """Broker order exchange for an underlying: DELTA (crypto), MCX (commodity), BFO (SENSEX), else NFO."""
     u = (underlying or "").upper()
+    if u in _CRYPTO_UNDERLYINGS:
+        return "DELTA"
     if u in _MCX_UNDERLYINGS:
         return "MCX"
     if u == "SENSEX":

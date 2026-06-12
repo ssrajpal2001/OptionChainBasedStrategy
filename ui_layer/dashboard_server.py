@@ -1229,6 +1229,56 @@ class DashboardServer:
                 "brokers": [b for b in _srv._broker_summary() if b["client_id"] == cid],
             }
 
+        @app.get("/api/client/broker/{binding_id}/account", tags=["Client"])
+        async def api_client_broker_account(binding_id: str, user: dict = Depends(_require_client)):
+            """Profile + funds + leverage from the LIVE broker (whatever the broker exposes).
+            Generic across brokers — calls get_profile()/get_funds()/get_leverage() if present.
+            Populated on Terminal-connect so the client sees their broker-side name, available funds
+            and (crypto) leverage. Returns {} fields the broker doesn't support."""
+            cid = user.get("client_id", "")
+            broker = ((getattr(_srv._router, "_brokers", None) or {}).get(cid, {}) or {}).get(binding_id)
+            if broker is None:
+                return {"ok": False, "error": "Broker not connected — turn Terminal ON first."}
+            out: dict = {"ok": True, "binding_id": binding_id,
+                         "provider": getattr(getattr(broker, "_b", None), "provider", "")
+                                     or getattr(broker, "provider", "")}
+            try:
+                if hasattr(broker, "get_profile"):
+                    p = await broker.get_profile()
+                    out["profile"] = {"name": p.get("name") or p.get("email") or p.get("user_name", ""),
+                                      "email": p.get("email", ""), "id": p.get("id", "")}
+            except Exception as exc:
+                out["profile_error"] = str(exc)
+            try:
+                if hasattr(broker, "get_funds"):
+                    out["funds"] = await broker.get_funds()
+            except Exception as exc:
+                out["funds_error"] = str(exc)
+            try:
+                if hasattr(broker, "get_leverage"):
+                    # Leverage is per-product on Delta; report the current default if the broker
+                    # tracks one, else leave for the per-product set call.
+                    out["leverage"] = getattr(broker, "_leverage", None)
+                    out["leverage_supported"] = True
+            except Exception:
+                out["leverage_supported"] = False
+            return out
+
+        @app.post("/api/client/broker/{binding_id}/leverage", tags=["Client"])
+        async def api_client_broker_set_leverage(
+            binding_id: str, body: dict, user: dict = Depends(_require_client),
+        ):
+            """Set leverage on a broker that supports it (Delta). body: {product_id, leverage}."""
+            cid = user.get("client_id", "")
+            broker = ((getattr(_srv._router, "_brokers", None) or {}).get(cid, {}) or {}).get(binding_id)
+            if broker is None or not hasattr(broker, "set_leverage"):
+                return {"ok": False, "error": "Broker does not support leverage."}
+            try:
+                ok = await broker.set_leverage(int(body.get("product_id")), float(body.get("leverage")))
+                return {"ok": bool(ok), "leverage": body.get("leverage")}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
         # ── CLIENT — live broker provisioning ────────────────────────────────
 
         @app.post("/api/client/register_broker", tags=["Client"])
