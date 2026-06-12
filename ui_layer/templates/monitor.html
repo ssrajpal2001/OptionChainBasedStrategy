@@ -1574,7 +1574,7 @@ document.addEventListener('alpine:init', () => {
         entry_basis: 'ltp', theta_target: 0,
         pool_itm_depth: 4, pool_otm_depth: 4, product_type: 'MIS',
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
-        tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0,
+        tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
         ratio_exit:    { enabled: false, threshold: 3.0 },
@@ -1633,6 +1633,7 @@ document.addEventListener('alpine:init', () => {
       if (ss.tsl_scalable.basis === undefined) ss.tsl_scalable.basis = 'ltp';
       if (ss.entry_basis  === undefined) ss.entry_basis  = 'ltp';
       if (ss.theta_target === undefined) ss.theta_target = 0;
+      if (ss.trail_basis  === undefined) ss.trail_basis  = 'ltp';
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
@@ -4539,8 +4540,23 @@ function histReplay() {
                   </label>
                 </div>
                 <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">
-                  Activates once profit reaches Lock %. Exits if profit drops to (peak &minus; Floor %) of credit.
+                  Activates once profit reaches Lock %. Exits if profit drops to (peak &minus; Floor %).
                 </p>
+                <div class="mb-2">
+                  <label class="sec-label">Basis <span style="color:var(--t-muted)">— how profit % is measured</span></label>
+                  <div class="flex gap-2 mt-0.5 h-[32px]"
+                       x-data="{ get _trb(){ return (indexConfig[adminSelectedIndex].sell_straddle.trail_basis)||'ltp'; } }">
+                    <template x-for="opt in [['ltp','LTP %'],['theta','THETA %']]" :key="opt[0]">
+                      <button type="button"
+                              class="flex-1 rounded font-mono text-xs font-bold border transition-all"
+                              :style="_trb===opt[0]
+                                ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.5)'
+                                : 'color:var(--t-muted);border-color:var(--t-border)'"
+                              @click="indexConfig[adminSelectedIndex].sell_straddle.trail_basis = opt[0]"
+                              x-text="opt[1]"></button>
+                    </template>
+                  </div>
+                </div>
                 <div class="grid grid-cols-2 gap-2">
                   <div>
                     <label class="sec-label">Lock at % profit</label>

@@ -120,6 +120,10 @@ class StraddlePosition:
     # Session VWAP tracking for VWAP Rise SL
     session_min_vwap: float = float("inf")
 
+    # Trailing-SL (lock-%/floor-%) peak profit % since entry (basis ltp or theta). Highest
+    # profit% seen; once it crosses lock%, exit when profit drops floor% below this peak.
+    trail_peak_pct: float = 0.0
+
     # Day-wise THETA exit: combined option TIME VALUE (extrinsic) captured at entry. The
     # theta-based day exit measures how far the live combined time value has decayed from this.
     entry_time_value: float = 0.0
@@ -377,6 +381,9 @@ class SellStraddleStrategy:
         self._trail_sl_enabled = bool(ss.get("tsl_enabled", True))
         self._trail_lock_pct   = float(ss.get("trail_lock_pct",  20.0)) / 100.0
         self._trail_floor_pct  = float(ss.get("trail_floor_pct", 10.0)) / 100.0
+        # Trailing-SL BASIS: "ltp" → profit% = running LTP P&L / entry credit × 100 (legacy);
+        # "theta" → profit% = combined time-value decay % (pos.premium_decay_pct()).
+        self._trail_basis      = str(ss.get("trail_basis", "ltp")).lower()
 
         # VWAP Rise SL — UI saves as nested {"enabled": bool, "threshold": float}
         _vwap_sl = ss.get("vwap_rise_sl", {})
@@ -1738,6 +1745,29 @@ class SellStraddleStrategy:
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 
+        # ── TRAILING SL (lock-%/floor-%-below-peak) — basis ltp | theta ──
+        # Activates once profit% crosses lock%; then exits (full) if profit drops floor%
+        # (percentage points) below the running peak. profit% measured per _trail_basis.
+        if self._trail_sl_enabled:
+            if self._trail_basis == "theta":
+                _profit_pct = pos.premium_decay_pct()
+            elif pos.net_credit > 0:
+                _profit_pct = pnl / pos.net_credit * 100.0
+            else:
+                _profit_pct = None
+            if _profit_pct is not None:
+                if _profit_pct > pos.trail_peak_pct:
+                    pos.trail_peak_pct = _profit_pct
+                _lock_pts  = self._trail_lock_pct  * 100.0
+                _floor_pts = self._trail_floor_pct * 100.0
+                if pos.trail_peak_pct >= _lock_pts and _profit_pct <= (pos.trail_peak_pct - _floor_pts):
+                    logger.info(
+                        "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → full exit",
+                        self._underlying, self._trail_basis, _profit_pct, pos.trail_peak_pct, _floor_pts,
+                    )
+                    await self._close_position(f"trailing_sl_{self._trail_basis}")
+                    return
+
         # LTP Decay → single-side roll per decayed leg (reference exit_logic step 2)
         if self._ltp_decay_enabled:
             rolled_any = False
@@ -1751,8 +1781,8 @@ class SellStraddleStrategy:
                 return
 
         # ── Exit priority below matches Option_Selling_May_2026 sell_v3 corrected order:
-        #    LTP-decay → Ratio → Scalable TSL → ROC guardrail → VWAP-Rise → exit_rules.
-        #    (No separate pct-based trailing SL — the reference uses Scalable TSL only.)
+        #    Trailing-SL (lock/floor, ltp|theta) → LTP-decay → Ratio → Scalable TSL →
+        #    ROC guardrail → VWAP-Rise → exit_rules.
 
         # 6. Ratio exit → ROLLOVER: close the LESS-PAIN (cheaper) leg and re-sell it closer,
         #    keeping the expensive (running) leg. Partner balanced against the running leg.
