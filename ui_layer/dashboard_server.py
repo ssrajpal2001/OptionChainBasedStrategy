@@ -2177,6 +2177,7 @@ class DashboardServer:
                             lot_multiplier=float(_row.get("lot_multiplier", 1.0) or 1.0),
                             product_type=(_row.get("product_type", "") or "MIS"),
                             trading_mode=(_row.get("trading_mode", "paper") or "paper"),
+                            source_ip=(_row.get("source_ip", "") or ""),
                         )
                         _nb = create_broker(_bb, cid)
                         if await _nb.authenticate():
@@ -2664,6 +2665,7 @@ class DashboardServer:
                                     lot_multiplier=float(b.get("lot_multiplier", 1.0) or 1.0),
                                     product_type=(b.get("product_type", "") or "MIS"),
                                     trading_mode=(b.get("trading_mode", "paper") or "paper"),
+                                    source_ip=(b.get("source_ip", "") or ""),
                                 )
                                 _nb = create_broker(_bb, client_id)
                                 if await _nb.authenticate():
