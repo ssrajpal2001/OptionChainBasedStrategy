@@ -6266,6 +6266,44 @@ function histReplay() {
     <div class="sec-label mb-0.5">Onboarding</div>
     <div class="font-display text-sm font-black tracking-widest mb-4" style="color:var(--t-green)">NEW CLIENT ACCOUNT PROVISIONING</div>
 
+    <!-- ── New-client onboarding runbook (IP + whitelist steps) ── -->
+    <div class="mb-4 rounded border" style="border-color:rgba(var(--t-cyan-rgb),0.3)" x-data="{ obOpen:false }">
+      <button @click="obOpen=!obOpen" type="button"
+              class="w-full flex items-center justify-between px-4 py-2.5 font-mono text-xs font-bold"
+              style="color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06)">
+        <span>📋 NEW-CLIENT SETUP STEPS — Zerodha IP &amp; whitelist (read before onboarding)</span>
+        <span x-text="obOpen ? '▾' : '▸'"></span>
+      </button>
+      <div x-show="obOpen" x-cloak class="px-4 py-3 font-mono text-xs leading-relaxed space-y-3" style="color:var(--t-text)">
+        <div style="color:var(--t-amber)">⚠ Each Zerodha app needs its OWN unique public IP (Zerodha static-IP is globally unique). source_ip = PRIVATE 172.31.x.x · whitelist/Kite = PUBLIC 13.x.x.x.</div>
+        <div>
+          <div class="font-bold mb-1" style="color:var(--t-cyan)">A. AWS / EC2 (system admin) — once per Zerodha binding</div>
+          1. EC2 → Elastic IPs → <strong>Allocate</strong> a new EIP (public, e.g. 13.x.x.x).<br>
+          2. EC2 → Instance → Networking → the ENI → Manage IP addresses → <strong>Assign new IPv4</strong> (private, e.g. 172.31.x.x).<br>
+          3. Elastic IPs → select the new EIP → <strong>Associate</strong> → choose the new private IP.<br>
+          4. Verify: <span style="color:var(--t-green)">curl --interface 172.31.x.x https://ifconfig.me</span> → must print the new EIP.
+        </div>
+        <div>
+          <div class="font-bold mb-1" style="color:var(--t-cyan)">B. In this app (admin)</div>
+          5. Create the client → add their <strong>Zerodha broker</strong> (api_key + api_secret).<br>
+          6. Assign that binding's egress IPs: <strong>source_ip = the PRIVATE IP (172.31.x.x)</strong>, <strong>whitelist_ip = the PUBLIC EIP (13.x.x.x)</strong>.
+        </div>
+        <div>
+          <div class="font-bold mb-1" style="color:var(--t-cyan)">C. What the CLIENT does (their Kite developer console)</div>
+          7. <strong>Whitelist the PUBLIC EIP (13.x.x.x)</strong> in the Kite app's Allowed IPs. ← the only IP the client enters.<br>
+          8. Redirect/postback URL: <strong>https://&lt;your-server&gt;/callback/zerodha</strong>.<br>
+          9. Generate token: click <strong>Terminal ON</strong> in the app and log in.
+        </div>
+        <div>
+          <div class="font-bold mb-1" style="color:var(--t-cyan)">D. Finish</div>
+          10. <strong>Terminal OFF → ON</strong> for that binding → broker binds to source_ip.<br>
+          Confirm: <span style="color:var(--t-green)">pm2 logs algo | grep "source IP"</span> → shows <em>bound API egress to source IP 172.31.x.x</em>.<br>
+          ✔ Then orders egress from the whitelisted EIP and Zerodha accepts them.
+        </div>
+        <div style="color:var(--t-muted)">Non-Zerodha brokers usually need no static IP. AWS limits: secondary private IPs per ENI depend on instance type; EIPs default 5/region (request increase to scale).</div>
+      </div>
+    </div>
+
     <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
 
       <!-- Left: identity + capital -->
