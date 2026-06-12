@@ -13,7 +13,9 @@ Two markets, fundamentally different lifecycles:
   • DELTA   : DAILY crypto options 24/7/365, suffix C/P, every contract expires 17:30 IST
               (12:00 UTC). At 17:30 IST the front-day contract dies and the next day's mints.
 
-Delta symbol format (verified shape):  {UNDERLYING}-{DDMONYY}-{STRIKE}-{C|P}   e.g. BTC-12JUN26-70000-C
+Delta India symbol format (VERIFIED live):  {C|P}-{UNDERLYING}-{STRIKE}-{DDMMYY}   e.g. C-BTC-60000-310726
+  (REST order entry uses the integer product_id from GET /v2/products, not this string.)
+  Strike steps are NON-uniform (BTC: 200 near ATM, 400/600 in the wings) → discover from products.
 """
 from __future__ import annotations
 
@@ -61,23 +63,27 @@ class UniversalOptionMapper:
         return "CE" if UniversalOptionMapper.to_short_type(option_type) == "C" else "PE"
 
     # ── Delta symbol <-> InternalSymbol ───────────────────────────────────────
+    # Delta India options symbology (VERIFIED against live /v2/products):
+    #   {C|P}-{UNDERLYING}-{STRIKE}-{DDMMYY}      e.g. C-BTC-60000-310726, P-ETH-1780-150626
+    #   settlement_time is 12:00:00Z == 17:30 IST (the daily rollover boundary).
     @staticmethod
     def to_delta_symbol(internal: InternalSymbol) -> str:
-        """InternalSymbol → 'BTC-12JUN26-70000-C'."""
-        return (f"{internal.underlying.upper()}-{internal.expiry.strftime('%d%b%y').upper()}"
-                f"-{internal.strike_int}-{UniversalOptionMapper.to_short_type(internal.option_type)}")
+        """InternalSymbol → 'C-BTC-60000-310726' (Delta India WS/market string)."""
+        return (f"{UniversalOptionMapper.to_short_type(internal.option_type)}"
+                f"-{internal.underlying.upper()}-{internal.strike_int}"
+                f"-{internal.expiry.strftime('%d%m%y')}")
 
     @staticmethod
     def parse_delta_symbol(symbol: str) -> InternalSymbol:
-        """'BTC-12JUN26-70000-C' → InternalSymbol(underlying, strike, 'CE'/'PE', expiry)."""
+        """'C-BTC-60000-310726' → InternalSymbol(underlying, strike, 'CE'/'PE', expiry)."""
         parts = str(symbol).strip().upper().split("-")
-        if len(parts) != 4:
+        if len(parts) != 4 or parts[0] not in ("C", "P"):
             raise ValueError(f"Not a Delta option symbol: {symbol!r}")
-        und, ddmonyy, strike_s, ctype = parts
-        dd, mon, yy = ddmonyy[:2], ddmonyy[2:5], ddmonyy[5:7]
-        if mon not in _MONTH_IDX:
-            raise ValueError(f"Bad month in Delta symbol: {symbol!r}")
-        exp = date(2000 + int(yy), _MONTH_IDX[mon], int(dd))
+        ctype, und, strike_s, ddmmyy = parts
+        if len(ddmmyy) != 6:
+            raise ValueError(f"Bad expiry in Delta symbol: {symbol!r}")
+        dd, mm, yy = int(ddmmyy[:2]), int(ddmmyy[2:4]), int(ddmmyy[4:6])
+        exp = date(2000 + yy, mm, dd)
         return InternalSymbol(
             underlying=und, strike=float(strike_s),
             option_type=UniversalOptionMapper.to_internal_type(ctype), expiry=exp,

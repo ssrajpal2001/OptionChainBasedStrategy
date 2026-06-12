@@ -17,17 +17,17 @@ def test_option_type_normalization():
 
 
 def test_to_delta_symbol():
-    s = InternalSymbol(underlying="BTC", strike=70000, option_type="CE", expiry=date(2026, 6, 12))
-    assert M.to_delta_symbol(s) == "BTC-12JUN26-70000-C"
-    p = InternalSymbol(underlying="ETH", strike=3500.0, option_type="PE", expiry=date(2026, 6, 12))
-    assert M.to_delta_symbol(p) == "ETH-12JUN26-3500-P"
+    s = InternalSymbol(underlying="BTC", strike=60000, option_type="CE", expiry=date(2026, 7, 31))
+    assert M.to_delta_symbol(s) == "C-BTC-60000-310726"
+    p = InternalSymbol(underlying="ETH", strike=1780.0, option_type="PE", expiry=date(2026, 6, 15))
+    assert M.to_delta_symbol(p) == "P-ETH-1780-150626"
 
 
 def test_parse_delta_symbol_roundtrip():
-    sym = "BTC-12JUN26-70000-C"
+    sym = "C-BTC-60000-310726"
     internal = M.parse_delta_symbol(sym)
-    assert internal.underlying == "BTC" and internal.strike == 70000 and internal.option_type == "CE"
-    assert internal.expiry == date(2026, 6, 12)
+    assert internal.underlying == "BTC" and internal.strike == 60000 and internal.option_type == "CE"
+    assert internal.expiry == date(2026, 7, 31)
     assert M.to_delta_symbol(internal) == sym
 
 
@@ -55,7 +55,7 @@ def test_build_internal_delta_resolves_active_expiry():
     now = datetime(2026, 6, 12, 9, 0, tzinfo=IST)
     s = M.build_internal("btc", "CALL", 70000, exchange="DELTA", now=now)
     assert s.underlying == "BTC" and s.option_type == "CE" and s.expiry == date(2026, 6, 12)
-    assert M.to_delta_symbol(s) == "BTC-12JUN26-70000-C"
+    assert M.to_delta_symbol(s) == "C-BTC-70000-120626"
 
 
 def test_build_internal_nse_requires_expiry():
