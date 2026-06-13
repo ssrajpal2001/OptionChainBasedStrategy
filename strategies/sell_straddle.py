@@ -821,6 +821,21 @@ class SellStraddleStrategy:
     def _on_fill(self, fill) -> None:
         """Handle fill confirmation — finalize entry or exit prices."""
         if fill.action == "ENTRY":
+            # ATOMICITY: the bridge aborted an asymmetric live entry (one leg only → it flattened the
+            # filled leg). Discard the optimistic position so we NEVER manage a naked leg, and roll
+            # back the trade counter so this failed attempt doesn't burn a daily trade.
+            if getattr(fill, "entry_aborted", False):
+                logger.error(
+                    "SellStraddle[%s]: ENTRY ABORTED by bridge (asymmetric fill) — discarding "
+                    "optimistic position; broker leg(s) were flattened. [%s/%s]",
+                    self._underlying, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
+                )
+                self._position = None
+                self._trades_today = max(0, self._trades_today - 1)
+                self._order_pending = False
+                self._persist()
+                self._apply_sl_cooldown()   # brief breather before retrying the entry
+                return
             if self._position and self._position.status == "open":
                 _legs = getattr(fill, "legs", ["CE", "PE"])
                 # GUARD: only adopt a fill price that is POSITIVE. A 0/missing fill (e.g. a

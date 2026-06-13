@@ -67,6 +67,7 @@ class DeltaBroker(BaseBroker):
         # Reuse the source_ip field as an optional "testnet" flag for crypto (no SEBI IP on Delta).
         self._base = TESTNET_BASE if str(getattr(binding, "source_ip", "")).lower() == "testnet" else PROD_BASE
         self._symbol_to_pid: Dict[str, int] = {}     # "C-BTC-60000-310726" -> product_id
+        self._order_pid: Dict[str, int] = {}          # order_id -> product_id (Delta cancel needs BOTH)
         self._products: Dict[str, dict] = {}          # symbol -> full product meta (tick/contract/settle)
         self._leverage: float = 1.0
 
@@ -195,12 +196,33 @@ class DeltaBroker(BaseBroker):
             body["limit_price"] = str(req.price)
         res = await self._request("POST", "/v2/orders", body)
         if res and res.get("success") and res.get("result"):
-            return str(res["result"].get("id", ""))
+            oid = str(res["result"].get("id", ""))
+            if oid:
+                self._order_pid[oid] = pid           # remember pid so we can CANCEL it later
+            return oid
         raise RuntimeError(f"Delta place_order failed: {res.get('error') if res else res}")
 
     async def cancel_order(self, order_id: str) -> bool:
-        res = await self._request("DELETE", "/v2/orders", {"id": order_id})
-        return bool(res and res.get("success"))
+        # Delta's DELETE /v2/orders requires BOTH id AND product_id. Sending only id silently
+        # fails → the order stays live and fills later as a maker (the cancel-race that left the
+        # smart executor thinking a leg was dead while Delta kept filling it). Always include pid.
+        body: Dict[str, Any] = {"id": order_id}
+        pid = self._order_pid.get(str(order_id))
+        if pid is None:
+            # Fall back: read the order to recover its product_id, then cancel.
+            try:
+                _o = ((await self._request("GET", f"/v2/orders/{order_id}")) or {}).get("result") or {}
+                pid = _o.get("product_id")
+            except Exception:
+                pid = None
+        if pid is not None:
+            body["product_id"] = int(pid)
+        res = await self._request("DELETE", "/v2/orders", body)
+        ok = bool(res and res.get("success"))
+        if not ok:
+            logger.warning("Delta cancel_order %s failed (pid=%s): %s",
+                           order_id, pid, (res or {}).get("error") if res else res)
+        return ok
 
     async def get_order_status(self, order_id: str) -> OrderFill:
         res = await self._request("GET", f"/v2/orders/{order_id}")
@@ -211,12 +233,22 @@ class DeltaBroker(BaseBroker):
         _size = int(float(o.get("size", 0) or 0))
         _unfilled = int(float(o.get("unfilled_size", _size) or 0)) if o else _size
         _filled = max(0, _size - _unfilled)
+        _state = str(o.get("state", "")).lower()
+        status = _STATUS.get(_state, OrderStatus.UNKNOWN)
+        # Robust terminal detection — _cancel_and_settle waits for a TERMINAL state, and an unmapped
+        # Delta state string (e.g. 'pending_cancel') used to read UNKNOWN forever → the executor
+        # bailed ('did not reach terminal state') while the order kept filling. Derive terminality
+        # from the fill counters when the state string isn't decisive:
+        if status == OrderStatus.UNKNOWN:
+            if _size > 0 and _unfilled == 0:
+                status = OrderStatus.COMPLETE          # fully filled regardless of state label
+            elif not o:
+                status = OrderStatus.CANCELLED         # order no longer exists → treat as terminal
         return OrderFill(
             order_id=str(order_id), broker_symbol=str(o.get("product_symbol", "")),
             side=OrderSide.BUY if str(o.get("side", "")) == "buy" else OrderSide.SELL,
             qty=_filled, avg_price=avg,
-            status=_STATUS.get(str(o.get("state", "")).lower(), OrderStatus.UNKNOWN),
-            client_id=self.client_id, raw=o,
+            status=status, client_id=self.client_id, raw=o,
         )
 
     async def get_positions(self) -> List[PositionRecord]:

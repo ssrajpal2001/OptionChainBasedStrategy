@@ -99,6 +99,9 @@ class StraddleFillEvent:
     timestamp:  datetime = field(default_factory=lambda: datetime.now(IST))
     paper_mode: bool = True
     legs:       list = field(default_factory=lambda: ["CE", "PE"])
+    # True when a LIVE ENTRY filled asymmetrically (one leg only) and the bridge flattened the filled
+    # leg and ABORTED — the strategy must discard its optimistic position, never manage a naked leg.
+    entry_aborted: bool = False
 
 
 # ── Iron Condor order events ──────────────────────────────────────────────────
@@ -598,7 +601,7 @@ class StraddleExecutionBridge:
             if not symbol:
                 logger.warning("StraddleBridge: no %s symbol for %s %d%s — skipping leg",
                                provider, ev.underlying, int(strike), opt_type)
-                return opt_type, _fallback_ltp
+                return opt_type, _fallback_ltp, 0, symbol
             try:
                 legfill = await _ex.execute_leg(
                     broker, broker_symbol=symbol, exchange=order_exchange(ev.underlying),
@@ -608,27 +611,71 @@ class StraddleExecutionBridge:
                 )
                 _avg = float(getattr(legfill, "avg_price", 0.0) or 0.0)
                 _px = _avg if _avg > 0 else _fallback_ltp
+                _fq = int(getattr(legfill, "filled_qty", 0) or 0)
                 _oids = getattr(legfill, "order_ids", []) or []
                 if _oids:
                     self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(_oids[-1])
                 logger.info("[LIVE] %s %s %s — filled %d@%.4f via %s (orders=%s) | client=%s",
-                            ev.action, ev.underlying, opt_type, getattr(legfill, "filled_qty", 0),
+                            ev.action, ev.underlying, opt_type, _fq,
                             _px, "LIMIT-chase" if _use_limit else "MARKET", _oids, client_id)
                 self._trade_log.log_event(client_id, binding_id,
                     f"{ev.action} {ev.underlying} {opt_type}{int(strike)} filled "
-                    f"{getattr(legfill, 'filled_qty', 0)}@{_px:.4f} "
-                    f"({'LIMIT-chase' if _use_limit else 'MARKET'}; orders={_oids})")
-                return opt_type, _px
+                    f"{_fq}@{_px:.4f} ({'LIMIT-chase' if _use_limit else 'MARKET'}; orders={_oids})")
+                return opt_type, _px, _fq, symbol
             except Exception as exc:
                 logger.error("[LIVE] %s %s %s order FAILED: %s — falling back to LTP",
                              ev.action, ev.underlying, opt_type, exc)
                 self._trade_log.log_event(client_id, binding_id,
                     f"LIVE {ev.action} {ev.underlying} {opt_type}{int(strike)} ORDER FAILED: {exc}")
-                return opt_type, _fallback_ltp
+                return opt_type, _fallback_ltp, 0, symbol
 
         _legs = [(ot, st) for ot, st in (("CE", ev.ce_strike), ("PE", ev.pe_strike)) if ot in ev.legs]
         _results = await asyncio.gather(*[_do_leg(ot, st) for ot, st in _legs])
-        fills = {ot: px for ot, px in _results}
+        fills = {ot: px for ot, px, _fq, _sym in _results}
+        filled_qty_by_leg = {ot: _fq for ot, _px, _fq, _sym in _results}
+        symbol_by_leg = {ot: _sym for ot, _px, _fq, _sym in _results}
+
+        # ── ATOMICITY GUARD (live ENTRY) — never keep a one-sided straddle ──────────────────────
+        # If an ENTRY filled asymmetrically (a leg got 0 / partial fills — the Delta cancel-race),
+        # FLATTEN whatever DID fill and ABORT, rather than manage a naked leg. (Policy: flatten+abort.)
+        if ev.action == "ENTRY" and not paper:
+            _full = [ot for ot in fills if filled_qty_by_leg.get(ot, 0) >= qty]
+            _partial = [ot for ot in fills if 0 < filled_qty_by_leg.get(ot, 0) < qty]
+            _any_filled = [ot for ot in fills if filled_qty_by_leg.get(ot, 0) > 0]
+            if _any_filled and len(_full) < len(_legs):
+                logger.error("[LIVE] %s ENTRY ASYMMETRIC — filled %s; FLATTENING + ABORTING (no naked leg). client=%s",
+                             ev.underlying, filled_qty_by_leg, client_id)
+                self._trade_log.log_event(client_id, binding_id,
+                    f"ENTRY ABORT {ev.underlying} asymmetric fill {filled_qty_by_leg} — flattening filled legs")
+                _close_side = OrderSide.BUY if side == OrderSide.SELL else OrderSide.SELL
+                for ot in _any_filled:
+                    _sym = symbol_by_leg.get(ot)
+                    _fq = filled_qty_by_leg.get(ot, 0)
+                    if not _sym or _fq <= 0:
+                        continue
+                    try:
+                        _req = OrderRequest(broker_symbol=_sym, exchange=order_exchange(ev.underlying),
+                                            side=_close_side, qty=int(_fq), order_type=OrderType.MARKET,
+                                            product=_ss_product, tag=f"SS_{ev.underlying}_ABORT"[:20],
+                                            client_id=client_id)
+                        _oid = await broker.place_order(_req)
+                        logger.info("[LIVE] %s ENTRY-ABORT flatten %s %d → order %s | client=%s",
+                                    ev.underlying, ot, int(_fq), _oid, client_id)
+                        self._trade_log.log_event(client_id, binding_id,
+                            f"ENTRY ABORT flatten {ev.underlying} {ot} {int(_fq)} → {_oid}")
+                    except Exception as exc:
+                        logger.error("[LIVE] %s ENTRY-ABORT flatten %s FAILED: %s — RECONCILE MANUALLY. client=%s",
+                                     ev.underlying, ot, exc, client_id)
+                        self._trade_log.log_event(client_id, binding_id,
+                            f"ENTRY ABORT flatten {ev.underlying} {ot} FAILED: {exc} — RECONCILE MANUALLY")
+                # Tell the strategy to discard its optimistic position — entry never established.
+                abort_ev = StraddleFillEvent(
+                    action="ENTRY", underlying=ev.underlying, atm=ev.atm,
+                    ce_strike=ev.ce_strike, pe_strike=ev.pe_strike, ce_fill=0.0, pe_fill=0.0,
+                    client_id=client_id, binding_id=binding_id, event_id=ev.event_id,
+                    paper_mode=paper, legs=ev.legs, entry_aborted=True)
+                await self._bus.publish(Topic.ORDER_FILL, abort_ev)
+                return
 
         fill_ev = StraddleFillEvent(
             action     = ev.action,
