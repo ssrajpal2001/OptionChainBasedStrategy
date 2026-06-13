@@ -1149,10 +1149,13 @@ class SellStraddleStrategy:
                 self._underlying, wait_min, ready_at.strftime("%H:%M"),
             )
             return True
-        remaining = int((ready_at - now).total_seconds() / 60)
-        logger.debug(
-            "SellStraddle[%s]: priming — %d min remaining (ready at %s)",
-            self._underlying, remaining, ready_at.strftime("%H:%M"),
+        remaining = max(0, int((ready_at - now).total_seconds() / 60.0 + 0.999))
+        logger.info(
+            "SellStraddle[%s]: priming — ~%d min remaining (ready %s; wait=%d min from your rules: "
+            "max_tf=%d ×%d slope)",
+            self._underlying, remaining, ready_at.strftime("%H:%M"), wait_min,
+            max((int(r.get("tf", 1)) for r in rules if r.get("tf")), default=1),
+            2 if wait_min > max((int(r.get("tf", 1)) for r in rules if r.get("tf")), default=1) else 1,
         )
         return False
 
