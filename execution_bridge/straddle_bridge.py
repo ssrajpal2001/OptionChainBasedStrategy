@@ -621,22 +621,18 @@ class StraddleExecutionBridge:
         if _ss_product not in ("MIS", "NRML"):
             _ss_product = "MIS"
 
-        fills = {}
-        for opt_type, strike in [("CE", ev.ce_strike), ("PE", ev.pe_strike)]:
-            if opt_type not in ev.legs:
-                continue
+        # Crypto (Delta, wide spreads) → LIMIT-at-mid with chase→market via SmartOrderExecutor; NSE/MCX
+        # → MARKET. Both legs execute CONCURRENTLY so neither sits half-on while the other is worked
+        # (minimises naked-leg risk during a chase). Position is booked from the REAL fill, not LTP.
+        _use_limit = (order_exchange(ev.underlying) == "DELTA")
+
+        async def _do_leg(opt_type, strike):
             symbol = _resolve_option_symbol(ev.underlying, expiry, int(strike), opt_type, provider)
-            if not symbol:
-                logger.warning(
-                    "StraddleBridge: no %s symbol for %s %d%s exp=%s — skipping leg",
-                    provider, ev.underlying, int(strike), opt_type, expiry,
-                )
-                continue
             _fallback_ltp = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
-            # Crypto (Delta, wide spreads) → LIMIT-at-mid with chase→market via the SmartOrderExecutor
-            # to avoid giving up the spread. NSE/MCX (liquid) → MARKET. Either way the position is
-            # booked from the REAL volume-weighted fill the executor returns — never the feed LTP.
-            _use_limit = (order_exchange(ev.underlying) == "DELTA")
+            if not symbol:
+                logger.warning("StraddleBridge: no %s symbol for %s %d%s — skipping leg",
+                               provider, ev.underlying, int(strike), opt_type)
+                return opt_type, _fallback_ltp
             try:
                 legfill = await self._executor.execute_leg(
                     broker, broker_symbol=symbol, exchange=order_exchange(ev.underlying),
@@ -645,25 +641,28 @@ class StraddleExecutionBridge:
                     use_limit=_use_limit, tick=0.0,
                 )
                 _avg = float(getattr(legfill, "avg_price", 0.0) or 0.0)
-                fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
+                _px = _avg if _avg > 0 else _fallback_ltp
                 _oids = getattr(legfill, "order_ids", []) or []
                 if _oids:
                     self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(_oids[-1])
-                logger.info(
-                    "[LIVE] %s %s %s — filled %d@%.4f via %s (orders=%s) | client=%s",
-                    ev.action, ev.underlying, opt_type, getattr(legfill, "filled_qty", 0),
-                    fills[opt_type], "LIMIT-chase" if _use_limit else "MARKET", _oids, client_id,
-                )
+                logger.info("[LIVE] %s %s %s — filled %d@%.4f via %s (orders=%s) | client=%s",
+                            ev.action, ev.underlying, opt_type, getattr(legfill, "filled_qty", 0),
+                            _px, "LIMIT-chase" if _use_limit else "MARKET", _oids, client_id)
                 self._trade_log.log_event(client_id, binding_id,
                     f"{ev.action} {ev.underlying} {opt_type}{int(strike)} filled "
-                    f"{getattr(legfill, 'filled_qty', 0)}@{fills[opt_type]:.4f} "
+                    f"{getattr(legfill, 'filled_qty', 0)}@{_px:.4f} "
                     f"({'LIMIT-chase' if _use_limit else 'MARKET'}; orders={_oids})")
+                return opt_type, _px
             except Exception as exc:
                 logger.error("[LIVE] %s %s %s order FAILED: %s — falling back to LTP",
                              ev.action, ev.underlying, opt_type, exc)
                 self._trade_log.log_event(client_id, binding_id,
                     f"LIVE {ev.action} {ev.underlying} {opt_type}{int(strike)} ORDER FAILED: {exc}")
-                fills[opt_type] = _fallback_ltp
+                return opt_type, _fallback_ltp
+
+        _legs = [(ot, st) for ot, st in (("CE", ev.ce_strike), ("PE", ev.pe_strike)) if ot in ev.legs]
+        _results = await asyncio.gather(*[_do_leg(ot, st) for ot, st in _legs])
+        fills = {ot: px for ot, px in _results}
 
         fill_ev = StraddleFillEvent(
             action     = ev.action,
