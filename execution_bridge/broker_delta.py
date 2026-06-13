@@ -206,10 +206,15 @@ class DeltaBroker(BaseBroker):
         res = await self._request("GET", f"/v2/orders/{order_id}")
         o = (res or {}).get("result") or {}
         avg = float(o.get("average_fill_price") or 0.0) if o else 0.0
+        # FILLED qty = size − unfilled_size (NOT the order size). Returning the order size made a
+        # working/cancelled order look fully filled → the smart executor double-counted on a chase.
+        _size = int(float(o.get("size", 0) or 0))
+        _unfilled = int(float(o.get("unfilled_size", _size) or 0)) if o else _size
+        _filled = max(0, _size - _unfilled)
         return OrderFill(
             order_id=str(order_id), broker_symbol=str(o.get("product_symbol", "")),
             side=OrderSide.BUY if str(o.get("side", "")) == "buy" else OrderSide.SELL,
-            qty=int(o.get("size", 0) or 0), avg_price=avg,
+            qty=_filled, avg_price=avg,
             status=_STATUS.get(str(o.get("state", "")).lower(), OrderStatus.UNKNOWN),
             client_id=self.client_id, raw=o,
         )

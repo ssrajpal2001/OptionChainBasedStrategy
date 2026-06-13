@@ -122,3 +122,29 @@ def test_partial_then_market_remainder():
     assert fill.filled_qty == 10 and fill.completed
     # VWAP: 4@102 + 6@104 = (408+624)/10 = 103.2
     assert abs(fill.avg_price - 103.2) < 1e-6
+
+
+def test_maker_fills_during_settle_no_double():
+    """The PRODUCTION bug: a resting LIMIT (maker) still shows OPEN right after cancel, then fills a
+    moment later. The executor must WAIT for the terminal state (settle), book that fill, and NOT
+    place another order — otherwise it double-sells (12 instead of 6)."""
+    b = _MockBroker(script=[("open", 0, 0.0)])
+    polls = {"n": 0}
+    base_status = b.get_order_status
+
+    async def _status(oid):
+        # O0: OPEN for the first 2 polls after cancel, then COMPLETE (maker fills late).
+        if oid == "O0" and oid in b.cancelled:
+            polls["n"] += 1
+            if polls["n"] >= 2:
+                return OrderFill(order_id=oid, broker_symbol="X", side=OrderSide.SELL,
+                                 qty=10, avg_price=101.5, status=OrderStatus.COMPLETE)
+            return OrderFill(order_id=oid, broker_symbol="X", side=OrderSide.SELL,
+                             qty=0, avg_price=0.0, status=OrderStatus.OPEN)
+        return await base_status(oid)
+    b.get_order_status = _status
+
+    fill = _leg(b, use_limit=True)
+    assert fill.filled_qty == 10                          # booked the late maker fill
+    assert not any(p[0].endswith("MARKET") for p in b.placed)   # NO extra order → no double-fill
+    assert len([p for p in b.placed if p[0].endswith("LIMIT")]) == 1   # only the one limit

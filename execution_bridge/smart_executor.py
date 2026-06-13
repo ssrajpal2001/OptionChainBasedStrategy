@@ -44,10 +44,11 @@ def _round_tick(price: float, tick: float) -> float:
 
 class SmartOrderExecutor:
     def __init__(self, fill_timeout_sec: float = 4.0, chase_attempts: int = 2,
-                 poll_interval: float = 0.5) -> None:
+                 poll_interval: float = 0.5, settle_timeout_sec: float = 6.0) -> None:
         self._timeout = fill_timeout_sec
         self._chases = chase_attempts
         self._poll = poll_interval
+        self._settle = settle_timeout_sec   # max wait for a cancelled order to reach a TERMINAL state
 
     async def _await_fill(self, broker, order_id: str) -> Tuple[int, float, str]:
         """Poll until filled / timeout. Returns (filled_qty, avg_price, state)."""
@@ -71,16 +72,33 @@ class SmartOrderExecutor:
             await asyncio.sleep(self._poll)
         return last[0] if last[2] == OrderStatus.COMPLETE else 0, last[1], last[2]
 
-    async def _reconcile_after_cancel(self, broker, order_id: str) -> Tuple[int, float]:
-        """After a cancel, the order may have JUST filled (cancel-race). Return the (qty, avg) that
-        actually filled so we never double-fill it with the next limit/market order."""
+    async def _cancel_and_settle(self, broker, order_id: str) -> Tuple[int, float, bool]:
+        """Cancel, then POLL until the order is TERMINAL (cancelled/complete/rejected) before we are
+        allowed to place anything else. Returns (filled_qty, avg, settled). This is the fix for the
+        cancel-race: a resting LIMIT can fill (as a maker) in the instant we cancel it; checking its
+        status ONCE missed that and we double-sold. We now wait for the broker's final state and book
+        the ACTUAL filled qty — and if it never settles, we report settled=False so the caller STOPS
+        (an under-fill is recoverable; a double-fill is not)."""
         try:
-            f = await broker.get_order_status(order_id)
-            if getattr(f, "status", None) == OrderStatus.COMPLETE:
-                return int(getattr(f, "qty", 0) or 0), float(getattr(f, "avg_price", 0.0) or 0.0)
+            await broker.cancel_order(order_id)
         except Exception:
             pass
-        return 0, 0.0
+        deadline = asyncio.get_event_loop().time() + self._settle
+        last_q, last_avg = 0, 0.0
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                f = await broker.get_order_status(order_id)
+            except Exception:
+                await asyncio.sleep(self._poll)
+                continue
+            q = int(getattr(f, "qty", 0) or 0)
+            avg = float(getattr(f, "avg_price", 0.0) or 0.0)
+            st = getattr(f, "status", OrderStatus.UNKNOWN)
+            last_q, last_avg = q, avg
+            if st in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.COMPLETE):
+                return q, avg, True
+            await asyncio.sleep(self._poll)
+        return last_q, last_avg, False
 
     async def execute_leg(self, broker, *, broker_symbol: str, exchange: str, side: OrderSide,
                           qty: int, product: str, tag: str, client_id: str,
@@ -131,16 +149,19 @@ class SmartOrderExecutor:
             if q > 0 and avg > 0 and st == OrderStatus.COMPLETE:
                 filled_qty += q; notional += avg * q
                 continue
-            # Not (fully) filled → cancel, then reconcile any cancel-race fill.
-            try:
-                await broker.cancel_order(oid)
-            except Exception:
-                pass
-            cq, cavg = await self._reconcile_after_cancel(broker, oid)
+            # Not (fully) filled → cancel and SETTLE (wait for terminal) before placing anything else,
+            # booking the real filled qty. If it never settles we MUST stop (avoid a double-fill).
+            cq, cavg, settled = await self._cancel_and_settle(broker, oid)
             if cq > 0 and cavg > 0:
                 filled_qty += cq; notional += cavg * cq
-            logger.info("SmartExec[%s]: limit @ %.4f unfilled (attempt %d) — chasing new mid.",
-                        broker_symbol, price, attempt + 1)
+            if not settled:
+                logger.error("SmartExec[%s]: order %s did not reach a terminal state after cancel — "
+                             "STOPPING (filled %d/%d) to avoid a double-fill. Reconcile manually.",
+                             broker_symbol, oid, filled_qty, qty)
+                avg = notional / filled_qty if filled_qty else 0.0
+                return LegFill(filled_qty, round(avg, 8), order_ids, filled_qty >= qty)
+            logger.info("SmartExec[%s]: limit @ %.4f unfilled (attempt %d, settled +%d) — chasing new mid.",
+                        broker_symbol, price, attempt + 1, cq)
 
         if filled_qty < qty:                              # chase exhausted → guarantee completion
             await _market(qty - filled_qty)
