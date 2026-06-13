@@ -1754,8 +1754,9 @@ class DashboardServer:
                         apply_deployment_to_runtime_config(dj)
                 except Exception as exc:
                     logger.warning("deployment_run apply failed for %s: %s", deploy_id, exc)
-            await _srv._client_db.set_deployment_running(deploy_id, cid, running)
-            # Stop → square off THIS strategy on THIS broker only.
+            # ORDER MATTERS: square off FIRST (while book still alive), THEN set is_running=False.
+            # Flipping is_running first lets StraddleBookManager's 5s reconcile tear the book down
+            # before square_off_binding finds it → exchange legs left open, nothing in history.
             squared = 0
             if not running and strat == "sell_straddle" and _srv._straddle_bridge is not None:
                 try:
@@ -1763,6 +1764,7 @@ class DashboardServer:
                         cid, bid, _srv._sell_straddles, underlying=und)
                 except Exception as exc:
                     logger.error("deployment_run square-off failed for %s: %s", deploy_id, exc)
+            await _srv._client_db.set_deployment_running(deploy_id, cid, running)
             logger.info("Dashboard: strategy RUN %s → %s (squared=%d)",
                         deploy_id, "ON" if running else "OFF", squared)
             return {"ok": True, "deploy_id": deploy_id, "running": running, "squared_off": squared}
