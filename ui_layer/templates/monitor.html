@@ -7319,10 +7319,12 @@ function histReplay() {
                 </template>
               </select>
             </div>
-            <div>
-              <label class="sec-label mb-1">LOT MULTIPLIER</label>
+            <div x-data="{ get _crypto(){ return ['BTC','ETH'].includes((deployForm.underlying||'').toUpperCase()); } }">
+              <label class="sec-label mb-1" x-text="_crypto ? 'CONTRACTS' : 'LOT MULTIPLIER'"></label>
               <input type="number" class="t-input" x-model.number="deployForm.lot_multiplier"
-                     min="1" max="50" step="1" placeholder="1"/>
+                     min="1" :max="_crypto ? 10000 : 50" step="1" placeholder="1"/>
+              <p class="text-[10px] mt-0.5" style="color:var(--t-muted)" x-show="_crypto"
+                 x-text="'1 contract = '+((deployForm.underlying||'').toUpperCase()==='ETH'?'0.01 ETH':'0.001 BTC')+'  →  '+((deployForm.lot_multiplier||0)*((deployForm.underlying||'').toUpperCase()==='ETH'?0.01:0.001)).toFixed(3)+' '+((deployForm.underlying||'').toUpperCase()||'BTC')"></p>
             </div>
             <div>
               <label class="sec-label mb-1">SQUARE-OFF TIME</label>
