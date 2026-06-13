@@ -200,7 +200,12 @@ class DeltaBroker(BaseBroker):
             if oid:
                 self._order_pid[oid] = pid           # remember pid so we can CANCEL it later
             return oid
-        raise RuntimeError(f"Delta place_order failed: {res.get('error') if res else res}")
+        # Surface the EXCHANGE rejection reason verbatim (e.g. insufficient_margin) for analysis.
+        _err = (res or {}).get("error") if res else None
+        _code = (_err or {}).get("code") if isinstance(_err, dict) else _err
+        _ctx = (_err or {}).get("context") if isinstance(_err, dict) else None
+        raise RuntimeError(f"Delta REJECTED {req.side} {req.qty} {req.broker_symbol}: "
+                           f"reason={_code} context={_ctx}")
 
     async def cancel_order(self, order_id: str) -> bool:
         # Delta's DELETE /v2/orders requires BOTH id AND product_id. Sending only id silently
