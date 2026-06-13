@@ -202,10 +202,21 @@ class TradeLogger:
     ) -> None:
         ts       = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         qty      = ev.lot_size * ev.lot_multiplier
-        pnl_pts  = ev.realized_pnl
+        # P&L from the REAL fills (short: entry − buyback), scoped to the legs ACTUALLY closed in this
+        # event. NOT ev.realized_pnl — the strategy set that from its cached signal-time LTP, which on a
+        # fast-moving leg can diverge from the fill (it even showed a PROFIT on a ratio roll that really
+        # filled at a LOSS, because the leg bounced between the trigger and the IOC fill). This makes the
+        # log line agree with the dashboard History (which already books off the real fill).
+        _sides   = set(getattr(ev, "legs", None) or ["CE", "PE"])
+        pnl_pts  = 0.0
+        if "CE" in _sides:
+            pnl_pts += (entry_ce - fill.ce_fill)
+        if "PE" in _sides:
+            pnl_pts += (entry_pe - fill.pe_fill)
         pnl_rs   = pnl_pts * qty
+        _legtag  = "+".join(sorted(_sides)) if _sides != {"CE", "PE"} else "CE+PE"
         line = (
-            f"{ts} | EXIT  | {ev.underlying} | ATM={ev.atm:.0f} | "
+            f"{ts} | EXIT  | {ev.underlying} | ATM={ev.atm:.0f} | legs={_legtag} | "
             f"CE={ev.ce_strike:.0f} {entry_ce:.2f}→{fill.ce_fill:.2f} | "
             f"PE={ev.pe_strike:.0f} {entry_pe:.2f}→{fill.pe_fill:.2f} | "
             f"PnL={pnl_pts:+.2f}pts {pnl_rs:+.0f}Rs | "
