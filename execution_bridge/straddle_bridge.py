@@ -282,8 +282,12 @@ class StraddleExecutionBridge:
         # Track last ENTRY event per underlying for exit price correlation
         self._last_entry: Dict[str, StraddleOrderEvent] = {}
         # Broker order_ids per (client, binding, underlying) → {"CE": id, "PE": id} so a
-        # later close can reference the exact orders the app opened (close-own-legs only).
+        # later close can reference the exact orders the app opened (close-own-legs only,
+        # and for cancel/modify of the exact exchange order).
         self._order_ids: Dict[tuple, Dict[str, str]] = {}
+        # Slippage-aware executor: crypto LIMIT-at-mid (chase→market); books from the REAL fill.
+        from execution_bridge.smart_executor import SmartOrderExecutor
+        self._executor = SmartOrderExecutor(fill_timeout_sec=4.0, chase_attempts=2)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -629,66 +633,36 @@ class StraddleExecutionBridge:
                 )
                 continue
             _fallback_ltp = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
-            _mtag = "PAPER" if paper else "LIVE"
-            req = OrderRequest(
-                broker_symbol=symbol,
-                exchange=order_exchange(ev.underlying),
-                side=side,
-                qty=qty,
-                order_type=OrderType.MARKET,
-                # Pass the live LTP as the order price. Live brokers ignore it for MARKET
-                # orders (Zerodha uses market_protection / a LTP-derived LIMIT internally),
-                # but MockBroker fills at req.price — so paper/demo fills the real premium
-                # instead of the hardcoded 100.0 default.
-                price=_fallback_ltp,
-                product=_ss_product,
-                tag=f"SS_{ev.underlying}_{ev.action}",
-                client_id=client_id,
-            )
+            # Crypto (Delta, wide spreads) → LIMIT-at-mid with chase→market via the SmartOrderExecutor
+            # to avoid giving up the spread. NSE/MCX (liquid) → MARKET. Either way the position is
+            # booked from the REAL volume-weighted fill the executor returns — never the feed LTP.
+            _use_limit = (order_exchange(ev.underlying) == "DELTA")
             try:
-                # place_order returns the broker ORDER-ID (a str), NOT a fill object.
-                # The real average fill price must be fetched via get_order_status — doing
-                # `order_id.avg_price` was raising "'str' object has no attribute 'avg_price'"
-                # on EVERY live leg, so the bridge silently fell back to the strategy LTP and
-                # recorded that as the fill (→ history P&L diverged from the broker order book).
-                order_id = await broker.place_order(req)
-                if paper:
-                    # PAPER: the order went to the broker (routing/IP verified). Book a LOCAL
-                    # sim fill at the strategy LTP — do not depend on a real fill/funds.
-                    fills[opt_type] = _fallback_ltp
-                    self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(order_id)
-                    logger.info(
-                        "[PAPER] %s %s %s order routed to broker — %s@%.2f (order_id=%s, sim-fill) | client=%s",
-                        ev.action, ev.underlying, opt_type, symbol, _fallback_ltp, order_id, client_id,
-                    )
-                    self._trade_log.log_event(client_id, binding_id,
-                        f"PAPER {ev.action} {ev.underlying} {opt_type}{int(strike)} routed (order_id={order_id}) sim@{_fallback_ltp:.2f}")
-                else:
-                    order_fill = await broker.get_order_status(order_id)
-                    _avg = float(getattr(order_fill, "avg_price", 0.0) or 0.0) if order_fill else 0.0
-                    # A just-placed market order may not show an avg yet; only trust a real >0 fill,
-                    # else fall back to the strategy LTP (entry-price integrity guard, c729394).
-                    fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
-                    # Track the real broker order_id per leg so a later close references it.
-                    self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(order_id)
-                    logger.info(
-                        "[LIVE] %s %s %s order placed — %s@%.2f (order_id=%s, avg=%.2f) | client=%s",
-                        ev.action, ev.underlying, opt_type, symbol, fills[opt_type], order_id, _avg, client_id,
-                    )
-                    self._trade_log.log_event(client_id, binding_id,
-                        f"{ev.action} {ev.underlying} {opt_type}{int(strike)} placed @ {fills[opt_type]:.2f} (order_id={order_id})")
-            except Exception as exc:
-                # PAPER: a no-fund rejection is EXPECTED — book the sim fill and continue.
-                # LIVE: order genuinely failed — fall back to LTP (entry-price integrity guard).
-                logger.log(
-                    logging.INFO if paper else logging.ERROR,
-                    "[%s] %s %s %s order rejected/failed: %s — %s",
-                    _mtag, ev.action, ev.underlying, opt_type, exc,
-                    "sim-fill (paper, expected no-fund)" if paper else "falling back to LTP",
+                legfill = await self._executor.execute_leg(
+                    broker, broker_symbol=symbol, exchange=order_exchange(ev.underlying),
+                    side=side, qty=qty, product=_ss_product,
+                    tag=f"SS_{ev.underlying}_{ev.action}", client_id=client_id,
+                    use_limit=_use_limit, tick=0.0,
+                )
+                _avg = float(getattr(legfill, "avg_price", 0.0) or 0.0)
+                fills[opt_type] = _avg if _avg > 0 else _fallback_ltp
+                _oids = getattr(legfill, "order_ids", []) or []
+                if _oids:
+                    self._order_ids.setdefault((client_id, binding_id, ev.underlying), {})[opt_type] = str(_oids[-1])
+                logger.info(
+                    "[LIVE] %s %s %s — filled %d@%.4f via %s (orders=%s) | client=%s",
+                    ev.action, ev.underlying, opt_type, getattr(legfill, "filled_qty", 0),
+                    fills[opt_type], "LIMIT-chase" if _use_limit else "MARKET", _oids, client_id,
                 )
                 self._trade_log.log_event(client_id, binding_id,
-                    f"{_mtag} {ev.action} {ev.underlying} {opt_type}{int(strike)} "
-                    f"{'rejected (paper sim-fill)' if paper else 'ORDER FAILED'}: {exc}")
+                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} filled "
+                    f"{getattr(legfill, 'filled_qty', 0)}@{fills[opt_type]:.4f} "
+                    f"({'LIMIT-chase' if _use_limit else 'MARKET'}; orders={_oids})")
+            except Exception as exc:
+                logger.error("[LIVE] %s %s %s order FAILED: %s — falling back to LTP",
+                             ev.action, ev.underlying, opt_type, exc)
+                self._trade_log.log_event(client_id, binding_id,
+                    f"LIVE {ev.action} {ev.underlying} {opt_type}{int(strike)} ORDER FAILED: {exc}")
                 fills[opt_type] = _fallback_ltp
 
         fill_ev = StraddleFillEvent(

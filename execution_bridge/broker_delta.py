@@ -171,6 +171,15 @@ class DeltaBroker(BaseBroker):
     def product_id_for(self, market_symbol: str) -> Optional[int]:
         return self._symbol_to_pid.get(str(market_symbol).upper())
 
+    async def get_quote(self, market_symbol: str):
+        """(best_bid, best_ask) for LIMIT mid-pricing. Public ticker endpoint."""
+        res = await self._request("GET", f"/v2/tickers/{market_symbol}", auth=False)
+        q = ((res or {}).get("result") or {}).get("quotes") or {}
+        try:
+            return float(q.get("best_bid") or 0.0), float(q.get("best_ask") or 0.0)
+        except Exception:
+            return 0.0, 0.0
+
     # ── orders ────────────────────────────────────────────────────────────────
     async def place_order(self, req: OrderRequest) -> str:
         pid = self._symbol_to_pid.get(req.broker_symbol.upper())
