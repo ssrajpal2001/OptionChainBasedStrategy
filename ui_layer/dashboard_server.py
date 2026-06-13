@@ -797,6 +797,38 @@ class DashboardServer:
             await _srv._client_db.set_admin_password_hash(_hp(new_pwd))
             return {"ok": True, "message": "Admin password updated."}
 
+        @app.post("/api/admin/client/{client_id}/reset-token", tags=["Admin"])
+        async def generate_client_reset_token(client_id: str, request: Request):
+            _require_admin(request)
+            if not _srv._client_db:
+                raise HTTPException(status_code=503, detail="DB not available.")
+            token = await _srv._client_db.create_reset_token("client", client_id)
+            return {"ok": True, "token": token, "expires_in": "24 hours",
+                    "note": "Show this token to the client once. It cannot be retrieved again."}
+
+        @app.post("/api/auth/reset-password", tags=["Auth"])
+        async def reset_password(request: Request):
+            try:
+                raw = await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid JSON.")
+            token   = str(raw.get("token") or "").strip()
+            new_pwd = str(raw.get("new_password") or "")
+            if not token or not new_pwd:
+                raise HTTPException(status_code=400, detail="token and new_password are required.")
+            if len(new_pwd) < 8:
+                raise HTTPException(status_code=400, detail="new_password must be at least 8 characters.")
+            result = _srv._client_db.consume_reset_token_sync(token)
+            if result is None:
+                raise HTTPException(status_code=400, detail="Invalid or expired reset token.")
+            target_role, target_id = result
+            from data_layer.client_db import hash_password as _hp
+            if target_role == "admin":
+                await _srv._client_db.set_admin_password_hash(_hp(new_pwd))
+            else:
+                await _srv._client_db.set_client_password(target_id, _hp(new_pwd))
+            return {"ok": True, "message": "Password updated. Please log in with your new password."}
+
         # ── ADMIN — read-only ─────────────────────────────────────────────────
 
         @app.get("/api/status", tags=["Admin"])

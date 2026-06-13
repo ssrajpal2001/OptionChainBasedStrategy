@@ -362,6 +362,14 @@ class ClientDB:
             return False
         return verify_password(password, row.get("password_hash", ""))
 
+    async def set_client_password(self, client_id: str, hashed: str) -> None:
+        """Store a hashed password for a client (updates password_hash column)."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE clients SET password_hash=? WHERE client_id=?",
+            (hashed, client_id),
+        )
+
     # ── Broker bindings ───────────────────────────────────────────────────────
 
     async def upsert_binding(
