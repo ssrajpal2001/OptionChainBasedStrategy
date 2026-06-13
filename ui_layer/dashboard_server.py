@@ -1880,6 +1880,7 @@ class DashboardServer:
             def _ss_legs(pos, product="MIS"):
                 out = []
                 ccy, cv = _ccy_cv(pos.underlying)
+                _crypto = str(pos.underlying).upper() in ("BTC", "ETH")
                 for leg in (pos.ce_leg, pos.pe_leg):
                     strike = int(getattr(leg, "strike", 0))
                     if strike <= 0:
@@ -1887,16 +1888,20 @@ class DashboardServer:
                     ot = getattr(leg, "option_type", "")
                     ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
                     ltp = float(getattr(leg, "ltp", ep) or ep)
+                    # Crypto P&L is valued at the MARK (fair value), not the noisy last-trade LTP, so it
+                    # matches the Delta app (a stale wide LTP can flip a leg's sign vs reality).
+                    _mark = float(getattr(leg, "mark", 0.0) or 0.0)
+                    _val = _mark if (_crypto and _mark > 0) else ltp
                     ls = int(getattr(pos, "lot_size", 0) or 0)
                     qty = -ls  # straddle is short both
-                    _pnl = round((ep - ltp) * abs(qty) * cv, 2)
+                    _pnl = round((ep - _val) * abs(qty) * cv, 2)
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
                                 "instrument": f"{pos.underlying} {strike} {ot}",
                                 "type": product, "side": "SELL", "ccy": ccy,
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
                                 "sell_avg": round(ep, 2), "buy_avg": 0.0,
-                                "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl})
+                                "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl})
                 return out
 
             def _find(strategies, underlying):

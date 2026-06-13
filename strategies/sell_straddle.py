@@ -91,6 +91,7 @@ class StraddleLeg:
     strike: float
     entry_price: float
     ltp: float = 0.0
+    mark: float = 0.0          # broker mark/ATP (fair value) — used for crypto P&L display (LTP is noisy)
     open_time: Optional[datetime] = None
     close_time: Optional[datetime] = None
     open_reason: str = ""
@@ -906,11 +907,16 @@ class SellStraddleStrategy:
                         self._pe_atp = _atp
             if self._position and self._position.status == "open":
                 pos = self._position
+                _mk = float(getattr(tick, "atp", 0.0) or 0.0)
                 if tick.option_type == "CE" and abs(tick.strike - pos.ce_leg.strike) < 0.01:
                     pos.ce_leg.ltp = tick.ltp
+                    if _mk > 0:
+                        pos.ce_leg.mark = _mk
                     self._ce_ltp_fresh = True
                 elif tick.option_type == "PE" and abs(tick.strike - pos.pe_leg.strike) < 0.01:
                     pos.pe_leg.ltp = tick.ltp
+                    if _mk > 0:
+                        pos.pe_leg.mark = _mk
                     self._pe_ltp_fresh = True
 
     # ── Candle processing ─────────────────────────────────────────────────────
