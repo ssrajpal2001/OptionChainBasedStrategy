@@ -2241,6 +2241,15 @@ class SellStraddleStrategy:
                 self._position.peak_profit        = 0.0
                 self._position.tsl_high_lock_rs   = 0.0
                 self._position.trailing_active    = False
+                # Re-arm the lock/floor TRAILING SL vs the NEW pair — without this it kept the OLD
+                # peak% and could fire a 'trailing SL' the instant after a roll (and on the THETA
+                # basis the % is measured against entry_time_value, which must also be re-baselined to
+                # the new pair or every decay% reads against the wrong denominator).
+                self._position.trail_peak_pct     = 0.0
+                try:
+                    self._position.entry_time_value = self._position.current_time_value(self._spot)
+                except Exception:
+                    pass
             self._persist()
             return
         # No valid partner in the pool → close all and start fresh (re-entry loop re-enters).
@@ -2265,6 +2274,15 @@ class SellStraddleStrategy:
                 self._position.peak_profit        = 0.0
                 self._position.tsl_high_lock_rs   = 0.0
                 self._position.trailing_active    = False
+                # Re-arm the lock/floor TRAILING SL vs the NEW pair — without this it kept the OLD
+                # peak% and could fire a 'trailing SL' the instant after a roll (and on the THETA
+                # basis the % is measured against entry_time_value, which must also be re-baselined to
+                # the new pair or every decay% reads against the wrong denominator).
+                self._position.trail_peak_pct     = 0.0
+                try:
+                    self._position.entry_time_value = self._position.current_time_value(self._spot)
+                except Exception:
+                    pass
             self._persist()
             return
         logger.warning("SellStraddle[%s]: partial roll %s invalid candidate — closing %s (0-or-2).",
