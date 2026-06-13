@@ -125,7 +125,13 @@ class SmartOrderExecutor:
             avg = notional / filled_qty if filled_qty else 0.0
             return LegFill(filled_qty, round(avg, 8), order_ids, filled_qty >= qty)
 
-        # LIMIT path with chase, then market for the remainder.
+        # LIMIT path — IOC MARKETABLE chase so an order NEVER rests on the book. A resting limit was
+        # the root of the naked-leg risk: on a thin Delta book a mid-priced sell sits as a maker, our
+        # cancel can fail, and it fills LATE (asymmetric). IOC = fill what's available NOW, kill the
+        # rest instantly → nothing rests, the cancel-race disappears. Try the MID once (free fill only
+        # if the book already crosses us), then become MARKETABLE (sell@bid / buy@ask) so the IOC truly
+        # fills, then a plain MARKET mops up any remainder. We book the broker's AUTHORITATIVE filled
+        # qty after each attempt (IOC orders are terminal immediately — no cancel/settle needed).
         for attempt in range(self._chases + 1):
             remaining = qty - filled_qty
             if remaining <= 0:
@@ -134,34 +140,40 @@ class SmartOrderExecutor:
                 bid, ask = await broker.get_quote(broker_symbol)
             except Exception:
                 bid, ask = 0.0, 0.0
-            if bid > 0 and ask > 0:
-                price = _round_tick((bid + ask) / 2.0, tick)
-            else:
-                price = 0.0
-            if price <= 0:                                # no quote → cannot price a limit, go market
+            if not (bid > 0 and ask > 0):
+                break                                    # no quote → cannot price a limit, go market
+            # SLIPPAGE LADDER: walk the price from the MID toward the marketable touch in equal steps
+            # across the attempts. We pay only as much of the half-spread as is needed to fill at the
+            # first level that has resting liquidity — attempt 0 is the mid (free if the book already
+            # crosses us), the final attempt is the touch (bid for a sell / ask for a buy = the MOST
+            # we ever give up = half the spread). IOC means nothing rests in between.
+            mid = (bid + ask) / 2.0
+            touch = bid if side == OrderSide.SELL else ask
+            frac = attempt / max(self._chases, 1)        # 0 → mid, 1 → touch
+            price = _round_tick(mid + (touch - mid) * frac, tick)
+            if price <= 0:
                 break
             req = OrderRequest(broker_symbol=broker_symbol, exchange=exchange, side=side, qty=remaining,
                                order_type=OrderType.LIMIT, price=price, product=product,
-                               tag=tag, client_id=client_id)
+                               tag=tag, client_id=client_id, time_in_force="ioc")
             oid = await broker.place_order(req)
             order_ids.append(str(oid))
-            q, avg, st = await self._await_fill(broker, oid)
-            if q > 0 and avg > 0 and st == OrderStatus.COMPLETE:
-                filled_qty += q; notional += avg * q
-                continue
-            # Not (fully) filled → cancel and SETTLE (wait for terminal) before placing anything else,
-            # booking the real filled qty. If it never settles we MUST stop (avoid a double-fill).
-            cq, cavg, settled = await self._cancel_and_settle(broker, oid)
-            if cq > 0 and cavg > 0:
-                filled_qty += cq; notional += cavg * cq
-            if not settled:
-                logger.error("SmartExec[%s]: order %s did not reach a terminal state after cancel — "
-                             "STOPPING (filled %d/%d) to avoid a double-fill. Reconcile manually.",
-                             broker_symbol, oid, filled_qty, qty)
-                avg = notional / filled_qty if filled_qty else 0.0
-                return LegFill(filled_qty, round(avg, 8), order_ids, filled_qty >= qty)
-            logger.info("SmartExec[%s]: limit @ %.4f unfilled (attempt %d, settled +%d) — chasing new mid.",
-                        broker_symbol, price, attempt + 1, cq)
+            q, avg, _st = await self._await_fill(broker, oid)
+            # IOC is terminal immediately — take the broker's AUTHORITATIVE final fill (handles a
+            # partial fill where the await loop saw it mid-flight). Book once; never double-count.
+            try:
+                f = await broker.get_order_status(oid)
+                fq = int(getattr(f, "qty", 0) or 0); favg = float(getattr(f, "avg_price", 0.0) or 0.0)
+            except Exception:
+                fq, favg = 0, 0.0
+            if fq <= 0 and q > 0:                         # fall back to the await result
+                fq, favg = q, avg
+            if fq > 0 and favg > 0:
+                filled_qty += fq; notional += favg * fq
+            if filled_qty >= qty:
+                break
+            logger.info("SmartExec[%s]: IOC @ %.4f (%.0f%% mid→touch) — filled %d/%d (attempt %d) — escalating.",
+                        broker_symbol, price, frac * 100.0, filled_qty, qty, attempt + 1)
 
         if filled_qty < qty:                              # chase exhausted → guarantee completion
             await _market(qty - filled_qty)

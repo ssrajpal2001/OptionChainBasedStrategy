@@ -63,6 +63,7 @@ class OrderRequest:
     product: str = "INTRADAY"
     tag: str = ""                # For linking to position_id
     client_id: str = ""          # Which client account
+    time_in_force: str = ""      # "", "ioc", "gtc", "fok" — IOC = fill-now-or-kill (no resting order)
 
 
 @dataclass

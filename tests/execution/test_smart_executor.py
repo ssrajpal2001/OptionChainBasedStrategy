@@ -77,11 +77,15 @@ def test_limit_fills_at_mid_immediately():
     assert b.placed[0][0].endswith("LIMIT")
 
 
-def test_chase_then_fills_on_second_attempt():
-    b = _MockBroker(script=[("open", 0, 0.0), ("fill", 10, 0.0)])   # 1st limit hangs, 2nd fills
+def test_ioc_chase_fills_on_second_rung_no_cancel():
+    # IOC ladder: rung-0 (mid) doesn't cross → killed (0); rung-1 (more marketable) fills.
+    # No resting order ⇒ NO cancel call, and no market fallback needed.
+    b = _MockBroker(script=[("open", 0, 0.0), ("fill", 10, 0.0)])
     fill = _leg(b, use_limit=True)
-    assert fill.completed and fill.filled_qty == 10 and fill.avg_price == 102.0
-    assert b.cancelled == ["O0"]                           # first was cancelled, no market needed
+    assert fill.completed and fill.filled_qty == 10
+    assert b.cancelled == []                               # IOC self-cancels — we never call cancel
+    assert not any(p[0].endswith("MARKET") for p in b.placed)   # filled via IOC limit, no market
+    assert 100.0 <= fill.avg_price <= 104.0                # filled within the spread (a ladder rung)
 
 
 def test_chase_exhausted_falls_back_to_market():
@@ -90,61 +94,24 @@ def test_chase_exhausted_falls_back_to_market():
     assert fill.completed and fill.filled_qty == 10
     assert b.placed[-1][0].endswith("MARKET")              # final leg is a market order
     assert fill.avg_price == 104.0                         # market filled at ask
+    assert b.cancelled == []                               # IOC path never cancels
 
 
-def test_cancel_race_does_not_double_fill():
-    # Limit shows OPEN during polling, but on cancel it reconciles as FILLED → must NOT also market.
-    b = _MockBroker(script=[("open", 0, 0.0)])
-    b._status["O0"] = (OrderStatus.OPEN, 0, 0.0)
-    # monkeypatch cancel to "discover" it actually filled (the race):
-    async def _cancel(oid):
-        b.cancelled.append(oid)
-        b._status[oid] = (OrderStatus.COMPLETE, 10, 102.0)
-        return True
-    b.cancel_order = _cancel
+def test_ioc_books_authoritative_qty_no_double():
+    # The IOC fill is booked ONCE from the broker's authoritative status — never doubled.
+    b = _MockBroker(script=[("fill", 10, 0.0)])
     fill = _leg(b, use_limit=True)
-    assert fill.filled_qty == 10 and fill.avg_price == 102.0
-    assert not any(p[0].endswith("MARKET") for p in b.placed)   # no extra market order → no double
+    assert fill.filled_qty == 10                           # exactly 10, not 20
+    assert len([p for p in b.placed if p[0].endswith("LIMIT")]) == 1   # filled on the first rung
+    assert not any(p[0].endswith("MARKET") for p in b.placed)
 
 
-def test_partial_then_market_remainder():
-    # First limit fills 4 (then cancel books it), market completes the remaining 6 at ask.
-    b = _MockBroker(script=[("open", 0, 0.0), ("open", 0, 0.0), ("open", 0, 0.0), ("fill", 6, 0.0)])
-    async def _cancel(oid):
-        b.cancelled.append(oid)
-        if oid == "O0":
-            b._status[oid] = (OrderStatus.COMPLETE, 4, 102.0)   # 4 filled on the race
-        else:
-            b._status[oid] = (OrderStatus.CANCELLED, 0, 0.0)
-        return True
-    b.cancel_order = _cancel
+def test_ioc_partial_then_market_remainder():
+    # IOC rung-0 partially fills 4 (rest killed), rungs 1-2 cross nothing, MARKET mops up the 6.
+    b = _MockBroker(script=[("partial", 4, 102.0), ("open", 0, 0.0), ("open", 0, 0.0), ("fill", 6, 104.0)])
     fill = _leg(b, use_limit=True)
     assert fill.filled_qty == 10 and fill.completed
     # VWAP: 4@102 + 6@104 = (408+624)/10 = 103.2
     assert abs(fill.avg_price - 103.2) < 1e-6
-
-
-def test_maker_fills_during_settle_no_double():
-    """The PRODUCTION bug: a resting LIMIT (maker) still shows OPEN right after cancel, then fills a
-    moment later. The executor must WAIT for the terminal state (settle), book that fill, and NOT
-    place another order — otherwise it double-sells (12 instead of 6)."""
-    b = _MockBroker(script=[("open", 0, 0.0)])
-    polls = {"n": 0}
-    base_status = b.get_order_status
-
-    async def _status(oid):
-        # O0: OPEN for the first 2 polls after cancel, then COMPLETE (maker fills late).
-        if oid == "O0" and oid in b.cancelled:
-            polls["n"] += 1
-            if polls["n"] >= 2:
-                return OrderFill(order_id=oid, broker_symbol="X", side=OrderSide.SELL,
-                                 qty=10, avg_price=101.5, status=OrderStatus.COMPLETE)
-            return OrderFill(order_id=oid, broker_symbol="X", side=OrderSide.SELL,
-                             qty=0, avg_price=0.0, status=OrderStatus.OPEN)
-        return await base_status(oid)
-    b.get_order_status = _status
-
-    fill = _leg(b, use_limit=True)
-    assert fill.filled_qty == 10                          # booked the late maker fill
-    assert not any(p[0].endswith("MARKET") for p in b.placed)   # NO extra order → no double-fill
-    assert len([p for p in b.placed if p[0].endswith("LIMIT")]) == 1   # only the one limit
+    assert b.placed[-1][0].endswith("MARKET")
+    assert b.cancelled == []

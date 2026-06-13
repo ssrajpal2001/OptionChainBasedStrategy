@@ -194,6 +194,11 @@ class DeltaBroker(BaseBroker):
         }
         if req.order_type in (OrderType.LIMIT, OrderType.SL_L) and req.price > 0:
             body["limit_price"] = str(req.price)
+        # IOC = fill what's available NOW, kill the remainder — never leaves a resting maker that
+        # could fill late (the root of the asymmetric/naked-leg risk on a thin Delta book).
+        _tif = str(getattr(req, "time_in_force", "") or "").lower()
+        if _tif in ("ioc", "gtc", "fok"):
+            body["time_in_force"] = _tif
         res = await self._request("POST", "/v2/orders", body)
         if res and res.get("success") and res.get("result"):
             oid = str(res["result"].get("id", ""))
