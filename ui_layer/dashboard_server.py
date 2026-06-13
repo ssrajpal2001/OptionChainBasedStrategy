@@ -249,6 +249,18 @@ try:
         tt_sl_mode:       str   = "dynamic"
         tt_sl_pct:        float = 2.0
 
+    class _ChangeAdminPasswordSchema(_PydanticBase):
+        current_password: str
+        new_password:     str
+
+    class _ResetPasswordSchema(_PydanticBase):
+        token:        str
+        new_password: str
+
+    class _SystemSettingSchema(_PydanticBase):
+        key:   str
+        value: str
+
     class _KillAllConfirmSchema(_PydanticBase):
         confirm: bool = False   # must be True to proceed
 
@@ -772,14 +784,10 @@ class DashboardServer:
             raise HTTPException(status_code=400, detail="role must be 'admin' or 'client'.")
 
         @app.post("/api/admin/change-password", tags=["Admin"])
-        async def admin_change_password(request: Request):
+        async def admin_change_password(request: Request, body: _ChangeAdminPasswordSchema):
             _require_admin(request)
-            try:
-                raw = await request.json()
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid JSON.")
-            current = str(raw.get("current_password") or "")
-            new_pwd = str(raw.get("new_password") or "")
+            current = body.current_password
+            new_pwd = body.new_password
             if not current or not new_pwd:
                 raise HTTPException(status_code=400, detail="current_password and new_password required.")
             if len(new_pwd) < 8:
@@ -797,6 +805,13 @@ class DashboardServer:
             await _srv._client_db.set_admin_password_hash(_hp(new_pwd))
             return {"ok": True, "message": "Admin password updated."}
 
+        @app.post("/api/admin/system-settings", tags=["Admin"])
+        async def set_system_setting(body: _SystemSettingSchema, _: dict = Depends(_require_admin)):
+            if not _srv._client_db:
+                raise HTTPException(status_code=503, detail="DB not available.")
+            await _srv._client_db.set_setting(body.key, body.value)
+            return {"ok": True}
+
         @app.post("/api/admin/client/{client_id}/reset-token", tags=["Admin"])
         async def generate_client_reset_token(client_id: str, request: Request):
             _require_admin(request)
@@ -807,13 +822,9 @@ class DashboardServer:
                     "note": "Show this token to the client once. It cannot be retrieved again."}
 
         @app.post("/api/auth/reset-password", tags=["Auth"])
-        async def reset_password(request: Request):
-            try:
-                raw = await request.json()
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid JSON.")
-            token   = str(raw.get("token") or "").strip()
-            new_pwd = str(raw.get("new_password") or "")
+        async def reset_password(body: _ResetPasswordSchema):
+            token   = body.token.strip()
+            new_pwd = body.new_password
             if not token or not new_pwd:
                 raise HTTPException(status_code=400, detail="token and new_password are required.")
             if len(new_pwd) < 8:
