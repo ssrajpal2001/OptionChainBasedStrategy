@@ -1866,8 +1866,20 @@ class DashboardServer:
                                 "ltp": round(ltp, 2), "pnl": pnl, "mtm": pnl})
                 return out
 
+            def _ccy_cv(underlying):
+                """(currency_symbol, contract_value) per exchange. Crypto (Delta) P&L is in USD and
+                each contract is a fraction of a coin (BTC 0.001, ETH 0.01), so the premium-points
+                P&L must be scaled by the contract value to match the Delta app. NSE/MCX = ₹, ×1."""
+                u = str(underlying).upper()
+                if u == "BTC":
+                    return ("$", 0.001)
+                if u == "ETH":
+                    return ("$", 0.01)
+                return ("₹", 1.0)
+
             def _ss_legs(pos, product="MIS"):
                 out = []
+                ccy, cv = _ccy_cv(pos.underlying)
                 for leg in (pos.ce_leg, pos.pe_leg):
                     strike = int(getattr(leg, "strike", 0))
                     if strike <= 0:
@@ -1877,10 +1889,10 @@ class DashboardServer:
                     ltp = float(getattr(leg, "ltp", ep) or ep)
                     ls = int(getattr(pos, "lot_size", 0) or 0)
                     qty = -ls  # straddle is short both
-                    _pnl = round((ep - ltp) * abs(qty), 2)
+                    _pnl = round((ep - ltp) * abs(qty) * cv, 2)
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
                                 "instrument": f"{pos.underlying} {strike} {ot}",
-                                "type": product, "side": "SELL",
+                                "type": product, "side": "SELL", "ccy": ccy,
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
                                 "sell_avg": round(ep, 2), "buy_avg": 0.0,
@@ -2049,7 +2061,9 @@ class DashboardServer:
                     logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
                 by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
                                           "booked": booked, "tracking": tracking,
-                                          "straddle": straddle_info}
+                                          "straddle": straddle_info,
+                                          "ccy": (legs[0].get("ccy", "₹") if legs else
+                                                  ("$" if str(underlying).upper() in ("BTC", "ETH") else "₹"))}
             return {"ok": True, "by_broker": by_broker}
 
         # ── CLIENT — history ──────────────────────────────────────────────────
