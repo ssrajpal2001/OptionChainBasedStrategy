@@ -994,7 +994,7 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
       // Live positions — auto-refresh every 3s while viewing the positions tab.
-      setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 3000);
+      setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 1500);
     },
 
     /* Hydrate all admin panels — called right after login or session restore */
