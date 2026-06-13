@@ -206,6 +206,16 @@ CREATE TABLE IF NOT EXISTS ic_trade_log (
     is_active_adjustment INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_ic_trade_log_id ON ic_trade_log(trade_id);
+
+CREATE TABLE IF NOT EXISTS password_resets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash  TEXT    NOT NULL,
+    target_role TEXT    NOT NULL,
+    target_id   TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL,
+    expires_at  TEXT    NOT NULL,
+    used        INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -875,6 +885,86 @@ class ClientDB:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+
+    # ── Admin password (DB-stored, avoids server restart on change) ──────────────
+
+    def get_admin_password_hash_sync(self) -> str:
+        """Return stored admin password hash, or '' if never set."""
+        return self.get_setting_sync("admin_password_hash", "")
+
+    async def set_admin_password_hash(self, hashed: str) -> None:
+        """Persist a new admin password hash."""
+        await self.set_setting("admin_password_hash", hashed)
+
+    # ── Password reset tokens ─────────────────────────────────────────────────────
+
+    async def create_reset_token(self, target_role: str, target_id: str) -> str:
+        """Generate a one-time reset token, store its hash, return plaintext token."""
+        import secrets, hashlib
+        from datetime import datetime, timedelta, timezone
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(hours=24)
+        await asyncio.to_thread(
+            self._exec,
+            "INSERT INTO password_resets (token_hash, target_role, target_id, created_at, expires_at, used) "
+            "VALUES (?, ?, ?, ?, ?, 0)",
+            (token_hash, target_role, target_id, now.isoformat(), expires.isoformat()),
+        )
+        return token
+
+    def consume_reset_token_sync(self, token: str) -> tuple[str, str] | None:
+        """Validate token, mark used, return (target_role, target_id) or None if invalid/expired."""
+        import hashlib
+        from datetime import datetime, timezone
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                "SELECT id, target_role, target_id, expires_at, used FROM password_resets "
+                "WHERE token_hash=?",
+                (token_hash,),
+            ).fetchone()
+            if row is None or row["used"]:
+                con.close()
+                return None
+            expires = datetime.fromisoformat(row["expires_at"])
+            if datetime.now(expires.tzinfo) > expires:
+                con.close()
+                return None
+            con.execute("UPDATE password_resets SET used=1 WHERE id=?", (row["id"],))
+            con.commit()
+            con.close()
+            return (row["target_role"], row["target_id"])
+        except Exception as exc:
+            logger.error("consume_reset_token_sync: %s", exc)
+            return None
+
+    # ── Batch straddle deployment query ──────────────────────────────────────────
+
+    def get_running_straddle_deployments_sync(self) -> list[dict]:
+        """Single JOIN: all is_running=1 sell_straddle deployments across active clients."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """
+                SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
+                       d.strategy_name, d.is_running, d.assigned_instrument
+                FROM clients c
+                JOIN strategy_deployments d ON c.client_id = d.client_id
+                WHERE c.is_active = 1
+                  AND d.strategy_name = 'sell_straddle'
+                  AND d.is_running = 1
+                """
+            ).fetchall()
+            con.close()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("get_running_straddle_deployments_sync: %s", exc)
+            return []
 
     # ── Boot-time bulk load ───────────────────────────────────────────────────
 
