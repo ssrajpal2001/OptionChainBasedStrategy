@@ -721,11 +721,17 @@ class DashboardServer:
                 )
 
             if role == "admin":
-                if not (
-                    hmac.compare_digest(username, auth_cfg.admin_username)
-                    and hmac.compare_digest(password, auth_cfg.admin_password)
-                ):
+                if not hmac.compare_digest(username, auth_cfg.admin_username):
                     raise HTTPException(status_code=401, detail="Invalid admin credentials.")
+                # DB-stored hash takes precedence over env var (allows change-password without restart)
+                stored_hash = _srv._client_db.get_admin_password_hash_sync() if _srv._client_db else ""
+                if stored_hash:
+                    from data_layer.client_db import verify_password as _vp
+                    if not _vp(password, stored_hash):
+                        raise HTTPException(status_code=401, detail="Invalid admin credentials.")
+                else:
+                    if not hmac.compare_digest(password, auth_cfg.admin_password):
+                        raise HTTPException(status_code=401, detail="Invalid admin credentials.")
                 token = create_token(username, "admin")
                 return {"access_token": token, "token_type": "bearer", "role": "admin"}
 
@@ -764,6 +770,32 @@ class DashboardServer:
                 }
 
             raise HTTPException(status_code=400, detail="role must be 'admin' or 'client'.")
+
+        @app.post("/api/admin/change-password", tags=["Admin"])
+        async def admin_change_password(request: Request):
+            _require_admin(request)
+            try:
+                raw = await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid JSON.")
+            current = str(raw.get("current_password") or "")
+            new_pwd = str(raw.get("new_password") or "")
+            if not current or not new_pwd:
+                raise HTTPException(status_code=400, detail="current_password and new_password required.")
+            if len(new_pwd) < 8:
+                raise HTTPException(status_code=400, detail="new_password must be at least 8 characters.")
+            # Verify current password (DB hash first, then env var)
+            auth_cfg = _srv._cfg.auth
+            stored_hash = _srv._client_db.get_admin_password_hash_sync() if _srv._client_db else ""
+            from data_layer.client_db import verify_password as _vp, hash_password as _hp
+            if stored_hash:
+                ok = _vp(current, stored_hash)
+            else:
+                ok = hmac.compare_digest(current, auth_cfg.admin_password)
+            if not ok:
+                raise HTTPException(status_code=401, detail="Current password is incorrect.")
+            await _srv._client_db.set_admin_password_hash(_hp(new_pwd))
+            return {"ok": True, "message": "Admin password updated."}
 
         # ── ADMIN — read-only ─────────────────────────────────────────────────
 
