@@ -97,8 +97,11 @@ class StraddleFillEvent:
     binding_id: str
     event_id:   str
     timestamp:  datetime = field(default_factory=lambda: datetime.now(IST))
-    paper_mode: bool = True
-    legs:       list = field(default_factory=lambda: ["CE", "PE"])
+    paper_mode:  bool = True
+    legs:        list = field(default_factory=lambda: ["CE", "PE"])
+    # Full broker symbols e.g. C-BTC-64000-140626 / NIFTY24600CE — empty string if unavailable.
+    ce_symbol:   str  = ""
+    pe_symbol:   str  = ""
     # True when a LIVE ENTRY filled asymmetrically (one leg only) and the bridge flattened the filled
     # leg and ABORTED — the strategy must discard its optimistic position, never manage a naked leg.
     entry_aborted: bool = False
@@ -775,6 +778,8 @@ class StraddleExecutionBridge:
             event_id   = ev.event_id,
             paper_mode = paper,
             legs       = ev.legs,
+            ce_symbol  = symbol_by_leg.get("CE", ""),
+            pe_symbol  = symbol_by_leg.get("PE", ""),
         )
 
         if ev.action == "ENTRY":

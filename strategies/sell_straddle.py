@@ -77,6 +77,7 @@ class StraddleLeg:
     open_time: Optional[datetime] = None
     close_time: Optional[datetime] = None
     open_reason: str = ""
+    symbol: str = ""            # full broker symbol e.g. C-BTC-64000-140626 or NIFTY24600CE
 
 
 @dataclass
@@ -834,14 +835,21 @@ class SellStraddleStrategy:
                 if "CE" in _legs and fill.ce_fill and fill.ce_fill > 0:
                     self._position.ce_leg.ltp         = fill.ce_fill
                     self._position.ce_leg.entry_price = fill.ce_fill
+                    if getattr(fill, "ce_symbol", ""):
+                        self._position.ce_leg.symbol = fill.ce_symbol
                 if "PE" in _legs and fill.pe_fill and fill.pe_fill > 0:
                     self._position.pe_leg.ltp         = fill.pe_fill
                     self._position.pe_leg.entry_price = fill.pe_fill
+                    if getattr(fill, "pe_symbol", ""):
+                        self._position.pe_leg.symbol = fill.pe_symbol
                 self._position.net_credit = self._position.ce_leg.entry_price + self._position.pe_leg.entry_price
                 self._persist()   # re-persist confirmed entry so it survives a restart
+                _ce_disp = self._position.ce_leg.symbol or f"CE{int(self._position.ce_leg.strike)}"
+                _pe_disp = self._position.pe_leg.symbol or f"PE{int(self._position.pe_leg.strike)}"
                 logger.info(
-                    "SellStraddle[%s]: ENTRY confirmed — CE=%.2f PE=%.2f credit=%.2f [%s/%s] legs=%s",
-                    self._underlying, self._position.ce_leg.entry_price, self._position.pe_leg.entry_price,
+                    "SellStraddle[%s]: ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f [%s/%s] legs=%s",
+                    self._underlying, _ce_disp, self._position.ce_leg.entry_price,
+                    _pe_disp, self._position.pe_leg.entry_price,
                     self._position.net_credit, fill.client_id, fill.binding_id, _legs,
                 )
             self._order_pending = False
@@ -1045,11 +1053,12 @@ class SellStraddleStrategy:
                 import time as _t
                 if _t.monotonic() - getattr(self, "_ind_src_log", 0.0) > 60.0:
                     self._ind_src_log = _t.monotonic()
+                    _ce_d = self._position.ce_leg.symbol or f"CE{int(self._position.ce_leg.strike)}"
+                    _pe_d = self._position.pe_leg.symbol or f"PE{int(self._position.pe_leg.strike)}"
                     logger.info(
-                        "SellStraddle[%s]: INDICATORS src=WARM-POOL-ENGINE CE%d/PE%d | "
+                        "SellStraddle[%s]: INDICATORS src=WARM-POOL-ENGINE %s/%s | "
                         "close=%.2f vwap=%.2f (prev=%.2f) slope=%.2f rsi=%.1f roc=%.2f",
-                        self._underlying, int(self._position.ce_leg.strike),
-                        int(self._position.pe_leg.strike), _pe.get("close", 0.0),
+                        self._underlying, _ce_d, _pe_d, _pe.get("close", 0.0),
                         _pe.get("vwap", 0.0), _pe.get("vwap_prev", 0.0), _pe.get("slope", 0.0),
                         _pe.get("rsi", 0.0), _pe.get("roc", 0.0))
                 return   # warm engine data is the source of truth for the active pair
