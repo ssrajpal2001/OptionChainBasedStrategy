@@ -2506,20 +2506,21 @@ class DashboardServer:
             await _srv._client_db.set_terminal_connected(cid, binding_id, False)
             await _srv._client_db.set_engine_active(cid, binding_id, False)
             await _srv._client_db.set_trade_enabled(cid, binding_id, False)
-            # Terminal OFF = broker disconnected → STOP every strategy on this broker (run toggles
-            # OFF) so no book re-enters, then square off all its open legs.
-            try:
-                for d in _srv._client_db.get_deployments_sync(cid):
-                    if d.get("binding_id") == binding_id:
-                        await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
-            except Exception:
-                pass
+            # ORDER MATTERS: square off open legs FIRST (places BUY-to-close on exchange), THEN
+            # set run toggles OFF. If we flip is_running first, StraddleBookManager's 5s reconcile
+            # tears the book down before square_off_binding runs → nothing closes on exchange.
             if _srv._straddle_bridge is not None:
                 try:
                     n = await _srv._straddle_bridge.square_off_binding(cid, binding_id, _srv._sell_straddles)
                     logger.info("Dashboard: Terminal OFF %s/%s — squared off %d leg(s).", cid, binding_id, n)
                 except Exception as exc:
                     logger.error("Dashboard: square-off on Terminal OFF failed for %s/%s: %s", cid, binding_id, exc)
+            try:
+                for d in _srv._client_db.get_deployments_sync(cid):
+                    if d.get("binding_id") == binding_id:
+                        await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            except Exception:
+                pass
             logger.info(
                 "Terminal disconnect: [%s/%s] disconnected — terminal + engine + trade cleared.",
                 cid, binding_id,
