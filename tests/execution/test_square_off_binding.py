@@ -1,5 +1,5 @@
 import asyncio, datetime
-from config.global_config import IST, GlobalConfig
+from config.global_config import IST, GlobalConfig, Topic
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 from data_layer.base_feeder import EventBus
 
@@ -21,16 +21,14 @@ class _FakeRouter:
 
 def test_square_off_only_that_binding(monkeypatch):
     async def run():
-        import execution_bridge.straddle_bridge as sb
         from execution_bridge.straddle_bridge import StraddleExecutionBridge
 
-        # Ensure symbol lookup returns a truthy symbol regardless of registry state.
-        monkeypatch.setattr(
-            sb._REG, "get_broker_symbol",
-            lambda *a, **k: "DUMMYSYM",
-        )
-
         bus = EventBus()
+        # Capture the EXIT order events square-off publishes (it now routes through the strategy's
+        # own _close_position → real exit pipeline, NOT raw place_order, so the close hits the
+        # exchange AND records history).
+        order_q = bus.subscribe(Topic.ORDER_REQUEST)
+
         broker = _FakeBroker()
         br = StraddleExecutionBridge(bus, registry=None, router=_FakeRouter(broker))
         ss = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY",
@@ -52,9 +50,17 @@ def test_square_off_only_that_binding(monkeypatch):
         )
         n = await br.square_off_binding("cli", "Z1", [ss, other])
         assert n == 2                       # CE + PE of THIS binding only
-        assert len(broker.orders) == 2
-        assert all(str(o.side).endswith("BUY") for o in broker.orders)   # buy-to-close
-        assert other._position.status == "open"   # other client's book untouched
+        # square-off routed the close via the exit pipeline → exactly ONE EXIT order event, stamped
+        # with THIS binding's identity, for the bridge consumer to buy-to-close + log to history.
+        evs = []
+        while not order_q.empty():
+            evs.append(order_q.get_nowait())
+        exits = [e for e in evs if getattr(e, "action", "") == "EXIT"]
+        assert len(exits) == 1
+        assert exits[0].client_id == "cli" and exits[0].binding_id == "Z1"
+        assert ss._position is None                 # this book's position closed/cleared
+        assert ss._stop_for_day is True             # re-entry blocked during teardown
+        assert other._position.status == "open"     # other client's book untouched
         # unknown binding -> no-op
         assert await br.square_off_binding("cli", "NOPE", [ss]) == 0
 

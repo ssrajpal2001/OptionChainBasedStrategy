@@ -375,13 +375,20 @@ class StraddleExecutionBridge:
                     and d.get("strategy_name") == "sell_straddle"
                     and str(d.get("underlying", "")).upper() == ev.underlying.upper()
                 ]
-                if not _matching:
-                    continue
-                if _target:
-                    if not any(int(d.get("is_running", 0) or 0) == 1 for d in _matching):
+                # An EXIT (buy-to-close) must ALWAYS be allowed to route — a square-off / kill /
+                # stop sets is_running=False the instant after the EXIT is published, so gating the
+                # close on is_running would strand the open legs on the exchange (the exact bug:
+                # "squared in the UI but still open on Delta"). Only ENTRIES are gated on a RUNNING
+                # deployment. The EXIT still needs terminal_connected (checked above) to place.
+                _is_exit = (ev.action == "EXIT")
+                if not _is_exit:
+                    if not _matching:
                         continue
-                elif not live_b.get("engine_active"):
-                    continue
+                    if _target:
+                        if not any(int(d.get("is_running", 0) or 0) == 1 for d in _matching):
+                            continue
+                    elif not live_b.get("engine_active"):
+                        continue
 
                 broker = (self._router._brokers or {}).get(client.client_id, {}).get(binding_id)
                 mode = live_b.get("trading_mode", "paper") or "paper"
@@ -441,21 +448,12 @@ class StraddleExecutionBridge:
 
     async def square_off_binding(self, client_id: str, binding_id: str, strategies,
                                  underlying: str = "") -> int:
-        """Square off (buy-to-close) the open sell-straddle legs for ONE binding's broker. When NO
-        other active broker remains for the strategy, ALSO discards the strategy's logical + persisted
-        position (no extra orders) so a restart won't restore a ghost. Returns legs squared off."""
-        router = self._router
-        broker = ((getattr(router, "_brokers", None) or {}).get(client_id, {}) or {}).get(binding_id)
-        if broker is None:
-            return 0
-        _b = getattr(broker, "_binding", None)
-        provider = (_b.provider if _b else getattr(broker, "provider", "mock"))
-        # PAPER bindings hold only a LOCAL sim position — NEVER place a real closing order (on a
-        # funded exchange a real BUY-to-close would fill and create a phantom position). Just discard
-        # the logical position below.
-        _paper = str(getattr(_b, "trading_mode", "paper") or "paper").lower() == "paper"
-        from datetime import datetime as _dt
-        from config.global_config import IST as _IST
+        """Square off the open sell-straddle legs for ONE binding's broker by driving the strategy's
+        OWN exit path (`_close_position`) — the SAME pipeline a normal/EOD exit uses. That guarantees
+        the legs are bought-to-close ON THE EXCHANGE (via SmartOrderExecutor, paper→sim-fill) AND the
+        exit is written to trade history. The old path here fired raw place_order()s and discarded the
+        position, doing NEITHER → "squared in the UI but still open on the exchange" + empty history.
+        Returns the number of legs squared off (2 per closed straddle)."""
         legs_closed = 0
         for ss in (strategies or []):
             # STRICT per-binding identity: square off ONLY the book that belongs to exactly THIS
@@ -470,61 +468,21 @@ class StraddleExecutionBridge:
             pos = getattr(ss, "_position", None)
             if not pos or getattr(pos, "status", "") != "open":
                 continue
-            underlying = ss._underlying
+            und = ss._underlying
             try:
-                product = str(_RC.index_section(underlying, "sell_straddle").get("product_type", "MIS")).upper()
-            except Exception:
-                product = "MIS"
-            if product not in ("MIS", "NRML"):
-                product = "MIS"
-            _today = _dt.now(_IST).date()
-            try:
-                _exps = _REG.all_expiries(underlying)
-                expiry = next((e for e in _exps if e >= _today), _today)
-            except Exception:
-                expiry = _today
-            qty = int(getattr(pos, "lot_size", 0) or (ss._lot_size * ss._lot_multiplier))
-            if _paper:
-                # Paper: close the LOCAL sim position only — no real orders.
+                # Block re-entry while we tear the book down, then route through the real exit.
+                ss._stop_for_day = True
+                await ss._close_position(f"manual_squareoff_{client_id}_{binding_id}"[:40])
                 legs_closed += 2
+                logger.info("StraddleBridge: SQUARE-OFF %s for %s/%s — routed via _close_position "
+                            "(real buy-to-close + history).", und, client_id, binding_id)
                 self._trade_log.log_event(client_id, binding_id,
-                    f"SQUARE-OFF (paper, sim-only) {underlying} — no real order placed")
-                if not self._other_active_broker_for(underlying, client_id, binding_id):
-                    try:
-                        ss.discard_position_after_squareoff(f"paper_toggle_off_{client_id}_{binding_id}")
-                    except Exception:
-                        pass
-                continue
-            for opt_type, strike in (("CE", pos.ce_leg.strike), ("PE", pos.pe_leg.strike)):
-                symbol = _resolve_option_symbol(underlying, expiry, int(strike), opt_type, provider)
-                if not symbol:
-                    continue
-                req = OrderRequest(
-                    broker_symbol=symbol, exchange=order_exchange(underlying),
-                    side=OrderSide.BUY, qty=qty, order_type=OrderType.MARKET,
-                    product=product, tag=f"SQUAREOFF_{binding_id}"[:20], client_id=client_id,
-                )
-                try:
-                    await broker.place_order(req)
-                    legs_closed += 1
-                    logger.info("StraddleBridge: SQUARE-OFF %s %s%d for %s/%s (toggle OFF)",
-                                underlying, opt_type, int(strike), client_id, binding_id)
-                    self._trade_log.log_event(client_id, binding_id,
-                        f"SQUARE-OFF (toggle OFF) {underlying} {opt_type}{int(strike)} qty={qty} product={product}")
-                except Exception as exc:
-                    logger.error("StraddleBridge: SQUARE-OFF FAILED %s %s%d for %s/%s: %s",
-                                 underlying, opt_type, int(strike), client_id, binding_id, exc)
-                    self._trade_log.log_event(client_id, binding_id,
-                        f"SQUARE-OFF FAILED {underlying} {opt_type}{int(strike)}: {exc}")
-            # If this was the LAST active broker for the strategy, forget the logical position so a
-            # restart does not restore a ghost (the broker legs are now flat). Other active brokers
-            # still holding it → keep managing the position for them.
-            if not self._other_active_broker_for(underlying, client_id, binding_id):
-                try:
-                    ss.discard_position_after_squareoff(f"toggle_off_{client_id}_{binding_id}")
-                except Exception as exc:
-                    logger.error("StraddleBridge: discard logical position failed for %s: %s",
-                                 underlying, exc)
+                    f"SQUARE-OFF (manual) {und} — closed via exit pipeline (real close + history)")
+            except Exception as exc:
+                logger.error("StraddleBridge: SQUARE-OFF FAILED %s for %s/%s: %s",
+                             und, client_id, binding_id, exc)
+                self._trade_log.log_event(client_id, binding_id,
+                    f"SQUARE-OFF FAILED {und}: {exc}")
         return legs_closed
 
     async def _paper_fill(
