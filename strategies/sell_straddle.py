@@ -939,15 +939,19 @@ class SellStraddleStrategy:
 
         # Record market-open for this session (first candle of the day)
         if self._market_open_dt is None or self._session_day(self._market_open_dt) != self._session_day(now):
-            # Session open is instrument-specific: MCX commodities (CRUDEOIL…) open
-            # 09:00, NSE/BSE indices 09:15. Using the wrong open mis-times priming
-            # (e.g. CRUDEOIL showing 'ready at 09:17' instead of 09:02).
+            # Session open is instrument-specific: MCX commodities (CRUDEOIL…) open 09:00, NSE/BSE
+            # indices 09:15. CRYPTO is 24/7 with NO fixed clock open and NO historical seed — so its
+            # indicators warm from live bars starting when THIS book begins receiving data; priming
+            # must count from NOW (the first candle of the session), not a fixed 09:15 (which would
+            # leave it 'priming' until 09:19 if the book starts in the early hours).
             _mcx = set(getattr(self._cfg, "mcx_underlyings", ())) if self._cfg else set()
-            _open = dtime(9, 0) if self._underlying in _mcx else _MARKET_OPEN
-            self._market_open_dt = now.replace(
-                hour=_open.hour, minute=_open.minute,
-                second=0, microsecond=0,
-            )
+            if self._is_crypto:
+                self._market_open_dt = now.replace(second=0, microsecond=0)
+            else:
+                _open = dtime(9, 0) if self._underlying in _mcx else _MARKET_OPEN
+                self._market_open_dt = now.replace(
+                    hour=_open.hour, minute=_open.minute, second=0, microsecond=0,
+                )
             self._primed = False
 
         # Update buffers
