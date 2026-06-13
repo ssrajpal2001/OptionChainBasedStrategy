@@ -503,7 +503,12 @@ async def _run_live(
     # it inside create_task() puts a already-completing task in the barrier,
     # which fires FIRST_COMPLETED ~50 ms after boot.  Await it here alongside
     # router.start() so the feeder is live before the barrier is entered.
-    await router.start()
+    try:
+        await router.start()
+    except RuntimeError as exc:
+        logger.critical("Startup aborted: %s", exc)
+        print(f"\n\nFATAL: {exc}\n\nCheck broker credentials in the dashboard and retry.\n")
+        raise SystemExit(1)
     await feeder.start()
 
     if "iron_condor" in _enabled_strats:

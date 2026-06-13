@@ -96,14 +96,14 @@ class StraddleBookManager:
                 logger.info("StraddleBookManager: spawned book %s/%s/%s (lots=%d)",
                             cid, bid, und, wanted[key])
             except Exception as exc:
-                logger.warning("StraddleBookManager: spawn %s failed: %s", key, exc)
+                logger.warning("StraddleBookManager: spawn %s failed: %s", key, exc, exc_info=True)
         # Stop books whose deployment was removed OR toggled OFF (is_running=0).
         for key in set(self._books) - set(wanted):
             book = self._books.pop(key)
             try:
                 book.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("StraddleBookManager: stop %s failed: %s", key, exc, exc_info=True)
             logger.info("StraddleBookManager: stopped book %s/%s/%s", *key)
         # Re-spawn a running book if its lot_multiplier changed in the deployment (so a
         # client-side LOT MULTIPLIER edit takes effect — drives both qty and scalable-TSL scaling).

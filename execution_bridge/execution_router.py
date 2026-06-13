@@ -110,22 +110,37 @@ class ExecutionRouter:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Authenticate brokers and spin up per-client workers."""
+        """Authenticate brokers and spin up per-client workers.
+
+        Raises RuntimeError if ANY broker auth fails — the system must not start
+        with a missing broker as it leads to confusing 'no broker for binding' errors later.
+        """
+        failed: list[str] = []
         for client in self._registry.all_active():
             self._brokers[client.client_id] = {}
             for binding in client.enabled_brokers():
                 broker = create_broker(binding, client.client_id)
-                if await broker.authenticate():
+                try:
+                    ok = await broker.authenticate()
+                except Exception as exc:
+                    logger.critical(
+                        "Router: Auth EXCEPTION for %s/%s (%s): %s",
+                        client.client_id, binding.binding_id, binding.provider, exc,
+                        exc_info=True,
+                    )
+                    ok = False
+                if ok:
                     self._brokers[client.client_id][binding.binding_id] = broker
                     logger.info(
                         "Router: Authenticated %s/%s (%s).",
                         client.client_id, binding.binding_id, binding.provider,
                     )
                 else:
-                    logger.error(
-                        "Router: Auth failed for %s/%s.",
-                        client.client_id, binding.binding_id,
+                    logger.critical(
+                        "Router: Auth FAILED for %s/%s (%s). System cannot start.",
+                        client.client_id, binding.binding_id, binding.provider,
                     )
+                    failed.append(f"{client.client_id}/{binding.binding_id}({binding.provider})")
 
             worker = ClientExecutionWorker(
                 client=client,
@@ -134,6 +149,12 @@ class ExecutionRouter:
                 cfg=self._cfg,
             )
             self._pool.register(worker)
+
+        if failed:
+            raise RuntimeError(
+                f"Broker authentication failed for: {', '.join(failed)}. "
+                "Fix credentials or remove the binding before starting in live mode."
+            )
 
         await self._pool.start_all()
         logger.info("Router: %d client workers active.", len(self._brokers))

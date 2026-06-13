@@ -331,6 +331,11 @@ class SellStraddleStrategy:
 
     def _load_thresholds(self) -> None:
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        if not ss:
+            logger.warning(
+                "SellStraddle[%s]: 'sell_straddle' config section missing from runtime config — using defaults.",
+                self._underlying,
+            )
 
         def _cfg(key: str, default):
             """
