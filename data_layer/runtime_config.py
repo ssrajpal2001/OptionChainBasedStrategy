@@ -372,6 +372,19 @@ class RuntimeConfig:
         logger.info("RuntimeConfig: index[%s][%s] saved (merged %d keys).",
                     index, strategy, len(data) if isinstance(data, dict) else 0)
 
+
+_REQUIRED_SS_KEYS: frozenset[str] = frozenset({"entry_rules_beginning", "exit_rules"})
+
+
+def validate_index_section(index: str, section: str, raw: dict) -> None:
+    """Warn about missing required keys in a strategy config section."""
+    for key in _REQUIRED_SS_KEYS:
+        if key not in raw:
+            logger.warning(
+                "RuntimeConfig[%s/%s]: missing expected key '%s' — defaults will apply.",
+                index, section, key,
+            )
+
     @staticmethod
     def set_index_config(index: str, data: Dict[str, Any]) -> None:
         """Persist full per-index config (sell_straddle + iron_condor together)."""

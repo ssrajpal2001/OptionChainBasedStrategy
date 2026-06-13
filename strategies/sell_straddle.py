@@ -330,12 +330,14 @@ class SellStraddleStrategy:
     # ── Config ────────────────────────────────────────────────────────────────
 
     def _load_thresholds(self) -> None:
+        from data_layer.runtime_config import validate_index_section
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         if not ss:
             logger.warning(
                 "SellStraddle[%s]: 'sell_straddle' config section missing from runtime config — using defaults.",
                 self._underlying,
             )
+        validate_index_section(self._underlying, "sell_straddle", ss)
 
         def _cfg(key: str, default):
             """

@@ -95,6 +95,28 @@ class ExchangeConfig:
             return time(17, 30, 0)
         return self.mcx_market_close if self.is_mcx(underlying) else self.market_close
 
+    def load_from_db(self, db) -> None:
+        """Override strike_steps and lot_sizes from system_settings table if DB values exist.
+
+        Keys: strike_step_<UNDERLYING> (float), lot_size_<UNDERLYING> (int).
+        Runs synchronously at startup before any async tasks are started.
+        ExchangeConfig is frozen so we mutate the inner dicts directly.
+        """
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        for prefix, target, cast in (
+            ("strike_step_", self.strike_steps, float),
+            ("lot_size_",    self.lot_sizes,    int),
+        ):
+            for key, value in db.get_all_settings_sync().items():
+                if key.startswith(prefix):
+                    underlying = key[len(prefix):].upper()
+                    try:
+                        target[underlying] = cast(value)
+                        _log.info("ExchangeConfig: %s=%s (from DB)", key, value)
+                    except (ValueError, TypeError):
+                        _log.warning("ExchangeConfig: invalid DB value for %s=%r, skipping.", key, value)
+
 
 # Module-level set + helper so execution bridges can pick the order exchange
 # without threading a config object through (kept in sync with ExchangeConfig).

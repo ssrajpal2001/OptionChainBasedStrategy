@@ -416,6 +416,7 @@ async def _run_live(
     from data_layer.client_db import ClientDB as _ClientDB
     _shared_client_db = _ClientDB()
     await _shared_client_db.initialise()
+    cfg.exchange.load_from_db(_shared_client_db)
     # Share the same DB instance across bridge + dashboard so engine_active state is consistent
     router._client_db = _shared_client_db
     # Now the DB exists → build the per-binding SellStraddle book manager.

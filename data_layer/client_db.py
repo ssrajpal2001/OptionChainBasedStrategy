@@ -884,6 +884,17 @@ class ClientDB:
             logger.error("ClientDB.get_setting_sync(%s): %s", key, exc)
             return default
 
+    def get_all_settings_sync(self) -> dict:
+        """Return all system_settings rows as a plain dict."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            rows = con.execute("SELECT key, value FROM system_settings").fetchall()
+            con.close()
+            return {k: v for k, v in rows}
+        except Exception as exc:
+            logger.error("ClientDB.get_all_settings_sync: %s", exc)
+            return {}
+
     async def set_setting(self, key: str, value: str) -> None:
         """Persist a system setting (upsert)."""
         logger.info("[DB] set_setting %s=%r", key, value[:80] if value else "")
