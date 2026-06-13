@@ -57,6 +57,28 @@ _OPTIONAL_BROKER_PACKAGES = [
     ("upstox-python-sdk", "upstox_client"),
 ]
 
+_WEAK_PASSWORDS = {"admin123", "password", "changeme", "secret", ""}
+
+
+def _enforce_secrets(mode: str) -> None:
+    """Refuse to start in live mode with default/weak credentials."""
+    if mode not in ("live",):
+        return
+    pwd = os.getenv("TERMINUS_ADMIN_PASSWORD", "admin123")
+    if pwd in _WEAK_PASSWORDS:
+        sys.exit(
+            "\nFATAL: TERMINUS_ADMIN_PASSWORD is a default/weak value.\n"
+            "  Set a strong password: export TERMINUS_ADMIN_PASSWORD=<your-password>\n"
+            "  Then restart.\n"
+        )
+    jwt = os.getenv("TERMINUS_JWT_SECRET", "terminus-dev-secret-CHANGE-IN-PRODUCTION")
+    if "CHANGE-IN-PRODUCTION" in jwt or len(jwt) < 32:
+        sys.exit(
+            "\nFATAL: TERMINUS_JWT_SECRET is the dev default or too short (< 32 chars).\n"
+            "  Generate one: python -c \"import secrets; print(secrets.token_hex(32))\"\n"
+            "  Then: export TERMINUS_JWT_SECRET=<generated-value>\n"
+        )
+
 
 def _check_packages(packages: list) -> list[str]:
     """Return display names of packages that cannot be imported."""
@@ -604,6 +626,9 @@ async def _run_live(
 
 def main() -> None:
     args = _parse_args()
+
+    # ── Enforce secrets for live mode ─────────────────────────────────────────
+    _enforce_secrets(args.mode)
 
     # ── Dependency check ──────────────────────────────────────────────────────
     if not args.no_preflight:
