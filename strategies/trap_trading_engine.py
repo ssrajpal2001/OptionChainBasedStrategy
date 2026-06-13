@@ -1569,11 +1569,12 @@ class TrapTradingEngine:
     # ── Strike helpers ────────────────────────────────────────────────────────
 
     def _atm_strike(self, underlying: str) -> float:
+        from strategies.strike_utils import compute_atm
         spot = self._spot_cache.get(underlying, 0.0)
         step = self._cfg.exchange.strike_steps.get(underlying, 50.0)
         if spot <= 0.0:
             return 0.0
-        return round(spot / step) * step
+        return compute_atm(spot, step)
 
     def _select_itm_strike(
         self, underlying: str, direction: str = "bearish"

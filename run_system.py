@@ -258,14 +258,7 @@ def _load_registry_from_db(registry) -> None:
                 return val if val is not None else default
 
             def _bdec(row, key):
-                """Read an XOR-encoded *_enc column and decode it to plaintext."""
-                enc = _bget(row, key, "")
-                if not enc:
-                    return ""
-                try:
-                    return _decode_cred(enc)
-                except Exception:
-                    return ""
+                return _decode_cred(_bget(row, key, ""))
 
             bindings = con.execute(
                 "SELECT * FROM broker_bindings WHERE client_id=? AND enabled=1", (cid,)

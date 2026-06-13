@@ -453,8 +453,9 @@ class IronCondorStrategy:
             self._clog.info("WAIT  spot=0 — no index tick received yet")
             return
 
+        from strategies.strike_utils import compute_atm
         step = self._strike_step
-        atm  = round(spot / step) * step
+        atm  = compute_atm(spot, step)
 
         short_ce_strike = atm + self._short_otm
         short_pe_strike = atm - self._short_otm
