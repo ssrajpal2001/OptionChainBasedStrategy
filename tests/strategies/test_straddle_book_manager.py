@@ -19,6 +19,22 @@ class _DB:
     def __init__(self, deps): self._deps = deps          # {client_id: [deployment dicts]}
     def get_all_clients_sync(self): return [{"client_id": c} for c in self._deps]
     def get_deployments_sync(self, cid): return self._deps.get(cid, [])
+    def get_running_straddle_deployments_sync(self):
+        """Batch query: all is_running=1 sell_straddle deployments. (Replaces N+1 loop.)"""
+        result = []
+        for cid, deps in self._deps.items():
+            for d in deps:
+                if str(d.get("strategy_name", "")).lower() == "sell_straddle" and int(d.get("is_running", 0) or 0) == 1:
+                    result.append({
+                        "client_id": cid,
+                        "binding_id": d.get("binding_id", ""),
+                        "underlying": d.get("underlying", ""),
+                        "lot_multiplier": d.get("lot_multiplier", 1),
+                        "strategy_name": d.get("strategy_name", ""),
+                        "is_running": d.get("is_running", 0),
+                        "assigned_instrument": d.get("assigned_instrument", "")
+                    })
+        return result
 
 
 def _mgr(monkeypatch, deps):

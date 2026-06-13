@@ -58,38 +58,27 @@ class StraddleBookManager:
 
     def _wanted(self) -> Dict[Key, int]:
         """Map of (client,binding,underlying) → lot_multiplier for every sell_straddle
-        deployment that is RUNNING (is_running=1). A deployed-but-stopped strategy is NOT
-        wanted — its book only spawns when the Run toggle is ON, so a re-selected/already-
-        ticked deployment with is_running=0 never silently trades, and toggling OFF stops it.
+        deployment that is RUNNING (is_running=1). Single JOIN query — O(1) regardless
+        of client count (replaces N+1 per-client loop).
         """
         wanted: Dict[Key, int] = {}
         try:
-            clients = self._db.get_all_clients_sync()
+            rows = self._db.get_running_straddle_deployments_sync()
         except Exception:
-            clients = []
-        for c in clients:
-            cid = c.get("client_id", "")
-            if not cid:
+            return wanted
+        for d in rows:
+            cid = d.get("client_id", "")
+            bid = d.get("binding_id", "")
+            und = str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
+            if not cid or not bid:
+                continue
+            if self._indices and und not in self._indices:
                 continue
             try:
-                deps = self._db.get_deployments_sync(cid)
+                lots = max(1, int(round(float(d.get("lot_multiplier", 1) or 1))))
             except Exception:
-                deps = []
-            for d in deps:
-                if str(d.get("strategy_name", "")).lower() != "sell_straddle":
-                    continue
-                if int(d.get("is_running", 0) or 0) != 1:
-                    continue           # deployed but Run toggle OFF → do not spawn/trade
-                und = str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
-                if self._indices and und not in self._indices:
-                    continue           # only spawn books for indices the feeder actually subscribes
-                bid = d.get("binding_id", "")
-                if bid:
-                    try:
-                        lots = max(1, int(round(float(d.get("lot_multiplier", 1) or 1))))
-                    except Exception:
-                        lots = 1
-                    wanted[(cid, bid, und)] = lots
+                lots = 1
+            wanted[(cid, bid, und)] = lots
         return wanted
 
     def _reconcile(self) -> None:
