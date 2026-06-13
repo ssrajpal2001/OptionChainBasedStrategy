@@ -454,6 +454,56 @@ class StraddleExecutionBridge:
             logger.debug("StraddleBridge._other_active_broker_for(%s): %s", underlying, _exc)
         return False
 
+    async def _reconcile_flat(self, broker, symbols, product, exchange,
+                              client_id, binding_id, underlying, settle_sec: float = 3.0) -> None:
+        """Make the broker ACTUALLY flat in `symbols` — the only reliable guard when an order the
+        executor reported as unfilled is still live and fills late (Delta cancel/status is unreliable).
+        Steps: cancel this entry's known orders for these symbols, wait `settle_sec` for any pending
+        fill to land, then read the broker's REAL positions and market-flatten any residual qty."""
+        from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
+        _syms = {str(s).upper() for s in (symbols or []) if s}
+        if not _syms:
+            return
+        # 1) Cancel every order_id we placed for this (client,binding,underlying) — best-effort.
+        try:
+            _oids = (self._order_ids.get((client_id, binding_id, underlying)) or {})
+            for _oid in list(_oids.values()):
+                try:
+                    await broker.cancel_order(str(_oid))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # 2) Let any in-flight fill settle, then reconcile against REAL positions.
+        await asyncio.sleep(settle_sec)
+        if not hasattr(broker, "get_positions"):
+            return
+        try:
+            positions = await broker.get_positions()
+        except Exception as exc:
+            logger.error("StraddleBridge: reconcile get_positions failed for %s/%s: %s — RECONCILE MANUALLY.",
+                         client_id, binding_id, exc)
+            return
+        for p in (positions or []):
+            sym = str(getattr(p, "symbol", "")).upper()
+            qty = int(getattr(p, "qty", 0) or 0)
+            if sym not in _syms or qty == 0:
+                continue
+            _side = OrderSide.SELL if qty > 0 else OrderSide.BUY      # opposite of the open position
+            try:
+                _req = OrderRequest(broker_symbol=sym, exchange=exchange, side=_side, qty=abs(qty),
+                                    order_type=OrderType.MARKET, product=product,
+                                    tag=f"SS_{underlying}_RECON"[:20], client_id=client_id)
+                _oid = await broker.place_order(_req)
+                logger.error("StraddleBridge: RECONCILE-FLATTEN residual %s qty=%d (%s) → order %s | %s/%s",
+                             sym, qty, _side, _oid, client_id, binding_id)
+                self._trade_log.log_event(client_id, binding_id,
+                    f"RECONCILE-FLATTEN residual {sym} qty={qty} → {_oid}")
+            except Exception as exc:
+                logger.error("StraddleBridge: RECONCILE-FLATTEN %s FAILED: %s — RECONCILE MANUALLY.", sym, exc)
+                self._trade_log.log_event(client_id, binding_id,
+                    f"RECONCILE-FLATTEN {sym} FAILED: {exc} — RECONCILE MANUALLY")
+
     async def square_off_binding(self, client_id: str, binding_id: str, strategies,
                                  underlying: str = "") -> int:
         """Square off the open sell-straddle legs for ONE binding's broker by driving the strategy's
@@ -668,6 +718,14 @@ class StraddleExecutionBridge:
                                      ev.underlying, ot, exc, client_id)
                         self._trade_log.log_event(client_id, binding_id,
                             f"ENTRY ABORT flatten {ev.underlying} {ot} FAILED: {exc} — RECONCILE MANUALLY")
+                # The UNFILLED leg may have a resting/pending order that fills AFTER this abort (Delta's
+                # flaky cancel/status — the exact recurrence: PE reported 0 but its order was still
+                # live and filled late → naked short). Cancel its known orders, then RECONCILE against
+                # the broker's ACTUAL positions (ground truth) and flatten any residual qty.
+                _leg_syms = [s for s in symbol_by_leg.values() if s]
+                await self._reconcile_flat(broker, _leg_syms, _ss_product,
+                                           order_exchange(ev.underlying), client_id, binding_id,
+                                           ev.underlying)
                 # Tell the strategy to discard its optimistic position — entry never established.
                 abort_ev = StraddleFillEvent(
                     action="ENTRY", underlying=ev.underlying, atm=ev.atm,
