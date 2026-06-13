@@ -7657,18 +7657,18 @@ function histReplay() {
                           <span class="text-right" style="color:var(--t-muted)" x-text="(leg.buy_avg||0)>0?leg.buy_avg.toFixed(2):'—'"></span>
                           <span class="text-right price-live" style="color:var(--t-bright)" x-text="(leg.ltp||leg.entry_price)"></span>
                           <span class="text-right font-bold" :style="`color:${leg.pnl>=0?'var(--t-green)':'var(--t-red)'}`"
-                                x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(0)"></span>
+                                x-text="(leg.pnl>=0?'+':'')+leg.pnl.toFixed(leg.ccy==='$'?2:0)"></span>
                           <span class="text-right font-bold" :style="`color:${(leg.mtm!==undefined?leg.mtm:leg.pnl)>=0?'var(--t-green)':'var(--t-red)'}`"
-                                x-text="(((leg.mtm!==undefined?leg.mtm:leg.pnl))>=0?'+':'')+(leg.mtm!==undefined?leg.mtm:leg.pnl).toFixed(0)"></span>
+                                x-text="(((leg.mtm!==undefined?leg.mtm:leg.pnl))>=0?'+':'')+(leg.mtm!==undefined?leg.mtm:leg.pnl).toFixed(leg.ccy==='$'?2:0)"></span>
                         </div>
                       </template>
                       <!-- Totals row -->
                       <div class="grid items-center pt-1 border-t text-xs font-mono font-bold" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
                         <span style="color:var(--t-muted)">TOTAL</span><span></span><span></span><span></span><span></span><span></span>
                         <span class="text-right" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
+                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed((csPositions[b.binding_id][dep.strategy_name].ccy||'₹')==='$'?2:0)"></span>
                         <span class="text-right" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
+                              x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed((csPositions[b.binding_id][dep.strategy_name].ccy||'₹')==='$'?2:0)"></span>
                       </div>
                       </div>
                       </div>
@@ -7677,12 +7677,12 @@ function histReplay() {
                         <div class="flex justify-between" x-show="csPositions[b.binding_id][dep.strategy_name].booked!==undefined">
                           <span style="color:var(--t-muted)">Booked P&amp;L</span>
                           <span class="font-bold" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].booked||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                                x-text="((csPositions[b.binding_id][dep.strategy_name].booked||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].ccy||'₹')+(csPositions[b.binding_id][dep.strategy_name].booked||0).toFixed(0)"></span>
+                                x-text="((csPositions[b.binding_id][dep.strategy_name].booked||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].ccy||'₹')+(csPositions[b.binding_id][dep.strategy_name].booked||0).toFixed((csPositions[b.binding_id][dep.strategy_name].ccy||'₹')==='$'?2:0)"></span>
                         </div>
                         <div class="flex justify-between">
                           <span style="color:var(--t-muted)">Running P&amp;L</span>
                           <span class="font-bold" :style="`color:${(csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`"
-                                x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].ccy||'₹')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed(0)"></span>
+                                x-text="((csPositions[b.binding_id][dep.strategy_name].pnl||0)>=0?'+':'')+(csPositions[b.binding_id][dep.strategy_name].ccy||'₹')+(csPositions[b.binding_id][dep.strategy_name].pnl||0).toFixed((csPositions[b.binding_id][dep.strategy_name].ccy||'₹')==='$'?2:0)"></span>
                         </div>
                         <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border)">
                           <span class="sec-label">NET (Booked+Running)</span>
