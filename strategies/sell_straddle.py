@@ -511,6 +511,11 @@ class SellStraddleStrategy:
                 "session_realized_pnl_pts": self._session_realized_pnl_pts,
                 "trades_today":             self._trades_today,
                 "stop_for_day":             self._stop_for_day,
+                # Stamp the SESSION day (crypto: entry_start-anchored; NSE: calendar date) so a
+                # restart that crosses midnight inside a crypto session keeps the right count, and a
+                # restart in a NEW session starts fresh — independent of the position_store's
+                # calendar-date MIS rule.
+                "session_day":              str(self._session_day(datetime.now(IST))),
             }, product_type="MIS")
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session persist failed: %s", self._underlying, exc)
@@ -521,6 +526,14 @@ class SellStraddleStrategy:
         try:
             from data_layer import position_store as _ps
             _sess = _ps.load(self._persist_key + "_session")
+            # Only restore if the saved session belongs to the CURRENT session day — for crypto this
+            # is the entry_start-anchored day (so a midnight-crossing restart restores correctly, and
+            # a restart in a new session ignores the stale count). NSE keeps calendar-date semantics.
+            if _sess and str(_sess.get("session_day", str(self._session_day(datetime.now(IST))))) \
+                    != str(self._session_day(datetime.now(IST))):
+                logger.info("SellStraddle[%s]: persisted session is from a prior trading day "
+                            "(%s) — starting fresh.", self._underlying, _sess.get("session_day"))
+                _sess = None
             if _sess:
                 self._session_realized_pnl_pts = float(_sess.get("session_realized_pnl_pts", 0.0) or 0.0)
                 self._trades_today = max(self._trades_today, int(_sess.get("trades_today", 0) or 0))
@@ -2328,12 +2341,15 @@ class SellStraddleStrategy:
                         self._underlying, cooldown_min, self._sl_cooldown_until.strftime("%H:%M"))
 
     def _session_day(self, when: datetime):
-        """The 'trading day' key for daily-reset. NSE/MCX → calendar date. Crypto → the Delta active
-        DAILY-EXPIRY date (rolls at 17:30 IST), so a BTC session 18:30→16:30 (crossing midnight) is
-        ONE day and the reset fires at the 17:30 expiry (when we're already flat), not at midnight."""
+        """The 'trading day' key for daily-reset. NSE/MCX → calendar date. Crypto → keyed to the
+        CONFIGURED entry_start (e.g. 18:30): the day rolls when a new session begins, so a BTC
+        session 18:30→16:30 (crossing midnight) is ONE day. The reset fires at entry_start — NOT
+        calendar midnight, NOT a hardcoded expiry — and it's SAFE because reset_session wipes the
+        position, and by entry_start we're already squared off (at squareoff/entry_end) and flat,
+        so no live broker leg is orphaned. Before entry_start we're still in the prior session."""
         if self._is_crypto:
-            from data_layer.universal_option_mapper import UniversalOptionMapper as _M
-            return _M.active_daily_expiry(when)
+            from datetime import timedelta as _td
+            return when.date() if when.time() >= self._entry_start else (when.date() - _td(days=1))
         return when.date()
 
     def _is_in_entry_window(self, now: datetime) -> bool:
