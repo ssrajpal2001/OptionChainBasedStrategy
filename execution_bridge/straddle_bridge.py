@@ -287,7 +287,12 @@ class StraddleExecutionBridge:
         self._order_ids: Dict[tuple, Dict[str, str]] = {}
         # Slippage-aware executor: crypto LIMIT-at-mid (chase→market); books from the REAL fill.
         from execution_bridge.smart_executor import SmartOrderExecutor
+        # ENTRY: no rush — try the mid harder (2 chases × 4s) to save the spread.
         self._executor = SmartOrderExecutor(fill_timeout_sec=4.0, chase_attempts=2)
+        # EXIT/square-off: get flat PROMPTLY — try the mid ONCE (2s) then market the remainder, so a
+        # kill/EOD/manual square-off doesn't dawdle ~12s on a wide Delta book. Still anti-slippage
+        # (one mid attempt) but guarantees a fast flat via the market fallback.
+        self._exit_executor = SmartOrderExecutor(fill_timeout_sec=2.0, chase_attempts=1)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -584,6 +589,9 @@ class StraddleExecutionBridge:
         # (minimises naked-leg risk during a chase). Position is booked from the REAL fill, not LTP.
         _use_limit = (order_exchange(ev.underlying) == "DELTA")
 
+        # An EXIT must get flat promptly → faster mid-then-market executor; ENTRY tries the mid harder.
+        _ex = self._exit_executor if ev.action == "EXIT" else self._executor
+
         async def _do_leg(opt_type, strike):
             symbol = _resolve_option_symbol(ev.underlying, expiry, int(strike), opt_type, provider)
             _fallback_ltp = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
@@ -592,7 +600,7 @@ class StraddleExecutionBridge:
                                provider, ev.underlying, int(strike), opt_type)
                 return opt_type, _fallback_ltp
             try:
-                legfill = await self._executor.execute_leg(
+                legfill = await _ex.execute_leg(
                     broker, broker_symbol=symbol, exchange=order_exchange(ev.underlying),
                     side=side, qty=qty, product=_ss_product,
                     tag=f"SS_{ev.underlying}_{ev.action}", client_id=client_id,
