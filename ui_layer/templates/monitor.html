@@ -1580,6 +1580,7 @@ document.addEventListener('alpine:init', () => {
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
+        guardrail_pnl: { enabled: false, target_pts: 0, stoploss_pts: 0 },
         ratio_exit:    { enabled: false, threshold: 3.0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
@@ -1591,6 +1592,8 @@ document.addEventListener('alpine:init', () => {
           wednesday: { enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' },
           thursday:  { enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' },
           friday:    { enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' },
+          saturday:  { enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' },
+          sunday:    { enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' },
         }
       };
     },
@@ -1638,6 +1641,7 @@ document.addEventListener('alpine:init', () => {
       if (ss.theta_target === undefined) ss.theta_target = 0;
       if (ss.trail_basis  === undefined) ss.trail_basis  = 'ltp';
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
+      if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, target_pts: 0, stoploss_pts: 0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
@@ -1651,8 +1655,8 @@ document.addEventListener('alpine:init', () => {
       const ic = this.indexConfig[idx].iron_condor;
       if (ic && ic.product_type === undefined) ic.product_type = 'NRML';
       const _dayDef = () => ({ enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' });
-      if (!ss.per_day) ss.per_day = { monday:_dayDef(), tuesday:_dayDef(), wednesday:_dayDef(), thursday:_dayDef(), friday:_dayDef() };
-      for (const d of ['monday','tuesday','wednesday','thursday','friday']) {
+      if (!ss.per_day) ss.per_day = { monday:_dayDef(), tuesday:_dayDef(), wednesday:_dayDef(), thursday:_dayDef(), friday:_dayDef(), saturday:_dayDef(), sunday:_dayDef() };
+      for (const d of ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']) {
         if (!ss.per_day[d]) ss.per_day[d] = _dayDef();
         if (ss.per_day[d].profit_target_pct === undefined) ss.per_day[d].profit_target_pct = 0;
         if (ss.per_day[d].loss_sl_pct === undefined) ss.per_day[d].loss_sl_pct = 0;
@@ -4464,6 +4468,31 @@ function histReplay() {
                 </div>
               </div>
 
+              <!-- PnL Guardrail (points-based session target / stoploss) -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">PNL GUARDRAIL
+                    <span style="color:var(--t-muted);font-weight:400"> — session P&amp;L in points</span></span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="sec-label">Target (pts) <span style="color:var(--t-muted)">stop for day on profit</span></label>
+                    <input type="number" step="1" class="t-input mt-0.5" placeholder="0 = off"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.target_pts">
+                  </div>
+                  <div>
+                    <label class="sec-label">SL (pts) <span style="color:var(--t-muted)">negative, stop for day on loss</span></label>
+                    <input type="number" step="1" class="t-input mt-0.5" placeholder="e.g. -60"
+                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.stoploss_pts">
+                  </div>
+                </div>
+              </div>
+
               <!-- Ratio Exit -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
@@ -4687,7 +4716,7 @@ function histReplay() {
               <div class="sec-label mb-1">PER-DAY OVERRIDES
                 <span style="color:var(--t-muted);font-weight:400"> — 0 falls back to global values above</span>
               </div>
-              <template x-for="day in ['monday','tuesday','wednesday','thursday','friday']" :key="day">
+              <template x-for="day in ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']" :key="day">
                 <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                   <div class="flex items-center justify-between mb-2">
                     <span class="font-display font-bold text-xs uppercase" style="color:var(--t-bright)" x-text="day"></span>
