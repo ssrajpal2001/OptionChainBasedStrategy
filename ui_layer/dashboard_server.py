@@ -2210,9 +2210,10 @@ class DashboardServer:
             and stop its strategies — terminal stays connected. Distinct from the global
             STOP & SQUARE-OFF (/api/client/stop_squareoff) which flattens every broker."""
             cid = user.get("client_id", "")
-            for d in _srv._client_db.get_deployments_sync(cid):
-                if d.get("binding_id") == binding_id:
-                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
+            # ORDER MATTERS: flatten the open legs FIRST (places the broker BUY-to-close), THEN stop the
+            # deployments. If we set is_running=False first, StraddleBookManager's 5s reconcile can tear
+            # the book down before square_off_binding runs → it finds no book, closes NOTHING in the
+            # exchange, yet the position is discarded → real legs left open on Delta and the card vanishes.
             squared = 0
             if _srv._straddle_bridge is not None:
                 try:
@@ -2220,6 +2221,9 @@ class DashboardServer:
                         cid, binding_id, _srv._sell_straddles)
                 except Exception as exc:
                     logger.error("broker squareoff failed for %s/%s: %s", cid, binding_id, exc)
+            for d in _srv._client_db.get_deployments_sync(cid):
+                if d.get("binding_id") == binding_id:
+                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
             logger.info("Dashboard: broker square-off %s/%s — %d leg(s).", cid, binding_id, squared)
             return {"ok": True, "squared": squared,
                     "message": f"Squared off {squared} leg(s) on '{binding_id}'."}
