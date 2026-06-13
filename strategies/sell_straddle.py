@@ -866,8 +866,10 @@ class SellStraddleStrategy:
             _tick_count += 1
             now_ts = _time.monotonic()
             if now_ts - _last_log_ts >= 60.0:
-                self._clog.info("OPT_TICKS: %d option ticks received in last 60s  CE=%.2f PE=%.2f",
-                                _tick_count, self._ce_ltp, self._pe_ltp)
+                _step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+                _atm = int(round(self._spot / _step) * _step) if self._spot > 0 else 0
+                self._clog.info("OPT_TICKS: %d option ticks/60s  ATM=%d  CE%d=%.2f PE%d=%.2f",
+                                _tick_count, _atm, _atm, self._ce_ltp, _atm, self._pe_ltp)
                 _tick_count = 0
                 _last_log_ts = now_ts
             # Only capture the ATM strike's premium for entry — otherwise a
@@ -1343,9 +1345,11 @@ class SellStraddleStrategy:
         if self._order_pending:
             return  # Waiting for fill confirmation from bridge
         if self._spot <= 0 or self._ce_ltp <= 0 or self._pe_ltp <= 0:
+            _step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+            _atm = int(round(self._spot / _step) * _step) if self._spot > 0 else 0
             self._clog.info(
-                "WAIT  spot=%.2f CE_ltp=%.2f PE_ltp=%.2f — waiting for option ticks",
-                self._spot, self._ce_ltp, self._pe_ltp,
+                "WAIT  spot=%.2f ATM=%d CE%d_ltp=%.2f PE%d_ltp=%.2f — waiting for option ticks",
+                self._spot, _atm, _atm, self._ce_ltp, _atm, self._pe_ltp,
             )
             return
 
