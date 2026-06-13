@@ -1696,7 +1696,9 @@ class DashboardServer:
         @app.post("/api/client/stop_squareoff", tags=["Client"])
         async def api_client_stop_squareoff(user: dict = Depends(_require_client)):
             cid = user.get("client_id", "")
-            await _srv._client_db.stop_all_deployments(cid)          # all run toggles OFF
+            # Flatten every binding's legs FIRST, THEN stop the deployments — if we toggle the run
+            # flags off first, StraddleBookManager's reconcile can remove the books before we square
+            # them off and we close NOTHING on the exchange (orphaning real open legs).
             squared = 0
             if _srv._straddle_bridge is not None:
                 try:
@@ -1705,6 +1707,7 @@ class DashboardServer:
                             cid, b.get("binding_id", ""), _srv._sell_straddles)
                 except Exception as exc:
                     logger.error("stop_squareoff failed for %s: %s", cid, exc)
+            await _srv._client_db.stop_all_deployments(cid)          # all run toggles OFF
             logger.info("Dashboard: STOP & SQUARE-OFF %s — squared %d leg(s) across all brokers.",
                         cid, squared)
             return {"ok": True, "squared_off": squared}
@@ -2107,16 +2110,19 @@ class DashboardServer:
                 raise HTTPException(404, f"Binding '{binding_id}' not found.")
             # Kill = square off ALL app-pushed trades on this broker FIRST (close-own-legs only),
             # stop its strategies, THEN halt the worker / disconnect.
+            # ORDER MATTERS (same race as the per-broker square-off): flatten the legs BEFORE setting
+            # is_running=False, else StraddleBookManager's reconcile can remove the book first and we
+            # close NOTHING on the exchange.
             squared = 0
-            for d in _srv._client_db.get_deployments_sync(cid):
-                if d.get("binding_id") == binding_id:
-                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
             if _srv._straddle_bridge is not None:
                 try:
                     squared = await _srv._straddle_bridge.square_off_binding(
                         cid, binding_id, _srv._sell_straddles)
                 except Exception as exc:
                     logger.error("kill_broker square-off failed for %s/%s: %s", cid, binding_id, exc)
+            for d in _srv._client_db.get_deployments_sync(cid):
+                if d.get("binding_id") == binding_id:
+                    await _srv._client_db.set_deployment_running(d.get("deploy_id", ""), cid, False)
             if hasattr(worker, "halt"):
                 await worker.halt()
             elif hasattr(worker, "stop"):

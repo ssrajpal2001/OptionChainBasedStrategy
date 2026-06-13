@@ -636,27 +636,37 @@ class ClientDB:
             return []
 
     def get_bindings_safe_sync(self, client_id: str) -> List[dict]:
-        """Return bindings WITHOUT credentials — safe for API responses."""
-        try:
-            con = sqlite3.connect(self._db_path)
-            con.row_factory = sqlite3.Row
-            rows = [dict(r) for r in
-                    con.execute(
-                        """SELECT binding_id, provider, label, access_token,
-                                  token_generated_at, token_expiry_at,
-                                  assigned_strategy, assigned_instrument,
-                                  trading_mode, product_type,
-                                  is_trade_enabled, lot_multiplier, enabled,
-                                  terminal_connected, terminal_connected_at, engine_active,
-                                  show_granular_ticks, source_ip, whitelist_ip
-                           FROM broker_bindings WHERE client_id=? ORDER BY created_at""",
-                        (client_id,),
-                    ).fetchall()]
-            con.close()
-            return rows
-        except Exception as exc:
-            logger.error("ClientDB.get_bindings_safe_sync(%s): %s", client_id, exc)
-            return []
+        """Return bindings WITHOUT credentials — safe for API responses.
+
+        Retries on a transient "database is locked": a square-off / kill writes deployment + binding
+        rows, and a read racing that write used to throw → return [] → the UI panel showed ZERO
+        brokers (they reappeared on the next 8s poll). `timeout` makes SQLite WAIT for the writer
+        instead of erroring, and we retry a couple of times before giving up."""
+        import time as _t
+        last_exc = None
+        for _attempt in range(3):
+            try:
+                con = sqlite3.connect(self._db_path, timeout=5.0)
+                con.row_factory = sqlite3.Row
+                rows = [dict(r) for r in
+                        con.execute(
+                            """SELECT binding_id, provider, label, access_token,
+                                      token_generated_at, token_expiry_at,
+                                      assigned_strategy, assigned_instrument,
+                                      trading_mode, product_type,
+                                      is_trade_enabled, lot_multiplier, enabled,
+                                      terminal_connected, terminal_connected_at, engine_active,
+                                      show_granular_ticks, source_ip, whitelist_ip
+                               FROM broker_bindings WHERE client_id=? ORDER BY created_at""",
+                            (client_id,),
+                        ).fetchall()]
+                con.close()
+                return rows
+            except Exception as exc:
+                last_exc = exc
+                _t.sleep(0.15)
+        logger.error("ClientDB.get_bindings_safe_sync(%s): %s", client_id, last_exc)
+        return []
 
     # ── System feeder credentials ─────────────────────────────────────────────
 
