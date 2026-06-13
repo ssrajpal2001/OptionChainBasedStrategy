@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, date, time as dtime
@@ -65,21 +66,10 @@ def choose_expiry(premiums_by_expiry, min_ltp: float):
 
 
 def _make_ic_logger(underlying: str) -> logging.Logger:
-    name = f"client.ic.{underlying}"
-    lg = logging.getLogger(name)
-    if lg.handlers:
-        return lg
-    lg.setLevel(logging.DEBUG)
-    log_dir = os.path.join("logs", "clients")
-    os.makedirs(log_dir, exist_ok=True)
+    from utils.logging_utils import make_strategy_logger
+    from datetime import datetime
     date_str = datetime.now().strftime("%Y%m%d")
-    fh = logging.FileHandler(
-        os.path.join(log_dir, f"ic_{underlying}_{date_str}.log"), encoding="utf-8"
-    )
-    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
-    lg.addHandler(fh)
-    lg.propagate = False
-    return lg
+    return make_strategy_logger(f"ic_{underlying}_{date_str}", propagate=False)
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -414,8 +404,7 @@ class IronCondorStrategy:
         as the entry window is open, no position is held, and live premiums are
         present. Throttled to avoid re-evaluating on every tick.
         """
-        import time as _time
-        nowm = _time.monotonic()
+        nowm = time.monotonic()
         if nowm - getattr(self, "_last_entry_attempt", 0.0) < 1.0:
             return
         self._last_entry_attempt = nowm
@@ -437,9 +426,8 @@ class IronCondorStrategy:
             if day_names[now.weekday()] != self._entry_day:
                 # Throttled so the log isn't silent — explains an idle IC (a very common
                 # "IC not working" confusion when entry_day != today).
-                import time as _t
-                if _t.monotonic() - getattr(self, "_day_gate_log", 0.0) > 300.0:
-                    self._day_gate_log = _t.monotonic()
+                if time.monotonic() - getattr(self, "_day_gate_log", 0.0) > 300.0:
+                    self._day_gate_log = time.monotonic()
                     self._clog.info("WAIT  entry_day=%s but today=%s — IC idle today (set entry_day=daily to trade every day)",
                                     self._entry_day, day_names[now.weekday()])
                 return
@@ -587,9 +575,8 @@ class IronCondorStrategy:
 
         # Heartbeat — so you can see the IC is alive and managing a position even
         # when no exit/adjustment fires (throttled to once per 60s, per strategy log).
-        import time as _t
-        if _t.monotonic() - getattr(self, "_last_hb", 0.0) > 60.0:
-            self._last_hb = _t.monotonic()
+        if time.monotonic() - getattr(self, "_last_hb", 0.0) > 60.0:
+            self._last_hb = time.monotonic()
             self._clog.info(
                 "HOLDING exp=%s | short CE%d=%.2f PE%d=%.2f | hedge CE%d=%.2f PE%d=%.2f | "
                 "credit=%.2f pnl=₹%.0f (target=₹%.0f sl=₹%.0f)",
@@ -637,8 +624,7 @@ class IronCondorStrategy:
             return
         # Throttle: never adjust more than once per _adjust_cooldown_s. Stops the per-tick
         # adjustment storm (a breached/dry-run IC otherwise re-rolls every few ms → order spam).
-        import time as _t
-        if _t.monotonic() - getattr(self, "_last_adjust_t", 0.0) < self._adjust_cooldown_s:
+        if time.monotonic() - getattr(self, "_last_adjust_t", 0.0) < self._adjust_cooldown_s:
             return
         side = self.check_adjustment_criteria()
         if side:
@@ -878,8 +864,7 @@ class IronCondorStrategy:
         self._persist()   # clears the stored position
         # Re-entry cooldown — prevents the enter→instant-target/SL→re-enter churn
         # loop (esp. on volatile CRUDEOIL where one reprice blows past target/SL).
-        import time as _t
-        self._reentry_until = _t.monotonic() + float(
+        self._reentry_until = time.monotonic() + float(
             RuntimeConfig.index_section(self._underlying, "iron_condor").get("reentry_cooldown_sec", 60))
 
     # ── DB logging ────────────────────────────────────────────────────────────

@@ -58,29 +58,11 @@ _MARKET_OPEN     = dtime(9, 15)   # NSE session start
 
 
 def _make_strategy_logger(underlying: str, client_id: str = "", binding_id: str = "") -> logging.Logger:
-    """Per-strategy evaluation log. Per-binding books get their OWN file so each client's run is
-    readable in isolation: logs/clients/ss_{UND}_{client}_{binding}_{date}.log (legacy per-index
-    engine → ss_{UND}_{date}.log)."""
+    from utils.logging_utils import make_strategy_logger
+    from datetime import datetime
     tag = f"{underlying}" + (f"_{client_id}_{binding_id}" if client_id and binding_id else "")
-    name = f"client.ss.{tag}"
-    lg = logging.getLogger(name)
-    if lg.handlers:
-        return lg
-    lg.setLevel(logging.DEBUG)
-    log_dir = os.path.join("logs", "clients")
-    os.makedirs(log_dir, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d")
-    # RotatingFileHandler so a single book's log can't grow unbounded and fill the disk:
-    # 10 MB/file × 3 backups = 40 MB cap per book per day (auto-rolls, oldest dropped).
-    from logging.handlers import RotatingFileHandler
-    fh = RotatingFileHandler(
-        os.path.join(log_dir, f"ss_{tag}_{date_str}.log"), encoding="utf-8",
-        maxBytes=10 * 1024 * 1024, backupCount=3,
-    )
-    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
-    lg.addHandler(fh)
-    lg.propagate = False
-    return lg
+    return make_strategy_logger(f"ss_{tag}_{date_str}", propagate=False)
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -1416,6 +1398,7 @@ class SellStraddleStrategy:
         step   = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
+        _eff_target = self._theta_target if self._entry_basis == "theta" else ltp_target
 
         # Granular-audit heartbeat: when admin has AUDIT on for a client AND there is NO
         # open position, surface the live entry-scan status so the client UI panel appears
@@ -1428,7 +1411,7 @@ class SellStraddleStrategy:
                     _crit_h = [
                         {"name": "Status", "detail": f"no open position — {concept} scan", "hit": False},
                         {"name": "Spot/ATM", "detail": f"{self._spot:.2f} / {int(_atm)}", "hit": False},
-                        {"name": "Target/Offset", "detail": f"ltp≥{ltp_target:.0f}, ±{offset}", "hit": False},
+                        {"name": "Target/Offset", "detail": f"{self._entry_basis}≥{_eff_target:.0f}, ±{offset}", "hit": False},
                     ]
                     for _cid, _bid in _audit_clients:
                         await self._bus.publish(Topic.EXIT_AUDIT, {
@@ -1462,8 +1445,8 @@ class SellStraddleStrategy:
         if not sel:
             if use_beginning_sel:
                 self._clog.info(
-                    "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (target=%.2f offset=%d)",
-                    self._underlying, rule_key, self._spot, ltp_target, offset,
+                    "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (target=%.2f[%s] offset=%d)",
+                    self._underlying, rule_key, self._spot, _eff_target, self._entry_basis, offset,
                 )
             else:
                 # Re-entry pool returned nothing — distinguish "no balanced pair exists"
@@ -1475,8 +1458,8 @@ class SellStraddleStrategy:
                 )
                 if diag["kind"] == "no_pair":
                     self._clog.info(
-                        "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair exists (target=%.2f offset=%d)",
-                        self._underlying, rule_key, self._spot, ltp_target, offset,
+                        "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair exists (target=%.2f[%s] offset=%d)",
+                        self._underlying, rule_key, self._spot, _eff_target, self._entry_basis, offset,
                     )
                 else:  # blocked
                     self._clog.info(
@@ -2029,92 +2012,6 @@ class SellStraddleStrategy:
         return False
 
     # ── Smart Rolling ─────────────────────────────────────────────────────────
-
-    async def _try_smart_roll(self, now: datetime, trigger: str) -> bool:
-        """Reference exit_logic.perform_smart_roll — scan pool, then by per-leg strike:
-        Virtual / Partial / Physical / Full-exit. Returns True (caller does not also close)."""
-        from strategies.straddle_selection import scan_pool, classify_roll
-        pos = self._position
-        if not pos:
-            return True
-        if not self._is_in_entry_window(now) or self._trades_today >= self._max_trades:
-            await self._close_position(f"full_exit_{trigger}")
-            return True
-
-        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
-        rules = ss.get("entry_rules_reentry", [])
-        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
-        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
-
-        sel = scan_pool(
-            self._strike_prem, self._spot, step, offset, ltp_target,
-            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
-            metric=ss.get("reentry_best_metric", "balanced_premium"),
-            entry_basis=self._entry_basis, theta_target=self._theta_target,
-        )
-        ce_same = pe_same = False
-        ce_s = pe_s = ce_l = pe_l = None
-        if sel:
-            ce_s, pe_s, ce_l, pe_l = sel
-            ce_same = int(ce_s) == int(pos.ce_leg.strike)
-            pe_same = int(pe_s) == int(pos.pe_leg.strike)
-
-        outcome = classify_roll(ce_same, pe_same, has_candidates=bool(sel))
-        logger.info("SellStraddle[%s]: SMART ROLL (%s) → %s | cand=%s",
-                    self._underlying, trigger, outcome,
-                    f"{ce_s}/{pe_s}" if sel else "none")
-
-        if outcome == "full_exit":
-            await self._close_position(f"full_exit_{trigger}")
-            return True
-        if outcome == "virtual":
-            pos.ce_leg.entry_price = ce_l
-            pos.pe_leg.entry_price = pe_l
-            pos.ce_leg.ltp = ce_l
-            pos.pe_leg.ltp = pe_l
-            pos.net_credit = ce_l + pe_l
-            pos.tsl_high_lock_rs = 0.0
-            pos.peak_profit = 0.0
-            pos.trailing_active = False
-            pos.open_time = now
-            pos.session_min_vwap = float("inf")   # re-baseline vs the NEW pair (avoid instant false vwap_rise)
-            self._persist()
-            return True
-        # Partial roll = keep one leg, roll the other → use the CAPPED single-side roller
-        # (select_partner_for: partner <= kept leg's LTP, balanced, rule-passing) so the
-        # "<= kept leg" rollover rule applies here too, not just the scan_pool pick.
-        if outcome == "partial_pe":
-            await self._single_side_roll("PE", now, trigger)
-            return True
-        if outcome == "partial_ce":
-            await self._single_side_roll("CE", now, trigger)
-            return True
-        # physical — close both, open new pair
-        await self._close_leg("CE", f"physical_roll_{trigger}", now)
-        await self._close_leg("PE", f"physical_roll_{trigger}", now)
-        self._position = StraddlePosition(
-            underlying=self._underlying, atm_at_entry=round(self._spot / step) * step,
-            entry_spot=self._spot,
-            ce_leg=StraddleLeg("CE", ce_s, ce_l, ce_l, open_time=now, open_reason=f"physical_roll_{trigger}"),
-            pe_leg=StraddleLeg("PE", pe_s, pe_l, pe_l, open_time=now, open_reason=f"physical_roll_{trigger}"),
-            net_credit=ce_l + pe_l, open_time=now, status="open",
-            session_min_vwap=float("inf"),   # re-baseline vs the NEW pair (avoid instant false vwap_rise)
-            entry_indicators=dict(self._ind),
-            lot_size=self._lot_size * self._lot_multiplier,
-        )
-        from execution_bridge.straddle_bridge import StraddleOrderEvent
-        self._event_counter += 1
-        await self._emit_order(StraddleOrderEvent(
-            action="ENTRY", underlying=self._underlying, atm=self._position.atm_at_entry,
-            ce_strike=ce_s, pe_strike=pe_s, ce_ltp=ce_l, pe_ltp=pe_l,
-            lot_multiplier=self._lot_multiplier, lot_size=self._lot_size, spot=self._spot,
-            indicators=dict(self._ind),
-            event_id=f"{self._underlying}_PHYSROLL_{self._event_counter}",
-        ))
-        self._persist()
-        logger.info("SellStraddle[%s]: PHYSICAL ROLL → CE%s PE%s", self._underlying, ce_s, pe_s)
-        return True
 
     # ── Close ─────────────────────────────────────────────────────────────────
 

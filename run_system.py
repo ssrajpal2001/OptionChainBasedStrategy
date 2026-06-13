@@ -139,24 +139,14 @@ def _setup_logging(log_dir: str, level: str) -> None:
 
 
 def get_client_logger(client_id: str, strategy: str, log_dir: str = "logs") -> logging.Logger:
-    """
-    Return a logger that writes to logs/clients/{client_id}_{strategy}_YYYYMMDD.log.
-    Safe to call multiple times — reuses the handler if already set up.
-    """
+    from utils.logging_utils import make_strategy_logger
+    from datetime import datetime
     date_str = datetime.now().strftime("%Y%m%d")
-    name = f"client.{client_id}.{strategy}"
-    logger = logging.getLogger(name)
-    if logger.handlers:
-        return logger  # already configured
-    logger.setLevel(logging.DEBUG)
-    client_log_dir = os.path.join(log_dir, "clients")
-    os.makedirs(client_log_dir, exist_ok=True)
-    log_path = os.path.join(client_log_dir, f"{client_id}_{strategy}_{date_str}.log")
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
-    logger.addHandler(fh)
-    logger.propagate = True  # also appears in main system log
-    return logger
+    return make_strategy_logger(
+        f"{client_id}_{strategy}_{date_str}",
+        log_dir=os.path.join(log_dir, "clients"),
+        propagate=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
