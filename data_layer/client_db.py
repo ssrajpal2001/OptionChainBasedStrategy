@@ -971,7 +971,7 @@ class ClientDB:
             rows = con.execute(
                 """
                 SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
-                       d.strategy_name, d.is_running, d.assigned_instrument
+                       d.strategy_name, d.is_running
                 FROM clients c
                 JOIN strategy_deployments d ON c.client_id = d.client_id
                 WHERE c.is_active = 1
