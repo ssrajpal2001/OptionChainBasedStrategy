@@ -1624,14 +1624,11 @@ class SellStraddleStrategy:
             _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
             _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
             if credit and (_dpt or _dsl):
-                if self._day_exit_basis == "theta":
-                    _dpct = pos.premium_decay_pct()
-                    _crit.append(("Day%(θ)", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
-                                  (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
-                else:
-                    _dpct = (self._session_realized_pnl_pts + pnl) / credit * 100.0
-                    _crit.append(("Day%", f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
-                                  (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
+                # CUMULATIVE for both bases (closed trades + open running) — matches the live check.
+                _dpct = (self._session_realized_pnl_pts + pnl) / credit * 100.0
+                _lbl = "Day%(θ)" if self._day_exit_basis == "theta" else "Day%"
+                _crit.append((_lbl, f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
+                              (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
             elif not credit:
                 _crit.append(("Day%", "SKIPPED (initial_credit=0!)", False))
             _ce_ltp = float(getattr(getattr(pos, "ce_leg", None), "ltp", 0) or 0)
@@ -1775,12 +1772,13 @@ class SellStraddleStrategy:
         # Both use the same per-day target/SL thresholds; positive = profit in either basis.
         if self._initial_net_credit > 0:
             total_day_pts = self._session_realized_pnl_pts + pnl
-            if self._day_exit_basis == "theta":
-                total_day_pct = pos.premium_decay_pct()
-                _basis_lbl = "theta-premium-decay"
-            else:
-                total_day_pct = total_day_pts / self._initial_net_credit * 100
-                _basis_lbl = "ltp"
+            # Day target/SL is CUMULATIVE for BOTH bases: (closed-trade realized + open running) ÷ the
+            # day's first credit. A "Day" stop caps the WHOLE day, not one position. (theta previously
+            # used pos.premium_decay_pct() = the CURRENT position only, so a single trade doubling
+            # tripped a "day" SL while a string of small losers never would — fixed 2026-06-13.) The
+            # trailing SL still uses per-position premium_decay_pct(); only the day% is cumulative.
+            total_day_pct = total_day_pts / self._initial_net_credit * 100
+            _basis_lbl = "theta(cumulative)" if self._day_exit_basis == "theta" else "ltp"
 
             if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
                 logger.info(
