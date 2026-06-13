@@ -7580,7 +7580,7 @@ function histReplay() {
                  class="text-sm text-center py-5 font-mono" style="color:var(--t-muted)">
               No strategies deployed to this broker. Use ⚡ Deploy on the Brokers tab.
             </div>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div class="flex flex-col gap-3">
               <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                 <div class="t-card rounded p-4">
                   <!-- Header: strategy name + instrument + SQ time -->
