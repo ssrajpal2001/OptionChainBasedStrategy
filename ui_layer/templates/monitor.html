@@ -7792,17 +7792,92 @@ function histReplay() {
                           <div class="flex justify-between"><span style="color:var(--t-muted)">LTP — % checking</span><span :style="`color:${(ss.ltp.pct||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((ss.ltp.pct||0)>=0?'+':'')+(ss.ltp.pct||0).toFixed(2)+'%'"></span></div>
                         </div>
                       </template>
-                      <!-- Theta triplet (highlighted when Theta basis is active) -->
+                      <!-- Theta panel (enhanced) — highlighted when Theta basis active -->
                       <template x-if="ss.theta">
-                        <div class="rounded p-1.5 space-y-0.5"
+                        <div class="rounded p-1.5 space-y-1"
                              :style="ss.exit_basis==='theta'
                                ? 'background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.25)'
-                               : 'background:var(--t-surface);border:1px solid var(--t-border)'">
-                          <div class="flex justify-between"><span style="color:var(--t-muted)">Total Theta Received</span><span style="color:var(--t-text)" x-text="(ss.theta.entry||0).toFixed(2)"></span></div>
-                          <div class="flex justify-between"><span style="color:var(--t-muted)">Profit Target <span style="color:var(--t-dim)" x-text="'('+(ss.day_target_pct||0).toFixed(0)+'% = '+(ss.theta.target_amt||0).toFixed(2)+' pts)'"></span></span><span style="color:var(--t-green)" x-text="'exit ≤ '+(ss.theta.exit_profit_at||0).toFixed(2)"></span></div>
-                          <div class="flex justify-between"><span style="color:var(--t-muted)">Loss SL <span style="color:var(--t-dim)" x-text="'('+(ss.day_sl_pct||0).toFixed(0)+'% = '+(ss.theta.sl_amt||0).toFixed(2)+' pts)'"></span></span><span style="color:var(--t-red)" x-text="'exit ≥ '+(ss.theta.exit_loss_at||0).toFixed(2)"></span></div>
-                          <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)"><span style="color:var(--t-muted)">Current Premium</span><span class="price-live" style="color:var(--t-bright)" x-text="(ss.theta.current||0).toFixed(2)"></span></div>
-                          <div class="flex justify-between"><span style="color:var(--t-muted)">% Decayed (tracking)</span><span :style="`color:${(ss.theta.pct||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((ss.theta.pct||0)>=0?'+':'')+(ss.theta.pct||0).toFixed(2)+'%'"></span></div>
+                               : 'background:var(--t-surface);border:1px solid var(--t-border)'"
+                             x-data="{get cur(){ return dep.underlying||''; }, get ccy(){ return (this.cur.includes('BTC')||this.cur.includes('ETH'))?'$':'₹'; }, fmt(n){return Math.abs(n||0)>=1000?(Math.abs(n||0)/1000).toFixed(1)+'k':(n||0).toFixed(0);}}">
+                          <!-- Row: Theta received -->
+                          <div class="flex justify-between items-center">
+                            <span style="color:var(--t-muted)">Theta Received</span>
+                            <span class="font-mono">
+                              <span style="color:var(--t-text)" x-text="(ss.theta.entry||0).toFixed(1)+' pts'"></span>
+                              <span style="color:var(--t-dim)" x-text="' · '+ccy+fmt(ss.theta.entry_rs)"></span>
+                            </span>
+                          </div>
+                          <!-- Decay progress bar -->
+                          <div>
+                            <div class="flex justify-between text-xs mb-0.5">
+                              <span style="color:var(--t-muted)">Decayed</span>
+                              <span :style="`color:${(ss.theta.pct||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                                    x-text="((ss.theta.pct||0)>=0?'+':'')+(ss.theta.pct||0).toFixed(1)+'%  '+ccy+fmt(ss.theta.decayed_rs)"></span>
+                            </div>
+                            <div class="rounded-full overflow-hidden" style="height:4px;background:rgba(255,255,255,0.08)">
+                              <div class="h-full rounded-full transition-all"
+                                   :style="`width:${Math.min(Math.max(ss.theta.pct||0,0),100)}%;background:${(ss.theta.pct||0)>=(ss.day_target_pct||100)?'var(--t-green)':'var(--t-amber)'}`"></div>
+                            </div>
+                          </div>
+                          <!-- Profit Target -->
+                          <div class="rounded px-1.5 py-1 space-y-0.5" style="background:rgba(var(--t-green-rgb),0.05);border:1px solid rgba(var(--t-green-rgb),0.15)">
+                            <div class="flex justify-between">
+                              <span style="color:var(--t-muted)" x-text="'Profit Target ('+(ss.day_target_pct||0).toFixed(0)+'%)'"></span>
+                              <span style="color:var(--t-green)" x-text="(ss.theta.target_amt||0).toFixed(1)+' pts · '+ccy+fmt(ss.theta.target_rs)"></span>
+                            </div>
+                            <div class="flex justify-between text-xs">
+                              <span style="color:var(--t-dim)">Still need</span>
+                              <span :style="`color:${(ss.theta.remaining_pts||0)<=0?'var(--t-green)':'var(--t-dim)'}`"
+                                    x-text="(ss.theta.remaining_pts||0)<=0?'✓ target reached!':(ss.theta.remaining_pts||0).toFixed(1)+' pts · '+ccy+fmt(ss.theta.remaining_rs)"></span>
+                            </div>
+                          </div>
+                          <!-- Loss SL -->
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)" x-text="'Loss SL ('+(ss.day_sl_pct||0).toFixed(0)+'%)'"></span>
+                            <span style="color:var(--t-red)" x-text="(ss.theta.sl_amt||0).toFixed(1)+' pts · '+ccy+fmt(ss.theta.sl_rs)"></span>
+                          </div>
+                          <!-- Current premium -->
+                          <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)">
+                            <span style="color:var(--t-muted)">Current Premium</span>
+                            <span class="price-live font-mono" style="color:var(--t-bright)" x-text="(ss.theta.current||0).toFixed(1)+' pts'"></span>
+                          </div>
+                        </div>
+                      </template>
+                      <!-- Scalable TSL live state (only when enabled) -->
+                      <template x-if="ss.tsl && ss.tsl.enabled">
+                        <div class="rounded p-1.5 space-y-0.5" style="background:rgba(var(--t-cyan-rgb),0.05);border:1px solid rgba(var(--t-cyan-rgb),0.2)"
+                             x-data="{get cur(){ return dep.underlying||''; }, get ccy(){ return (this.cur.includes('BTC')||this.cur.includes('ETH'))?'$':'₹'; }, fmt(n){return Math.abs(n||0)>=1000?(Math.abs(n||0)/1000).toFixed(1)+'k':(n||0).toFixed(0);}}">
+                          <div class="flex justify-between items-center mb-0.5">
+                            <span class="sec-label" style="color:var(--t-cyan)">SCALABLE TSL</span>
+                            <span class="text-xs font-mono" style="color:var(--t-dim)" x-text="(ss.tsl.basis||'ltp').toUpperCase()+' basis'"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Current Profit</span>
+                            <span :style="`color:${(ss.tsl.current_profit_rs||0)>=0?'var(--t-green)':'var(--t-red)'}`"
+                                  x-text="ccy+fmt(ss.tsl.current_profit_rs)"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Lock activates at</span>
+                            <span style="color:var(--t-text)" x-text="ccy+fmt(ss.tsl.base_profit_rs)+' → lock '+ccy+fmt(ss.tsl.base_lock_rs)"></span>
+                          </div>
+                          <template x-if="ss.tsl.locked">
+                            <div class="flex justify-between">
+                              <span style="color:var(--t-muted)">Current Floor 🔒</span>
+                              <span style="color:var(--t-amber)" x-text="ccy+fmt(ss.tsl.lock_rs)"></span>
+                            </div>
+                          </template>
+                          <template x-if="!ss.tsl.locked">
+                            <div class="flex justify-between">
+                              <span style="color:var(--t-muted)">Floor</span>
+                              <span style="color:var(--t-dim)">— not locked yet</span>
+                            </div>
+                          </template>
+                          <template x-if="ss.tsl.next_step_rs">
+                            <div class="flex justify-between">
+                              <span style="color:var(--t-muted)">Next step at</span>
+                              <span style="color:var(--t-dim)" x-text="ccy+fmt(ss.tsl.next_step_rs)"></span>
+                            </div>
+                          </template>
                         </div>
                       </template>
                     </div>

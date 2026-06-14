@@ -2080,20 +2080,68 @@ class DashboardServer:
                                     _tPct = float(pos.premium_decay_pct())
                                 except Exception:
                                     _eTV = _cTV = _tPct = 0.0
+                                # Use _initial_entry_time_value (max across re-entries) as denominator
+                                _init_etv = float(getattr(strat, "_initial_entry_time_value", 0.0) or 0.0) or _eTV
+                                _lot_sz  = int(getattr(strat, "_lot_size", 1) or 1)
+                                _lot_mul = int(getattr(strat, "_lot_multiplier", 1) or 1)
+                                _qty     = _lot_sz * _lot_mul
                                 straddle_info["total_value_sold"] = round(_entryC, 2)
                                 straddle_info["ltp"] = {"total_sold": round(_entryC, 2),
                                                         "current": round(_curC, 2), "pct": round(_ltp_pct, 2)}
                                 # Fixed exit levels known AT ENTRY: total premium × day% (user spec).
-                                #   profit: premium decays by _eTV×target% → exit when current ≤ this
-                                #   loss:   premium rises  by _eTV×sl%     → exit when current ≥ this
-                                _tgt_amt = round(_eTV * _dpt / 100.0, 2)
-                                _sl_amt  = round(_eTV * _dsl / 100.0, 2)
+                                _tgt_amt     = round(_init_etv * _dpt / 100.0, 2)
+                                _sl_amt      = round(_init_etv * _dsl / 100.0, 2)
+                                _decayed_pts = round(_init_etv - _cTV, 2)   # positive = profit
+                                _remain_pts  = round(_tgt_amt - _decayed_pts, 2)
                                 straddle_info["theta"] = {
-                                    "entry": round(_eTV, 2), "current": round(_cTV, 2), "pct": round(_tPct, 2),
-                                    "target_amt": _tgt_amt, "sl_amt": _sl_amt,
-                                    "exit_profit_at": round(_eTV - _tgt_amt, 2),
-                                    "exit_loss_at":   round(_eTV + _sl_amt, 2),
+                                    "entry": round(_init_etv, 2),
+                                    "entry_rs": round(_init_etv * _qty, 2),
+                                    "current": round(_cTV, 2),
+                                    "pct": round(_tPct, 2),
+                                    "target_amt": _tgt_amt,
+                                    "target_rs": round(_tgt_amt * _qty, 2),
+                                    "sl_amt": _sl_amt,
+                                    "sl_rs": round(_sl_amt * _qty, 2),
+                                    "decayed_pts": _decayed_pts,
+                                    "decayed_rs": round(_decayed_pts * _qty, 2),
+                                    "remaining_pts": _remain_pts,
+                                    "remaining_rs": round(_remain_pts * _qty, 2),
+                                    "exit_profit_at": round(_init_etv - _tgt_amt, 2),
+                                    "exit_loss_at":   round(_init_etv + _sl_amt, 2),
                                 }
+                                # Scalable TSL live state
+                                _tsl_on = bool(getattr(strat, "_tsl_enabled", False))
+                                try:
+                                    if _tsl_on:
+                                        _tsl_basis   = str(getattr(strat, "_tsl_basis", "ltp")).lower()
+                                        _bp = float(getattr(strat, "_tsl_base_profit_rs", 0)) * _lot_mul
+                                        _bl = float(getattr(strat, "_tsl_base_lock_rs",   0)) * _lot_mul
+                                        _sp = float(getattr(strat, "_tsl_step_profit_rs", 0)) * _lot_mul
+                                        _cur_lock = float(getattr(pos, "tsl_high_lock_rs", 0.0) or 0.0)
+                                        if _tsl_basis == "theta":
+                                            _tsl_pnl_pts = _eTV - float(pos.current_time_value(_spot))
+                                        else:
+                                            _tsl_pnl_pts = float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+                                        _cur_profit_rs = round(_tsl_pnl_pts * _qty, 2)
+                                        if _cur_profit_rs < _bp:
+                                            _next_rs = _bp
+                                        elif _sp > 0:
+                                            _steps = int((_cur_profit_rs - _bp) // _sp)
+                                            _next_rs = _bp + (_steps + 1) * _sp
+                                        else:
+                                            _next_rs = None
+                                        straddle_info["tsl"] = {
+                                            "enabled": True, "basis": _tsl_basis,
+                                            "base_profit_rs": round(_bp), "base_lock_rs": round(_bl),
+                                            "current_profit_rs": _cur_profit_rs,
+                                            "locked": _cur_lock > 0,
+                                            "lock_rs": round(_cur_lock),
+                                            "next_step_rs": round(_next_rs) if _next_rs is not None else None,
+                                        }
+                                    else:
+                                        straddle_info["tsl"] = {"enabled": False}
+                                except Exception:
+                                    straddle_info["tsl"] = {"enabled": False}
                     elif sname == "trap_trading":
                         eng = getattr(_srv, "_trap_engine", None)
                         op = getattr(eng, "_open_positions", {}) if eng else {}
