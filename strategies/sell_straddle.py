@@ -1557,13 +1557,17 @@ class SellStraddleStrategy:
         self._trades_today  += 1
         self._beginning_failed = False
         self._order_pending  = True
-        # Lock initial credit/theta as denominators for day-% calculations
+        # Lock initial credit/theta as denominators for day-% calculations.
+        # LTP credit: fixed at first entry (never rises — credit doesn't grow on re-entry).
         if self._initial_net_credit <= 0:
             self._initial_net_credit = ce_ltp + pe_ltp
-        if self._initial_entry_time_value <= 0 and self._position:
-            self._initial_entry_time_value = float(
-                getattr(self._position, "entry_time_value", 0.0) or 0.0
-            ) or self._initial_net_credit
+        # Theta denominator: update to the HIGHER value if a re-entry/roll collects more theta
+        # than the original entry — so the profit target scales up with the new theta collected.
+        # If re-entry theta < original, keep the original bar (client spec point 3).
+        if self._position:
+            _new_etv = float(getattr(self._position, "entry_time_value", 0.0) or 0.0) or (ce_ltp + pe_ltp)
+            if _new_etv > self._initial_entry_time_value:
+                self._initial_entry_time_value = _new_etv
 
         logger.info(
             "SellStraddle[%s]: ENTERED — CE%d=%.2f PE%d=%.2f credit=%.2f | %s=PASS [%s]",
