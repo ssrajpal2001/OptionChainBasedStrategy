@@ -400,6 +400,8 @@ class SellStraddleStrategy:
         # Ratio exit — UI saves as nested {"enabled": bool, "threshold": float}
         _ratio = ss.get("ratio_exit", {})
         self._ratio_threshold = float(_ratio.get("threshold", ss.get("ratio_exit_threshold", 3.0)))
+        # Max ratio allowed at entry — block scan_pool result if already too skewed at fill time
+        self._max_entry_ratio = float(_ratio.get("max_entry_ratio", ss.get("max_entry_ratio", 0.0)))
 
         # Scalable TSL — UI saves as nested {"enabled": bool, "base_profit": int, ...}
         _tsl = ss.get("tsl_scalable", {})
@@ -1463,6 +1465,19 @@ class SellStraddleStrategy:
 
         for _ln in _trace:
             self._clog.info("SELECT %s | %s", self._underlying, _ln)
+
+        # Block entry if selected pair is already too skewed (avoids instant ratio_exit)
+        if sel and self._max_entry_ratio > 0:
+            _ce_ltp = self._strike_prem.get(f"{sel[0]}:CE", 0.0) or 0.0
+            _pe_ltp = self._strike_prem.get(f"{sel[1]}:PE", 0.0) or 0.0
+            if _ce_ltp > 0 and _pe_ltp > 0:
+                _entry_ratio = max(_ce_ltp, _pe_ltp) / min(_ce_ltp, _pe_ltp)
+                if _entry_ratio > self._max_entry_ratio:
+                    self._clog.info(
+                        "EVAL %s [%s] ENTRY-BLOCKED ratio=%.2fx > max_entry_ratio=%.2fx — pair CE%d/PE%d skewed, skipping",
+                        self._underlying, rule_key, _entry_ratio, self._max_entry_ratio, sel[0], sel[1],
+                    )
+                    sel = None
 
         if not sel:
             if use_beginning_sel:
