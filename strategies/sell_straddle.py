@@ -667,7 +667,9 @@ class SellStraddleStrategy:
             f"║ BEGINNING ENTRY: {beg}",
             f"║ RE-ENTRY GATES:  {ren}",
             f"║ ROLLOVERS: Decay:{'ON' if decay_on else 'OFF'}({self._ltp_exit_min:.0f}) | "
-            f"Ratio:{'ON' if ratio_on else 'OFF'}({self._ratio_threshold:.1f}x) | SmartRoll:ON",
+            f"Ratio:{'ON' if ratio_on else 'OFF'}({self._ratio_threshold:.1f}x"
+            + (f" MaxEntry:{self._max_entry_ratio:.1f}x" if self._max_entry_ratio > 0 else "")
+            + ") | SmartRoll:ON",
             f"║ TRAILING SL: {'ON' if self._trail_sl_enabled else 'OFF'} "
             f"Lock:{self._trail_lock_pct*100:.1f}% Floor:{self._trail_floor_pct*100:.1f}% "
             f"BASIS:{self._trail_basis.upper()}",
