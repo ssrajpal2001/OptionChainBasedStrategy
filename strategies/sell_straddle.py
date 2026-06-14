@@ -289,7 +289,8 @@ class SellStraddleStrategy:
 
         # Day-level P&L tracking (mirrors old sell_v3 session guardrail logic)
         self._session_realized_pnl_pts: float = 0.0   # sum of all closed trade P&L today (in premium pts)
-        self._initial_net_credit: float = 0.0         # credit from first trade — fixed denominator for day %
+        self._initial_net_credit: float = 0.0         # credit from first trade — LTP denominator for day %
+        self._initial_entry_time_value: float = 0.0   # theta (time-value) from first trade — theta denominator
         self._stop_for_day: bool = False               # True after day-profit-target or day-loss-SL fires
 
         # Post-restore warm-up: hold P&L exits until a restored position's legs tick fresh.
@@ -553,6 +554,10 @@ class SellStraddleStrategy:
                 # is SKIPPED on a restored position → the day loss-SL never fires.
                 if self._initial_net_credit <= 0 and self._position.net_credit > 0:
                     self._initial_net_credit = self._position.net_credit
+                if self._initial_entry_time_value <= 0:
+                    self._initial_entry_time_value = float(
+                        getattr(self._position, "entry_time_value", 0.0) or 0.0
+                    ) or self._initial_net_credit
                 # WARM-UP GUARD: the persisted leg LTPs are from the LAST structural event
                 # (entry/roll), NOT the latest tick — so running P&L computed off them right
                 # after restore is stale and can FALSELY trip the Day-loss-SL (closing a
@@ -698,6 +703,7 @@ class SellStraddleStrategy:
         self._primed                    = False
         self._session_realized_pnl_pts  = 0.0
         self._initial_net_credit        = 0.0
+        self._initial_entry_time_value  = 0.0
         self._stop_for_day              = False
         self._prem_closes.clear()
         self._prem_volumes.clear()
@@ -1551,9 +1557,13 @@ class SellStraddleStrategy:
         self._trades_today  += 1
         self._beginning_failed = False
         self._order_pending  = True
-        # Lock initial credit as the denominator for all day-% calculations
+        # Lock initial credit/theta as denominators for day-% calculations
         if self._initial_net_credit <= 0:
             self._initial_net_credit = ce_ltp + pe_ltp
+        if self._initial_entry_time_value <= 0 and self._position:
+            self._initial_entry_time_value = float(
+                getattr(self._position, "entry_time_value", 0.0) or 0.0
+            ) or self._initial_net_credit
 
         logger.info(
             "SellStraddle[%s]: ENTERED — CE%d=%.2f PE%d=%.2f credit=%.2f | %s=PASS [%s]",
@@ -1770,21 +1780,28 @@ class SellStraddleStrategy:
         #             based; chosen 2026-06-10 — tracks P&L, doesn't oscillate with spot).
         # Both use the same per-day target/SL thresholds; positive = profit in either basis.
         if self._initial_net_credit > 0:
-            total_day_pts = self._session_realized_pnl_pts + pnl
-            # Day target/SL is CUMULATIVE for BOTH bases: (closed-trade realized + open running) ÷ the
-            # day's first credit. A "Day" stop caps the WHOLE day, not one position. (theta previously
-            # used pos.premium_decay_pct() = the CURRENT position only, so a single trade doubling
-            # tripped a "day" SL while a string of small losers never would — fixed 2026-06-13.) The
-            # trailing SL still uses per-position premium_decay_pct(); only the day% is cumulative.
-            total_day_pct = total_day_pts / self._initial_net_credit * 100
-            _basis_lbl = "theta(cumulative)" if self._day_exit_basis == "theta" else "ltp"
+            # LTP basis  → denominator = initial LTP credit (net_credit per unit).
+            # Theta basis → denominator = initial time-value received (entry_time_value × lot_size × qty);
+            #               since lot factors cancel in %, use entry_time_value per unit as denominator;
+            #               running component uses theta decay (entry_tv − current_tv) not raw LTP.
+            if self._day_exit_basis == "theta" and self._initial_entry_time_value > 0:
+                _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+                _running_theta = (_etv - pos.current_time_value(self._spot)) if _etv > 0 else pnl
+                total_day_pts = self._session_realized_pnl_pts + _running_theta
+                _day_denom = self._initial_entry_time_value
+                _basis_lbl = "theta(cumulative)"
+            else:
+                total_day_pts = self._session_realized_pnl_pts + pnl
+                _day_denom = self._initial_net_credit
+                _basis_lbl = "ltp"
+            total_day_pct = total_day_pts / _day_denom * 100
 
             if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
                 logger.info(
                     "SellStraddle[%s]: DAY PROFIT TARGET [%s] — day=%.1f%% (≥%.1f%%) | "
                     "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
                     self._underlying, _basis_lbl, total_day_pct, self._day_profit_target_pct,
-                    self._session_realized_pnl_pts, pnl, self._initial_net_credit,
+                    self._session_realized_pnl_pts, pnl, _day_denom,
                     pos.net_credit, pos.current_value,
                 )
                 await self._close_position("day_profit_target")
@@ -1797,7 +1814,7 @@ class SellStraddleStrategy:
                     "SellStraddle[%s]: DAY LOSS SL [%s] — day=%.1f%% (≤-%.1f%%) | "
                     "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
                     self._underlying, _basis_lbl, total_day_pct, self._day_loss_sl_pct,
-                    self._session_realized_pnl_pts, pnl, self._initial_net_credit,
+                    self._session_realized_pnl_pts, pnl, _day_denom,
                     pos.net_credit, pos.current_value,
                 )
                 await self._close_position("day_loss_sl")
