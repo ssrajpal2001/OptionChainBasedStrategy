@@ -108,7 +108,7 @@ class DeltaChainManager:
                     return
         if not self._running:
             return
-        asyncio.create_task(self._feeder.run(), name="delta_feeder_run")
+        asyncio.create_task(self._run_feeder_with_reconnect(), name="delta_feeder_run")
         asyncio.create_task(self._track_spot(), name="delta_spot_track")
         # rollover → re-discover + re-subscribe
         rollover = DeltaRolloverWorker(self._on_rollover)
@@ -124,6 +124,39 @@ class DeltaChainManager:
                 break
             for und in self._unds:
                 await self._reconcile(und)
+
+    async def _run_feeder_with_reconnect(self) -> None:
+        """Run DeltaFeeder; reconnect with backoff when it exits (watchdog close or network drop)."""
+        attempt = 0
+        while self._running:
+            try:
+                await self._feeder.run()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("DeltaChainManager: feeder error: %s", exc)
+            if not self._running:
+                break
+            delay = min(2 ** attempt, 60)
+            logger.info(
+                "DeltaChainManager: feeder disconnected — reconnecting in %.0fs (attempt %d).",
+                delay, attempt + 1,
+            )
+            await asyncio.sleep(delay)
+            try:
+                await self._feeder.disconnect()
+                ok = await self._feeder.connect()
+            except Exception as exc:
+                logger.warning("DeltaChainManager: reconnect raised: %s", exc)
+                ok = False
+            if ok:
+                attempt = 0
+                logger.info(
+                    "DeltaChainManager: feeder reconnected — re-subscribing %d symbols.",
+                    len(self._feeder._subs),
+                )
+            else:
+                attempt += 1
 
     async def _track_spot(self) -> None:
         """Update spot from the feeder's IndexTick stream (DeltaFeeder publishes spot_price)."""

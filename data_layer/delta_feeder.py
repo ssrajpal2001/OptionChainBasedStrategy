@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any, List
 
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 WS_URL = "wss://socket.india.delta.exchange"   # Delta India market-data socket (v2/ticker channel)
 
+_STALE_TICK_SEC = 300   # 5 min no ticks → assume WS silently dead → force close
+
 
 class DeltaFeeder(BaseFeeder):
     def __init__(self, bus, cfg=None) -> None:
@@ -45,6 +48,7 @@ class DeltaFeeder(BaseFeeder):
         self._ws = None
         self._subs: set = set()
         self._heartbeat_task = None
+        self._last_tick_ts: float = 0.0
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
     async def connect(self) -> bool:
@@ -57,6 +61,7 @@ class DeltaFeeder(BaseFeeder):
             self._session = aiohttp.ClientSession()
             self._ws = await self._session.ws_connect(WS_URL, heartbeat=30)
             self._connected = True
+            self._last_tick_ts = time.monotonic()
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             if self._subs:
                 await self.subscribe_tokens(list(self._subs))
@@ -81,11 +86,25 @@ class DeltaFeeder(BaseFeeder):
             pass
 
     async def _heartbeat_loop(self) -> None:
-        # Delta keepalive: enable server heartbeats once; aiohttp's ws heartbeat=30 sends WS pings.
+        # Enable server-side heartbeats once, then watch for stale ticks.
         try:
             await self._ws.send_json({"type": "enable_heartbeat"})
         except Exception:
             pass
+        while self._running and self._ws is not None:
+            await asyncio.sleep(60)
+            if not self._running:
+                break
+            elapsed = time.monotonic() - self._last_tick_ts
+            if elapsed > _STALE_TICK_SEC:
+                logger.warning(
+                    "DeltaFeeder: no ticks for %.0fs — closing WS to force reconnect.", elapsed
+                )
+                try:
+                    await self._ws.close()
+                except Exception:
+                    pass
+                break
 
     # ── subscription ──────────────────────────────────────────────────────────
     async def subscribe_tokens(self, tokens: List[str]) -> None:
@@ -128,6 +147,7 @@ class DeltaFeeder(BaseFeeder):
             return
         if d.get("type") != "v2/ticker":
             return
+        self._last_tick_ts = time.monotonic()
         sym = str(d.get("symbol", "")).upper()
         if not sym or sym[0] not in ("C", "P"):
             return
