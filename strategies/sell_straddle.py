@@ -2180,6 +2180,9 @@ class SellStraddleStrategy:
                 self._position.trail_peak_pct     = 0.0
                 try:
                     self._position.entry_time_value = self._position.current_time_value(self._spot)
+                    # Update day% theta denominator if roll collected more theta (client spec point 3)
+                    if self._position.entry_time_value > self._initial_entry_time_value:
+                        self._initial_entry_time_value = self._position.entry_time_value
                 except Exception:
                     pass
             self._persist()
@@ -2213,6 +2216,9 @@ class SellStraddleStrategy:
                 self._position.trail_peak_pct     = 0.0
                 try:
                     self._position.entry_time_value = self._position.current_time_value(self._spot)
+                    # Update day% theta denominator if roll collected more theta (client spec point 3)
+                    if self._position.entry_time_value > self._initial_entry_time_value:
+                        self._initial_entry_time_value = self._position.entry_time_value
                 except Exception:
                     pass
             self._persist()
