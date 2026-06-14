@@ -7805,7 +7805,7 @@ function histReplay() {
                              :style="ss.exit_basis==='theta'
                                ? 'background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.25)'
                                : 'background:var(--t-surface);border:1px solid var(--t-border)'"
-                             x-data="{get cur(){ return dep.underlying||''; }, get ccy(){ return (this.cur.includes('BTC')||this.cur.includes('ETH'))?'$':'₹'; }, fmt(n){return Math.abs(n||0)>=1000?(Math.abs(n||0)/1000).toFixed(1)+'k':(n||0).toFixed(0);}}">
+                             x-data="{get cur(){ return dep.underlying||''; }, get ccy(){ return (this.cur.includes('BTC')||this.cur.includes('ETH'))?'$':'₹'; }, fmt(n){const v=n||0,a=Math.abs(v);return a>=1000?(v/1000).toFixed(1)+'k':a>=10?v.toFixed(0):a>=1?v.toFixed(2):v.toFixed(4);}}">
                           <!-- Row: Theta received -->
                           <div class="flex justify-between items-center">
                             <span style="color:var(--t-muted)">Theta Received</span>
@@ -7853,7 +7853,7 @@ function histReplay() {
                       <!-- Scalable TSL live state (only when enabled) -->
                       <template x-if="ss.tsl && ss.tsl.enabled">
                         <div class="rounded p-1.5 space-y-0.5" style="background:rgba(var(--t-cyan-rgb),0.05);border:1px solid rgba(var(--t-cyan-rgb),0.2)"
-                             x-data="{get cur(){ return dep.underlying||''; }, get ccy(){ return (this.cur.includes('BTC')||this.cur.includes('ETH'))?'$':'₹'; }, fmt(n){return Math.abs(n||0)>=1000?(Math.abs(n||0)/1000).toFixed(1)+'k':(n||0).toFixed(0);}}">
+                             x-data="{get cur(){ return dep.underlying||''; }, get ccy(){ return (this.cur.includes('BTC')||this.cur.includes('ETH'))?'$':'₹'; }, fmt(n){const v=n||0,a=Math.abs(v);return a>=1000?(v/1000).toFixed(1)+'k':a>=10?v.toFixed(0):a>=1?v.toFixed(2):v.toFixed(4);}}">
                           <div class="flex justify-between items-center mb-0.5">
                             <span class="sec-label" style="color:var(--t-cyan)">SCALABLE TSL</span>
                             <span class="text-xs font-mono" style="color:var(--t-dim)" x-text="(ss.tsl.basis||'ltp').toUpperCase()+' basis'"></span>
