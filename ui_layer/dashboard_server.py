@@ -2076,10 +2076,11 @@ class DashboardServer:
                                     # entry (entry_time_value; == premium for an ATM straddle).
                                     # Fixed thresholds = entry_theta × day%. Track premium decay.
                                     _eTV = float(getattr(pos, "entry_time_value", 0.0) or 0.0) or float(pos.net_credit or 0.0)
-                                    _cTV = float(pos.current_value)
+                                    _cTV = float(pos.current_value)              # full LTP premium (for display)
+                                    _cTV_theta = float(pos.current_time_value(_spot))  # time-value only (for theta decay)
                                     _tPct = float(pos.premium_decay_pct())
                                 except Exception:
-                                    _eTV = _cTV = _tPct = 0.0
+                                    _eTV = _cTV = _cTV_theta = _tPct = 0.0
                                 # Use _initial_entry_time_value (max across re-entries) as denominator
                                 _init_etv = float(getattr(strat, "_initial_entry_time_value", 0.0) or 0.0) or _eTV
                                 _lot_sz  = int(getattr(strat, "_lot_size", 1) or 1)
@@ -2091,7 +2092,7 @@ class DashboardServer:
                                 # Fixed exit levels known AT ENTRY: total premium × day% (user spec).
                                 _tgt_amt     = round(_init_etv * _dpt / 100.0, 2)
                                 _sl_amt      = round(_init_etv * _dsl / 100.0, 2)
-                                _decayed_pts = round(_init_etv - _cTV, 2)   # positive = profit
+                                _decayed_pts = round(_init_etv - _cTV_theta, 2)  # time-value decay, positive = profit
                                 _remain_pts  = round(_tgt_amt - _decayed_pts, 2)
                                 straddle_info["theta"] = {
                                     "entry": round(_init_etv, 2),
