@@ -1975,8 +1975,20 @@ class DashboardServer:
                     ls = int(getattr(pos, "lot_size", 0) or 0)
                     qty = -ls  # straddle is short both
                     _pnl = round((ep - _val) * abs(qty) * cv, 2)
+                    # Extract expiry from leg.symbol (Delta: C-BTC-64000-140626 → 14JUN26)
+                    _sym = str(getattr(leg, "symbol", "") or "")
+                    _exp_lbl = ""
+                    _parts = _sym.split("-")
+                    if len(_parts) == 4 and len(_parts[3]) == 6 and _parts[3].isdigit():
+                        _dd, _mm, _yy = _parts[3][:2], _parts[3][2:4], _parts[3][4:]
+                        _mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+                        try:
+                            _exp_lbl = f"{int(_dd)}{_mons[int(_mm)-1]}{_yy}"
+                        except Exception:
+                            pass
+                    _instr = f"{pos.underlying} {strike} {ot}" + (f" {_exp_lbl}" if _exp_lbl else "")
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
-                                "instrument": f"{pos.underlying} {strike} {ot}",
+                                "instrument": _instr,
                                 "type": product, "side": "SELL", "ccy": ccy,
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),

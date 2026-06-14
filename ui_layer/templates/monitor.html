@@ -1582,7 +1582,7 @@ document.addEventListener('alpine:init', () => {
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
         guardrail_pnl: { enabled: false, target_pts: 0, stoploss_pts: 0 },
-        ratio_exit:    { enabled: false, threshold: 3.0 },
+        ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
         sl_cooldown_minutes: 5,
@@ -1643,7 +1643,8 @@ document.addEventListener('alpine:init', () => {
       if (ss.trail_basis  === undefined) ss.trail_basis  = 'ltp';
       if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
       if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, target_pts: 0, stoploss_pts: 0 };
-      if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0 };
+      if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0, max_entry_ratio: 0 };
+      if (ss.ratio_exit.max_entry_ratio === undefined) ss.ratio_exit.max_entry_ratio = 0;
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
       // Migrate legacy tf-multiplier → direct minutes (× 5) if the new field is absent.
@@ -4542,11 +4543,17 @@ function histReplay() {
                           :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.ratio_exit.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
                   </label>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-2 mb-1.5">
                   <label class="sec-label">Threshold</label>
                   <input type="number" step="0.1" class="t-input" style="width:80px"
                          x-model.number="indexConfig[adminSelectedIndex].sell_straddle.ratio_exit.threshold">
                   <span class="font-mono text-xs" style="color:var(--t-muted)">exit when max(CE,PE) / min(CE,PE) ≥ this</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">Max Entry Ratio</label>
+                  <input type="number" step="0.1" min="0" class="t-input" style="width:80px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.ratio_exit.max_entry_ratio">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">block entry if CE/PE already skewed ≥ this (0 = off)</span>
                 </div>
               </div>
 
