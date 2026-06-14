@@ -2098,6 +2098,10 @@ class DashboardServer:
                                 _lot_sz  = int(getattr(strat, "_lot_size", 1) or 1)
                                 _lot_mul = int(getattr(strat, "_lot_multiplier", 1) or 1)
                                 _qty     = _lot_sz * _lot_mul
+                                # Contract value: BTC=0.001, ETH=0.01, NSE=1.0
+                                _und_u = str(pos.underlying).upper()
+                                _cv = 0.001 if _und_u == "BTC" else (0.01 if _und_u == "ETH" else 1.0)
+                                _qty_cv = _qty * _cv   # actual currency units per premium pt
                                 straddle_info["total_value_sold"] = round(_entryC, 2)
                                 straddle_info["ltp"] = {"total_sold": round(_entryC, 2),
                                                         "current": round(_curC, 2), "pct": round(_ltp_pct, 2)}
@@ -2108,17 +2112,17 @@ class DashboardServer:
                                 _remain_pts  = round(_tgt_amt - _decayed_pts, 2)
                                 straddle_info["theta"] = {
                                     "entry": round(_init_etv, 2),
-                                    "entry_rs": round(_init_etv * _qty, 2),
+                                    "entry_rs": round(_init_etv * _qty_cv, 4),
                                     "current": round(_cTV, 2),
                                     "pct": round(_tPct, 2),
                                     "target_amt": _tgt_amt,
-                                    "target_rs": round(_tgt_amt * _qty, 2),
+                                    "target_rs": round(_tgt_amt * _qty_cv, 4),
                                     "sl_amt": _sl_amt,
-                                    "sl_rs": round(_sl_amt * _qty, 2),
+                                    "sl_rs": round(_sl_amt * _qty_cv, 4),
                                     "decayed_pts": _decayed_pts,
-                                    "decayed_rs": round(_decayed_pts * _qty, 2),
+                                    "decayed_rs": round(_decayed_pts * _qty_cv, 4),
                                     "remaining_pts": _remain_pts,
-                                    "remaining_rs": round(_remain_pts * _qty, 2),
+                                    "remaining_rs": round(_remain_pts * _qty_cv, 4),
                                     "exit_profit_at": round(_init_etv - _tgt_amt, 2),
                                     "exit_loss_at":   round(_init_etv + _sl_amt, 2),
                                 }
@@ -2127,15 +2131,15 @@ class DashboardServer:
                                 try:
                                     if _tsl_on:
                                         _tsl_basis   = str(getattr(strat, "_tsl_basis", "ltp")).lower()
-                                        _bp = float(getattr(strat, "_tsl_base_profit_rs", 0)) * _lot_mul
-                                        _bl = float(getattr(strat, "_tsl_base_lock_rs",   0)) * _lot_mul
-                                        _sp = float(getattr(strat, "_tsl_step_profit_rs", 0)) * _lot_mul
+                                        _bp = float(getattr(strat, "_tsl_base_profit_rs", 0)) * _lot_mul * _cv
+                                        _bl = float(getattr(strat, "_tsl_base_lock_rs",   0)) * _lot_mul * _cv
+                                        _sp = float(getattr(strat, "_tsl_step_profit_rs", 0)) * _lot_mul * _cv
                                         _cur_lock = float(getattr(pos, "tsl_high_lock_rs", 0.0) or 0.0)
                                         if _tsl_basis == "theta":
                                             _tsl_pnl_pts = _eTV - float(pos.current_time_value(_spot))
                                         else:
                                             _tsl_pnl_pts = float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
-                                        _cur_profit_rs = round(_tsl_pnl_pts * _qty, 2)
+                                        _cur_profit_rs = round(_tsl_pnl_pts * _qty_cv, 4)
                                         if _cur_profit_rs < _bp:
                                             _next_rs = _bp
                                         elif _sp > 0:
@@ -2145,11 +2149,11 @@ class DashboardServer:
                                             _next_rs = None
                                         straddle_info["tsl"] = {
                                             "enabled": True, "basis": _tsl_basis,
-                                            "base_profit_rs": round(_bp), "base_lock_rs": round(_bl),
+                                            "base_profit_rs": round(_bp, 4), "base_lock_rs": round(_bl, 4),
                                             "current_profit_rs": _cur_profit_rs,
                                             "locked": _cur_lock > 0,
-                                            "lock_rs": round(_cur_lock),
-                                            "next_step_rs": round(_next_rs) if _next_rs is not None else None,
+                                            "lock_rs": round(_cur_lock, 4),
+                                            "next_step_rs": round(_next_rs, 4) if _next_rs is not None else None,
                                         }
                                     else:
                                         straddle_info["tsl"] = {"enabled": False}

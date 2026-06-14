@@ -675,7 +675,7 @@ class SellStraddleStrategy:
             f"BASIS:{self._trail_basis.upper()}",
             f"║ SCALABLE TSL: {'ON' if self._tsl_enabled else 'OFF'} "
             f"Base:{self._tsl_base_profit_rs:.0f}/{self._tsl_base_lock_rs:.0f} "
-            f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} (₹) "
+            f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} ({self._ccy_symbol}/BTC if crypto) "
             f"BASIS:{self._tsl_basis.upper()}",
             f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%) | "
             f"ROC GUARDRAIL: {'ON' if self._guardrail_roc_enabled else 'OFF'}"
@@ -1906,8 +1906,10 @@ class SellStraddleStrategy:
                 if _etv > 0:
                     _tsl_pnl = _etv - pos.current_time_value(self._spot)
             if self._check_scalable_tsl(pos, _tsl_pnl):
-                logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=₹%.0f pnl=₹%.0f",
-                            self._underlying, self._tsl_basis, pos.tsl_high_lock_rs, self._pnl_rs(_tsl_pnl))
+                logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=%s%.4f pnl=%s%.4f",
+                            self._underlying, self._tsl_basis,
+                            self._ccy_symbol, pos.tsl_high_lock_rs,
+                            self._ccy_symbol, self._pnl_rs(_tsl_pnl))
                 # Roll the cheaper (decayed) leg; keep the richer (losing) leg.
                 _roll_side = "CE" if pos.ce_leg.ltp <= pos.pe_leg.ltp else "PE"
                 await self._single_side_roll(_roll_side, now, "scalable_tsl")
@@ -2026,10 +2028,23 @@ class SellStraddleStrategy:
                 await self._close_position("exit_rules")  # full exit → fresh re-entry
                 return
 
+    @property
+    def _contract_cv(self) -> float:
+        """Contract value multiplier: BTC=0.001, ETH=0.01, NSE/MCX=1.0.
+        Converts premium-pts × contracts → actual currency ($ for crypto, ₹ for NSE)."""
+        u = str(self._underlying).upper()
+        if u == "BTC": return 0.001
+        if u == "ETH": return 0.01
+        return 1.0
+
+    @property
+    def _ccy_symbol(self) -> str:
+        return "$" if self._contract_cv < 1.0 else "₹"
+
     def _pnl_rs(self, pnl_pts: float) -> float:
-        """Convert P&L in premium points to rupees."""
+        """Convert P&L in premium points to currency units ($ for crypto, ₹ for NSE)."""
         qty = self._lot_size * self._lot_multiplier
-        return pnl_pts * qty
+        return pnl_pts * qty * self._contract_cv
 
     def _check_scalable_tsl(self, pos: StraddlePosition, pnl_pts: float) -> bool:
         """
@@ -2043,13 +2058,16 @@ class SellStraddleStrategy:
           ...
         Once locked, exit when PnL drops below locked amount.
         """
+        # Config values are "per contract unit" (₹ for NSE, $ per BTC for crypto).
+        # Scale by lot_multiplier × contract_cv to get actual currency threshold.
+        _cv          = self._contract_cv
         qty_mult     = self._lot_multiplier
-        base_profit  = self._tsl_base_profit_rs  * qty_mult
-        base_lock    = self._tsl_base_lock_rs    * qty_mult
-        step_profit  = self._tsl_step_profit_rs  * qty_mult
-        step_lock    = self._tsl_step_lock_rs    * qty_mult
+        base_profit  = self._tsl_base_profit_rs  * qty_mult * _cv
+        base_lock    = self._tsl_base_lock_rs    * qty_mult * _cv
+        step_profit  = self._tsl_step_profit_rs  * qty_mult * _cv
+        step_lock    = self._tsl_step_lock_rs    * qty_mult * _cv
 
-        profit_rs = self._pnl_rs(pnl_pts)
+        profit_rs = self._pnl_rs(pnl_pts)   # already uses _contract_cv via _pnl_rs
 
         if profit_rs >= base_profit and step_profit > 0:
             num_steps       = int((profit_rs - base_profit) // step_profit)
@@ -2057,8 +2075,9 @@ class SellStraddleStrategy:
             if calc_lock > pos.tsl_high_lock_rs:
                 pos.tsl_high_lock_rs = calc_lock
                 logger.debug(
-                    "SellStraddle[%s]: TSL lock updated — ₹%.0f (profit=₹%.0f step=%d)",
-                    self._underlying, calc_lock, profit_rs, num_steps,
+                    "SellStraddle[%s]: TSL lock updated — %s%.4f (profit=%s%.4f step=%d)",
+                    self._underlying, self._ccy_symbol, calc_lock,
+                    self._ccy_symbol, profit_rs, num_steps,
                 )
 
         if pos.tsl_high_lock_rs > 0 and profit_rs < pos.tsl_high_lock_rs:
@@ -2279,10 +2298,10 @@ class SellStraddleStrategy:
         pos.status        = "closed"
 
         logger.info(
-            "SellStraddle[%s]: CLOSED — reason=%s pnl=₹%.0f (%.2f pts) "
+            "SellStraddle[%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) "
             "CE %.2f→%.2f PE %.2f→%.2f",
             self._underlying, reason,
-            self._pnl_rs(pos.realized_pnl), pos.realized_pnl,
+            self._ccy_symbol, self._pnl_rs(pos.realized_pnl), pos.realized_pnl,
             pos.ce_leg.entry_price, pos.ce_leg.ltp,
             pos.pe_leg.entry_price, pos.pe_leg.ltp,
         )

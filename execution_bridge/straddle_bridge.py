@@ -216,13 +216,17 @@ class TradeLogger:
             pnl_pts += (entry_ce - fill.ce_fill)
         if "PE" in _sides:
             pnl_pts += (entry_pe - fill.pe_fill)
-        pnl_rs   = pnl_pts * qty
+        _und = str(ev.underlying).upper()
+        _cv  = 0.001 if _und == "BTC" else (0.01 if _und == "ETH" else 1.0)
+        _ccy = "$" if _cv < 1.0 else "₹"
+        pnl_rs   = pnl_pts * qty * _cv
         _legtag  = "+".join(sorted(_sides)) if _sides != {"CE", "PE"} else "CE+PE"
+        _rs_fmt  = f"{pnl_rs:+.4f}" if _cv < 1.0 else f"{pnl_rs:+.0f}"
         line = (
             f"{ts} | EXIT  | {ev.underlying} | ATM={ev.atm:.0f} | legs={_legtag} | "
             f"CE={ev.ce_strike:.0f} {entry_ce:.2f}→{fill.ce_fill:.2f} | "
             f"PE={ev.pe_strike:.0f} {entry_pe:.2f}→{fill.pe_fill:.2f} | "
-            f"PnL={pnl_pts:+.2f}pts {pnl_rs:+.0f}Rs | "
+            f"PnL={pnl_pts:+.2f}pts {_ccy}{_rs_fmt} | "
             f"Reason={ev.close_reason} | "
             f"{'[PAPER]' if fill.paper_mode else '[LIVE]'}\n"
         )
