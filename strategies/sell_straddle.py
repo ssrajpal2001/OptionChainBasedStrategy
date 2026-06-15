@@ -1724,6 +1724,21 @@ class SellStraddleStrategy:
         now = datetime.now(IST)
         pnl = pos.unrealized_pnl
 
+        # Cache latest exit eval for dashboard (always updated, no audit-client gate).
+        import time as _t_ev
+        if _t_ev.monotonic() - getattr(self, "_last_eval_cache_t", 0.0) >= 3.0:
+            self._last_eval_cache_t = _t_ev.monotonic()
+            _credit_ev = self._initial_net_credit or pos.net_credit or 0.0
+            _crit_ev, _dump_ev = self._build_exit_criteria(pos, pnl, _credit_ev)
+            _max_tf_ev = max((int(r.get("tf", 1)) for r in (self._exit_rules or [])), default=1)
+            self._last_exit_eval = {
+                "criteria": [{"name": n, "detail": d, "hit": bool(h)} for n, d, h in _crit_ev],
+                "ind_by_tf": {str(tf): {k: round(v, 2) for k, v in (idict or {}).items()}
+                              for tf, idict in (_dump_ev or {}).items()},
+                "max_tf": _max_tf_ev,
+                "ts": now.timestamp(),
+            }
+
         # Live granular exit audit → client UI, every tick (self-throttled to ~3s). This is
         # what makes the panel MOVE — the per-bucket EXIT-EVAL log below only refreshes once
         # per max-TF boundary, but tick-level rows (P&L/Day%/LTPdecay/Ratio) change each tick.

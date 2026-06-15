@@ -7887,6 +7887,46 @@ function histReplay() {
                           </template>
                         </div>
                       </template>
+                      <!-- Exit Rules evaluation panel — always shown when position open and eval data available -->
+                      <template x-if="ss.exit_eval && ss.exit_eval.criteria && ss.exit_eval.criteria.length">
+                        <div class="rounded p-1.5 space-y-0.5" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)">
+                          <div class="flex items-center justify-between cursor-pointer"
+                               @click="ss._exitOpen = !ss._exitOpen">
+                            <span class="sec-label" style="color:var(--t-cyan)">EXIT RULE CHECK
+                              <span class="ml-1" style="color:var(--t-muted);font-weight:400;font-size:0.65rem"
+                                    x-text="'max-tf '+( ss.exit_eval.max_tf||1)+'m · updated '+(ss.exit_eval.ts ? new Date(ss.exit_eval.ts*1000).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—')"></span>
+                            </span>
+                            <span class="font-mono text-xs" style="color:var(--t-muted)"
+                                  x-text="ss._exitOpen ? '▾' : '▸'"></span>
+                          </div>
+                          <template x-if="ss._exitOpen !== false">
+                            <div class="space-y-0.5 pt-0.5">
+                              <template x-for="c in (ss.exit_eval.criteria||[])" :key="c.name">
+                                <div class="flex justify-between font-mono text-xs py-0.5 rounded px-1"
+                                     :style="c.hit ? 'background:rgba(var(--t-red-rgb),0.08)' : ''">
+                                  <span :style="`color:${c.hit?'var(--t-red)':'var(--t-green)'}`"
+                                        x-text="(c.hit ? '✗ ' : '✓ ')+c.name"></span>
+                                  <span style="color:var(--t-text)" x-text="c.detail"></span>
+                                </div>
+                              </template>
+                              <!-- Per-TF indicator dump for Dynamic exit rules -->
+                              <template x-if="ss.exit_eval.ind_by_tf && Object.keys(ss.exit_eval.ind_by_tf).length">
+                                <div class="mt-1 pt-1 border-t" style="border-color:rgba(var(--t-cyan-rgb),0.15)">
+                                  <template x-for="[tf, inds] in Object.entries(ss.exit_eval.ind_by_tf)" :key="tf">
+                                    <div class="mb-0.5">
+                                      <span class="font-mono text-xs" style="color:var(--t-dim)" x-text="tf+'m → '"></span>
+                                      <template x-for="[k,v] in Object.entries(inds||{})" :key="k">
+                                        <span class="font-mono text-xs mr-2" style="color:var(--t-muted)"
+                                              x-text="k+'='+v"></span>
+                                      </template>
+                                    </div>
+                                  </template>
+                                </div>
+                              </template>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
                     </div>
                   </template>
 

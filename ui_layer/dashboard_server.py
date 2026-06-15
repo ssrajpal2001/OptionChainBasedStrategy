@@ -2159,6 +2159,8 @@ class DashboardServer:
                                         straddle_info["tsl"] = {"enabled": False}
                                 except Exception:
                                     straddle_info["tsl"] = {"enabled": False}
+                                # Exit eval cache — built every 3s by _check_exits
+                                straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
                     elif sname == "trap_trading":
                         eng = getattr(_srv, "_trap_engine", None)
                         op = getattr(eng, "_open_positions", {}) if eng else {}
