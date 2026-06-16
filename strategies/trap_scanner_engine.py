@@ -74,7 +74,7 @@ _INDEX_CFG: Dict[str, dict] = {
     "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": [[18, 45], [19, 15]], "exchange": "MCX",
-                   "htf_source": "futures"},
+                   "htf_source": "futures", "htf_min_override": 30},
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
                    "sl_buf": 50.0, "cutoff": "23:00", "sq_off": "23:15",
                    "window": None, "exchange": "DELTA", "htf_source": "futures"},
@@ -173,9 +173,11 @@ class TrapScannerEngine:
         self._entry_win  = _adm.get("entry_window",     _def["window"])
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
-        self._gap_thresh = float(ts_admin_cfg.get("gap_threshold_pct", 1.0))
-        self._htf_min    = int(ts_admin_cfg.get("htf_minutes", 75))
-        self._ltf_min    = int(ts_admin_cfg.get("ltf_minutes", 5))
+        self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 1.0))
+        # CrudeOil HTF = 30-min (frozen per spec); all others = admin-configurable (default 75)
+        _htf_override     = _def.get("htf_min_override")
+        self._htf_min     = _htf_override if _htf_override else int(ts_admin_cfg.get("htf_minutes", 75))
+        self._ltf_min     = int(ts_admin_cfg.get("ltf_minutes", 5))
         self._cascade_min = 15   # intermediate TF for intraday cascade
 
         self._running = False
@@ -500,13 +502,20 @@ class TrapScannerEngine:
                             del bars_list[:-2000]
                         self._on_candle_close(label, ts)
 
-                # Tick-level exit for open position
+                # P&L tick monitoring — uses 1-ITM exec_key, NOT scan-strike bars
+                # Scan bars (ce1/ce2/pe1/pe2) continue to build for LTF detection.
+                # Only the 1-ITM contract's LTP drives SL, T1, and trail checks.
                 if self._position:
-                    ps = self._position.get("leg", "")
-                    if ((is_ce1 and ps == "CE1") or (is_ce2 and ps == "CE2") or
-                            (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2") or
-                            (is_fut and ps == "FUT")):
+                    exec_key = self._position.get("exec_key", "")
+                    if exec_key and sym == exec_key:
                         await self._check_tick_exit(ltp, ts)
+                    elif not exec_key:
+                        # Fallback (no exec_key set): match by leg as before
+                        ps = self._position.get("leg", "")
+                        if ((is_ce1 and ps == "CE1") or (is_ce2 and ps == "CE2") or
+                                (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2") or
+                                (is_fut and ps == "FUT")):
+                            await self._check_tick_exit(ltp, ts)
         except asyncio.CancelledError:
             pass
 
@@ -603,7 +612,12 @@ class TrapScannerEngine:
                 self._run_ltf_on("PE2", self._bars_pe2, bull_zones, "PE")
 
     def _run_ltf_on(self, leg_key: str, bars: List[dict],
-                    htf_zones: List[dict], opt_type: str) -> None:
+                    htf_zones: List[dict], opt_type: str,
+                    require_closed: bool = True) -> None:
+        """
+        require_closed=True  (normal mode): entry only when 5-min zone is CLOSED
+        require_closed=False (cascade mode): entry on TRAPPED (price hit bears' SL is enough)
+        """
         if not htf_zones or len(bars) < 3:
             return
         df = _bars_to_df(bars[-200:])
@@ -619,7 +633,12 @@ class TrapScannerEngine:
                 htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
                 htf_target=zone.get("sl", 0.0),
             )
-            best = scanner.select_best_ltf_entry(ltf_entries)
+            if require_closed:
+                best = scanner.select_best_ltf_entry(ltf_entries)  # CLOSED only
+            else:
+                # Cascade: accept TRAPPED (price crossed bears' SL — that IS the signal)
+                trapped_ltf = [e for e in ltf_entries if e["status"] in ("TRAPPED", "CLOSED")]
+                best = min(trapped_ltf, key=lambda e: e["zone_low"]) if trapped_ltf else None
             if best:
                 asyncio.get_event_loop().create_task(
                     self._on_entry_signal(leg_key, opt_type, best, zone)
@@ -641,7 +660,7 @@ class TrapScannerEngine:
                 return
             self._run_htf_scan(bars_override=today_bars, minutes_override=self._cascade_min)
             zones_15m = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
-            self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE")
+            self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE", require_closed=False)
         else:
             today_bars = [b for b in self._bars_spot
                           if pd.to_datetime(b["datetime"]).date() == today]
@@ -656,11 +675,11 @@ class TrapScannerEngine:
             bear_15 = [e for e in all_15 if e.get("kind") == "BEAR" and e["status"] == "TRAPPED"]
             bull_15 = [e for e in all_15 if e.get("kind") == "BULL" and e["status"] == "TRAPPED"]
             if bear_15:
-                self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE")
-                self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE")
+                self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE", require_closed=False)
+                self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE", require_closed=False)
             if bull_15:
-                self._run_ltf_on("PE1", self._bars_pe1, bull_15, "PE")
-                self._run_ltf_on("PE2", self._bars_pe2, bull_15, "PE")
+                self._run_ltf_on("PE1", self._bars_pe1, bull_15, "PE", require_closed=False)
+                self._run_ltf_on("PE2", self._bars_pe2, bull_15, "PE", require_closed=False)
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -687,12 +706,22 @@ class TrapScannerEngine:
         self._notified_uids.add(uid)
 
         # Strike: CE1/CE2 or PE1/PE2 based on leg
-        strike_map = {
+        scan_strike_map = {
             "CE1": self._ce1_strike, "CE2": self._ce2_strike,
             "PE1": self._pe1_strike, "PE2": self._pe2_strike,
-            "FUT": self._ce1_strike,   # futures bear trap → buy CE1 (S1)
+            "FUT": self._ce1_strike,
         }
-        strike   = strike_map.get(leg) or 0
+        scan_strike = scan_strike_map.get(leg) or 0
+
+        # 1-ITM adjustment: CE order strike is 1 step deeper ITM (lower for CE, higher for PE)
+        # Scan runs on the pivot strike; order and P&L tracking use the 1-ITM strike.
+        if opt_type == "CE":
+            strike = scan_strike - self._step   # 1 step ITM for CE
+        elif opt_type == "PE":
+            strike = scan_strike + self._step   # 1 step ITM for PE
+        else:
+            strike = scan_strike
+
         ep       = round(entry.get("zone_trigger", entry.get("zone_high", 0)), 2)
         t1_price = round(htf_zone.get("sl", 0), 2)
         sl_price = round(entry["zone_low"] - self._sl_buf, 2)
@@ -700,9 +729,19 @@ class TrapScannerEngine:
         t1_qty    = total_qty // 2
 
         self._log.info(
-            "ENTRY %s %d%s ep=%.2f sl=%.2f t1=%.2f qty=%d",
-            self._und, strike, opt_type, ep, sl_price, t1_price, total_qty,
+            "ENTRY %s scan=%d order=%d%s ep=%.2f sl=%.2f t1=%.2f qty=%d",
+            self._und, scan_strike, strike, opt_type, ep, sl_price, t1_price, total_qty,
         )
+
+        # Subscribe the 1-ITM option key for live P&L and SL tracking
+        exec_key = self._build_upstox_key(strike, opt_type)
+        try:
+            from data_layer.strike_rebalancer import PinRequest
+            await self._bus.publish(Topic.PIN_REQUEST,
+                                    PinRequest(instrument_key=exec_key,
+                                               owner=f"trap_exec_{self._cid}_{self._bid}"))
+        except Exception:
+            pass
 
         broker = await self._ensure_broker()
         if not broker:
@@ -732,7 +771,8 @@ class TrapScannerEngine:
         self._position = {
             "leg":           leg,
             "side":          opt_type,
-            "strike":        strike,
+            "strike":        strike,        # 1-ITM order strike
+            "exec_key":      exec_key,      # Upstox key for the 1-ITM contract (P&L tracking)
             "entry_price":   round(avg, 2),
             "sl_price":      sl_price,
             "trail_sl":      sl_price,    # starts same; trails 5m option-bar lows after T1
