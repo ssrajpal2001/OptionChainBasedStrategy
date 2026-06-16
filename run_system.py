@@ -148,15 +148,19 @@ def _setup_logging(log_dir: str, level: str) -> None:
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(os.path.join(log_dir, "trades"), exist_ok=True)
     os.makedirs(os.path.join(log_dir, "clients"), exist_ok=True)
-    # System log: logs/system-YYYYMMDD.log  (one per day, appended)
+    # System log: logs/system-YYYYMMDD.log — rotating 50 MB × 5 files = 250 MB max
+    import logging.handlers as _lh
     date_str = datetime.now().strftime("%Y%m%d")
     log_file = os.path.join(log_dir, f"system-{date_str}.log")
+    _fh = _lh.RotatingFileHandler(
+        log_file, encoding="utf-8", maxBytes=50 * 1024 * 1024, backupCount=5,
+    )
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file, encoding="utf-8"),
+            _fh,
         ],
     )
 
