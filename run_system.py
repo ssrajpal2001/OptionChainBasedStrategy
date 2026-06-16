@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import gc
+gc.set_threshold(700, 10, 10)   # gen0 less frequent → fewer GC pauses during tick storms
 import importlib
 import logging
 import os
