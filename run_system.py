@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import importlib
 import logging
 import os
@@ -575,7 +576,22 @@ async def _run_live(
         asyncio.create_task(strike_cleanup.run(),       name="strike_cleanup"),
         asyncio.create_task(gap_handler.run(),          name="gap_handler"),
         asyncio.create_task(shutdown_event.wait(),      name="shutdown_sentinel"),
+        asyncio.create_task(_memory_watchdog(),         name="memory_watchdog"),
     ]
+
+    async def _memory_watchdog() -> None:
+        """Log RSS every 30 min and force a GC cycle. Logs a WARNING if RSS > 2.5 GB
+        so we know well before the 4 GB t3.medium limit is approached."""
+        import resource
+        while True:
+            await asyncio.sleep(1800)   # 30 minutes
+            gc.collect()
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            bus_stats = {t: len(qs) for t, qs in bus._subs.items() if qs}
+            logger.info("MEMORY rss=%.0f MB | eventbus_queues=%s", rss_mb, bus_stats)
+            if rss_mb > 2500:
+                logger.warning("MEMORY HIGH: %.0f MB RSS — approaching 4 GB limit. "
+                               "Consider restarting after market hours.", rss_mb)
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
@@ -601,7 +617,7 @@ async def _run_live(
         for _ic in _iron_condors:
             _ic.stop()
     if straddle_manager is not None:
-        straddle_manager.stop()   # stops every per-binding book
+        await straddle_manager.stop_async()   # awaits task cancellation → frees EventBus queues
     risk_mgr.stop()
     rebalancer.stop()
     strike_cleanup.stop()

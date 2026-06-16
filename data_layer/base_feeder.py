@@ -131,6 +131,14 @@ class EventBus:
         self._subs[topic].append(q)
         return q
 
+    def unsubscribe(self, topic: str, q: asyncio.Queue) -> None:
+        """Remove a queue returned by subscribe(). Call this when the consumer task exits
+        to prevent orphaned queues accumulating in long-running processes."""
+        try:
+            self._subs[topic].remove(q)
+        except (ValueError, KeyError):
+            pass
+
     async def publish(self, topic: str, event: Any) -> None:
         queues = self._subs.get(topic, [])
         for q in queues:
@@ -339,9 +347,9 @@ class BaseFeeder(ABC):
     async def _publish_index(self, tick: IndexTick) -> None:
         from config.global_config import Topic
         if not hasattr(self, "_last_good_index"):
-            self._last_good_index = {}
-            self._bad_tick_count = {}
-            self._bad_tick_log = {}
+            self._last_good_index: Dict[str, float] = {}
+            self._bad_tick_count:  Dict[str, int]   = {}
+            self._bad_tick_log:    Dict[str, float]  = {}
         _lg = self._last_good_index.get(tick.symbol, 0.0)
         if _lg > 0 and tick.ltp > 0:
             dev = abs(tick.ltp - _lg) / _lg
@@ -375,12 +383,22 @@ class BaseFeeder(ABC):
     def _option_key(self, tick: "OptionTick") -> str:
         return f"{tick.underlying}:{tick.expiry}:{int(tick.strike)}:{tick.option_type}"
 
+    # Max entries kept in option bad-tick guard dicts — caps memory on rolling expirations.
+    _OPT_CACHE_MAX = 2000
+
     async def _publish_option(self, tick: OptionTick) -> None:
         from config.global_config import Topic
         if not hasattr(self, "_last_good_opt"):
-            self._last_good_opt = {}
-            self._opt_bad_count = {}
-            self._opt_bad_log = {}
+            self._last_good_opt: Dict[str, float] = {}
+            self._opt_bad_count: Dict[str, int]   = {}
+            self._opt_bad_log:   Dict[str, float]  = {}
+        # Evict oldest entries when the dict exceeds the cap (expiry rollovers accumulate keys).
+        if len(self._last_good_opt) > self._OPT_CACHE_MAX:
+            evict = list(self._last_good_opt.keys())[:self._OPT_CACHE_MAX // 4]
+            for _k in evict:
+                self._last_good_opt.pop(_k, None)
+                self._opt_bad_count.pop(_k, None)
+                self._opt_bad_log.pop(_k, None)
         _ok = self._option_key(tick)
         _lg = self._last_good_opt.get(_ok, 0.0)
         if _lg > 0 and tick.ltp > 0:

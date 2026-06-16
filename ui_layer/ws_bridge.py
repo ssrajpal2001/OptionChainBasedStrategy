@@ -330,6 +330,11 @@ class WsBridge:
                     )
                     row["is_atm"] = (int(tick.strike) == int(_round_to_step(spot, step)))
                 self._option_cache[key] = row
+                # Evict oldest entries when cache exceeds 500 keys — prevents unbounded
+                # growth across expiry rollovers (old-expiry strikes never seen again).
+                if len(self._option_cache) > 500:
+                    for _old in list(self._option_cache.keys())[:100]:
+                        del self._option_cache[_old]
             except Exception as exc:
                 logger.debug("WsBridge._option_loop: %s", exc)
 

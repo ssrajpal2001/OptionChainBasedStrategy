@@ -129,3 +129,13 @@ class StraddleBookManager:
                 book.stop()
             except Exception:
                 pass
+
+    async def stop_async(self) -> None:
+        """Graceful shutdown — awaits each book's task cancellation so EventBus queues
+        are properly freed before the process exits."""
+        self._running = False
+        await asyncio.gather(
+            *[book.stop_async() for book in self._books.values()],
+            return_exceptions=True,
+        )
+        self._books.clear()

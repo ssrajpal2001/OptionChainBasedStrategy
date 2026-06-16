@@ -577,6 +577,9 @@ class SellStraddleStrategy:
             logger.warning("SellStraddle[%s]: restore failed: %s", self._underlying, exc)
         _tag = f"{self._underlying}" + (f"_{self._client_id}_{self._binding_id}"
                                         if self._client_id and self._binding_id else "")
+        # Store queue references so stop_async() can unsubscribe them from EventBus,
+        # preventing orphaned Queue objects accumulating across book restarts.
+        self._loop_queues: Dict[str, asyncio.Queue] = {}
         self._tasks = [
             asyncio.create_task(self._candle_loop(), name=f"ss_{_tag}_candle"),
             asyncio.create_task(self._tick_loop(),   name=f"ss_{_tag}_tick"),
@@ -698,6 +701,16 @@ class SellStraddleStrategy:
         for t in self._tasks:
             if not t.done():
                 t.cancel()
+        # Tasks are awaited by the event loop after cancel(); callers that need to
+        # guarantee cleanup should await stop_async() instead.
+
+    async def stop_async(self) -> None:
+        """Cancel all tasks and await their completion so EventBus queues are freed."""
+        self._running = False
+        for t in self._tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
 
     def reset_session(self) -> None:
         self._trades_today              = 0
@@ -729,25 +742,31 @@ class SellStraddleStrategy:
 
     async def _candle_loop(self) -> None:
         q = self._bus.subscribe(Topic.CANDLE_CLOSE)
-        while self._running:
-            try:
-                ev: CandleEvent = await asyncio.wait_for(q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                break
-            if ev.symbol != self._underlying:
-                continue
-            try:
-                await self._on_candle(ev)
-            except Exception as exc:
-                # Never let one candle error kill the loop (was stopping entries).
-                logger.exception("SellStraddle[%s]: _on_candle error: %s", self._underlying, exc)
+        self._loop_queues["candle"] = q
+        try:
+            while self._running:
+                try:
+                    ev: CandleEvent = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+                if ev.symbol != self._underlying:
+                    continue
+                try:
+                    await self._on_candle(ev)
+                except Exception as exc:
+                    # Never let one candle error kill the loop (was stopping entries).
+                    logger.exception("SellStraddle[%s]: _on_candle error: %s", self._underlying, exc)
+        finally:
+            self._bus.unsubscribe(Topic.CANDLE_CLOSE, q)
+            self._loop_queues.pop("candle", None)
 
     async def _tick_loop(self) -> None:
         from data_layer.base_feeder import IndexTick
         import time as _t
         q = self._bus.subscribe(Topic.INDEX_TICK)
+        self._loop_queues["tick"] = q
         _idx_count = 0
         _last_hb = 0.0
         while self._running:
@@ -800,11 +819,15 @@ class SellStraddleStrategy:
             except Exception as _exc:
                 logger.exception("SellStraddle[%s]: tick-handler error (recovered, engine alive): %s",
                                  self._underlying, _exc)
+        finally:
+            self._bus.unsubscribe(Topic.INDEX_TICK, q)
+            self._loop_queues.pop("tick", None)
 
     async def _fill_loop(self) -> None:
         """Receive fill confirmations from StraddleExecutionBridge."""
         from execution_bridge.straddle_bridge import StraddleFillEvent
         q = self._bus.subscribe(Topic.ORDER_FILL)
+        self._loop_queues["fill"] = q
         while self._running:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=1.0)
@@ -817,6 +840,9 @@ class SellStraddleStrategy:
             if ev.underlying != self._underlying:
                 continue
             self._on_fill(ev)
+        finally:
+            self._bus.unsubscribe(Topic.ORDER_FILL, q)
+            self._loop_queues.pop("fill", None)
 
     def _on_fill(self, fill) -> None:
         """Handle fill confirmation — finalize entry or exit prices."""
@@ -874,6 +900,7 @@ class SellStraddleStrategy:
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick
         q = self._bus.subscribe(Topic.OPTION_TICK)
+        self._loop_queues["option"] = q
         _tick_count = 0
         _last_log_ts = 0.0
         import time as _time
@@ -940,6 +967,9 @@ class SellStraddleStrategy:
                     if _mk > 0:
                         pos.pe_leg.mark = _mk
                     self._pe_ltp_fresh = True
+        finally:
+            self._bus.unsubscribe(Topic.OPTION_TICK, q)
+            self._loop_queues.pop("option", None)
 
     # ── Candle processing ─────────────────────────────────────────────────────
 
