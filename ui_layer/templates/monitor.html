@@ -1983,7 +1983,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap')+' · '+dep.underlying;
+      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':'Trap')+' · '+dep.underlying;
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
         : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
@@ -5191,9 +5191,11 @@ function histReplay() {
                 <span :style="bk.initialized?'color:var(--t-green)':'color:var(--t-yellow)'"
                       x-text="bk.initialized?(bk.intraday_mode?'INTRADAY':'HTF READY'):'WARMING'"></span>
                 <span x-show="bk.gap_fired" style="color:var(--t-red)">GAP</span>
-                <span x-show="bk.ce_strike" x-text="'CE '+bk.ce_strike" style="color:var(--t-green)"></span>
-                <span x-show="bk.pe_strike" x-text="'PE '+bk.pe_strike" style="color:var(--t-red)"></span>
-                <span x-text="'zones CE:'+bk.open_zones_ce+' PE:'+bk.open_zones_pe" style="color:var(--t-muted)"></span>
+                <span x-show="bk.ce1_strike" x-text="'CE1 '+bk.ce1_strike" style="color:var(--t-green)"></span>
+                <span x-show="bk.ce2_strike" x-text="'CE2 '+bk.ce2_strike" style="color:var(--t-green)"></span>
+                <span x-show="bk.pe1_strike" x-text="'PE1 '+bk.pe1_strike" style="color:var(--t-red)"></span>
+                <span x-show="bk.pe2_strike" x-text="'PE2 '+bk.pe2_strike" style="color:var(--t-red)"></span>
+                <span x-text="'bear:'+bk.bear_zones+' bull:'+bk.bull_zones" style="color:var(--t-muted)"></span>
               </div>
               <template x-if="bk.position">
                 <div class="mt-1 pt-1 border-t flex gap-3 flex-wrap" style="border-color:var(--t-border)">
@@ -7519,6 +7521,7 @@ function histReplay() {
                 <option value="sell_straddle">Sell Straddle (SS)</option>
                 <option value="iron_condor">Iron Condor (IC)</option>
                 <option value="trap_trading">Liquidity Trap Trading (LTT)</option>
+                <option value="trap_scanner">Trap Scanner (TS) — lot must be even</option>
               </select>
             </div>
             <div>

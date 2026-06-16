@@ -2686,7 +2686,7 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle", "iron_condor", "trap_trading"}
+            allowed_strategies = {"sell_straddle", "iron_condor", "trap_trading", "trap_scanner"}
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 
