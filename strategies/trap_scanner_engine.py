@@ -563,11 +563,17 @@ class TrapScannerEngine:
         if self._position:
             return
 
-        # Refresh HTF spot scan on HTF boundary
-        if self._htf_source == "spot" and leg == "SPOT" and ts.minute % self._htf_min == 0:
-            self._run_htf_scan()
-            if self._trapped_zone_count() > 0:
-                self._intraday_mode = False
+        # Refresh HTF scan on HTF boundary (SPOT for NSE/BSE; FUT for CrudeOil)
+        is_htf_boundary = ts.minute % self._htf_min == 0
+        if is_htf_boundary:
+            if self._htf_source == "spot" and leg == "SPOT":
+                self._run_htf_scan()
+                if self._trapped_zone_count() > 0:
+                    self._intraday_mode = False
+            elif self._htf_source == "futures" and leg == "FUT":
+                self._run_htf_scan()
+                if self._trapped_zone_count() > 0:
+                    self._intraday_mode = False
 
         # On every LTF boundary — scan option premium bars inside HTF zones
         if ts.minute % self._ltf_min != 0:
@@ -644,25 +650,36 @@ class TrapScannerEngine:
     async def _cascade_scan(self, ts: datetime) -> None:
         """
         Intraday cascade: no 75-min zone TRAPPED.
-        1. Resample today's spot/futures bars to 15-min → scan_htf_spot / scan_htf
-        2. If a 15-min zone TRAPPED → scan_ltf on 5-min option bars inside it
-        3. Entry fires on TRAPPED (no need for CLOSED in cascade mode)
+        1. Resample today's completed 1m bars to 15-min (drop current incomplete bar)
+        2. scan_htf_spot / scan_htf on those completed 15-min bars
+        3. If a 15-min zone TRAPPED → scan_ltf on completed 5-min option bars
+        4. Entry fires on TRAPPED status (not CLOSED — cascade rule)
         """
         today = datetime.now(IST).date()
+        # Current 15-min bucket start — bars in this bucket are still forming
+        cur_15m_start = ts.replace(second=0, microsecond=0)
+        cur_15m_start = cur_15m_start.replace(minute=(cur_15m_start.minute // self._cascade_min) * self._cascade_min)
+
+        def _complete_today(src: List[dict]) -> List[dict]:
+            """Return today's bars that belong to a COMPLETED 15-min bucket."""
+            return [
+                b for b in src
+                if (pd.to_datetime(b["datetime"]).date() == today and
+                    pd.to_datetime(b["datetime"]) < cur_15m_start)
+            ]
+
         if self._htf_source == "futures":
-            today_bars = [b for b in self._bars_fut
-                          if pd.to_datetime(b["datetime"]).date() == today]
+            today_bars = _complete_today(self._bars_fut)
             if len(today_bars) < 4:
                 return
             self._run_htf_scan(bars_override=today_bars, minutes_override=self._cascade_min)
             zones_15m = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
             self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE", require_closed=False)
         else:
-            today_bars = [b for b in self._bars_spot
-                          if pd.to_datetime(b["datetime"]).date() == today]
+            today_bars = _complete_today(self._bars_spot)
             if len(today_bars) < 4:
                 return
-            # Temporary 15-min scan (don't overwrite main HTF state)
+            # Temporary 15-min scan (don't overwrite main 75-min HTF state)
             df_today = _bars_to_df(today_bars)
             htf_15 = _resample_htf(df_today, self._cascade_min)
             if len(htf_15) < 2:
@@ -814,9 +831,12 @@ class TrapScannerEngine:
 
     def _update_trail_sl(self, pos: dict, ts: datetime) -> None:
         """
-        Trail SL using 5-min OPTION bar lows (ratchet only UP).
-        New bears entering below the 5-min option bar low → their entry price becomes our SL.
-        Mirrors live_tracker._run_cascade_simulation logic exactly.
+        Trail SL on SCAN-STRIKE option bars. We are always a buyer — option price UP = profit.
+        On each new 5-min candle close: candidate = prev_5m_HIGH - sl_buf.
+        trail_sl only moves UP. Never down. Same rule for CE and PE.
+
+        Rationale: as the option premium makes a new 5-min high, we lock in that level
+        minus a small buffer as the new floor. Partial retracements don't trigger the stop.
         """
         bar_5m = ts.replace(second=0, microsecond=0)
         bar_5m = bar_5m.replace(minute=(bar_5m.minute // 5) * 5)
@@ -825,7 +845,6 @@ class TrapScannerEngine:
             return
         pos["last_5m_ts"] = bar_5m
 
-        # Pick the option bar list matching the open position
         leg_bars_map = {
             "CE1": self._bars_ce1, "CE2": self._bars_ce2,
             "PE1": self._bars_pe1, "PE2": self._bars_pe2,
@@ -843,12 +862,13 @@ class TrapScannerEngine:
         if not bucket:
             return
 
-        prev_low  = min(b["low"] for b in bucket)
-        candidate = round(prev_low - self._sl_buf, 2)
+        prev_high = max(b["high"] for b in bucket)
+        candidate = round(prev_high - self._sl_buf, 2)
         if candidate > pos["trail_sl"]:
             old = pos["trail_sl"]
             pos["trail_sl"] = candidate
-            self._log.info("TRAIL_SL %.2f → %.2f (opt_5m_low=%.2f)", old, candidate, prev_low)
+            self._log.info("TRAIL_SL %.2f → %.2f (5m_high=%.2f buf=%.2f)",
+                           old, candidate, prev_high, self._sl_buf)
 
     async def _place_exit(self, qty: int, price: float, reason: str) -> Optional[str]:
         if qty <= 0 or not self._position:
