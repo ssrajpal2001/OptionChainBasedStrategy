@@ -744,6 +744,9 @@ document.addEventListener('alpine:init', () => {
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
     indexConfig: { _trap: { htf_minutes:75, ltf_minutes:5, retest_zone_pct:0.5, slippage_buffer:0.5, sl_mode:'dynamic', sl_pct:2.0, sl_buffer_pct:0.3, entry_cutoff_time:'14:45' } },
     trapSaveMsg: '', trapSaveOk: null,
+    trapScannerCfg: { htf_minutes: 75, ltf_minutes: 5, gap_threshold_pct: 1.0, per_index: {} },
+    trapScannerSaveMsg: '', trapScannerSaveOk: null,
+    trapScannerBooks: [],
     indexConfigLoading: false,
     indexConfigSaving:  false,
     indexConfigMsg:     '',
@@ -1005,6 +1008,7 @@ document.addEventListener('alpine:init', () => {
       this.loadAuthAlerts();
       this.loadRms();
       this.loadTrapConfig();
+      this.loadTrapScannerCfg();
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); }, 800);
       setTimeout(() => { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); }, 1200);
       setTimeout(() => { this.loadIndexConfig(this.adminSelectedIndex); }, 1500);
@@ -1724,6 +1728,34 @@ document.addEventListener('alpine:init', () => {
         this.trapSaveOk = false;
         this.trapSaveMsg = 'Network error: ' + (e.message || String(e));
       }
+    },
+
+    async loadTrapScannerCfg() {
+      try {
+        const r = await this._fetch('/api/admin/trap_scanner/settings');
+        if (r) { const d = await r.json(); if (d && d.ok !== false && d.settings) this.trapScannerCfg = d.settings; }
+      } catch (e) {}
+      try {
+        const r = await this._fetch('/api/admin/trap_scanner/status');
+        if (r) { const d = await r.json(); if (d && d.books) this.trapScannerBooks = d.books; }
+      } catch (e) {}
+    },
+
+    async saveTrapScannerCfg() {
+      this.trapScannerSaveMsg = 'Saving…'; this.trapScannerSaveOk = null;
+      try {
+        const r = await this._fetch('/api/admin/trap_scanner/settings', {
+          method: 'POST', json: this.trapScannerCfg
+        });
+        if (!r) throw new Error('No response');
+        const d = await r.json();
+        this.trapScannerSaveOk  = d.ok !== false;
+        this.trapScannerSaveMsg = d.message || (d.ok ? 'Saved.' : (d.error || 'Save failed.'));
+      } catch (e) {
+        this.trapScannerSaveOk = false;
+        this.trapScannerSaveMsg = 'Error: ' + (e.message || String(e));
+      }
+      setTimeout(() => { this.trapScannerSaveMsg = ''; }, 4000);
     },
 
     _newRule() {
@@ -4133,6 +4165,13 @@ function histReplay() {
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           TRAP TRADING
         </button>
+        <button @click="adminStrategyTab='trap_scanner'"
+                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
+                :style="adminStrategyTab==='trap_scanner'
+                  ? 'color:var(--t-yellow);background:rgba(var(--t-yellow-rgb),0.08);border-bottom:2px solid var(--t-yellow)'
+                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
+          TRAP SCANNER
+        </button>
         <div class="ml-auto flex items-center px-3">
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
         </div>
@@ -5059,6 +5098,119 @@ function histReplay() {
              :style="trapSaveOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08)' : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08)'"
              x-text="trapSaveMsg"></div>
       </div><!-- end liquidity trap trading config -->
+
+      <!-- ══ TRAP SCANNER config ════════════════════════════════════════════ -->
+      <div x-show="adminStrategyTab==='trap_scanner'" class="p-4 flex flex-col gap-3">
+
+        <div class="rounded border p-3" style="border-color:var(--t-border)">
+          <div class="font-display text-sm font-black tracking-widest mb-2" style="color:var(--t-yellow)">
+            TRAP SCANNER — GLOBAL TIMEFRAME SETTINGS
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">HTF Minutes (bearish trap reference)</span>
+              <input type="number" min="15" max="240" class="t-input"
+                     x-model.number="trapScannerCfg.htf_minutes" placeholder="75">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">LTF Minutes (entry confirmation)</span>
+              <input type="number" min="1" max="30" class="t-input"
+                     x-model.number="trapScannerCfg.ltf_minutes" placeholder="5">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Gap Threshold % (auto pivot vs ITM strikes)</span>
+              <input type="number" min="0.1" max="5" step="0.1" class="t-input"
+                     x-model.number="trapScannerCfg.gap_threshold_pct" placeholder="1.0">
+            </label>
+          </div>
+        </div>
+
+        <!-- Per-index overrides -->
+        <div class="rounded border p-3" style="border-color:var(--t-border)">
+          <div class="font-display text-xs font-bold tracking-widest mb-2" style="color:var(--t-muted)">
+            PER-INDEX OVERRIDE — <span x-text="adminSelectedIndex"></span>
+            <span class="ml-2 text-xs font-normal" style="color:var(--t-muted)">(blank = use global defaults)</span>
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Entry Cutoff (IST, HH:MM)</span>
+              <input type="text" class="t-input" placeholder="13:45"
+                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].entry_cutoff||'')">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Square Off (IST, HH:MM)</span>
+              <input type="text" class="t-input" placeholder="14:00"
+                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].sq_off_time||'')">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">SL Buffer (pts below zone_low)</span>
+              <input type="number" step="0.5" class="t-input" placeholder="2.0"
+                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].sl_buffer||2.0)">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Gap ITM Near (pts, no-zone pivot)</span>
+              <input type="number" class="t-input" placeholder="200"
+                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].gap_itm_near||0)">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Gap ITM Far (pts, fallback)</span>
+              <input type="number" class="t-input" placeholder="400"
+                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].gap_itm_far||0)">
+            </label>
+            <label class="flex flex-col gap-1 col-span-2">
+              <span style="color:var(--t-muted)">Entry Window (CrudeOil W2 only — leave blank for other indices)</span>
+              <input type="text" class="t-input" placeholder='e.g. "18:45-19:15"'
+                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].entry_window_str||'')">
+            </label>
+          </div>
+        </div>
+
+        <!-- Save -->
+        <div class="flex items-center gap-3 mt-1">
+          <button @click="saveTrapScannerCfg()"
+                  class="font-mono text-xs font-bold py-2 px-5 rounded transition-all"
+                  style="background:var(--t-yellow);color:#0a0e14;border:none;cursor:pointer;letter-spacing:0.08em">
+            SAVE TRAP SCANNER SETTINGS
+          </button>
+          <span x-show="trapScannerSaveMsg" class="font-mono text-xs px-2 py-1 rounded"
+                :style="trapScannerSaveOk?'color:var(--t-green)':'color:var(--t-red)'"
+                x-text="trapScannerSaveMsg"></span>
+        </div>
+
+        <!-- Live books status -->
+        <div class="rounded border p-3 mt-1" style="border-color:var(--t-border)">
+          <div class="font-display text-xs font-bold tracking-widest mb-2" style="color:var(--t-muted)">LIVE TRAP SCANNER BOOKS</div>
+          <template x-if="trapScannerBooks.length===0">
+            <div class="font-mono text-xs" style="color:var(--t-muted)">No active trap scanner deployments.</div>
+          </template>
+          <template x-for="bk in trapScannerBooks" :key="bk.client_id+'_'+bk.binding_id+'_'+bk.underlying">
+            <div class="rounded border p-2 mb-2 text-xs font-mono" style="border-color:var(--t-border)">
+              <div class="flex gap-3 flex-wrap">
+                <span style="color:var(--t-cyan)" x-text="bk.underlying"></span>
+                <span style="color:var(--t-muted)" x-text="bk.client_id+'/'+bk.binding_id"></span>
+                <span :style="bk.initialized?'color:var(--t-green)':'color:var(--t-yellow)'"
+                      x-text="bk.initialized?(bk.intraday_mode?'INTRADAY':'HTF READY'):'WARMING'"></span>
+                <span x-show="bk.gap_fired" style="color:var(--t-red)">GAP</span>
+                <span x-show="bk.ce_strike" x-text="'CE '+bk.ce_strike" style="color:var(--t-green)"></span>
+                <span x-show="bk.pe_strike" x-text="'PE '+bk.pe_strike" style="color:var(--t-red)"></span>
+                <span x-text="'zones CE:'+bk.open_zones_ce+' PE:'+bk.open_zones_pe" style="color:var(--t-muted)"></span>
+              </div>
+              <template x-if="bk.position">
+                <div class="mt-1 pt-1 border-t flex gap-3 flex-wrap" style="border-color:var(--t-border)">
+                  <span style="color:var(--t-yellow)">POSITION</span>
+                  <span x-text="bk.position.side+' '+bk.position.strike"></span>
+                  <span x-text="'entry='+bk.position.entry_price"></span>
+                  <span x-text="'sl='+bk.position.sl_price"></span>
+                  <span x-text="'t1='+bk.position.t1_price" style="color:var(--t-green)"></span>
+                  <span x-text="'qty='+bk.position.remaining_qty+'/'+bk.position.total_qty"></span>
+                  <span x-show="bk.position.t1_hit" style="color:var(--t-green)">T1✓</span>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+
+      </div><!-- end trap scanner config -->
 
     </div><!-- end strategy tabs card -->
 

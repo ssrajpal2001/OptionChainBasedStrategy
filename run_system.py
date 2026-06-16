@@ -428,6 +428,8 @@ async def _run_live(
     # Now the DB exists → build the per-binding SellStraddle book manager.
     from strategies.straddle_book_manager import StraddleBookManager
     straddle_manager = StraddleBookManager(bus, cfg, _shared_client_db, cfg.monitored_indices)
+    from strategies.trap_book_manager import TrapBookManager
+    trap_scanner_manager = TrapBookManager(bus, cfg, _shared_client_db, cfg.monitored_indices)
     # Crypto (Delta) feed: for any BTC/ETH in monitored_indices, run a DeltaChainManager that
     # drives a DeltaFeeder (spot + ATM±N strikes for the active daily expiry + 17:30 rollover) onto
     # the SAME EventBus the sell-straddle books consume. Runs alongside the NSE GlobalFeeder.
@@ -508,6 +510,7 @@ async def _run_live(
                 iron_condors=_iron_condors,
                 straddle_manager=straddle_manager,
                 straddle_bridge=straddle_bridge,
+                trap_scanner_manager=trap_scanner_manager,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -569,6 +572,8 @@ async def _run_live(
         tasks.append(asyncio.create_task(trap_engine.run(),   name="trap_engine"))
     if "sell_straddle" in _enabled_strats and straddle_manager is not None:
         tasks.append(asyncio.create_task(straddle_manager.run(), name="straddle_books"))
+    if "trap_scanner" in _enabled_strats:
+        tasks.append(asyncio.create_task(trap_scanner_manager.run(), name="trap_scanner_books"))
     if delta_chain is not None:
         tasks.append(asyncio.create_task(delta_chain.run(), name="delta_chain"))
     tasks += [

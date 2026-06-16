@@ -493,6 +493,7 @@ class GlobalConfig:
     strategy: StrategyParams = field(default_factory=StrategyParams)
     auth: AuthConfig = field(default_factory=AuthConfig)
     trap_engine: TrapEngineConfig = field(default_factory=TrapEngineConfig)
+    trap_scanner_enabled: bool = False   # set True in run_system when --strategies trap_scanner
 
     # Active indices to monitor (feeder subscribes to all). Trimmed to keep the total
     # WS subscription under the broker's ~50/connection cap (each index ≈ (2*chain_depth+1)*2

@@ -606,6 +606,7 @@ class DashboardServer:
         sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
         straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
+        trap_scanner_manager=None,  # TrapBookManager — per-binding trap scanner books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -619,6 +620,7 @@ class DashboardServer:
         self._straddle_manager = straddle_manager
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
+        self._trap_scanner_manager = trap_scanner_manager
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -5266,6 +5268,57 @@ class DashboardServer:
                 pass
             finally:
                 bridge.remove_connection(websocket)
+
+        # ── ADMIN — Trap Scanner config ───────────────────────────────────────
+
+        @app.get("/api/admin/trap_scanner/settings", tags=["Admin"])
+        async def api_trap_scanner_settings_get(_: dict = Depends(_require_admin)):
+            """Return the current trap_scanner global admin settings (stored in system_settings)."""
+            import json
+            raw = await asyncio.to_thread(
+                _srv._client_db.get_setting_sync, "trap_scanner", ""
+            )
+            cfg = {}
+            if raw:
+                try:
+                    cfg = json.loads(raw)
+                except Exception:
+                    pass
+            return {"ok": True, "settings": cfg}
+
+        @app.post("/api/admin/trap_scanner/settings", tags=["Admin"])
+        async def api_trap_scanner_settings_save(
+            request: Request, _: dict = Depends(_require_admin),
+        ):
+            """Persist trap_scanner admin settings (htf_minutes, ltf_minutes, per_index config etc.)."""
+            import json
+            try:
+                body = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON body."}
+            # Whitelist top-level keys
+            allowed_top = {"htf_minutes", "ltf_minutes", "gap_threshold_pct", "per_index"}
+            filtered = {k: v for k, v in body.items() if k in allowed_top}
+            if not filtered:
+                return {"ok": False, "error": "No valid fields provided."}
+            # Load existing and merge
+            raw = await asyncio.to_thread(_srv._client_db.get_setting_sync, "trap_scanner", "{}")
+            try:
+                existing = json.loads(raw)
+            except Exception:
+                existing = {}
+            existing.update(filtered)
+            await _srv._client_db.set_setting("trap_scanner", json.dumps(existing))
+            logger.info("TrapScanner admin settings saved: %s", filtered)
+            return {"ok": True, "message": "Trap scanner settings saved."}
+
+        @app.get("/api/admin/trap_scanner/status", tags=["Admin"])
+        async def api_trap_scanner_status(_: dict = Depends(_require_admin)):
+            """Return live telemetry for all running trap scanner books."""
+            mgr = getattr(_srv, "_trap_scanner_manager", None)
+            if mgr is None:
+                return {"ok": True, "books": []}
+            return {"ok": True, "books": mgr.telemetry_all()}
 
         return app
 

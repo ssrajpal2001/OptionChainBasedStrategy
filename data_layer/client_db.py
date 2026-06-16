@@ -985,6 +985,28 @@ class ClientDB:
             logger.error("get_running_straddle_deployments_sync: %s", exc)
             return []
 
+    def get_running_trap_deployments_sync(self) -> list[dict]:
+        """Single JOIN: all is_running=1 trap_scanner deployments across active clients."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """
+                SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
+                       d.strategy_name, d.is_running
+                FROM clients c
+                JOIN strategy_deployments d ON c.client_id = d.client_id
+                WHERE c.is_active = 1
+                  AND d.strategy_name = 'trap_scanner'
+                  AND d.is_running = 1
+                """
+            ).fetchall()
+            con.close()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("get_running_trap_deployments_sync: %s", exc)
+            return []
+
     # ── Boot-time bulk load ───────────────────────────────────────────────────
 
     def load_all_profiles(self) -> list:
