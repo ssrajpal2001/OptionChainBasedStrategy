@@ -831,12 +831,14 @@ class TrapScannerEngine:
 
     def _update_trail_sl(self, pos: dict, ts: datetime) -> None:
         """
-        Trail SL on SCAN-STRIKE option bars. We are always a buyer — option price UP = profit.
-        On each new 5-min candle close: candidate = prev_5m_HIGH - sl_buf.
-        trail_sl only moves UP. Never down. Same rule for CE and PE.
+        Trail SL on SCAN-STRIKE option bars. We are always a buyer — option UP = profit.
+        On each new 5-min candle close: candidate = prev_5m_LOW - sl_buf.
+        trail_sl only moves UP (ratchet). Never down. Same rule for CE and PE.
 
-        Rationale: as the option premium makes a new 5-min high, we lock in that level
-        minus a small buffer as the new floor. Partial retracements don't trigger the stop.
+        Why bar LOW (not HIGH): new bears enter below the 5m bar low (shorting there).
+        Their SL is above the bar high. Our SL = their entry minus buffer.
+        We exit when those bears are in profit = real reversal, not a normal retracement.
+        As each successive 5m bar low is higher, our SL ratchets up with it.
         """
         bar_5m = ts.replace(second=0, microsecond=0)
         bar_5m = bar_5m.replace(minute=(bar_5m.minute // 5) * 5)
@@ -862,13 +864,13 @@ class TrapScannerEngine:
         if not bucket:
             return
 
-        prev_high = max(b["high"] for b in bucket)
-        candidate = round(prev_high - self._sl_buf, 2)
+        prev_low  = min(b["low"] for b in bucket)
+        candidate = round(prev_low - self._sl_buf, 2)
         if candidate > pos["trail_sl"]:
             old = pos["trail_sl"]
             pos["trail_sl"] = candidate
-            self._log.info("TRAIL_SL %.2f → %.2f (5m_high=%.2f buf=%.2f)",
-                           old, candidate, prev_high, self._sl_buf)
+            self._log.info("TRAIL_SL %.2f → %.2f (5m_low=%.2f buf=%.2f)",
+                           old, candidate, prev_low, self._sl_buf)
 
     async def _place_exit(self, qty: int, price: float, reason: str) -> Optional[str]:
         if qty <= 0 or not self._position:
