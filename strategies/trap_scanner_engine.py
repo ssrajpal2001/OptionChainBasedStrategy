@@ -502,20 +502,16 @@ class TrapScannerEngine:
                             del bars_list[:-2000]
                         self._on_candle_close(label, ts)
 
-                # P&L tick monitoring — uses 1-ITM exec_key, NOT scan-strike bars
-                # Scan bars (ce1/ce2/pe1/pe2) continue to build for LTF detection.
-                # Only the 1-ITM contract's LTP drives SL, T1, and trail checks.
+                # SL/T1/trail monitoring uses SCAN-STRIKE option LTP (not 1-ITM exec key).
+                # Zone SL levels (zone_high/low) are derived from scan-strike price action,
+                # so the scan-strike feed is the correct reference for all exit checks.
+                # exec_key is used ONLY for order placement — never for price monitoring.
                 if self._position:
-                    exec_key = self._position.get("exec_key", "")
-                    if exec_key and sym == exec_key:
+                    ps = self._position.get("leg", "")
+                    if ((is_ce1 and ps == "CE1") or (is_ce2 and ps == "CE2") or
+                            (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2") or
+                            (is_fut and ps == "FUT")):
                         await self._check_tick_exit(ltp, ts)
-                    elif not exec_key:
-                        # Fallback (no exec_key set): match by leg as before
-                        ps = self._position.get("leg", "")
-                        if ((is_ce1 and ps == "CE1") or (is_ce2 and ps == "CE2") or
-                                (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2") or
-                                (is_fut and ps == "FUT")):
-                            await self._check_tick_exit(ltp, ts)
         except asyncio.CancelledError:
             pass
 
