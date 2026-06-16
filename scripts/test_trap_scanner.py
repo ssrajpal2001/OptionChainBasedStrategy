@@ -260,9 +260,10 @@ def run_index(name, cfg, prev_date, fetch_to, split_on=None):
         pe_strike = atm + near if gap_dir=="UP" else atm - near
         print(f"\n  GAP {gap_dir} = {gap_pct:.2f}%  ->  CE={ce_strike}  PE={pe_strike}  (ITM+/-{near})")
     else:
-        ce_strike = rs(piv["R1"])
-        pe_strike = rs(piv["S1"])
-        print(f"\n  No gap ({gap_pct:.2f}%)  ->  Pivot  CE={ce_strike} (R1={piv['R1']:.0f})  PE={pe_strike} (S1={piv['S1']:.0f})")
+        # CE at S1/S2 (support, bears short here); PE at R1/R2 (resistance, bulls buy here)
+        ce_strike = rs(piv["S1"])
+        pe_strike = rs(piv["R1"])
+        print(f"\n  No gap ({gap_pct:.2f}%)  ->  Pivot  CE={ce_strike} (S1={piv['S1']:.0f})  PE={pe_strike} (R1={piv['R1']:.0f})")
 
     # HTF scan on FULL data (prev + today) — ref candle can be from prev day!
     # Then filter to zones that became TRAPPED/CLOSED DURING today's session only.
