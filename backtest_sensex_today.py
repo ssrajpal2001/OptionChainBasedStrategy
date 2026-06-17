@@ -41,28 +41,43 @@ SL_BUF_PCT = 2.0
 
 
 async def fetch_bars(key: str, days: int = 8) -> list:
+    """Fetch historical bars (completed sessions) + today's intraday bars merged."""
+    headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
     today   = date.today()
     to_date = today + timedelta(days=1)
     fr_date = today - timedelta(days=days)
-    url = (f"https://api.upstox.com/v2/historical-candle/"
-           f"{key}/1minute/{to_date}/{fr_date}")
-    headers = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
+
+    # 1. Historical (completed sessions)
+    hist_url = (f"https://api.upstox.com/v2/historical-candle/"
+                f"{key}/1minute/{to_date}/{fr_date}")
+    # 2. Today's intraday (live session — Upstox intraday endpoint)
+    intra_url = f"https://api.upstox.com/v2/historical-candle/intraday/{key}/1minute"
+
+    all_bars = []
+    seen_dts = set()
+
     async with aiohttp.ClientSession() as s:
-        async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            if r.status != 200:
-                body = await r.text()
-                print(f"  HTTP {r.status} for {key}: {body[:200]}")
-                return []
-            data = await r.json()
-    candles = data.get("data", {}).get("candles", [])
-    bars = [
-        {"datetime": c[0], "open": float(c[1]), "high": float(c[2]),
-         "low": float(c[3]), "close": float(c[4]), "volume": int(c[5])}
-        for c in reversed(candles)
-    ]
-    print(f"  {key}: {len(bars)} bars  "
-          f"({bars[0]['datetime'][:10] if bars else '—'} → {bars[-1]['datetime'][:10] if bars else '—'})")
-    return bars
+        for url, label in [(hist_url, "hist"), (intra_url, "intraday")]:
+            async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    body = await r.text()
+                    print(f"    {label} HTTP {r.status}: {body[:120]}")
+                    continue
+                data = await r.json()
+            candles = data.get("data", {}).get("candles", [])
+            for c in reversed(candles):
+                dt = c[0]
+                if dt not in seen_dts:
+                    seen_dts.add(dt)
+                    all_bars.append({"datetime": dt, "open": float(c[1]), "high": float(c[2]),
+                                     "low": float(c[3]), "close": float(c[4]), "volume": int(c[5])})
+            print(f"    {key} [{label}]: {len(candles)} candles")
+
+    all_bars.sort(key=lambda b: b["datetime"])
+    print(f"  {key}: {len(all_bars)} bars total  "
+          f"({all_bars[0]['datetime'][:10] if all_bars else '—'} → "
+          f"{all_bars[-1]['datetime'][:10] if all_bars else '—'})")
+    return all_bars
 
 
 def to_df(bars):
