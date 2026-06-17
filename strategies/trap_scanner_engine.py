@@ -698,6 +698,7 @@ class TrapScannerEngine:
     async def _idx_tick_loop(self) -> None:
         q = self._bus.subscribe(Topic.INDEX_TICK)
         self._loop_queues["idx"] = q
+        _last_resub = datetime.now(IST)
         try:
             while self._running:
                 try:
@@ -709,6 +710,19 @@ class TrapScannerEngine:
                 self._spot_cache = float(tick.ltp)
                 if not self._initialized:
                     continue
+                # Re-subscribe tracked option keys every 60s — survives feeder reconnect
+                now = datetime.now(IST)
+                if (now - _last_resub).total_seconds() >= 60:
+                    _last_resub = now
+                    keys = [k for k in [self._ce1_key, self._ce2_key,
+                                        self._pe1_key, self._pe2_key] if k]
+                    if keys:
+                        feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+                        if feeder and hasattr(feeder, "subscribe_tokens"):
+                            try:
+                                await feeder.subscribe_tokens(keys)
+                            except Exception:
+                                pass
                 # SPOT bars: legacy htf_source="spot" path
                 if self._htf_source == "spot":
                     closed = self._update_bucket("SPOT", tick.ltp, tick.timestamp)
@@ -1482,19 +1496,42 @@ class TrapScannerEngine:
         return None, None
 
     async def _subscribe_instruments(self) -> None:
-        if self._rebalancer is None:
-            self._log.warning("No rebalancer set — tracked strikes will rely on ATM window only")
-            return
-        for strike in [self._ce1_strike, self._ce2_strike, self._pe1_strike, self._pe2_strike]:
-            if strike:
+        """Pin + force-subscribe all tracked option keys so ticks arrive regardless of ATM window."""
+        # Step 1: pin strikes so rebalancer never unsubscribes them on ATM drift
+        if self._rebalancer is not None:
+            for strike in [self._ce1_strike, self._ce2_strike, self._pe1_strike, self._pe2_strike]:
+                if strike:
+                    try:
+                        self._rebalancer.pin_strike(self._und, float(strike))
+                    except Exception as exc:
+                        self._log.warning("pin_strike %s %s: %s", self._und, strike, exc)
+        else:
+            self._log.warning("No rebalancer set — falling back to direct feeder subscription only")
+
+        # Step 2: force-subscribe the specific instrument keys directly via feeder.
+        # pin_strike alone only prevents UNsubscription; it does NOT subscribe a key that
+        # was never in the ATM window.  Deep-ITM / OTM legs used by TrapScanner are often
+        # outside the ±N-strike window, so they never receive ticks without this call.
+        keys = [k for k in [self._ce1_key, self._ce2_key,
+                             self._pe1_key, self._pe2_key] if k]
+        if keys:
+            feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+            if feeder and hasattr(feeder, "subscribe_tokens"):
                 try:
-                    self._rebalancer.pin_strike(self._und, float(strike))
+                    await feeder.subscribe_tokens(keys)
+                    self._log.info("force-subscribed %d option keys: %s", len(keys), keys)
                 except Exception as exc:
-                    self._log.warning("pin_strike %s %s: %s", self._und, strike, exc)
+                    self._log.warning("feeder.subscribe_tokens failed: %s", exc)
+            else:
+                self._log.warning("No feeder accessible — option ticks depend on ATM window")
+
         self._log.info(
-            "pinned CE1=%s CE2=%s PE1=%s PE2=%s for %s",
-            self._ce1_strike, self._ce2_strike,
-            self._pe1_strike, self._pe2_strike, self._und,
+            "pinned CE1=%s(%s) CE2=%s(%s) PE1=%s(%s) PE2=%s(%s) for %s",
+            self._ce1_strike, self._ce1_key,
+            self._ce2_strike, self._ce2_key,
+            self._pe1_strike, self._pe1_key,
+            self._pe2_strike, self._pe2_key,
+            self._und,
         )
 
     def _build_upstox_key(self, strike: Optional[int], opt_type: str) -> str:
