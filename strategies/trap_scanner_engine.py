@@ -1928,9 +1928,9 @@ class TrapScannerEngine:
             we = time(win[1][0], win[1][1])
             in_win = ws <= now_ist.time() <= we
             if now_ist.time() < ws:
-                mins_to = int((datetime.combine(now_ist.date(), ws)
-                               - now_ist.replace(tzinfo=None).replace(tzinfo=IST)).total_seconds() // 60)
-                win_status = f"Opens in {int((datetime.combine(now_ist.date(), ws) - now_ist.replace(tzinfo=None)).total_seconds()//60)}m ({ws.strftime('%H:%M')})"
+                now_naive  = now_ist.replace(tzinfo=None)
+                mins_to    = int((datetime.combine(now_ist.date(), ws) - now_naive).total_seconds() // 60)
+                win_status = f"Opens in {mins_to}m ({ws.strftime('%H:%M')})"
             elif in_win:
                 win_status = f"OPEN until {we.strftime('%H:%M')}"
             else:
