@@ -733,13 +733,30 @@ class TrapScannerEngine:
                         self._on_candle_close("SPOT", tick.timestamp)
                 # FUT bars: futures-mode (CrudeOil/BTC/ETH) — underlying LTP arrives as INDEX_TICK
                 elif self._htf_source == "futures":
-                    self._ltp_cache["FUT"] = float(tick.ltp)
+                    fut_ltp = float(tick.ltp)
+                    self._ltp_cache["FUT"] = fut_ltp
                     closed = self._update_bucket("FUT", tick.ltp, tick.timestamp)
                     if closed:
                         self._bars_fut.append(closed)
                         if len(self._bars_fut) > 2000:
                             del self._bars_fut[:-2000]
                         self._on_candle_close("FUT", tick.timestamp)
+                    # T1 check for futures-mode: futures LTP reaches HTF zone target.
+                    # SL is tracked by option ticks (CE1/PE1) in _opt_tick_loop.
+                    # Only T1 uses futures price (because T1 target is in futures terms).
+                    if self._position:
+                        pos = self._position
+                        t1f = pos.get("t1_price_fut")
+                        if t1f and not pos.get("t1_hit") and fut_ltp >= t1f:
+                            pos["t1_hit"] = True
+                            pos["remaining_qty"] -= pos["t1_qty"]
+                            self._log.info(
+                                "T1 HIT (futures) fut_ltp=%.2f t1_fut=%.2f qty=%d",
+                                fut_ltp, t1f, pos["t1_qty"],
+                            )
+                            oid = await self._place_exit(pos["t1_qty"], pos["entry_price"], "T1")
+                            pos["order_id_t1"] = oid
+                            self._persist_position()
         except asyncio.CancelledError:
             pass
 
@@ -984,16 +1001,29 @@ class TrapScannerEngine:
             strike = scan_strike
 
         ep       = round(entry.get("zone_trigger", entry.get("zone_high", 0)), 2)
-        t1_price = round(htf_zone.get("sl", 0), 2)
-        sl_price = round(entry["zone_low"] - self._sl_buf, 2)
         total_qty = self._lot_size * self._lot_mul
         t1_qty    = total_qty // 2
 
+        # futures-mode (CrudeOil/BTC/ETH): zone prices are in FUTURES units.
+        # SL/T1 must be in OPTION price units. Use scan-strike option LTP at signal time.
+        # T1 is checked against FUTURES LTP (in _idx_tick_loop); SL against option LTP.
+        if self._htf_source == "futures":
+            tracking_leg = "CE1" if opt_type == "CE" else "PE1"  # use option tick for SL
+            scan_opt_ltp = self._ltp_cache.get(tracking_leg) or 0.0
+            sl_price     = round(max(scan_opt_ltp - self._sl_buf, 1.0), 2)
+            t1_price     = 0.0           # set below in position dict (futures T1)
+            t1_price_fut = round(htf_zone.get("sl", 0), 2)  # futures target for idx-tick check
+        else:
+            tracking_leg = leg           # option bars drive both SL and T1
+            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)
+            t1_price     = round(htf_zone.get("sl", 0), 2)
+            t1_price_fut = None
+
         self._log.info(
             "ENTRY %s scan_strike=%d order_strike=%d%s spot=%.2f atm=%d "
-            "ep=%.2f sl=%.2f t1=%.2f qty=%d",
+            "ep=%.2f sl=%.2f t1=%.2f(fut=%s) qty=%d tracking=%s",
             self._und, scan_strike, strike, opt_type, spot, atm,
-            ep, sl_price, t1_price, total_qty,
+            ep, sl_price, t1_price, t1_price_fut, total_qty, tracking_leg,
         )
 
         # Subscribe the 1-ITM option key for live P&L and SL tracking
@@ -1033,31 +1063,33 @@ class TrapScannerEngine:
             "CE1": self._ce1_key, "CE2": self._ce2_key,
             "PE1": self._pe1_key, "PE2": self._pe2_key,
             "FUT": self._fut_key,
-        }.get(leg, "")
+        }.get(tracking_leg, "")
         self._position = {
-            "leg":           leg,
-            "side":          opt_type,
-            "strike":        strike,        # 1-ITM exec strike (order + P&L)
-            "scan_strike":   scan_strike,   # pivot strike used for zone detection
-            "spot_at_entry": round(spot, 2),
-            "exec_key":      exec_key,      # Upstox key for 1-ITM contract
-            "scan_key":      scan_key,      # Upstox key for scan strike (SL tracking)
-            "entry_price":   round(avg, 2),
-            "sl_price":      sl_price,
-            "trail_sl":      sl_price,    # steps up via trap-based trail after T1
-            "last_5m_ts":    None,
+            "leg":            tracking_leg,  # CE1/PE1 for futures-mode (option tick routes SL check)
+            "signal_leg":     leg,           # original detection leg (FUT for CrudeOil)
+            "side":           opt_type,
+            "strike":         strike,        # 1-ITM exec strike (order + P&L)
+            "scan_strike":    scan_strike,   # pivot strike used for zone detection
+            "spot_at_entry":  round(spot, 2),
+            "exec_key":       exec_key,      # Upstox key for 1-ITM contract
+            "scan_key":       scan_key,      # Upstox key for tracking leg (SL monitoring)
+            "entry_price":    round(avg, 2),
+            "sl_price":       sl_price,
+            "trail_sl":       sl_price,      # steps up via trap-based trail after T1
+            "last_5m_ts":     None,
             # Trap-based trail state: bears trapped above entry → squeezed → pullback → confirmed
             # Each entry: {zone_trigger, zone_high, state: WATCHING|SQUEEZED|PULLED_BACK|CONFIRMED}
-            "trail_traps":   [],
-            "t1_price":      t1_price,
-            "total_qty":     total_qty,
-            "t1_qty":        t1_qty,
-            "remaining_qty": total_qty,
-            "t1_hit":        False,
-            "entry_ts":      now.isoformat(),
-            "signal_source": f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
+            "trail_traps":    [],
+            "t1_price":       t1_price,      # option T1 (0 for futures-mode — use t1_price_fut)
+            "t1_price_fut":   t1_price_fut,  # futures T1 level; checked in _idx_tick_loop
+            "total_qty":      total_qty,
+            "t1_qty":         t1_qty,
+            "remaining_qty":  total_qty,
+            "t1_hit":         False,
+            "entry_ts":       now.isoformat(),
+            "signal_source":  f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
             "order_id_entry": order_id,
-            "order_id_t1":   None,
+            "order_id_t1":    None,
         }
         self._persist_position()
         self._log.info(
@@ -1757,6 +1789,7 @@ class TrapScannerEngine:
             "notified_uids":  len(self._notified_uids),
             "position": {
                 "leg":           pos["leg"],
+                "signal_leg":    pos.get("signal_leg", pos["leg"]),
                 "side":          pos["side"],
                 "strike":        pos["strike"],        # 1-ITM exec strike
                 "scan_strike":   pos.get("scan_strike"),
@@ -1767,7 +1800,8 @@ class TrapScannerEngine:
                 "entry_price":   pos["entry_price"],
                 "sl_price":      pos["sl_price"],
                 "trail_sl":      pos["trail_sl"],
-                "t1_price":      pos["t1_price"],
+                "t1_price":      pos.get("t1_price", 0),
+                "t1_price_fut":  pos.get("t1_price_fut"),
                 "total_qty":     pos["total_qty"],
                 "remaining_qty": pos["remaining_qty"],
                 "t1_hit":        pos["t1_hit"],
