@@ -1053,6 +1053,7 @@ class ClientDB:
                     user_id=b.get("user_id", ""),
                     api_key=b.get("api_key", ""),
                     api_secret=b.get("api_secret", ""),
+                    password=b.get("password", ""),
                     totp_secret=b.get("totp_secret", ""),
                     access_token=b.get("access_token", ""),
                     lot_multiplier=float(b.get("lot_multiplier", 1.0)),
