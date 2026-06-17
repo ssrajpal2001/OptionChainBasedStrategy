@@ -803,12 +803,16 @@ class TrapScannerEngine:
         }
         scan_strike = scan_strike_map.get(leg) or 0
 
-        # 1-ITM adjustment: CE order strike is 1 step deeper ITM (lower for CE, higher for PE)
-        # Scan runs on the pivot strike; order and P&L tracking use the 1-ITM strike.
+        # 1-ITM from SPOT ATM (not from scan_strike).
+        # Scan/HTF/LTF zone detection runs on the pivot strike (S1/S2/R1/R2).
+        # Only the ORDER and exec tracking use spot ATM − 1 step (CE) / + 1 step (PE)
+        # so the entry is always ~1 step ITM regardless of how far S1 is from current price.
+        spot = self._spot_cache or self._spot_open
+        atm  = _round_strike(spot, self._step)
         if opt_type == "CE":
-            strike = scan_strike - self._step   # 1 step ITM for CE
+            strike = atm - self._step       # 1 step ITM for CE
         elif opt_type == "PE":
-            strike = scan_strike + self._step   # 1 step ITM for PE
+            strike = atm + self._step       # 1 step ITM for PE
         else:
             strike = scan_strike
 
@@ -819,8 +823,10 @@ class TrapScannerEngine:
         t1_qty    = total_qty // 2
 
         self._log.info(
-            "ENTRY %s scan=%d order=%d%s ep=%.2f sl=%.2f t1=%.2f qty=%d",
-            self._und, scan_strike, strike, opt_type, ep, sl_price, t1_price, total_qty,
+            "ENTRY %s scan_strike=%d order_strike=%d%s spot=%.2f atm=%d "
+            "ep=%.2f sl=%.2f t1=%.2f qty=%d",
+            self._und, scan_strike, strike, opt_type, spot, atm,
+            ep, sl_price, t1_price, total_qty,
         )
 
         # Subscribe the 1-ITM option key for live P&L and SL tracking
@@ -858,14 +864,22 @@ class TrapScannerEngine:
             self._log.error("Entry order failed: %s", exc)
             return
 
+        scan_key = {
+            "CE1": self._ce1_key, "CE2": self._ce2_key,
+            "PE1": self._pe1_key, "PE2": self._pe2_key,
+            "FUT": self._fut_key,
+        }.get(leg, "")
         self._position = {
             "leg":           leg,
             "side":          opt_type,
-            "strike":        strike,        # 1-ITM order strike
-            "exec_key":      exec_key,      # Upstox key for the 1-ITM contract (P&L tracking)
+            "strike":        strike,        # 1-ITM exec strike (order + P&L)
+            "scan_strike":   scan_strike,   # pivot strike used for zone detection
+            "spot_at_entry": round(spot, 2),
+            "exec_key":      exec_key,      # Upstox key for 1-ITM contract
+            "scan_key":      scan_key,      # Upstox key for scan strike (SL tracking)
             "entry_price":   round(avg, 2),
             "sl_price":      sl_price,
-            "trail_sl":      sl_price,    # starts same; trails 5m option-bar lows after T1
+            "trail_sl":      sl_price,    # trails 5m option-bar lows after T1
             "last_5m_ts":    None,
             "t1_price":      t1_price,
             "total_qty":     total_qty,
@@ -873,11 +887,15 @@ class TrapScannerEngine:
             "remaining_qty": total_qty,
             "t1_hit":        False,
             "entry_ts":      now.isoformat(),
+            "signal_source": f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
             "order_id_entry": order_id,
             "order_id_t1":   None,
         }
         self._persist_position()
-        self._log.info("ENTRY PLACED fill=%.2f order=%s", avg, order_id)
+        self._log.info(
+            "ENTRY PLACED scan=%d exec=%d%s spot=%.2f fill=%.2f sl=%.2f t1=%.2f order=%s",
+            scan_strike, strike, opt_type, spot, avg, sl_price, t1_price, order_id,
+        )
 
     # ── Tick exit ─────────────────────────────────────────────────────────────
 
@@ -1282,7 +1300,12 @@ class TrapScannerEngine:
             "position": {
                 "leg":           pos["leg"],
                 "side":          pos["side"],
-                "strike":        pos["strike"],
+                "strike":        pos["strike"],        # 1-ITM exec strike
+                "scan_strike":   pos.get("scan_strike"),
+                "spot_at_entry": pos.get("spot_at_entry"),
+                "scan_key":      pos.get("scan_key", ""),
+                "exec_key":      pos.get("exec_key", ""),
+                "signal_source": pos.get("signal_source", ""),
                 "entry_price":   pos["entry_price"],
                 "sl_price":      pos["sl_price"],
                 "trail_sl":      pos["trail_sl"],

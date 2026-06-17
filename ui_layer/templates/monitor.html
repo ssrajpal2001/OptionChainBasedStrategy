@@ -8010,15 +8010,25 @@ function histReplay() {
                       <div x-show="!bk||!bk.zones||bk.zones.length===0" class="text-xs font-mono py-1" style="color:var(--t-muted)">No HTF zones detected yet.</div>
                       <!-- Open position -->
                       <template x-if="bk&&bk.position">
-                        <div class="mt-2 pt-2 border-t flex flex-wrap gap-2 text-xs font-mono" style="border-color:var(--t-border)">
-                          <span style="color:var(--t-yellow);font-weight:700">POSITION</span>
-                          <span style="color:var(--t-bright)" x-text="bk.position.side+' '+bk.position.strike"></span>
-                          <span x-text="'entry='+bk.position.entry_price"></span>
-                          <span x-text="'SL='+bk.position.sl_price" style="color:var(--t-red)"></span>
-                          <span x-show="bk.position.t1_hit" x-text="'trail_SL='+bk.position.trail_sl" style="color:var(--t-cyan)"></span>
-                          <span x-text="'T1='+bk.position.t1_price" style="color:var(--t-green)"></span>
-                          <span x-text="'qty='+bk.position.remaining_qty+'/'+bk.position.total_qty" style="color:var(--t-muted)"></span>
-                          <span x-show="bk.position.t1_hit" style="color:var(--t-green);font-weight:700">T1✓</span>
+                        <div class="mt-2 pt-2 border-t text-xs font-mono space-y-1" style="border-color:var(--t-border)">
+                          <div class="flex flex-wrap gap-2">
+                            <span style="color:var(--t-yellow);font-weight:700">POSITION</span>
+                            <span style="color:var(--t-bright)" x-text="bk.position.side+' '+bk.position.strike+' (exec)'"></span>
+                            <span x-show="bk.position.scan_strike" style="color:var(--t-muted)" x-text="'scan='+bk.position.scan_strike"></span>
+                            <span x-show="bk.position.spot_at_entry" style="color:var(--t-muted)" x-text="'spot@entry='+bk.position.spot_at_entry"></span>
+                            <span x-show="bk.position.t1_hit" style="color:var(--t-green);font-weight:700">T1✓</span>
+                          </div>
+                          <div class="flex flex-wrap gap-2">
+                            <span x-text="'entry='+bk.position.entry_price" style="color:var(--t-bright)"></span>
+                            <span :style="bk.position.t1_hit?'color:var(--t-cyan)':'color:var(--t-red)'"
+                                  x-text="bk.position.t1_hit?('trail_SL='+bk.position.trail_sl):('SL='+bk.position.sl_price)"></span>
+                            <span x-text="'T1='+bk.position.t1_price" style="color:var(--t-green)"></span>
+                            <span x-text="'qty='+bk.position.remaining_qty+'/'+bk.position.total_qty" style="color:var(--t-muted)"></span>
+                          </div>
+                          <div x-show="bk.position.entry_ts" class="flex flex-wrap gap-2" style="color:var(--t-muted)">
+                            <span x-text="'at '+bk.position.entry_ts.substring(11,19)"></span>
+                            <span x-show="bk.position.signal_source" x-text="'via '+bk.position.signal_source"></span>
+                          </div>
                         </div>
                       </template>
                       <div x-show="!bk||!bk.position" class="text-xs font-mono mt-1" style="color:var(--t-muted)">No open position — scanning zones</div>

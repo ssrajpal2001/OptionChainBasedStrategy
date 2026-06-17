@@ -134,7 +134,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--strategies",
-        default="sell_straddle,iron_condor,trap",
+        default="sell_straddle,iron_condor,trap_scanner",
         help="Comma-list of strategies to RUN. Others are constructed but never started. "
              "e.g. --strategies sell_straddle (run only the sell-straddle).",
     )
