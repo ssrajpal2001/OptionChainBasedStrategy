@@ -1282,7 +1282,7 @@ class TrapScannerEngine:
             import aiohttp
             today   = date.today()
             to_date = today + timedelta(days=1)   # include today (Upstox excludes to_date)
-            fr_date = today - timedelta(days=3)
+            fr_date = today - timedelta(days=8)   # prev week + current week for HTF pattern seed
             url = (f"https://api.upstox.com/v2/historical-candle/"
                    f"{instrument_key}/1minute/{to_date}/{fr_date}")
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
