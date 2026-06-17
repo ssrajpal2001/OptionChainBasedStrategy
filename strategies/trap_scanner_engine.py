@@ -442,6 +442,13 @@ class TrapScannerEngine:
                 self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
                 self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
                 self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                self._log.info(
+                    "Bars seeded — CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
+                    self._ce1_key, len(self._bars_ce1),
+                    self._ce2_key, len(self._bars_ce2),
+                    self._pe1_key, len(self._bars_pe1),
+                    self._pe2_key, len(self._bars_pe2),
+                )
 
             self._run_htf_scan()
             self._htf_atr_val = self._compute_htf_atr()
@@ -1289,14 +1296,23 @@ class TrapScannerEngine:
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
                     if r.status != 200:
+                        body = await r.text()
+                        self._log.warning(
+                            "_fetch_1m_history(%s): HTTP %d — %s", instrument_key, r.status, body[:200]
+                        )
                         return []
                     data = await r.json()
             candles = data.get("data", {}).get("candles", [])
-            return [
+            bars = [
                 {"datetime": c[0], "open": float(c[1]), "high": float(c[2]),
                  "low": float(c[3]), "close": float(c[4]), "volume": int(c[5])}
                 for c in reversed(candles)  # oldest first
             ]
+            self._log.info("_fetch_1m_history(%s): %d bars (%s → %s)",
+                           instrument_key, len(bars),
+                           bars[0]["datetime"][:10] if bars else "—",
+                           bars[-1]["datetime"][:10] if bars else "—")
+            return bars
         except Exception as exc:
             self._log.warning("_fetch_1m_history(%s): %s", instrument_key, exc)
             return []
@@ -1345,19 +1361,34 @@ class TrapScannerEngine:
         # REGISTRY is pre-loaded by the rebalancer at startup; if loaded it has correct keys.
         try:
             from data_layer.instrument_registry import REGISTRY
-            if self._expiry_date is not None and REGISTRY.is_loaded(self._und):
+            reg_loaded = REGISTRY.is_loaded(self._und)
+            if self._expiry_date is not None and reg_loaded:
                 key = REGISTRY.get_upstox_key(self._und, self._expiry_date, int(strike), opt_type)
                 if key:
+                    self._log.debug(
+                        "_build_upstox_key %s %s%s → REGISTRY: %s", self._und, strike, opt_type, key
+                    )
                     return key
-        except Exception:
-            pass
+                self._log.warning(
+                    "_build_upstox_key %s %s%s → REGISTRY loaded but strike NOT found (expiry=%s)",
+                    self._und, strike, opt_type, self._expiry_date,
+                )
+            elif not reg_loaded:
+                self._log.warning(
+                    "_build_upstox_key %s %s%s → REGISTRY NOT loaded for %s; using fallback key",
+                    self._und, strike, opt_type, self._und,
+                )
+        except Exception as exc:
+            self._log.warning("_build_upstox_key REGISTRY lookup failed: %s", exc)
         # Fallback: constructed symbol (works for NSE_FO; BSE_FO may return empty from REST)
         _PFX = {
             "NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
             "FINNIFTY": "NSE_FO|", "SENSEX": "BSE_FO|", "MIDCPNIFTY": "NSE_FO|",
         }
         pfx = _PFX.get(self._und, "NSE_FO|")
-        return f"{pfx}{self._und}{exp}{strike}{opt_type}"
+        fallback = f"{pfx}{self._und}{exp}{strike}{opt_type}"
+        self._log.warning("_build_upstox_key %s %s%s → FALLBACK key: %s", self._und, strike, opt_type, fallback)
+        return fallback
 
     def _build_broker_symbol(self, strike: Optional[int], opt_type: str) -> str:
         exp = self._expiry_str or ""
