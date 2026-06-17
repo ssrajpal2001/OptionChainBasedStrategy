@@ -73,7 +73,7 @@ _INDEX_CFG: Dict[str, dict] = {
     "MIDCPNIFTY": {"step": 25,  "lot": 75,  "gap_near": 100, "gap_far": 200,
                    "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
-    "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 400,
+    "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 500,
                    "sl_buf": 2.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": [[18, 45], [19, 15]], "exchange": "MCX",
                    "htf_source": "futures", "htf_min_override": 30},
@@ -374,8 +374,12 @@ class TrapScannerEngine:
                     gap_pct = abs(today_open - C) / C * 100
             self._gap_fired = gap_pct >= self._gap_thresh
 
-            if self._gap_fired:
-                direction = "UP" if today_open > C else "DOWN"
+            # Futures-mode underlyings (CrudeOil etc.) always use ATM ± fixed ITM offsets —
+            # pivot-based S1/S2/R1/R2 is meaningless for commodity options.
+            use_atm_offsets = self._htf_source == "futures" or self._gap_fired
+
+            if use_atm_offsets:
+                direction = "UP" if today_open >= C else "DOWN"
                 atm = _round_strike(today_open, self._step)
                 if direction == "UP":
                     self._ce1_strike = atm - self._gap_near
@@ -387,9 +391,10 @@ class TrapScannerEngine:
                     self._ce2_strike = atm + self._gap_far
                     self._pe1_strike = atm - self._gap_near
                     self._pe2_strike = atm - self._gap_far
+                label = f"GAP {direction} {gap_pct:.1f}%" if self._gap_fired else f"ATM±offsets (no gap {gap_pct:.1f}%)"
                 self._log.info(
-                    "GAP %s %.1f%% → CE1=%d CE2=%d PE1=%d PE2=%d",
-                    direction, gap_pct,
+                    "%s → CE1=%d CE2=%d PE1=%d PE2=%d",
+                    label,
                     self._ce1_strike, self._ce2_strike,
                     self._pe1_strike, self._pe2_strike,
                 )
@@ -416,8 +421,31 @@ class TrapScannerEngine:
                 return False
 
             if self._htf_source == "futures":
-                self._fut_key = _SPOT_KEYS.get(self._und, "")
+                # Use REGISTRY for the near-month futures key (correct for MCX CrudeOil)
+                try:
+                    from data_layer.instrument_registry import REGISTRY as _REG
+                    fk = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
+                except Exception:
+                    fk = ""
+                self._fut_key = fk or _SPOT_KEYS.get(self._und, "")
                 self._bars_fut = await self._fetch_1m_history(self._fut_key)
+                # Also seed option bars (needed for LTF scan)
+                self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
+                self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
+                self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
+                self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
+                self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
+                self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
+                self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
+                self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                self._log.info(
+                    "Bars seeded — FUT(%s)=%d CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
+                    self._fut_key, len(self._bars_fut),
+                    self._ce1_key, len(self._bars_ce1),
+                    self._ce2_key, len(self._bars_ce2),
+                    self._pe1_key, len(self._bars_pe1),
+                    self._pe2_key, len(self._bars_pe2),
+                )
             elif self._htf_source == "spot":
                 # Legacy: SPOT bars for HTF, option bars for LTF
                 spot_key = _SPOT_KEYS.get(self._und, "")
@@ -1331,8 +1359,6 @@ class TrapScannerEngine:
 
         Fallback: weekday math, used only if REGISTRY is not yet loaded.
         """
-        if self._und == "CRUDEOIL":
-            return date.today().strftime("%b%y").upper(), None
         try:
             from data_layer.instrument_registry import REGISTRY
             if REGISTRY.is_loaded(self._und):
@@ -1344,11 +1370,26 @@ class TrapScannerEngine:
                 self._log.warning("_get_expiry %s → REGISTRY loaded but no active expiry found", self._und)
         except Exception as exc:
             self._log.warning("_get_expiry REGISTRY lookup failed: %s", exc)
-        # Fallback: weekday math (works for NSE; BSE timezone may differ by one day)
+        # Fallback: weekday math (works for NSE; BSE/MCX may differ — prefer REGISTRY)
         _EXPIRY_DOW = {
             "NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
             "SENSEX": 3, "MIDCPNIFTY": 1,  # SENSEX = Thursday (verified from BSE master 2026-06-17)
         }
+        if self._und == "CRUDEOIL":
+            # MCX CrudeOil options expire on 20th (or nearest preceding Monday if 20th is weekend)
+            today = date.today()
+            d = date(today.year, today.month, 20)
+            while d.weekday() > 4:   # weekend → back to Friday (but MCX uses Monday; keep simple)
+                d -= timedelta(days=1)
+            if d < today:   # 20th already passed this month → next month
+                import calendar as _cal
+                nm = today.month + 1 if today.month < 12 else 1
+                ny = today.year if today.month < 12 else today.year + 1
+                d = date(ny, nm, 20)
+                while d.weekday() > 4:
+                    d -= timedelta(days=1)
+            self._log.warning("_get_expiry CRUDEOIL → REGISTRY unavailable; date-20 fallback: %s", d)
+            return d.strftime("%d%b%y").upper(), d
         weekday = _EXPIRY_DOW.get(self._und, 3)
         d = date.today()
         for _ in range(7):
@@ -1405,6 +1446,7 @@ class TrapScannerEngine:
         _PFX = {
             "NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
             "FINNIFTY": "NSE_FO|", "SENSEX": "BSE_FO|", "MIDCPNIFTY": "NSE_FO|",
+            "CRUDEOIL": "MCX_FO|",
         }
         pfx = _PFX.get(self._und, "NSE_FO|")
         fallback = f"{pfx}{self._und}{exp}{strike}{opt_type}"
