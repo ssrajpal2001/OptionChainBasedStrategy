@@ -741,8 +741,11 @@ class TrapScannerEngine:
                         if len(self._bars_fut) > 2000:
                             del self._bars_fut[:-2000]
                         self._on_candle_close("FUT", tick.timestamp)
-                    # All exits (T1, SL, trail) are tracked via option ticks in _opt_tick_loop.
-                    # Futures LTP is only used for HTF zone detection + dual-confirm at signal time.
+                    # Futures-mode: SL/T1/trail all checked against futures LTP.
+                    # Signal, SL level, and T1 level all in futures ₹ → consistent.
+                    # When triggered, _place_exit closes the 1-ITM option via exec_key.
+                    if self._position and self._position.get("leg") == "FUT":
+                        await self._check_tick_exit(fut_ltp, tick.timestamp)
         except asyncio.CancelledError:
             pass
 
@@ -1045,35 +1048,13 @@ class TrapScannerEngine:
         # T1 = nearest option zone_high above entry (from option HTF bars).
         # Futures price is NOT checked again after entry — all exits on option LTP.
         if self._htf_source == "futures":
-            # leg="FUT" (futures bars drove the LTF signal); map to option leg for tick routing
-            tracking_leg = "CE1" if opt_type == "CE" else "PE1"
-            scan_opt_ltp = self._ltp_cache.get(tracking_leg) or float(entry.get("zone_trigger", 0))
-            opt_zone_low = float(entry.get("zone_low", 0))
-            sl_from_zone = round(opt_zone_low - self._sl_buf, 2) if opt_zone_low > 0 else 0.0
-            sl_from_pct  = round(scan_opt_ltp * (1.0 - self._sl_buf / scan_opt_ltp if scan_opt_ltp > 0 else 0.02), 2)
-            sl_price     = max(sl_from_zone, sl_from_pct) if sl_from_zone > 0 else sl_from_pct
-            # T1: nearest option zone_high above entry from option HTF bars
-            opt_bars = self._bars_ce1 if opt_type == "CE" else self._bars_pe1
-            t1_price = 0.0
-            if opt_bars:
-                try:
-                    opt_df  = _bars_to_df(opt_bars)
-                    opt_htf = opt_df.resample(f"{self._htf_min}min", on="datetime").agg(
-                        {"open": "first", "high": "max", "low": "min", "close": "last"}
-                    ).dropna().reset_index()
-                    if len(opt_htf) >= 2:
-                        _, opt_zones = scanner.scan_htf(opt_htf)
-                        resistances = sorted(
-                            [z.get("zone_high", 0) for z in opt_zones
-                             if z.get("zone_high", 0) > scan_opt_ltp]
-                        )
-                        t1_price = round(resistances[0], 2) if resistances else round(scan_opt_ltp * 1.05, 2)
-                except Exception as exc:
-                    self._log.warning("T1 computation from option HTF failed: %s", exc)
-                    t1_price = round(scan_opt_ltp * 1.05, 2)
-            if t1_price <= 0:
-                t1_price = round(scan_opt_ltp * 1.05, 2)
-            t1_price_fut = None  # not used; all exits on option LTP
+            # Signal + SL + T1 all in FUTURES price domain (same chart as detection).
+            # pos["leg"]="FUT" → _idx_tick_loop calls _check_tick_exit with futures LTP.
+            # Order and actual close go to exec_key (1-ITM option) via _place_exit.
+            tracking_leg = "FUT"
+            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)
+            t1_price     = round(htf_zone.get("sl", 0), 2)   # next HTF resistance in futures ₹
+            t1_price_fut = None
         else:
             tracking_leg = leg           # option bars drive both SL and T1
             sl_price     = round(entry["zone_low"] - self._sl_buf, 2)
@@ -1082,9 +1063,9 @@ class TrapScannerEngine:
 
         self._log.info(
             "ENTRY %s scan_strike=%d order_strike=%d%s spot=%.2f atm=%d "
-            "ep=%.2f sl=%.2f t1=%.2f(fut=%s) qty=%d tracking=%s",
+            "ep=%.2f sl=%.2f t1=%.2f qty=%d tracking=%s",
             self._und, scan_strike, strike, opt_type, spot, atm,
-            ep, sl_price, t1_price, t1_price_fut, total_qty, tracking_leg,
+            ep, sl_price, t1_price, total_qty, tracking_leg,
         )
 
         # Subscribe the 1-ITM option key for live P&L and SL tracking
