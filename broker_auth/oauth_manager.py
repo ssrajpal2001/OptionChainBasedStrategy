@@ -35,7 +35,11 @@ logger = logging.getLogger(__name__)
 
 # ── Provider capability registry ─────────────────────────────────────────────
 
-_OAUTH_PROVIDERS = {"fyers", "upstox", "zerodha", "dhan", "angelone", "aliceblue"}
+_OAUTH_PROVIDERS = {"fyers", "upstox", "upstox2", "zerodha", "dhan", "angelone", "aliceblue"}
+
+# upstox2 = second Upstox account used exclusively for CrudeOil/MCX data feed.
+# It uses the identical OAuth flow and API endpoints as "upstox".
+_UPSTOX_FAMILY = {"upstox", "upstox2"}
 _MANUAL_TOKEN_PROVIDERS: set = set()  # empty — all supported brokers now use OAuth redirect
 
 
@@ -73,9 +77,9 @@ def generate_auth_url(
         logger.info("[OAuth] Fyers auth URL generated in %.1fms", (time.monotonic()-t0)*1000)
         return True, url
 
-    elif p == "upstox":
+    elif p in _UPSTOX_FAMILY:
         url = _upstox_auth_url(api_key, callback_url, state)
-        logger.info("[OAuth] Upstox auth URL generated in %.1fms", (time.monotonic()-t0)*1000)
+        logger.info("[OAuth] %s auth URL generated in %.1fms", p.upper(), (time.monotonic()-t0)*1000)
         return True, url
 
     elif p == "zerodha":
@@ -211,7 +215,7 @@ def exchange_code(
     try:
         if p == "fyers":
             ok, msg, token = _fyers_exchange(api_key, api_secret, auth_code, callback_url)
-        elif p == "upstox":
+        elif p in _UPSTOX_FAMILY:
             ok, msg, token = _upstox_exchange(api_key, api_secret, auth_code, callback_url)
         elif p == "zerodha":
             ok, msg, token = _zerodha_exchange(api_key, api_secret, auth_code)
@@ -404,7 +408,7 @@ def validate_token(
             )
             ok = r.status_code == 200 and (r.json() or {}).get("s") == "ok"
 
-        elif p == "upstox":
+        elif p in _UPSTOX_FAMILY:
             r = requests.get(
                 "https://api.upstox.com/v2/user/profile",
                 headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},

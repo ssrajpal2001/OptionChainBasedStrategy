@@ -980,7 +980,7 @@ class DashboardServer:
             dual_conn = (feeder._dual_feeder.provider_connected
                          if feeder and getattr(feeder, "_dual_feeder", None) else {})
 
-            _ALL_PROVIDERS = ["upstox", "fyers", "zerodha", "dhan", "angelone", "aliceblue"]
+            _ALL_PROVIDERS = ["upstox", "upstox2", "fyers", "zerodha", "dhan", "angelone", "aliceblue"]
             providers_status: dict = {}
             for p in _ALL_PROVIDERS:
                 row = _srv._client_db.get_feeder_creds_sync(p) or {}

@@ -1366,6 +1366,34 @@ class TrapScannerEngine:
             await self._place_exit(pos["remaining_qty"], 0.0, "EOD")
         self._position = None
         self._clear_persisted_position()
+        # Unsubscribe all option keys from the live feeder after market close so
+        # those WS slots are freed up (important when running NIFTY + SENSEX + CrudeOil
+        # on a single account — NSE/BSE slots released before CrudeOil session starts).
+        await self._unsubscribe_all_legs()
+
+    async def _unsubscribe_all_legs(self) -> None:
+        """Release all pinned/subscribed option keys from the feeder after EOD."""
+        keys = [k for k in [self._ce1_key, self._ce2_key,
+                             self._pe1_key, self._pe2_key] if k]
+        if not keys:
+            return
+        feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+        if feeder and hasattr(feeder, "unsubscribe_tokens"):
+            try:
+                await feeder.unsubscribe_tokens(keys)
+                self._log.info("EOD: unsubscribed %d option keys for %s: %s",
+                               len(keys), self._und, keys)
+            except Exception as exc:
+                self._log.warning("EOD unsubscribe failed: %s", exc)
+        # Also unpin strikes so rebalancer doesn't re-subscribe them tomorrow at wrong prices
+        if self._rebalancer is not None:
+            for strike in [self._ce1_strike, self._ce2_strike,
+                           self._pe1_strike, self._pe2_strike]:
+                if strike:
+                    try:
+                        self._rebalancer.unpin_strike(self._und, float(strike))
+                    except Exception:
+                        pass
 
     def _reset_day_state(self) -> None:
         self._initialized   = False
@@ -1676,6 +1704,13 @@ class TrapScannerEngine:
         return primary_strike, primary_key  # last resort: place anyway
 
     def _get_upstox_token(self) -> Optional[str]:
+        # CrudeOil uses a dedicated second Upstox account (upstox2) for MCX data.
+        # Falls back to the primary "upstox" account if upstox2 has no token yet.
+        if self._und == "CRUDEOIL":
+            creds2 = self._db.get_feeder_creds_sync("upstox2")
+            token2 = (creds2 or {}).get("access_token") or ""
+            if token2:
+                return token2
         creds = self._db.get_feeder_creds_sync("upstox")
         return (creds or {}).get("access_token") or ""
 

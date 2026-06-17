@@ -631,16 +631,17 @@ document.addEventListener('alpine:init', () => {
     tokenOk:       null,
 
     /* ── Admin feeder toggles ───────────────────────────────────────── */
-    feederToggle:        { upstox: false, fyers: false },
-    feederToggleLoading: { upstox: false, fyers: false },
-    feederEditOpen:      { upstox: false, fyers: false },
+    feederToggle:        { upstox: false, upstox2: false, fyers: false },
+    feederToggleLoading: { upstox: false, upstox2: false, fyers: false },
+    feederEditOpen:      { upstox: false, upstox2: false, fyers: false },
     feederEditCreds:     {
-      upstox: { client_id:'', api_key:'', secret:'' },
-      fyers:  { client_id:'', api_key:'', secret:'' },
+      upstox:  { client_id:'', api_key:'', secret:'' },
+      upstox2: { client_id:'', api_key:'', secret:'' },
+      fyers:   { client_id:'', api_key:'', secret:'' },
     },
-    feederEditSaving:    { upstox: false, fyers: false },
-    feederEditMsg:       { upstox: '', fyers: '' },
-    feederMsg:           { upstox: '', fyers: '' },
+    feederEditSaving:    { upstox: false, upstox2: false, fyers: false },
+    feederEditMsg:       { upstox: '', upstox2: '', fyers: '' },
+    feederMsg:           { upstox: '', upstox2: '', fyers: '' },
     positions: [], posLoading: false, posTs: '',
 
     /* ── RMS ─────────────────────────────────────────────────────────── */
@@ -764,7 +765,7 @@ document.addEventListener('alpine:init', () => {
                     upstox_token_fresh: false,   fyers_token_fresh: false,
                     upstox_connected: false,      fyers_connected: false },
 
-    supportedFeeders: ['mock','fyers','upstox','zerodha','dhan','angelone','aliceblue'],
+    supportedFeeders: ['mock','fyers','upstox','upstox2','zerodha','dhan','angelone','aliceblue'],
     redirectBase: '', redirectBaseMsg: '', redirectBaseSaving: false,
 
     /* ── Client broker modal ────────────────────────────────────────── */
@@ -5532,17 +5533,17 @@ function histReplay() {
            x-text="redirectBaseMsg"></div>
     </div>
 
-    <!-- Feeder toggle rows — Upstox + Fyers -->
+    <!-- Feeder toggle rows — Upstox + Upstox2 (CrudeOil) + Fyers -->
     <div class="space-y-3">
-      <template x-for="p in ['upstox','fyers']" :key="p">
+      <template x-for="p in ['upstox','upstox2','fyers']" :key="p">
         <div class="rounded p-3 flex flex-col gap-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
 
           <!-- Row: name + status + gear + toggle -->
           <div class="flex items-center gap-3">
             <div class="flex-1 min-w-0">
               <div class="font-ui font-bold text-sm tracking-widest"
-                   :style="p==='upstox'?'color:var(--t-cyan)':'color:var(--t-amber)'"
-                   x-text="p==='upstox'?'UPSTOX API v2':'FYERS API v3'"></div>
+                   :style="p==='upstox'?'color:var(--t-cyan)':p==='upstox2'?'color:var(--t-green)':'color:var(--t-amber)'"
+                   x-text="p==='upstox'?'UPSTOX API v2 (NIFTY/SENSEX)':p==='upstox2'?'UPSTOX API v2 (CRUDEOIL)':'FYERS API v3'"></div>
               <div class="font-mono text-xs mt-0.5">
                 <span x-show="(systemStatus.providers||{})[p]?.token_fresh"
                       style="color:var(--t-green)">&#x25CF; TOKEN FRESH</span>
