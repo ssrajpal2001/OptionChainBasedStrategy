@@ -5224,37 +5224,95 @@ function histReplay() {
           <template x-for="bk in trapScannerBooks" :key="bk.client_id+'_'+bk.binding_id+'_'+bk.underlying">
             <div class="rounded border p-2 mb-2 text-xs font-mono" style="border-color:var(--t-border)">
               <!-- Header row -->
-              <div class="flex gap-3 flex-wrap">
-                <span style="color:var(--t-cyan)" x-text="bk.underlying"></span>
+              <div class="flex gap-3 flex-wrap items-center">
+                <span style="color:var(--t-cyan);font-weight:700" x-text="bk.underlying"></span>
                 <span style="color:var(--t-muted)" x-text="bk.client_id+'/'+bk.binding_id"></span>
                 <span :style="bk.initialized?'color:var(--t-green)':'color:var(--t-yellow)'"
-                      x-text="bk.initialized?(bk.intraday_mode?'INTRADAY CASCADE':'HTF READY'):'WARMING'"></span>
-                <span x-show="bk.gap_fired" style="color:var(--t-red)">GAP</span>
+                      x-text="bk.initialized?(bk.intraday_mode?'CASCADE':'HTF READY'):'WARMING'"></span>
+                <span x-show="bk.gap_fired" style="color:var(--t-red);font-weight:700">GAP</span>
+                <!-- Entry window badge -->
+                <span :style="bk.entry_window_open?'color:var(--t-green);font-weight:700;background:rgba(0,255,100,0.08);padding:1px 6px;border-radius:3px':'color:var(--t-red);background:rgba(255,50,50,0.08);padding:1px 6px;border-radius:3px'"
+                      x-text="bk.entry_window_open?'WINDOW OPEN':'WINDOW CLOSED'"
+                      x-show="bk.entry_window_status"></span>
+                <span x-show="bk.entry_window_status" style="color:var(--t-dim)" x-text="bk.entry_window_status"></span>
+                <span x-text="(bk.htf_source==='futures'?'FUT':'SPOT')+'='+bk.spot_ltp" style="color:var(--t-bright);font-weight:700"></span>
+                <span x-show="bk.htf_atr>0" x-text="'ATR='+bk.htf_atr" style="color:var(--t-dim)"></span>
+              </div>
+              <!-- Strike selection row -->
+              <div class="flex gap-3 flex-wrap mt-1">
                 <span x-show="bk.ce1_strike" x-text="'CE1='+bk.ce1_strike" style="color:var(--t-green)"></span>
                 <span x-show="bk.ce2_strike" x-text="'CE2='+bk.ce2_strike" style="color:var(--t-green)"></span>
                 <span x-show="bk.pe1_strike" x-text="'PE1='+bk.pe1_strike" style="color:var(--t-red)"></span>
                 <span x-show="bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
-                <span x-text="'LTP='+bk.spot_ltp" style="color:var(--t-dim)"></span>
-                <span x-show="bk.htf_atr>0" x-text="'ATR='+bk.htf_atr" style="color:var(--t-dim)"></span>
+                <span x-show="bk.expiry" style="color:var(--t-dim)" x-text="'exp='+bk.expiry"></span>
               </div>
-              <!-- Contracts table (CE1/CE2/PE1/PE2 LTP + zone status — mirrors NiftyTrapScanner dashboard) -->
+              <!-- Nearest zone info (futures-mode: most important line — where to watch) -->
+              <template x-if="bk.htf_source==='futures' && (bk.nearest_ce_zone||bk.nearest_pe_zone)">
+                <div class="mt-2 rounded p-2" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2)">
+                  <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-yellow)">WATCH — WHERE MARKET NEEDS TO GO</div>
+                  <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
+                    <!-- CE side: bear trap zone -->
+                    <template x-if="bk.nearest_ce_zone">
+                      <div class="text-xs font-mono">
+                        <span style="color:var(--t-green);font-weight:700">CE ENTRY</span>
+                        <span style="color:var(--t-muted)"> when FUT reaches </span>
+                        <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
+                        <span style="color:var(--t-muted)"> zone </span>
+                        <span style="color:var(--t-dim)" x-text="'['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
+                        <span x-show="bk.nearest_ce_zone.dist_pts!=null"
+                              :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
+                              x-text="' ('+bk.nearest_ce_zone.dist_pts+' pts '+( bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')+')'"></span>
+                        <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                              x-text="' → '+(bk.nearest_ce_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
+                      </div>
+                    </template>
+                    <!-- PE side: bull trap zone -->
+                    <template x-if="bk.nearest_pe_zone">
+                      <div class="text-xs font-mono">
+                        <span style="color:var(--t-red);font-weight:700">PE ENTRY</span>
+                        <span style="color:var(--t-muted)"> when FUT reaches </span>
+                        <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
+                        <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
+                        <span x-show="bk.nearest_pe_zone.dist_pts!=null"
+                              :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
+                              x-text="' ('+bk.nearest_pe_zone.dist_pts+' pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')+')'"></span>
+                        <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                              x-text="' → '+(bk.nearest_pe_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+              <!-- Contracts table: LTP + nearest trigger per leg -->
               <template x-if="bk.contracts">
                 <div class="mt-2 text-xs font-mono">
                   <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;color:var(--t-muted)">
-                    <span>LEG</span><span>STRIKE</span><span>LTP</span><span>ZONE H</span><span>TRIGGER</span><span>T1 TGT</span><span>LTF STATUS</span>
+                    <span>LEG</span><span>STRIKE</span><span>LTP</span>
+                    <span x-text="bk.htf_source==='futures'?'FUT ZONE H':'ZONE H'"></span>
+                    <span>TRIGGER</span><span>T1 TGT</span><span>STATUS</span>
                   </div>
                   <template x-for="[leg, ct] in Object.entries(bk.contracts)" :key="leg">
-                    <div class="grid py-0.5"
-                         :style="'grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;border-top:1px solid var(--t-border);'+(ct.zone?'color:var(--t-bright)':'color:var(--t-dim)')">
-                      <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'" x-text="leg"></span>
-                      <span x-text="ct.strike||'—'"></span>
-                      <span x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
-                      <span x-text="ct.zone?ct.zone.zone_high:'—'"></span>
-                      <span x-text="ct.zone?ct.zone.zone_trigger:'—'"></span>
-                      <span x-text="ct.zone?ct.zone.t1_target:'—'"></span>
-                      <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow)':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                            x-text="ct.zone?(ct.zone.ltf_status==='entered'?'ENTERED':ct.zone.ltf_status==='ltf_signal'?'SIGNAL':'TRAPPED'):'—'"></span>
-                    </div>
+                    <template x-if="leg==='CE1'||leg==='PE1'">
+                      <div class="grid py-0.5"
+                           :style="'grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;border-top:1px solid var(--t-border);'+(ct.zone?'color:var(--t-bright)':'color:var(--t-dim)')">
+                        <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'" x-text="leg"></span>
+                        <span x-text="ct.strike||'—'"></span>
+                        <span style="color:var(--t-bright)" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                        <span x-text="ct.zone?ct.zone.zone_high:'—'"></span>
+                        <span x-text="ct.zone?ct.zone.zone_trigger:'—'"></span>
+                        <span x-text="ct.zone?ct.zone.t1_target:'—'"></span>
+                        <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
+                              x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP!':'ARMED'):'—'"></span>
+                      </div>
+                    </template>
+                    <template x-if="leg==='CE2'||leg==='PE2'">
+                      <div class="grid py-0.5" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
+                        <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'" x-text="leg"></span>
+                        <span x-text="ct.strike||'—'"></span>
+                        <span x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                        <span>—</span><span>—</span><span>—</span><span style="color:var(--t-dim)">hedge</span>
+                      </div>
+                    </template>
                   </template>
                 </div>
               </template>

@@ -1626,11 +1626,7 @@ class TrapScannerEngine:
         ltp = self._spot_cache or 0.0
         atr = self._htf_atr_val
 
-        zones = (
-            self._zone_info_list(self._htf_bear_zones, "CE") +
-            self._zone_info_list(self._htf_bull_zones, "PE") +
-            self._zone_info_list(self._htf_fut_zones,  "FUT")
-        )
+        # zones built later: opt_zones + fut_zones_ui (sorted, capped at 10)
         bear_trapped = sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED")
         bull_trapped = sum(1 for e in self._htf_bull_zones if e["status"] == "TRAPPED")
         fut_trapped  = sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED")
@@ -1651,40 +1647,104 @@ class TrapScannerEngine:
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
             }
 
+        # Entry window status
+        now_ist  = datetime.now(IST)
+        win      = self._entry_win   # [[h,m],[h,m]] or None
+        if win:
+            ws = time(win[0][0], win[0][1])
+            we = time(win[1][0], win[1][1])
+            in_win = ws <= now_ist.time() <= we
+            if now_ist.time() < ws:
+                mins_to = int((datetime.combine(now_ist.date(), ws)
+                               - now_ist.replace(tzinfo=None).replace(tzinfo=IST)).total_seconds() // 60)
+                win_status = f"Opens in {int((datetime.combine(now_ist.date(), ws) - now_ist.replace(tzinfo=None)).total_seconds()//60)}m ({ws.strftime('%H:%M')})"
+            elif in_win:
+                win_status = f"OPEN until {we.strftime('%H:%M')}"
+            else:
+                win_status = f"Closed ({we.strftime('%H:%M')}) — next session"
+        else:
+            in_win     = True
+            win_status = "All-day"
+
+        # Nearest FUT zone for futures-mode instruments (closest TRAPPED zone by distance from spot)
+        def _nearest_fut_zone(side: str) -> Optional[dict]:
+            trapped = [z for z in self._htf_fut_zones if z["status"] == "TRAPPED"]
+            if not trapped or not ltp:
+                return None
+            # bear zone → closest above spot; bull zone → closest below spot
+            candidates = [z for z in trapped
+                          if (z.get("zone_trigger", 0) >= ltp if side == "CE"
+                              else z.get("zone_trigger", 0) <= ltp)]
+            if not candidates:
+                candidates = trapped  # fallback: all zones
+            best = min(candidates, key=lambda z: abs(z.get("zone_trigger", 0) - ltp))
+            uid  = _zone_uid(best)
+            trig = round(best.get("zone_trigger", 0), 2)
+            dist = round(abs(ltp - trig), 1) if ltp else None
+            return {
+                "zone_high":    round(best.get("zone_high",    0), 2),
+                "zone_low":     round(best.get("zone_low",     0), 2),
+                "zone_trigger": trig,
+                "t1_target":    round(best.get("sl", 0), 2),
+                "dist_pts":     dist,
+                "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
+            }
+
         # Per-contract LTP and status for UI (mirrors NiftyTrapScanner dashboard table)
+        # futures-mode: zone column shows nearest FUT zone (not empty option-bar zone)
+        if self._htf_source == "futures":
+            ce_zone = _nearest_fut_zone("CE")
+            pe_zone = _nearest_fut_zone("PE")
+        else:
+            ce_zone = _best_zone_summary(self._htf_bear_zones)
+            pe_zone = _best_zone_summary(self._htf_bull_zones)
+
         contracts = {
             "CE1": {"strike": self._ce1_strike, "ltp": self._ltp_cache.get("CE1"),
-                    "bars": len(self._bars_ce1),
-                    "zone": _best_zone_summary(self._htf_bear_zones)},
+                    "bars": len(self._bars_ce1), "zone": ce_zone},
             "CE2": {"strike": self._ce2_strike, "ltp": self._ltp_cache.get("CE2"),
                     "bars": len(self._bars_ce2), "zone": None},
             "PE1": {"strike": self._pe1_strike, "ltp": self._ltp_cache.get("PE1"),
-                    "bars": len(self._bars_pe1),
-                    "zone": _best_zone_summary(self._htf_bull_zones)},
+                    "bars": len(self._bars_pe1), "zone": pe_zone},
             "PE2": {"strike": self._pe2_strike, "ltp": self._ltp_cache.get("PE2"),
                     "bars": len(self._bars_pe2), "zone": None},
         }
 
+        # FUT zones: sort by distance from spot and return nearest 10 (not all 90)
+        def _sorted_fut_zones(max_n: int = 10) -> list:
+            raw = self._zone_info_list(self._htf_fut_zones, "FUT")
+            if ltp:
+                raw.sort(key=lambda z: abs((z.get("zone_trigger") or 0) - ltp))
+            return raw[:max_n]
+
+        opt_zones   = (self._zone_info_list(self._htf_bear_zones, "CE") +
+                       self._zone_info_list(self._htf_bull_zones, "PE"))
+        fut_zones_ui = _sorted_fut_zones(10)
+
         snap = {
-            "underlying":     self._und,
-            "client_id":      self._cid,
-            "binding_id":     self._bid,
-            "initialized":    self._initialized,
-            "intraday_mode":  self._intraday_mode,
-            "gap_fired":      self._gap_fired,
-            "spot_ltp":       ltp,
-            "htf_source":     self._htf_source,
-            "htf_atr":        atr,
-            "ce1_strike":     self._ce1_strike,
-            "ce2_strike":     self._ce2_strike,
-            "pe1_strike":     self._pe1_strike,
-            "pe2_strike":     self._pe2_strike,
-            "expiry":         self._expiry_str,
-            "bear_zones":     bear_trapped,
-            "bull_zones":     bull_trapped,
-            "fut_zones":      fut_trapped,
-            "zones":          zones,
-            "contracts":      contracts,
+            "underlying":       self._und,
+            "client_id":        self._cid,
+            "binding_id":       self._bid,
+            "initialized":      self._initialized,
+            "intraday_mode":    self._intraday_mode,
+            "gap_fired":        self._gap_fired,
+            "spot_ltp":         ltp,
+            "htf_source":       self._htf_source,
+            "htf_atr":          atr,
+            "ce1_strike":       self._ce1_strike,
+            "ce2_strike":       self._ce2_strike,
+            "pe1_strike":       self._pe1_strike,
+            "pe2_strike":       self._pe2_strike,
+            "expiry":           self._expiry_str,
+            "bear_zones":       bear_trapped,
+            "bull_zones":       bull_trapped,
+            "fut_zones":        fut_trapped,
+            "zones":            opt_zones + fut_zones_ui,
+            "entry_window_open":   in_win,
+            "entry_window_status": win_status,
+            "nearest_ce_zone":     _nearest_fut_zone("CE") if self._htf_source == "futures" else None,
+            "nearest_pe_zone":     _nearest_fut_zone("PE") if self._htf_source == "futures" else None,
+            "contracts":        contracts,
             "bars_spot":      len(self._bars_spot),
             "bars_ce1":       len(self._bars_ce1),
             "bars_pe1":       len(self._bars_pe1),
