@@ -297,6 +297,9 @@ def _load_registry_from_db(registry) -> None:
                     is_trade_enabled=bool(_bget(b, "is_trade_enabled", 1)),
                     lot_multiplier=float(_bget(b, "lot_multiplier", 1.0) or 1.0),
                     product_type=_bget(b, "product_type", "MIS") or "MIS",
+                    password=_bdec(b, "password_enc"),
+                    totp_secret=_bdec(b, "totp_secret_enc"),
+                    source_ip=_bget(b, "source_ip", "") or "",
                 ))
             registry.register(profile)
             log.info("Loaded client from DB: %s (approved=%s)", cid, profile.is_admin_approved)
