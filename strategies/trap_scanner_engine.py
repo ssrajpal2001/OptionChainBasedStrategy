@@ -657,8 +657,8 @@ class TrapScannerEngine:
                 is_ce2 = _match(self._ce2_key, self._ce2_strike, "CE") and not is_ce1
                 is_pe1 = _match(self._pe1_key, self._pe1_strike, "PE")
                 is_pe2 = _match(self._pe2_key, self._pe2_strike, "PE") and not is_pe1
-                is_fut = (self._htf_source == "futures"
-                          and str(tick.underlying or "").upper() == self._und)
+                # FUT bars built from INDEX_TICK in _idx_tick_loop — never route option ticks to FUT
+                is_fut = False
 
                 for bkey, bars_list, label in [
                     ("CE1", self._bars_ce1, "CE1"),
@@ -707,14 +707,25 @@ class TrapScannerEngine:
                 if str(tick.symbol).upper() != self._und:
                     continue
                 self._spot_cache = float(tick.ltp)
-                # SPOT bars only needed when htf_source="spot" (legacy path)
-                if self._initialized and self._htf_source == "spot":
+                if not self._initialized:
+                    continue
+                # SPOT bars: legacy htf_source="spot" path
+                if self._htf_source == "spot":
                     closed = self._update_bucket("SPOT", tick.ltp, tick.timestamp)
                     if closed:
                         self._bars_spot.append(closed)
                         if len(self._bars_spot) > 2000:
                             del self._bars_spot[:-2000]
                         self._on_candle_close("SPOT", tick.timestamp)
+                # FUT bars: futures-mode (CrudeOil/BTC/ETH) — underlying LTP arrives as INDEX_TICK
+                elif self._htf_source == "futures":
+                    self._ltp_cache["FUT"] = float(tick.ltp)
+                    closed = self._update_bucket("FUT", tick.ltp, tick.timestamp)
+                    if closed:
+                        self._bars_fut.append(closed)
+                        if len(self._bars_fut) > 2000:
+                            del self._bars_fut[:-2000]
+                        self._on_candle_close("FUT", tick.timestamp)
         except asyncio.CancelledError:
             pass
 

@@ -809,6 +809,7 @@ document.addEventListener('alpine:init', () => {
     // Granular tick-by-tick exit audit (admin-gated) — key `${client_id}_${underlying}` → payload
     exitAudit: {},
     auditOpen: {},   // underlying → collapsible open/closed
+    futZonesOpen: {},    // bk uid → bool (FUT zone table expanded)
     // Client premium-chart state (per deploy_id)
     chartOpen: {},        // deploy_id → bool (panel open)
     chartData: {},        // deploy_id → series array
@@ -5257,13 +5258,13 @@ function histReplay() {
                   </template>
                 </div>
               </template>
-              <!-- Detailed zone table (all zones) -->
-              <template x-if="bk.zones && bk.zones.length>0">
+              <!-- Option zones (CE/PE) — always visible -->
+              <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
                 <div class="mt-2">
                   <div class="grid text-center mb-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
-                    <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>REACH</span><span>LTF STATUS</span>
+                    <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                   </div>
-                  <template x-for="z in bk.zones" :key="z.uid">
+                  <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT')" :key="z.uid">
                     <div class="grid text-center py-0.5"
                          :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
                       <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
@@ -5271,9 +5272,38 @@ function histReplay() {
                       <span x-text="z.zone_high"></span>
                       <span x-text="z.zone_trigger"></span>
                       <span x-text="z.htf_target"></span>
-                      <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'YES':'FAR'"></span>
+                      <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
                       <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                            x-text="z.ltf_status==='entered'?'ENTERED':z.ltf_status==='ltf_signal'?'SIGNAL':z.ltf_status==='watching'?'WATCHING':'—'"></span>
+                            x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <!-- FUT zones (futures bias — collapsible, hidden by default) -->
+              <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type==='FUT').length>0">
+                <div class="mt-1">
+                  <button @click="futZonesOpen[bk.underlying+'_'+bk.client_id]=!futZonesOpen[bk.underlying+'_'+bk.client_id]"
+                          class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
+                    <span x-text="futZonesOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide FUT Zones':'▼ FUT Zones ('+bk.zones.filter(z=>z.opt_type==='FUT').length+')'"></span>
+                  </button>
+                  <template x-if="futZonesOpen[bk.underlying+'_'+bk.client_id]">
+                    <div class="mt-1">
+                      <div class="grid text-center mb-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
+                        <span>FUT</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
+                      </div>
+                      <template x-for="z in bk.zones.filter(z=>z.opt_type==='FUT')" :key="z.uid">
+                        <div class="grid text-center py-0.5"
+                             :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
+                          <span style="color:var(--t-yellow)" x-text="z.opt_type"></span>
+                          <span x-text="z.zone_low"></span>
+                          <span x-text="z.zone_high"></span>
+                          <span x-text="z.zone_trigger"></span>
+                          <span x-text="z.htf_target"></span>
+                          <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
+                          <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
+                                x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
+                        </div>
+                      </template>
                     </div>
                   </template>
                 </div>
@@ -8028,13 +8058,13 @@ function histReplay() {
                           </template>
                         </div>
                       </template>
-                      <!-- Full zone list (collapsible detail) -->
-                      <template x-if="bk&&bk.zones&&bk.zones.length>0">
+                      <!-- Option zones (CE/PE) — always visible -->
+                      <template x-if="bk&&bk.zones&&bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
                         <div class="mt-1">
                           <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
-                            <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>REACH</span><span>LTF STATUS</span>
+                            <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                           </div>
-                          <template x-for="z in bk.zones" :key="z.uid">
+                          <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT')" :key="z.uid">
                             <div class="grid text-center py-0.5 text-xs font-mono"
                                  :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
                               <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
@@ -8042,9 +8072,38 @@ function histReplay() {
                               <span x-text="z.zone_high"></span>
                               <span x-text="z.zone_trigger"></span>
                               <span x-text="z.htf_target"></span>
-                              <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'YES':'FAR'"></span>
+                              <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
                               <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                                    x-text="z.ltf_status==='entered'?'ENTERED':z.ltf_status==='ltf_signal'?'SIGNAL':z.ltf_status==='watching'?'WATCHING':'—'"></span>
+                                    x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <!-- FUT zones (futures bias — collapsible, hidden by default) -->
+                      <template x-if="bk&&bk.zones&&bk.zones.filter(z=>z.opt_type==='FUT').length>0">
+                        <div class="mt-1">
+                          <button @click="futZonesOpen[bk.underlying+'_'+bk.client_id]=!futZonesOpen[bk.underlying+'_'+bk.client_id]"
+                                  class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
+                            <span x-text="futZonesOpen[bk.underlying+'_'+bk.client_id]?'^ Hide FUT Zones':'+ FUT Zones ('+bk.zones.filter(z=>z.opt_type==='FUT').length+')'"></span>
+                          </button>
+                          <template x-if="futZonesOpen[bk.underlying+'_'+bk.client_id]">
+                            <div class="mt-1">
+                              <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
+                                <span>FUT</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
+                              </div>
+                              <template x-for="z in bk.zones.filter(z=>z.opt_type==='FUT')" :key="z.uid">
+                                <div class="grid text-center py-0.5 text-xs font-mono"
+                                     :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
+                                  <span style="color:var(--t-yellow)" x-text="z.opt_type"></span>
+                                  <span x-text="z.zone_low"></span>
+                                  <span x-text="z.zone_high"></span>
+                                  <span x-text="z.zone_trigger"></span>
+                                  <span x-text="z.htf_target"></span>
+                                  <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
+                                  <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
+                                        x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
+                                </div>
+                              </template>
                             </div>
                           </template>
                         </div>
