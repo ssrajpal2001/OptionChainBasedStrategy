@@ -52,6 +52,10 @@ class AngelBroker(BaseBroker):
                 except Exception as exc:
                     logger.error("AngelBroker[%s]: source-IP bind to %s FAILED: %s", self.client_id, _src, exc)
 
+            # DEBUG — remove after confirming auth works
+            logger.info("AngelBroker [%s]: DEBUG binding — user_id=%r pw=%r totp=%r token=%r",
+                        self.client_id, self._b.user_id, self._b.password,
+                        self._b.totp_secret[:4] if self._b.totp_secret else "", bool(self._b.access_token))
             # Path 1 — OAuth access_token already stored (from /callback/angelone)
             if self._b.access_token:
                 # Strip "Bearer " prefix if present — SmartAPI expects the raw JWT
@@ -65,6 +69,9 @@ class AngelBroker(BaseBroker):
 
             # Path 2 — headless login with client_code (or user_id) + password + TOTP
             elif (self._b.client_code or self._b.user_id) and self._b.password:
+                # DEBUG — remove after confirming auth works
+                logger.info("AngelBroker [%s]: headless path — user_id=%r client_code=%r pw_len=%d",
+                            self.client_id, self._b.user_id, self._b.client_code, len(self._b.password))
                 import pyotp
                 totp = pyotp.TOTP(self._b.totp_secret).now() if self._b.totp_secret else ""
                 angel_client = self._b.client_code or self._b.user_id
