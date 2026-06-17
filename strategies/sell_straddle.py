@@ -769,7 +769,8 @@ class SellStraddleStrategy:
         self._loop_queues["tick"] = q
         _idx_count = 0
         _last_hb = 0.0
-        while self._running:
+        try:
+          while self._running:
             try:
                 tick: IndexTick = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -828,7 +829,8 @@ class SellStraddleStrategy:
         from execution_bridge.straddle_bridge import StraddleFillEvent
         q = self._bus.subscribe(Topic.ORDER_FILL)
         self._loop_queues["fill"] = q
-        while self._running:
+        try:
+          while self._running:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -904,7 +906,8 @@ class SellStraddleStrategy:
         _tick_count = 0
         _last_log_ts = 0.0
         import time as _time
-        while self._running:
+        try:
+          while self._running:
             try:
                 tick: OptionTick = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
