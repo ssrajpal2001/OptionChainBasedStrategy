@@ -1017,26 +1017,37 @@ class TrapScannerEngine:
         self._notified_uids.add(uid)
         self._zone_ltf_status[uid] = "entered"
 
-        # Strike: CE1/CE2 or PE1/PE2 based on leg
+        # Scan strike (S1 CE / R1 PE) is naturally ITM relative to futures LTP
         scan_strike_map = {
             "CE1": self._ce1_strike, "CE2": self._ce2_strike,
             "PE1": self._pe1_strike, "PE2": self._pe2_strike,
-            "FUT": self._ce1_strike,
+            "FUT": self._ce1_strike if opt_type == "CE" else self._pe1_strike,
         }
         scan_strike = scan_strike_map.get(leg) or 0
 
-        # 1-ITM from SPOT ATM (not from scan_strike).
-        # Scan/HTF/LTF zone detection runs on the pivot strike (S1/S2/R1/R2).
-        # Only the ORDER and exec tracking use spot ATM − 1 step (CE) / + 1 step (PE)
-        # so the entry is always ~1 step ITM regardless of how far S1 is from current price.
         spot = self._spot_cache or self._spot_open
         atm  = _round_strike(spot, self._step)
-        if opt_type == "CE":
-            strike = atm - self._step       # 1 step ITM for CE
-        elif opt_type == "PE":
-            strike = atm + self._step       # 1 step ITM for PE
+
+        if self._htf_source == "futures":
+            # CrudeOil/BTC/ETH: order goes to scan strike (S1 CE / R1 PE).
+            # S1/R1 pivot strikes are naturally ITM — no separate 1-ITM computation needed.
+            # Spread check: if scan strike too wide, fall back to ATM.
+            primary_strike = scan_strike
+            primary_key    = self._build_upstox_key(primary_strike, opt_type)
+            atm_key        = self._build_upstox_key(atm, opt_type)
+            max_spread_pct = float(self._admin_cfg.get("max_spread_pct", 3.0))
+            strike, exec_key = await self._pick_liquid_strike(
+                primary_strike, primary_key, atm, atm_key, opt_type, max_spread_pct
+            )
         else:
-            strike = scan_strike
+            # Sensex/Nifty: 1-ITM option for better delta
+            if opt_type == "CE":
+                strike = atm - self._step
+            elif opt_type == "PE":
+                strike = atm + self._step
+            else:
+                strike = scan_strike
+            exec_key = self._build_upstox_key(strike, opt_type)
 
         ep       = round(entry.get("zone_trigger", entry.get("zone_high", 0)), 2)
         total_qty = self._lot_size * self._lot_mul
@@ -1063,13 +1074,11 @@ class TrapScannerEngine:
 
         self._log.info(
             "ENTRY %s scan_strike=%d order_strike=%d%s spot=%.2f atm=%d "
-            "ep=%.2f sl=%.2f t1=%.2f qty=%d tracking=%s",
+            "ep=%.2f sl=%.2f t1=%.2f qty=%d tracking=%s exec_key=%s",
             self._und, scan_strike, strike, opt_type, spot, atm,
-            ep, sl_price, t1_price, total_qty, tracking_leg,
+            ep, sl_price, t1_price, total_qty, tracking_leg, exec_key,
         )
 
-        # Subscribe the 1-ITM option key for live P&L and SL tracking
-        exec_key = self._build_upstox_key(strike, opt_type)
         if self._rebalancer is not None:
             try:
                 self._rebalancer.pin_strike(self._und, float(strike))
@@ -1101,17 +1110,20 @@ class TrapScannerEngine:
             self._log.error("Entry order failed: %s", exc)
             return
 
+        # scan_key = the key used for SL/T1 monitoring ticks.
+        # futures-mode: tracking_leg="FUT" → futures key (SL/T1 in futures ₹).
+        # option-mode:  tracking_leg=CE1/PE1 → that option's Upstox key.
         scan_key = {
             "CE1": self._ce1_key, "CE2": self._ce2_key,
             "PE1": self._pe1_key, "PE2": self._pe2_key,
             "FUT": self._fut_key,
-        }.get(tracking_leg, "")
+        }.get(tracking_leg, self._fut_key if self._htf_source == "futures" else "")
         self._position = {
-            "leg":            tracking_leg,  # CE1/PE1 for futures-mode (option tick routes SL check)
+            "leg":            tracking_leg,  # FUT for futures-mode (futures ticks drive SL/T1)
             "signal_leg":     leg,           # original detection leg (FUT for CrudeOil)
             "side":           opt_type,
-            "strike":         strike,        # 1-ITM exec strike (order + P&L)
-            "scan_strike":    scan_strike,   # pivot strike used for zone detection
+            "strike":         strike,        # exec strike (scan strike or ATM fallback)
+            "scan_strike":    scan_strike,   # pivot strike (S1/R1) used for zone detection
             "spot_at_entry":  round(spot, 2),
             "exec_key":       exec_key,      # Upstox key for 1-ITM contract
             "scan_key":       scan_key,      # Upstox key for tracking leg (SL monitoring)
@@ -1122,8 +1134,8 @@ class TrapScannerEngine:
             # Trap-based trail state: bears trapped above entry → squeezed → pullback → confirmed
             # Each entry: {zone_trigger, zone_high, state: WATCHING|SQUEEZED|PULLED_BACK|CONFIRMED}
             "trail_traps":    [],
-            "t1_price":       t1_price,      # option T1 (0 for futures-mode — use t1_price_fut)
-            "t1_price_fut":   t1_price_fut,  # futures T1 level; checked in _idx_tick_loop
+            "t1_price":       t1_price,      # futures ₹ for futures-mode; option ₹ for option-mode
+            "t1_price_fut":   t1_price_fut,  # unused (kept for backward compat with persisted state)
             "total_qty":      total_qty,
             "t1_qty":         t1_qty,
             "remaining_qty":  total_qty,
@@ -1514,6 +1526,68 @@ class TrapScannerEngine:
         except Exception as exc:
             self._log.warning("_fetch_1m_history(%s): %s", instrument_key, exc)
             return []
+
+    async def _pick_liquid_strike(
+        self,
+        primary_strike: int, primary_key: str,
+        atm_strike: int,    atm_key: str,
+        opt_type: str, max_spread_pct: float
+    ) -> tuple:
+        """
+        Check bid-ask spread on primary (scan) strike; fall back to ATM if too wide.
+        Returns (strike, upstox_key) for the chosen exec strike.
+
+        For futures-mode (CrudeOil): primary = scan strike (S1 CE / R1 PE).
+        For option-mode (Sensex/Nifty): primary = 1-ITM option.
+        """
+        async def _spread_pct(key: str) -> float:
+            try:
+                import aiohttp
+                token = self._get_upstox_token()
+                if not token:
+                    return 0.0
+                url = (f"https://api.upstox.com/v2/market-quote/quotes"
+                       f"?instrument_key={key.replace('|', '%7C')}")
+                headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(url, headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=3)) as r:
+                        if r.status != 200:
+                            return 0.0
+                        data = await r.json()
+                quotes = data.get("data", {})
+                quote = list(quotes.values())[0] if quotes else {}
+                depth = quote.get("depth", {})
+                bid = (depth.get("buy") or [{}])[0].get("price", 0)
+                ask = (depth.get("sell") or [{}])[0].get("price", 0)
+                if not bid or not ask:
+                    return 0.0
+                mid = (bid + ask) / 2
+                return round((ask - bid) / mid * 100, 2) if mid > 0 else 0.0
+            except Exception as exc:
+                self._log.warning("spread check %s: %s", key, exc)
+                return 0.0
+
+        sp = await _spread_pct(primary_key)
+        if sp == 0.0 or sp <= max_spread_pct:
+            if sp > 0:
+                self._log.info("spread OK: %s%s spread=%.1f%%", primary_strike, opt_type, sp)
+            return primary_strike, primary_key
+
+        self._log.warning(
+            "spread too wide: %s%s spread=%.1f%% > %.1f%% — trying ATM %s",
+            primary_strike, opt_type, sp, max_spread_pct, atm_strike,
+        )
+        sp_atm = await _spread_pct(atm_key)
+        if sp_atm == 0.0 or sp_atm <= max_spread_pct:
+            self._log.info("ATM fallback: %s%s spread=%.1f%%", atm_strike, opt_type, sp_atm)
+            return atm_strike, atm_key
+
+        self._log.warning(
+            "ATM also too wide: %s%s spread=%.1f%% — using scan strike anyway",
+            atm_strike, opt_type, sp_atm,
+        )
+        return primary_strike, primary_key  # last resort: place anyway
 
     def _get_upstox_token(self) -> Optional[str]:
         creds = self._db.get_feeder_creds_sync("upstox")
