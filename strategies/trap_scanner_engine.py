@@ -1347,7 +1347,7 @@ class TrapScannerEngine:
         # Fallback: weekday math (works for NSE; BSE timezone may differ by one day)
         _EXPIRY_DOW = {
             "NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
-            "SENSEX": 4, "MIDCPNIFTY": 1,
+            "SENSEX": 3, "MIDCPNIFTY": 1,  # SENSEX = Thursday (verified from BSE master 2026-06-17)
         }
         weekday = _EXPIRY_DOW.get(self._und, 3)
         d = date.today()
