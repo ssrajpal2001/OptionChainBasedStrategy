@@ -8,6 +8,8 @@ so this module has zero external dependencies — pure Python, testable standalo
 DO NOT modify the detection logic. Only data connectivity wiring belongs outside.
 """
 
+from __future__ import annotations
+from typing import Optional
 import pandas as pd
 
 # ── Local constants (replaces NiftyTrapScanner's config.py import) ─────────────
@@ -256,7 +258,7 @@ def scan_ltf_bull(df: pd.DataFrame,
     return pd.DataFrame(events) if events else pd.DataFrame(), entries
 
 
-def select_best_ltf_entry(ltf_entries: list) -> dict | None:
+def select_best_ltf_entry(ltf_entries: list) -> Optional[dict]:
     """Return the CLOSED LTF entry with lowest zone_low (most conservative stop)."""
     closed = [e for e in ltf_entries if e["status"] == "CLOSED"]
     return min(closed, key=lambda e: e["zone_low"]) if closed else None
