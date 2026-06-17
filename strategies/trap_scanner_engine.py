@@ -205,6 +205,7 @@ class TrapScannerEngine:
         self._gap_fired  = False
         self._spot_open  = 0.0
         self._spot_cache = 0.0
+        self._expiry_date: Optional[date] = None   # date object, set alongside _expiry_str
 
         # Live option LTP cache: bkey → last seen LTP
         # Used by zone-reachability check when htf_source="option" (option units vs spot units)
@@ -409,7 +410,7 @@ class TrapScannerEngine:
                     self._pe2_strike, pivots["r2"],
                 )
 
-            self._expiry_str = await self._get_expiry()
+            self._expiry_str, self._expiry_date = await self._get_expiry()
             if not self._expiry_str:
                 self._log.warning("No expiry found")
                 return False
@@ -1130,7 +1131,7 @@ class TrapScannerEngine:
         self._pe1_strike = None; self._pe2_strike = None
         self._ce1_key = None; self._ce2_key = None
         self._pe1_key = None; self._pe2_key = None
-        self._expiry_str = None
+        self._expiry_str = None; self._expiry_date = None
         self._clear_persisted_position()
 
     # ── Position persistence (Point 11: no carryforward across days) ──────────
@@ -1304,20 +1305,21 @@ class TrapScannerEngine:
         creds = self._db.get_feeder_creds_sync("upstox")
         return (creds or {}).get("access_token") or ""
 
-    async def _get_expiry(self) -> Optional[str]:
+    async def _get_expiry(self) -> tuple:
+        """Returns (expiry_str, expiry_date). expiry_str = e.g. '18JUN26', expiry_date = date obj."""
         _EXPIRY_DOW = {
             "NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
             "SENSEX": 4, "MIDCPNIFTY": 1,
         }
         if self._und == "CRUDEOIL":
-            return date.today().strftime("%b%y").upper()
+            return date.today().strftime("%b%y").upper(), None
         weekday = _EXPIRY_DOW.get(self._und, 3)
         d = date.today()
         for _ in range(7):
             if d.weekday() == weekday:
-                return d.strftime("%d%b%y").upper()
+                return d.strftime("%d%b%y").upper(), d
             d += timedelta(days=1)
-        return None
+        return None, None
 
     async def _subscribe_instruments(self) -> None:
         if self._rebalancer is None:
@@ -1338,12 +1340,23 @@ class TrapScannerEngine:
     def _build_upstox_key(self, strike: Optional[int], opt_type: str) -> str:
         if not strike:
             return ""
+        exp = self._expiry_str or ""
+        # Try global REGISTRY first — BSE_FO requires a numeric token (not symbol format).
+        # REGISTRY is pre-loaded by the rebalancer at startup; if loaded it has correct keys.
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            if self._expiry_date is not None and REGISTRY.is_loaded(self._und):
+                key = REGISTRY.get_upstox_key(self._und, self._expiry_date, int(strike), opt_type)
+                if key:
+                    return key
+        except Exception:
+            pass
+        # Fallback: constructed symbol (works for NSE_FO; BSE_FO may return empty from REST)
         _PFX = {
             "NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
             "FINNIFTY": "NSE_FO|", "SENSEX": "BSE_FO|", "MIDCPNIFTY": "NSE_FO|",
         }
         pfx = _PFX.get(self._und, "NSE_FO|")
-        exp = self._expiry_str or ""
         return f"{pfx}{self._und}{exp}{strike}{opt_type}"
 
     def _build_broker_symbol(self, strike: Optional[int], opt_type: str) -> str:
