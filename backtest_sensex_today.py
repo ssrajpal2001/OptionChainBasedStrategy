@@ -177,9 +177,9 @@ def simulate_trade(ltf_entry, htf_zone, bars_5m_today, side, label):
     if exit_time is None:
         exit_reason = "OPEN"
 
-    print(f"    EXIT @ {exit_time.strftime('%H:%M') if exit_time else '—'}  "
-          f"reason={exit_reason}  exit_px={exit_price:.1f if exit_price else 0:.1f}  "
-          f"NET P&L = ₹{pnl:.0f}")
+    ep_str = f"{exit_price:.1f}" if exit_price is not None else "—"
+    et_str = exit_time.strftime('%H:%M') if exit_time is not None else "—"
+    print(f"    EXIT @ {et_str}  reason={exit_reason}  exit_px={ep_str}  NET P&L = ₹{pnl:.0f}")
     return {"label": label, "entry": entry_price, "entry_time": str(entry_time),
             "exit": exit_price, "exit_time": str(exit_time), "reason": exit_reason, "pnl": pnl}
 
