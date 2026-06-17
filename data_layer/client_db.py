@@ -1227,60 +1227,6 @@ class ClientDB:
                 else:
                     raise
 
-        # Security migration: drop password_enc / totp_secret_enc from broker_bindings
-        existing_bb_cols = {row[1] for row in con.execute("PRAGMA table_info(broker_bindings)").fetchall()}
-        if "password_enc" in existing_bb_cols or "totp_secret_enc" in existing_bb_cols:
-            logger.info("ClientDB: migrating broker_bindings — dropping password/totp columns")
-            try:
-                con.executescript("""
-                    BEGIN;
-                    ALTER TABLE broker_bindings RENAME TO broker_bindings_old;
-                    CREATE TABLE broker_bindings (
-                        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                        client_id           TEXT    NOT NULL,
-                        binding_id          TEXT    NOT NULL,
-                        provider            TEXT    NOT NULL,
-                        label               TEXT    DEFAULT '',
-                        user_id_enc         TEXT    DEFAULT '',
-                        api_key_enc         TEXT    DEFAULT '',
-                        api_secret_enc      TEXT    DEFAULT '',
-                        access_token        TEXT    DEFAULT '',
-                        token_generated_at  TEXT    DEFAULT '',
-                        token_expiry_at     TEXT    DEFAULT '',
-                        assigned_strategy   TEXT    DEFAULT '',
-                        assigned_instrument TEXT    DEFAULT 'NIFTY',
-                        trading_mode        TEXT    DEFAULT 'paper',
-                        is_trade_enabled    INTEGER DEFAULT 1,
-                        lot_multiplier      REAL    DEFAULT 1.0,
-                        enabled             INTEGER DEFAULT 1,
-                        terminal_connected  INTEGER DEFAULT 0,
-                        terminal_connected_at TEXT  DEFAULT '',
-                        engine_active       INTEGER DEFAULT 0,
-                        created_at          TEXT    NOT NULL,
-                        UNIQUE(client_id, binding_id)
-                    );
-                    INSERT INTO broker_bindings
-                        (id, client_id, binding_id, provider, label,
-                         user_id_enc, api_key_enc, api_secret_enc,
-                         access_token, token_generated_at, token_expiry_at,
-                         assigned_strategy, assigned_instrument, trading_mode,
-                         is_trade_enabled, lot_multiplier, enabled, created_at)
-                    SELECT
-                        id, client_id, binding_id, provider, label,
-                        user_id_enc, api_key_enc, api_secret_enc,
-                        access_token, token_generated_at, token_expiry_at,
-                        assigned_strategy,
-                        COALESCE(assigned_instrument, 'NIFTY'),
-                        COALESCE(trading_mode, 'paper'),
-                        is_trade_enabled, lot_multiplier, enabled, created_at
-                    FROM broker_bindings_old;
-                    DROP TABLE broker_bindings_old;
-                    CREATE INDEX IF NOT EXISTS idx_bb_client ON broker_bindings(client_id);
-                    COMMIT;
-                """)
-                logger.info("ClientDB: broker_bindings migration complete.")
-            except Exception as exc:
-                logger.error("ClientDB: broker_bindings migration FAILED: %s", exc)
 
         # Security migration: drop password_enc / totp_secret_enc from system_feeder_creds
         existing_fc_cols = {row[1] for row in con.execute("PRAGMA table_info(system_feeder_creds)").fetchall()}
