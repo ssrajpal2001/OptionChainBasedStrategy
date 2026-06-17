@@ -56,21 +56,23 @@ logger = logging.getLogger(__name__)
 
 # ── Per-index config ──────────────────────────────────────────────────────────
 _INDEX_CFG: Dict[str, dict] = {
+    # htf_source="option": HTF and LTF both scan OPTION premium bars (same units → scan_ltf works)
+    # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
     "NIFTY":      {"step": 100, "lot": 75,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
-                   "window": None, "exchange": "NFO", "htf_source": "spot"},
+                   "window": None, "exchange": "NFO", "htf_source": "option"},
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
                    "sl_buf": 4.0, "cutoff": "15:10", "sq_off": "15:20",
-                   "window": None, "exchange": "NFO", "htf_source": "spot"},
+                   "window": None, "exchange": "NFO", "htf_source": "option"},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
-                   "window": None, "exchange": "NFO", "htf_source": "spot"},
+                   "window": None, "exchange": "NFO", "htf_source": "option"},
     "SENSEX":     {"step": 100, "lot": 20,  "gap_near": 300, "gap_far": 600,
                    "sl_buf": 2.0, "cutoff": "15:20", "sq_off": "15:25",
-                   "window": None, "exchange": "BFO", "htf_source": "spot"},
+                   "window": None, "exchange": "BFO", "htf_source": "option"},
     "MIDCPNIFTY": {"step": 25,  "lot": 75,  "gap_near": 100, "gap_far": 200,
                    "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
-                   "window": None, "exchange": "NFO", "htf_source": "spot"},
+                   "window": None, "exchange": "NFO", "htf_source": "option"},
     "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": [[18, 45], [19, 15]], "exchange": "MCX",
@@ -204,7 +206,11 @@ class TrapScannerEngine:
         self._spot_open  = 0.0
         self._spot_cache = 0.0
 
-        # 1m bars — SPOT for HTF scan; per-option for LTF scan and trail SL
+        # Live option LTP cache: bkey → last seen LTP
+        # Used by zone-reachability check when htf_source="option" (option units vs spot units)
+        self._ltp_cache: Dict[str, float] = {}
+
+        # 1m bars — SPOT for HTF scan (htf_source="spot"); per-option for LTF/HTF
         self._bars_spot: List[dict] = []
         self._bars_ce1: List[dict] = []
         self._bars_ce2: List[dict] = []
@@ -396,11 +402,22 @@ class TrapScannerEngine:
             if self._htf_source == "futures":
                 self._fut_key = _SPOT_KEYS.get(self._und, "")
                 self._bars_fut = await self._fetch_1m_history(self._fut_key)
-            else:
-                # Fetch SPOT bars for HTF scan
+            elif self._htf_source == "spot":
+                # Legacy: SPOT bars for HTF, option bars for LTF
                 spot_key = _SPOT_KEYS.get(self._und, "")
                 self._bars_spot = await self._fetch_1m_history(spot_key)
-                # Fetch option premium bars for LTF scan + trail SL
+                self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
+                self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
+                self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
+                self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
+                self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
+                self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
+                self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
+                self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+            else:
+                # htf_source="option" (NSE/BSE): option bars for BOTH HTF and LTF
+                # CE1=S1 bars detect bear seller traps; PE1=R1 bars detect bull seller traps
+                # All zone H/L values in option premium units → scan_ltf is consistent
                 self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
                 self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
                 self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
@@ -435,7 +452,12 @@ class TrapScannerEngine:
 
     def _compute_htf_atr(self) -> float:
         """14-bar ATR on HTF bars. Used for zone-reachability distance check."""
-        bars = self._bars_spot if self._htf_source == "spot" else self._bars_fut
+        if self._htf_source == "futures":
+            bars = self._bars_fut
+        elif self._htf_source == "spot":
+            bars = self._bars_spot
+        else:  # "option": use CE1 bars (representative; same scale as zones)
+            bars = self._bars_ce1
         df = _bars_to_df(bars)
         if df.empty:
             return 0.0
@@ -455,7 +477,12 @@ class TrapScannerEngine:
         prev_close — so the check stays relevant through the session.
         If a zone later comes into range (HTF boundary rescan), flip back to normal.
         """
-        ltp = self._spot_cache or self._spot_open
+        # For option-bar HTF, zone levels are in option premium units — compare option LTP
+        if self._htf_source == "option":
+            ltp = (self._ltp_cache.get("CE1") or self._ltp_cache.get("PE1") or
+                   self._ltp_cache.get("CE2") or self._ltp_cache.get("PE2") or 0.0)
+        else:
+            ltp = self._spot_cache or self._spot_open
         if not ltp or self._htf_atr_val <= 0:
             # No ATR yet — fall back to simple trapped-count logic
             if self._trapped_zone_count() == 0:
@@ -500,9 +527,11 @@ class TrapScannerEngine:
     def _run_htf_scan(self, bars_override: Optional[List[dict]] = None,
                       minutes_override: Optional[int] = None) -> None:
         """
-        Run HTF scan on SPOT bars (NSE/BSE) or FUTURES bars (MCX).
-        scan_htf_spot → bear traps (→ CE buy) + bull traps (→ PE buy)
-        scan_htf      → bear traps only (futures)
+        Run HTF scan on option premium bars (NSE/BSE) or futures bars (MCX).
+        htf_source="option": scan_htf on CE1 bars for BEAR zones; scan_htf on PE1 for BULL zones
+          → zone H/L in option premium units; scan_ltf with same bars is consistent (no mismatch)
+        htf_source="spot":   scan_htf_spot on SPOT bars (legacy path)
+        htf_source="futures": scan_htf on futures bars
         """
         minutes = minutes_override or self._htf_min
         if self._htf_source == "futures":
@@ -515,7 +544,22 @@ class TrapScannerEngine:
                 return
             _, entries = scanner.scan_htf(htf)
             self._htf_fut_zones = entries
-        else:
+        elif self._htf_source == "option":
+            # Bear zones from CE1 bars: seller traps on CE premium → buy CE
+            df_ce = _bars_to_df(bars_override or self._bars_ce1)
+            if not df_ce.empty and len(df_ce) >= 2:
+                htf_ce = _resample_htf(df_ce, minutes)
+                if len(htf_ce) >= 2:
+                    _, bear_entries = scanner.scan_htf(htf_ce)
+                    self._htf_bear_zones = bear_entries
+            # Bull zones from PE1 bars: seller traps on PE premium → buy PE
+            df_pe = _bars_to_df(self._bars_pe1)
+            if not df_pe.empty and len(df_pe) >= 2:
+                htf_pe = _resample_htf(df_pe, minutes)
+                if len(htf_pe) >= 2:
+                    _, bull_entries = scanner.scan_htf(htf_pe)
+                    self._htf_bull_zones = bull_entries
+        else:  # "spot" legacy
             bars = bars_override or self._bars_spot
             df = _bars_to_df(bars)
             if df.empty or len(df) < 2:
@@ -579,6 +623,7 @@ class TrapScannerEngine:
                     }[bkey]
                     if not active:
                         continue
+                    self._ltp_cache[bkey] = ltp   # track live option LTP per leg
                     closed = self._update_bucket(bkey, ltp, ts)
                     if closed:
                         bars_list.append(closed)
@@ -611,12 +656,14 @@ class TrapScannerEngine:
                 if str(tick.symbol).upper() != self._und:
                     continue
                 self._spot_cache = float(tick.ltp)
+                # SPOT bars only needed when htf_source="spot" (legacy path)
                 if self._initialized and self._htf_source == "spot":
                     closed = self._update_bucket("SPOT", tick.ltp, tick.timestamp)
                     if closed:
                         self._bars_spot.append(closed)
                         if len(self._bars_spot) > 2000:
                             del self._bars_spot[:-2000]
+                        self._on_candle_close("SPOT", tick.timestamp)
         except asyncio.CancelledError:
             pass
 
@@ -647,14 +694,18 @@ class TrapScannerEngine:
         if self._position:
             return
 
-        # Refresh HTF scan on HTF boundary (SPOT for NSE/BSE; FUT for CrudeOil)
+        # Refresh HTF scan on HTF boundary
+        # "option": trigger on CE1 bar close (scans both CE1 and PE1)
+        # "spot":   trigger on SPOT bar close
+        # "futures": trigger on FUT bar close
         is_htf_boundary = ts.minute % self._htf_min == 0
         if is_htf_boundary:
-            if self._htf_source == "spot" and leg == "SPOT":
-                self._run_htf_scan()
-                self._htf_atr_val = self._compute_htf_atr()
-                self._check_zone_reachability()
-            elif self._htf_source == "futures" and leg == "FUT":
+            htf_trigger = (
+                (self._htf_source == "option"  and leg == "CE1") or
+                (self._htf_source == "spot"    and leg == "SPOT") or
+                (self._htf_source == "futures" and leg == "FUT")
+            )
+            if htf_trigger:
                 self._run_htf_scan()
                 self._htf_atr_val = self._compute_htf_atr()
                 self._check_zone_reachability()
@@ -706,7 +757,13 @@ class TrapScannerEngine:
         """
         if not htf_zones or len(bars) < 3:
             return
-        df = _bars_to_df(bars[-200:])
+        # Bug C fix: LTF scan today-only — historical seeded bars must not produce stale zones
+        today = datetime.now(IST).date()
+        today_bars = [b for b in bars
+                      if pd.to_datetime(b.get("datetime", "")).date() == today]
+        if len(today_bars) < 3:
+            return
+        df = _bars_to_df(today_bars[-200:])
         for zone in htf_zones:
             uid = _zone_uid(zone)
             if uid in self._notified_uids:
@@ -762,11 +819,34 @@ class TrapScannerEngine:
             self._run_htf_scan(bars_override=today_bars, minutes_override=self._cascade_min)
             zones_15m = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
             self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE", require_closed=False)
-        else:
+        elif self._htf_source == "option":
+            # 15-min CE1 bars for bear cascade; 15-min PE1 bars for bull cascade
+            today_ce = _complete_today(self._bars_ce1)
+            today_pe = _complete_today(self._bars_pe1)
+            bear_15: list = []
+            bull_15: list = []
+            if len(today_ce) >= 4:
+                df_ce = _bars_to_df(today_ce)
+                htf_ce = _resample_htf(df_ce, self._cascade_min)
+                if len(htf_ce) >= 2:
+                    _, be = scanner.scan_htf(htf_ce)
+                    bear_15 = [e for e in be if e["status"] == "TRAPPED"]
+            if len(today_pe) >= 4:
+                df_pe = _bars_to_df(today_pe)
+                htf_pe = _resample_htf(df_pe, self._cascade_min)
+                if len(htf_pe) >= 2:
+                    _, bu = scanner.scan_htf(htf_pe)
+                    bull_15 = [e for e in bu if e["status"] == "TRAPPED"]
+            if bear_15:
+                self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE", require_closed=False)
+                self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE", require_closed=False)
+            if bull_15:
+                self._run_ltf_on("PE1", self._bars_pe1, bull_15, "PE", require_closed=False)
+                self._run_ltf_on("PE2", self._bars_pe2, bull_15, "PE", require_closed=False)
+        else:  # "spot" legacy cascade
             today_bars = _complete_today(self._bars_spot)
             if len(today_bars) < 4:
                 return
-            # Temporary 15-min scan (don't overwrite main 75-min HTF state)
             df_today = _bars_to_df(today_bars)
             htf_15 = _resample_htf(df_today, self._cascade_min)
             if len(htf_15) < 2:
@@ -1030,6 +1110,7 @@ class TrapScannerEngine:
         self._notified_uids  = set()
         self._zone_ltf_status = {}
         self._htf_atr_val = 0.0
+        self._ltp_cache   = {}
         self._ce1_strike = None; self._ce2_strike = None
         self._pe1_strike = None; self._pe2_strike = None
         self._ce1_key = None; self._ce2_key = None
@@ -1294,6 +1375,37 @@ class TrapScannerEngine:
         bear_trapped = sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED")
         bull_trapped = sum(1 for e in self._htf_bull_zones if e["status"] == "TRAPPED")
         fut_trapped  = sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED")
+
+        def _best_zone_summary(zone_list: list) -> Optional[dict]:
+            """Most recent TRAPPED zone for UI display."""
+            trapped = [z for z in zone_list if z["status"] == "TRAPPED"]
+            if not trapped:
+                return None
+            z = trapped[-1]
+            uid = _zone_uid(z)
+            return {
+                "zone_high":    round(z.get("zone_high", 0), 2),
+                "zone_low":     round(z.get("zone_low", 0), 2),
+                "zone_trigger": round(z.get("zone_trigger", z.get("entry", 0)), 2),
+                "t1_target":    round(z.get("sl", 0), 2),
+                "trapped_on":   str(z.get("trapped_on", "")),
+                "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
+            }
+
+        # Per-contract LTP and status for UI (mirrors NiftyTrapScanner dashboard table)
+        contracts = {
+            "CE1": {"strike": self._ce1_strike, "ltp": self._ltp_cache.get("CE1"),
+                    "bars": len(self._bars_ce1),
+                    "zone": _best_zone_summary(self._htf_bear_zones)},
+            "CE2": {"strike": self._ce2_strike, "ltp": self._ltp_cache.get("CE2"),
+                    "bars": len(self._bars_ce2), "zone": None},
+            "PE1": {"strike": self._pe1_strike, "ltp": self._ltp_cache.get("PE1"),
+                    "bars": len(self._bars_pe1),
+                    "zone": _best_zone_summary(self._htf_bull_zones)},
+            "PE2": {"strike": self._pe2_strike, "ltp": self._ltp_cache.get("PE2"),
+                    "bars": len(self._bars_pe2), "zone": None},
+        }
+
         return {
             "underlying":     self._und,
             "client_id":      self._cid,
@@ -1302,6 +1414,7 @@ class TrapScannerEngine:
             "intraday_mode":  self._intraday_mode,
             "gap_fired":      self._gap_fired,
             "spot_ltp":       ltp,
+            "htf_source":     self._htf_source,
             "htf_atr":        atr,
             "ce1_strike":     self._ce1_strike,
             "ce2_strike":     self._ce2_strike,
@@ -1312,6 +1425,7 @@ class TrapScannerEngine:
             "bull_zones":     bull_trapped,
             "fut_zones":      fut_trapped,
             "zones":          zones,
+            "contracts":      contracts,
             "bars_spot":      len(self._bars_spot),
             "bars_ce1":       len(self._bars_ce1),
             "bars_pe1":       len(self._bars_pe1),
