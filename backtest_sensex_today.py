@@ -114,6 +114,8 @@ def simulate_trade(ltf_entry, htf_zone, bars_5m_today, side, label):
     sl_price     = max(sl_from_zone, sl_buf) if sl_from_zone > 0 else sl_buf
     # T1 target = HTF zone_high (bears' original SL = our profit target)
     t1_target = htf_zone.get("zone_high", htf_zone.get("sl", 0))
+    zone_high = htf_zone.get("zone_high", 0)
+    zone_low  = htf_zone.get("zone_low", 0)
 
     qty_remaining = QTY
     qty_t1        = QTY // 2
