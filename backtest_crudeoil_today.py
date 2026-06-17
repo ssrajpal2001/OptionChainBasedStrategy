@@ -18,7 +18,7 @@ sys.path.insert(0, os.getcwd())
 
 import aiohttp
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date, timedelta, time as dtime
 from data_layer.client_db import ClientDB
 from data_layer.instrument_registry import REGISTRY
 from strategies.trap_scanner import scanner
@@ -474,9 +474,22 @@ async def main():
         day_stopped        = False
         trades_taken       = 0
 
+        # CrudeOil entry window: 18:45–19:15 IST (as per live engine config)
+        # Entry cutoff: 22:45 IST
+        ENTRY_WIN_START = dtime(18, 45)
+        ENTRY_WIN_END   = dtime(19, 15)
+        ENTRY_CUTOFF    = dtime(22, 45)
+
         for et, ltf_e, htf_z in all_entries:
             if day_stopped:
                 print(f"    SKIP {et.strftime('%H:%M')} -- day stopped")
+                continue
+            et_time = et.time() if hasattr(et, "time") else et
+            if not (ENTRY_WIN_START <= et_time <= ENTRY_WIN_END):
+                print(f"    SKIP {et.strftime('%H:%M')} -- outside entry window {ENTRY_WIN_START.strftime('%H:%M')}-{ENTRY_WIN_END.strftime('%H:%M')}")
+                continue
+            if et_time >= ENTRY_CUTOFF:
+                print(f"    SKIP {et.strftime('%H:%M')} -- past cutoff {ENTRY_CUTOFF.strftime('%H:%M')}")
                 continue
             zh_key = round(htf_z.get("zone_high", 0), 1)
             if zh_key in blacklisted_zones:
