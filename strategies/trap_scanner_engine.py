@@ -803,15 +803,15 @@ class TrapScannerEngine:
         Normal mode: 5-min LTF scan on OPTION premium bars inside HTF spot zones.
         BEAR spot zones → scan CE1/CE2 option bars
         BULL spot zones → scan PE1/PE2 option bars
-        FUTURES mode    → dual-confirm: option bar trap + futures price inside HTF zone
+        FUTURES mode    → LTF also on FUTURES bars (institutions move via futures, not options).
+                          Option bars are illiquid/gappy — unsuitable for trap detection.
+                          Only ORDER and post-entry exits use options.
         """
         if self._htf_source == "futures":
+            if leg != "FUT":
+                return  # LTF scan only on FUT candle close
             zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
-            # LTF runs on OPTION bars; futures price dual-confirms zone membership
-            if leg in ("CE1",):
-                self._run_ltf_futures_mode("CE1", self._bars_ce1, zones, "CE")
-            elif leg in ("PE1",):
-                self._run_ltf_futures_mode("PE1", self._bars_pe1, zones, "PE")
+            self._run_ltf_futures_mode("FUT", self._bars_fut, zones, "CE")
             return
 
         # BEAR zones → buy CE
@@ -877,14 +877,16 @@ class TrapScannerEngine:
     def _run_ltf_futures_mode(self, leg_key: str, bars: List[dict],
                                htf_zones: List[dict], opt_type: str) -> None:
         """
-        Futures-mode LTF: scan OPTION bars (CE1/PE1) for 5-min traps.
-        Dual-confirmation: option trap must occur while futures price is inside an HTF zone.
+        Futures-mode LTF: scan FUTURES bars for 5-min traps (same price domain as HTF).
+        CrudeOil institutions move via futures; option bars are illiquid/gappy.
 
-        Unlike option-mode, zone_high/low are in FUTURES price units and cannot be used
-        to filter option bar traps. Instead:
-          1. Scan all option bar traps (no zone-price filter)
-          2. Check current futures LTP against each HTF zone
-          3. Fire entry only when futures LTP is inside a trapped HTF zone
+        Both HTF and LTF use futures bars — zone prices are consistent.
+        Normal scan_ltf zone-filter works because bars and zones share futures price units.
+
+        Compared to option-mode _run_ltf_on:
+          - No dual-confirm needed (LTF bars ARE the futures signal)
+          - opt_type is always "CE" (bear trap → buy CE); PE logic TBD
+          - tracking_leg in position is CE1/PE1 (option ticks for SL/T1/trail)
         """
         if not htf_zones or len(bars) < 3:
             return
@@ -894,21 +896,6 @@ class TrapScannerEngine:
         if len(today_bars) < 3:
             return
         df = _bars_to_df(today_bars[-200:])
-        fut_ltp = self._ltp_cache.get("FUT", 0.0)
-
-        # Scan option bars for traps — pass extreme high/low so no price-range filter applies
-        scan_fn = getattr(scanner, "scan_ltf_bull", scanner.scan_ltf) if opt_type == "PE" else scanner.scan_ltf
-        _, ltf_entries = scan_fn(
-            df,
-            htf_zone_high=df["high"].max() if not df.empty else 9999999,
-            htf_zone_low=0.0,
-            htf_ref_bar="",
-            htf_trap_bar="",
-            htf_target=0.0,
-        )
-        best = scanner.select_best_ltf_entry(ltf_entries)
-        if not best:
-            return
 
         for zone in htf_zones:
             uid = _zone_uid(zone)
@@ -916,16 +903,21 @@ class TrapScannerEngine:
                 continue
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
-            # Dual-confirm: current futures price must be inside this HTF zone
-            zh = zone.get("zone_high", 0)
-            zl = zone.get("zone_low", 0)
-            if not (fut_ltp > 0 and zl <= fut_ltp <= zh):
-                continue
-            self._zone_ltf_status[uid] = "ltf_signal"
-            asyncio.get_event_loop().create_task(
-                self._on_entry_signal(leg_key, opt_type, best, zone)
+            _, ltf_entries = scanner.scan_ltf(
+                df,
+                htf_zone_high=zone["zone_high"],
+                htf_zone_low=zone["zone_low"],
+                htf_ref_bar=str(zone.get("ref_ts", "")),
+                htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
+                htf_target=zone.get("sl", 0.0),
             )
-            return
+            best = scanner.select_best_ltf_entry(ltf_entries)
+            if best:
+                self._zone_ltf_status[uid] = "ltf_signal"
+                asyncio.get_event_loop().create_task(
+                    self._on_entry_signal(leg_key, opt_type, best, zone)
+                )
+                return
 
     async def _cascade_scan(self, ts: datetime) -> None:
         """
@@ -1053,7 +1045,8 @@ class TrapScannerEngine:
         # T1 = nearest option zone_high above entry (from option HTF bars).
         # Futures price is NOT checked again after entry — all exits on option LTP.
         if self._htf_source == "futures":
-            tracking_leg = leg  # already CE1/PE1 from _run_ltf_futures_mode
+            # leg="FUT" (futures bars drove the LTF signal); map to option leg for tick routing
+            tracking_leg = "CE1" if opt_type == "CE" else "PE1"
             scan_opt_ltp = self._ltp_cache.get(tracking_leg) or float(entry.get("zone_trigger", 0))
             opt_zone_low = float(entry.get("zone_low", 0))
             sl_from_zone = round(opt_zone_low - self._sl_buf, 2) if opt_zone_low > 0 else 0.0
