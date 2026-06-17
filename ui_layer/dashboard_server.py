@@ -239,7 +239,7 @@ try:
         ic_midcp_otm:      float = 150.0
         ic_midcp_wing:     float = 200.0
         # Sell Straddle (global fallback — per-index config preferred)
-        ss_entry_start:    str   = "09:20"
+        ss_entry_start:    str   = "09:15"
         ss_entry_end:      str   = "12:00"
         ss_squareoff_time: str   = "15:15"
         ss_max_trades:     int   = 1
@@ -3190,7 +3190,7 @@ class DashboardServer:
                 "ic_sensex_wing":     ic_idx.get("SENSEX",     {}).get("wing_width_pts",500.0),
                 "ic_midcp_otm":       ic_idx.get("MIDCPNIFTY", {}).get("short_otm_pts", 150.0),
                 "ic_midcp_wing":      ic_idx.get("MIDCPNIFTY", {}).get("wing_width_pts",200.0),
-                "ss_entry_start":     ss.get("entry_start",    "09:20"),
+                "ss_entry_start":     ss.get("entry_start",    "09:15"),
                 "ss_entry_end":       ss.get("entry_end",      "12:00"),
                 "ss_squareoff_time":  ss.get("squareoff_time", "15:15"),
                 "ss_max_trades":      ss.get("max_trades",      1),

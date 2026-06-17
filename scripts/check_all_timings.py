@@ -43,10 +43,10 @@ async def main():
                 print(raw)
 
     if not apply:
-        print("\n\n--- Pass --apply to write trap_scanner timings ---")
+        print("\n\n--- Pass --apply to write correct timings for both strategies ---")
         return
 
-    # Apply trap_scanner timings
+    # Apply trap_scanner per-index timings
     raw = db.get_setting_sync("trap_scanner", "{}")
     current = json.loads(raw) if raw else {}
     per_index = current.get("per_index", {})
@@ -56,5 +56,15 @@ async def main():
     await db.set_setting("trap_scanner", json.dumps(current))
     print("\n✓ trap_scanner timings saved.")
     print(json.dumps(current, indent=2))
+
+    # Apply sell_straddle global timings
+    ss_raw = db.get_setting_sync("sell_straddle", "{}")
+    ss = json.loads(ss_raw) if ss_raw else {}
+    ss["entry_start"]    = "09:15"   # market opens 09:15
+    ss["entry_end"]      = ss.get("entry_end",      "12:00")
+    ss["squareoff_time"] = ss.get("squareoff_time", "15:15")
+    await db.set_setting("sell_straddle", json.dumps(ss))
+    print("\n✓ sell_straddle timings saved.")
+    print(json.dumps(ss, indent=2))
 
 asyncio.run(main())

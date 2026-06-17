@@ -730,7 +730,7 @@ document.addEventListener('alpine:init', () => {
       ic_nifty_otm: 200, ic_nifty_wing: 200, ic_banknifty_otm: 400, ic_banknifty_wing: 500,
       ic_finnifty_otm: 200, ic_finnifty_wing: 200, ic_sensex_otm: 500, ic_sensex_wing: 500,
       ic_midcp_otm: 150, ic_midcp_wing: 200,
-      ss_entry_start: '09:20', ss_entry_end: '12:00', ss_squareoff_time: '15:15',
+      ss_entry_start: '09:15', ss_entry_end: '12:00', ss_squareoff_time: '15:15',
       ss_max_trades: 1,
       tt_htf_minutes: 75, tt_ltf_minutes: 5, tt_sl_mode: 'dynamic', tt_sl_pct: 2.0,
     },
@@ -2307,7 +2307,7 @@ document.addEventListener('alpine:init', () => {
         lot_multiplier: b.lot_multiplier || 1,
         max_profit_rs:  0,
         max_sl_rs:      0,
-        squareoff_time: '15:15',
+        squareoff_time: this.strategyConfig.ss_squareoff_time || '15:15',
       };
       this.deployMsg = ''; this.deployOk = null;
       this.deployDeleteLoading = {};
