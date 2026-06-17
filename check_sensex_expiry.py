@@ -2,11 +2,9 @@
 import sys, os
 sys.path.insert(0, os.getcwd())
 
-from data_layer.instrument_registry import REGISTRY, InstrumentRegistry
+from data_layer.instrument_registry import REGISTRY
 from datetime import date
 
-# Load from Upstox master (BSE master for SENSEX)
-# We need a token — read from the SQLite DB the same way the engine does
 try:
     from data_layer.client_db import ClientDB
     db = ClientDB("data/clients.db")
@@ -21,28 +19,20 @@ if not token:
     sys.exit(1)
 
 print(f"Token: {token[:20]}...")
+print("\nLoading SENSEX contracts from BSE master...")
+REGISTRY.load_sync("SENSEX", token)
+print(f"is_loaded: {REGISTRY.is_loaded('SENSEX')}")
 
-# Load SENSEX into REGISTRY
-import asyncio
+expiries = REGISTRY.all_expiries("SENSEX")
+print(f"All expiries for SENSEX: {expiries}")
 
-async def main():
-    print("\nLoading SENSEX contracts from BSE master...")
-    ok = await REGISTRY.load("SENSEX", token)
-    print(f"Load result: {ok}")
-    print(f"is_loaded: {REGISTRY.is_loaded('SENSEX')}")
-    
-    expiries = REGISTRY.all_expiries("SENSEX")
-    print(f"All expiries for SENSEX: {expiries}")
-    
-    nearest = REGISTRY.get_active_expiry("SENSEX")
-    print(f"Nearest active expiry: {nearest}")
-    
-    if nearest:
-        # Check a few strikes around 77000
-        for strike in [76500, 76800, 77000, 77100, 77400, 77700]:
-            for ot in ["CE", "PE"]:
-                key = REGISTRY.get_upstox_key("SENSEX", nearest, strike, ot)
-                if key:
-                    print(f"  SENSEX {strike}{ot} exp={nearest} → {key}")
+nearest = REGISTRY.get_active_expiry("SENSEX")
+print(f"Nearest active expiry: {nearest}")
 
-asyncio.run(main())
+if nearest:
+    print("\nStrike lookup around 77000:")
+    for strike in [76500, 76800, 77000, 77100, 77400, 77700]:
+        for ot in ["CE", "PE"]:
+            key = REGISTRY.get_upstox_key("SENSEX", nearest, strike, ot)
+            status = key if key else "NOT FOUND"
+            print(f"  SENSEX {strike}{ot} exp={nearest} → {status}")
