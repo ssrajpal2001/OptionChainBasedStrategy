@@ -576,19 +576,6 @@ async def _run_live(
         tasks.append(asyncio.create_task(trap_scanner_manager.run(), name="trap_scanner_books"))
     if delta_chain is not None:
         tasks.append(asyncio.create_task(delta_chain.run(), name="delta_chain"))
-    tasks += [
-        asyncio.create_task(router.run(),               name="router"),
-        asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
-        asyncio.create_task(ic_bridge.run(),            name="ic_bridge"),
-        asyncio.create_task(client_mgr.run(),           name="client_mgr"),
-        asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
-        asyncio.create_task(rebalancer.run(),           name="rebalancer"),
-        asyncio.create_task(strike_cleanup.run(),       name="strike_cleanup"),
-        asyncio.create_task(gap_handler.run(),          name="gap_handler"),
-        asyncio.create_task(shutdown_event.wait(),      name="shutdown_sentinel"),
-        asyncio.create_task(_memory_watchdog(),         name="memory_watchdog"),
-    ]
-
     async def _memory_watchdog() -> None:
         """Log RSS every 30 min and force a GC cycle. Logs a WARNING if RSS > 2.5 GB
         so we know well before the 4 GB t3.medium limit is approached."""
@@ -602,6 +589,19 @@ async def _run_live(
             if rss_mb > 2500:
                 logger.warning("MEMORY HIGH: %.0f MB RSS — approaching 4 GB limit. "
                                "Consider restarting after market hours.", rss_mb)
+
+    tasks += [
+        asyncio.create_task(router.run(),               name="router"),
+        asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
+        asyncio.create_task(ic_bridge.run(),            name="ic_bridge"),
+        asyncio.create_task(client_mgr.run(),           name="client_mgr"),
+        asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
+        asyncio.create_task(rebalancer.run(),           name="rebalancer"),
+        asyncio.create_task(strike_cleanup.run(),       name="strike_cleanup"),
+        asyncio.create_task(gap_handler.run(),          name="gap_handler"),
+        asyncio.create_task(shutdown_event.wait(),      name="shutdown_sentinel"),
+        asyncio.create_task(_memory_watchdog(),         name="memory_watchdog"),
+    ]
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
