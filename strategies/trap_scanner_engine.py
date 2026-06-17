@@ -323,25 +323,36 @@ class TrapScannerEngine:
     async def _morning_init(self) -> bool:
         try:
             prev = await self._fetch_prev_day_ohlc()
-            if not prev:
-                self._log.warning("No prev-day OHLC")
-                return False
-            H, L, C = prev["high"], prev["low"], prev["close"]
-            pivots = _pivot_levels(H, L, C)
-            self._log.info(
-                "Prev-day H=%.0f L=%.0f C=%.0f | P=%.0f R1=%.0f R2=%.0f S1=%.0f S2=%.0f",
-                H, L, C, pivots["pivot"], pivots["r1"], pivots["r2"],
-                pivots["s1"], pivots["s2"],
-            )
 
             today_open = self._spot_cache if self._spot_cache > 0 else await self._fetch_today_open()
             if today_open <= 0:
-                today_open = C
+                today_open = (prev["close"] if prev else 0.0)
             self._spot_open = today_open
-            gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
-            self._gap_fired = gap_pct >= self._gap_thresh
 
-            if self._gap_fired:
+            if prev:
+                H, L, C = prev["high"], prev["low"], prev["close"]
+                pivots = _pivot_levels(H, L, C)
+                self._log.info(
+                    "Prev-day H=%.0f L=%.0f C=%.0f | P=%.0f R1=%.0f R2=%.0f S1=%.0f S2=%.0f",
+                    H, L, C, pivots["pivot"], pivots["r1"], pivots["r2"],
+                    pivots["s1"], pivots["s2"],
+                )
+                gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
+                self._gap_fired = gap_pct >= self._gap_thresh
+            else:
+                # Fallback: no prev-day OHLC (BSE/MCX REST issue or expired token).
+                # Use live spot to place ATM-based strikes (equivalent to no-gap pivot mode
+                # with ATM as the reference). HTF scan will still run on intraday bars.
+                self._log.warning(
+                    "No prev-day OHLC for %s — using live spot ATM for strikes", self._und
+                )
+                gap_pct = 0.0
+                self._gap_fired = False
+                pivots = None
+
+            # Strike selection
+            if self._gap_fired and prev:
+                C = prev["close"]
                 direction = "UP" if today_open > C else "DOWN"
                 atm = _round_strike(today_open, self._step)
                 if direction == "UP":
@@ -360,7 +371,7 @@ class TrapScannerEngine:
                     self._ce1_strike, self._ce2_strike,
                     self._pe1_strike, self._pe2_strike,
                 )
-            else:
+            elif pivots:
                 # CE at support (S1/S2): bears short at support → CE trapped when price bounces
                 # PE at resistance (R1/R2): bulls buy at resistance → PE trapped when price drops
                 self._ce1_strike = _round_strike(pivots["s1"], self._step)
@@ -375,6 +386,22 @@ class TrapScannerEngine:
                     self._ce2_strike, pivots["s2"],
                     self._pe1_strike, pivots["r1"],
                     self._pe2_strike, pivots["r2"],
+                )
+            else:
+                # No prev-day data at all: ATM ± near/far offsets
+                ref = today_open or self._spot_cache
+                if not ref:
+                    self._log.warning("No spot reference for strike selection — aborting init")
+                    return False
+                atm = _round_strike(ref, self._step)
+                self._ce1_strike = atm - self._gap_near
+                self._ce2_strike = atm - self._gap_far
+                self._pe1_strike = atm + self._gap_near
+                self._pe2_strike = atm + self._gap_far
+                self._log.info(
+                    "FALLBACK strikes (no OHLC) ATM=%d → CE1=%d CE2=%d PE1=%d PE2=%d",
+                    atm, self._ce1_strike, self._ce2_strike,
+                    self._pe1_strike, self._pe2_strike,
                 )
 
             self._expiry_str = await self._get_expiry()
@@ -1108,9 +1135,11 @@ class TrapScannerEngine:
         try:
             token = self._get_upstox_token()
             if not token:
+                self._log.warning("_fetch_prev_day_ohlc: no Upstox token")
                 return None
             spot_key = _SPOT_KEYS.get(self._und)
             if not spot_key:
+                self._log.warning("_fetch_prev_day_ohlc: no spot key for %s", self._und)
                 return None
             import aiohttp
             today   = date.today()
@@ -1121,10 +1150,19 @@ class TrapScannerEngine:
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
                     if r.status != 200:
+                        body = await r.text()
+                        self._log.warning(
+                            "_fetch_prev_day_ohlc: HTTP %d for %s — %s",
+                            r.status, spot_key, body[:200],
+                        )
                         return None
                     data = await r.json()
             candles = data.get("data", {}).get("candles", [])
             if len(candles) < 2:
+                self._log.warning(
+                    "_fetch_prev_day_ohlc: only %d candle(s) returned for %s",
+                    len(candles), spot_key,
+                )
                 return None
             prev = candles[1]
             return {"open": float(prev[1]), "high": float(prev[2]),
