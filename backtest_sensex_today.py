@@ -98,18 +98,22 @@ def resample_htf(df, minutes):
     return htf
 
 
-def simulate_trade(entry_bar, zones, bars_5m_today, side, label):
-    """Simulate entry + T1 + trail exit on 5-min bars after entry_bar."""
-    if not zones:
-        return None
-    zone = zones[-1]
-    t1_target  = zone.get("t1_target", 0)
-    zone_high  = zone.get("zone_high", 0)
-    zone_low   = zone.get("zone_low", 0)
+def simulate_trade(ltf_entry, htf_zone, bars_5m_today, side, label):
+    """Simulate entry + T1 + trail exit on 5-min bars after LTF entry signal.
 
-    entry_time  = pd.to_datetime(entry_bar["datetime"])
-    entry_price = entry_bar["close"]
-    sl_price    = entry_price * (1 - SL_BUF_PCT / 100)
+    ltf_entry: dict from scan_htf applied to zone_df (has zone_trigger, trapped_on, sl)
+    htf_zone:  parent HTF zone dict (has zone_high = T1 target for us = bears' SL)
+    """
+    entry_time  = pd.to_datetime(ltf_entry.get("trapped_on") or ltf_entry.get("ref_ts"))
+    if entry_time is pd.NaT or entry_time is None:
+        return None
+    entry_price = ltf_entry.get("zone_trigger", ltf_entry.get("entry", 0))
+    # SL = LTF zone_low (where LTF pattern invalidates), or buf% below entry
+    sl_from_zone = ltf_entry.get("zone_low", 0)
+    sl_buf       = entry_price * (1 - SL_BUF_PCT / 100)
+    sl_price     = max(sl_from_zone, sl_buf) if sl_from_zone > 0 else sl_buf
+    # T1 target = HTF zone_high (bears' original SL = our profit target)
+    t1_target = htf_zone.get("zone_high", htf_zone.get("sl", 0))
 
     qty_remaining = QTY
     qty_t1        = QTY // 2
@@ -249,11 +253,19 @@ async def main():
         if df5.empty or len(df5) < 3:
             print(f"  {label}: not enough 5-min bars ({len(df5)})")
             continue
-        entries, _ = scanner.scan_ltf(df5, zones)
-        print(f"  {label}: LTF entries found = {len(entries)}")
-        for e in entries:
-            bars_list = [b for b in df5.to_dict("records")]
-            result = simulate_trade(e, zones, bars_list, side, label)
+        all_entries = []   # list of (ltf_entry_dict, htf_zone_dict)
+        for z in zones:
+            zh = z.get("zone_high", 0)
+            zl = z.get("zone_low", 0)
+            scan_fn = scanner.scan_ltf_bull if side == "PE" else scanner.scan_ltf
+            _, ltf_list = scan_fn(df5, zh, zl)
+            ltf_trapped = [e for e in ltf_list if e.get("status") == "TRAPPED"]
+            for e in ltf_trapped:
+                all_entries.append((e, z))
+        print(f"  {label}: LTF TRAPPED entries = {len(all_entries)}")
+        bars_list = df5.to_dict("records")
+        for ltf_e, htf_z in all_entries:
+            result = simulate_trade(ltf_e, htf_z, bars_list, side, label)
             if result:
                 all_results.append(result)
 
