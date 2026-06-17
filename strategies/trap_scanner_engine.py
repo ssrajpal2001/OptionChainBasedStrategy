@@ -337,47 +337,67 @@ class TrapScannerEngine:
 
     async def _morning_init(self) -> bool:
         try:
-            prev = await self._fetch_prev_day_ohlc()
-            if not prev:
-                self._log.warning(
-                    "No prev-day OHLC for %s — cannot compute pivots/strikes; will retry in 120s",
-                    self._und,
+            if self._htf_source == "futures":
+                # Futures-mode (CrudeOil/BTC/ETH): get prev_close + today_open from the SAME
+                # active contract's 1m bars. Daily-candle API can return an expired contract's
+                # close (e.g. June close when July contract is active) → false 5.9% gap.
+                try:
+                    from data_layer.instrument_registry import REGISTRY as _REG
+                    fk_early = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
+                except Exception:
+                    fk_early = ""
+                if not fk_early:
+                    self._log.warning(
+                        "Futures-mode %s: no futures key in REGISTRY; will retry in 120s", self._und
+                    )
+                    return False
+                C_fut, today_open_fut = await self._fetch_prev_close_and_today_open_from_1m(fk_early)
+                if C_fut <= 0:
+                    self._log.warning(
+                        "Futures-mode %s: no prev-day close from 1m bars; will retry in 120s", self._und
+                    )
+                    return False
+                C = C_fut
+                H, L = C, C   # H/L unused for futures-mode (no pivots needed)
+                pivots = _pivot_levels(C, C, C)  # placeholder — pivots not used in futures-mode
+                today_open = today_open_fut if today_open_fut > 0 else C
+                self._log.info("Futures prev_close=%.0f today_open=%.0f (from 1m bars, same contract)",
+                               C, today_open)
+            else:
+                prev = await self._fetch_prev_day_ohlc()
+                if not prev:
+                    self._log.warning(
+                        "No prev-day OHLC for %s — cannot compute pivots/strikes; will retry in 120s",
+                        self._und,
+                    )
+                    return False
+                H, L, C = prev["high"], prev["low"], prev["close"]
+                pivots = _pivot_levels(H, L, C)
+                self._log.info(
+                    "Prev-day H=%.0f L=%.0f C=%.0f | P=%.0f R1=%.0f R2=%.0f S1=%.0f S2=%.0f",
+                    H, L, C, pivots["pivot"], pivots["r1"], pivots["r2"],
+                    pivots["s1"], pivots["s2"],
                 )
-                return False
-            H, L, C = prev["high"], prev["low"], prev["close"]
-            pivots = _pivot_levels(H, L, C)
-            self._log.info(
-                "Prev-day H=%.0f L=%.0f C=%.0f | P=%.0f R1=%.0f R2=%.0f S1=%.0f S2=%.0f",
-                H, L, C, pivots["pivot"], pivots["r1"], pivots["r2"],
-                pivots["s1"], pivots["s2"],
-            )
-
-            # Always fetch today_open via REST — must be the FIRST bar's OPEN (9:00/9:15 AM),
-            # NOT the current live price. Gap direction = prev-day close vs today's open.
-            today_open = await self._fetch_today_open()
-            if today_open <= 0:
-                # For futures-mode (CrudeOil etc.), _spot_cache is the CURRENT live price, not
-                # today's open — using it would give wrong gap direction. Fall back to prev close
-                # (0% gap, no direction bias) rather than mislead strike selection.
-                if self._htf_source == "futures":
-                    today_open = C  # conservative: assume no gap, use prev close
-                else:
+                # Always fetch today_open via REST — must be the FIRST bar's OPEN (9:15 AM),
+                # NOT the current live price. Gap direction = prev-day close vs today's open.
+                today_open = await self._fetch_today_open()
+                if today_open <= 0:
                     today_open = self._spot_cache if self._spot_cache > 0 else C
-            if today_open <= 0:
-                today_open = C
+                if today_open <= 0:
+                    today_open = C
+                # Sanity: index gaps > 4% are almost impossible for NSE/BSE — bad feed value
+                gap_check = abs(today_open - C) / C * 100 if C > 0 else 0.0
+                if gap_check > 4.0:
+                    self._log.warning(
+                        "Gap %.1f%% > 4%% looks like bad spot_cache; re-fetching today_open via REST",
+                        gap_check,
+                    )
+                    fallback = await self._fetch_today_open()
+                    if fallback > 0:
+                        today_open = fallback
+
             self._spot_open = today_open
             gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
-            # Sanity: index gaps > 4% are almost impossible for NSE/BSE — bad feed value
-            if gap_pct > 4.0 and self._htf_source == "option":
-                self._log.warning(
-                    "Gap %.1f%% > 4%% looks like bad spot_cache; re-fetching today_open via REST",
-                    gap_pct,
-                )
-                fallback = await self._fetch_today_open()
-                if fallback > 0:
-                    today_open = fallback
-                    self._spot_open = today_open
-                    gap_pct = abs(today_open - C) / C * 100
             self._gap_fired = gap_pct >= self._gap_thresh
 
             # Futures-mode underlyings (CrudeOil etc.) always use ATM ± fixed ITM offsets —
@@ -1522,6 +1542,31 @@ class TrapScannerEngine:
         except Exception as exc:
             self._log.warning("_fetch_today_open: %s", exc)
             return 0.0
+
+    async def _fetch_prev_close_and_today_open_from_1m(self, fut_key: str) -> tuple:
+        """
+        For futures-mode (CrudeOil/BTC/ETH): return (prev_close, today_open) from the
+        same 1m historical bars used for HTF scanning.
+
+        Using 1m bars avoids the daily-candle endpoint mixing up EXPIRED vs ACTIVE contract
+        prices (e.g. June contract close vs July contract open giving a false 5.9% gap).
+        Both values come from the SAME active contract → gap direction is accurate.
+
+        Returns (prev_close, today_open) — (0.0, 0.0) on failure.
+        """
+        try:
+            bars = await self._fetch_1m_history(fut_key)
+            if not bars:
+                return 0.0, 0.0
+            today_str = date.today().isoformat()
+            today_bars = [b for b in bars if b["datetime"][:10] == today_str]
+            prev_bars  = [b for b in bars if b["datetime"][:10] < today_str]
+            today_open = float(today_bars[0]["open"]) if today_bars else 0.0   # first bar of today
+            prev_close = float(prev_bars[-1]["close"]) if prev_bars else 0.0   # last bar of yesterday
+            return prev_close, today_open
+        except Exception as exc:
+            self._log.warning("_fetch_prev_close_and_today_open_from_1m: %s", exc)
+            return 0.0, 0.0
 
     async def _fetch_1m_history(self, instrument_key: str) -> List[dict]:
         if not instrument_key:
