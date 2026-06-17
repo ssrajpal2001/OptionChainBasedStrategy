@@ -242,9 +242,19 @@ async def main():
     print("\n── LTF Scan (5-min entries) ──")
     all_results = []
 
+    # Use HTF zones + cascade zones (union) — HTF zones from old data may be
+    # out of today's premium range; cascade fills the gap with intraday 15-min zones
+    bear_zones_all = trapped_bear + [z for z in casc_bear_t
+                                     if not any(abs(z["zone_high"] - h["zone_high"]) < 1
+                                                for h in trapped_bear)]
+    bull_zones_all = trapped_bull + [z for z in casc_bull_t
+                                     if not any(abs(z["zone_high"] - h["zone_high"]) < 1
+                                                for h in trapped_bull)]
+    print(f"\nCombined zones: bear={len(bear_zones_all)}  bull={len(bull_zones_all)}")
+
     for label, opt_bars_today, zones, side in [
-        ("CE1-BEAR", ce1_today_bars, trapped_bear or casc_bear_t, "CE"),
-        ("PE1-BULL", pe1_today_bars, trapped_bull or casc_bull_t, "PE"),
+        ("CE1-BEAR", ce1_today_bars, bear_zones_all, "CE"),
+        ("PE1-BULL", pe1_today_bars, bull_zones_all, "PE"),
     ]:
         if not zones:
             print(f"  {label}: no zones → skip")
