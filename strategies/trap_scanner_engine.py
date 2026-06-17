@@ -1555,6 +1555,24 @@ class TrapScannerEngine:
             })
         return result
 
+    @staticmethod
+    def _to_py(obj):
+        """Recursively convert numpy scalars to native Python types for JSON serialization."""
+        import numpy as np
+        if isinstance(obj, dict):
+            return {k: TrapScannerEngine._to_py(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [TrapScannerEngine._to_py(v) for v in obj]
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
     def telemetry_snapshot(self) -> dict:
         pos = self._position
         ltp = self._spot_cache or 0.0
@@ -1599,7 +1617,7 @@ class TrapScannerEngine:
                     "bars": len(self._bars_pe2), "zone": None},
         }
 
-        return {
+        snap = {
             "underlying":     self._und,
             "client_id":      self._cid,
             "binding_id":     self._bid,
@@ -1641,8 +1659,9 @@ class TrapScannerEngine:
                 "t1_hit":        pos["t1_hit"],
                 "entry_ts":      pos["entry_ts"],
                 "trail_traps":   [
-                    {"zt": t["zone_trigger"], "zh": t["zone_high"], "state": t["state"]}
+                    {"zt": float(t["zone_trigger"]), "zh": float(t["zone_high"]), "state": str(t["state"])}
                     for t in pos.get("trail_traps", [])
                 ],
             } if pos else None,
         }
+        return self._to_py(snap)
