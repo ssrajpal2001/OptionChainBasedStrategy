@@ -222,6 +222,11 @@ class TrapScannerEngine:
         # Dedup: zones that already fired an entry today
         self._notified_uids: Set[str] = set()
 
+        # Per-zone LTF status for telemetry: uid → "watching"|"ltf_signal"|"entered"
+        self._zone_ltf_status: Dict[str, str] = {}
+        # HTF ATR for zone-reachability check (Point 1)
+        self._htf_atr_val: float = 0.0
+
         # Cascade mode: no 75-min zone TRAPPED → use 15-min → 5-min
         self._intraday_mode = False
 
@@ -395,14 +400,15 @@ class TrapScannerEngine:
                 self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
 
             self._run_htf_scan()
-            trapped_count = self._trapped_zone_count()
-
-            if trapped_count == 0:
-                self._log.info("No HTF zones TRAPPED — switching to intraday cascade (15m)")
-                self._intraday_mode = True
-            else:
-                self._intraday_mode = False
-                self._log.info("HTF scan: %d TRAPPED zones", trapped_count)
+            self._htf_atr_val = self._compute_htf_atr()
+            self._check_zone_reachability()
+            self._log.info(
+                "HTF scan: bear=%d bull=%d fut=%d ATR=%.2f intraday_mode=%s",
+                sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED"),
+                sum(1 for e in self._htf_bull_zones if e["status"] == "TRAPPED"),
+                sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED"),
+                self._htf_atr_val, self._intraday_mode,
+            )
 
             await self._subscribe_instruments()
             await self._ensure_broker()
@@ -412,6 +418,70 @@ class TrapScannerEngine:
             return False
 
     # ── HTF scan ──────────────────────────────────────────────────────────────
+
+    def _compute_htf_atr(self) -> float:
+        """14-bar ATR on HTF bars. Used for zone-reachability distance check."""
+        bars = self._bars_spot if self._htf_source == "spot" else self._bars_fut
+        df = _bars_to_df(bars)
+        if df.empty:
+            return 0.0
+        htf = _resample_htf(df, self._htf_min)
+        if len(htf) < 2:
+            return 0.0
+        trs = []
+        for i in range(1, len(htf)):
+            h, l, pc = htf.iloc[i]["high"], htf.iloc[i]["low"], htf.iloc[i - 1]["close"]
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        return round(sum(trs[-14:]) / min(len(trs), 14), 2) if trs else 0.0
+
+    def _check_zone_reachability(self) -> None:
+        """
+        Point 1: if nearest TRAPPED zone trigger is further than 1.5×ATR from current
+        LTP, switch to intraday cascade (15-min) immediately.  Uses live LTP — not
+        prev_close — so the check stays relevant through the session.
+        If a zone later comes into range (HTF boundary rescan), flip back to normal.
+        """
+        ltp = self._spot_cache or self._spot_open
+        if not ltp or self._htf_atr_val <= 0:
+            # No ATR yet — fall back to simple trapped-count logic
+            if self._trapped_zone_count() == 0:
+                if not self._intraday_mode:
+                    self._intraday_mode = True
+                    self._log.info("No TRAPPED zones → cascade")
+            else:
+                if self._intraday_mode:
+                    self._intraday_mode = False
+            return
+
+        threshold = 1.5 * self._htf_atr_val
+        trapped = (
+            [e for e in self._htf_bear_zones if e["status"] == "TRAPPED"] +
+            [e for e in self._htf_bull_zones if e["status"] == "TRAPPED"] +
+            [e for e in self._htf_fut_zones  if e["status"] == "TRAPPED"]
+        )
+        if not trapped:
+            if not self._intraday_mode:
+                self._intraday_mode = True
+                self._log.info("No TRAPPED zones → cascade")
+            return
+
+        nearest_dist = min(
+            abs(ltp - z.get("zone_trigger", z.get("entry", ltp))) for z in trapped
+        )
+        if nearest_dist > threshold:
+            if not self._intraday_mode:
+                self._intraday_mode = True
+                self._log.info(
+                    "Nearest zone too far: dist=%.2f > 1.5×ATR=%.2f ltp=%.2f → cascade",
+                    nearest_dist, threshold, ltp,
+                )
+        else:
+            if self._intraday_mode:
+                self._intraday_mode = False
+                self._log.info(
+                    "Zone reachable: dist=%.2f ≤ 1.5×ATR=%.2f → normal mode",
+                    nearest_dist, threshold,
+                )
 
     def _run_htf_scan(self, bars_override: Optional[List[dict]] = None,
                       minutes_override: Optional[int] = None) -> None:
@@ -568,12 +638,12 @@ class TrapScannerEngine:
         if is_htf_boundary:
             if self._htf_source == "spot" and leg == "SPOT":
                 self._run_htf_scan()
-                if self._trapped_zone_count() > 0:
-                    self._intraday_mode = False
+                self._htf_atr_val = self._compute_htf_atr()
+                self._check_zone_reachability()
             elif self._htf_source == "futures" and leg == "FUT":
                 self._run_htf_scan()
-                if self._trapped_zone_count() > 0:
-                    self._intraday_mode = False
+                self._htf_atr_val = self._compute_htf_atr()
+                self._check_zone_reachability()
 
         # On every LTF boundary — scan option premium bars inside HTF zones
         if ts.minute % self._ltf_min != 0:
@@ -627,6 +697,8 @@ class TrapScannerEngine:
             uid = _zone_uid(zone)
             if uid in self._notified_uids:
                 continue
+            if uid not in self._zone_ltf_status:
+                self._zone_ltf_status[uid] = "watching"
             _, ltf_entries = scanner.scan_ltf(
                 df,
                 htf_zone_high=zone["zone_high"],
@@ -642,6 +714,7 @@ class TrapScannerEngine:
                 trapped_ltf = [e for e in ltf_entries if e["status"] in ("TRAPPED", "CLOSED")]
                 best = min(trapped_ltf, key=lambda e: e["zone_low"]) if trapped_ltf else None
             if best:
+                self._zone_ltf_status[uid] = "ltf_signal"
                 asyncio.get_event_loop().create_task(
                     self._on_entry_signal(leg_key, opt_type, best, zone)
                 )
@@ -717,6 +790,7 @@ class TrapScannerEngine:
         if uid in self._notified_uids:
             return
         self._notified_uids.add(uid)
+        self._zone_ltf_status[uid] = "entered"
 
         # Strike: CE1/CE2 or PE1/PE2 based on leg
         scan_strike_map = {
@@ -919,6 +993,8 @@ class TrapScannerEngine:
         self._htf_fut_zones  = []
         self._buckets        = {}
         self._notified_uids  = set()
+        self._zone_ltf_status = {}
+        self._htf_atr_val = 0.0
         self._ce1_strike = None; self._ce2_strike = None
         self._pe1_strike = None; self._pe2_strike = None
         self._ce1_key = None; self._ce2_key = None
@@ -1083,8 +1159,41 @@ class TrapScannerEngine:
 
     # ── Telemetry ─────────────────────────────────────────────────────────────
 
+    def _zone_info_list(self, zones: List[dict], opt_type: str) -> list:
+        ltp = self._spot_cache or 0.0
+        atr = self._htf_atr_val
+        threshold = 1.5 * atr if atr > 0 else None
+        result = []
+        for z in zones:
+            uid = _zone_uid(z)
+            trigger = round(z.get("zone_trigger", z.get("entry", 0)), 2)
+            dist = round(abs(ltp - trigger), 2) if ltp else None
+            reachable = (dist is not None and threshold is not None and dist <= threshold)
+            result.append({
+                "uid":          uid,
+                "opt_type":     opt_type,
+                "zone_low":     round(z.get("zone_low",  0), 2),
+                "zone_high":    round(z.get("zone_high", 0), 2),
+                "zone_trigger": trigger,
+                "htf_target":   round(z.get("sl", 0), 2),
+                "trapped_on":   str(z.get("trapped_on", "") or ""),
+                "status":       z.get("status", ""),
+                "reachable":    reachable,
+                "dist_from_ltp": dist,
+                "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
+            })
+        return result
+
     def telemetry_snapshot(self) -> dict:
         pos = self._position
+        ltp = self._spot_cache or 0.0
+        atr = self._htf_atr_val
+
+        zones = (
+            self._zone_info_list(self._htf_bear_zones, "CE") +
+            self._zone_info_list(self._htf_bull_zones, "PE") +
+            self._zone_info_list(self._htf_fut_zones,  "FUT")
+        )
         bear_trapped = sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED")
         bull_trapped = sum(1 for e in self._htf_bull_zones if e["status"] == "TRAPPED")
         fut_trapped  = sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED")
@@ -1095,6 +1204,8 @@ class TrapScannerEngine:
             "initialized":    self._initialized,
             "intraday_mode":  self._intraday_mode,
             "gap_fired":      self._gap_fired,
+            "spot_ltp":       ltp,
+            "htf_atr":        atr,
             "ce1_strike":     self._ce1_strike,
             "ce2_strike":     self._ce2_strike,
             "pe1_strike":     self._pe1_strike,
@@ -1103,6 +1214,7 @@ class TrapScannerEngine:
             "bear_zones":     bear_trapped,
             "bull_zones":     bull_trapped,
             "fut_zones":      fut_trapped,
+            "zones":          zones,
             "bars_spot":      len(self._bars_spot),
             "bars_ce1":       len(self._bars_ce1),
             "bars_pe1":       len(self._bars_pe1),

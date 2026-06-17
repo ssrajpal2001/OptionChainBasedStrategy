@@ -5186,24 +5186,52 @@ function histReplay() {
           </template>
           <template x-for="bk in trapScannerBooks" :key="bk.client_id+'_'+bk.binding_id+'_'+bk.underlying">
             <div class="rounded border p-2 mb-2 text-xs font-mono" style="border-color:var(--t-border)">
+              <!-- Header row -->
               <div class="flex gap-3 flex-wrap">
                 <span style="color:var(--t-cyan)" x-text="bk.underlying"></span>
                 <span style="color:var(--t-muted)" x-text="bk.client_id+'/'+bk.binding_id"></span>
                 <span :style="bk.initialized?'color:var(--t-green)':'color:var(--t-yellow)'"
-                      x-text="bk.initialized?(bk.intraday_mode?'INTRADAY':'HTF READY'):'WARMING'"></span>
+                      x-text="bk.initialized?(bk.intraday_mode?'INTRADAY CASCADE':'HTF READY'):'WARMING'"></span>
                 <span x-show="bk.gap_fired" style="color:var(--t-red)">GAP</span>
-                <span x-show="bk.ce1_strike" x-text="'CE1 '+bk.ce1_strike" style="color:var(--t-green)"></span>
-                <span x-show="bk.ce2_strike" x-text="'CE2 '+bk.ce2_strike" style="color:var(--t-green)"></span>
-                <span x-show="bk.pe1_strike" x-text="'PE1 '+bk.pe1_strike" style="color:var(--t-red)"></span>
-                <span x-show="bk.pe2_strike" x-text="'PE2 '+bk.pe2_strike" style="color:var(--t-red)"></span>
-                <span x-text="'bear:'+bk.bear_zones+' bull:'+bk.bull_zones" style="color:var(--t-muted)"></span>
+                <span x-show="bk.ce1_strike" x-text="'CE1='+bk.ce1_strike" style="color:var(--t-green)"></span>
+                <span x-show="bk.ce2_strike" x-text="'CE2='+bk.ce2_strike" style="color:var(--t-green)"></span>
+                <span x-show="bk.pe1_strike" x-text="'PE1='+bk.pe1_strike" style="color:var(--t-red)"></span>
+                <span x-show="bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
+                <span x-text="'LTP='+bk.spot_ltp" style="color:var(--t-dim)"></span>
+                <span x-show="bk.htf_atr>0" x-text="'ATR='+bk.htf_atr" style="color:var(--t-dim)"></span>
               </div>
+              <!-- Zone table -->
+              <template x-if="bk.zones && bk.zones.length>0">
+                <div class="mt-2">
+                  <div class="grid text-center mb-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
+                    <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>REACH</span><span>LTF STATUS</span>
+                  </div>
+                  <template x-for="z in bk.zones" :key="z.uid">
+                    <div class="grid text-center py-0.5"
+                         :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
+                      <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
+                      <span x-text="z.zone_low"></span>
+                      <span x-text="z.zone_high"></span>
+                      <span x-text="z.zone_trigger"></span>
+                      <span x-text="z.htf_target"></span>
+                      <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'YES':'FAR'"></span>
+                      <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
+                            x-text="z.ltf_status==='entered'?'ENTERED':z.ltf_status==='ltf_signal'?'SIGNAL':z.ltf_status==='watching'?'WATCHING':'—'"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <template x-if="!bk.zones || bk.zones.length===0">
+                <div class="mt-1" style="color:var(--t-muted)">No HTF zones detected yet.</div>
+              </template>
+              <!-- Position row -->
               <template x-if="bk.position">
                 <div class="mt-1 pt-1 border-t flex gap-3 flex-wrap" style="border-color:var(--t-border)">
                   <span style="color:var(--t-yellow)">POSITION</span>
                   <span x-text="bk.position.side+' '+bk.position.strike"></span>
                   <span x-text="'entry='+bk.position.entry_price"></span>
                   <span x-text="'sl='+bk.position.sl_price"></span>
+                  <span x-show="bk.position.t1_hit" x-text="'trail_sl='+bk.position.trail_sl" style="color:var(--t-cyan)"></span>
                   <span x-text="'t1='+bk.position.t1_price" style="color:var(--t-green)"></span>
                   <span x-text="'qty='+bk.position.remaining_qty+'/'+bk.position.total_qty"></span>
                   <span x-show="bk.position.t1_hit" style="color:var(--t-green)">T1✓</span>
