@@ -1545,24 +1545,31 @@ class TrapScannerEngine:
 
     async def _fetch_prev_close_and_today_open_from_1m(self, fut_key: str) -> tuple:
         """
-        For futures-mode (CrudeOil/BTC/ETH): return (prev_close, today_open) from the
-        same 1m historical bars used for HTF scanning.
+        For futures-mode (CrudeOil/BTC/ETH): return (prev_close, today_open).
 
-        Using 1m bars avoids the daily-candle endpoint mixing up EXPIRED vs ACTIVE contract
-        prices (e.g. June contract close vs July contract open giving a false 5.9% gap).
-        Both values come from the SAME active contract → gap direction is accurate.
+        prev_close: historical 1m endpoint (ends yesterday) — same active contract,
+          avoids daily-candle API returning an EXPIRED contract's close (e.g. June
+          close when July contract is active → false 5.9% gap).
+        today_open: intraday endpoint via _fetch_today_open() — MCX historical
+          endpoint excludes today's session, intraday endpoint has today's bars.
 
         Returns (prev_close, today_open) — (0.0, 0.0) on failure.
         """
         try:
+            # Historical bars → last bar of yesterday = prev_close (same active contract)
+            # MCX historical endpoint excludes today's session — that's expected and correct
             bars = await self._fetch_1m_history(fut_key)
             if not bars:
                 return 0.0, 0.0
-            today_str = date.today().isoformat()
-            today_bars = [b for b in bars if b["datetime"][:10] == today_str]
+            today_str  = date.today().isoformat()
             prev_bars  = [b for b in bars if b["datetime"][:10] < today_str]
-            today_open = float(today_bars[0]["open"]) if today_bars else 0.0   # first bar of today
-            prev_close = float(prev_bars[-1]["close"]) if prev_bars else 0.0   # last bar of yesterday
+            prev_close = float(prev_bars[-1]["close"]) if prev_bars else 0.0
+
+            # Intraday endpoint → first bar of today's session = today_open
+            # _fetch_today_open() uses REGISTRY for CrudeOil/BTC/ETH (no _SPOT_KEYS entry)
+            # and returns candles[-1][1] = oldest (9:00 AM) bar's open = true market open
+            today_open = await self._fetch_today_open()
+
             return prev_close, today_open
         except Exception as exc:
             self._log.warning("_fetch_prev_close_and_today_open_from_1m: %s", exc)
