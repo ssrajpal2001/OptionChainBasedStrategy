@@ -1040,36 +1040,47 @@ class TrapScannerEngine:
                 primary_strike, primary_key, atm, atm_key, opt_type, max_spread_pct
             )
         else:
-            # Sensex/Nifty: 1-ITM option for better delta
+            # Sensex/Nifty: 1-ITM option is primary; ATM as fallback if spread too wide.
+            # tracked_sym (scan_key) = SCAN STRIKE option key — never changes, even if
+            # exec_key falls back to ATM. SL/T1 are always on the scan strike option LTP.
             if opt_type == "CE":
-                strike = atm - self._step
+                primary_1itm = atm - self._step
             elif opt_type == "PE":
-                strike = atm + self._step
+                primary_1itm = atm + self._step
             else:
-                strike = scan_strike
-            exec_key = self._build_upstox_key(strike, opt_type)
+                primary_1itm = scan_strike
+            primary_key    = self._build_upstox_key(primary_1itm, opt_type)
+            atm_key        = self._build_upstox_key(atm, opt_type)
+            max_spread_pct = float(self._admin_cfg.get("max_spread_pct", 3.0))
+            strike, exec_key = await self._pick_liquid_strike(
+                primary_1itm, primary_key, atm, atm_key, opt_type, max_spread_pct
+            )
 
         ep       = round(entry.get("zone_trigger", entry.get("zone_high", 0)), 2)
         total_qty = self._lot_size * self._lot_mul
         t1_qty    = total_qty // 2
 
-        # futures-mode (CrudeOil/BTC/ETH): entry fires from option bar trap (leg=CE1/PE1).
-        # zone_high/low in `entry` are in OPTION price units (from option bar scan).
-        # SL = max(option zone_low, entry_price*(1-pct)) in option ₹.
-        # T1 = nearest option zone_high above entry (from option HTF bars).
-        # Futures price is NOT checked again after entry — all exits on option LTP.
+        # Price domain for SL/T1/monitoring depends on htf_source:
+        #
+        # futures-mode (CrudeOil/BTC/ETH):
+        #   Signal from FUTURES bars → SL/T1 also in FUTURES ₹ (same chart).
+        #   pos["leg"]="FUT" → _idx_tick_loop drives _check_tick_exit with futures LTP.
+        #   Order close goes to exec_key (scan strike option or ATM fallback) via _place_exit.
+        #   scan_key = futures key (tracked_sym fixed; never the option key).
+        #
+        # option-mode (Sensex/Nifty):
+        #   Signal from SCAN STRIKE option bars → SL/T1 in OPTION ₹.
+        #   pos["leg"]=CE1/PE1 → _opt_tick_loop drives _check_tick_exit with option LTP.
+        #   scan_key = scan strike option key (tracked_sym fixed; NOT the exec/1-ITM key).
         if self._htf_source == "futures":
-            # Signal + SL + T1 all in FUTURES price domain (same chart as detection).
-            # pos["leg"]="FUT" → _idx_tick_loop calls _check_tick_exit with futures LTP.
-            # Order and actual close go to exec_key (1-ITM option) via _place_exit.
             tracking_leg = "FUT"
-            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)
-            t1_price     = round(htf_zone.get("sl", 0), 2)   # next HTF resistance in futures ₹
+            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # futures zone_low
+            t1_price     = round(htf_zone.get("sl", 0), 2)             # next HTF resistance (futures ₹)
             t1_price_fut = None
         else:
-            tracking_leg = leg           # option bars drive both SL and T1
-            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)
-            t1_price     = round(htf_zone.get("sl", 0), 2)
+            tracking_leg = leg   # CE1 or PE1 — scan strike option bars
+            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # option zone_low (option ₹)
+            t1_price     = round(htf_zone.get("sl", 0), 2)             # option HTF SL target
             t1_price_fut = None
 
         self._log.info(
