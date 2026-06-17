@@ -998,6 +998,7 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadStrategyTelemetry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
+      setInterval(() => { this.loadTrapScannerBooks(); }, 5000);
       // Live positions — auto-refresh every 3s while viewing the positions tab.
       setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 1500);
     },
@@ -1739,6 +1740,14 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await this._fetch('/api/admin/trap_scanner/status');
         if (r) { const d = await r.json(); if (d && d.books) this.trapScannerBooks = d.books; }
+      } catch (e) {}
+      // Also load client-scoped books (works for non-admin users too; merges if admin already loaded all)
+      try {
+        const rc = await this._fetch('/api/client/trap_scanner/status');
+        if (rc) { const dc = await rc.json(); if (dc && dc.books) {
+          const existing = new Set(this.trapScannerBooks.map(b=>b.client_id+'_'+b.binding_id+'_'+b.underlying));
+          dc.books.forEach(b => { if (!existing.has(b.client_id+'_'+b.binding_id+'_'+b.underlying)) this.trapScannerBooks.push(b); });
+        }}
       } catch (e) {}
     },
 
@@ -2534,6 +2543,33 @@ document.addEventListener('alpine:init', () => {
           this.csHistPage = 1;   // reset to first page on (re)load
         }
       } catch {} finally { this.csHistoryLoading = false; }
+    },
+
+    // Find the live trap scanner book for a given (binding_id, underlying).
+    trapBookFor(bid, und) {
+      return this.trapScannerBooks.find(b => b.binding_id === bid && b.underlying === und) || null;
+    },
+
+    // Refresh trap scanner books (called every 5s for live client card updates).
+    async loadTrapScannerBooks() {
+      try {
+        const rc = await this._fetch('/api/client/trap_scanner/status');
+        if (rc) { const d = await rc.json(); if (d && d.books) {
+          d.books.forEach(nb => {
+            const idx = this.trapScannerBooks.findIndex(b=>b.binding_id===nb.binding_id&&b.underlying===nb.underlying);
+            if (idx >= 0) this.trapScannerBooks.splice(idx, 1, nb); else this.trapScannerBooks.push(nb);
+          });
+        }}
+      } catch (e) {}
+      if (this.screen === 'admin') try {
+        const ra = await this._fetch('/api/admin/trap_scanner/status');
+        if (ra) { const d = await ra.json(); if (d && d.books) {
+          d.books.forEach(nb => {
+            const idx = this.trapScannerBooks.findIndex(b=>b.binding_id===nb.binding_id&&b.underlying===nb.underlying);
+            if (idx >= 0) this.trapScannerBooks.splice(idx, 1, nb); else this.trapScannerBooks.push(nb);
+          });
+        }}
+      } catch (e) {}
     },
 
     // Day P&L for one broker binding = sum of running + booked across its deployed strategies.
@@ -7829,7 +7865,7 @@ function histReplay() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Liquidity Trap Trading'"></div>
+                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':'Liquidity Trap Trading'"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -7935,7 +7971,61 @@ function histReplay() {
                       </div>
                     </div>
                   </template>
-                  <template x-if="!csPositions[b.binding_id]||!csPositions[b.binding_id][dep.strategy_name]||(csPositions[b.binding_id][dep.strategy_name].legs||[]).length===0">
+                  <!-- Trap Scanner live zone panel (replaces generic idle message for trap_scanner) -->
+                  <template x-if="dep.strategy_name==='trap_scanner'">
+                    <div x-data="{ get bk(){ return trapBookFor(b.binding_id, dep.underlying) } }">
+                      <!-- Status header -->
+                      <div class="flex flex-wrap gap-2 text-xs font-mono mb-2">
+                        <span :style="(bk&&bk.initialized)?'color:var(--t-green)':'color:var(--t-yellow)'"
+                              x-text="bk?(bk.initialized?(bk.intraday_mode?'INTRADAY CASCADE':'HTF READY'):'WARMING'):'Not started'"></span>
+                        <span x-show="bk&&bk.gap_fired" style="color:var(--t-red)">GAP</span>
+                        <span style="color:var(--t-muted)" x-show="bk&&bk.spot_ltp" x-text="'Spot '+bk.spot_ltp"></span>
+                        <span style="color:var(--t-muted)" x-show="bk&&bk.htf_atr>0" x-text="'ATR '+bk.htf_atr"></span>
+                        <span x-show="bk&&bk.ce1_strike" x-text="'CE='+bk.ce1_strike" style="color:var(--t-green)"></span>
+                        <span x-show="bk&&bk.ce2_strike" x-text="'CE2='+bk.ce2_strike" style="color:var(--t-green)"></span>
+                        <span x-show="bk&&bk.pe1_strike" x-text="'PE='+bk.pe1_strike" style="color:var(--t-red)"></span>
+                        <span x-show="bk&&bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
+                      </div>
+                      <!-- Zone table -->
+                      <template x-if="bk&&bk.zones&&bk.zones.length>0">
+                        <div>
+                          <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
+                            <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>REACH</span><span>LTF STATUS</span>
+                          </div>
+                          <template x-for="z in bk.zones" :key="z.uid">
+                            <div class="grid text-center py-0.5 text-xs font-mono"
+                                 :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
+                              <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
+                              <span x-text="z.zone_low"></span>
+                              <span x-text="z.zone_high"></span>
+                              <span x-text="z.zone_trigger"></span>
+                              <span x-text="z.htf_target"></span>
+                              <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'YES':'FAR'"></span>
+                              <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
+                                    x-text="z.ltf_status==='entered'?'ENTERED':z.ltf_status==='ltf_signal'?'SIGNAL':z.ltf_status==='watching'?'WATCHING':'—'"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <div x-show="!bk||!bk.zones||bk.zones.length===0" class="text-xs font-mono py-1" style="color:var(--t-muted)">No HTF zones detected yet.</div>
+                      <!-- Open position -->
+                      <template x-if="bk&&bk.position">
+                        <div class="mt-2 pt-2 border-t flex flex-wrap gap-2 text-xs font-mono" style="border-color:var(--t-border)">
+                          <span style="color:var(--t-yellow);font-weight:700">POSITION</span>
+                          <span style="color:var(--t-bright)" x-text="bk.position.side+' '+bk.position.strike"></span>
+                          <span x-text="'entry='+bk.position.entry_price"></span>
+                          <span x-text="'SL='+bk.position.sl_price" style="color:var(--t-red)"></span>
+                          <span x-show="bk.position.t1_hit" x-text="'trail_SL='+bk.position.trail_sl" style="color:var(--t-cyan)"></span>
+                          <span x-text="'T1='+bk.position.t1_price" style="color:var(--t-green)"></span>
+                          <span x-text="'qty='+bk.position.remaining_qty+'/'+bk.position.total_qty" style="color:var(--t-muted)"></span>
+                          <span x-show="bk.position.t1_hit" style="color:var(--t-green);font-weight:700">T1✓</span>
+                        </div>
+                      </template>
+                      <div x-show="!bk||!bk.position" class="text-xs font-mono mt-1" style="color:var(--t-muted)">No open position — scanning zones</div>
+                    </div>
+                  </template>
+
+                  <template x-if="dep.strategy_name!=='trap_scanner'&&(!csPositions[b.binding_id]||!csPositions[b.binding_id][dep.strategy_name]||(csPositions[b.binding_id][dep.strategy_name].legs||[]).length===0)">
                     <div class="text-xs text-center py-4 font-mono" style="color:var(--t-muted)">
                       No open position — waiting for entry signal
                     </div>

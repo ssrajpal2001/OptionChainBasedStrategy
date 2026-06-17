@@ -5359,6 +5359,16 @@ class DashboardServer:
                 return {"ok": True, "books": []}
             return {"ok": True, "books": mgr.telemetry_all()}
 
+        @app.get("/api/client/trap_scanner/status", tags=["Client"])
+        async def api_client_trap_scanner_status(user: dict = Depends(_current_user)):
+            """Return live telemetry for trap scanner books belonging to this client."""
+            mgr = getattr(_srv, "_trap_scanner_manager", None)
+            if mgr is None:
+                return {"ok": True, "books": []}
+            cid = user.get("client_id") or user.get("username")
+            books = [b for b in mgr.telemetry_all() if b.get("client_id") == cid]
+            return {"ok": True, "books": books}
+
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
