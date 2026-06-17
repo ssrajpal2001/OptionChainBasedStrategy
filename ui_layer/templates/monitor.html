@@ -5283,34 +5283,54 @@ function histReplay() {
                   </div>
                 </div>
               </template>
-              <!-- Contracts table: LTP + nearest trigger per leg -->
+              <!-- Contracts table: per-leg zone + LTF status (matches NiftyTrapScanner reference) -->
               <template x-if="bk.contracts">
                 <div class="mt-2 text-xs font-mono">
-                  <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;color:var(--t-muted)">
+                  <!-- Header -->
+                  <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;color:var(--t-muted)">
                     <span>LEG</span><span>STRIKE</span><span>LTP</span>
-                    <span x-text="bk.htf_source==='futures'?'FUT ZONE H':'ZONE H'"></span>
-                    <span>TRIGGER</span><span>T1 TGT</span><span>STATUS</span>
+                    <span x-text="bk.htf_source==='futures'?'HTF ZONE (FUT PRICE)':'HTF ZONE (OPT PRICE)'"></span>
+                    <span>LTF STATUS</span>
                   </div>
                   <template x-for="[leg, ct] in Object.entries(bk.contracts)" :key="leg">
+                    <!-- CE1 / PE1 — show full zone info block -->
                     <template x-if="leg==='CE1'||leg==='PE1'">
-                      <div class="grid py-0.5"
-                           :style="'grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;border-top:1px solid var(--t-border);'+(ct.zone?'color:var(--t-bright)':'color:var(--t-dim)')">
-                        <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'" x-text="leg"></span>
-                        <span x-text="ct.strike||'—'"></span>
-                        <span style="color:var(--t-bright)" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
-                        <span x-text="ct.zone?ct.zone.zone_high:'—'"></span>
-                        <span x-text="ct.zone?ct.zone.zone_trigger:'—'"></span>
-                        <span x-text="ct.zone?ct.zone.t1_target:'—'"></span>
-                        <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
-                              x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP!':'ARMED'):'—'"></span>
+                      <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
+                        <!-- LEG -->
+                        <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
+                        <!-- STRIKE -->
+                        <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
+                        <!-- LTP — highlight bright, shows option premium -->
+                        <span style="color:var(--t-yellow);font-weight:700" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                        <!-- Zone block — matches reference format -->
+                        <div x-show="ct.zone">
+                          <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
+                          <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
+                          <div style="color:var(--t-cyan)"
+                               x-text="ct.zone?(bk.htf_source==='futures'?(leg.startsWith('CE')?'Entry if FUT < ':'Entry if FUT > ')+ct.zone.zone_trigger:(leg.startsWith('CE')?'Entry if OPT < ':'Entry if OPT > ')+ct.zone.zone_trigger):'—'"></div>
+                          <div style="color:var(--t-green)" x-text="ct.zone&&ct.zone.t1_target?'Target: '+ct.zone.t1_target:''"></div>
+                          <div x-show="ct.zone?.dist_pts!=null"
+                               :style="ct.zone?.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
+                               x-text="ct.zone?.dist_pts!=null?ct.zone.dist_pts+' pts away':''"></div>
+                        </div>
+                        <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
+                        <!-- LTF Status -->
+                        <div>
+                          <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
+                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':'Monitoring'):'—'"></span>
+                          <div x-show="ct.zone&&ct.zone.ltf_status==='watching'" style="color:var(--t-dim);margin-top:2px"
+                               x-text="'5-min trap needed'+(bk.htf_source==='futures'?' inside FUT zone':' inside zone')"></div>
+                        </div>
                       </div>
                     </template>
+                    <!-- CE2 / PE2 — compact hedge row -->
                     <template x-if="leg==='CE2'||leg==='PE2'">
-                      <div class="grid py-0.5" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
+                      <div class="grid py-0.5" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-dim)">
                         <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'" x-text="leg"></span>
                         <span x-text="ct.strike||'—'"></span>
                         <span x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
-                        <span>—</span><span>—</span><span>—</span><span style="color:var(--t-dim)">hedge</span>
+                        <span style="color:var(--t-dim)">hedge leg</span>
+                        <span style="color:var(--t-dim)">—</span>
                       </div>
                     </template>
                   </template>
@@ -8098,21 +8118,48 @@ function histReplay() {
                       <!-- Contracts table (CE1/CE2/PE1/PE2 LTP + zone — mirrors NiftyTrapScanner) -->
                       <template x-if="bk&&bk.contracts">
                         <div class="mt-2 text-xs font-mono">
-                          <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;color:var(--t-muted)">
-                            <span>LEG</span><span>STRIKE</span><span>LTP</span><span>ZONE H</span><span>TRIGGER</span><span>T1 TGT</span><span>LTF STATUS</span>
+                          <!-- Header -->
+                          <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;color:var(--t-muted)">
+                            <span>LEG</span><span>STRIKE</span><span>LTP</span>
+                            <span x-text="bk.htf_source==='futures'?'HTF ZONE (FUT PRICE)':'HTF ZONE (OPT PRICE)'"></span>
+                            <span>LTF STATUS</span>
                           </div>
                           <template x-for="[leg, ct] in Object.entries(bk.contracts)" :key="leg">
-                            <div class="grid py-0.5"
-                                 :style="'grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 1fr 1fr 5rem;gap:2px;border-top:1px solid var(--t-border);'+(ct.zone?'color:var(--t-bright)':'color:var(--t-dim)')">
-                              <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'" x-text="leg"></span>
-                              <span x-text="ct.strike||'—'"></span>
-                              <span x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
-                              <span x-text="ct.zone?ct.zone.zone_high:'—'"></span>
-                              <span x-text="ct.zone?ct.zone.zone_trigger:'—'"></span>
-                              <span x-text="ct.zone?ct.zone.t1_target:'—'"></span>
-                              <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow)':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                                    x-text="ct.zone?(ct.zone.ltf_status==='entered'?'ENTERED':ct.zone.ltf_status==='ltf_signal'?'SIGNAL':'TRAPPED'):'—'"></span>
-                            </div>
+                            <!-- CE1 / PE1 — full zone info block -->
+                            <template x-if="leg==='CE1'||leg==='PE1'">
+                              <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
+                                <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
+                                <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
+                                <span style="color:var(--t-yellow);font-weight:700" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                                <div x-show="ct.zone">
+                                  <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
+                                  <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
+                                  <div style="color:var(--t-cyan)"
+                                       x-text="ct.zone?(bk.htf_source==='futures'?(leg.startsWith('CE')?'Entry if FUT < ':'Entry if FUT > ')+ct.zone.zone_trigger:(leg.startsWith('CE')?'Entry if OPT < ':'Entry if OPT > ')+ct.zone.zone_trigger):'—'"></div>
+                                  <div style="color:var(--t-green)" x-text="ct.zone&&ct.zone.t1_target?'Target: '+ct.zone.t1_target:''"></div>
+                                  <div x-show="ct.zone?.dist_pts!=null"
+                                       :style="ct.zone?.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
+                                       x-text="ct.zone?.dist_pts!=null?ct.zone.dist_pts+' pts away':''"></div>
+                                </div>
+                                <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
+                                <div>
+                                  <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
+                                        x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':'Monitoring'):'—'"></span>
+                                  <div x-show="ct.zone&&ct.zone.ltf_status==='watching'" style="color:var(--t-dim);margin-top:2px"
+                                       x-text="'5-min trap needed'+(bk.htf_source==='futures'?' inside FUT zone':' inside zone')"></div>
+                                </div>
+                              </div>
+                            </template>
+                            <!-- CE2 / PE2 — compact hedge row -->
+                            <template x-if="leg==='CE2'||leg==='PE2'">
+                              <div class="grid py-0.5" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-dim)">
+                                <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'" x-text="leg"></span>
+                                <span x-text="ct.strike||'—'"></span>
+                                <span x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                                <span style="color:var(--t-dim)">hedge leg</span>
+                                <span style="color:var(--t-dim)">—</span>
+                              </div>
+                            </template>
                           </template>
                         </div>
                       </template>

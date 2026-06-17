@@ -1638,12 +1638,16 @@ class TrapScannerEngine:
                 return None
             z = trapped[-1]
             uid = _zone_uid(z)
+            trig = round(z.get("zone_trigger", z.get("entry", 0)), 2)
+            dist = round(abs(ltp - trig), 1) if ltp else None
             return {
                 "zone_high":    round(z.get("zone_high", 0), 2),
                 "zone_low":     round(z.get("zone_low", 0), 2),
-                "zone_trigger": round(z.get("zone_trigger", z.get("entry", 0)), 2),
+                "zone_trigger": trig,
                 "t1_target":    round(z.get("sl", 0), 2),
+                "dist_pts":     dist,
                 "trapped_on":   str(z.get("trapped_on", "")),
+                "htf_label":    f"{self._htf_min}-min",
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
             }
 
@@ -1687,6 +1691,8 @@ class TrapScannerEngine:
                 "zone_trigger": trig,
                 "t1_target":    round(best.get("sl", 0), 2),
                 "dist_pts":     dist,
+                "trapped_on":   str(best.get("trapped_on", "") or ""),
+                "htf_label":    f"{self._htf_min}-min",
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
             }
 
