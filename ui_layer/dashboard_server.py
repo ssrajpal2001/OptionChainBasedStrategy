@@ -2483,6 +2483,39 @@ class DashboardServer:
                     logger.error("[Terminal] [%s/%s] Delta connect error: %s", cid, binding_id, exc)
                     return {"ok": False, "error": f"Delta connect error: {exc}"}
 
+            # Angel One headless auth — MPIN + TOTP, no OAuth needed.
+            if provider == "angelone" and b.get("password"):
+                try:
+                    from config.client_profiles import BrokerBinding as _BB
+                    from execution_bridge.base_broker import create_broker
+                    _bb = _BB(
+                        binding_id=binding_id, provider="angelone", label=b.get("label", ""),
+                        user_id=user_id, api_key=api_key, api_secret="",
+                        password=b.get("password", ""), totp_secret=b.get("totp_secret", ""),
+                        access_token="",
+                        is_trade_enabled=bool(b.get("is_trade_enabled", 1)),
+                        lot_multiplier=float(b.get("lot_multiplier", 1.0) or 1.0),
+                        product_type=(b.get("product_type", "") or "MIS"),
+                        trading_mode=(b.get("trading_mode", "paper") or "paper"),
+                        source_ip=(b.get("source_ip", "") or ""),
+                    )
+                    _nb = create_broker(_bb, cid)
+                    if await _nb.authenticate():
+                        await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                        if _srv._router is not None:
+                            _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
+                            try:
+                                _srv._router._pool.add_broker_to_worker(cid, binding_id, _nb, "angelone")
+                            except Exception:
+                                pass
+                        logger.info("[Terminal] [%s/%s] ANGELONE connected (headless MPIN+TOTP).", cid, binding_id)
+                        return {"ok": True, "connected": True, "message": "Angel One connected (headless).",
+                                "flow": "headless"}
+                    return {"ok": False, "error": "Angel One headless auth failed — check CLIENT ID, MPIN, and TOTP secret."}
+                except Exception as exc:
+                    logger.error("[Terminal] [%s/%s] Angel One connect error: %s", cid, binding_id, exc)
+                    return {"ok": False, "error": f"Angel One connect error: {exc}"}
+
             ok, msg, token = await _he.authenticate_binding(b, cid, _srv._client_db)
 
             if ok:
@@ -2505,6 +2538,8 @@ class DashboardServer:
                             label=_row.get("label", ""), user_id=_row.get("user_id", ""),
                             api_key=_row.get("api_key", ""), api_secret=_row.get("api_secret", ""),
                             access_token=_row.get("access_token", ""),
+                            password=_row.get("password", ""),
+                            totp_secret=_row.get("totp_secret", ""),
                             is_trade_enabled=bool(_row.get("is_trade_enabled", 1)),
                             lot_multiplier=float(_row.get("lot_multiplier", 1.0) or 1.0),
                             product_type=(_row.get("product_type", "") or "MIS"),
