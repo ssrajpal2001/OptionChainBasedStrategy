@@ -741,22 +741,8 @@ class TrapScannerEngine:
                         if len(self._bars_fut) > 2000:
                             del self._bars_fut[:-2000]
                         self._on_candle_close("FUT", tick.timestamp)
-                    # T1 check for futures-mode: futures LTP reaches HTF zone target.
-                    # SL is tracked by option ticks (CE1/PE1) in _opt_tick_loop.
-                    # Only T1 uses futures price (because T1 target is in futures terms).
-                    if self._position:
-                        pos = self._position
-                        t1f = pos.get("t1_price_fut")
-                        if t1f and not pos.get("t1_hit") and fut_ltp >= t1f:
-                            pos["t1_hit"] = True
-                            pos["remaining_qty"] -= pos["t1_qty"]
-                            self._log.info(
-                                "T1 HIT (futures) fut_ltp=%.2f t1_fut=%.2f qty=%d",
-                                fut_ltp, t1f, pos["t1_qty"],
-                            )
-                            oid = await self._place_exit(pos["t1_qty"], pos["entry_price"], "T1")
-                            pos["order_id_t1"] = oid
-                            self._persist_position()
+                    # All exits (T1, SL, trail) are tracked via option ticks in _opt_tick_loop.
+                    # Futures LTP is only used for HTF zone detection + dual-confirm at signal time.
         except asyncio.CancelledError:
             pass
 
@@ -817,11 +803,15 @@ class TrapScannerEngine:
         Normal mode: 5-min LTF scan on OPTION premium bars inside HTF spot zones.
         BEAR spot zones → scan CE1/CE2 option bars
         BULL spot zones → scan PE1/PE2 option bars
-        FUTURES zones   → scan FUT bars
+        FUTURES mode    → dual-confirm: option bar trap + futures price inside HTF zone
         """
         if self._htf_source == "futures":
             zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
-            self._run_ltf_on("FUT", self._bars_fut, zones, "CE")
+            # LTF runs on OPTION bars; futures price dual-confirms zone membership
+            if leg in ("CE1",):
+                self._run_ltf_futures_mode("CE1", self._bars_ce1, zones, "CE")
+            elif leg in ("PE1",):
+                self._run_ltf_futures_mode("PE1", self._bars_pe1, zones, "PE")
             return
 
         # BEAR zones → buy CE
@@ -883,6 +873,59 @@ class TrapScannerEngine:
                     self._on_entry_signal(leg_key, opt_type, best, zone)
                 )
                 return
+
+    def _run_ltf_futures_mode(self, leg_key: str, bars: List[dict],
+                               htf_zones: List[dict], opt_type: str) -> None:
+        """
+        Futures-mode LTF: scan OPTION bars (CE1/PE1) for 5-min traps.
+        Dual-confirmation: option trap must occur while futures price is inside an HTF zone.
+
+        Unlike option-mode, zone_high/low are in FUTURES price units and cannot be used
+        to filter option bar traps. Instead:
+          1. Scan all option bar traps (no zone-price filter)
+          2. Check current futures LTP against each HTF zone
+          3. Fire entry only when futures LTP is inside a trapped HTF zone
+        """
+        if not htf_zones or len(bars) < 3:
+            return
+        today = datetime.now(IST).date()
+        today_bars = [b for b in bars
+                      if pd.to_datetime(b.get("datetime", "")).date() == today]
+        if len(today_bars) < 3:
+            return
+        df = _bars_to_df(today_bars[-200:])
+        fut_ltp = self._ltp_cache.get("FUT", 0.0)
+
+        # Scan option bars for traps — pass extreme high/low so no price-range filter applies
+        scan_fn = getattr(scanner, "scan_ltf_bull", scanner.scan_ltf) if opt_type == "PE" else scanner.scan_ltf
+        _, ltf_entries = scan_fn(
+            df,
+            htf_zone_high=df["high"].max() if not df.empty else 9999999,
+            htf_zone_low=0.0,
+            htf_ref_bar="",
+            htf_trap_bar="",
+            htf_target=0.0,
+        )
+        best = scanner.select_best_ltf_entry(ltf_entries)
+        if not best:
+            return
+
+        for zone in htf_zones:
+            uid = _zone_uid(zone)
+            if uid in self._notified_uids:
+                continue
+            if uid not in self._zone_ltf_status:
+                self._zone_ltf_status[uid] = "watching"
+            # Dual-confirm: current futures price must be inside this HTF zone
+            zh = zone.get("zone_high", 0)
+            zl = zone.get("zone_low", 0)
+            if not (fut_ltp > 0 and zl <= fut_ltp <= zh):
+                continue
+            self._zone_ltf_status[uid] = "ltf_signal"
+            asyncio.get_event_loop().create_task(
+                self._on_entry_signal(leg_key, opt_type, best, zone)
+            )
+            return
 
     async def _cascade_scan(self, ts: datetime) -> None:
         """
@@ -1004,15 +1047,40 @@ class TrapScannerEngine:
         total_qty = self._lot_size * self._lot_mul
         t1_qty    = total_qty // 2
 
-        # futures-mode (CrudeOil/BTC/ETH): zone prices are in FUTURES units.
-        # SL/T1 must be in OPTION price units. Use scan-strike option LTP at signal time.
-        # T1 is checked against FUTURES LTP (in _idx_tick_loop); SL against option LTP.
+        # futures-mode (CrudeOil/BTC/ETH): entry fires from option bar trap (leg=CE1/PE1).
+        # zone_high/low in `entry` are in OPTION price units (from option bar scan).
+        # SL = max(option zone_low, entry_price*(1-pct)) in option ₹.
+        # T1 = nearest option zone_high above entry (from option HTF bars).
+        # Futures price is NOT checked again after entry — all exits on option LTP.
         if self._htf_source == "futures":
-            tracking_leg = "CE1" if opt_type == "CE" else "PE1"  # use option tick for SL
-            scan_opt_ltp = self._ltp_cache.get(tracking_leg) or 0.0
-            sl_price     = round(max(scan_opt_ltp - self._sl_buf, 1.0), 2)
-            t1_price     = 0.0           # set below in position dict (futures T1)
-            t1_price_fut = round(htf_zone.get("sl", 0), 2)  # futures target for idx-tick check
+            tracking_leg = leg  # already CE1/PE1 from _run_ltf_futures_mode
+            scan_opt_ltp = self._ltp_cache.get(tracking_leg) or float(entry.get("zone_trigger", 0))
+            opt_zone_low = float(entry.get("zone_low", 0))
+            sl_from_zone = round(opt_zone_low - self._sl_buf, 2) if opt_zone_low > 0 else 0.0
+            sl_from_pct  = round(scan_opt_ltp * (1.0 - self._sl_buf / scan_opt_ltp if scan_opt_ltp > 0 else 0.02), 2)
+            sl_price     = max(sl_from_zone, sl_from_pct) if sl_from_zone > 0 else sl_from_pct
+            # T1: nearest option zone_high above entry from option HTF bars
+            opt_bars = self._bars_ce1 if opt_type == "CE" else self._bars_pe1
+            t1_price = 0.0
+            if opt_bars:
+                try:
+                    opt_df  = _bars_to_df(opt_bars)
+                    opt_htf = opt_df.resample(f"{self._htf_min}min", on="datetime").agg(
+                        {"open": "first", "high": "max", "low": "min", "close": "last"}
+                    ).dropna().reset_index()
+                    if len(opt_htf) >= 2:
+                        _, opt_zones = scanner.scan_htf(opt_htf)
+                        resistances = sorted(
+                            [z.get("zone_high", 0) for z in opt_zones
+                             if z.get("zone_high", 0) > scan_opt_ltp]
+                        )
+                        t1_price = round(resistances[0], 2) if resistances else round(scan_opt_ltp * 1.05, 2)
+                except Exception as exc:
+                    self._log.warning("T1 computation from option HTF failed: %s", exc)
+                    t1_price = round(scan_opt_ltp * 1.05, 2)
+            if t1_price <= 0:
+                t1_price = round(scan_opt_ltp * 1.05, 2)
+            t1_price_fut = None  # not used; all exits on option LTP
         else:
             tracking_leg = leg           # option bars drive both SL and T1
             sl_price     = round(entry["zone_low"] - self._sl_buf, 2)
