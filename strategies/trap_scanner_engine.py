@@ -402,12 +402,15 @@ class TrapScannerEngine:
             self._run_htf_scan()
             self._htf_atr_val = self._compute_htf_atr()
             self._check_zone_reachability()
+            # Point 11: restore today's position if restarted mid-day; discard yesterday's.
+            self._load_persisted_position()
             self._log.info(
-                "HTF scan: bear=%d bull=%d fut=%d ATR=%.2f intraday_mode=%s",
+                "HTF scan: bear=%d bull=%d fut=%d ATR=%.2f intraday_mode=%s position=%s",
                 sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED"),
                 sum(1 for e in self._htf_bull_zones if e["status"] == "TRAPPED"),
                 sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED"),
                 self._htf_atr_val, self._intraday_mode,
+                self._position["side"] if self._position else "none",
             )
 
             await self._subscribe_instruments()
@@ -873,6 +876,7 @@ class TrapScannerEngine:
             "order_id_entry": order_id,
             "order_id_t1":   None,
         }
+        self._persist_position()
         self._log.info("ENTRY PLACED fill=%.2f order=%s", avg, order_id)
 
     # ── Tick exit ─────────────────────────────────────────────────────────────
@@ -889,6 +893,7 @@ class TrapScannerEngine:
             self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d", ltp, pos["t1_price"], pos["t1_qty"])
             oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
             pos["order_id_t1"] = oid
+            self._persist_position()
 
         # Advance 5m trail SL using OPTION bar lows (only after T1)
         if pos["t1_hit"] and ts is not None:
@@ -902,6 +907,7 @@ class TrapScannerEngine:
             self._log.info("%s ltp=%.2f sl=%.2f qty=%d", reason, ltp, active_sl, remaining)
             await self._place_exit(remaining, active_sl, reason)
             self._position = None
+            self._clear_persisted_position()
 
     def _update_trail_sl(self, pos: dict, ts: datetime) -> None:
         """
@@ -945,6 +951,7 @@ class TrapScannerEngine:
             pos["trail_sl"] = candidate
             self._log.info("TRAIL_SL %.2f → %.2f (5m_low=%.2f buf=%.2f)",
                            old, candidate, prev_low, self._sl_buf)
+            self._persist_position()
 
     async def _place_exit(self, qty: int, price: float, reason: str) -> Optional[str]:
         if qty <= 0 or not self._position:
@@ -981,6 +988,7 @@ class TrapScannerEngine:
             self._log.info("EOD square-off: %d units", pos["remaining_qty"])
             await self._place_exit(pos["remaining_qty"], 0.0, "EOD")
         self._position = None
+        self._clear_persisted_position()
 
     def _reset_day_state(self) -> None:
         self._initialized   = False
@@ -1000,6 +1008,58 @@ class TrapScannerEngine:
         self._ce1_key = None; self._ce2_key = None
         self._pe1_key = None; self._pe2_key = None
         self._expiry_str = None
+        self._clear_persisted_position()
+
+    # ── Position persistence (Point 11: no carryforward across days) ──────────
+
+    def _position_file(self) -> str:
+        os.makedirs("data", exist_ok=True)
+        return os.path.join("data", f"trap_scanner_{self._cid}_{self._bid}_{self._und}.json")
+
+    def _persist_position(self) -> None:
+        """Write current position to disk so a restart can recover today's trade."""
+        try:
+            with open(self._position_file(), "w") as f:
+                json.dump(self._position, f)
+        except Exception as exc:
+            self._log.warning("_persist_position failed: %s", exc)
+
+    def _clear_persisted_position(self) -> None:
+        try:
+            p = self._position_file()
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+    def _load_persisted_position(self) -> None:
+        """
+        On morning_init: restore today's trade if the process restarted mid-day.
+        Any position whose entry_ts is NOT today is discarded (Point 11).
+        """
+        try:
+            p = self._position_file()
+            if not os.path.exists(p):
+                return
+            with open(p) as f:
+                saved = json.load(f)
+            if not saved:
+                return
+            entry_ts = saved.get("entry_ts", "")
+            entry_date = datetime.fromisoformat(entry_ts).date() if entry_ts else None
+            if entry_date != date.today():
+                self._log.info("Discarding persisted position from %s (not today)", entry_date)
+                self._clear_persisted_position()
+                return
+            self._position = saved
+            self._log.info(
+                "Restored persisted position: %s %s strike=%s entry=%.2f sl=%.2f qty=%d",
+                saved.get("side"), saved.get("leg"), saved.get("strike"),
+                saved.get("entry_price", 0), saved.get("sl_price", 0),
+                saved.get("remaining_qty", 0),
+            )
+        except Exception as exc:
+            self._log.warning("_load_persisted_position failed: %s", exc)
 
     # ── Broker ────────────────────────────────────────────────────────────────
 
