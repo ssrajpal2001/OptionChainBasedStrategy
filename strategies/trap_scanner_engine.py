@@ -234,10 +234,14 @@ class TrapScannerEngine:
         self._position: Optional[Dict] = None
 
         self._broker: Optional[Any] = None
+        self._rebalancer: Optional[Any] = None   # set via set_rebalancer()
         self._initialized   = False
         self._day_init_done = False
 
         self._log = self._make_logger()
+
+    def set_rebalancer(self, rebalancer) -> None:
+        self._rebalancer = rebalancer
 
     def _make_logger(self) -> logging.Logger:
         name = f"client.ts.{self._und}.{self._cid}.{self._bid}"
@@ -323,36 +327,28 @@ class TrapScannerEngine:
     async def _morning_init(self) -> bool:
         try:
             prev = await self._fetch_prev_day_ohlc()
+            if not prev:
+                self._log.warning(
+                    "No prev-day OHLC for %s — cannot compute pivots/strikes; will retry in 120s",
+                    self._und,
+                )
+                return False
+            H, L, C = prev["high"], prev["low"], prev["close"]
+            pivots = _pivot_levels(H, L, C)
+            self._log.info(
+                "Prev-day H=%.0f L=%.0f C=%.0f | P=%.0f R1=%.0f R2=%.0f S1=%.0f S2=%.0f",
+                H, L, C, pivots["pivot"], pivots["r1"], pivots["r2"],
+                pivots["s1"], pivots["s2"],
+            )
 
             today_open = self._spot_cache if self._spot_cache > 0 else await self._fetch_today_open()
             if today_open <= 0:
-                today_open = (prev["close"] if prev else 0.0)
+                today_open = C
             self._spot_open = today_open
+            gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
+            self._gap_fired = gap_pct >= self._gap_thresh
 
-            if prev:
-                H, L, C = prev["high"], prev["low"], prev["close"]
-                pivots = _pivot_levels(H, L, C)
-                self._log.info(
-                    "Prev-day H=%.0f L=%.0f C=%.0f | P=%.0f R1=%.0f R2=%.0f S1=%.0f S2=%.0f",
-                    H, L, C, pivots["pivot"], pivots["r1"], pivots["r2"],
-                    pivots["s1"], pivots["s2"],
-                )
-                gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
-                self._gap_fired = gap_pct >= self._gap_thresh
-            else:
-                # Fallback: no prev-day OHLC (BSE/MCX REST issue or expired token).
-                # Use live spot to place ATM-based strikes (equivalent to no-gap pivot mode
-                # with ATM as the reference). HTF scan will still run on intraday bars.
-                self._log.warning(
-                    "No prev-day OHLC for %s — using live spot ATM for strikes", self._und
-                )
-                gap_pct = 0.0
-                self._gap_fired = False
-                pivots = None
-
-            # Strike selection
-            if self._gap_fired and prev:
-                C = prev["close"]
+            if self._gap_fired:
                 direction = "UP" if today_open > C else "DOWN"
                 atm = _round_strike(today_open, self._step)
                 if direction == "UP":
@@ -371,7 +367,7 @@ class TrapScannerEngine:
                     self._ce1_strike, self._ce2_strike,
                     self._pe1_strike, self._pe2_strike,
                 )
-            elif pivots:
+            else:
                 # CE at support (S1/S2): bears short at support → CE trapped when price bounces
                 # PE at resistance (R1/R2): bulls buy at resistance → PE trapped when price drops
                 self._ce1_strike = _round_strike(pivots["s1"], self._step)
@@ -386,22 +382,6 @@ class TrapScannerEngine:
                     self._ce2_strike, pivots["s2"],
                     self._pe1_strike, pivots["r1"],
                     self._pe2_strike, pivots["r2"],
-                )
-            else:
-                # No prev-day data at all: ATM ± near/far offsets
-                ref = today_open or self._spot_cache
-                if not ref:
-                    self._log.warning("No spot reference for strike selection — aborting init")
-                    return False
-                atm = _round_strike(ref, self._step)
-                self._ce1_strike = atm - self._gap_near
-                self._ce2_strike = atm - self._gap_far
-                self._pe1_strike = atm + self._gap_near
-                self._pe2_strike = atm + self._gap_far
-                self._log.info(
-                    "FALLBACK strikes (no OHLC) ATM=%d → CE1=%d CE2=%d PE1=%d PE2=%d",
-                    atm, self._ce1_strike, self._ce2_strike,
-                    self._pe1_strike, self._pe2_strike,
                 )
 
             self._expiry_str = await self._get_expiry()
@@ -858,13 +838,11 @@ class TrapScannerEngine:
 
         # Subscribe the 1-ITM option key for live P&L and SL tracking
         exec_key = self._build_upstox_key(strike, opt_type)
-        try:
-            from data_layer.strike_rebalancer import PinRequest
-            await self._bus.publish(Topic.PIN_REQUEST,
-                                    PinRequest(instrument_key=exec_key,
-                                               owner=f"trap_exec_{self._cid}_{self._bid}"))
-        except Exception:
-            pass
+        if self._rebalancer is not None:
+            try:
+                self._rebalancer.pin_strike(self._und, float(strike))
+            except Exception:
+                pass
 
         broker = await self._ensure_broker()
         if not broker:
@@ -1145,7 +1123,7 @@ class TrapScannerEngine:
             today   = date.today()
             fr_date = today - timedelta(days=10)
             url = (f"https://api.upstox.com/v2/historical-candle/"
-                   f"{spot_key}/1day/{today}/{fr_date}")
+                   f"{spot_key}/day/{today}/{fr_date}")
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
@@ -1242,21 +1220,20 @@ class TrapScannerEngine:
         return None
 
     async def _subscribe_instruments(self) -> None:
-        keys = [k for k in [
-            self._ce1_key, self._ce2_key,
-            self._pe1_key, self._pe2_key,
-            self._fut_key,
-        ] if k]
-        if not keys:
+        if self._rebalancer is None:
+            self._log.warning("No rebalancer set — tracked strikes will rely on ATM window only")
             return
-        try:
-            from data_layer.strike_rebalancer import PinRequest
-            for key in keys:
-                pr = PinRequest(instrument_key=key,
-                                owner=f"trap_{self._cid}_{self._bid}")
-                await self._bus.publish(Topic.PIN_REQUEST, pr)
-        except Exception as exc:
-            self._log.warning("_subscribe_instruments: %s", exc)
+        for strike in [self._ce1_strike, self._ce2_strike, self._pe1_strike, self._pe2_strike]:
+            if strike:
+                try:
+                    self._rebalancer.pin_strike(self._und, float(strike))
+                except Exception as exc:
+                    self._log.warning("pin_strike %s %s: %s", self._und, strike, exc)
+        self._log.info(
+            "pinned CE1=%s CE2=%s PE1=%s PE2=%s for %s",
+            self._ce1_strike, self._ce2_strike,
+            self._pe1_strike, self._pe2_strike, self._und,
+        )
 
     def _build_upstox_key(self, strike: Optional[int], opt_type: str) -> str:
         if not strike:

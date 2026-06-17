@@ -29,7 +29,14 @@ class TrapBookManager:
         self._indices = {str(i).upper() for i in (monitored_indices or [])}
         self._reconcile_sec = reconcile_sec
         self._books: Dict[Key, TrapScannerEngine] = {}
+        self._rebalancer = None
         self._running = False
+
+    def set_rebalancer(self, rebalancer) -> None:
+        self._rebalancer = rebalancer
+        # Apply to any already-running books
+        for eng in self._books.values():
+            eng.set_rebalancer(rebalancer)
 
     @property
     def books(self) -> List[TrapScannerEngine]:
@@ -107,6 +114,8 @@ class TrapBookManager:
                     ts_admin_cfg=ts_cfg,
                     client_db=self._db,
                 )
+                if self._rebalancer is not None:
+                    eng.set_rebalancer(self._rebalancer)
                 eng.start()
                 self._books[key] = eng
                 logger.info("TrapBookManager: spawned %s/%s/%s (lots=%d)",

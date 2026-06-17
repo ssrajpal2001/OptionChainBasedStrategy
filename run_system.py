@@ -487,6 +487,8 @@ async def _run_live(
     rebalancer     = StrikeRebalancer(bus, cfg, feeder)
     # Let the trap pin its deep-ITM tracked strikes so cleanup keeps them live.
     trap_engine.set_rebalancer(rebalancer)
+    # Give the trap scanner book manager the rebalancer so new engines can pin their strikes.
+    trap_scanner_manager.set_rebalancer(rebalancer)
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 
