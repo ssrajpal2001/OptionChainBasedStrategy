@@ -57,19 +57,19 @@ logger = logging.getLogger(__name__)
 # ── Per-index config ──────────────────────────────────────────────────────────
 _INDEX_CFG: Dict[str, dict] = {
     "NIFTY":      {"step": 100, "lot": 75,  "gap_near": 200, "gap_far": 400,
-                   "sl_buf": 2.0, "cutoff": "13:45", "sq_off": "14:00",
+                   "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "spot"},
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
-                   "sl_buf": 4.0, "cutoff": "13:45", "sq_off": "14:00",
+                   "sl_buf": 4.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "spot"},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
-                   "sl_buf": 2.0, "cutoff": "13:45", "sq_off": "14:00",
+                   "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "spot"},
     "SENSEX":     {"step": 100, "lot": 20,  "gap_near": 300, "gap_far": 600,
-                   "sl_buf": 2.0, "cutoff": "13:45", "sq_off": "14:00",
+                   "sl_buf": 2.0, "cutoff": "15:20", "sq_off": "15:25",
                    "window": None, "exchange": "BFO", "htf_source": "spot"},
     "MIDCPNIFTY": {"step": 25,  "lot": 75,  "gap_near": 100, "gap_far": 200,
-                   "sl_buf": 1.0, "cutoff": "13:45", "sq_off": "14:00",
+                   "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "spot"},
     "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "22:45", "sq_off": "23:00",
@@ -305,6 +305,10 @@ class TrapScannerEngine:
                     await self._eod_square_off()
                     self._reset_day_state()
                 elif not self._initialized and now.time() >= market_open:
+                    # Never re-init after sq_off time — prevents infinite EOD→init→EOD loop
+                    if now.time() >= time(sq_h, sq_m):
+                        await asyncio.sleep(60)
+                        continue
                     if not self._day_init_done:
                         ok = await self._morning_init()
                         self._day_init_done = True
