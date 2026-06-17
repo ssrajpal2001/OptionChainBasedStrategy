@@ -351,11 +351,26 @@ class TrapScannerEngine:
                 pivots["s1"], pivots["s2"],
             )
 
-            today_open = self._spot_cache if self._spot_cache > 0 else await self._fetch_today_open()
+            # Always fetch today_open via REST (not _spot_cache) — live tick can give stale/wrong
+            # values for BSE SENSEX; REST is more reliable for gap calculation at morning init
+            today_open = await self._fetch_today_open()
+            if today_open <= 0:
+                today_open = self._spot_cache if self._spot_cache > 0 else C
             if today_open <= 0:
                 today_open = C
             self._spot_open = today_open
             gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
+            # Sanity: index gaps > 4% are almost impossible for NSE/BSE — bad feed value
+            if gap_pct > 4.0 and self._htf_source == "option":
+                self._log.warning(
+                    "Gap %.1f%% > 4%% looks like bad spot_cache; re-fetching today_open via REST",
+                    gap_pct,
+                )
+                fallback = await self._fetch_today_open()
+                if fallback > 0:
+                    today_open = fallback
+                    self._spot_open = today_open
+                    gap_pct = abs(today_open - C) / C * 100
             self._gap_fired = gap_pct >= self._gap_thresh
 
             if self._gap_fired:
