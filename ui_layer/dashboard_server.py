@@ -305,6 +305,8 @@ try:
         user_id:             str   = ""
         api_key:             str   = ""
         api_secret:          str   = ""
+        password:            str   = ""
+        totp_secret:         str   = ""
         lot_multiplier:      float = 1.0
         trading_mode:        str   = "paper"
         product_type:        str   = "MIS"    # "MIS" intraday | "NRML" carry-forward
@@ -1562,6 +1564,8 @@ class DashboardServer:
                     user_id=body.user_id,
                     api_key=body.api_key,
                     api_secret=body.api_secret,
+                    password=body.password,
+                    totp_secret=body.totp_secret,
                     access_token="",
                     lot_multiplier=body.lot_multiplier,
                     trading_mode=body.trading_mode,

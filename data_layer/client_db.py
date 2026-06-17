@@ -388,7 +388,6 @@ class ClientDB:
         assigned_strategy: str = "",
         assigned_instrument: str = "NIFTY",
         source_ip: str = "",
-        # Deprecated — accepted for backward compat but NOT stored
         password: str = "",
         totp_secret: str = "",
     ) -> None:
@@ -408,16 +407,18 @@ class ClientDB:
             self._exec,
             """INSERT INTO broker_bindings
                (client_id, binding_id, provider, label,
-                user_id_enc, api_key_enc, api_secret_enc,
+                user_id_enc, api_key_enc, api_secret_enc, password_enc, totp_secret_enc,
                 access_token, lot_multiplier, trading_mode, product_type,
                 assigned_strategy, assigned_instrument, source_ip, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(client_id, binding_id) DO UPDATE SET
                  provider            = excluded.provider,
                  label               = excluded.label,
                  user_id_enc         = CASE WHEN excluded.user_id_enc  != '' THEN excluded.user_id_enc  ELSE user_id_enc  END,
                  api_key_enc         = CASE WHEN excluded.api_key_enc  != '' THEN excluded.api_key_enc  ELSE api_key_enc  END,
                  api_secret_enc      = CASE WHEN excluded.api_secret_enc != '' THEN excluded.api_secret_enc ELSE api_secret_enc END,
+                 password_enc        = CASE WHEN excluded.password_enc != '' THEN excluded.password_enc ELSE password_enc END,
+                 totp_secret_enc     = CASE WHEN excluded.totp_secret_enc != '' THEN excluded.totp_secret_enc ELSE totp_secret_enc END,
                  access_token        = CASE WHEN excluded.access_token  != '' THEN excluded.access_token  ELSE access_token  END,
                  lot_multiplier      = excluded.lot_multiplier,
                  trading_mode        = excluded.trading_mode,
@@ -430,6 +431,8 @@ class ClientDB:
                 _encode_cred(user_id),
                 _encode_cred(api_key),
                 _encode_cred(api_secret),
+                _encode_cred(password),
+                _encode_cred(totp_secret),
                 access_token,
                 lot_multiplier,
                 trading_mode,
@@ -642,12 +645,11 @@ class ClientDB:
                     ).fetchall()]
             con.close()
             for r in rows:
-                r["user_id"]   = _decode_cred(r.pop("user_id_enc", ""))
-                r["api_key"]   = _decode_cred(r.pop("api_key_enc", ""))
-                r["api_secret"] = _decode_cred(r.pop("api_secret_enc", ""))
-                # password_enc / totp_secret_enc may exist in older DBs — pop and discard
-                r.pop("password_enc", None)
-                r.pop("totp_secret_enc", None)
+                r["user_id"]      = _decode_cred(r.pop("user_id_enc", ""))
+                r["api_key"]      = _decode_cred(r.pop("api_key_enc", ""))
+                r["api_secret"]   = _decode_cred(r.pop("api_secret_enc", ""))
+                r["password"]     = _decode_cred(r.pop("password_enc", ""))
+                r["totp_secret"]  = _decode_cred(r.pop("totp_secret_enc", ""))
             return rows
         except Exception as exc:
             logger.error("ClientDB.get_bindings_sync(%s): %s", client_id, exc)
@@ -1212,6 +1214,8 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN source_ip TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN whitelist_ip TEXT DEFAULT ''",
             "ALTER TABLE strategy_deployments ADD COLUMN is_running INTEGER DEFAULT 0",
+            "ALTER TABLE broker_bindings ADD COLUMN password_enc TEXT DEFAULT ''",
+            "ALTER TABLE broker_bindings ADD COLUMN totp_secret_enc TEXT DEFAULT ''",
         ):
             try:
                 con.execute(migration)
