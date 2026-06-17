@@ -1322,17 +1322,38 @@ class TrapScannerEngine:
         return (creds or {}).get("access_token") or ""
 
     async def _get_expiry(self) -> tuple:
-        """Returns (expiry_str, expiry_date). expiry_str = e.g. '18JUN26', expiry_date = date obj."""
+        """Returns (expiry_str, expiry_date). expiry_str = e.g. '18JUN26', expiry_date = date obj.
+
+        Primary: asks REGISTRY for the nearest loaded expiry — this is always correct because
+        it comes from the actual Upstox master JSON (BSE_FO stores epochs, not symbol strings,
+        so hardcoded weekday math was getting the right calendar date but the REGISTRY had a
+        different date key due to timezone offset in the BSE epoch).
+
+        Fallback: weekday math, used only if REGISTRY is not yet loaded.
+        """
+        if self._und == "CRUDEOIL":
+            return date.today().strftime("%b%y").upper(), None
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            if REGISTRY.is_loaded(self._und):
+                exp_date = REGISTRY.get_active_expiry(self._und)
+                if exp_date is not None:
+                    exp_str = exp_date.strftime("%d%b%y").upper()
+                    self._log.info("_get_expiry %s → REGISTRY: %s (%s)", self._und, exp_str, exp_date)
+                    return exp_str, exp_date
+                self._log.warning("_get_expiry %s → REGISTRY loaded but no active expiry found", self._und)
+        except Exception as exc:
+            self._log.warning("_get_expiry REGISTRY lookup failed: %s", exc)
+        # Fallback: weekday math (works for NSE; BSE timezone may differ by one day)
         _EXPIRY_DOW = {
             "NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
             "SENSEX": 4, "MIDCPNIFTY": 1,
         }
-        if self._und == "CRUDEOIL":
-            return date.today().strftime("%b%y").upper(), None
         weekday = _EXPIRY_DOW.get(self._und, 3)
         d = date.today()
         for _ in range(7):
             if d.weekday() == weekday:
+                self._log.warning("_get_expiry %s → REGISTRY unavailable; weekday fallback: %s", self._und, d)
                 return d.strftime("%d%b%y").upper(), d
             d += timedelta(days=1)
         return None, None
