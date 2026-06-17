@@ -7973,7 +7973,7 @@ function histReplay() {
                   </template>
                   <!-- Trap Scanner live zone panel (replaces generic idle message for trap_scanner) -->
                   <template x-if="dep.strategy_name==='trap_scanner'">
-                    <div x-data="{ get bk(){ return trapBookFor(b.binding_id, dep.underlying) } }">
+                    <div x-data="{ bk: null }" x-effect="bk = trapBookFor(b.binding_id, dep.underlying)">
                       <!-- Status header -->
                       <div class="flex flex-wrap gap-2 text-xs font-mono mb-2">
                         <span :style="(bk&&bk.initialized)?'color:var(--t-green)':'color:var(--t-yellow)'"
