@@ -293,9 +293,12 @@ async def main():
         print(f"No futures bars for today ({today})")
         return
 
-    today_open = fut_today[0]["open"]
+    # Gap direction: PREV DAY CLOSE vs TODAY OPENING (first bar open, NOT current price)
+    # fut_bars sorted ascending (oldest first) → fut_today[0] = first bar of today = market open
+    # reversed(fut_bars) = newest-first → first match with date < today = last bar of yesterday
+    today_open = fut_today[0]["open"]   # 9:00 AM bar open = true market open
     prev_close = next((b["close"] for b in reversed(fut_bars)
-                       if b["datetime"][:10] < today), today_open)
+                       if b["datetime"][:10] < today), today_open)  # yesterday's last bar close
     direction  = "UP" if today_open >= prev_close else "DOWN"
     atm        = _round_strike(today_open, STEP)
 

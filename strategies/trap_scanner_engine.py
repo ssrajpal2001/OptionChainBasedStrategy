@@ -352,11 +352,17 @@ class TrapScannerEngine:
                 pivots["s1"], pivots["s2"],
             )
 
-            # Always fetch today_open via REST (not _spot_cache) — live tick can give stale/wrong
-            # values for BSE SENSEX; REST is more reliable for gap calculation at morning init
+            # Always fetch today_open via REST — must be the FIRST bar's OPEN (9:00/9:15 AM),
+            # NOT the current live price. Gap direction = prev-day close vs today's open.
             today_open = await self._fetch_today_open()
             if today_open <= 0:
-                today_open = self._spot_cache if self._spot_cache > 0 else C
+                # For futures-mode (CrudeOil etc.), _spot_cache is the CURRENT live price, not
+                # today's open — using it would give wrong gap direction. Fall back to prev close
+                # (0% gap, no direction bias) rather than mislead strike selection.
+                if self._htf_source == "futures":
+                    today_open = C  # conservative: assume no gap, use prev close
+                else:
+                    today_open = self._spot_cache if self._spot_cache > 0 else C
             if today_open <= 0:
                 today_open = C
             self._spot_open = today_open
@@ -1445,6 +1451,13 @@ class TrapScannerEngine:
                 self._log.warning("_fetch_prev_day_ohlc: no Upstox token")
                 return None
             spot_key = _SPOT_KEYS.get(self._und)
+            if not spot_key and self._htf_source == "futures":
+                # Futures-mode (CrudeOil, BTC, ETH): use REGISTRY futures key for daily OHLC
+                try:
+                    from data_layer.instrument_registry import REGISTRY as _REG
+                    spot_key = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
+                except Exception:
+                    pass
             if not spot_key:
                 self._log.warning("_fetch_prev_day_ohlc: no spot key for %s", self._und)
                 return None
@@ -1479,11 +1492,19 @@ class TrapScannerEngine:
             return None
 
     async def _fetch_today_open(self) -> float:
+        """Return today's OPENING price (first bar of the session), NOT the current live price."""
         try:
             token = self._get_upstox_token()
             if not token:
                 return 0.0
             spot_key = _SPOT_KEYS.get(self._und)
+            if not spot_key and self._htf_source == "futures":
+                # Futures-mode (CrudeOil, BTC, ETH): use REGISTRY futures key
+                try:
+                    from data_layer.instrument_registry import REGISTRY as _REG
+                    spot_key = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
+                except Exception:
+                    pass
             if not spot_key:
                 return 0.0
             import aiohttp
@@ -1495,6 +1516,8 @@ class TrapScannerEngine:
                         return 0.0
                     data = await r.json()
             candles = data.get("data", {}).get("candles", [])
+            # Upstox returns candles newest-first; candles[-1] = oldest = first bar of the day
+            # Use its OPEN = today's true market open (for gap direction check vs prev-day close)
             return float(candles[-1][1]) if candles else 0.0
         except Exception as exc:
             self._log.warning("_fetch_today_open: %s", exc)
