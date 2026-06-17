@@ -253,13 +253,22 @@ async def main():
         if df5.empty or len(df5) < 3:
             print(f"  {label}: not enough 5-min bars ({len(df5)})")
             continue
+        print(f"  5-min bars today: {len(df5)}  "
+              f"close range [{df5['close'].min():.1f}–{df5['close'].max():.1f}]  "
+              f"low range [{df5['low'].min():.1f}–{df5['low'].max():.1f}]")
         all_entries = []   # list of (ltf_entry_dict, htf_zone_dict)
         for z in zones:
             zh = z.get("zone_high", 0)
             zl = z.get("zone_low", 0)
+            trig = z.get("zone_trigger", 0)
             scan_fn = scanner.scan_ltf_bull if side == "PE" else scanner.scan_ltf
             _, ltf_list = scan_fn(df5, zh, zl)
+            in_zone = df5[(df5["low"] <= zh) & (df5["close"] >= zl * 0.95)]
+            ltf_all    = len(ltf_list)
             ltf_trapped = [e for e in ltf_list if e.get("status") == "TRAPPED"]
+            if in_zone.shape[0] > 0 or ltf_all > 0:
+                print(f"    zone [{zl:.1f}–{zh:.1f}] trigger={trig:.1f}  "
+                      f"bars_in_zone={in_zone.shape[0]}  ltf_all={ltf_all}  ltf_trapped={len(ltf_trapped)}")
             for e in ltf_trapped:
                 all_entries.append((e, z))
         print(f"  {label}: LTF TRAPPED entries = {len(all_entries)}")
