@@ -1019,8 +1019,11 @@ class TrapScannerEngine:
             "scan_key":      scan_key,      # Upstox key for scan strike (SL tracking)
             "entry_price":   round(avg, 2),
             "sl_price":      sl_price,
-            "trail_sl":      sl_price,    # trails 5m option-bar lows after T1
+            "trail_sl":      sl_price,    # steps up via trap-based trail after T1
             "last_5m_ts":    None,
+            # Trap-based trail state: bears trapped above entry → squeezed → pullback → confirmed
+            # Each entry: {zone_trigger, zone_high, state: WATCHING|SQUEEZED|PULLED_BACK|CONFIRMED}
+            "trail_traps":   [],
             "t1_price":      t1_price,
             "total_qty":     total_qty,
             "t1_qty":        t1_qty,
@@ -1069,14 +1072,16 @@ class TrapScannerEngine:
 
     def _update_trail_sl(self, pos: dict, ts: datetime) -> None:
         """
-        Trail SL on SCAN-STRIKE option bars. We are always a buyer — option UP = profit.
-        On each new 5-min candle close: candidate = prev_5m_LOW - sl_buf.
-        trail_sl only moves UP (ratchet). Never down. Same rule for CE and PE.
+        Trap-based trail SL on SCAN-STRIKE option bars. Only active after T1.
 
-        Why bar LOW (not HIGH): new bears enter below the 5m bar low (shorting there).
-        Their SL is above the bar high. Our SL = their entry minus buffer.
-        We exit when those bears are in profit = real reversal, not a normal retracement.
-        As each successive 5m bar low is higher, our SL ratchets up with it.
+        Logic (per new 5-min bar close):
+          1. Scan latest option bars for bear traps that formed ABOVE our entry
+          2. Register new traps as WATCHING
+          3. State machine per trap:
+             WATCHING    → hi >= zone_high (bears' SL hit = bears squeezed)     → SQUEEZED
+             SQUEEZED    → lo <= zone_trigger (price pulls back to bears' entry) → PULLED_BACK
+             PULLED_BACK → hi >= zone_high again (confirmed support held)        → CONFIRMED
+             CONFIRMED   → trail_sl steps up to zone_trigger (bears' entry)
         """
         bar_5m = ts.replace(second=0, microsecond=0)
         bar_5m = bar_5m.replace(minute=(bar_5m.minute // 5) * 5)
@@ -1094,21 +1099,87 @@ class TrapScannerEngine:
         if not bars:
             return
 
-        prev_start = bar_5m - timedelta(minutes=5)
-        bucket = [
-            b for b in bars[-15:]
-            if prev_start <= datetime.fromisoformat(b["datetime"]) < bar_5m
-        ]
-        if not bucket:
+        # Build 5-min bars from raw 1-min bars for the scan
+        import pandas as pd
+        df1 = pd.DataFrame(bars)
+        if df1.empty or "datetime" not in df1.columns:
+            return
+        df1["datetime"] = pd.to_datetime(df1["datetime"])
+        df1 = df1.set_index("datetime")
+        df5 = df1.resample("5min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last"}
+        ).dropna().reset_index()
+
+        if len(df5) < 3:
             return
 
-        prev_low  = min(b["low"] for b in bucket)
-        candidate = round(prev_low - self._sl_buf, 2)
-        if candidate > pos["trail_sl"]:
-            old = pos["trail_sl"]
-            pos["trail_sl"] = candidate
-            self._log.info("TRAIL_SL %.2f → %.2f (5m_low=%.2f buf=%.2f)",
-                           old, candidate, prev_low, self._sl_buf)
+        entry_price = pos["entry_price"]
+        entry_ts    = datetime.fromisoformat(pos["entry_ts"])
+        trail_traps = pos.setdefault("trail_traps", [])
+
+        # Scan 5-min option bars for new bear traps above entry
+        from strategies.trap_scanner import scanner as _sc
+        try:
+            _, all_traps = _sc.scan_ltf(df5, df5["high"].max(), df5["low"].min())
+        except Exception:
+            return
+
+        # Register new traps formed after entry and above entry price
+        known_keys = {t["key"] for t in trail_traps}
+        for trap in all_traps:
+            if trap.get("status") != "TRAPPED":
+                continue
+            trap_ts = pd.to_datetime(trap.get("trapped_on") or trap.get("ref_ts"))
+            if trap_ts is None:
+                continue
+            trap_ts_dt = trap_ts.to_pydatetime().replace(tzinfo=None)
+            if trap_ts_dt <= entry_ts:
+                continue
+            zt = trap.get("zone_trigger", 0)
+            zh = trap.get("zone_high", 0)
+            if zt <= entry_price or zh <= zt:
+                continue
+            key = trap_ts_dt.strftime("%H%M")
+            if key not in known_keys:
+                trail_traps.append({"key": key, "zone_trigger": zt,
+                                    "zone_high": zh, "state": "WATCHING"})
+                self._log.debug("TRAIL trap registered key=%s zt=%.2f zh=%.2f", key, zt, zh)
+
+        # Get current bar hi/lo for state advances
+        prev_start = bar_5m - timedelta(minutes=5)
+        bucket = [b for b in bars[-15:]
+                  if prev_start <= datetime.fromisoformat(b["datetime"]) < bar_5m]
+        if not bucket:
+            return
+        bar_hi = max(b["high"] for b in bucket)
+        bar_lo = min(b["low"]  for b in bucket)
+
+        changed = False
+        for trap in trail_traps:
+            if trap["state"] == "CONFIRMED":
+                continue
+            zh, zt = trap["zone_high"], trap["zone_trigger"]
+            if trap["state"] == "WATCHING":
+                if bar_hi >= zh:
+                    trap["state"] = "SQUEEZED"
+                    self._log.info("TRAIL SQUEEZED zt=%.2f zh=%.2f bar_hi=%.2f",
+                                   zt, zh, bar_hi)
+            elif trap["state"] == "SQUEEZED":
+                if bar_lo <= zt:
+                    trap["state"] = "PULLED_BACK"
+                    self._log.info("TRAIL PULLED_BACK zt=%.2f bar_lo=%.2f", zt, bar_lo)
+            elif trap["state"] == "PULLED_BACK":
+                if bar_hi >= zh:
+                    trap["state"] = "CONFIRMED"
+                    if zt > pos["trail_sl"]:
+                        old = pos["trail_sl"]
+                        pos["trail_sl"] = zt
+                        changed = True
+                        self._log.info("TRAIL_SL STEP UP %.2f -> %.2f "
+                                       "(bears at %.2f confirmed support, zh=%.2f)",
+                                       old, zt, zt, zh)
+
+        if changed:
             self._persist_position()
 
     async def _place_exit(self, qty: int, price: float, reason: str) -> Optional[str]:
@@ -1569,5 +1640,9 @@ class TrapScannerEngine:
                 "remaining_qty": pos["remaining_qty"],
                 "t1_hit":        pos["t1_hit"],
                 "entry_ts":      pos["entry_ts"],
+                "trail_traps":   [
+                    {"zt": t["zone_trigger"], "zh": t["zone_high"], "state": t["state"]}
+                    for t in pos.get("trail_traps", [])
+                ],
             } if pos else None,
         }
