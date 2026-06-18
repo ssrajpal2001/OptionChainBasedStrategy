@@ -251,6 +251,7 @@ class TrapScannerEngine:
 
         self._broker: Optional[Any] = None
         self._rebalancer: Optional[Any] = None   # set via set_rebalancer()
+        self._mcx_feeder: Optional[Any] = None   # dedicated Upstox2 feeder for MCX
         self._initialized   = False
         self._day_init_done = False
 
@@ -258,6 +259,10 @@ class TrapScannerEngine:
 
     def set_rebalancer(self, rebalancer) -> None:
         self._rebalancer = rebalancer
+
+    def set_mcx_feeder(self, feeder) -> None:
+        """Dedicated Upstox2 feeder for MCX option subscriptions (CrudeOil/Gold)."""
+        self._mcx_feeder = feeder
 
     def _make_logger(self) -> logging.Logger:
         name = f"client.ts.{self._und}.{self._cid}.{self._bid}"
@@ -821,7 +826,8 @@ class TrapScannerEngine:
                     keys = [k for k in [self._ce1_key, self._ce2_key,
                                         self._pe1_key, self._pe2_key] if k]
                     if keys:
-                        feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+                        feeder = (self._mcx_feeder if self._mcx_feeder is not None
+                                  else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
                         if feeder and hasattr(feeder, "subscribe_tokens"):
                             try:
                                 await feeder.subscribe_tokens(keys)
@@ -2040,11 +2046,16 @@ class TrapScannerEngine:
         keys = [k for k in [self._ce1_key, self._ce2_key,
                              self._pe1_key, self._pe2_key] if k]
         if keys:
-            feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+            # MCX indices (CrudeOil) use dedicated Upstox2 feeder; others use main feeder
+            if self._mcx_feeder is not None:
+                feeder = self._mcx_feeder
+            else:
+                feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
             if feeder and hasattr(feeder, "subscribe_tokens"):
                 try:
                     await feeder.subscribe_tokens(keys)
-                    self._log.info("force-subscribed %d option keys: %s", len(keys), keys)
+                    self._log.info("force-subscribed %d option keys via %s: %s",
+                                   len(keys), type(feeder).__name__, keys)
                 except Exception as exc:
                     self._log.warning("feeder.subscribe_tokens failed: %s", exc)
             else:

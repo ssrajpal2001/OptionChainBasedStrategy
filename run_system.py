@@ -489,6 +489,26 @@ async def _run_live(
     trap_engine.set_rebalancer(rebalancer)
     # Give the trap scanner book manager the rebalancer so new engines can pin their strikes.
     trap_scanner_manager.set_rebalancer(rebalancer)
+    # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
+    # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
+    _has_mcx = any(cfg.exchange.is_mcx(i) for i in cfg.monitored_indices)
+    if _has_mcx:
+        from data_layer.global_feeder import UpstoxFeeder as _UpstoxFeeder
+        _upstox2_creds = await asyncio.to_thread(
+            _shared_client_db.get_feeder_creds_sync, "upstox2"
+        )
+        _upstox2_token = (_upstox2_creds or {}).get("access_token", "")
+        if _upstox2_token:
+            _mcx_feeder = _UpstoxFeeder(bus, cfg)
+            _mcx_feeder.set_credentials({"access_token": _upstox2_token})
+            trap_scanner_manager.set_mcx_feeder(_mcx_feeder)
+            logging.getLogger(__name__).info(
+                "MCX Upstox2 feeder wired to trap scanner manager."
+            )
+        else:
+            logging.getLogger(__name__).warning(
+                "MCX indices detected but upstox2 token missing — CrudeOil option ticks via Upstox1."
+            )
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 
@@ -547,6 +567,13 @@ async def _run_live(
         print(f"\n\nFATAL: {exc}\n\nCheck broker credentials in the dashboard and retry.\n")
         raise SystemExit(1)
     await feeder.start()
+    # Start MCX Upstox2 feeder if wired (CrudeOil/Gold option tick delivery)
+    if _has_mcx and "_mcx_feeder" in dir():
+        try:
+            await _mcx_feeder.start()
+            logging.getLogger(__name__).info("MCX Upstox2 feeder started.")
+        except Exception as _exc:
+            logging.getLogger(__name__).warning("MCX Upstox2 feeder start failed: %s", _exc)
 
     if "iron_condor" in _enabled_strats:
         for _ic in _iron_condors:

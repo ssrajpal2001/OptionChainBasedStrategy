@@ -30,13 +30,19 @@ class TrapBookManager:
         self._reconcile_sec = reconcile_sec
         self._books: Dict[Key, TrapScannerEngine] = {}
         self._rebalancer = None
+        self._mcx_feeder = None   # dedicated Upstox2 feeder for MCX indices
         self._running = False
 
     def set_rebalancer(self, rebalancer) -> None:
         self._rebalancer = rebalancer
-        # Apply to any already-running books
         for eng in self._books.values():
             eng.set_rebalancer(rebalancer)
+
+    def set_mcx_feeder(self, feeder) -> None:
+        self._mcx_feeder = feeder
+        for eng in self._books.values():
+            if eng._cfg.exchange.is_mcx(eng._und):
+                eng.set_mcx_feeder(feeder)
 
     @property
     def books(self) -> List[TrapScannerEngine]:
@@ -116,6 +122,8 @@ class TrapBookManager:
                 )
                 if self._rebalancer is not None:
                     eng.set_rebalancer(self._rebalancer)
+                if self._mcx_feeder is not None and self._cfg.exchange.is_mcx(und):
+                    eng.set_mcx_feeder(self._mcx_feeder)
                 eng.start()
                 self._books[key] = eng
                 logger.info("TrapBookManager: spawned %s/%s/%s (lots=%d)",
