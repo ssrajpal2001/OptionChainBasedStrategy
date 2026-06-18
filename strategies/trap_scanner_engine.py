@@ -2177,14 +2177,16 @@ class TrapScannerEngine:
         # Nearest FUT zone for futures-mode instruments (closest TRAPPED zone by distance from spot)
         def _nearest_fut_zone(side: str) -> Optional[dict]:
             trapped = [z for z in self._htf_fut_zones if z["status"] == "TRAPPED"]
-            if not trapped or not ltp:
+            # For display: fall back to all zones when none are fully TRAPPED yet
+            pool = trapped or [z for z in self._htf_fut_zones if z.get("status")]
+            if not pool or not ltp:
                 return None
             # bear zone → closest above spot; bull zone → closest below spot
-            candidates = [z for z in trapped
+            candidates = [z for z in pool
                           if (z.get("zone_trigger", 0) >= ltp if side == "CE"
                               else z.get("zone_trigger", 0) <= ltp)]
             if not candidates:
-                candidates = trapped  # fallback: all zones
+                candidates = pool  # fallback: all zones
             best = min(candidates, key=lambda z: abs(z.get("zone_trigger", 0) - ltp))
             uid  = _zone_uid(best)
             trig = round(best.get("zone_trigger", 0), 2)
