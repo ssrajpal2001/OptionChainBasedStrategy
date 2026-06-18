@@ -1282,14 +1282,19 @@ class TrapScannerEngine:
             # PE (bull trap): SL = ceiling above zone → exit if FUT rises to sl (ltp >= sl)
             if opt_type == "CE":
                 sl_price = round(entry["zone_low"]  - self._sl_buf, 2)
+                # T1 = LTF zone_high (= ref bar LOW where 5-min bears shorted; their SL = our target)
+                # Fall back to HTF zone sl only if LTF doesn't have it
+                t1_price = round(entry.get("sl", entry.get("zone_high", htf_zone.get("sl", 0))), 2)
             else:
                 sl_price = round(entry["zone_high"] + self._sl_buf, 2)
-            t1_price     = round(htf_zone.get("sl", 0), 2)             # next HTF resistance (futures ₹)
+                # T1 = LTF zone_low (bull trap: bulls shorted below zone_low → their SL = our target)
+                t1_price = round(entry.get("zone_low", htf_zone.get("sl", 0)), 2)
             t1_price_fut = None
         else:
             tracking_leg = leg   # CE1 or PE1 — scan strike option bars
             sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # option zone_low (option ₹)
-            t1_price     = round(htf_zone.get("sl", 0), 2)             # option HTF SL target
+            # T1 = LTF entry sl field (= ref bar HIGH = bears' SL level)
+            t1_price     = round(entry.get("sl", htf_zone.get("sl", 0)), 2)
             t1_price_fut = None
 
         self._log.info(
