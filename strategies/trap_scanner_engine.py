@@ -823,12 +823,13 @@ class TrapScannerEngine:
                 # Re-subscribe tracked option keys every 60s — survives feeder reconnect
                 now = datetime.now(IST)
                 if (now - _last_resub).total_seconds() >= 60:
-                    ce1_ltp = self._ltp_cache.get(self._ce1_key, 0)
-                    pe1_ltp = self._ltp_cache.get(self._pe1_key, 0)
+                    ce1_ltp = self._ltp_cache.get("CE1", 0)
+                    pe1_ltp = self._ltp_cache.get("PE1", 0)
                     self._log.info(
-                        "heartbeat: spot=%.2f CE1=%.1f PE1=%.1f ticks/min active pos=%s",
+                        "heartbeat: spot=%.2f CE1=%.1f PE1=%.1f pos=%s [keys: ce1=%s pe1=%s]",
                         raw_ltp, ce1_ltp, pe1_ltp,
                         self._position["side"] if self._position else "none",
+                        self._ce1_key, self._pe1_key,
                     )
                     _last_resub = now
                     keys = [k for k in [self._ce1_key, self._ce2_key,
