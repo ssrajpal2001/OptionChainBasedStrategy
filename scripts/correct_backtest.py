@@ -320,7 +320,7 @@ def run_sensex_backtest(days):
 
     wins = sum(1 for t in all_trades if t["pnl"] > 0)
     print(f"\nSENSEX: Trades={len(all_trades)}  Wins={wins}  Losses={len(all_trades)-wins}  Net={total:.1f} pts")
-    print(f"Rupees (SENSEX lot=10): Rs {total*10:.0f}")
+    print(f"Rupees (SENSEX lot=20, 2lots=40): Rs {total*40:.0f}")
     return total
 
 
