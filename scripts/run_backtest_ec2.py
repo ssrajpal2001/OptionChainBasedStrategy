@@ -48,5 +48,5 @@ c_total = bt.run_crudeoil_backtest(DAYS, "NSE_COM|149475")
 
 print(f"\n{'='*60}")
 print(f"SENSEX   net: {s_total:.1f} pts  (lot=20)  Rs {s_total*20:.0f}")
-print(f"CRUDEOIL net: {c_total:.1f} pts  (lot=100)  Rs {c_total*100:.0f}")
-print(f"COMBINED P&L: Rs {s_total*20 + c_total*100:.0f}")
+print(f"CRUDEOIL net: {c_total:.1f} pts  (lot=200)  Rs {c_total*200:.0f}")
+print(f"COMBINED P&L: Rs {s_total*20 + c_total*200:.0f}")
