@@ -799,11 +799,12 @@ class TrapScannerEngine:
                     continue
                 raw_ltp = float(tick.ltp)
                 # Sanity guard: BSE SENSEX WebSocket intermittently mis-decodes to ~80000
-                # (3-4% above real value). Reject ticks deviating >2.5% from known ref.
-                _ref = self._spot_cache if self._spot_cache > 0 else self._spot_open
+                # (3-4% above real value). _spot_open is set from URL-encoded REST call
+                # and is reliable; use it as the fixed anchor to reject bad ticks.
+                _ref = self._spot_open  # today's first bar open — reliable anchor
                 if _ref > 0 and abs(raw_ltp - _ref) / _ref > 0.025:
                     self._log.warning(
-                        "SPOT tick rejected: ltp=%.2f deviates >2.5%% from ref=%.2f (BSE mis-decode?)",
+                        "SPOT tick rejected: ltp=%.2f deviates >2.5%% from open=%.2f (BSE mis-decode?)",
                         raw_ltp, _ref,
                     )
                     continue
