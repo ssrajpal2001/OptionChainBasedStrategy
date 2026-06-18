@@ -266,17 +266,22 @@ def select_best_ltf_entry(ltf_entries: list) -> Optional[dict]:
 
 def select_fresh_ltf_entry(ltf_entries: list, opt_type: str = "CE") -> Optional[dict]:
     """
-    "Clean old zones first" logic:
+    "Clean old zones first" logic.
 
     TRAPPED = sellers/buyers just got trapped (price broke their zone) = entry signal.
     CLOSED  = zone resolved (price came back past entry = old traders escaped).
 
     Flow:
     1. Find the last CLOSED zone (most recent resolved structure).
-    2. If no CLOSED zones exist → no old structure → enter on any TRAPPED zone.
-    3. If CLOSED zones exist → look for TRAPPED zones formed AFTER last CLOSED zone.
-       These are "fresh" traps with no old unresolved structure above/below them.
-    4. If no fresh TRAPPED zone after last CLOSED → wait (old cleared, new not formed yet).
+    2. If no CLOSED zones exist → enter on the deepest fresh TRAPPED zone.
+    3. If CLOSED zones exist → only enter on TRAPPED zones formed AFTER last CLOSED.
+    4. If no fresh TRAPPED zone after last CLOSED → wait.
+
+    Tie-breaking (multiple zones trapped in the same candle — fast open sweep):
+      CE: pick the zone with the HIGHEST zone_low  (deepest = last bears to enter,
+          weakest hands, tightest SL, maximum squeeze).
+      PE: pick the zone with the LOWEST zone_high  (deepest = last bulls to enter).
+      This is the correct priority because deeper = more recent = more bears squeezed.
 
     opt_type: "CE" uses bear zones, "PE" uses bull zones.
     """
@@ -287,33 +292,40 @@ def select_fresh_ltf_entry(ltf_entries: list, opt_type: str = "CE") -> Optional[
         v = e.get(key)
         return str(v) if v else ""
 
+    def _best_among(zones: list) -> Optional[dict]:
+        """Among a set of TRAPPED zones, pick the deepest (most bears squeezed)."""
+        if not zones:
+            return None
+        # Sort by trapped_on descending (most recent trap first).
+        # Break ties by zone_low descending for CE (deepest = highest zone_low),
+        # or zone_high ascending for PE (deepest = lowest zone_high).
+        if opt_type == "CE":
+            return sorted(zones, key=lambda e: (_ts(e, "trapped_on"), e["zone_low"]))[-1]
+        else:
+            return sorted(zones, key=lambda e: (_ts(e, "trapped_on"), -e["zone_high"]))[-1]
+
     closed_zones  = [e for e in ltf_entries if e["status"] == "CLOSED"]
     trapped_zones = [e for e in ltf_entries if e["status"] == "TRAPPED"]
 
     if not closed_zones:
-        # No old resolved structure → enter on the most recent TRAPPED zone (fresh)
-        if not trapped_zones:
-            return None
-        best = sorted(trapped_zones, key=lambda e: _ts(e, "trapped_on"))[-1]
-        return best
+        # No old resolved structure → enter on the deepest fresh TRAPPED zone.
+        return _best_among(trapped_zones)
 
-    # Find most recently closed zone
-    last_closed = sorted(closed_zones, key=lambda e: _ts(e, "closed_on"))[-1]
+    # Find most recently closed zone.
+    last_closed    = sorted(closed_zones, key=lambda e: _ts(e, "closed_on"))[-1]
     last_closed_ts = _ts(last_closed, "closed_on")
 
-    # Fresh TRAPPED zones: ref_ts (formation bar) after last resolved zone's closed_on
+    # Fresh TRAPPED zones: formed (ref_ts) AFTER the last CLOSED zone resolved.
     fresh_trapped = [
         e for e in trapped_zones
         if _ts(e, "ref_ts") > last_closed_ts
     ]
 
     if not fresh_trapped:
-        # Old structure cleared but no new trap formed yet — keep waiting
+        # Old structure cleared but no new trap yet — wait.
         return None
 
-    # Pick most recent fresh trap (user wants last fresh zone, not oldest)
-    best = sorted(fresh_trapped, key=lambda e: _ts(e, "trapped_on"))[-1]
-    return best
+    return _best_among(fresh_trapped)
 
 
 def simulate_today_trades(all_entries: list, df1: pd.DataFrame,

@@ -60,7 +60,7 @@ _INDEX_CFG: Dict[str, dict] = {
     # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
     "NIFTY":      {"step": 100, "lot": 75,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
-                   "window": None, "exchange": "NFO", "htf_source": "spot"},
+                   "window": None, "exchange": "NFO", "htf_source": "option"},
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
                    "sl_buf": 4.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
@@ -69,7 +69,7 @@ _INDEX_CFG: Dict[str, dict] = {
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "SENSEX":     {"step": 100, "lot": 20,  "gap_near": 300, "gap_far": 600,
                    "sl_buf": 2.0, "cutoff": "15:20", "sq_off": "15:25",
-                   "window": None, "exchange": "BFO", "htf_source": "spot"},
+                   "window": None, "exchange": "BFO", "htf_source": "option"},
     "MIDCPNIFTY": {"step": 25,  "lot": 75,  "gap_near": 100, "gap_far": 200,
                    "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
@@ -465,16 +465,22 @@ class TrapScannerEngine:
                 except Exception:
                     fk = ""
                 self._fut_key = fk or _SPOT_KEYS.get(self._und, "")
-                self._bars_fut = await self._fetch_1m_history(self._fut_key)
+                # Guard: skip re-fetch if bars already seeded (retry path or live ticks already added)
+                if not self._bars_fut:
+                    self._bars_fut = await self._fetch_1m_history(self._fut_key)
                 # Also seed option bars (needed for LTF scan)
                 self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
                 self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
                 self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
                 self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
-                self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
-                self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
-                self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
-                self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                if not self._bars_ce1:
+                    self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
+                if not self._bars_ce2:
+                    self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
+                if not self._bars_pe1:
+                    self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
+                if not self._bars_pe2:
+                    self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
                 self._log.info(
                     "Bars seeded — FUT(%s)=%d CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
                     self._fut_key, len(self._bars_fut),
@@ -486,15 +492,20 @@ class TrapScannerEngine:
             elif self._htf_source == "spot":
                 # Legacy: SPOT bars for HTF, option bars for LTF
                 spot_key = _SPOT_KEYS.get(self._und, "")
-                self._bars_spot = await self._fetch_1m_history(spot_key)
                 self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
                 self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
                 self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
                 self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
-                self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
-                self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
-                self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
-                self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                if not self._bars_spot:
+                    self._bars_spot = await self._fetch_1m_history(spot_key)
+                if not self._bars_ce1:
+                    self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
+                if not self._bars_ce2:
+                    self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
+                if not self._bars_pe1:
+                    self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
+                if not self._bars_pe2:
+                    self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
             else:
                 # htf_source="option" (NSE/BSE): option bars for BOTH HTF and LTF
                 # CE1=S1 bars detect bear seller traps; PE1=R1 bars detect bull seller traps
@@ -503,10 +514,14 @@ class TrapScannerEngine:
                 self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
                 self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
                 self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
-                self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
-                self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
-                self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
-                self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                if not self._bars_ce1:
+                    self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
+                if not self._bars_ce2:
+                    self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
+                if not self._bars_pe1:
+                    self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
+                if not self._bars_pe2:
+                    self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
                 self._log.info(
                     "Bars seeded — CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
                     self._ce1_key, len(self._bars_ce1),
@@ -901,6 +916,31 @@ class TrapScannerEngine:
 
     # ── Candle close → scan logic ─────────────────────────────────────────────
 
+    def _ltp_in_any_htf_zone(self, leg: str) -> bool:
+        """
+        Return True if the current live LTP for this leg is inside any TRAPPED HTF zone.
+        Used to bypass the 5-min LTF gate so a fast opening move that sweeps both
+        HTF and LTF bears simultaneously is caught on the very next 1-min close.
+        """
+        if self._position:
+            return False   # already in trade — no need for fast scan
+        ltp = self._ltp_cache.get(leg, 0)
+        if ltp <= 0:
+            return False
+        if self._htf_source == "option":
+            all_zones = (
+                [z for z in self._htf_bear_zones if z["status"] == "TRAPPED"]
+                if leg in ("CE1", "CE2") else
+                [z for z in self._htf_bull_zones if z["status"] == "TRAPPED"]
+            )
+        elif self._htf_source == "futures":
+            all_zones = [z for z in self._htf_fut_zones if z["status"] == "TRAPPED"]
+        else:
+            all_zones = []
+        # Include a 2% buffer above zone_high: price may be in "waiting_retest" state
+        # (trapped above zone_high, coming back). Keep the 1-min gate alive until retest.
+        return any(z["zone_low"] <= ltp <= z["zone_high"] * 1.02 for z in all_zones)
+
     def _on_candle_close(self, leg: str, ts: datetime) -> None:
         # Futures-mode TSL: on every FUT candle close while in position,
         # check for new bear traps ABOVE entry → advance trail_sl
@@ -935,8 +975,12 @@ class TrapScannerEngine:
                     self._position["side"] if self._position else "none",
                 )
 
-        # On every LTF boundary — scan option premium bars inside HTF zones
-        if ts.minute % self._ltf_min != 0:
+        # On every LTF boundary — scan option premium bars inside HTF zones.
+        # FAST-OPEN exception: if current LTP is already inside a TRAPPED HTF zone
+        # (seeded from prev-day bars), scan on every 1-min close so we catch the
+        # opening sweep that removes both HTF and LTF bears simultaneously.
+        at_ltf_boundary = (ts.minute % self._ltf_min == 0)
+        if not at_ltf_boundary and not self._ltp_in_any_htf_zone(leg):
             return
 
         if self._htf_source == "option":
@@ -1035,11 +1079,11 @@ class TrapScannerEngine:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Gate: option premium must be in lower 2/3 of zone (bear trap = sellers in, price low).
+            # Gate: price must be anywhere inside [zone_low, zone_high] — full zone valid.
+            # No 1/3 restriction: LTF traps (existing or new) anywhere in the zone are entry candidates.
             z_low  = zone["zone_low"]
             z_high = zone["zone_high"]
-            trigger_hi = z_low + 2 * (z_high - z_low) / 3
-            if current_price > 0 and (current_price < z_low or current_price > trigger_hi):
+            if current_price > 0 and (current_price < z_low or current_price > z_high):
                 continue
 
             _, ltf_entries = scanner.scan_ltf(
@@ -1057,6 +1101,20 @@ class TrapScannerEngine:
                 trapped_ltf = [e for e in ltf_entries if e["status"] in ("TRAPPED", "CLOSED")]
                 best = min(trapped_ltf, key=lambda e: e["zone_low"]) if trapped_ltf else None
             if best:
+                # Entry is at zone_high = LTF sellers' entry level (C1.LOW).
+                # After TRAPPED (price shot above C1.HIGH), we wait for price to pull
+                # back to zone_high — that re-test of sellers' entry IS our entry signal.
+                # Both CE and PE use same check: option premium must retrace to zone_high.
+                entry_level = best["zone_high"]
+                tol = entry_level * 0.005  # 0.5% tolerance for tick noise
+                if current_price > entry_level + tol:
+                    # Price still above sellers' entry — trap fired but retest not yet.
+                    self._zone_ltf_status[uid] = "waiting_retest"
+                    self._log.debug(
+                        "_run_ltf_on [%s] WAITING RETEST: ltp=%.2f > zone_high=%.2f",
+                        leg_key, current_price, entry_level,
+                    )
+                    continue
                 self._zone_ltf_status[uid] = "ltf_signal"
                 asyncio.get_event_loop().create_task(
                     self._on_entry_signal(leg_key, opt_type, best, zone)
@@ -1343,7 +1401,9 @@ class TrapScannerEngine:
                 primary_1itm, primary_key, atm, atm_key, opt_type, max_spread_pct
             )
 
-        ep       = round(entry.get("zone_trigger", entry.get("zone_high", 0)), 2)
+        # Entry reference = zone_high (sellers' entry level = C1.LOW).
+        # We entered when premium re-tested this level after TRAPPED.
+        ep       = round(entry.get("zone_high", entry.get("zone_trigger", 0)), 2)
         total_qty = self._lot_size * self._lot_mul
         t1_qty    = total_qty // 2
 
