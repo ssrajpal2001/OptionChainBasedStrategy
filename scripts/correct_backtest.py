@@ -167,17 +167,19 @@ def find_opt_entry(opt_ctx, opt_day_df, sl_buf=2.0):
     return None, None, None, mode if near else "OPT-CASCADE"
 
 
-def simulate_2lots(df_1m, ep, sl, t1, ets, sl_buf=2.0):
+def simulate_2lots(df_1m, ep, sl, t1, ets, sl_buf=2.0, eod="15:25"):
     """
     2-lot simulation:
     Lot 1: exits at T1 (partial profit booking)
     Lot 2: trails from T1 until SL hit or EOD
     Returns list of (lot, exit_price, reason, ts, pnl)
+    eod: time string for force-exit e.g. "15:25" or "23:25" (CrudeOil)
     """
     tsl = sl
     t1_hit = False
     lot1_done = False
     results = []
+    eod_time = pd.Timestamp(eod).time()
 
     for _, bar in df_1m[df_1m["ts"] > ets].iterrows():
         # T1 hit — book Lot 1
@@ -205,7 +207,7 @@ def simulate_2lots(df_1m, ep, sl, t1, ets, sl_buf=2.0):
                 results.append((2, round(tsl, 2), "TSL", bar["ts"], round(tsl - ep, 1)))
                 return results
 
-        if bar["ts"].time() >= pd.Timestamp("15:25").time():
+        if bar["ts"].time() >= eod_time:
             cp = round(bar["c"], 2)
             if not lot1_done:
                 results.append((1, cp, "EOD", bar["ts"], round(cp - ep, 1)))
@@ -226,16 +228,22 @@ def run_sensex_backtest(days):
     print("  Logic: SPOT 75m → bear/bull → OPTION zones → OPTION LTF entry")
     print("="*80)
 
+    from datetime import timedelta
+    first_day = pd.Timestamp(days[0]).date()
+    last_day  = pd.Timestamp(days[-1]).date()
+    from_dt   = str(first_day - timedelta(days=10))
+    to_dt     = str(last_day)
+
     print("Fetching SENSEX SPOT (BSE_INDEX|SENSEX)...")
-    spot_all = mkt(fetch("BSE_INDEX|SENSEX", "2026-06-10", "2026-06-17"))
+    spot_all = mkt(fetch("BSE_INDEX|SENSEX", from_dt, to_dt))
     print(f"  Spot bars: {len(spot_all)}")
 
     print("Fetching CE1 (BSE_FO|1137766)...")
-    ce_all = mkt(fetch("BSE_FO|1137766", "2026-06-10", "2026-06-17"))
+    ce_all = mkt(fetch("BSE_FO|1137766", from_dt, to_dt))
     print(f"  CE1 bars: {len(ce_all)}")
 
     print("Fetching PE1 (BSE_FO|1147016)...")
-    pe_all = mkt(fetch("BSE_FO|1147016", "2026-06-15", "2026-06-17"))
+    pe_all = mkt(fetch("BSE_FO|1147016", from_dt, to_dt))
     print(f"  PE1 bars: {len(pe_all)}")
 
     HDR = f"{'Date':<12}{'Side':<5}{'SpotMode':<14}{'OptMode':<13}{'LTF':<9}{'OptZone':<14}{'In':<6}{'Entry':<8}{'SL':<7}{'T1':<7}{'Out':<6}{'Exit':<8}{'PnL':<7}Res"
@@ -285,6 +293,11 @@ def run_sensex_backtest(days):
             ep  = round(best["entry"], 2)
             sl  = round(best["zone_low"] - 2.0, 2)  # SL below LTF option zone_low
             t1  = round(zone["zone_high"], 2)        # T1 = option HTF/cascade zone_high
+
+            if sl >= ep:
+                print(f"  {side:<5}SKIP — inverted SL (ep={ep} sl={sl})")
+                continue
+
             trades_2lot = simulate_2lots(opt_day, ep, sl, t1, ets)
 
             oz  = f"{zone['zone_low']:.0f}->{zone['zone_high']:.0f}"
@@ -312,7 +325,13 @@ def run_crudeoil_backtest(days, crude_key):
 
     print(f"Fetching CrudeOil Futures ({crude_key})...")
     # MCX trades 09:00-23:30 IST
-    crude_all_raw = fetch(crude_key, "2026-06-10", "2026-06-17")
+    # Fetch 10 calendar days before first backtest day for HTF context
+    from datetime import datetime, timedelta
+    first_day = pd.Timestamp(days[0]).date()
+    last_day  = pd.Timestamp(days[-1]).date()
+    from_dt   = str(first_day - timedelta(days=10))
+    to_dt     = str(last_day)
+    crude_all_raw = fetch(crude_key, from_dt, to_dt)
     if crude_all_raw.empty:
         print(f"  FAILED — key {crude_key} returned no data")
         return 0
@@ -329,61 +348,78 @@ def run_crudeoil_backtest(days, crude_key):
     total = 0
     all_trades = []
 
+    # CrudeOil runs two sessions per day — day (09:00-16:59) and evening (17:00-23:30)
+    # Zones from each session are used ONLY for LTF entries within that session
+    SESSIONS = [
+        ("DAY",     "09:00", "16:59", "16:55"),
+        ("EVENING", "17:00", "23:30", "23:25"),
+    ]
+
     for dt in days:
         bt = pd.Timestamp(dt).date()
-        ctx = crude_all[crude_all["ts"].dt.date <= bt]
-        day = crude_all[crude_all["ts"].dt.date == bt].copy()
-        if day.empty:
+        day_all = crude_all[crude_all["ts"].dt.date == bt].copy()
+        if day_all.empty:
             print(f"{dt}  NO DATA")
             continue
 
-        open_ltp = day["c"].iloc[0]
-
-        # For CrudeOil, bear trap → BUY futures (price will spike up after trap)
-        # bull trap → SELL futures — but we only BUY here (CE-equivalent = bear trap reversal)
-        bear_z, bull_z, mode, atr = find_direction(ctx, day)
-        all_zones = bear_z + bull_z  # trade both directions on futures
-
-        if not all_zones:
-            print(f"{dt}  {mode:<14}No zones  open={open_ltp:.0f}")
-            continue
-
-        df5 = _resample_htf(_bars_to_df(to_bars(day)), 5)
-        best = zone = ets = None
-        for z in all_zones:
-            _, ltf = scanner.scan_ltf(df5, z["zone_high"], z["zone_low"])
-            closed = [x for x in ltf if x["status"] == "CLOSED"]
-            b = scanner.select_best_ltf_entry(closed)
-            if not b:
-                trapped_ltf = [x for x in ltf if x["status"] == "TRAPPED"]
-                b = min(trapped_ltf, key=lambda e: e["zone_low"]) if trapped_ltf else None
-            if not b:
+        for sess_name, sess_start, sess_end, sess_eod in SESSIONS:
+            sess_day = day_all[
+                (day_all["ts"].dt.time >= pd.Timestamp(sess_start).time()) &
+                (day_all["ts"].dt.time <= pd.Timestamp(sess_end).time())
+            ].copy()
+            if sess_day.empty:
                 continue
-            ts = get_ts(b)
-            if ts is None:
+
+            # Historical context = all bars before this date + today's session bars
+            ctx_hist = crude_all[crude_all["ts"].dt.date < bt]
+            sess_ctx = pd.concat([ctx_hist, sess_day]).reset_index(drop=True)
+
+            open_ltp = sess_day["c"].iloc[0]
+            bear_z, bull_z, mode, atr = find_direction(sess_ctx, sess_day)
+            all_zones = bear_z + bull_z
+
+            if not all_zones:
+                continue  # no zones in this session, skip quietly
+
+            df5 = _resample_htf(_bars_to_df(to_bars(sess_day)), 5)
+            best = zone = ets = None
+            for z in all_zones:
+                _, ltf = scanner.scan_ltf(df5, z["zone_high"], z["zone_low"])
+                closed = [x for x in ltf if x["status"] == "CLOSED"]
+                b = scanner.select_best_ltf_entry(closed)
+                if not b:
+                    trapped_ltf = [x for x in ltf if x["status"] == "TRAPPED"]
+                    b = min(trapped_ltf, key=lambda e: e["zone_low"]) if trapped_ltf else None
+                if not b:
+                    continue
+                ts = get_ts(b)
+                if ts is None:
+                    continue
+                best, zone, ets = b, z, ts
+                break
+
+            if not best:
                 continue
-            best, zone, ets = b, z, ts
-            break
 
-        if not best:
-            print(f"{dt}  {mode:<14}{'':9}No LTF entry  zones={len(all_zones)}  open={open_ltp:.0f}")
-            continue
+            ep  = round(best["entry"], 2)
+            zone_width = zone["zone_high"] - zone["zone_low"]
+            sl  = round(ep - zone_width - 5.0, 2)   # SL = entry - zone_width - buffer (always below)
+            t1  = round(ep + 2.0 * zone_width, 2)   # T1 = 2R above entry
 
-        ep  = round(best["entry"], 2)
-        sl  = round(zone["zone_low"] - 5.0, 2)  # SL below HTF zone_low (not LTF)
-        t1  = round(zone["zone_high"] + 0.5 * (zone["zone_high"] - zone["zone_low"]), 2)
-        trades_2lot = simulate_2lots(day, ep, sl, t1, ets, sl_buf=5.0)
-        xp = trades_2lot[-1][1] if trades_2lot else ep
-        xr = trades_2lot[-1][2] if trades_2lot else "NONE"
-        xt = trades_2lot[-1][3] if trades_2lot else ets
-        oz  = f"{zone['zone_low']:.0f}->{zone['zone_high']:.0f}"
-        for lot_n, xp2, xr2, xt2, pnl2 in trades_2lot:
-            total += pnl2
-            all_trades.append({"pnl": pnl2, "xr": xr2})
-            res = ("WIN" if pnl2 > 0 else "LOSS") + "/" + xr2
-            print(f"{dt}  {mode:<14}{best['status']:<9}{oz:<14}"
-                  f"{ets.strftime('%H:%M'):<6}{ep:<8}{sl:<8}{t1:<8}"
-                  f"{xt2.strftime('%H:%M'):<6}{xp2:<8}L{lot_n}:{pnl2:<5}{res}")
+            # Inverted SL guard
+            if sl >= ep:
+                print(f"{dt}/{sess_name}  SKIP — inverted SL (ep={ep} sl={sl})")
+                continue
+
+            trades_2lot = simulate_2lots(sess_day, ep, sl, t1, ets, sl_buf=5.0, eod=sess_eod)
+            oz  = f"{zone['zone_low']:.0f}->{zone['zone_high']:.0f}"
+            for lot_n, xp2, xr2, xt2, pnl2 in trades_2lot:
+                total += pnl2
+                all_trades.append({"pnl": pnl2, "xr": xr2})
+                res = ("WIN" if pnl2 > 0 else "LOSS") + "/" + xr2
+                print(f"{dt}/{sess_name:<8}{mode:<14}{best['status']:<9}{oz:<14}"
+                      f"{ets.strftime('%H:%M'):<6}{ep:<8}{sl:<8}{t1:<8}"
+                      f"{xt2.strftime('%H:%M'):<6}{xp2:<8}L{lot_n}:{pnl2:<5}{res}")
 
     wins = sum(1 for t in all_trades if t["pnl"] > 0)
     print(f"\nCRUDEOIL: Trades={len(all_trades)}  Wins={wins}  Losses={len(all_trades)-wins}  Net={total:.1f} pts")
