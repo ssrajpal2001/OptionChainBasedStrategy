@@ -1857,7 +1857,11 @@ class TrapScannerEngine:
     # ── Telemetry ─────────────────────────────────────────────────────────────
 
     def _zone_info_list(self, zones: List[dict], opt_type: str) -> list:
-        ltp = self._spot_cache or 0.0
+        if self._htf_source == "option":
+            ltp = (self._ltp_cache.get(opt_type + "1") or self._ltp_cache.get(opt_type + "2") or
+                   self._ltp_cache.get("CE1") or self._ltp_cache.get("PE1") or 0.0)
+        else:
+            ltp = self._spot_cache or 0.0
         atr = self._htf_atr_val
         threshold = 1.5 * atr if atr > 0 else None
         result = []
