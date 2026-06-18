@@ -74,7 +74,7 @@ _INDEX_CFG: Dict[str, dict] = {
                    "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 500,
-                   "sl_buf": 2.0, "cutoff": "22:45", "sq_off": "23:00",
+                   "sl_buf": 20.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": [[14, 30], [22, 45]], "exchange": "MCX",
                    "htf_source": "futures", "htf_min_override": 30},
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
@@ -1676,8 +1676,17 @@ class TrapScannerEngine:
     def _persist_position(self) -> None:
         """Write current position to disk so a restart can recover today's trade."""
         try:
+            import pandas as pd
+
+            def _default(obj):
+                if isinstance(obj, (pd.Timestamp,)):
+                    return str(obj)
+                if hasattr(obj, 'isoformat'):
+                    return obj.isoformat()
+                raise TypeError(f"Not serializable: {type(obj)}")
+
             with open(self._position_file(), "w") as f:
-                json.dump(self._position, f)
+                json.dump(self._position, f, default=_default)
         except Exception as exc:
             self._log.warning("_persist_position failed: %s", exc)
 
