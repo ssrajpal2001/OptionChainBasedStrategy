@@ -36,8 +36,13 @@ async def main():
     if not ce_ikey or not pe_ikey:
         print("ERROR: could not resolve instrument keys"); return
 
-    ce_bars = await fetch_upstox_warm_1m(ce_ikey, token)
-    pe_bars = await fetch_upstox_warm_1m(pe_ikey, token)
+    from data_layer.historical_candles import fetch_upstox_1m, fetch_upstox_intraday_1m
+    # Always fetch both prev-day and today separately — warm_1m skips prev-day when today>=15 bars
+    ce_prev, ce_today = await asyncio.gather(fetch_upstox_1m(ce_ikey, token), fetch_upstox_intraday_1m(ce_ikey, token))
+    pe_prev, pe_today = await asyncio.gather(fetch_upstox_1m(pe_ikey, token), fetch_upstox_intraday_1m(pe_ikey, token))
+    ce_bars = ce_prev + ce_today
+    pe_bars = pe_prev + pe_today
+    print(f"CE{CE_STRIKE}: prev={len(ce_prev)} today={len(ce_today)}  PE{PE_STRIKE}: prev={len(pe_prev)} today={len(pe_today)}")
     if not ce_bars or not pe_bars:
         print("ERROR: no bar data"); return
 
@@ -87,7 +92,7 @@ async def main():
     print(f"Prev-day seed bars (3m): {len(seed_closes)} | Today bars (3m): {len(today_closes)}")
 
     RSI_LEN = 14
-    ROC_LEN = 10
+    ROC_LEN = 9   # (close - close[9]) / close[9] * 100 → 9 bars back
 
     print(f"\n{'='*62}")
     print(f"  TF={TF}m — TODAY only (RSI/ROC seeded from prev-day)")
