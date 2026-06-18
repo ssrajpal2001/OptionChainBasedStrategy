@@ -21,7 +21,7 @@ DUMMY_EXCHANGE    = "MCX"
 DUMMY_SYMBOL      = "CRUDEOIL"       # prefix — script will search for CE option
 DUMMY_OPTION_TYPE = "CE"             # buy a call option (not futures)
 DUMMY_STRIKE      = 8000             # far OTM CE strike (crude ~7000-7100 range)
-DUMMY_QTY         = 1
+DUMMY_QTY         = 100              # CrudeOil lot size = 100
 DUMMY_LIMIT_PRICE = 0.50             # far below market option price → will NOT fill
 
 SEP = "=" * 55
