@@ -826,7 +826,7 @@ document.addEventListener('alpine:init', () => {
     deployDeleteId: '',            // set before calling deleteDeploy to avoid x-for scope issues
     // Portal broker add form state
     showPortalBrokerForm: false,
-    portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', api_key:'', api_secret:'', lot_multiplier:1.0, trading_mode:'paper', product_type:'MIS', assigned_strategy:'', assigned_instrument:'NIFTY' },
+    portalBroker: { provider:'zerodha', binding_id:'', label:'', user_id:'', api_key:'', api_secret:'', password:'', totp_secret:'', lot_multiplier:1.0, trading_mode:'paper', product_type:'MIS', assigned_strategy:'', assigned_instrument:'NIFTY' },
     portalBrokerMsg: '', portalBrokerOk: null, portalBrokerLoading: false,
     portalBrokerIsEdit: false,
 
@@ -7133,7 +7133,11 @@ function histReplay() {
                 <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
                 <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
               </div>
-              <!-- Password/PIN not stored — auth via broker OAuth portal -->
+              <!-- Password/MPIN — only for headless-auth brokers (AngelOne) -->
+              <div x-show="portalBroker.provider==='angelone'">
+                <div class="sec-label mb-1">MPIN (4-digit login PIN)</div>
+                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password" placeholder="leave blank to keep existing"/>
+              </div>
             </div>
             <div class="grid gap-3"
                  :class="(brokerFieldConfig[portalBroker.provider].api_key && brokerFieldConfig[portalBroker.provider].api_secret) ? 'grid-cols-2' : 'grid-cols-1'">
@@ -7146,7 +7150,11 @@ function histReplay() {
                 <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
               </div>
             </div>
-            <!-- TOTP secret not stored — 2FA handled on broker's secure portal -->
+            <!-- TOTP secret — only for headless-auth brokers (AngelOne) -->
+            <div x-show="portalBroker.provider==='angelone'">
+              <div class="sec-label mb-1">TOTP SECRET (base32 key from authenticator app)</div>
+              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password" placeholder="leave blank to keep existing"/>
+            </div>
             <!-- OAuth info banner for OAuth-capable providers -->
             <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).oauth"
                  class="text-xs px-3 py-2 rounded leading-relaxed"
