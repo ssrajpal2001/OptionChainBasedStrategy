@@ -2226,18 +2226,17 @@ class TrapScannerEngine:
 
         # Nearest FUT zone for futures-mode instruments (closest TRAPPED zone by distance from spot)
         def _nearest_fut_zone(side: str) -> Optional[dict]:
-            trapped = [z for z in self._htf_fut_zones if z["status"] == "TRAPPED"]
-            # For display: fall back to all zones when none are fully TRAPPED yet
-            pool = trapped or [z for z in self._htf_fut_zones if z.get("status")]
+            # CE → BEAR zones (sellers trapped, entry on price falling through zone)
+            # PE → BULL zones (buyers trapped, entry on price rising through zone)
+            kind_filter = "BEAR" if side == "CE" else "BULL"
+            typed = [z for z in self._htf_fut_zones if z.get("kind") == kind_filter]
+            if not typed:
+                typed = list(self._htf_fut_zones)  # fallback if kind not set
+            trapped = [z for z in typed if z["status"] == "TRAPPED"]
+            pool = trapped or [z for z in typed if z.get("status")]
             if not pool or not ltp:
                 return None
-            # bear zone → closest above spot; bull zone → closest below spot
-            candidates = [z for z in pool
-                          if (z.get("zone_trigger", 0) >= ltp if side == "CE"
-                              else z.get("zone_trigger", 0) <= ltp)]
-            if not candidates:
-                candidates = pool  # fallback: all zones
-            best = min(candidates, key=lambda z: abs(z.get("zone_trigger", 0) - ltp))
+            best = min(pool, key=lambda z: abs(z.get("zone_trigger", 0) - ltp))
             uid  = _zone_uid(best)
             trig = round(best.get("zone_trigger", 0), 2)
             dist = round(abs(ltp - trig), 1) if ltp else None
@@ -2250,6 +2249,7 @@ class TrapScannerEngine:
                 "trapped_on":   str(best.get("trapped_on", "") or ""),
                 "htf_label":    f"{self._htf_min}-min",
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
+                "kind":         best.get("kind", kind_filter),
             }
 
         # Per-contract LTP and status for UI (mirrors NiftyTrapScanner dashboard table)
