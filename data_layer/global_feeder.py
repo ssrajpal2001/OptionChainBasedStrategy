@@ -515,6 +515,14 @@ class UpstoxFeeder(BaseFeeder):
         now = datetime.now(IST)
 
         for inst_key, feed_data in feeds.items():
+            # Diagnostic: log first MCX option tick received (one-shot)
+            if inst_key.startswith("MCX_FO|") and not inst_key == "MCX_FO|499095":
+                _dk = f"_mcxoptlog_{inst_key}"
+                if not getattr(self, _dk, False):
+                    setattr(self, _dk, True)
+                    ltp_raw = self._extract_ltp(feed_data)
+                    logger.info("UpstoxFeeder: MCX option tick received key=%s ltp=%s", inst_key, ltp_raw)
+
             ltp = self._extract_ltp(feed_data)
             if ltp is None or ltp == 0.0:
                 continue
