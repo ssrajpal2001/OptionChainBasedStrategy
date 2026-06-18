@@ -44,7 +44,8 @@ async def fetch_upstox_1m(instrument_key: str, access_token: str, max_step_back:
     stepping back day-by-day over holidays/empties up to max_step_back days. Each candle:
     {'ts','open','high','low','close','volume'}. [] if none found."""
     def _get(d: date):
-        url = (f"https://api.upstox.com/v2/historical-candle/{instrument_key}/1minute/"
+        from urllib.parse import quote as _q
+        url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/1minute/"
                f"{d.isoformat()}/{d.isoformat()}")
         return _parse_candles(_http_get_json(url, access_token))
 
@@ -61,7 +62,8 @@ async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> Li
     """TODAY's 1-min candles (oldest-first, open→now) for an Upstox instrument_key via the
     intraday endpoint (no date range). [] on error/empty."""
     def _get():
-        url = f"https://api.upstox.com/v2/historical-candle/intraday/{instrument_key}/1minute"
+        from urllib.parse import quote as _q
+        url = f"https://api.upstox.com/v2/historical-candle/intraday/{_q(instrument_key, safe='')}/1minute"
         return _parse_candles(_http_get_json(url, access_token))
 
     return await asyncio.to_thread(_get)
