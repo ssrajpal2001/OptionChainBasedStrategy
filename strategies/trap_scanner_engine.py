@@ -242,6 +242,7 @@ class TrapScannerEngine:
 
         # Position
         self._position: Optional[Dict] = None
+        self._sweep_watch: Optional[Dict] = None   # liquidity sweep re-entry after SL
 
         self._broker: Optional[Any] = None
         self._rebalancer: Optional[Any] = None   # set via set_rebalancer()
@@ -563,8 +564,17 @@ class TrapScannerEngine:
             ltp_ce = self._ltp_cache.get("CE1") or self._ltp_cache.get("CE2") or 0.0
             ltp_pe = self._ltp_cache.get("PE1") or self._ltp_cache.get("PE2") or 0.0
 
+            def _regime_ok(zone: dict, ltp: float) -> bool:
+                """Drop zones from a different premium regime (theta-decayed or expired)."""
+                if ltp <= 0:
+                    return True
+                zh = zone.get("zone_high", 0.0)
+                zl = zone.get("zone_low", 0.0)
+                return zh > ltp * 0.3 and zl < ltp * 3.0
+
             # --- CE leg ---
             bear_trapped = [e for e in self._htf_bear_zones if e["status"] == "TRAPPED"]
+            bear_trapped = [z for z in bear_trapped if _regime_ok(z, ltp_ce)]
             if not bear_trapped or not ltp_ce or threshold is None:
                 new_ce = True
                 reason_ce = "No bear zones" if not bear_trapped else "No CE LTP/ATR"
@@ -578,6 +588,7 @@ class TrapScannerEngine:
 
             # --- PE leg ---
             bull_trapped = [e for e in self._htf_bull_zones if e["status"] == "TRAPPED"]
+            bull_trapped = [z for z in bull_trapped if _regime_ok(z, ltp_pe)]
             if not bull_trapped or not ltp_pe or threshold is None:
                 new_pe = True
                 reason_pe = "No bull zones" if not bull_trapped else "No PE LTP/ATR"
@@ -865,17 +876,18 @@ class TrapScannerEngine:
             return
 
         if self._htf_source == "option":
-            # Per-leg: CE and PE cascade independently
             ce_leg = leg in ("CE1", "CE2")
             pe_leg = leg in ("PE1", "PE2")
             do_cascade_ce = ce_leg and self._intraday_mode_ce
             do_cascade_pe = pe_leg and self._intraday_mode_pe
-            if do_cascade_ce or do_cascade_pe:
-                asyncio.get_event_loop().create_task(
-                    self._cascade_scan(ts, cascade_ce=do_cascade_ce, cascade_pe=do_cascade_pe)
-                )
-            else:
-                self._ltf_scan_normal(leg, ts)
+            # Always run HTF normal scan first (uses 75-min near zones)
+            self._ltf_scan_normal(leg, ts)
+            # Also always dispatch cascade as fallback: if HTF zones exist but price never
+            # enters them (different premium regime intraday), cascade finds today's zones.
+            # _on_entry_signal's _notified_uids + self._position guard prevent double entry.
+            asyncio.get_event_loop().create_task(
+                self._cascade_scan(ts, cascade_ce=ce_leg, cascade_pe=pe_leg)
+            )
         else:
             if self._intraday_mode:
                 asyncio.get_event_loop().create_task(self._cascade_scan(ts))
@@ -901,19 +913,22 @@ class TrapScannerEngine:
         # BEAR zones → buy CE
         bear_zones = [e for e in self._htf_bear_zones if e["status"] == "TRAPPED"]
         if bear_zones:
-            # Try CE1 (S1) first, then CE2 (S2)
+            # option-source: accept TRAPPED on LTF (same rule as cascade — premium traps
+            # rarely complete a full CLOSED 5-min bar; TRAPPED is sufficient signal)
+            _rc = self._htf_source != "option"
             if leg in ("CE1",):
-                self._run_ltf_on("CE1", self._bars_ce1, bear_zones, "CE")
+                self._run_ltf_on("CE1", self._bars_ce1, bear_zones, "CE", require_closed=_rc)
             elif leg in ("CE2",):
-                self._run_ltf_on("CE2", self._bars_ce2, bear_zones, "CE")
+                self._run_ltf_on("CE2", self._bars_ce2, bear_zones, "CE", require_closed=_rc)
 
         # BULL zones → buy PE
         bull_zones = [e for e in self._htf_bull_zones if e["status"] == "TRAPPED"]
         if bull_zones:
+            _rc = self._htf_source != "option"
             if leg in ("PE1",):
-                self._run_ltf_on("PE1", self._bars_pe1, bull_zones, "PE")
+                self._run_ltf_on("PE1", self._bars_pe1, bull_zones, "PE", require_closed=_rc)
             elif leg in ("PE2",):
-                self._run_ltf_on("PE2", self._bars_pe2, bull_zones, "PE")
+                self._run_ltf_on("PE2", self._bars_pe2, bull_zones, "PE", require_closed=_rc)
 
     def _run_ltf_on(self, leg_key: str, bars: List[dict],
                     htf_zones: List[dict], opt_type: str,
@@ -1246,6 +1261,8 @@ class TrapScannerEngine:
             "signal_source":  f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
             "order_id_entry": order_id,
             "order_id_t1":    None,
+            "htf_zone":       htf_zone,
+            "opt_type":       opt_type,
         }
         self._persist_position()
         self._log.info(
@@ -1255,9 +1272,39 @@ class TrapScannerEngine:
 
     # ── Tick exit ─────────────────────────────────────────────────────────────
 
+    async def _check_sweep_reentry(self, ltp: float) -> None:
+        """
+        After a plain SL hit, watch for liquidity sweep: price recovers above sl_level
+        within 2 ticks/candles → re-enter same zone (bears swept longs, now reversing).
+        """
+        sw = self._sweep_watch
+        if not sw or self._position:
+            return
+        if ltp > sw["sl_level"]:
+            self._log.info(
+                "SWEEP REENTRY: ltp=%.2f recovered above sl=%.2f → re-entering %s",
+                ltp, sw["sl_level"], sw["leg"],
+            )
+            self._sweep_watch = None
+            # Re-fire entry signal using stored zone — notified_uid already consumed,
+            # so create a synthetic entry dict at current ltp.
+            zone = sw.get("entry_zone", {})
+            synth_entry = {
+                "entry": ltp, "zone_low": zone.get("zone_low", ltp - 5),
+                "zone_high": zone.get("zone_high", ltp + 5),
+                "status": "SWEEP", "closed_on": None, "trapped_on": None,
+            }
+            await self._on_entry_signal(sw["leg"], sw["opt_type"], synth_entry, zone)
+        else:
+            sw["candles_left"] -= 1
+            if sw["candles_left"] <= 0:
+                self._log.info("Sweep watch expired — no recovery above %.2f", sw["sl_level"])
+                self._sweep_watch = None
+
     async def _check_tick_exit(self, ltp: float, ts: Optional[datetime] = None) -> None:
         pos = self._position
         if not pos:
+            await self._check_sweep_reentry(ltp)
             return
 
         # T1: 50% at HTF target
@@ -1280,6 +1327,19 @@ class TrapScannerEngine:
             reason = "TRAIL_SL" if pos["t1_hit"] else "SL"
             self._log.info("%s ltp=%.2f sl=%.2f qty=%d", reason, ltp, active_sl, remaining)
             await self._place_exit(remaining, active_sl, reason)
+            # Liquidity sweep watch: only on plain SL (not trail), not after T1.
+            # If price recovers above SL within 2 candles → sweep → re-enter same zone.
+            if not pos["t1_hit"]:
+                self._sweep_watch = {
+                    "opt_type":   pos.get("opt_type", "CE"),
+                    "leg":        pos["leg"],
+                    "sl_level":   active_sl,
+                    "entry_zone": pos.get("htf_zone", {}),
+                    "qty":        remaining,
+                    "candles_left": 2,
+                    "orig_entry": pos["entry_price"],
+                }
+                self._log.info("SL hit — watching for liquidity sweep re-entry above %.2f", active_sl)
             self._position = None
             self._clear_persisted_position()
 
@@ -1465,6 +1525,7 @@ class TrapScannerEngine:
         self._intraday_mode    = False
         self._intraday_mode_ce = False
         self._intraday_mode_pe = False
+        self._sweep_watch      = None
         self._day_init_done = False
         self._bars_spot = []; self._bars_fut = []
         self._bars_ce1  = []; self._bars_ce2 = []
