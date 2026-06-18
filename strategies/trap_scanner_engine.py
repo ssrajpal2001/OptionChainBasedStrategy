@@ -1093,21 +1093,24 @@ class TrapScannerEngine:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Proximity gate — both CE and PE use UPPER 1/3 of zone.
-            # Entry happened at zone_high (bears shorted / bulls bought).
-            # When price returns to zone, 5-min scan starts at zone_high - width/3.
-            #   CE: price came from above bears' SL → re-enters zone from top
-            #   PE: price bounced from below bulls' SL → must reach near zone_high
-            # Gate: zone_high - width/3  <=  spot  <=  zone_high
+            # Proximity gate (futures domain):
+            #   CE (bear trap): bears shorted at zone_high, price descended past their SL,
+            #     now deep in zone → trigger at LOWER 1/3 [zone_low, zone_low + width/3]
+            #   PE (bull trap): bulls bought at zone_high, price bounced from below their SL,
+            #     now rising back near zone_high → trigger at UPPER 1/3 [zone_high-width/3, zone_high]
             z_low  = zone["zone_low"]
             z_high = zone["zone_high"]
             width  = z_high - z_low
-            trigger_lo = z_high - width / 3
-            trigger_hi = z_high
+            if opt_type == "PE":
+                trigger_lo = z_high - width / 3
+                trigger_hi = z_high
+            else:  # CE
+                trigger_lo = z_low
+                trigger_hi = z_low + width / 3
             if current_spot > 0 and (current_spot < trigger_lo or current_spot > trigger_hi):
                 self._log.debug(
-                    "zone %s skipped: spot=%.1f not in upper-1/3 trigger [%.1f, %.1f]",
-                    uid, current_spot, trigger_lo, trigger_hi)
+                    "zone %s skipped: spot=%.1f not in %s trigger [%.1f, %.1f]",
+                    uid, current_spot, opt_type, trigger_lo, trigger_hi)
                 continue
 
             _, ltf_entries = scanner.scan_ltf(
