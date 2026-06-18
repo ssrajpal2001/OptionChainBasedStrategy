@@ -755,7 +755,7 @@ class FyersFeeder(BaseFeeder):
             if not meta:
                 return None
             und, strike, ot, exp = meta
-            from data_layer.base_feeder import InternalSymbol
+            from data_layer.symbol_translator import InternalSymbol
             internal = InternalSymbol(underlying=und, expiry=exp, strike=strike, option_type=ot)
             return SymbolTranslator.to_fyers(internal, is_monthly=is_monthly_expiry(exp, und))
         except Exception:
@@ -770,6 +770,8 @@ class FyersFeeder(BaseFeeder):
                 fyers_sym = self._upstox_mcx_to_fyers(t)
                 if fyers_sym:
                     converted.append(fyers_sym)
+                else:
+                    logger.debug("FyersFeeder: could not convert MCX key %s to Fyers format", t)
         mine = [t for t in tokens if self._is_fyers_symbol(t)] + converted
         # Diagnostic: reveal received vs matched so we can see why options may be 0.
         logger.info(
