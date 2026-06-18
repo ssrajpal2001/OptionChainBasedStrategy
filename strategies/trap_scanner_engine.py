@@ -801,12 +801,15 @@ class TrapScannerEngine:
                 # entirely so pre-init bad ticks can't contaminate the distance check.
                 if not self._initialized:
                     continue
-                _ref = self._spot_open  # today's first bar open — reliable anchor
-                # MCX commodities (CrudeOil, Gold) can move 5-6% intraday; equity 2.5%
-                _guard = 0.06 if self._cfg.exchange.is_mcx(self._und) else 0.025
+                # Guard against broker mis-decode spikes (e.g. BSE 80025 vs real 73840).
+                # Use LAST GOOD TICK as rolling reference (not day-open) so legitimate
+                # intraday moves of any size are accepted; only sudden per-tick jumps
+                # are rejected. MCX crude/gold can gap 5%+ at session open so 8% cap.
+                _ref = self._spot_cache if self._spot_cache > 0 else self._spot_open
+                _guard = 0.08 if self._cfg.exchange.is_mcx(self._und) else 0.04
                 if _ref > 0 and abs(raw_ltp - _ref) / _ref > _guard:
                     self._log.warning(
-                        "SPOT tick rejected: ltp=%.2f deviates >%.1f%% from open=%.2f (mis-decode?)",
+                        "SPOT tick rejected: ltp=%.2f deviates >%.1f%% from last=%.2f (mis-decode?)",
                         raw_ltp, _guard * 100, _ref,
                     )
                     continue
