@@ -572,8 +572,16 @@ async def _run_live(
         try:
             _ok = await _mcx_feeder.connect()
             if _ok:
+                # Upstox2 is MCX-only — drop NSE/BSE index keys that connect() added.
+                # Subscribing NSE_INDEX|... on an MCX account causes silent WS failure.
+                _mcx_feeder._subscribed_keys = [
+                    k for k in _mcx_feeder._subscribed_keys if k.startswith("MCX")
+                ]
                 asyncio.create_task(_mcx_feeder._ws_loop(), name="mcx_upstox2_ws")
-                logging.getLogger(__name__).info("MCX Upstox2 feeder connected and WS loop started.")
+                logging.getLogger(__name__).info(
+                    "MCX Upstox2 feeder connected and WS loop started (%d MCX keys).",
+                    len(_mcx_feeder._subscribed_keys),
+                )
             else:
                 logging.getLogger(__name__).warning(
                     "MCX Upstox2 feeder connect() returned False — no MCX option ticks.")
