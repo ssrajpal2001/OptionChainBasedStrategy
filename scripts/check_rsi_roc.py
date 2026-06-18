@@ -67,9 +67,11 @@ async def main():
             abs_min = dt_ist.hour * 60 + dt_ist.minute
             g = abs_min // tf  # clock-aligned: 9:15,9:16,9:17 → same group; 9:18 → next
             if g not in groups:
-                groups[g] = {"ts": dt_ist, "close": b["close"], "open_ts": dt_ist}
+                groups[g] = {"ts": dt_ist, "close": b["close"]}
             else:
-                groups[g]["close"] = b["close"]  # keep updating → last bar = close
+                groups[g]["close"] = b["close"]
+                # label = close time = last bar open + 1 min
+                groups[g]["ts"] = dt_ist + timedelta(minutes=1)
         return [groups[g] for g in sorted(groups.keys())]
 
     tf_bars_all = resample(bars_1m, TF)
