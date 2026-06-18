@@ -1135,10 +1135,10 @@ class DashboardServer:
 
             t0 = _time.monotonic()
             p  = provider.lower()
-            if p not in {"upstox", "fyers"}:
+            if p not in {"upstox", "upstox2", "fyers"}:
                 return {
                     "ok":    False,
-                    "error": f"Unsupported feeder provider '{provider}'. Allowed: upstox, fyers.",
+                    "error": f"Unsupported feeder provider '{provider}'. Allowed: upstox, upstox2, fyers.",
                 }
 
             db_row  = _srv._client_db.get_feeder_creds_sync(p) or {}
@@ -1222,7 +1222,7 @@ class DashboardServer:
         ):
             """Toggle OFF for admin feeder — stops the active feeder for this provider."""
             p = provider.lower()
-            if p not in {"upstox", "fyers"}:
+            if p not in {"upstox", "upstox2", "fyers"}:
                 return {"ok": False, "error": f"Unsupported feeder provider '{p}'."}
 
             feeder = _srv._feeder
