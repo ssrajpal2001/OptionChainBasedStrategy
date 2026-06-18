@@ -69,15 +69,34 @@ async def main():
             result = result[:-1]
         return result
 
-    for tf_name, tf_closes in [("1m", combined), ("2m", resample_closes(combined, 2)), ("3m", resample_closes(combined, 3))]:
-        arr = np.array(tf_closes, dtype=np.float64)
-        n_tf = len(arr)
-        rsi_val = float(_rsi(arr)) if n_tf >= 15 else None
-        roc_val = float((arr[-1] - arr[-11]) / arr[-11] * 100) if n_tf >= 11 and arr[-11] != 0 else None
-        rsi_str = f"{rsi_val:.2f}" if rsi_val is not None else f"N/A ({n_tf} bars, need 15)"
-        roc_str = f"{roc_val:.2f}%" if roc_val is not None else f"N/A ({n_tf} bars, need 11)"
-        print(f"\n  [{tf_name}] bars={n_tf}  close={tf_closes[-1]:.2f}")
-        print(f"    RSI(14) = {rsi_str}")
-        print(f"    ROC(10) = {roc_str}")
+    # Build time series table
+    ce_times = [b["ts"] for b in ce_bars] if ce_bars else []  # timestamps from CE bars
+    # align times to combined window
+    ce_times_aligned = ce_times[-n:] if len(ce_times) >= n else ce_times
+
+    for tf_name, tf in [("1m", 1), ("2m", 2), ("3m", 3)]:
+        tf_closes = combined if tf == 1 else resample_closes(combined, tf)
+        tf_times  = ce_times_aligned if tf == 1 else resample_closes(ce_times_aligned, tf)
+        print(f"\n{'='*55}")
+        print(f"  Timeframe: {tf_name}  ({len(tf_closes)} bars)")
+        print(f"{'='*55}")
+        print(f"  {'Time':<20} {'Close':>8} {'RSI(14)':>9} {'ROC(10)':>9}")
+        print(f"  {'-'*20} {'-'*8} {'-'*9} {'-'*9}")
+        arr_all = np.array(tf_closes, dtype=np.float64)
+        for i in range(len(tf_closes)):
+            if i < 14:  # not enough history for RSI
+                continue
+            arr_i = arr_all[:i+1]
+            rsi_i = float(_rsi(arr_i))
+            roc_i = float((arr_i[-1] - arr_i[-11]) / arr_i[-11] * 100) if len(arr_i) >= 11 and arr_i[-11] != 0 else None
+            ts = tf_times[i] if i < len(tf_times) else ""
+            try:
+                from datetime import timezone, timedelta
+                IST = timezone(timedelta(hours=5, minutes=30))
+                dt = datetime.fromtimestamp(float(ts), tz=IST).strftime("%H:%M") if ts else f"bar{i}"
+            except Exception:
+                dt = f"bar{i}"
+            roc_str = f"{roc_i:>9.2f}" if roc_i is not None else f"{'N/A':>9}"
+            print(f"  {dt:<20} {tf_closes[i]:>8.2f} {rsi_i:>9.2f} {roc_str}")
 
 asyncio.run(main())
