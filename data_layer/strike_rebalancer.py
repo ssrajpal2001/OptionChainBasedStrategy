@@ -45,7 +45,9 @@ from data_layer.symbol_translator import InternalSymbol
 
 logger = logging.getLogger(__name__)
 
-_MARKET_OPEN = time(9, 15, 0)
+_MARKET_OPEN  = time(9, 15, 0)
+_NSE_CLOSE    = time(15, 30, 0)   # unsubscribe NSE/BSE strikes after this
+_NSE_INDICES  = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"})
 _REBALANCE_THRESHOLD = 3   # strike intervals drift before rebalancing
 
 
@@ -62,6 +64,7 @@ class _UnderlyingState:
     active_strikes: Set[float] = field(default_factory=set)
     pinned_strikes: Set[float] = field(default_factory=set)
     rebalance_count: int = 0
+    eod_unsubscribed: bool = False           # True once NSE EOD cleanup has run
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,6 +226,28 @@ class StrikeRebalancer:
             return
 
         state = self._state[underlying]
+
+        # NSE/BSE EOD: unsubscribe ALL non-pinned strikes once after 15:30 IST to free
+        # up Fyers WS slots for MCX evening session (crude/gold etc run until ~23:30).
+        if (underlying in _NSE_INDICES
+                and not state.eod_unsubscribed
+                and tick.timestamp.astimezone(IST).time() >= _NSE_CLOSE):
+            to_unsub = state.active_strikes - state.pinned_strikes
+            if to_unsub and self._feeder is not None:
+                tokens = self._strikes_to_tokens(underlying, to_unsub)
+                try:
+                    await self._feeder.unsubscribe_tokens(tokens)
+                    state.active_strikes -= to_unsub
+                    logger.info(
+                        "StrikeRebalancer: [%s] NSE EOD — unsubscribed %d strikes (%d pinned kept)",
+                        underlying, len(to_unsub), len(state.pinned_strikes),
+                    )
+                except Exception as exc:
+                    logger.warning("StrikeRebalancer: [%s] NSE EOD unsubscribe failed: %s",
+                                   underlying, exc)
+            state.eod_unsubscribed = True
+            return  # skip normal rebalance processing after close
+
         step = self._cfg.exchange.strike_steps.get(underlying, 50.0)
         atm = _round_to_strike(tick.ltp, step)
 
