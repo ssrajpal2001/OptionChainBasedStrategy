@@ -15,11 +15,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CLIENT_ID  = sys.argv[1] if len(sys.argv) > 1 else "ssrajpal2001"
 BINDING_ID = sys.argv[2] if len(sys.argv) > 2 else None
 
-# Dummy order: buy 1 lot MCX CrudeOil futures at price far below market (won't fill)
+# Dummy order: buy 1 lot MCX CrudeOil CE option (far OTM) at Rs 0.50 limit — won't fill,
+# tiny premium, no margin needed. Change strike if needed.
 DUMMY_EXCHANGE    = "MCX"
-DUMMY_SYMBOL      = "CRUDEOIL"       # MCX CrudeOil near-month futures
+DUMMY_SYMBOL      = "CRUDEOIL"       # prefix — script will search for CE option
+DUMMY_OPTION_TYPE = "CE"             # buy a call option (not futures)
+DUMMY_STRIKE      = 8000             # far OTM CE strike (crude ~7000-7100 range)
 DUMMY_QTY         = 1
-DUMMY_LIMIT_PRICE = 100.0            # far below market (~7000) → will NOT fill, safe to cancel
+DUMMY_LIMIT_PRICE = 0.50             # far below market option price → will NOT fill
 
 SEP = "=" * 55
 
@@ -70,8 +73,28 @@ async def main():
     # ── 3. Place dummy order ─────────────────────────────────
     from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
 
+    # Resolve MCX CrudeOil option symbol via AngelOne scrip search
+    from data_layer.instrument_registry import REGISTRY
+    from datetime import date
+    await asyncio.to_thread(REGISTRY.load_sync, "CRUDEOIL", "")
+    exp = REGISTRY.get_active_expiry("CRUDEOIL", date.today())
+    angel_symbol = None
+    if exp:
+        raw = await asyncio.to_thread(
+            broker._smartapi.searchScrip, DUMMY_EXCHANGE,
+            f"CRUDEOIL{exp.strftime('%d%b%y').upper()}{DUMMY_STRIKE}{DUMMY_OPTION_TYPE}"
+        )
+        hits = (raw or {}).get("data") or []
+        if hits:
+            angel_symbol = hits[0]["tradingsymbol"]
+            print(f"      Resolved: {angel_symbol}")
+    if not angel_symbol:
+        # fallback: let broker resolve via its own lookup
+        angel_symbol = f"CRUDEOIL{DUMMY_STRIKE}{DUMMY_OPTION_TYPE}"
+        print(f"      Using fallback symbol: {angel_symbol}")
+
     req = OrderRequest(
-        broker_symbol = DUMMY_SYMBOL,
+        broker_symbol = angel_symbol,
         exchange      = DUMMY_EXCHANGE,
         side          = OrderSide.BUY,
         qty           = DUMMY_QTY,
@@ -80,7 +103,7 @@ async def main():
         tag           = "TEST_CYCLE",
     )
 
-    print(f"[ 2 ] Placing LIMIT BUY order: {DUMMY_SYMBOL} qty={DUMMY_QTY} @ {DUMMY_LIMIT_PRICE}")
+    print(f"[ 2 ] Placing LIMIT BUY order: {angel_symbol} qty={DUMMY_QTY} @ {DUMMY_LIMIT_PRICE}")
     try:
         order_id = await broker.place_order(req)
         print(f"      Order ID returned : {order_id!r}")
