@@ -901,6 +901,11 @@ class TrapScannerEngine:
     # ── Candle close → scan logic ─────────────────────────────────────────────
 
     def _on_candle_close(self, leg: str, ts: datetime) -> None:
+        # Futures-mode TSL: on every FUT candle close while in position,
+        # check for new bear traps ABOVE entry → advance trail_sl
+        if self._position and self._htf_source == "futures" and leg == "FUT":
+            self._update_futures_tsl(ts)
+            return
         if self._position:
             return
 
@@ -1723,6 +1728,73 @@ class TrapScannerEngine:
                 json.dump(self._position, f, default=_default)
         except Exception as exc:
             self._log.warning("_persist_position failed: %s", exc)
+
+    def _update_futures_tsl(self, ts: datetime) -> None:
+        """
+        Futures-mode TSL: on each 5-min FUT candle close while in a CE/PE position,
+        scan for new TRAPPED bear zones ABOVE (CE) or below (PE) the entry spot.
+
+        TSL step 1: first new zone above entry → trail_sl = spot_at_entry (CTC)
+        TSL step 2: each subsequent zone → trail_sl = new zone_low - sl_buf (trails up)
+
+        Only advances trail_sl — never moves it back down.
+        Only runs before T1 is hit (after T1, trail is handled by _update_trail_sl).
+        """
+        pos = self._position
+        if not pos or pos.get("t1_hit"):
+            return
+
+        today = datetime.now(IST).date()
+        today_bars = [b for b in self._bars_fut
+                      if pd.to_datetime(b.get("datetime", "")).date() == today]
+        if len(today_bars) < 3:
+            return
+
+        df  = _bars_to_df(today_bars[-100:])
+        opt_type      = pos.get("opt_type", "CE")
+        spot_at_entry = pos.get("spot_at_entry", pos.get("ep", 0))
+        current_sl    = pos.get("trail_sl", pos.get("sl_price", 0))
+        orig_sl       = pos.get("sl_price", 0)
+
+        _, entries = scanner.scan_htf(df)
+        trapped = [e for e in entries if e["status"] == "TRAPPED"]
+
+        if opt_type == "CE":
+            # New bear traps ABOVE entry spot confirm upward momentum
+            above = [e for e in trapped if e.get("zone_high", 0) > spot_at_entry]
+            if not above:
+                return
+            # Best zone = highest zone_low above entry (most conservative trail)
+            best = max(above, key=lambda e: e.get("zone_low", 0))
+            new_sl = round(best["zone_low"] - self._sl_buf, 2)
+
+            if current_sl < spot_at_entry:
+                # Step 1: advance to CTC (break-even) first
+                new_sl = max(new_sl, spot_at_entry)
+            # Only advance, never retreat
+            if new_sl > current_sl:
+                self._log.info(
+                    "TSL advance (CE): trail_sl %.2f → %.2f (zone_low=%.2f above entry=%.2f)",
+                    current_sl, new_sl, best["zone_low"], spot_at_entry,
+                )
+                pos["trail_sl"] = new_sl
+                self._persist_position()
+        else:
+            # PE: new bull traps BELOW entry spot
+            below = [e for e in trapped if e.get("zone_low", 0) < spot_at_entry]
+            if not below:
+                return
+            best  = min(below, key=lambda e: e.get("zone_high", float("inf")))
+            new_sl = round(best["zone_high"] + self._sl_buf, 2)
+            if current_sl > spot_at_entry:
+                new_sl = min(new_sl, spot_at_entry)
+            if new_sl < current_sl:
+                self._log.info(
+                    "TSL advance (PE): trail_sl %.2f → %.2f (zone_high=%.2f below entry=%.2f)",
+                    current_sl, new_sl, best["zone_high"], spot_at_entry,
+                )
+                pos["trail_sl"] = new_sl
+                self._persist_position()
 
     def _compute_option_t1(self, opt_bars: list) -> float:
         """T1 = latest TRAPPED bear zone sl on the option chart (ref bar HIGH = bears' SL)."""
