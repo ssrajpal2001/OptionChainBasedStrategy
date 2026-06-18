@@ -2030,7 +2030,8 @@ class TrapScannerEngine:
     # ── Telemetry ─────────────────────────────────────────────────────────────
 
     def _zone_info_list(self, zones: List[dict], opt_type: str) -> list:
-        if self._htf_source == "option":
+        if self._htf_source in ("option", "spot"):
+            # Zones are in option premium units — compare against option LTP
             ltp = (self._ltp_cache.get(opt_type + "1") or self._ltp_cache.get(opt_type + "2") or
                    self._ltp_cache.get("CE1") or self._ltp_cache.get("PE1") or 0.0)
         else:
@@ -2082,7 +2083,7 @@ class TrapScannerEngine:
         # For option-bar HTF, zone distance should be in option premium units
         opt_ltp = (self._ltp_cache.get("CE1") or self._ltp_cache.get("PE1") or
                    self._ltp_cache.get("CE2") or self._ltp_cache.get("PE2") or 0.0)
-        zone_ltp = opt_ltp if self._htf_source == "option" else ltp
+        zone_ltp = opt_ltp if self._htf_source in ("option", "spot") else ltp
         atr = self._htf_atr_val
 
         # zones built later: opt_zones + fut_zones_ui (sorted, capped at 10)
