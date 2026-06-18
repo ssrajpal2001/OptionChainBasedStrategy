@@ -95,13 +95,38 @@ async def main():
     print(f"  {'Time':<8} {'Close':>8} {'RSI(14)':>9} {'ROC(10)':>9}")
     print(f"  {'-'*8} {'-'*8} {'-'*9} {'-'*9}")
 
+    def wilder_rsi_series(closes, period=14):
+        """Proper Wilder RSI over the full series. Returns list of (rsi or None) per bar."""
+        out = [None] * len(closes)
+        if len(closes) < period + 1:
+            return out
+        deltas = np.diff(np.array(closes, dtype=np.float64))
+        gains  = np.where(deltas > 0, deltas, 0.0)
+        losses = np.where(deltas < 0, -deltas, 0.0)
+        # seed with SMA of first `period` changes
+        avg_g = float(gains[:period].mean())
+        avg_l = float(losses[:period].mean())
+        out[period] = 100.0 if avg_l == 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+        for i in range(period, len(deltas)):
+            avg_g = (avg_g * (period - 1) + float(gains[i])) / period
+            avg_l = (avg_l * (period - 1) + float(losses[i])) / period
+            out[i + 1] = 100.0 if avg_l == 0 else 100.0 - 100.0 / (1.0 + avg_g / avg_l)
+        return out
+
+    # Compute RSI over full series (seed + today), then show only today's slice
+    full_closes = seed_closes + today_closes
+    rsi_series  = wilder_rsi_series(full_closes, RSI_LEN)
+    rsi_today   = rsi_series[len(seed_closes):]  # today's RSI values aligned to today_closes
+
     for i in range(len(today_bars)):
-        # full series = seed + today up to bar i (so RSI is valid from bar 0 of today)
-        full_closes = seed_closes + today_closes[:i+1]
-        arr_i = np.array(full_closes, dtype=np.float64)
-        rsi_val = f"{float(_rsi(arr_i)):>9.2f}" if len(arr_i) >= RSI_LEN + 1 else f"{'N/A':>9}"
-        roc_val = (f"{float((arr_i[-1]-arr_i[-ROC_LEN-1])/arr_i[-ROC_LEN-1]*100):>9.2f}"
-                   if len(arr_i) >= ROC_LEN + 1 and arr_i[-ROC_LEN-1] != 0 else f"{'N/A':>9}")
+        full_idx = len(seed_closes) + i
+        rsi_v = rsi_series[full_idx]
+        rsi_val = f"{rsi_v:>9.2f}" if rsi_v is not None else f"{'N/A':>9}"
+        # ROC uses full series too
+        full_so_far = full_closes[:full_idx + 1]
+        roc_v = ((full_so_far[-1] - full_so_far[-ROC_LEN-1]) / full_so_far[-ROC_LEN-1] * 100
+                 if len(full_so_far) >= ROC_LEN + 1 and full_so_far[-ROC_LEN-1] != 0 else None)
+        roc_val = f"{roc_v:>9.2f}" if roc_v is not None else f"{'N/A':>9}"
         ts = today_bars[i]["ts"]
         t_str = ts.strftime("%H:%M") if hasattr(ts, "strftime") else str(ts)
         print(f"  {t_str:<8} {today_closes[i]:>8.2f} {rsi_val} {roc_val}")
