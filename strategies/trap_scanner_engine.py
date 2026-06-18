@@ -1103,11 +1103,11 @@ class TrapScannerEngine:
             z_high = zone["zone_high"]
             width  = z_high - z_low
             if opt_type == "PE":
-                trigger_lo = z_high - width / 3
+                trigger_lo = z_high - 2 * width / 3   # upper 2/3 of zone
                 trigger_hi = z_high
             else:  # CE
                 trigger_lo = z_low
-                trigger_hi = z_low + width / 3
+                trigger_hi = z_low + 2 * width / 3    # lower 2/3 of zone
             if current_spot > 0 and (current_spot < trigger_lo or current_spot > trigger_hi):
                 self._log.debug(
                     "zone %s skipped: spot=%.1f not in %s trigger [%.1f, %.1f]",
