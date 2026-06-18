@@ -348,11 +348,12 @@ def run_crudeoil_backtest(days, crude_key):
     total = 0
     all_trades = []
 
-    # CrudeOil runs two sessions per day — day (09:00-16:59) and evening (17:00-23:30)
-    # Zones from each session are used ONLY for LTF entries within that session
+    # CrudeOil live engine: window=[[14,30],[22,45]] — two entry windows per day.
+    # Each window has its own scan context (only uses bars up to that session end).
+    # We give a 2-hr lookback window before each entry window for zone detection.
     SESSIONS = [
-        ("DAY",     "09:00", "16:59", "16:55"),
-        ("EVENING", "17:00", "23:30", "23:25"),
+        ("W1_14:30", "12:30", "16:00", "15:55"),   # Window 1: 14:30 entry, scan 12:30-16:00
+        ("W2_22:45", "20:30", "23:30", "23:25"),   # Window 2: 22:45 entry, scan 20:30-23:30
     ]
 
     for dt in days:
