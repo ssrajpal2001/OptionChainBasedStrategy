@@ -8284,26 +8284,40 @@ function histReplay() {
                         </div>
                       </template>
                       <div x-show="!bk||(!bk.contracts&&(!bk.zones||bk.zones.length===0))" class="text-xs font-mono py-1" style="color:var(--t-muted)">No HTF zones detected yet.</div>
-                      <!-- Open position -->
+                      <!-- Open position — live ledger table -->
                       <template x-if="bk&&bk.position">
-                        <div class="mt-2 pt-2 border-t text-xs font-mono space-y-1" style="border-color:var(--t-border)">
-                          <div class="flex flex-wrap gap-2">
-                            <span style="color:var(--t-yellow);font-weight:700">POSITION</span>
-                            <span style="color:var(--t-bright)" x-text="bk.position.side+' '+bk.position.strike+' (exec)'"></span>
-                            <span x-show="bk.position.scan_strike" style="color:var(--t-muted)" x-text="'scan='+bk.position.scan_strike"></span>
-                            <span x-show="bk.position.spot_at_entry" style="color:var(--t-muted)" x-text="'spot@entry='+bk.position.spot_at_entry"></span>
-                            <span x-show="bk.position.t1_hit" style="color:var(--t-green);font-weight:700">T1✓</span>
+                        <div class="mt-2 pt-2 border-t text-xs font-mono" style="border-color:var(--t-border)"
+                             x-data="{
+                               get leg(){ return bk.position.side==='CE'?'CE1':'PE1' },
+                               get ltp(){ return (bk.contracts&&bk.contracts[bk.position.side==='CE'?'CE1':'PE1']?.ltp)||0 },
+                               get ep(){ return bk.position.entry_price||0 },
+                               get qty(){ return bk.position.remaining_qty||0 },
+                               get pnl(){ return this.ltp&&this.ep ? Math.round((this.ltp-this.ep)*this.qty) : 0 },
+                               get pnlPts(){ return this.ltp&&this.ep ? (this.ltp-this.ep).toFixed(1) : '—' }
+                             }">
+                          <!-- header row -->
+                          <div class="grid gap-1 pb-1 mb-1" style="grid-template-columns:3rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 4rem;border-bottom:1px solid var(--t-border);color:var(--t-muted)">
+                            <span>LEG</span><span>STRIKE</span><span>ENTRY</span><span>LTP</span><span>SL</span><span>T1</span><span>QTY</span><span>P&amp;L (₹)</span>
                           </div>
-                          <div class="flex flex-wrap gap-2">
-                            <span x-text="'entry='+bk.position.entry_price" style="color:var(--t-bright)"></span>
+                          <!-- data row -->
+                          <div class="grid gap-1 py-1" style="grid-template-columns:3rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 4rem">
+                            <span :style="bk.position.side==='CE'?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'"
+                                  x-text="bk.position.side"></span>
+                            <span style="color:var(--t-bright)" x-text="bk.position.strike"></span>
+                            <span style="color:var(--t-bright)" x-text="ep.toFixed(1)"></span>
+                            <span style="color:var(--t-yellow);font-weight:700" x-text="ltp?ltp.toFixed(1):'—'"></span>
                             <span :style="bk.position.t1_hit?'color:var(--t-cyan)':'color:var(--t-red)'"
-                                  x-text="bk.position.t1_hit?('trail_SL='+bk.position.trail_sl):('SL='+bk.position.sl_price)"></span>
-                            <span x-text="'T1='+bk.position.t1_price" style="color:var(--t-green)"></span>
-                            <span x-text="'qty='+bk.position.remaining_qty+'/'+bk.position.total_qty" style="color:var(--t-muted)"></span>
+                                  x-text="bk.position.t1_hit?(bk.position.trail_sl||'—'):(bk.position.sl_price||'—')"></span>
+                            <span style="color:var(--t-green)" x-text="bk.position.t1_price||'—'"></span>
+                            <span style="color:var(--t-muted)" x-text="qty+'/'+bk.position.total_qty"></span>
+                            <span :style="pnl>=0?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'"
+                                  x-text="ltp?(( pnl>=0?'+':'')+pnl+' ('+pnlPts+'pts)'):'—'"></span>
                           </div>
-                          <div x-show="bk.position.entry_ts" class="flex flex-wrap gap-2" style="color:var(--t-muted)">
-                            <span x-text="'at '+bk.position.entry_ts.substring(11,19)"></span>
-                            <span x-show="bk.position.signal_source" x-text="'via '+bk.position.signal_source"></span>
+                          <!-- meta row -->
+                          <div class="flex flex-wrap gap-2 pt-1" style="color:var(--t-muted);border-top:1px solid var(--t-border)">
+                            <span x-show="bk.position.t1_hit" style="color:var(--t-green);font-weight:700">T1 ✓ trailing</span>
+                            <span x-text="'spot@entry='+bk.position.spot_at_entry"></span>
+                            <span x-show="bk.position.entry_ts" x-text="'at '+bk.position.entry_ts.substring(11,19)"></span>
                           </div>
                         </div>
                       </template>
