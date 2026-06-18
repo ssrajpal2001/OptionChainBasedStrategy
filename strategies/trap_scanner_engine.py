@@ -176,6 +176,7 @@ class TrapScannerEngine:
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
         self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 1.0))
+        self._admin_cfg   = ts_admin_cfg
         # CrudeOil HTF = 30-min (frozen per spec); all others = admin-configurable (default 75)
         _htf_override     = _def.get("htf_min_override")
         self._htf_min     = _htf_override if _htf_override else int(ts_admin_cfg.get("htf_minutes", 75))
