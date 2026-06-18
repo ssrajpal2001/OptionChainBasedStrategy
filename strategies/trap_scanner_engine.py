@@ -1035,11 +1035,11 @@ class TrapScannerEngine:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Gate: price must be inside HTF zone [zone_trigger, zone_high].
+            # Gate: option premium must be in lower 2/3 of zone (bear trap = sellers in, price low).
             z_low  = zone["zone_low"]
             z_high = zone["zone_high"]
-            zone_trigger = zone.get("zone_trigger", z_low + (z_high - z_low) / 3)
-            if current_price > 0 and (current_price < zone_trigger or current_price > z_high):
+            trigger_hi = z_low + 2 * (z_high - z_low) / 3
+            if current_price > 0 and (current_price < z_low or current_price > trigger_hi):
                 continue
 
             _, ltf_entries = scanner.scan_ltf(
