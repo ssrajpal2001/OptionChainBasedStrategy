@@ -15,12 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CLIENT_ID  = sys.argv[1] if len(sys.argv) > 1 else "ssrajpal2001"
 BINDING_ID = sys.argv[2] if len(sys.argv) > 2 else None
 
-# Dummy order: buy 1 lot NIFTY futures at a limit price far below market (won't fill)
-# Change to any liquid MCX/NSE symbol available in your account
-DUMMY_EXCHANGE    = "NSE"
-DUMMY_SYMBOL      = "NIFTY"          # NSE index — AngelOne allows NSE EQ for test
+# Dummy order: buy 1 lot MCX CrudeOil futures at price far below market (won't fill)
+DUMMY_EXCHANGE    = "MCX"
+DUMMY_SYMBOL      = "CRUDEOIL"       # MCX CrudeOil near-month futures
 DUMMY_QTY         = 1
-DUMMY_LIMIT_PRICE = 100.0            # far below market → will NOT fill, safe to cancel
+DUMMY_LIMIT_PRICE = 100.0            # far below market (~7000) → will NOT fill, safe to cancel
 
 SEP = "=" * 55
 

@@ -5314,7 +5314,20 @@ function histReplay() {
                                :style="ct.zone?.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
                                x-text="ct.zone?.dist_pts!=null?ct.zone.dist_pts+' pts away':''"></div>
                         </div>
-                        <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
+                        <div x-show="!ct.zone && bk.htf_source!=='futures'" style="color:var(--t-dim)">No zone — scanning</div>
+                        <!-- Futures mode: show nearest FUT zone on leg even when no active trap -->
+                        <div x-show="!ct.zone && bk.htf_source==='futures'">
+                          <template x-if="(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)">
+                            <div>
+                              <div style="color:var(--t-muted)" x-text="'Nearest FUT zone ('+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.htf_label||'30-min')+') · '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.trapped_on?.slice(5,16))"></div>
+                              <div style="color:var(--t-dim)" x-text="'Zone '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_low)+' → '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_high)"></div>
+                              <div style="color:var(--t-cyan)" x-text="(leg==='CE1'?'Entry if FUT < ':'Entry if FUT > ')+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_trigger)"></div>
+                              <div :style="((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.dist_pts||999)<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
+                                   x-text="((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.dist_pts)+' pts away'"></div>
+                            </div>
+                          </template>
+                          <div x-show="!(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)" style="color:var(--t-dim)">No zone — scanning</div>
+                        </div>
                         <!-- LTF Status -->
                         <div>
                           <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
