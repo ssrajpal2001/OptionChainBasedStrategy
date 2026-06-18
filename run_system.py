@@ -566,11 +566,17 @@ async def _run_live(
         print(f"\n\nFATAL: {exc}\n\nCheck broker credentials in the dashboard and retry.\n")
         raise SystemExit(1)
     await feeder.start()
-    # Start MCX Upstox2 feeder if wired (CrudeOil/Gold option tick delivery)
+    # Start MCX Upstox2 feeder if wired (CrudeOil/Gold option tick delivery).
+    # UpstoxFeeder has no start() — use connect() then create_task(_ws_loop()).
     if _mcx_feeder is not None:
         try:
-            await _mcx_feeder.start()
-            logging.getLogger(__name__).info("MCX Upstox2 feeder started.")
+            _ok = await _mcx_feeder.connect()
+            if _ok:
+                asyncio.create_task(_mcx_feeder._ws_loop(), name="mcx_upstox2_ws")
+                logging.getLogger(__name__).info("MCX Upstox2 feeder connected and WS loop started.")
+            else:
+                logging.getLogger(__name__).warning(
+                    "MCX Upstox2 feeder connect() returned False — no MCX option ticks.")
         except Exception as _exc:
             logging.getLogger(__name__).warning("MCX Upstox2 feeder start failed: %s", _exc)
 
