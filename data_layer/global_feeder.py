@@ -736,9 +736,41 @@ class FyersFeeder(BaseFeeder):
         """
         return token.startswith(("NSE:", "BSE:", "MCX:")) and "|" not in token
 
+    def _upstox_mcx_to_fyers(self, upstox_key: str) -> Optional[str]:
+        """Convert MCX_FO|<id> Upstox key → MCX:CRUDEOIL26JUL7000CE Fyers format."""
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            from data_layer.symbol_translator import SymbolTranslator
+            from data_layer.instrument_registry import is_monthly_expiry
+            meta = None
+            for und, kmap in REGISTRY._upstox_keys.items():
+                for (exp_str, strike, ot), key in kmap.items():
+                    if key == upstox_key:
+                        from datetime import date as _date
+                        exp = _date.fromisoformat(exp_str)
+                        meta = (und, strike, ot, exp)
+                        break
+                if meta:
+                    break
+            if not meta:
+                return None
+            und, strike, ot, exp = meta
+            from data_layer.base_feeder import InternalSymbol
+            internal = InternalSymbol(underlying=und, expiry=exp, strike=strike, option_type=ot)
+            return SymbolTranslator.to_fyers(internal, is_monthly=is_monthly_expiry(exp, und))
+        except Exception:
+            return None
+
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
-        mine = [t for t in tokens if self._is_fyers_symbol(t)]
+        # Also convert any MCX_FO|... Upstox keys to Fyers MCX:... format.
+        converted = []
+        for t in tokens:
+            if t.startswith("MCX_FO|") and not self._is_fyers_symbol(t):
+                fyers_sym = self._upstox_mcx_to_fyers(t)
+                if fyers_sym:
+                    converted.append(fyers_sym)
+        mine = [t for t in tokens if self._is_fyers_symbol(t)] + converted
         # Diagnostic: reveal received vs matched so we can see why options may be 0.
         logger.info(
             "FyersFeeder.subscribe_tokens: received=%d matched_fyers=%d connected=%s sample_in=%r sample_mine=%r",
