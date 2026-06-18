@@ -54,6 +54,9 @@ async def main():
 
     # Resample to TF: keep LAST bar per group (close of tf candle); include in-progress group
     def resample(bars_1m, tf):
+        # Upstox 1m bars use CLOSE-time labels: bar "9:15" = 9:14:00-9:15:00.
+        # So first 3m candle = bars 9:16, 9:17, 9:18 → labeled 9:18 (close time).
+        # Grouping: (abs_minute - 1) // tf puts 9:16,9:17,9:18 in the same bucket.
         groups = {}
         for b in bars_1m:
             try:
@@ -61,10 +64,9 @@ async def main():
             except Exception:
                 dt = datetime.fromtimestamp(0, tz=timezone.utc)
             dt_ist = dt.astimezone(IST)
-            # group index = minutes since 09:15 // tf
-            mins_since_open = (dt_ist.hour * 60 + dt_ist.minute) - (9 * 60 + 15)
-            g = max(mins_since_open, 0) // tf
-            groups[g] = {"ts": dt_ist, "close": b["close"]}
+            abs_min = dt_ist.hour * 60 + dt_ist.minute
+            g = (abs_min - 1) // tf
+            groups[g] = {"ts": dt_ist, "close": b["close"]}  # last bar = close of tf candle
         return [groups[g] for g in sorted(groups.keys())]
 
     tf_bars = resample(bars_1m, TF)
