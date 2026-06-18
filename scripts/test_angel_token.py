@@ -10,14 +10,15 @@ from data_layer.client_db import ClientDB
 
 async def main():
     db = ClientDB("data/clients.db")
-    bindings = db.get_bindings_safe_sync("ssrajpal2001")
-    angel = next((b for b in bindings if "angel" in b.get("broker","").lower()), None)
+    bindings = db.get_bindings_sync("ssrajpal2001")
+    angel = next((b for b in bindings if "angel" in b.get("provider","").lower()), None)
     if not angel:
-        print("ERROR: No AngelOne binding found for ssrajpal2001")
+        print("Available bindings:", [b.get("binding_id") for b in bindings])
+        print("ERROR: No AngelOne binding found. Check provider field.")
         return
 
-    api_key      = angel.get("api_key", "")
     access_token = angel.get("access_token", "")
+    api_key      = angel.get("api_key", "")
     client_code  = angel.get("client_code") or angel.get("user_id", "")
     password     = angel.get("password", "")
     totp_secret  = angel.get("totp_secret", "")
