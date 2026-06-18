@@ -1717,10 +1717,12 @@ class TrapScannerEngine:
                 self._log.warning("_fetch_prev_day_ohlc: no spot key for %s", self._und)
                 return None
             import aiohttp
+            from urllib.parse import quote as _quote
             today   = date.today()
             fr_date = today - timedelta(days=10)
+            encoded_key = _quote(spot_key, safe="")
             url = (f"https://api.upstox.com/v2/historical-candle/"
-                   f"{spot_key}/day/{today}/{fr_date}")
+                   f"{encoded_key}/day/{today}/{fr_date}")
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
@@ -1733,13 +1735,25 @@ class TrapScannerEngine:
                         return None
                     data = await r.json()
             candles = data.get("data", {}).get("candles", [])
-            if len(candles) < 2:
+            if not candles:
                 self._log.warning(
-                    "_fetch_prev_day_ohlc: only %d candle(s) returned for %s",
-                    len(candles), spot_key,
+                    "_fetch_prev_day_ohlc: no candles returned for %s", spot_key,
                 )
                 return None
-            prev = candles[1]
+            # Upstox returns newest-first. During market hours today's daily candle
+            # is NOT included → candles[0] = yesterday. After market close candles[0]
+            # = today (partial/closed) → candles[1] = yesterday.
+            # Detect by comparing candle date to today.
+            first_date = str(candles[0][0])[:10]
+            if first_date == str(today):
+                if len(candles) < 2:
+                    self._log.warning("_fetch_prev_day_ohlc: only today's candle for %s", spot_key)
+                    return None
+                prev = candles[1]
+            else:
+                prev = candles[0]
+            self._log.info("_fetch_prev_day_ohlc(%s): prev=%s H=%.2f L=%.2f C=%.2f",
+                           spot_key, str(prev[0])[:10], float(prev[2]), float(prev[3]), float(prev[4]))
             return {"open": float(prev[1]), "high": float(prev[2]),
                     "low":  float(prev[3]), "close": float(prev[4])}
         except Exception as exc:
