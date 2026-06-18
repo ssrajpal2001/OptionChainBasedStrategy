@@ -1753,7 +1753,9 @@ class TrapScannerEngine:
             if not spot_key:
                 return 0.0
             import aiohttp
-            url = f"https://api.upstox.com/v2/historical-candle/intraday/{spot_key}/1minute"
+            from urllib.parse import quote
+            encoded_key = quote(spot_key, safe="")
+            url = f"https://api.upstox.com/v2/historical-candle/intraday/{encoded_key}/1minute"
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as r:
@@ -1761,9 +1763,13 @@ class TrapScannerEngine:
                         return 0.0
                     data = await r.json()
             candles = data.get("data", {}).get("candles", [])
+            if not candles:
+                return 0.0
             # Upstox returns candles newest-first; candles[-1] = oldest = first bar of the day
-            # Use its OPEN = today's true market open (for gap direction check vs prev-day close)
-            return float(candles[-1][1]) if candles else 0.0
+            today_open = float(candles[-1][1])
+            self._log.info("_fetch_today_open(%s): first_bar_open=%.2f (from %d candles)",
+                           spot_key, today_open, len(candles))
+            return today_open
         except Exception as exc:
             self._log.warning("_fetch_today_open: %s", exc)
             return 0.0
