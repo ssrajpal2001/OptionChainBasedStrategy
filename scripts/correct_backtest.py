@@ -132,15 +132,25 @@ def find_opt_entry(opt_ctx, opt_day_df, sl_buf=2.0):
         mode = "OPT-HTF"
 
     df5 = _resample_htf(_bars_to_df(to_bars(opt_day_df)), 5)
+    recent_highs = df5["high"].iloc[-6:].tolist() if len(df5) >= 6 else df5["high"].tolist()
+    recent_lows  = df5["low"].iloc[-6:].tolist()  if len(df5) >= 6 else df5["low"].tolist()
 
-    def _scan_zones(zone_list):
+    def _scan_zones(zone_list, opt_type="CE"):
         for z in zone_list:
-            _, ltf = scanner.scan_ltf(df5, z["zone_high"], z["zone_low"])
-            closed = [x for x in ltf if x["status"] == "CLOSED"]
-            b = scanner.select_best_ltf_entry(closed)
-            if not b:
-                trapped_ltf = [x for x in ltf if x["status"] == "TRAPPED"]
-                b = min(trapped_ltf, key=lambda e: e["zone_low"]) if trapped_ltf else None
+            z_low, z_high = z["zone_low"], z["zone_high"]
+            # Zone invalidation
+            if opt_type == "CE" and recent_lows and min(recent_lows) < z_low:
+                continue
+            if opt_type == "PE" and recent_highs and max(recent_highs) > z_high:
+                continue
+            # Direction-of-approach
+            if opt_type == "CE" and recent_highs and max(recent_highs) <= z_high:
+                continue
+            if opt_type == "PE" and recent_lows and min(recent_lows) >= z_low:
+                continue
+            scan_fn = scanner.scan_ltf_bull if opt_type == "PE" else scanner.scan_ltf
+            _, ltf = scan_fn(df5, z_high, z_low)
+            b = scanner.select_fresh_ltf_entry(ltf, opt_type=opt_type)
             if not b:
                 continue
             ts = get_ts(b)
@@ -151,16 +161,16 @@ def find_opt_entry(opt_ctx, opt_day_df, sl_buf=2.0):
 
     # Try HTF near zones first
     if near:
-        b, z, ts = _scan_zones(near)
+        b, z, ts = _scan_zones(near, opt_type="CE")
         if b:
             return b, z, ts, "OPT-HTF"
-        mode = "OPT-HTF+CASC"  # HTF found zones but price never entered; try cascade
+        mode = "OPT-HTF+CASC"
 
-    # Cascade fallback (always tried when HTF gives no entry)
+    # Cascade fallback
     casc15 = _resample_htf(_bars_to_df(to_bars(opt_day_df)), 15)
     _, c_ents = scanner.scan_htf(casc15)
     casc = [e for e in c_ents if e["status"] == "TRAPPED"]
-    b, z, ts = _scan_zones(casc)
+    b, z, ts = _scan_zones(casc, opt_type="CE")
     if b:
         return b, z, ts, mode if near else "OPT-CASCADE"
 
@@ -383,14 +393,26 @@ def run_crudeoil_backtest(days, crude_key):
                 continue  # no zones in this session, skip quietly
 
             df5 = _resample_htf(_bars_to_df(to_bars(sess_day)), 5)
+            recent_highs5 = df5["high"].iloc[-6:].tolist() if len(df5) >= 6 else df5["high"].tolist()
+            recent_lows5  = df5["low"].iloc[-6:].tolist()  if len(df5) >= 6 else df5["low"].tolist()
+
             best = zone = ets = None
             for z in all_zones:
-                _, ltf = scanner.scan_ltf(df5, z["zone_high"], z["zone_low"])
-                closed = [x for x in ltf if x["status"] == "CLOSED"]
-                b = scanner.select_best_ltf_entry(closed)
-                if not b:
-                    trapped_ltf = [x for x in ltf if x["status"] == "TRAPPED"]
-                    b = min(trapped_ltf, key=lambda e: e["zone_low"]) if trapped_ltf else None
+                opt_type = "PE" if z.get("kind") == "BULL" else "CE"
+                z_low, z_high = z["zone_low"], z["zone_high"]
+                # Zone invalidation: price broke through zone in wrong direction
+                if opt_type == "CE" and recent_lows5 and min(recent_lows5) < z_low:
+                    continue
+                if opt_type == "PE" and recent_highs5 and max(recent_highs5) > z_high:
+                    continue
+                # Direction-of-approach: CE from above, PE from below
+                if opt_type == "CE" and recent_highs5 and max(recent_highs5) <= z_high:
+                    continue
+                if opt_type == "PE" and recent_lows5 and min(recent_lows5) >= z_low:
+                    continue
+                scan_fn = scanner.scan_ltf_bull if opt_type == "PE" else scanner.scan_ltf
+                _, ltf = scan_fn(df5, z_high, z_low)
+                b = scanner.select_fresh_ltf_entry(ltf, opt_type=opt_type)
                 if not b:
                     continue
                 ts = get_ts(b)
@@ -429,13 +451,13 @@ def run_crudeoil_backtest(days, crude_key):
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
-DAYS = ["2026-06-15", "2026-06-16", "2026-06-17"]
+DAYS = ["2026-06-12", "2026-06-13", "2026-06-16", "2026-06-17", "2026-06-18"]
 
 s_total = run_sensex_backtest(DAYS)
 
-# CrudeOil — try multiple possible keys for Jul 2026 futures
-# NSE_COM|149475 = CRUDEOIL26JULFUT, 100 barrel lot, Jul 2026 expiry
-CRUDE_KEY = "NSE_COM|149475"
+# CrudeOil Jul 2026 futures — MCX_FO|520702 (new contract from Jun 19)
+# Use MCX key for intraday data
+CRUDE_KEY = "MCX_FO|520702"
 c_total = run_crudeoil_backtest(DAYS, CRUDE_KEY)
 
 print(f"\n{'='*60}")
