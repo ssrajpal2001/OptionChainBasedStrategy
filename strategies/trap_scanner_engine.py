@@ -541,7 +541,7 @@ class TrapScannerEngine:
         if self._htf_source == "futures":
             bars = self._bars_fut
         elif self._htf_source == "spot":
-            bars = self._bars_spot
+            bars = self._bars_ce1  # option bars — ATR must match option zone scale
         else:  # "option": use CE1 bars (representative; same scale as zones)
             bars = self._bars_ce1
         df = _bars_to_df(bars)
