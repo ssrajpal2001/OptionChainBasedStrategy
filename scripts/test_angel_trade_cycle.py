@@ -87,7 +87,10 @@ async def main():
         hits = (raw or {}).get("data") or []
         if hits:
             angel_symbol = hits[0]["tradingsymbol"]
-            print(f"      Resolved: {angel_symbol}")
+            sym_token    = hits[0]["symboltoken"]
+            # Pre-populate broker cache so place_order skips the duplicate searchScrip call
+            broker._tok_cache[(DUMMY_EXCHANGE, angel_symbol)] = (sym_token, angel_symbol)
+            print(f"      Resolved: {angel_symbol}  token={sym_token}")
     if not angel_symbol:
         # fallback: let broker resolve via its own lookup
         angel_symbol = f"CRUDEOIL{DUMMY_STRIKE}{DUMMY_OPTION_TYPE}"
