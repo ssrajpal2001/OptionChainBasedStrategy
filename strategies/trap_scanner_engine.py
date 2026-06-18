@@ -2456,9 +2456,18 @@ class TrapScannerEngine:
             pool = trapped or [z for z in typed if z.get("status")]
             if not pool or not ltp:
                 return None
-            best = min(pool, key=lambda z: abs(z.get("zone_trigger", 0) - ltp))
+            def _zone_trig(z: dict) -> float:
+                # zone_trigger not stored in scan_htf_spot entries; compute from 2/3 rule
+                zl, zh = z.get("zone_low", 0), z.get("zone_high", 0)
+                w = zh - zl
+                if kind_filter == "BEAR":
+                    return zl + 2 * w / 3   # lower 2/3 = bear entry region
+                else:
+                    return zh - 2 * w / 3   # upper 2/3 = bull entry region
+
+            best = min(pool, key=lambda z: abs(_zone_trig(z) - ltp))
             uid  = _zone_uid(best)
-            trig = round(best.get("zone_trigger", 0), 2)
+            trig = round(_zone_trig(best), 2)
             dist = round(abs(ltp - trig), 1) if ltp else None
             return {
                 "zone_high":    round(best.get("zone_high",    0), 2),
