@@ -492,6 +492,7 @@ async def _run_live(
     # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
     # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
     _has_mcx = any(cfg.exchange.is_mcx(i) for i in cfg.monitored_indices)
+    _mcx_feeder = None
     if _has_mcx:
         from data_layer.global_feeder import UpstoxFeeder as _UpstoxFeeder
         _upstox2_creds = await asyncio.to_thread(
@@ -502,9 +503,7 @@ async def _run_live(
             _mcx_feeder = _UpstoxFeeder(bus, cfg)
             _mcx_feeder.set_credentials({"access_token": _upstox2_token})
             trap_scanner_manager.set_mcx_feeder(_mcx_feeder)
-            logging.getLogger(__name__).info(
-                "MCX Upstox2 feeder wired to trap scanner manager."
-            )
+            logging.getLogger(__name__).info("MCX Upstox2 feeder wired to trap scanner manager.")
         else:
             logging.getLogger(__name__).warning(
                 "MCX indices detected but upstox2 token missing — CrudeOil option ticks via Upstox1."
@@ -568,7 +567,7 @@ async def _run_live(
         raise SystemExit(1)
     await feeder.start()
     # Start MCX Upstox2 feeder if wired (CrudeOil/Gold option tick delivery)
-    if _has_mcx and "_mcx_feeder" in dir():
+    if _mcx_feeder is not None:
         try:
             await _mcx_feeder.start()
             logging.getLogger(__name__).info("MCX Upstox2 feeder started.")
