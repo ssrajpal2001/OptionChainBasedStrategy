@@ -1122,7 +1122,7 @@ class TrapScannerEngine:
             self._log.info("spot cascade: bear=%d bull=%d from %d 15m candles",
                            len(spot_bear), len(spot_bull), len(htf_spot_15))
 
-            # CE side: spot says bear trap → scan CE1 option bars (15-min) for option entry zones
+            # CE side: spot bear trap (bears squeezed → market up → CE rises → BUY CE)
             if spot_bear:
                 today_ce = _complete_today(self._bars_ce1)
                 if len(today_ce) >= 4:
@@ -1131,13 +1131,21 @@ class TrapScannerEngine:
                     if len(htf_ce_15) >= 2:
                         _, ce_ents = scanner.scan_htf(htf_ce_15)
                         bear_opt_15 = [e for e in ce_ents if e["status"] == "TRAPPED"]
-                        self._log.info("CE opt cascade: %d/%d zones TRAPPED from %d 15m candles",
-                                       len(bear_opt_15), len(ce_ents), len(htf_ce_15))
+                        self._log.info("CE opt cascade: %d/%d zones TRAPPED from %d 15m candles ltp=%.1f",
+                                       len(bear_opt_15), len(ce_ents), len(htf_ce_15),
+                                       self._ltp_cache.get("CE1") or 0)
+                        # Update live display so LEG shows today's zones not stale historical
                         if bear_opt_15:
+                            self._opt_bear_zones = ce_ents  # all (incl non-trapped) for zone table
                             self._run_ltf_on("CE1", self._bars_ce1, bear_opt_15, "CE", require_closed=False)
                             self._run_ltf_on("CE2", self._bars_ce2, bear_opt_15, "CE", require_closed=False)
+                        else:
+                            self._log.info("CE opt cascade: no trapped zones — ltp=%.1f zones=%s",
+                                           self._ltp_cache.get("CE1") or 0,
+                                           [(round(e.get("zone_low",0),1), round(e.get("zone_high",0),1),
+                                             e["status"]) for e in ce_ents[-5:]])
 
-            # PE side: spot says bull trap → scan PE1 option bars (15-min) for option entry zones
+            # PE side: spot bull trap (bulls squeezed → market down → PE rises → BUY PE)
             if spot_bull:
                 today_pe = _complete_today(self._bars_pe1)
                 if len(today_pe) >= 4:
@@ -1146,11 +1154,18 @@ class TrapScannerEngine:
                     if len(htf_pe_15) >= 2:
                         _, pe_ents = scanner.scan_htf(htf_pe_15)
                         bull_opt_15 = [e for e in pe_ents if e["status"] == "TRAPPED"]
-                        self._log.info("PE opt cascade: %d/%d zones TRAPPED from %d 15m candles",
-                                       len(bull_opt_15), len(pe_ents), len(htf_pe_15))
+                        self._log.info("PE opt cascade: %d/%d zones TRAPPED from %d 15m candles ltp=%.1f",
+                                       len(bull_opt_15), len(pe_ents), len(htf_pe_15),
+                                       self._ltp_cache.get("PE1") or 0)
                         if bull_opt_15:
+                            self._opt_bull_zones = pe_ents  # update display
                             self._run_ltf_on("PE1", self._bars_pe1, bull_opt_15, "PE", require_closed=False)
                             self._run_ltf_on("PE2", self._bars_pe2, bull_opt_15, "PE", require_closed=False)
+                        else:
+                            self._log.info("PE opt cascade: no trapped zones — ltp=%.1f zones=%s",
+                                           self._ltp_cache.get("PE1") or 0,
+                                           [(round(e.get("zone_low",0),1), round(e.get("zone_high",0),1),
+                                             e["status"]) for e in pe_ents[-5:]])
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -2162,9 +2177,9 @@ class TrapScannerEngine:
             ce_zone = _nearest_fut_zone("CE")
             pe_zone = _nearest_fut_zone("PE")
         elif self._htf_source == "spot":
-            # Show option-level zones for entry; spot zones are direction-only (internal)
-            ce_zone = _best_zone_summary(self._opt_bear_zones) if bool([e for e in self._htf_bear_zones if e["status"] == "TRAPPED"]) else None
-            pe_zone = _best_zone_summary(self._opt_bull_zones) if bool([e for e in self._htf_bull_zones if e["status"] == "TRAPPED"]) else None
+            # Show option-level zones; show if either HTF 75-min OR cascade found direction
+            ce_zone = _best_zone_summary(self._opt_bear_zones) if self._opt_bear_zones else None
+            pe_zone = _best_zone_summary(self._opt_bull_zones) if self._opt_bull_zones else None
         else:
             ce_zone = _best_zone_summary(self._htf_bear_zones)
             pe_zone = _best_zone_summary(self._htf_bull_zones)
@@ -2188,9 +2203,10 @@ class TrapScannerEngine:
             return raw[:max_n]
 
         if self._htf_source == "spot":
-            # Spot zones are direction-only; show option-level zones in the table
+            # Show option zones (updated every cascade cycle); spot zones are direction-only
             opt_zones = (self._zone_info_list(self._opt_bear_zones, "CE") +
                          self._zone_info_list(self._opt_bull_zones, "PE"))
+            # Add spot direction info to header via bear/bull counts (already in bear_trapped/bull_trapped)
         else:
             opt_zones = (self._zone_info_list(self._htf_bear_zones, "CE") +
                          self._zone_info_list(self._htf_bull_zones, "PE"))
