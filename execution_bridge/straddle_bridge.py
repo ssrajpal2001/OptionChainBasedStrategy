@@ -692,17 +692,30 @@ class StraddleExecutionBridge:
                 # Under-fill with NO exception (order was accepted but didn't fully fill) — pull the
                 # EXCHANGE's final order state so the reason is exchange-sourced, not inferred
                 # (distinguishes 'rested unfilled / cancelled' from a margin/contract rejection).
+                # If filled_qty=0, poll order status (up to 5s) until broker confirms real fill
                 if _fq < qty and _oids and hasattr(broker, "get_order_status"):
                     try:
-                        _f = await broker.get_order_status(str(_oids[-1]))
-                        _raw = getattr(_f, "raw", {}) or {}
-                        _reason = (f"state={_raw.get('state')} unfilled={_raw.get('unfilled_size')} "
-                                   f"avg={getattr(_f,'avg_price',0)} "
-                                   f"cancel_reason={_raw.get('cancellation_reason') or _raw.get('meta_data')}")
-                        logger.warning("[LIVE] %s %s %s UNDER-FILL %d/%d — exchange says: %s",
-                                       ev.action, ev.underlying, opt_type, _fq, qty, _reason)
-                        self._trade_log.log_event(client_id, binding_id,
-                            f"{ev.action} {ev.underlying} {opt_type}{int(strike)} UNDER-FILL {_fq}/{qty} — exchange: {_reason}")
+                        _f = None
+                        for _attempt in range(5):
+                            await asyncio.sleep(1)
+                            _f = await broker.get_order_status(str(_oids[-1]))
+                            _real_avg = float(getattr(_f, "avg_price", 0.0) or 0.0)
+                            _real_qty = int(getattr(_f, "filled_qty", 0) or 0)
+                            if _real_avg > 0:
+                                _px = _real_avg
+                                _fq = _real_qty if _real_qty > 0 else qty
+                                logger.info("[LIVE] %s %s %s — broker fill confirmed after %ds: qty=%d avg=%.4f",
+                                            ev.action, ev.underlying, opt_type, _attempt+1, _fq, _px)
+                                break
+                        if _f is not None and _px == _fallback_ltp:
+                            _raw = getattr(_f, "raw", {}) or {}
+                            _reason = (f"state={_raw.get('state')} unfilled={_raw.get('unfilled_size')} "
+                                       f"avg={getattr(_f,'avg_price',0)} "
+                                       f"cancel_reason={_raw.get('cancellation_reason') or _raw.get('meta_data')}")
+                            logger.warning("[LIVE] %s %s %s UNDER-FILL %d/%d — exchange: %s",
+                                           ev.action, ev.underlying, opt_type, _fq, qty, _reason)
+                            self._trade_log.log_event(client_id, binding_id,
+                                f"{ev.action} {ev.underlying} {opt_type}{int(strike)} UNDER-FILL {_fq}/{qty} — exchange: {_reason}")
                     except Exception:
                         pass
                 return opt_type, _px, _fq, symbol
