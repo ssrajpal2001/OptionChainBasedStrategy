@@ -1906,6 +1906,10 @@ class TrapScannerEngine:
     def telemetry_snapshot(self) -> dict:
         pos = self._position
         ltp = self._spot_cache or 0.0
+        # For option-bar HTF, zone distance should be in option premium units
+        opt_ltp = (self._ltp_cache.get("CE1") or self._ltp_cache.get("PE1") or
+                   self._ltp_cache.get("CE2") or self._ltp_cache.get("PE2") or 0.0)
+        zone_ltp = opt_ltp if self._htf_source == "option" else ltp
         atr = self._htf_atr_val
 
         # zones built later: opt_zones + fut_zones_ui (sorted, capped at 10)
@@ -1921,7 +1925,7 @@ class TrapScannerEngine:
             z = trapped[-1]
             uid = _zone_uid(z)
             trig = round(z.get("zone_trigger", z.get("entry", 0)), 2)
-            dist = round(abs(ltp - trig), 1) if ltp else None
+            dist = round(abs(zone_ltp - trig), 1) if zone_ltp else None
             return {
                 "zone_high":    round(z.get("zone_high", 0), 2),
                 "zone_low":     round(z.get("zone_low", 0), 2),
