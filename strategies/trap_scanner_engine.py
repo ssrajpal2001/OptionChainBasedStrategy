@@ -1086,6 +1086,9 @@ class TrapScannerEngine:
             return
         df = _bars_to_df(today_bars[-200:])
         current_spot = self._ltp_cache.get("FUT", 0) or self._ltp_cache.get("SPOT", 0)
+        # Recent 5-min highs/lows from today's bars (last 6 bars = 30 min of context)
+        recent_highs = df["high"].iloc[-6:].tolist() if len(df) >= 6 else df["high"].tolist()
+        recent_lows  = df["low"].iloc[-6:].tolist()  if len(df) >= 6 else df["low"].tolist()
 
         for zone in htf_zones:
             uid = _zone_uid(zone)
@@ -1094,25 +1097,65 @@ class TrapScannerEngine:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Proximity gate (futures domain):
-            #   CE (bear trap): bears shorted at zone_high, price descended past their SL,
-            #     now deep in zone → trigger at LOWER 1/3 [zone_low, zone_low + width/3]
-            #   PE (bull trap): bulls bought at zone_high, price bounced from below their SL,
-            #     now rising back near zone_high → trigger at UPPER 1/3 [zone_high-width/3, zone_high]
             z_low  = zone["zone_low"]
             z_high = zone["zone_high"]
             width  = z_high - z_low
+
+            # Zone invalidation: if price already broke through the zone in the wrong direction
+            # today, the trapped traders were actually RIGHT — skip this zone.
+            # CE (bear zone): bears were right if price broke below zone_low today
+            # PE (bull zone): bulls were right if price broke above zone_high today
+            if opt_type == "CE" and recent_lows and min(recent_lows) < z_low:
+                self._log.debug(
+                    "zone %s invalidated: price broke below zone_low=%.1f (bears were right)",
+                    uid, z_low)
+                continue
+            if opt_type == "PE" and recent_highs and max(recent_highs) > z_high:
+                self._log.debug(
+                    "zone %s invalidated: price broke above zone_high=%.1f (bulls were right)",
+                    uid, z_high)
+                continue
+
+            # Proximity gate (futures domain):
+            #   CE (bear trap): price must be inside lower 2/3 [zone_low, zone_low + 2*width/3]
+            #   PE (bull trap): price must be inside upper 2/3 [zone_high - 2*width/3, zone_high]
             if opt_type == "PE":
-                trigger_lo = z_high - 2 * width / 3   # upper 2/3 of zone
+                trigger_lo = z_high - 2 * width / 3
                 trigger_hi = z_high
             else:  # CE
                 trigger_lo = z_low
-                trigger_hi = z_low + 2 * width / 3    # lower 2/3 of zone
+                trigger_hi = z_low + 2 * width / 3
             if current_spot > 0 and (current_spot < trigger_lo or current_spot > trigger_hi):
                 self._log.debug(
                     "zone %s skipped: spot=%.1f not in %s trigger [%.1f, %.1f]",
                     uid, current_spot, opt_type, trigger_lo, trigger_hi)
                 continue
+
+            # Direction-of-approach gate:
+            # CE (bear trap): price must be approaching FROM ABOVE — it was above zone_high
+            #   recently (bears entered from top) and has now descended into the zone.
+            #   Reject if price is bouncing UP into the zone from below zone_low.
+            # PE (bull trap): price must be approaching FROM BELOW — it was below zone_low
+            #   recently (bulls entered from bottom) and has now risen into the zone.
+            #   Reject if price is falling DOWN into the zone from above zone_high.
+            if opt_type == "CE":
+                # Require that price was above zone_high at some point in last 30 min
+                if recent_highs and max(recent_highs) <= z_high:
+                    self._log.debug(
+                        "zone %s skipped: CE approach wrong direction — "
+                        "price never came from above zone_high=%.1f (recent_high=%.1f, "
+                        "price bouncing up from below)",
+                        uid, z_high, max(recent_highs) if recent_highs else 0)
+                    continue
+            else:  # PE
+                # Require that price was below zone_low at some point in last 30 min
+                if recent_lows and min(recent_lows) >= z_low:
+                    self._log.debug(
+                        "zone %s skipped: PE approach wrong direction — "
+                        "price never came from below zone_low=%.1f (recent_low=%.1f, "
+                        "price falling down from above)",
+                        uid, z_low, min(recent_lows) if recent_lows else 0)
+                    continue
 
             _, ltf_entries = scanner.scan_ltf(
                 df,
