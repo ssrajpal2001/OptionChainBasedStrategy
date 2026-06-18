@@ -1026,10 +1026,11 @@ class TrapScannerEngine:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Gate: price must be at or above zone_trigger (1/3 entry level).
-            zone_trigger = zone.get("zone_trigger",
-                           zone["zone_low"] + (zone["zone_high"] - zone["zone_low"]) / 3)
-            if current_price > 0 and current_price < zone_trigger:
+            # Gate: price must be inside HTF zone [zone_trigger, zone_high].
+            z_low  = zone["zone_low"]
+            z_high = zone["zone_high"]
+            zone_trigger = zone.get("zone_trigger", z_low + (z_high - z_low) / 3)
+            if current_price > 0 and (current_price < zone_trigger or current_price > z_high):
                 continue
 
             _, ltf_entries = scanner.scan_ltf(
@@ -1084,13 +1085,17 @@ class TrapScannerEngine:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Gate: current spot must be >= zone_trigger (1/3 from zone_low into zone).
-            # Prevents LTF scan running when price is far below the HTF zone.
-            zone_trigger = zone.get("zone_trigger",
-                           zone["zone_low"] + (zone["zone_high"] - zone["zone_low"]) / 3)
-            if current_spot > 0 and current_spot < zone_trigger:
-                self._log.debug("zone %s skipped: spot=%.1f < zone_trigger=%.1f",
-                                uid, current_spot, zone_trigger)
+            # Gate: price must be INSIDE the HTF zone [zone_low, zone_high].
+            # Bulls entered at zone_high; their SL = zone_low.
+            # 5-min scan starts at zone_trigger (1/3 from zone_low) and is valid up to zone_high.
+            # If spot < zone_low → zone already broken, skip.
+            # If spot > zone_high → price above the zone, no entry context, skip.
+            z_low  = zone["zone_low"]
+            z_high = zone["zone_high"]
+            zone_trigger = zone.get("zone_trigger", z_low + (z_high - z_low) / 3)
+            if current_spot > 0 and (current_spot < zone_trigger or current_spot > z_high):
+                self._log.debug("zone %s skipped: spot=%.1f not in trigger zone [%.1f, %.1f]",
+                                uid, current_spot, zone_trigger, z_high)
                 continue
 
             _, ltf_entries = scanner.scan_ltf(
