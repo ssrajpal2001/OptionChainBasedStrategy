@@ -75,6 +75,10 @@ class AngelBroker(BaseBroker):
                 if not (data and data.get("status")):
                     logger.error("AngelBroker [%s]: Headless auth failed: %s", self.client_id, data)
                     return False
+                # Save JWT token back to binding so UI shows "Token OK"
+                jwt = (data.get("data") or {}).get("jwtToken", "")
+                if jwt:
+                    self._b.access_token = jwt
 
             else:
                 logger.error(
