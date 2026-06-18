@@ -784,6 +784,15 @@ class TrapScannerEngine:
                             (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2") or
                             (is_fut and ps == "FUT")):
                         await self._check_tick_exit(ltp, ts)
+
+                    # Futures-mode T1 is in option domain — check option ltp here.
+                    # SL stays in futures domain (_idx_tick_loop). Only T1 uses option ltp.
+                    if (self._htf_source == "futures" and ps == "FUT"
+                            and not self._position.get("t1_hit")
+                            and self._position.get("t1_price", 0) > 0):
+                        opt_side = self._position.get("opt_type", "CE")
+                        if (opt_side == "CE" and is_ce1) or (opt_side == "PE" and is_pe1):
+                            await self._check_option_t1(ltp, ts)
         except asyncio.CancelledError:
             pass
 
@@ -1284,10 +1293,12 @@ class TrapScannerEngine:
                 sl_price = round(entry["zone_low"]  - self._sl_buf, 2)
             else:
                 sl_price = round(entry["zone_high"] + self._sl_buf, 2)
-            # T1 = HTF zone sl = 30-min ref bar HIGH where bears entered short and got trapped.
-            # Market came back to the zone to release them; their SL = our profit target.
-            t1_price     = round(htf_zone.get("sl", 0), 2)
-            t1_price_fut = None
+            # T1 = option chart HTF: latest TRAPPED bear zone sl on CE1/PE1 bars.
+            # Bears shorted the option → their SL (ref bar HIGH on option chart) = our T1.
+            # Checked against option ltp (not futures) in _opt_tick_loop.
+            opt_bars = self._bars_ce1 if opt_type == "CE" else self._bars_pe1
+            t1_price     = self._compute_option_t1(opt_bars)
+            t1_price_fut = round(htf_zone.get("sl", 0), 2)  # kept for logging/UI reference
         else:
             tracking_leg = leg   # CE1 or PE1 — scan strike option bars
             sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # option zone_low (option ₹)
@@ -1406,18 +1417,35 @@ class TrapScannerEngine:
                 self._log.info("Sweep watch expired — no recovery above %.2f", sw["sl_level"])
                 self._sweep_watch = None
 
+    async def _check_option_t1(self, opt_ltp: float, ts: Optional[datetime] = None) -> None:
+        """Futures-mode T1 check against option ltp (CE1/PE1). SL stays in futures domain."""
+        pos = self._position
+        if not pos or pos.get("t1_hit") or not pos.get("t1_price", 0):
+            return
+        if opt_ltp >= pos["t1_price"]:
+            pos["t1_hit"] = True
+            pos["remaining_qty"] -= pos["t1_qty"]
+            # CTC trail_sl = spot_at_entry (futures domain, not option fill price)
+            pos["trail_sl"] = pos.get("spot_at_entry", pos["sl_price"])
+            self._log.info("T1 HIT (option) opt_ltp=%.2f t1=%.2f qty=%d → trail_sl=%.2f (CTC futures)",
+                           opt_ltp, pos["t1_price"], pos["t1_qty"], pos["trail_sl"])
+            oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
+            pos["order_id_t1"] = oid
+            self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="T1", qty_override=pos["t1_qty"])
+            self._persist_position()
+
     async def _check_tick_exit(self, ltp: float, ts: Optional[datetime] = None) -> None:
         pos = self._position
         if not pos:
             await self._check_sweep_reentry(ltp)
             return
 
-        # T1: 50% at HTF target
-        if not pos["t1_hit"] and ltp >= pos["t1_price"]:
+        # T1: 50% at HTF target (option-mode only; futures-mode T1 handled in _check_option_t1)
+        if not pos["t1_hit"] and ltp >= pos["t1_price"] and self._htf_source != "futures":
             pos["t1_hit"] = True
             pos["remaining_qty"] -= pos["t1_qty"]
-            # Immediately move trail_sl to entry_price (CTC / break-even) on T1
-            pos["trail_sl"] = pos["entry_price"]
+            # CTC: futures-mode uses spot_at_entry; option-mode uses entry_price
+            pos["trail_sl"] = pos.get("spot_at_entry", pos["entry_price"])
             self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d → trail_sl reset to CTC %.2f",
                            ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"])
             oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
@@ -1695,6 +1723,24 @@ class TrapScannerEngine:
                 json.dump(self._position, f, default=_default)
         except Exception as exc:
             self._log.warning("_persist_position failed: %s", exc)
+
+    def _compute_option_t1(self, opt_bars: list) -> float:
+        """T1 = latest TRAPPED bear zone sl on the option chart (ref bar HIGH = bears' SL)."""
+        try:
+            if not opt_bars or len(opt_bars) < 3:
+                return 0.0
+            df  = _bars_to_df(opt_bars[-200:])
+            htf = _resample_htf(df, self._htf_min)
+            if len(htf) < 2:
+                return 0.0
+            _, entries = scanner.scan_htf(htf)
+            trapped = [e for e in entries if e["status"] == "TRAPPED"]
+            if not trapped:
+                return 0.0
+            return round(trapped[-1]["sl"], 2)   # most recent trapped zone's ref bar HIGH
+        except Exception as exc:
+            self._log.warning("_compute_option_t1 failed: %s", exc)
+            return 0.0
 
     def _record_closed_trade(self, pos: dict, exit_price: float,
                              exit_reason: str, qty_override: int = 0) -> None:
