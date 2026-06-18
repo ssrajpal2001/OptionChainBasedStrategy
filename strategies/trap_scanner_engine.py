@@ -1389,7 +1389,10 @@ class TrapScannerEngine:
         if not pos["t1_hit"] and ltp >= pos["t1_price"]:
             pos["t1_hit"] = True
             pos["remaining_qty"] -= pos["t1_qty"]
-            self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d", ltp, pos["t1_price"], pos["t1_qty"])
+            # Immediately move trail_sl to entry_price (CTC / break-even) on T1
+            pos["trail_sl"] = pos["entry_price"]
+            self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d → trail_sl reset to CTC %.2f",
+                           ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"])
             oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
             pos["order_id_t1"] = oid
             self._persist_position()
@@ -1432,7 +1435,7 @@ class TrapScannerEngine:
              WATCHING    → hi >= zone_high (bears' SL hit = bears squeezed)     → SQUEEZED
              SQUEEZED    → lo <= zone_trigger (price pulls back to bears' entry) → PULLED_BACK
              PULLED_BACK → hi >= zone_high again (confirmed support held)        → CONFIRMED
-             CONFIRMED   → trail_sl steps up to zone_trigger (bears' entry)
+             CONFIRMED   → trail_sl steps up to zone_trigger − sl_buf (bears' entry − buffer)
         """
         bar_5m = ts.replace(second=0, microsecond=0)
         bar_5m = bar_5m.replace(minute=(bar_5m.minute // 5) * 5)
@@ -1522,13 +1525,15 @@ class TrapScannerEngine:
             elif trap["state"] == "PULLED_BACK":
                 if bar_hi >= zh:
                     trap["state"] = "CONFIRMED"
-                    if zt > pos["trail_sl"]:
+                    # Step trail_sl to zone_trigger − sl_buf (same buffer as hard SL)
+                    new_sl = round(zt - self._sl_buf, 2)
+                    if new_sl > pos["trail_sl"]:
                         old = pos["trail_sl"]
-                        pos["trail_sl"] = zt
+                        pos["trail_sl"] = new_sl
                         changed = True
                         self._log.info("TRAIL_SL STEP UP %.2f -> %.2f "
-                                       "(bears at %.2f confirmed support, zh=%.2f)",
-                                       old, zt, zt, zh)
+                                       "(bears at zt=%.2f confirmed, buf=%.2f, zh=%.2f)",
+                                       old, new_sl, zt, self._sl_buf, zh)
 
         if changed:
             self._persist_position()
