@@ -969,8 +969,16 @@ class TrapScannerEngine:
         if self._htf_source == "futures":
             if leg != "FUT":
                 return  # LTF scan only on FUT candle close
-            zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
-            self._run_ltf_futures_mode("FUT", self._bars_fut, zones, "CE")
+            # BEAR zones (descending lows) → buy CE: price approaches from above → lower 1/3
+            bear_zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
+                          and e.get("direction", "bear") == "bear"]
+            if bear_zones:
+                self._run_ltf_futures_mode("FUT", self._bars_fut, bear_zones, "CE")
+            # BULL zones (ascending highs) → buy PE: price bounces from below → upper 1/3
+            bull_zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
+                          and e.get("direction", "bear") == "bull"]
+            if bull_zones:
+                self._run_ltf_futures_mode("FUT", self._bars_fut, bull_zones, "PE")
             return
 
         # BEAR zones → buy CE
@@ -1085,18 +1093,28 @@ class TrapScannerEngine:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Gate: price must be INSIDE the HTF zone [zone_low, zone_high].
-            # Bulls entered at zone_high; their SL = zone_low.
-            # 5-min scan starts at zone_trigger (1/3 from zone_low) and is valid up to zone_high.
-            # If spot < zone_low → zone already broken, skip.
-            # If spot > zone_high → price above the zone, no entry context, skip.
+            # Proximity gate — direction-aware:
+            #   CE (bear trap): price approaches from above → lower 1/3 of zone
+            #     valid when zone_low <= spot <= zone_low + (zone_high-zone_low)/3
+            #   PE (bull trap): price bounces from below → upper 1/3 of zone
+            #     valid when zone_high - (zone_high-zone_low)/3 <= spot <= zone_high
             z_low  = zone["zone_low"]
             z_high = zone["zone_high"]
-            zone_trigger = zone.get("zone_trigger", z_low + (z_high - z_low) / 3)
-            if current_spot > 0 and (current_spot < zone_trigger or current_spot > z_high):
-                self._log.debug("zone %s skipped: spot=%.1f not in trigger zone [%.1f, %.1f]",
-                                uid, current_spot, zone_trigger, z_high)
-                continue
+            width  = z_high - z_low
+            if current_spot > 0:
+                if opt_type == "PE":
+                    # upper 1/3: [zone_high - width/3, zone_high]
+                    trigger_lo = z_high - width / 3
+                    trigger_hi = z_high
+                else:
+                    # lower 1/3: [zone_low, zone_low + width/3]
+                    trigger_lo = z_low
+                    trigger_hi = z_low + width / 3
+                if current_spot < trigger_lo or current_spot > trigger_hi:
+                    self._log.debug(
+                        "zone %s skipped: spot=%.1f not in %s trigger [%.1f, %.1f]",
+                        uid, current_spot, opt_type, trigger_lo, trigger_hi)
+                    continue
 
             _, ltf_entries = scanner.scan_ltf(
                 df,
