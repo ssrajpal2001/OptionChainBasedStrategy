@@ -235,7 +235,10 @@ class TrapScannerEngine:
         self._htf_atr_val: float = 0.0
 
         # Cascade mode: no 75-min zone TRAPPED → use 15-min → 5-min
-        self._intraday_mode = False
+        # Per-leg for htf_source="option" (CE and PE evaluated independently)
+        self._intraday_mode = False      # legacy / futures / spot
+        self._intraday_mode_ce = False   # option-source CE leg
+        self._intraday_mode_pe = False   # option-source PE leg
 
         # Position
         self._position: Optional[Dict] = None
@@ -549,19 +552,50 @@ class TrapScannerEngine:
 
     def _check_zone_reachability(self) -> None:
         """
-        Point 1: if nearest TRAPPED zone trigger is further than 1.5×ATR from current
-        LTP, switch to intraday cascade (15-min) immediately.  Uses live LTP — not
-        prev_close — so the check stays relevant through the session.
-        If a zone later comes into range (HTF boundary rescan), flip back to normal.
+        Per-leg cascade for htf_source=option: CE and PE evaluated independently.
+        CE cascades if no bear zones OR nearest bear zone > 1.5×ATR from CE LTP.
+        PE cascades if no bull zones OR nearest bull zone > 1.5×ATR from PE LTP.
+        For futures/spot: single shared _intraday_mode (unchanged).
         """
-        # For option-bar HTF, zone levels are in option premium units — compare option LTP
+        threshold = 1.5 * self._htf_atr_val if self._htf_atr_val > 0 else None
+
         if self._htf_source == "option":
-            ltp = (self._ltp_cache.get("CE1") or self._ltp_cache.get("PE1") or
-                   self._ltp_cache.get("CE2") or self._ltp_cache.get("PE2") or 0.0)
-        else:
-            ltp = self._spot_cache or self._spot_open
-        if not ltp or self._htf_atr_val <= 0:
-            # No ATR yet — fall back to simple trapped-count logic
+            ltp_ce = self._ltp_cache.get("CE1") or self._ltp_cache.get("CE2") or 0.0
+            ltp_pe = self._ltp_cache.get("PE1") or self._ltp_cache.get("PE2") or 0.0
+
+            # --- CE leg ---
+            bear_trapped = [e for e in self._htf_bear_zones if e["status"] == "TRAPPED"]
+            if not bear_trapped or not ltp_ce or threshold is None:
+                new_ce = True
+                reason_ce = "No bear zones" if not bear_trapped else "No CE LTP/ATR"
+            else:
+                dist_ce = min(abs(ltp_ce - z.get("zone_trigger", ltp_ce)) for z in bear_trapped)
+                new_ce = dist_ce > threshold
+                reason_ce = f"dist={dist_ce:.1f} {'>' if new_ce else '<='} {threshold:.1f}"
+            if new_ce != self._intraday_mode_ce:
+                self._intraday_mode_ce = new_ce
+                self._log.info("CE cascade=%s (%s) ltp_ce=%.1f", new_ce, reason_ce, ltp_ce)
+
+            # --- PE leg ---
+            bull_trapped = [e for e in self._htf_bull_zones if e["status"] == "TRAPPED"]
+            if not bull_trapped or not ltp_pe or threshold is None:
+                new_pe = True
+                reason_pe = "No bull zones" if not bull_trapped else "No PE LTP/ATR"
+            else:
+                dist_pe = min(abs(ltp_pe - z.get("zone_trigger", ltp_pe)) for z in bull_trapped)
+                new_pe = dist_pe > threshold
+                reason_pe = f"dist={dist_pe:.1f} {'>' if new_pe else '<='} {threshold:.1f}"
+            if new_pe != self._intraday_mode_pe:
+                self._intraday_mode_pe = new_pe
+                self._log.info("PE cascade=%s (%s) ltp_pe=%.1f", new_pe, reason_pe, ltp_pe)
+
+            # Legacy single flag = True if either leg is cascading
+            self._intraday_mode = self._intraday_mode_ce or self._intraday_mode_pe
+            return
+
+        # --- futures / spot: single shared flag ---
+        ltp = self._spot_cache or self._spot_open
+        if not ltp or threshold is None:
             if self._trapped_zone_count() == 0:
                 if not self._intraday_mode:
                     self._intraday_mode = True
@@ -571,7 +605,6 @@ class TrapScannerEngine:
                     self._intraday_mode = False
             return
 
-        threshold = 1.5 * self._htf_atr_val
         trapped = (
             [e for e in self._htf_bear_zones if e["status"] == "TRAPPED"] +
             [e for e in self._htf_bull_zones if e["status"] == "TRAPPED"] +
@@ -590,14 +623,14 @@ class TrapScannerEngine:
             if not self._intraday_mode:
                 self._intraday_mode = True
                 self._log.info(
-                    "Nearest zone too far: dist=%.2f > 1.5×ATR=%.2f ltp=%.2f → cascade",
+                    "Nearest zone too far: dist=%.2f > 1.5*ATR=%.2f ltp=%.2f → cascade",
                     nearest_dist, threshold, ltp,
                 )
         else:
             if self._intraday_mode:
                 self._intraday_mode = False
                 self._log.info(
-                    "Zone reachable: dist=%.2f ≤ 1.5×ATR=%.2f → normal mode",
+                    "Zone reachable: dist=%.2f <= 1.5*ATR=%.2f → normal mode",
                     nearest_dist, threshold,
                 )
 
@@ -831,10 +864,23 @@ class TrapScannerEngine:
         if ts.minute % self._ltf_min != 0:
             return
 
-        if self._intraday_mode:
-            asyncio.get_event_loop().create_task(self._cascade_scan(ts))
+        if self._htf_source == "option":
+            # Per-leg: CE and PE cascade independently
+            ce_leg = leg in ("CE1", "CE2")
+            pe_leg = leg in ("PE1", "PE2")
+            do_cascade_ce = ce_leg and self._intraday_mode_ce
+            do_cascade_pe = pe_leg and self._intraday_mode_pe
+            if do_cascade_ce or do_cascade_pe:
+                asyncio.get_event_loop().create_task(
+                    self._cascade_scan(ts, cascade_ce=do_cascade_ce, cascade_pe=do_cascade_pe)
+                )
+            else:
+                self._ltf_scan_normal(leg, ts)
         else:
-            self._ltf_scan_normal(leg, ts)
+            if self._intraday_mode:
+                asyncio.get_event_loop().create_task(self._cascade_scan(ts))
+            else:
+                self._ltf_scan_normal(leg, ts)
 
     def _ltf_scan_normal(self, leg: str, ts: datetime) -> None:
         """
@@ -957,11 +1003,13 @@ class TrapScannerEngine:
                 )
                 return
 
-    async def _cascade_scan(self, ts: datetime) -> None:
+    async def _cascade_scan(self, ts: datetime,
+                             cascade_ce: bool = True, cascade_pe: bool = True) -> None:
         """
-        Intraday cascade: no 75-min zone TRAPPED.
+        Intraday cascade: no 75-min zone TRAPPED (or zone too far).
+        Per-leg for htf_source=option: cascade_ce/cascade_pe control which leg scans.
         1. Resample today's completed 1m bars to 15-min (drop current incomplete bar)
-        2. scan_htf_spot / scan_htf on those completed 15-min bars
+        2. scan_htf on those completed 15-min bars
         3. If a 15-min zone TRAPPED → scan_ltf on completed 5-min option bars
         4. Entry fires on TRAPPED status (not CLOSED — cascade rule)
         """
@@ -986,23 +1034,29 @@ class TrapScannerEngine:
             zones_15m = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
             self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE", require_closed=False)
         elif self._htf_source == "option":
-            # 15-min CE1 bars for bear cascade; 15-min PE1 bars for bull cascade
-            today_ce = _complete_today(self._bars_ce1)
-            today_pe = _complete_today(self._bars_pe1)
+            # Per-leg: only scan the leg(s) that are in cascade mode
             bear_15: list = []
             bull_15: list = []
-            if len(today_ce) >= 4:
-                df_ce = _bars_to_df(today_ce)
-                htf_ce = _resample_htf(df_ce, self._cascade_min)
-                if len(htf_ce) >= 2:
-                    _, be = scanner.scan_htf(htf_ce)
-                    bear_15 = [e for e in be if e["status"] == "TRAPPED"]
-            if len(today_pe) >= 4:
-                df_pe = _bars_to_df(today_pe)
-                htf_pe = _resample_htf(df_pe, self._cascade_min)
-                if len(htf_pe) >= 2:
-                    _, bu = scanner.scan_htf(htf_pe)
-                    bull_15 = [e for e in bu if e["status"] == "TRAPPED"]
+            if cascade_ce:
+                today_ce = _complete_today(self._bars_ce1)
+                if len(today_ce) >= 4:
+                    df_ce = _bars_to_df(today_ce)
+                    htf_ce = _resample_htf(df_ce, self._cascade_min)
+                    if len(htf_ce) >= 2:
+                        _, be = scanner.scan_htf(htf_ce)
+                        bear_15 = [e for e in be if e["status"] == "TRAPPED"]
+                        if bear_15:
+                            self._log.info("CE cascade: %d fresh %dm zones", len(bear_15), self._cascade_min)
+            if cascade_pe:
+                today_pe = _complete_today(self._bars_pe1)
+                if len(today_pe) >= 4:
+                    df_pe = _bars_to_df(today_pe)
+                    htf_pe = _resample_htf(df_pe, self._cascade_min)
+                    if len(htf_pe) >= 2:
+                        _, bu = scanner.scan_htf(htf_pe)
+                        bull_15 = [e for e in bu if e["status"] == "TRAPPED"]
+                        if bull_15:
+                            self._log.info("PE cascade: %d fresh %dm zones", len(bull_15), self._cascade_min)
             if bear_15:
                 self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE", require_closed=False)
                 self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE", require_closed=False)
@@ -1405,8 +1459,10 @@ class TrapScannerEngine:
                         pass
 
     def _reset_day_state(self) -> None:
-        self._initialized   = False
-        self._intraday_mode = False
+        self._initialized      = False
+        self._intraday_mode    = False
+        self._intraday_mode_ce = False
+        self._intraday_mode_pe = False
         self._day_init_done = False
         self._bars_spot = []; self._bars_fut = []
         self._bars_ce1  = []; self._bars_ce2 = []
@@ -2019,6 +2075,8 @@ class TrapScannerEngine:
             "binding_id":       self._bid,
             "initialized":      self._initialized,
             "intraday_mode":    self._intraday_mode,
+            "cascade_ce":       self._intraday_mode_ce,
+            "cascade_pe":       self._intraday_mode_pe,
             "gap_fired":        self._gap_fired,
             "spot_ltp":         ltp,
             "htf_source":       self._htf_source,
