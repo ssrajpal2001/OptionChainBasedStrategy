@@ -797,7 +797,17 @@ class TrapScannerEngine:
                     continue
                 if str(tick.symbol).upper() != self._und:
                     continue
-                self._spot_cache = float(tick.ltp)
+                raw_ltp = float(tick.ltp)
+                # Sanity guard: BSE SENSEX live WebSocket can mis-decode to ~80000.
+                # If we have a known prev-day close, reject any ltp that deviates >8%.
+                _ref = self._spot_open or 0.0
+                if _ref > 0 and abs(raw_ltp - _ref) / _ref > 0.08:
+                    self._log.warning(
+                        "SPOT tick rejected: ltp=%.2f deviates >8%% from ref=%.2f (BSE mis-decode?)",
+                        raw_ltp, _ref,
+                    )
+                    continue
+                self._spot_cache = raw_ltp
                 if not self._initialized:
                     continue
                 # Re-subscribe tracked option keys every 60s — survives feeder reconnect
