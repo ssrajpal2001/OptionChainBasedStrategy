@@ -306,7 +306,7 @@ class TrapScannerEngine:
                 now = datetime.now(IST)
                 sq_h, sq_m = map(int, self._sq_off_str.split(":"))
                 is_mcx = self._und in ("CRUDEOIL",)
-                market_open = time(9, 5) if is_mcx else time(9, 15)
+                market_open = time(9, 5) if is_mcx else time(9, 16)
 
                 if now.time() >= time(sq_h, sq_m) and self._initialized:
                     await self._eod_square_off()
