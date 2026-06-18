@@ -227,8 +227,13 @@ class StrikeRebalancer:
 
         state = self._state[underlying]
 
-        # NSE/BSE EOD: unsubscribe ALL non-pinned strikes once after 15:30 IST to free
-        # up Fyers WS slots for MCX evening session (crude/gold etc run until ~23:30).
+        # NSE/BSE: block initial subscription AND unsubscribe after 15:30 IST to free
+        # Upstox/Fyers WS slots for MCX evening session (crude/gold run until ~23:30).
+        if underlying in _NSE_INDICES:
+            now_t = tick.timestamp.astimezone(IST).time()
+            if now_t >= _NSE_CLOSE:
+                # Mark so initial_subscribe is also blocked on restart after NSE close
+                state.eod_unsubscribed = True
         if (underlying in _NSE_INDICES
                 and not state.eod_unsubscribed
                 and tick.timestamp.astimezone(IST).time() >= _NSE_CLOSE):
@@ -252,7 +257,10 @@ class StrikeRebalancer:
         atm = _round_to_strike(tick.ltp, step)
 
         # Record market-open ATM on first qualifying tick
+        # Skip for NSE/BSE indices after market close — don't waste WS slots
         if state.open_atm is None and _is_market_open(tick.timestamp):
+            if state.eod_unsubscribed:
+                return  # NSE already closed, don't subscribe
             state.open_atm = atm
             state.current_atm = atm
             await self._initial_subscribe(underlying, atm, step, state)
