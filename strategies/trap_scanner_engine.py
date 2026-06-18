@@ -799,8 +799,12 @@ class TrapScannerEngine:
                     continue
                 raw_ltp = float(tick.ltp)
                 # Sanity guard: BSE SENSEX WebSocket intermittently mis-decodes to ~80000
-                # (3-4% above real value). _spot_open is set from URL-encoded REST call
-                # and is reliable; use it as the fixed anchor to reject bad ticks.
+                # (3-4% above real value). _spot_open is set during warm_start from a
+                # URL-encoded REST call and is a reliable anchor. Before warm_start
+                # completes (_initialized=False, _spot_open=0) we skip _spot_cache
+                # entirely so pre-init bad ticks can't contaminate the distance check.
+                if not self._initialized:
+                    continue
                 _ref = self._spot_open  # today's first bar open — reliable anchor
                 if _ref > 0 and abs(raw_ltp - _ref) / _ref > 0.025:
                     self._log.warning(
@@ -809,8 +813,6 @@ class TrapScannerEngine:
                     )
                     continue
                 self._spot_cache = raw_ltp
-                if not self._initialized:
-                    continue
                 # Re-subscribe tracked option keys every 60s — survives feeder reconnect
                 now = datetime.now(IST)
                 if (now - _last_resub).total_seconds() >= 60:
