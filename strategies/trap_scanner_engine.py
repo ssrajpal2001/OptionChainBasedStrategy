@@ -802,10 +802,12 @@ class TrapScannerEngine:
                 if not self._initialized:
                     continue
                 _ref = self._spot_open  # today's first bar open — reliable anchor
-                if _ref > 0 and abs(raw_ltp - _ref) / _ref > 0.025:
+                # MCX commodities (CrudeOil, Gold) can move 5-6% intraday; equity 2.5%
+                _guard = 0.06 if self._cfg.exchange.is_mcx(self._und) else 0.025
+                if _ref > 0 and abs(raw_ltp - _ref) / _ref > _guard:
                     self._log.warning(
-                        "SPOT tick rejected: ltp=%.2f deviates >2.5%% from open=%.2f (BSE mis-decode?)",
-                        raw_ltp, _ref,
+                        "SPOT tick rejected: ltp=%.2f deviates >%.1f%% from open=%.2f (mis-decode?)",
+                        raw_ltp, _guard * 100, _ref,
                     )
                     continue
                 self._spot_cache = raw_ltp
