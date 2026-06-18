@@ -132,22 +132,19 @@ def find_opt_entry(opt_ctx, opt_day_df, sl_buf=2.0):
         mode = "OPT-HTF"
 
     df5 = _resample_htf(_bars_to_df(to_bars(opt_day_df)), 5)
-    recent_highs = df5["high"].iloc[-6:].tolist() if len(df5) >= 6 else df5["high"].tolist()
-    recent_lows  = df5["low"].iloc[-6:].tolist()  if len(df5) >= 6 else df5["low"].tolist()
+    # Day-wide min/max for option premium invalidation
+    day_min = df5["low"].min()  if len(df5) > 0 else 0
+    day_max = df5["high"].max() if len(df5) > 0 else 0
 
     def _scan_zones(zone_list, opt_type="CE"):
         for z in zone_list:
             z_low, z_high = z["zone_low"], z["zone_high"]
-            # Zone invalidation
-            if opt_type == "CE" and recent_lows and min(recent_lows) < z_low:
+            # Zone invalidation: option premium broke wrong way (sellers/buyers confirmed right)
+            if opt_type == "CE" and day_min > 0 and day_min < z_low:
                 continue
-            if opt_type == "PE" and recent_highs and max(recent_highs) > z_high:
+            if opt_type == "PE" and day_max > 0 and day_max > z_high:
                 continue
-            # Direction-of-approach
-            if opt_type == "CE" and recent_highs and max(recent_highs) <= z_high:
-                continue
-            if opt_type == "PE" and recent_lows and min(recent_lows) >= z_low:
-                continue
+            # Note: direction-of-approach omitted in backtest (can't time-align to entry bar)
             scan_fn = scanner.scan_ltf_bull if opt_type == "PE" else scanner.scan_ltf
             _, ltf = scan_fn(df5, z_high, z_low)
             b = scanner.select_fresh_ltf_entry(ltf, opt_type=opt_type)
@@ -393,23 +390,20 @@ def run_crudeoil_backtest(days, crude_key):
                 continue  # no zones in this session, skip quietly
 
             df5 = _resample_htf(_bars_to_df(to_bars(sess_day)), 5)
-            recent_highs5 = df5["high"].iloc[-6:].tolist() if len(df5) >= 6 else df5["high"].tolist()
-            recent_lows5  = df5["low"].iloc[-6:].tolist()  if len(df5) >= 6 else df5["low"].tolist()
+            # Day-wide min/max for zone invalidation
+            sess_day_min = df5["low"].min()  if len(df5) > 0 else 0
+            sess_day_max = df5["high"].max() if len(df5) > 0 else 0
 
             best = zone = ets = None
             for z in all_zones:
                 opt_type = "PE" if z.get("kind") == "BULL" else "CE"
                 z_low, z_high = z["zone_low"], z["zone_high"]
-                # Zone invalidation: price broke through zone in wrong direction
-                if opt_type == "CE" and recent_lows5 and min(recent_lows5) < z_low:
+                # Zone invalidation: price broke through zone in wrong direction (bears/bulls confirmed right)
+                if opt_type == "CE" and sess_day_min > 0 and sess_day_min < z_low:
                     continue
-                if opt_type == "PE" and recent_highs5 and max(recent_highs5) > z_high:
+                if opt_type == "PE" and sess_day_max > 0 and sess_day_max > z_high:
                     continue
-                # Direction-of-approach: CE from above, PE from below
-                if opt_type == "CE" and recent_highs5 and max(recent_highs5) <= z_high:
-                    continue
-                if opt_type == "PE" and recent_lows5 and min(recent_lows5) >= z_low:
-                    continue
+                # Note: direction-of-approach check omitted in backtest (can't time-align to entry bar)
                 scan_fn = scanner.scan_ltf_bull if opt_type == "PE" else scanner.scan_ltf
                 _, ltf = scan_fn(df5, z_high, z_low)
                 b = scanner.select_fresh_ltf_entry(ltf, opt_type=opt_type)
