@@ -816,7 +816,16 @@ class TrapScannerEngine:
             if htf_trigger:
                 self._run_htf_scan()
                 self._htf_atr_val = self._compute_htf_atr()
+                prev_mode = self._intraday_mode
                 self._check_zone_reachability()
+                self._log.info(
+                    "HTF scan: bear=%d bull=%d fut=%d ATR=%.2f intraday_mode=%s position=%s",
+                    sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED"),
+                    sum(1 for e in self._htf_bull_zones if e["status"] == "TRAPPED"),
+                    sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED"),
+                    self._htf_atr_val, self._intraday_mode,
+                    self._position["side"] if self._position else "none",
+                )
 
         # On every LTF boundary — scan option premium bars inside HTF zones
         if ts.minute % self._ltf_min != 0:
