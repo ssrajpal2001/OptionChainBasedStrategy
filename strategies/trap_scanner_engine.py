@@ -434,20 +434,20 @@ class TrapScannerEngine:
                     self._pe1_strike, self._pe2_strike,
                 )
             else:
-                # CE at resistance (R1/R2): CE sellers sell near resistance; trapped when CE rises
-                # PE at support (S1/S2): PE sellers sell near support; trapped when PE rises
-                self._ce1_strike = _round_strike(pivots["r1"], self._step)
-                self._ce2_strike = _round_strike(pivots["r2"], self._step)
-                self._pe1_strike = _round_strike(pivots["s1"], self._step)
-                self._pe2_strike = _round_strike(pivots["s2"], self._step)
+                # CE at support (S1/S2): CE option tracks support zone traps
+                # PE at resistance (R1/R2): PE option tracks resistance zone traps
+                self._ce1_strike = _round_strike(pivots["s1"], self._step)
+                self._ce2_strike = _round_strike(pivots["s2"], self._step)
+                self._pe1_strike = _round_strike(pivots["r1"], self._step)
+                self._pe2_strike = _round_strike(pivots["r2"], self._step)
                 self._log.info(
-                    "No gap (%.1f%%) → CE1=%d(R1=%.0f) CE2=%d(R2=%.0f) "
-                    "PE1=%d(S1=%.0f) PE2=%d(S2=%.0f)",
+                    "No gap (%.1f%%) → CE1=%d(S1=%.0f) CE2=%d(S2=%.0f) "
+                    "PE1=%d(R1=%.0f) PE2=%d(R2=%.0f)",
                     gap_pct,
-                    self._ce1_strike, pivots["r1"],
-                    self._ce2_strike, pivots["r2"],
-                    self._pe1_strike, pivots["s1"],
-                    self._pe2_strike, pivots["s2"],
+                    self._ce1_strike, pivots["s1"],
+                    self._ce2_strike, pivots["s2"],
+                    self._pe1_strike, pivots["r1"],
+                    self._pe2_strike, pivots["r2"],
                 )
 
             self._expiry_str, self._expiry_date = await self._get_expiry()
