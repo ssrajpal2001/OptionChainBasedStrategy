@@ -1258,7 +1258,12 @@ class TrapScannerEngine:
         #   scan_key = scan strike option key (tracked_sym fixed; NOT the exec/1-ITM key).
         if self._htf_source == "futures":
             tracking_leg = "FUT"
-            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # futures zone_low
+            # CE (bear trap): SL = floor below zone → exit if FUT drops to sl (ltp <= sl)
+            # PE (bull trap): SL = ceiling above zone → exit if FUT rises to sl (ltp >= sl)
+            if opt_type == "CE":
+                sl_price = round(entry["zone_low"]  - self._sl_buf, 2)
+            else:
+                sl_price = round(entry["zone_high"] + self._sl_buf, 2)
             t1_price     = round(htf_zone.get("sl", 0), 2)             # next HTF resistance (futures ₹)
             t1_price_fut = None
         else:
@@ -1401,9 +1406,14 @@ class TrapScannerEngine:
         if pos["t1_hit"] and ts is not None:
             self._update_trail_sl(pos, ts)
 
-        # Exit check
+        # Exit check — direction-aware:
+        # CE (futures): sl is floor → exit when FUT drops to/below sl
+        # PE (futures): sl is ceiling → exit when FUT rises to/above sl
+        # Option-mode (NIFTY/SENSEX): always buyers → option LTP drops → ltp <= sl
         active_sl = pos["trail_sl"] if pos["t1_hit"] else pos["sl_price"]
-        if ltp <= active_sl:
+        is_pe_fut = (self._htf_source == "futures" and pos.get("opt_type") == "PE")
+        sl_hit = (ltp >= active_sl) if is_pe_fut else (ltp <= active_sl)
+        if sl_hit:
             remaining = pos["remaining_qty"]
             reason = "TRAIL_SL" if pos["t1_hit"] else "SL"
             self._log.info("%s ltp=%.2f sl=%.2f qty=%d", reason, ltp, active_sl, remaining)
@@ -1525,15 +1535,25 @@ class TrapScannerEngine:
             elif trap["state"] == "PULLED_BACK":
                 if bar_hi >= zh:
                     trap["state"] = "CONFIRMED"
-                    # Step trail_sl to zone_trigger − sl_buf (same buffer as hard SL)
-                    new_sl = round(zt - self._sl_buf, 2)
-                    if new_sl > pos["trail_sl"]:
+                    # CE (futures / option-mode): sl is floor → step UP
+                    # PE (futures): sl is ceiling → step DOWN (zone_trigger + buf moves ceiling down)
+                    is_pe_fut = (self._htf_source == "futures"
+                                 and pos.get("opt_type") == "PE")
+                    if is_pe_fut:
+                        new_sl = round(zt + self._sl_buf, 2)
+                        better = new_sl < pos["trail_sl"]
+                        direction = "DOWN"
+                    else:
+                        new_sl = round(zt - self._sl_buf, 2)
+                        better = new_sl > pos["trail_sl"]
+                        direction = "UP"
+                    if better:
                         old = pos["trail_sl"]
                         pos["trail_sl"] = new_sl
                         changed = True
-                        self._log.info("TRAIL_SL STEP UP %.2f -> %.2f "
-                                       "(bears at zt=%.2f confirmed, buf=%.2f, zh=%.2f)",
-                                       old, new_sl, zt, self._sl_buf, zh)
+                        self._log.info("TRAIL_SL STEP %s %.2f -> %.2f "
+                                       "(zt=%.2f confirmed, buf=%.2f, zh=%.2f)",
+                                       direction, old, new_sl, zt, self._sl_buf, zh)
 
         if changed:
             self._persist_position()
