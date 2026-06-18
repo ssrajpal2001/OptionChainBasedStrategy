@@ -491,23 +491,7 @@ async def _run_live(
     trap_scanner_manager.set_rebalancer(rebalancer)
     # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
     # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
-    _has_mcx = any(cfg.exchange.is_mcx(i) for i in cfg.monitored_indices)
-    _mcx_feeder = None
-    if _has_mcx:
-        from data_layer.global_feeder import UpstoxFeeder as _UpstoxFeeder
-        _upstox2_creds = await asyncio.to_thread(
-            _shared_client_db.get_feeder_creds_sync, "upstox2"
-        )
-        _upstox2_token = (_upstox2_creds or {}).get("access_token", "")
-        if _upstox2_token:
-            _mcx_feeder = _UpstoxFeeder(bus, cfg)
-            _mcx_feeder.set_credentials({"access_token": _upstox2_token})
-            trap_scanner_manager.set_mcx_feeder(_mcx_feeder)
-            logging.getLogger(__name__).info("MCX Upstox2 feeder wired to trap scanner manager.")
-        else:
-            logging.getLogger(__name__).warning(
-                "MCX indices detected but upstox2 token missing — CrudeOil option ticks via Upstox1."
-            )
+    _mcx_feeder = None  # Upstox1 handles MCX options (Upstox2 lacks MCX options data plan)
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 
@@ -566,27 +550,7 @@ async def _run_live(
         print(f"\n\nFATAL: {exc}\n\nCheck broker credentials in the dashboard and retry.\n")
         raise SystemExit(1)
     await feeder.start()
-    # Start MCX Upstox2 feeder if wired (CrudeOil/Gold option tick delivery).
-    # UpstoxFeeder has no start() — use connect() then create_task(_ws_loop()).
-    if _mcx_feeder is not None:
-        try:
-            _ok = await _mcx_feeder.connect()
-            if _ok:
-                # Upstox2 is MCX-only — drop NSE/BSE index keys that connect() added.
-                # Subscribing NSE_INDEX|... on an MCX account causes silent WS failure.
-                _mcx_feeder._subscribed_keys = [
-                    k for k in _mcx_feeder._subscribed_keys if k.startswith("MCX")
-                ]
-                asyncio.create_task(_mcx_feeder._ws_loop(), name="mcx_upstox2_ws")
-                logging.getLogger(__name__).info(
-                    "MCX Upstox2 feeder connected and WS loop started (%d MCX keys).",
-                    len(_mcx_feeder._subscribed_keys),
-                )
-            else:
-                logging.getLogger(__name__).warning(
-                    "MCX Upstox2 feeder connect() returned False — no MCX option ticks.")
-        except Exception as _exc:
-            logging.getLogger(__name__).warning("MCX Upstox2 feeder start failed: %s", _exc)
+
 
     if "iron_condor" in _enabled_strats:
         for _ic in _iron_condors:
