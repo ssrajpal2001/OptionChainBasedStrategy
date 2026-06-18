@@ -264,6 +264,63 @@ def select_best_ltf_entry(ltf_entries: list) -> Optional[dict]:
     return min(closed, key=lambda e: e["zone_low"]) if closed else None
 
 
+def select_fresh_ltf_entry(ltf_entries: list, opt_type: str = "CE") -> Optional[dict]:
+    """
+    "Clean old zones first" logic:
+
+    When price enters an HTF zone, there may already be existing 5-min trapped zones
+    inside it (old sellers/buyers who entered earlier). Entering immediately into those
+    gives bad risk/reward — we're trading against existing structure.
+
+    Instead:
+    1. Find the LAST (most recent) TRAPPED 5-min zone inside the HTF zone.
+    2. Check if that zone has already been CLOSED (its SL was hit = old traders exited).
+    3. If the last zone is CLOSED → old structure is cleared → look for a NEW TRAPPED
+       zone that formed AFTER the last zone's closed_on timestamp → that is fresh entry.
+    4. If the last zone is still TRAPPED (SL not yet hit) → wait, don't enter yet.
+    5. If there are no prior zones → the first CLOSED zone is fine to enter (no structure).
+
+    opt_type: "CE" uses bear zones (scan_htf/scan_ltf output), "PE" uses bull zones.
+    Both share the same entry dict structure so logic is identical.
+    """
+    trapped = [e for e in ltf_entries if e["status"] in ("TRAPPED", "CLOSED")]
+    if not trapped:
+        return None
+
+    # Sort by trapped_on timestamp ascending so last = most recent
+    def _ts(e):
+        v = e.get("trapped_on")
+        return str(v) if v else ""
+
+    trapped_sorted = sorted(trapped, key=_ts)
+    last = trapped_sorted[-1]
+
+    if last["status"] == "TRAPPED":
+        # Last zone still open — old traders still inside, wait for them to be cleared
+        return None
+
+    # last zone is CLOSED — old structure cleared. Look for a NEW zone formed after it.
+    last_closed_ts = str(last.get("closed_on", ""))
+    if not last_closed_ts:
+        # No close timestamp — fall back to standard select
+        closed = [e for e in ltf_entries if e["status"] == "CLOSED"]
+        return min(closed, key=lambda e: e["zone_low"]) if closed else None
+
+    # Find zones whose ref_ts (formation bar) is after the last zone closed
+    fresh = [
+        e for e in ltf_entries
+        if e["status"] == "CLOSED" and str(e.get("ref_ts", "")) > last_closed_ts
+    ]
+    if not fresh:
+        # No fresh zone yet — old cleared but no new trap formed, keep waiting
+        return None
+
+    # Among fresh zones pick the most conservative (lowest zone_low for CE, highest for PE)
+    if opt_type == "PE":
+        return max(fresh, key=lambda e: e.get("zone_low", 0))
+    return min(fresh, key=lambda e: e["zone_low"])
+
+
 def simulate_today_trades(all_entries: list, df1: pd.DataFrame,
                           sl_buffer: float = 3.0,
                           lot_size: int = 20, qty: int = 2) -> list:

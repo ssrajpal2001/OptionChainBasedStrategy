@@ -1116,48 +1116,32 @@ class TrapScannerEngine:
                     uid, z_high)
                 continue
 
-            # Proximity gate (futures domain):
-            #   CE (bear trap): price must be inside lower 2/3 [zone_low, zone_low + 2*width/3]
-            #   PE (bull trap): price must be inside upper 2/3 [zone_high - 2*width/3, zone_high]
-            if opt_type == "PE":
-                trigger_lo = z_high - 2 * width / 3
-                trigger_hi = z_high
-            else:  # CE
-                trigger_lo = z_low
-                trigger_hi = z_low + 2 * width / 3
-            if current_spot > 0 and (current_spot < trigger_lo or current_spot > trigger_hi):
-                self._log.debug(
-                    "zone %s skipped: spot=%.1f not in %s trigger [%.1f, %.1f]",
-                    uid, current_spot, opt_type, trigger_lo, trigger_hi)
+            # Proximity gate: full zone (removed 2/3 restriction).
+            # Direction-of-approach + "clean old zones" logic handles quality filtering.
+            # CE: price must be inside [zone_low, zone_high] approaching from above
+            # PE: price must be inside [zone_low, zone_high] approaching from below
+            if current_spot > 0 and (current_spot < z_low or current_spot > z_high):
                 continue
 
             # Direction-of-approach gate:
-            # CE (bear trap): price must be approaching FROM ABOVE — it was above zone_high
-            #   recently (bears entered from top) and has now descended into the zone.
-            #   Reject if price is bouncing UP into the zone from below zone_low.
-            # PE (bull trap): price must be approaching FROM BELOW — it was below zone_low
-            #   recently (bulls entered from bottom) and has now risen into the zone.
-            #   Reject if price is falling DOWN into the zone from above zone_high.
+            # CE (bear trap): price must have come FROM ABOVE zone_high recently
+            # PE (bull trap): price must have come FROM BELOW zone_low recently
             if opt_type == "CE":
-                # Require that price was above zone_high at some point in last 30 min
                 if recent_highs and max(recent_highs) <= z_high:
                     self._log.debug(
-                        "zone %s skipped: CE approach wrong direction — "
-                        "price never came from above zone_high=%.1f (recent_high=%.1f, "
-                        "price bouncing up from below)",
-                        uid, z_high, max(recent_highs) if recent_highs else 0)
+                        "zone %s skipped: CE wrong direction — never above zone_high=%.1f",
+                        uid, z_high)
                     continue
             else:  # PE
-                # Require that price was below zone_low at some point in last 30 min
                 if recent_lows and min(recent_lows) >= z_low:
                     self._log.debug(
-                        "zone %s skipped: PE approach wrong direction — "
-                        "price never came from below zone_low=%.1f (recent_low=%.1f, "
-                        "price falling down from above)",
-                        uid, z_low, min(recent_lows) if recent_lows else 0)
+                        "zone %s skipped: PE wrong direction — never below zone_low=%.1f",
+                        uid, z_low)
                     continue
 
-            _, ltf_entries = scanner.scan_ltf(
+            # Scan 5-min bars inside the HTF zone
+            scan_fn = scanner.scan_ltf_bull if opt_type == "PE" else scanner.scan_ltf
+            _, ltf_entries = scan_fn(
                 df,
                 htf_zone_high=zone["zone_high"],
                 htf_zone_low=zone["zone_low"],
@@ -1165,7 +1149,8 @@ class TrapScannerEngine:
                 htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
                 htf_target=zone.get("sl", 0.0),
             )
-            best = scanner.select_best_ltf_entry(ltf_entries)
+            # "Clean old zones first": only enter after last existing 5-min zone is cleared
+            best = scanner.select_fresh_ltf_entry(ltf_entries, opt_type=opt_type)
             if best:
                 self._zone_ltf_status[uid] = "ltf_signal"
                 asyncio.get_event_loop().create_task(
