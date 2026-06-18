@@ -394,11 +394,11 @@ class UpstoxFeeder(BaseFeeder):
         for t in mine:
             if t in self._subscribed_keys:
                 self._subscribed_keys.remove(t)
-        if self._streamer and self._connected and mine:
-            try:
-                self._streamer.unsubscribe(mine)
-            except Exception as exc:
-                logger.debug("UpstoxFeeder: unsubscribe error: %s", exc)
+        # NOTE: intentionally NOT calling self._streamer.unsubscribe() here.
+        # The Upstox SDK unsubscribe call triggers a WS reconnect which kills ALL
+        # subscriptions (including MCX options). Removing from _subscribed_keys
+        # is enough — the keys won't re-subscribe on reconnect and the extra ticks
+        # from already-subscribed NSE strikes are ignored harmlessly.
 
     async def _ws_loop(self) -> None:
         if not self._streamer:
