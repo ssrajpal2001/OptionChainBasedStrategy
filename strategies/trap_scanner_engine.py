@@ -670,7 +670,8 @@ class TrapScannerEngine:
             htf = _resample_htf(df, minutes)
             if len(htf) < 2:
                 return
-            _, entries = scanner.scan_htf(htf)
+            # scan_htf_spot returns bear (→CE) + bull (→PE) zones with kind/direction fields
+            _, entries = scanner.scan_htf_spot(htf)
             self._htf_fut_zones = entries
         elif self._htf_source == "option":
             # Bear zones from CE1 bars: seller traps on CE premium → buy CE
@@ -969,14 +970,14 @@ class TrapScannerEngine:
         if self._htf_source == "futures":
             if leg != "FUT":
                 return  # LTF scan only on FUT candle close
-            # BEAR zones (descending lows) → buy CE: price approaches from above → lower 1/3
+            # BEAR zones (kind="BEAR", descending lows) → buy CE: lower 1/3 trigger
             bear_zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
-                          and e.get("direction", "bear") == "bear"]
+                          and e.get("kind", "BEAR") == "BEAR"]
             if bear_zones:
                 self._run_ltf_futures_mode("FUT", self._bars_fut, bear_zones, "CE")
-            # BULL zones (ascending highs) → buy PE: price bounces from below → upper 1/3
+            # BULL zones (kind="BULL", ascending highs) → buy PE: upper 1/3 trigger
             bull_zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
-                          and e.get("direction", "bear") == "bull"]
+                          and e.get("kind", "BEAR") == "BULL"]
             if bull_zones:
                 self._run_ltf_futures_mode("FUT", self._bars_fut, bull_zones, "PE")
             return
