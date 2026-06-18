@@ -50,18 +50,18 @@ async def main():
     ce_bars = ce_bars[-n:]
     pe_bars = pe_bars[-n:]
 
-    # Build 1m combined series with timestamps
-    bars_1m = []
-    for cb, pb in zip(ce_bars, pe_bars):
-        bars_1m.append({"ts": cb["ts"], "close": cb["close"] + pb["close"]})
+    def combine_1m(ce_list, pe_list):
+        n = min(len(ce_list), len(pe_list))
+        return [{"ts": ce_list[-n+i]["ts"], "close": ce_list[-n+i]["close"] + pe_list[-n+i]["close"]}
+                for i in range(n)]
 
-    print(f"1m bars: {len(bars_1m)}  combined last={bars_1m[-1]['close']:.2f}")
+    prev_1m  = combine_1m(ce_prev, pe_prev)
+    today_1m = combine_1m(ce_today, pe_today)
+    print(f"1m bars: prev={len(prev_1m)} today={len(today_1m)}")
 
-    # Resample to TF: keep LAST bar per group (close of tf candle); include in-progress group
     def resample(bars_1m, tf):
-        # Upstox 1m bars use CLOSE-time labels: bar "9:15" = 9:14:00-9:15:00.
-        # So first 3m candle = bars 9:16, 9:17, 9:18 → labeled 9:18 (close time).
-        # Grouping: (abs_minute - 1) // tf puts 9:16,9:17,9:18 in the same bucket.
+        """Resample 1m bars to tf-minute candles. Each group keyed by bar index, not abs_min,
+        so prev-day and today don't collide when resampled separately."""
         groups = {}
         for b in bars_1m:
             try:
@@ -70,26 +70,20 @@ async def main():
                 dt = datetime.fromtimestamp(0, tz=timezone.utc)
             dt_ist = dt.astimezone(IST)
             abs_min = dt_ist.hour * 60 + dt_ist.minute
-            g = abs_min // tf  # clock-aligned: 9:15,9:16,9:17 → same group; 9:18 → next
+            g = abs_min // tf
             if g not in groups:
                 groups[g] = {"ts": dt_ist, "close": b["close"]}
             else:
                 groups[g]["close"] = b["close"]
-                # label = close time = last bar open + 1 min
                 groups[g]["ts"] = dt_ist + timedelta(minutes=1)
         return [groups[g] for g in sorted(groups.keys())]
 
-    tf_bars_all = resample(bars_1m, TF)
-
-    # Split into prev-day (seed) and today's bars
-    today_date = date.today()
-    today_bars  = [b for b in tf_bars_all if b["ts"].date() == today_date]
-    seed_bars   = [b for b in tf_bars_all if b["ts"].date() < today_date]
-
-    seed_closes = [b["close"] for b in seed_bars]
+    # Resample SEPARATELY so same-time groups don't overwrite each other
+    seed_bars  = resample(prev_1m,  TF)
+    today_bars = resample(today_1m, TF)
+    seed_closes  = [b["close"] for b in seed_bars]
     today_closes = [b["close"] for b in today_bars]
-
-    print(f"Prev-day seed bars (3m): {len(seed_closes)} | Today bars (3m): {len(today_closes)}")
+    print(f"Seed bars ({TF}m): {len(seed_closes)} | Today bars ({TF}m): {len(today_closes)}")
 
     RSI_LEN = 14
     ROC_LEN = 9   # (close - close[9]) / close[9] * 100 → 9 bars back
