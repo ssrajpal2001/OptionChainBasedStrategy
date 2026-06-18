@@ -1039,24 +1039,26 @@ class TrapScannerEngine:
             bull_15: list = []
             if cascade_ce:
                 today_ce = _complete_today(self._bars_ce1)
+                self._log.info("CE cascade scan: today_bars=%d", len(today_ce))
                 if len(today_ce) >= 4:
                     df_ce = _bars_to_df(today_ce)
                     htf_ce = _resample_htf(df_ce, self._cascade_min)
                     if len(htf_ce) >= 2:
                         _, be = scanner.scan_htf(htf_ce)
                         bear_15 = [e for e in be if e["status"] == "TRAPPED"]
-                        if bear_15:
-                            self._log.info("CE cascade: %d fresh %dm zones", len(bear_15), self._cascade_min)
+                        self._log.info("CE cascade: %d/%d zones TRAPPED from %d 15m candles",
+                                       len(bear_15), len(be), len(htf_ce))
             if cascade_pe:
                 today_pe = _complete_today(self._bars_pe1)
+                self._log.info("PE cascade scan: today_bars=%d", len(today_pe))
                 if len(today_pe) >= 4:
                     df_pe = _bars_to_df(today_pe)
                     htf_pe = _resample_htf(df_pe, self._cascade_min)
                     if len(htf_pe) >= 2:
                         _, bu = scanner.scan_htf(htf_pe)
                         bull_15 = [e for e in bu if e["status"] == "TRAPPED"]
-                        if bull_15:
-                            self._log.info("PE cascade: %d fresh %dm zones", len(bull_15), self._cascade_min)
+                        self._log.info("PE cascade: %d/%d zones TRAPPED from %d 15m candles",
+                                       len(bull_15), len(bu), len(htf_pe))
             if bear_15:
                 self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE", require_closed=False)
                 self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE", require_closed=False)
