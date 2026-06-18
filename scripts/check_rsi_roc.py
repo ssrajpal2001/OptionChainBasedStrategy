@@ -25,6 +25,8 @@ async def main():
         print("ERROR: no upstox token in DB"); return
 
     und = "NIFTY"
+    # Registry must be loaded before use
+    await asyncio.to_thread(REGISTRY.load_sync, und, token)
     exp = REGISTRY.get_active_expiry(und, date.today())
     print(f"Using expiry: {exp}")
 
