@@ -608,16 +608,22 @@ class SellStraddleStrategy:
                 strikes = pool_strike_set(self._spot, step, itm, otm)
                 exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
                 seeded = 0
-                for stk in strikes:
-                    for side in ("CE", "PE"):
-                        ikey = REGISTRY.get_broker_symbol(self._underlying, exp, int(stk), side, "upstox")
-                        if not ikey:
-                            continue
-                        bars = await fetch_upstox_warm_1m(ikey, token)
-                        if bars:
-                            closes = [b["close"] for b in bars]
-                            self._pool_engine.seed_strike(int(stk), side, closes, closes)
-                            seeded += 1
+                # Build seed list: pool strikes + any restored open position CE/PE (may be outside pool window)
+                seed_pairs: list = [(int(stk), side) for stk in strikes for side in ("CE", "PE")]
+                pos = self._position
+                if pos and pos.status == "open" and pos.ce_leg and pos.pe_leg:
+                    for _stk, _side in [(int(pos.ce_leg.strike), "CE"), (int(pos.pe_leg.strike), "PE")]:
+                        if (_stk, _side) not in seed_pairs:
+                            seed_pairs.append((_stk, _side))
+                for stk, side in seed_pairs:
+                    ikey = REGISTRY.get_broker_symbol(self._underlying, exp, stk, side, "upstox")
+                    if not ikey:
+                        continue
+                    bars = await fetch_upstox_warm_1m(ikey, token)
+                    if bars:
+                        closes = [b["close"] for b in bars]
+                        self._pool_engine.seed_strike(stk, side, closes, closes)
+                        seeded += 1
                 logger.info("SellStraddle[%s]: pool engine seeded %d legs (warm RSI/ROC).",
                             self._underlying, seeded)
             except Exception as exc:
