@@ -416,16 +416,12 @@ class TrapScannerEngine:
             if use_atm_offsets:
                 direction = "UP" if today_open >= C else "DOWN"
                 atm = _round_strike(today_open, self._step)
-                if direction == "UP":
-                    self._ce1_strike = atm - self._gap_near
-                    self._ce2_strike = atm - self._gap_far
-                    self._pe1_strike = atm + self._gap_near
-                    self._pe2_strike = atm + self._gap_far
-                else:
-                    self._ce1_strike = atm + self._gap_near
-                    self._ce2_strike = atm + self._gap_far
-                    self._pe1_strike = atm - self._gap_near
-                    self._pe2_strike = atm - self._gap_far
+                # Futures mode: always buy ITM options → CE = ATM-offset (ITM call),
+                # PE = ATM+offset (ITM put). Direction never flips strike assignment.
+                self._ce1_strike = atm - self._gap_near
+                self._ce2_strike = atm - self._gap_far
+                self._pe1_strike = atm + self._gap_near
+                self._pe2_strike = atm + self._gap_far
                 label = f"GAP {direction} {gap_pct:.1f}%" if self._gap_fired else f"ATM±offsets (no gap {gap_pct:.1f}%)"
                 self._log.info(
                     "%s → CE1=%d CE2=%d PE1=%d PE2=%d",
