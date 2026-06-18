@@ -1210,6 +1210,25 @@ class TrapScannerEngine:
             # "Clean old zones first": only enter after last existing 5-min zone is cleared
             best = scanner.select_fresh_ltf_entry(ltf_entries, opt_type=opt_type)
             if best:
+                # Retest gate: wait for futures price to pull back to sellers'/buyers' entry.
+                # CE (bear zone): sellers entered at zone_high (C1.LOW). After TRAPPED
+                #   (price > C1.HIGH), wait for price to come back DOWN to zone_high.
+                # PE (bull zone): buyers entered at zone_low (C1.HIGH of bull zone). After
+                #   TRAPPED (price < C1.LOW), wait for price to come back UP to zone_low.
+                tol = 0.005  # 0.5%
+                if opt_type == "CE":
+                    entry_level = best["zone_high"]
+                    retest_ok = current_spot <= entry_level * (1 + tol)
+                else:
+                    entry_level = best["zone_low"]
+                    retest_ok = current_spot >= entry_level * (1 - tol)
+                if not retest_ok:
+                    self._zone_ltf_status[uid] = "waiting_retest"
+                    self._log.debug(
+                        "_run_ltf_futures_mode [%s/%s] WAITING RETEST: spot=%.1f entry_level=%.1f",
+                        leg_key, opt_type, current_spot, entry_level,
+                    )
+                    continue
                 self._zone_ltf_status[uid] = "ltf_signal"
                 asyncio.get_event_loop().create_task(
                     self._on_entry_signal(leg_key, opt_type, best, zone)

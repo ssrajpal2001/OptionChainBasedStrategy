@@ -560,9 +560,20 @@ def run_day_futures_mode(
         if best is None:
             continue
 
-        entry_p = float(best.get("zone_trigger", cur_fut))
-        sl_p    = round(best["zone_low"] - sl_buf, 2) if opt == "CE" \
-                  else round(best["zone_high"] + sl_buf, 2)
+        # Retest gate: CE waits for price to pull back to zone_high (sellers' entry).
+        # PE waits for price to come back up to zone_low (buyers' entry = C1.HIGH of bull zone).
+        tol = 0.005
+        if opt == "CE":
+            entry_p = float(best["zone_high"])
+            if cur_fut > entry_p * (1 + tol):
+                continue  # waiting for retest
+        else:
+            entry_p = float(best["zone_low"])
+            if cur_fut < entry_p * (1 - tol):
+                continue  # waiting for retest
+
+        sl_p = round(best["zone_low"] - sl_buf, 2) if opt == "CE" \
+               else round(best["zone_high"] + sl_buf, 2)
 
         notified.add(uid)
         in_trade = {
