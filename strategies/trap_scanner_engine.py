@@ -1017,12 +1017,21 @@ class TrapScannerEngine:
         if len(today_bars) < 3:
             return
         df = _bars_to_df(today_bars[-200:])
+        current_price = self._ltp_cache.get(leg_key, 0) or self._ltp_cache.get("SPOT", 0)
+
         for zone in htf_zones:
             uid = _zone_uid(zone)
             if uid in self._notified_uids:
                 continue
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
+
+            # Gate: price must be at or above zone_trigger (1/3 entry level).
+            zone_trigger = zone.get("zone_trigger",
+                           zone["zone_low"] + (zone["zone_high"] - zone["zone_low"]) / 3)
+            if current_price > 0 and current_price < zone_trigger:
+                continue
+
             _, ltf_entries = scanner.scan_ltf(
                 df,
                 htf_zone_high=zone["zone_high"],
@@ -1066,6 +1075,7 @@ class TrapScannerEngine:
         if len(today_bars) < 3:
             return
         df = _bars_to_df(today_bars[-200:])
+        current_spot = self._ltp_cache.get("FUT", 0) or self._ltp_cache.get("SPOT", 0)
 
         for zone in htf_zones:
             uid = _zone_uid(zone)
@@ -1073,6 +1083,16 @@ class TrapScannerEngine:
                 continue
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
+
+            # Gate: current spot must be >= zone_trigger (1/3 from zone_low into zone).
+            # Prevents LTF scan running when price is far below the HTF zone.
+            zone_trigger = zone.get("zone_trigger",
+                           zone["zone_low"] + (zone["zone_high"] - zone["zone_low"]) / 3)
+            if current_spot > 0 and current_spot < zone_trigger:
+                self._log.debug("zone %s skipped: spot=%.1f < zone_trigger=%.1f",
+                                uid, current_spot, zone_trigger)
+                continue
+
             _, ltf_entries = scanner.scan_ltf(
                 df,
                 htf_zone_high=zone["zone_high"],
