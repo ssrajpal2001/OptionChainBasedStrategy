@@ -44,7 +44,8 @@ DAYS = last_n_trading_days(5)
 print(f"\nBacktest period: {DAYS[0]} to {DAYS[-1]}")
 
 s_total = bt.run_sensex_backtest(DAYS)
-c_total = bt.run_crudeoil_backtest(DAYS, "NSE_COM|149475")
+# Jun contract (expired ~Jun 18): MCX_FO|499095  Jul contract (from Jun 19): MCX_FO|520702
+c_total = bt.run_crudeoil_backtest(DAYS, "MCX_FO|499095")
 
 print(f"\n{'='*60}")
 print(f"SENSEX   net: {s_total:.1f} pts  (lot=20)  Rs {s_total*20:.0f}")
