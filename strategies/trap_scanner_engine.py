@@ -1420,6 +1420,7 @@ class TrapScannerEngine:
                            ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"])
             oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
             pos["order_id_t1"] = oid
+            self._record_closed_trade(pos, exit_price=ltp, exit_reason="T1", qty_override=pos["t1_qty"])
             self._persist_position()
 
         # Advance 5m trail SL using OPTION bar lows (only after T1)
@@ -1438,6 +1439,7 @@ class TrapScannerEngine:
             reason = "TRAIL_SL" if pos["t1_hit"] else "SL"
             self._log.info("%s ltp=%.2f sl=%.2f qty=%d", reason, ltp, active_sl, remaining)
             await self._place_exit(remaining, active_sl, reason)
+            self._record_closed_trade(pos, exit_price=ltp, exit_reason=reason)
             # Liquidity sweep watch: only on plain SL (not trail), not after T1.
             # If price recovers above SL within 2 candles → sweep → re-enter same zone.
             if not pos["t1_hit"]:
@@ -1611,7 +1613,9 @@ class TrapScannerEngine:
         pos = self._position
         if pos and pos["remaining_qty"] > 0:
             self._log.info("EOD square-off: %d units", pos["remaining_qty"])
+            eod_ltp = self._ltp_cache.get(pos["leg"], 0.0)
             await self._place_exit(pos["remaining_qty"], 0.0, "EOD")
+            self._record_closed_trade(pos, exit_price=eod_ltp, exit_reason="EOD")
         self._position = None
         self._clear_persisted_position()
         # Unsubscribe all option keys from the live feeder after market close so
@@ -1689,6 +1693,52 @@ class TrapScannerEngine:
                 json.dump(self._position, f, default=_default)
         except Exception as exc:
             self._log.warning("_persist_position failed: %s", exc)
+
+    def _record_closed_trade(self, pos: dict, exit_price: float,
+                             exit_reason: str, qty_override: int = 0) -> None:
+        """Write one closed-trade record to data/history and logs/trades."""
+        try:
+            from data_layer.trade_history import record as _hist_record
+            qty   = qty_override or pos.get("remaining_qty", 0)
+            ep    = float(pos.get("entry_price", 0))
+            xp    = float(exit_price)
+            pnl   = round((xp - ep) * qty, 2)
+            _hist_record(
+                client_id   = self._cid,
+                strategy    = "trap_scanner",
+                instrument  = f"{self._und} {pos.get('side','')} {pos.get('strike','')}",
+                entry_price = ep,
+                exit_price  = xp,
+                exit_reason = exit_reason,
+                pnl         = pnl,
+                binding_id  = self._bid,
+                ts          = datetime.now(IST).isoformat(timespec="seconds"),
+                legs        = [{
+                    "side":       pos.get("side", ""),
+                    "strike":     pos.get("strike", 0),
+                    "entry":      ep,
+                    "exit":       xp,
+                    "pnl":        pnl,
+                    "entry_ts":   pos.get("entry_ts", ""),
+                    "exit_ts":    datetime.now(IST).isoformat(timespec="seconds"),
+                    "entry_reason": pos.get("signal_source", "HTF"),
+                }],
+            )
+            # Also append to logs/trades/ (mirrors straddle format)
+            os.makedirs(os.path.join("logs", "trades"), exist_ok=True)
+            trade_file = os.path.join("logs", "trades",
+                f"ts_{self._und}_{self._cid}_{datetime.now(IST).strftime('%Y%m%d')}.log")
+            with open(trade_file, "a") as f:
+                f.write(
+                    f"{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"{pos.get('side')} {pos.get('strike')} | "
+                    f"entry={ep} exit={xp:.2f} qty={qty} pnl={pnl:+.2f} reason={exit_reason} "
+                    f"spot@entry={pos.get('spot_at_entry','?')}\n"
+                )
+            self._log.info("trade recorded: %s %s entry=%.2f exit=%.2f pnl=%+.2f reason=%s",
+                           pos.get('side'), pos.get('strike'), ep, xp, pnl, exit_reason)
+        except Exception as exc:
+            self._log.warning("_record_closed_trade failed: %s", exc)
 
     def _clear_persisted_position(self) -> None:
         try:
