@@ -238,6 +238,7 @@ class TrapScannerEngine:
 
         # Dedup: zones that already fired an entry today
         self._notified_uids: Set[str] = set()
+        self._no_margin_today: bool     = False  # set True after all 3 strikes rejected
 
         # Per-zone LTF status for telemetry: uid → "watching"|"ltf_signal"|"entered"
         self._zone_ltf_status: Dict[str, str] = {}
@@ -1303,15 +1304,17 @@ class TrapScannerEngine:
                 htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
                 htf_target=zone.get("sl", 0.0),
             )
-            # Pick the extreme 5-min zone within the HTF zone:
-            # CE (bear): lowest zone_low — catch sellers at the bottom of the 30-min range
-            # PE (bull): highest zone_high — catch sellers at the top of the 30-min range
+            # Pick the FIRST trap market reaches as it enters the HTF zone:
+            # CE (market coming DOWN): highest zone_high first — bears who entered highest
+            #   are the first ones market returns to; their covering = reversal UP = buy CE.
+            # PE (market coming UP): lowest zone_low first — bulls who entered lowest
+            #   are the first ones market returns to; their covering = reversal DOWN = buy PE.
             trapped_ltf = [e for e in ltf_entries if e.get("status") == "TRAPPED"]
             if trapped_ltf:
                 if opt_type == "CE":
-                    trapped_ltf = [min(trapped_ltf, key=lambda e: e.get("zone_low", 0))]
-                else:
                     trapped_ltf = [max(trapped_ltf, key=lambda e: e.get("zone_high", 0))]
+                else:
+                    trapped_ltf = [min(trapped_ltf, key=lambda e: e.get("zone_low", 0))]
             best = scanner.select_fresh_ltf_entry(trapped_ltf, opt_type=opt_type)
             if best:
                 # Retest gate: wait for futures price to pull back to sellers'/buyers' entry.
@@ -1466,6 +1469,9 @@ class TrapScannerEngine:
 
     async def _on_entry_signal(self, leg: str, opt_type: str,
                                 entry: dict, htf_zone: dict) -> None:
+        if self._no_margin_today:
+            self._log.debug("Entry blocked — no margin today (add funds)")
+            return
         if self._position:
             return
         now = datetime.now(IST)
@@ -1606,10 +1612,10 @@ class TrapScannerEngine:
                 self._log.info("Entry %s %s: status=%s avg=%.2f — waiting...",
                                label, oid, fl.status, fl.avg_price or 0)
                 await _asyncio.sleep(1)
-            return fl  # return last known (may still be PENDING — treated as failure)
+            return fl
 
-        async def _place_and_fill(sym, key, ltp_hint, label):
-            """Place a MARKET order and wait for fill. Returns (order_id, fill, strike_val, key_val)."""
+        async def _place_and_fill(sym, ltp_hint, label):
+            """Place a MARKET order and wait for fill."""
             r = req.__class__(
                 broker_symbol=sym,
                 exchange=self._exchange,
@@ -1625,32 +1631,53 @@ class TrapScannerEngine:
             return oid, fl
 
         try:
-            # Primary strike (scan strike or 1-ITM)
             opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
-            primary_ltp = self._ltp_cache.get(opt_leg_key, 0) or ep
-            order_id, fill = await _place_and_fill(broker_sym, exec_key, primary_ltp, f"{strike}{opt_type}")
 
-            # If not filled (cancelled / margin reject / still pending) → retry ATM
-            if fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
+            # Build 1-ITM, ATM, 1-OTM strikes for futures-mode
+            if self._htf_source == "futures":
+                itm1_strike = strike          # scan strike (naturally ITM)
+                atm_strike  = atm
+                if opt_type == "CE":
+                    otm1_strike = atm + self._step   # 1-OTM CE = above ATM
+                else:
+                    otm1_strike = atm - self._step   # 1-OTM PE = below ATM
+            else:
+                itm1_strike = strike
+                atm_strike  = atm
+                if opt_type == "CE":
+                    otm1_strike = atm + self._step
+                else:
+                    otm1_strike = atm - self._step
+
+            candidates = [
+                (itm1_strike, self._build_broker_symbol(itm1_strike, opt_type), "1-ITM"),
+                (atm_strike,  self._build_broker_symbol(atm_strike,  opt_type), "ATM"),
+                (otm1_strike, self._build_broker_symbol(otm1_strike, opt_type), "1-OTM"),
+            ]
+
+            order_id = None
+            fill = None
+            for cand_strike, cand_sym, cand_label in candidates:
+                cand_ltp = self._ltp_cache.get(opt_leg_key, 0) or 0
+                self._log.info("Entry attempt %s: %d%s ltp=%.2f", cand_label, cand_strike, opt_type, cand_ltp)
+                order_id, fill = await _place_and_fill(cand_sym, cand_ltp, f"{cand_strike}{opt_type}{cand_label}")
+                if fill.status == OrderStatus.COMPLETE and fill.avg_price > 0:
+                    strike   = cand_strike
+                    exec_key = self._build_upstox_key(cand_strike, opt_type)
+                    self._log.info("Entry FILLED at %s: %d%s avg=%.2f", cand_label, cand_strike, opt_type, fill.avg_price)
+                    break
                 self._log.warning(
-                    "Entry %s%s order %s not filled (status=%s avg=%.2f) — retrying ATM %d",
-                    strike, opt_type, order_id, fill.status, fill.avg_price or 0, atm
+                    "Entry %s %d%s REJECTED (status=%s) — trying next",
+                    cand_label, cand_strike, opt_type, fill.status if fill else "none"
                 )
-                if strike != atm:
-                    atm_sym = self._build_broker_symbol(atm, opt_type)
-                    atm_key_str = self._build_upstox_key(atm, opt_type)
-                    atm_ltp = self._ltp_cache.get(opt_leg_key, 0) or 0
-                    order_id, fill = await _place_and_fill(atm_sym, atm_key_str, atm_ltp, f"{atm}{opt_type}ATM")
-                    strike   = atm
-                    exec_key = atm_key_str
 
-            # Final check — abort if still not filled
-            if fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
+            if fill is None or fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
                 self._log.error(
-                    "Entry aborted — no confirmed fill after primary+ATM attempt "
-                    "(order=%s status=%s avg=%.2f)",
-                    order_id, fill.status, fill.avg_price or 0
+                    "Entry aborted — all 3 strikes (1-ITM/ATM/1-OTM) rejected for %s%s. "
+                    "Add funds to trade CrudeOil options.",
+                    strike, opt_type
                 )
+                self._no_margin_today = True   # flag to skip further entries today
                 return
 
             avg = fill.avg_price
