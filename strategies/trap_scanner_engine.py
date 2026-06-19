@@ -1116,7 +1116,7 @@ class TrapScannerEngine:
                         and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
             fut_bull = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
                         and e.get("kind", "BEAR") == "BULL"
-                        and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
+                        and spot >= e.get("zone_low", 0)]
             if leg == "CE1" and fut_bear:
                 self._run_ltf_on("CE1", self._bars_ce1, fut_bear, "CE",
                                  require_closed=True, price_override=spot, all_cleared_entry=True)
