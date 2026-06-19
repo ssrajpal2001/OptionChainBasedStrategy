@@ -1303,8 +1303,16 @@ class TrapScannerEngine:
                 htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
                 htf_target=zone.get("sl", 0.0),
             )
-            # "Clean old zones first": only enter after last existing 5-min zone is cleared
-            best = scanner.select_fresh_ltf_entry(ltf_entries, opt_type=opt_type)
+            # Pick the extreme 5-min zone within the HTF zone:
+            # CE (bear): lowest zone_low — catch sellers at the bottom of the 30-min range
+            # PE (bull): highest zone_high — catch sellers at the top of the 30-min range
+            trapped_ltf = [e for e in ltf_entries if e.get("status") == "TRAPPED"]
+            if trapped_ltf:
+                if opt_type == "CE":
+                    trapped_ltf = [min(trapped_ltf, key=lambda e: e.get("zone_low", 0))]
+                else:
+                    trapped_ltf = [max(trapped_ltf, key=lambda e: e.get("zone_high", 0))]
+            best = scanner.select_fresh_ltf_entry(trapped_ltf, opt_type=opt_type)
             if best:
                 # Retest gate: wait for futures price to pull back to sellers'/buyers' entry.
                 # CE (bear zone): sellers entered at zone_high (C1.LOW). After TRAPPED
