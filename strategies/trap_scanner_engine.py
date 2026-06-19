@@ -206,7 +206,8 @@ class TrapScannerEngine:
         self._gap_fired  = False
         self._spot_open  = 0.0
         self._spot_cache = 0.0
-        self._spot_bad_cnt: int = 0  # consecutive SPOT filter rejections (unstick after 5)
+        self._spot_bad_cnt: int = 0  # consecutive SPOT filter rejections
+        self._spot_bad_t0: float = 0.0  # monotonic time when bad-tick streak started
         self._expiry_date: Optional[date] = None   # date object, set alongside _expiry_str
 
         # Live option LTP cache: bkey → last seen LTP
@@ -904,19 +905,32 @@ class TrapScannerEngine:
                 _ref = self._spot_cache if self._spot_cache > 0 else self._spot_open
                 _guard = 0.08 if self._cfg.exchange.is_mcx(self._und) else 0.04
                 if _ref > 0 and abs(raw_ltp - _ref) / _ref > _guard:
+                    import time as _time
+                    if self._spot_bad_cnt == 0:
+                        self._spot_bad_t0 = _time.monotonic()
                     self._spot_bad_cnt += 1
-                    if self._spot_bad_cnt < 5:
+                    if self._spot_bad_cnt < 10:
                         self._log.warning(
                             "SPOT tick rejected: ltp=%.2f deviates >%.1f%% from last=%.2f "
                             "(mis-decode? consecutive=%d)",
                             raw_ltp, _guard * 100, _ref, self._spot_bad_cnt,
                         )
                         continue
-                    # 5+ consecutive rejects → real regime change, accept and reset
+                    # 10+ consecutive rejects — only accept if spread over >2s
+                    # (burst within 2s = Upstox reconnect dump, not a real regime change)
+                    elapsed = _time.monotonic() - self._spot_bad_t0
+                    if elapsed < 2.0:
+                        self._log.warning(
+                            "SPOT filter: rejecting burst of %d bad ticks in %.1fs "
+                            "(reconnect dump, not regime change; ltp=%.2f old_ref=%.2f)",
+                            self._spot_bad_cnt, elapsed, raw_ltp, _ref,
+                        )
+                        self._spot_bad_cnt = 0
+                        continue
                     self._log.info(
                         "SPOT filter unstick: accepting ltp=%.2f after %d consecutive rejects "
-                        "(old_ref=%.2f — likely regime change, not mis-decode)",
-                        raw_ltp, self._spot_bad_cnt, _ref,
+                        "over %.1fs (old_ref=%.2f — confirmed regime change)",
+                        raw_ltp, self._spot_bad_cnt, elapsed, _ref,
                     )
                 self._spot_bad_cnt = 0
                 self._spot_cache = raw_ltp
