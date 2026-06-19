@@ -766,7 +766,7 @@ class FyersFeeder(BaseFeeder):
         # Also convert any MCX_FO|... Upstox keys to Fyers MCX:... format.
         converted = []
         for t in tokens:
-            if t.startswith("MCX_FO|") and not self._is_fyers_symbol(t):
+            if (t.startswith("MCX_FO|") or t.startswith("BSE_FO|")) and not self._is_fyers_symbol(t):
                 fyers_sym = self._upstox_mcx_to_fyers(t)
                 if fyers_sym:
                     converted.append(fyers_sym)

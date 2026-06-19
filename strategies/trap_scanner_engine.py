@@ -223,8 +223,10 @@ class TrapScannerEngine:
 
         # HTF zones from last spot scan (tuples: (zone_dict, "CE"|"PE"))
         # BEAR zone → CE signal;  BULL zone → PE signal
-        self._htf_bear_zones: List[dict] = []   # bear traps → CE entry
-        self._htf_bull_zones: List[dict] = []   # bull traps → PE entry
+        self._htf_bear_zones: List[dict] = []    # seller traps in CE1 premium → buy CE1
+        self._htf_bear_zones_2: List[dict] = [] # seller traps in CE2 premium → buy CE2
+        self._htf_bull_zones: List[dict] = []   # seller traps in PE1 premium → buy PE1
+        self._htf_bull_zones_2: List[dict] = [] # seller traps in PE2 premium → buy PE2
         self._htf_fut_zones: List[dict] = []    # futures only
 
         # htf_source="spot": separate option-level zones for LTF entry
@@ -696,13 +698,27 @@ class TrapScannerEngine:
                 if len(htf_ce) >= 2:
                     _, bear_entries = scanner.scan_htf(htf_ce)
                     self._htf_bear_zones = bear_entries
-            # Bull zones from PE1 bars: seller traps on PE premium → buy PE
+            # Seller traps in CE2 bars → buy CE2
+            df_ce2 = _bars_to_df(self._bars_ce2)
+            if not df_ce2.empty and len(df_ce2) >= 2:
+                htf_ce2 = _resample_htf(df_ce2, minutes)
+                if len(htf_ce2) >= 2:
+                    _, bear_entries_2 = scanner.scan_htf(htf_ce2)
+                    self._htf_bear_zones_2 = bear_entries_2
+            # Seller traps in PE1 bars → buy PE1
             df_pe = _bars_to_df(self._bars_pe1)
             if not df_pe.empty and len(df_pe) >= 2:
                 htf_pe = _resample_htf(df_pe, minutes)
                 if len(htf_pe) >= 2:
                     _, bull_entries = scanner.scan_htf(htf_pe)
                     self._htf_bull_zones = bull_entries
+            # Seller traps in PE2 bars → buy PE2
+            df_pe2 = _bars_to_df(self._bars_pe2)
+            if not df_pe2.empty and len(df_pe2) >= 2:
+                htf_pe2 = _resample_htf(df_pe2, minutes)
+                if len(htf_pe2) >= 2:
+                    _, bull_entries_2 = scanner.scan_htf(htf_pe2)
+                    self._htf_bull_zones_2 = bull_entries_2
         else:  # "spot": scan spot for direction, option bars for entry zones
             bars = bars_override or self._bars_spot
             df = _bars_to_df(bars)
@@ -1034,25 +1050,30 @@ class TrapScannerEngine:
         if self._htf_source == "spot":
             bear_zones = [e for e in self._opt_bear_zones if e["status"] == "TRAPPED"] if spot_has_bear else []
             bull_zones = [e for e in self._opt_bull_zones if e["status"] == "TRAPPED"] if spot_has_bull else []
+        bear_zones_2: list = []
+        bull_zones_2: list = []
+        if self._htf_source == "spot":
+            bear_zones = [e for e in self._opt_bear_zones if e["status"] == "TRAPPED"] if spot_has_bear else []
+            bull_zones = [e for e in self._opt_bull_zones if e["status"] == "TRAPPED"] if spot_has_bull else []
         else:
-            bear_zones = [e for e in self._htf_bear_zones if e["status"] == "TRAPPED"]
-            bull_zones = [e for e in self._htf_bull_zones if e["status"] == "TRAPPED"]
+            ltp_ce = self._ltp_cache.get("CE1") or self._ltp_cache.get("CE2") or 0.0
+            ltp_pe = self._ltp_cache.get("PE1") or self._ltp_cache.get("PE2") or 0.0
+            def _alive_ce(z): return ltp_ce <= 0 or ltp_ce >= z.get("zone_low", 0)
+            def _alive_pe(z): return ltp_pe <= 0 or ltp_pe >= z.get("zone_low", 0)
+            bear_zones   = [e for e in self._htf_bear_zones   if e["status"] == "TRAPPED" and _alive_ce(e)]
+            bear_zones_2 = [e for e in self._htf_bear_zones_2 if e["status"] == "TRAPPED" and _alive_ce(e)]
+            bull_zones   = [e for e in self._htf_bull_zones   if e["status"] == "TRAPPED" and _alive_pe(e)]
+            bull_zones_2 = [e for e in self._htf_bull_zones_2 if e["status"] == "TRAPPED" and _alive_pe(e)]
 
-        if bear_zones:
-            # option-source: accept TRAPPED on LTF (same rule as cascade — premium traps
-            # rarely complete a full CLOSED 5-min bar; TRAPPED is sufficient signal)
-            _rc = self._htf_source not in ("option", "spot")
-            if leg in ("CE1",):
-                self._run_ltf_on("CE1", self._bars_ce1, bear_zones, "CE", require_closed=_rc)
-            elif leg in ("CE2",):
-                self._run_ltf_on("CE2", self._bars_ce2, bear_zones, "CE", require_closed=_rc)
-
-        if bull_zones:
-            _rc = self._htf_source not in ("option", "spot")
-            if leg in ("PE1",):
-                self._run_ltf_on("PE1", self._bars_pe1, bull_zones, "PE", require_closed=_rc)
-            elif leg in ("PE2",):
-                self._run_ltf_on("PE2", self._bars_pe2, bull_zones, "PE", require_closed=_rc)
+        _rc = self._htf_source not in ("option", "spot")
+        if leg == "CE1" and bear_zones:
+            self._run_ltf_on("CE1", self._bars_ce1, bear_zones, "CE", require_closed=_rc)
+        elif leg == "CE2" and bear_zones_2:
+            self._run_ltf_on("CE2", self._bars_ce2, bear_zones_2, "CE", require_closed=_rc)
+        elif leg == "PE1" and bull_zones:
+            self._run_ltf_on("PE1", self._bars_pe1, bull_zones, "PE", require_closed=_rc)
+        elif leg == "PE2" and bull_zones_2:
+            self._run_ltf_on("PE2", self._bars_pe2, bull_zones_2, "PE", require_closed=_rc)
 
     def _run_ltf_on(self, leg_key: str, bars: List[dict],
                     htf_zones: List[dict], opt_type: str,
@@ -1840,7 +1861,8 @@ class TrapScannerEngine:
         self._bars_spot = []; self._bars_fut = []
         self._bars_ce1  = []; self._bars_ce2 = []
         self._bars_pe1  = []; self._bars_pe2 = []
-        self._htf_bear_zones = []; self._htf_bull_zones = []
+        self._htf_bear_zones = []; self._htf_bear_zones_2 = []
+        self._htf_bull_zones = []; self._htf_bull_zones_2 = []
         self._htf_fut_zones  = []
         self._buckets        = {}
         self._notified_uids  = set()
@@ -2211,7 +2233,7 @@ class TrapScannerEngine:
             import aiohttp
             today   = date.today()
             to_date = today + timedelta(days=1)   # include today (Upstox excludes to_date)
-            fr_date = today - timedelta(days=8)   # prev week + current week for HTF pattern seed
+            fr_date = today - timedelta(days=14)   # full prev week + current week for HTF pattern seed
             url = (f"https://api.upstox.com/v2/historical-candle/"
                    f"{instrument_key}/1minute/{to_date}/{fr_date}")
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -2513,11 +2535,11 @@ class TrapScannerEngine:
         fut_trapped  = sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED")
 
         def _best_zone_summary(zone_list: list) -> Optional[dict]:
-            """Most recent TRAPPED zone for UI display."""
+            """Nearest TRAPPED zone for UI display — closest trigger to current option LTP."""
             trapped = [z for z in zone_list if z["status"] == "TRAPPED"]
             if not trapped:
                 return None
-            z = trapped[-1]
+            z = min(trapped, key=lambda z: abs(zone_ltp - z.get("zone_trigger", z.get("entry", zone_ltp))))
             uid = _zone_uid(z)
             trig = round(z.get("zone_trigger", z.get("entry", 0)), 2)
             dist = round(abs(zone_ltp - trig), 1) if zone_ltp else None
@@ -2605,11 +2627,11 @@ class TrapScannerEngine:
             "CE1": {"strike": self._ce1_strike, "ltp": self._ltp_cache.get("CE1"),
                     "bars": len(self._bars_ce1), "zone": ce_zone},
             "CE2": {"strike": self._ce2_strike, "ltp": self._ltp_cache.get("CE2"),
-                    "bars": len(self._bars_ce2), "zone": None},
+                    "bars": len(self._bars_ce2), "zone": _best_zone_summary(self._htf_bear_zones_2)},
             "PE1": {"strike": self._pe1_strike, "ltp": self._ltp_cache.get("PE1"),
                     "bars": len(self._bars_pe1), "zone": pe_zone},
             "PE2": {"strike": self._pe2_strike, "ltp": self._ltp_cache.get("PE2"),
-                    "bars": len(self._bars_pe2), "zone": None},
+                    "bars": len(self._bars_pe2), "zone": _best_zone_summary(self._htf_bull_zones_2)},
         }
 
         # FUT zones: sort by distance from spot and return nearest 10 (not all 90)
