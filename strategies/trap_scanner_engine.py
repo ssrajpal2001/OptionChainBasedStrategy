@@ -947,7 +947,8 @@ class TrapScannerEngine:
                         self._ce1_key, self._pe1_key,
                     )
                     _last_resub = now
-                    keys = [k for k in [self._ce1_key, self._ce2_key,
+                    keys = [k for k in [self._fut_key,
+                                        self._ce1_key, self._ce2_key,
                                         self._pe1_key, self._pe2_key] if k]
                     if keys:
                         feeder = (self._mcx_feeder if self._mcx_feeder is not None
@@ -2400,13 +2401,8 @@ class TrapScannerEngine:
         return primary_strike, primary_key  # last resort: place anyway
 
     def _get_upstox_token(self) -> Optional[str]:
-        # CrudeOil uses a dedicated second Upstox account (upstox2) for MCX data.
-        # Falls back to the primary "upstox" account if upstox2 has no token yet.
-        if self._und == "CRUDEOIL":
-            creds2 = self._db.get_feeder_creds_sync("upstox2")
-            token2 = (creds2 or {}).get("access_token") or ""
-            if token2:
-                return token2
+        # All underlyings including MCX CrudeOil use the primary upstox account.
+        # Upstox WebSocket handles both NSE/BSE and MCX on the same connection.
         creds = self._db.get_feeder_creds_sync("upstox")
         return (creds or {}).get("access_token") or ""
 
@@ -2651,9 +2647,9 @@ class TrapScannerEngine:
                 "htf_label":    f"{self._htf_min}-min",
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
             }
-            }
 
         # Entry window status
+
         now_ist  = datetime.now(IST)
         win      = self._entry_win   # [[h,m],[h,m]] or None
         if win:
