@@ -1104,18 +1104,23 @@ class TrapScannerEngine:
                           Only ORDER and post-entry exits use options.
         """
         if self._htf_source == "futures":
-            if leg != "FUT":
-                return  # LTF scan only on FUT candle close
-            # BEAR zones (kind="BEAR", descending lows) → buy CE: lower 1/3 trigger
-            bear_zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
-                          and e.get("kind", "BEAR") == "BEAR"]
-            if bear_zones:
-                self._run_ltf_futures_mode("FUT", self._bars_fut, bear_zones, "CE")
-            # BULL zones (kind="BULL", ascending highs) → buy PE: upper 1/3 trigger
-            bull_zones = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
-                          and e.get("kind", "BEAR") == "BULL"]
-            if bull_zones:
-                self._run_ltf_futures_mode("FUT", self._bars_fut, bull_zones, "PE")
+            # Futures zones = BIAS only. LTF detection on OPTION bars (CE1/PE1).
+            # Bear futures zone → CE bias → scan CE1 option bars for bear traps → buy CE.
+            # Bull futures zone → PE bias → scan PE1 option bars for bear traps → buy PE.
+            # FUT candle close does not trigger LTF — option ticks do.
+            if leg == "FUT":
+                return
+            spot = self._spot_cache or 0.0
+            fut_bear = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
+                        and e.get("kind", "BEAR") == "BEAR"
+                        and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
+            fut_bull = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
+                        and e.get("kind", "BEAR") == "BULL"
+                        and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
+            if leg == "CE1" and fut_bear:
+                self._run_ltf_on("CE1", self._bars_ce1, fut_bear, "CE", require_closed=True)
+            elif leg == "PE1" and fut_bull:
+                self._run_ltf_on("PE1", self._bars_pe1, fut_bull, "PE", require_closed=True)
             return
 
         # BEAR zones → buy CE
