@@ -2628,13 +2628,13 @@ class TrapScannerEngine:
                 inside = [z for z in trapped
                           if z.get("zone_low", 0) <= zone_ltp <= z.get("zone_high", 0)]
                 if inside:
-                    z = max(inside, key=lambda z: z.get("zone_high", 0))
+                    z = max(inside, key=lambda zz: zz.get("zone_high", 0))
                 else:
                     above = [z for z in trapped if z.get("zone_high", 0) > zone_ltp]
                     if above:
-                        z = min(above, key=lambda z: z.get("zone_high", 0) - zone_ltp)
+                        z = min(above, key=lambda zz: zz.get("zone_high", 0) - zone_ltp)
                     else:
-                        z = max(trapped, key=lambda z: z.get("zone_high", 0))
+                        z = max(trapped, key=lambda zz: zz.get("zone_high", 0))
             else:
                 z = trapped[-1]
 
@@ -2650,6 +2650,7 @@ class TrapScannerEngine:
                 "trapped_on":   str(z.get("trapped_on", "")),
                 "htf_label":    f"{self._htf_min}-min",
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
+            }
             }
 
         # Entry window status
