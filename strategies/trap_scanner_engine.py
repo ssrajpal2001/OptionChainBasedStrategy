@@ -1595,46 +1595,66 @@ class TrapScannerEngine:
             client_id=self._cid,
         )
         from execution_bridge.base_broker import OrderStatus
+        import asyncio as _asyncio
+
+        async def _wait_fill(oid: str, label: str):
+            """Poll up to 6s for a terminal order status (COMPLETE or CANCELLED)."""
+            for attempt in range(6):
+                fl = await broker.get_order_status(oid)
+                if fl.status in (OrderStatus.COMPLETE, OrderStatus.CANCELLED):
+                    return fl
+                self._log.info("Entry %s %s: status=%s avg=%.2f — waiting...",
+                               label, oid, fl.status, fl.avg_price or 0)
+                await _asyncio.sleep(1)
+            return fl  # return last known (may still be PENDING — treated as failure)
+
+        async def _place_and_fill(sym, key, ltp_hint, label):
+            """Place a MARKET order and wait for fill. Returns (order_id, fill, strike_val, key_val)."""
+            r = req.__class__(
+                broker_symbol=sym,
+                exchange=self._exchange,
+                side=req.side,
+                qty=total_qty,
+                order_type=req.order_type,
+                price=ltp_hint,
+                tag=req.tag,
+                client_id=self._cid,
+            )
+            oid = await broker.place_order(r)
+            fl  = await _wait_fill(oid, label)
+            return oid, fl
+
         try:
-            order_id = await broker.place_order(req)
-            fill = await broker.get_order_status(order_id)
+            # Primary strike (scan strike or 1-ITM)
+            opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
+            primary_ltp = self._ltp_cache.get(opt_leg_key, 0) or ep
+            order_id, fill = await _place_and_fill(broker_sym, exec_key, primary_ltp, f"{strike}{opt_type}")
 
-            # If cancelled (e.g. insufficient margin), retry with ATM strike once.
-            if fill.status == OrderStatus.CANCELLED and strike != atm:
+            # If not filled (cancelled / margin reject / still pending) → retry ATM
+            if fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
                 self._log.warning(
-                    "Entry order %s CANCELLED (margin?) for %d%s — retrying ATM %d",
-                    order_id, strike, opt_type, atm
+                    "Entry %s%s order %s not filled (status=%s avg=%.2f) — retrying ATM %d",
+                    strike, opt_type, order_id, fill.status, fill.avg_price or 0, atm
                 )
-                atm_sym = self._build_broker_symbol(atm, opt_type)
-                atm_key = self._build_upstox_key(atm, opt_type)
-                opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
-                atm_ltp = self._ltp_cache.get(opt_leg_key, 0) or 0
-                req2 = req.__class__(
-                    broker_symbol=atm_sym,
-                    exchange=self._exchange,
-                    side=req.side,
-                    qty=total_qty,
-                    order_type=req.order_type,
-                    price=atm_ltp,
-                    tag=req.tag,
-                    client_id=self._cid,
+                if strike != atm:
+                    atm_sym = self._build_broker_symbol(atm, opt_type)
+                    atm_key_str = self._build_upstox_key(atm, opt_type)
+                    atm_ltp = self._ltp_cache.get(opt_leg_key, 0) or 0
+                    order_id, fill = await _place_and_fill(atm_sym, atm_key_str, atm_ltp, f"{atm}{opt_type}ATM")
+                    strike   = atm
+                    exec_key = atm_key_str
+
+            # Final check — abort if still not filled
+            if fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
+                self._log.error(
+                    "Entry aborted — no confirmed fill after primary+ATM attempt "
+                    "(order=%s status=%s avg=%.2f)",
+                    order_id, fill.status, fill.avg_price or 0
                 )
-                order_id = await broker.place_order(req2)
-                fill = await broker.get_order_status(order_id)
-                strike   = atm
-                exec_key = atm_key
-
-            if fill.avg_price > 0:
-                avg = fill.avg_price
-            elif self._htf_source == "futures":
-                opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
-                avg = self._ltp_cache.get(opt_leg_key, 0) or ep
-            else:
-                avg = ep
-
-            if fill.status == OrderStatus.CANCELLED:
-                self._log.error("Entry order %s CANCELLED — aborting (no ATM fallback left)", order_id)
                 return
+
+            avg = fill.avg_price
+
         except Exception as exc:
             self._log.error("Entry order failed: %s", exc)
             return
