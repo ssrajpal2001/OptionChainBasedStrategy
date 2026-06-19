@@ -2473,14 +2473,13 @@ class TrapScannerEngine:
         # pin_strike alone only prevents UNsubscription; it does NOT subscribe a key that
         # was never in the ATM window.  Deep-ITM / OTM legs used by TrapScanner are often
         # outside the ±N-strike window, so they never receive ticks without this call.
-        keys = [k for k in [self._ce1_key, self._ce2_key,
+        # For futures-mode (CrudeOil) also subscribe the futures key so INDEX_TICK arrives.
+        keys = [k for k in [self._fut_key,
+                             self._ce1_key, self._ce2_key,
                              self._pe1_key, self._pe2_key] if k]
         if keys:
-            # MCX indices (CrudeOil) use dedicated Upstox2 feeder; others use main feeder
-            if self._mcx_feeder is not None:
-                feeder = self._mcx_feeder
-            else:
-                feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+            feeder = (self._mcx_feeder if self._mcx_feeder is not None
+                      else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
             if feeder and hasattr(feeder, "subscribe_tokens"):
                 try:
                     await feeder.subscribe_tokens(keys)
