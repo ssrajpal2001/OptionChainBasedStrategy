@@ -1118,9 +1118,11 @@ class TrapScannerEngine:
                         and e.get("kind", "BEAR") == "BULL"
                         and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
             if leg == "CE1" and fut_bear:
-                self._run_ltf_on("CE1", self._bars_ce1, fut_bear, "CE", require_closed=True, price_override=spot)
+                self._run_ltf_on("CE1", self._bars_ce1, fut_bear, "CE",
+                                 require_closed=True, price_override=spot, all_cleared_entry=True)
             elif leg == "PE1" and fut_bull:
-                self._run_ltf_on("PE1", self._bars_pe1, fut_bull, "PE", require_closed=True, price_override=spot)
+                self._run_ltf_on("PE1", self._bars_pe1, fut_bull, "PE",
+                                 require_closed=True, price_override=spot, all_cleared_entry=True)
             return
 
         # BEAR zones → buy CE
@@ -1159,10 +1161,13 @@ class TrapScannerEngine:
     def _run_ltf_on(self, leg_key: str, bars: List[dict],
                     htf_zones: List[dict], opt_type: str,
                     require_closed: bool = True,
-                    price_override: float = 0.0) -> None:
+                    price_override: float = 0.0,
+                    all_cleared_entry: bool = False) -> None:
         """
-        require_closed=True  (normal mode): entry only when 5-min zone is CLOSED
-        require_closed=False (cascade mode): entry on TRAPPED (price hit bears' SL is enough)
+        require_closed=True    : entry when LTF zone is CLOSED (normal mode)
+        require_closed=False   : entry on TRAPPED (cascade mode)
+        all_cleared_entry=True : entry when ALL LTF bear traps in option bars are CLOSED
+                                 (futures-mode: sellers exhausted = enter immediately, no retest)
         """
         if not htf_zones or len(bars) < 3:
             return
@@ -1174,6 +1179,35 @@ class TrapScannerEngine:
             return
         df = _bars_to_df(today_bars[-200:])
         current_price = price_override if price_override > 0 else (self._ltp_cache.get(leg_key, 0) or self._ltp_cache.get("SPOT", 0))
+
+        # Futures-mode: ALL-CLEARED entry — when every LTF bear trap in option bars
+        # is CLOSED (all option sellers have covered), sellers are exhausted → enter now.
+        if all_cleared_entry:
+            uid = _zone_uid(htf_zones[0]) if htf_zones else "fut_mode"
+            if uid in self._notified_uids:
+                return
+            _, ltf_entries = scanner.scan_ltf(
+                df,
+                htf_zone_high=9999999,  # no zone bounds — scan full today's bars
+                htf_zone_low=0,
+                htf_ref_bar="",
+                htf_trap_bar="",
+                htf_target=0.0,
+            )
+            trapped_now  = [e for e in ltf_entries if e["status"] == "TRAPPED"]
+            closed_today = [e for e in ltf_entries if e["status"] == "CLOSED"]
+            self._log.info(
+                "_run_ltf_on [%s] all_cleared: trapped=%d closed=%d",
+                leg_key, len(trapped_now), len(closed_today),
+            )
+            if closed_today and not trapped_now:
+                # All sellers out — pick the most recent closed zone as reference
+                best = max(closed_today, key=lambda e: str(e.get("closed_on", "")))
+                self._zone_ltf_status[uid] = "ltf_signal_all_cleared"
+                asyncio.get_event_loop().create_task(
+                    self._on_entry_signal(leg_key, opt_type, best, htf_zones[0])
+                )
+            return
 
         for zone in htf_zones:
             uid = _zone_uid(zone)
