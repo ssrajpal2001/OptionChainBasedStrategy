@@ -1118,9 +1118,9 @@ class TrapScannerEngine:
                         and e.get("kind", "BEAR") == "BULL"
                         and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
             if leg == "CE1" and fut_bear:
-                self._run_ltf_on("CE1", self._bars_ce1, fut_bear, "CE", require_closed=True)
+                self._run_ltf_on("CE1", self._bars_ce1, fut_bear, "CE", require_closed=True, price_override=spot)
             elif leg == "PE1" and fut_bull:
-                self._run_ltf_on("PE1", self._bars_pe1, fut_bull, "PE", require_closed=True)
+                self._run_ltf_on("PE1", self._bars_pe1, fut_bull, "PE", require_closed=True, price_override=spot)
             return
 
         # BEAR zones → buy CE
@@ -1158,7 +1158,8 @@ class TrapScannerEngine:
 
     def _run_ltf_on(self, leg_key: str, bars: List[dict],
                     htf_zones: List[dict], opt_type: str,
-                    require_closed: bool = True) -> None:
+                    require_closed: bool = True,
+                    price_override: float = 0.0) -> None:
         """
         require_closed=True  (normal mode): entry only when 5-min zone is CLOSED
         require_closed=False (cascade mode): entry on TRAPPED (price hit bears' SL is enough)
@@ -1172,7 +1173,7 @@ class TrapScannerEngine:
         if len(today_bars) < 3:
             return
         df = _bars_to_df(today_bars[-200:])
-        current_price = self._ltp_cache.get(leg_key, 0) or self._ltp_cache.get("SPOT", 0)
+        current_price = price_override if price_override > 0 else (self._ltp_cache.get(leg_key, 0) or self._ltp_cache.get("SPOT", 0))
 
         for zone in htf_zones:
             uid = _zone_uid(zone)
