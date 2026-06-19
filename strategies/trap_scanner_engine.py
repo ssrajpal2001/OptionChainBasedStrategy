@@ -719,6 +719,54 @@ class TrapScannerEngine:
                 if len(htf_pe2) >= 2:
                     _, bull_entries_2 = scanner.scan_htf(htf_pe2)
                     self._htf_bull_zones_2 = bull_entries_2
+
+            # Intraday cascade fallback: if no CLOSE HTF zone exists for a leg,
+            # scan today's 15-min bars to find intraday seller traps
+            INTRADAY_MIN = 15
+            atr = self._htf_atr_val or 100
+            close_thresh = 2.0 * atr
+
+            def _nearest_dist(zones, ltp):
+                if not zones or ltp <= 0:
+                    return float('inf')
+                trapped = [z for z in zones if z["status"] == "TRAPPED"]
+                if not trapped:
+                    return float('inf')
+                return min(abs(z.get("zone_trigger", ltp) - ltp) for z in trapped)
+
+            def _intraday_zones(bars, ltp, existing):
+                """Scan 15-min intraday bars; return new zones not already close to existing ones."""
+                df = _bars_to_df(bars)
+                if df.empty or len(df) < 2:
+                    return []
+                intra = _resample_htf(df, INTRADAY_MIN)
+                if len(intra) < 2:
+                    return []
+                _, zones = scanner.scan_htf(intra)
+                # Tag as intraday and deduplicate by zone_low
+                existing_lows = {round(z.get("zone_low", 0), 1) for z in existing}
+                new = []
+                for z in zones:
+                    z = dict(z, htf_label="15-min intraday")
+                    if round(z.get("zone_low", 0), 1) not in existing_lows:
+                        new.append(z)
+                return new
+
+            ltp_ce1 = self._ltp_cache.get("CE1") or 0
+            if _nearest_dist(self._htf_bear_zones, ltp_ce1) > close_thresh:
+                self._htf_bear_zones += _intraday_zones(self._bars_ce1, ltp_ce1, self._htf_bear_zones)
+
+            ltp_ce2 = self._ltp_cache.get("CE2") or 0
+            if _nearest_dist(self._htf_bear_zones_2, ltp_ce2) > close_thresh:
+                self._htf_bear_zones_2 += _intraday_zones(self._bars_ce2, ltp_ce2, self._htf_bear_zones_2)
+
+            ltp_pe1 = self._ltp_cache.get("PE1") or 0
+            if _nearest_dist(self._htf_bull_zones, ltp_pe1) > close_thresh:
+                self._htf_bull_zones += _intraday_zones(self._bars_pe1, ltp_pe1, self._htf_bull_zones)
+
+            ltp_pe2 = self._ltp_cache.get("PE2") or 0
+            if _nearest_dist(self._htf_bull_zones_2, ltp_pe2) > close_thresh:
+                self._htf_bull_zones_2 += _intraday_zones(self._bars_pe2, ltp_pe2, self._htf_bull_zones_2)
         else:  # "spot": scan spot for direction, option bars for entry zones
             bars = bars_override or self._bars_spot
             df = _bars_to_df(bars)
