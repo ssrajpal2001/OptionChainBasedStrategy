@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 
@@ -93,8 +93,41 @@ class SymbolTranslator:
 
     @staticmethod
     def from_fyers(raw: str) -> Optional[InternalSymbol]:
-        """Parse a Fyers symbol back to InternalSymbol."""
-        pattern = r"^(?:NSE|BSE):([A-Z]+)(\d{2})([0-9ON D])(\d{2})(\d+)(CE|PE)$"
+        """Parse a Fyers symbol back to InternalSymbol.
+        Handles both weekly (BSE:SENSEX26625CE) and monthly (BSE:SENSEX26JUN76700CE) formats.
+        """
+        # Monthly format: 3-char month name, no day field (e.g. BSE:SENSEX26JUN77100CE)
+        m_monthly = re.match(
+            r"^(?:NSE|BSE):([A-Z]+)(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d+)(CE|PE)$",
+            raw,
+        )
+        if m_monthly:
+            underlying, yy, mon3, strike_str, opt_type = m_monthly.groups()
+            month = _MONTH_3.index(mon3) + 1
+            year = 2000 + int(yy)
+            # Look up actual expiry from the instrument registry (authoritative)
+            try:
+                from data_layer.instrument_registry import REGISTRY
+                all_exp = REGISTRY.all_expiries(underlying)
+                month_exps = [e for e in all_exp if e.year == year and e.month == month]
+                expiry = max(month_exps) if month_exps else None
+            except Exception:
+                expiry = None
+            if expiry is None:
+                import calendar as _cal
+                last_day = _cal.monthrange(year, month)[1]
+                d = date(year, month, last_day)
+                while d.weekday() != 3:
+                    d -= timedelta(days=1)
+                expiry = d
+            return InternalSymbol(
+                underlying=underlying,
+                strike=float(strike_str),
+                option_type=opt_type,
+                expiry=expiry,
+            )
+        # Weekly format: single-char month code + 2-digit day
+        pattern = r"^(?:NSE|BSE):([A-Z]+)(\d{2})([0-9OND])(\d{2})(\d+)(CE|PE)$"
         m = re.match(pattern, raw)
         if not m:
             return None
