@@ -486,6 +486,18 @@ class TrapScannerEngine:
                     self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
                 if not self._bars_pe2:
                     self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                # Merge today's intraday bars (historical API ends at prev day)
+                for attr, key in [
+                    ("_bars_fut", self._fut_key),
+                    ("_bars_ce1", self._ce1_key), ("_bars_ce2", self._ce2_key),
+                    ("_bars_pe1", self._pe1_key), ("_bars_pe2", self._pe2_key),
+                ]:
+                    intra = await self._fetch_intraday_bars(key)
+                    if intra:
+                        existing = {b["datetime"] for b in getattr(self, attr)}
+                        merged = getattr(self, attr) + [b for b in intra if b["datetime"] not in existing]
+                        merged.sort(key=lambda b: b["datetime"])
+                        setattr(self, attr, merged)
                 self._log.info(
                     "Bars seeded — FUT(%s)=%d CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
                     self._fut_key, len(self._bars_fut),
@@ -2432,6 +2444,35 @@ class TrapScannerEngine:
         except Exception as exc:
             self._log.warning("_fetch_prev_close_and_today_open_from_1m: %s", exc)
             return 0.0, 0.0
+
+    async def _fetch_intraday_bars(self, instrument_key: str) -> List[dict]:
+        """Fetch today's intraday 1-min bars from Upstox intraday endpoint."""
+        if not instrument_key:
+            return []
+        try:
+            token = self._get_upstox_token()
+            if not token:
+                return []
+            import aiohttp
+            url = (f"https://api.upstox.com/v2/historical-candle/intraday/"
+                   f"{instrument_key}/1minute")
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    if r.status != 200:
+                        return []
+                    data = await r.json()
+            candles = data.get("data", {}).get("candles", [])
+            bars = [
+                {"datetime": c[0], "open": float(c[1]), "high": float(c[2]),
+                 "low": float(c[3]), "close": float(c[4]), "volume": int(c[5])}
+                for c in reversed(candles)
+            ]
+            self._log.info("_fetch_intraday_bars(%s): %d bars today", instrument_key, len(bars))
+            return bars
+        except Exception as exc:
+            self._log.warning("_fetch_intraday_bars(%s) error: %s", instrument_key, exc)
+            return []
 
     async def _fetch_1m_history(self, instrument_key: str) -> List[dict]:
         if not instrument_key:
