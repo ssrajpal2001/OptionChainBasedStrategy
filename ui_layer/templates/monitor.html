@@ -8316,8 +8316,10 @@ function histReplay() {
                       <template x-if="bk&&bk.position">
                         <div class="mt-2 pt-2 border-t text-xs font-mono" style="border-color:var(--t-border)"
                              x-data="{
+                               get isFut(){ return bk.htf_source==='futures' },
                                get leg(){ return bk.position.side==='CE'?'CE1':'PE1' },
-                               get ltp(){ return (bk.contracts&&bk.contracts[bk.position.side==='CE'?'CE1':'PE1']?.ltp)||0 },
+                               get optLtp(){ return bk.position.opt_ltp||0 },
+                               get ltp(){ return this.isFut ? this.optLtp : ((bk.contracts&&bk.contracts[this.leg]?.ltp)||0) },
                                get ep(){ return bk.position.entry_price||0 },
                                get qty(){ return bk.position.remaining_qty||0 },
                                get pnl(){ return this.ltp&&this.ep ? Math.round((this.ltp-this.ep)*this.qty) : 0 },
@@ -8325,18 +8327,28 @@ function histReplay() {
                              }">
                           <!-- header row -->
                           <div class="grid gap-1 pb-1 mb-1" style="grid-template-columns:3rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 4rem;border-bottom:1px solid var(--t-border);color:var(--t-muted)">
-                            <span>LEG</span><span>STRIKE</span><span>ENTRY</span><span>LTP</span><span>SL</span><span>T1</span><span>QTY</span><span>P&amp;L (₹)</span>
+                            <span>LEG</span><span>STRIKE</span>
+                            <span x-text="isFut?'FUT@ENTRY':'ENTRY'"></span>
+                            <span x-text="isFut?'OPT ENTRY':'LTP'"></span>
+                            <span x-text="isFut?'OPT LTP':'SL'"></span>
+                            <span x-text="isFut?'FUT SL':'T1'"></span>
+                            <span>QTY</span><span>P&amp;L (₹)</span>
                           </div>
                           <!-- data row -->
                           <div class="grid gap-1 py-1" style="grid-template-columns:3rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 4rem">
                             <span :style="bk.position.side==='CE'?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'"
                                   x-text="bk.position.side"></span>
                             <span style="color:var(--t-bright)" x-text="bk.position.strike"></span>
-                            <span style="color:var(--t-bright)" x-text="ep.toFixed(1)"></span>
-                            <span style="color:var(--t-yellow);font-weight:700" x-text="ltp?ltp.toFixed(1):'—'"></span>
-                            <span :style="bk.position.t1_hit?'color:var(--t-cyan)':'color:var(--t-red)'"
-                                  x-text="bk.position.t1_hit?(bk.position.trail_sl||'—'):(bk.position.sl_price||'—')"></span>
-                            <span style="color:var(--t-green)" x-text="bk.position.t1_price||'—'"></span>
+                            <template x-if="isFut">
+                              <span style="color:var(--t-bright)" x-text="bk.position.spot_at_entry||'—'"></span>
+                            </template>
+                            <template x-if="!isFut">
+                              <span style="color:var(--t-bright)" x-text="ep.toFixed(1)"></span>
+                            </template>
+                            <span style="color:var(--t-bright)" x-text="isFut?(ep>0?ep.toFixed(1):'—'):(ltp?ltp.toFixed(1):'—')"></span>
+                            <span style="color:var(--t-yellow);font-weight:700" x-text="isFut?(optLtp?optLtp.toFixed(1):'—'):(bk.position.t1_hit?(bk.position.trail_sl||'—'):(bk.position.sl_price||'—'))"></span>
+                            <span :style="isFut?'color:var(--t-red)':(bk.position.t1_hit?'color:var(--t-cyan)':'color:var(--t-red)')"
+                                  x-text="isFut?(bk.position.t1_hit?(bk.position.trail_sl||'—'):(bk.position.sl_price||'—')):(bk.position.t1_price||'—')"></span>
                             <span style="color:var(--t-muted)" x-text="qty+'/'+bk.position.total_qty"></span>
                             <span :style="pnl>=0?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'"
                                   x-text="ltp?(( pnl>=0?'+':'')+pnl+' ('+pnlPts+'pts)'):'—'"></span>
@@ -8344,7 +8356,9 @@ function histReplay() {
                           <!-- meta row -->
                           <div class="flex flex-wrap gap-2 pt-1" style="color:var(--t-muted);border-top:1px solid var(--t-border)">
                             <span x-show="bk.position.t1_hit" style="color:var(--t-green);font-weight:700">T1 ✓ trailing</span>
-                            <span x-text="'spot@entry='+bk.position.spot_at_entry"></span>
+                            <span x-show="!isFut" x-text="'spot@entry='+bk.position.spot_at_entry"></span>
+                            <span x-show="isFut&&bk.position.fut_entry_ref" x-text="'fut zone='+bk.position.fut_entry_ref"></span>
+                            <span x-show="isFut&&bk.position.spot_at_entry" x-text="'fut@entry='+bk.position.spot_at_entry"></span>
                             <span x-show="bk.position.entry_ts" x-text="'at '+bk.position.entry_ts.substring(11,19)"></span>
                           </div>
                         </div>

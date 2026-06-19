@@ -1594,10 +1594,47 @@ class TrapScannerEngine:
             tag=f"TRAP_{self._und}_{opt_type}",
             client_id=self._cid,
         )
+        from execution_bridge.base_broker import OrderStatus
         try:
             order_id = await broker.place_order(req)
             fill = await broker.get_order_status(order_id)
-            avg  = fill.avg_price if fill.avg_price > 0 else ep
+
+            # If cancelled (e.g. insufficient margin), retry with ATM strike once.
+            if fill.status == OrderStatus.CANCELLED and strike != atm:
+                self._log.warning(
+                    "Entry order %s CANCELLED (margin?) for %d%s — retrying ATM %d",
+                    order_id, strike, opt_type, atm
+                )
+                atm_sym = self._build_broker_symbol(atm, opt_type)
+                atm_key = self._build_upstox_key(atm, opt_type)
+                opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
+                atm_ltp = self._ltp_cache.get(opt_leg_key, 0) or 0
+                req2 = req.__class__(
+                    broker_symbol=atm_sym,
+                    exchange=self._exchange,
+                    side=req.side,
+                    qty=total_qty,
+                    order_type=req.order_type,
+                    price=atm_ltp,
+                    tag=req.tag,
+                    client_id=self._cid,
+                )
+                order_id = await broker.place_order(req2)
+                fill = await broker.get_order_status(order_id)
+                strike   = atm
+                exec_key = atm_key
+
+            if fill.avg_price > 0:
+                avg = fill.avg_price
+            elif self._htf_source == "futures":
+                opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
+                avg = self._ltp_cache.get(opt_leg_key, 0) or ep
+            else:
+                avg = ep
+
+            if fill.status == OrderStatus.CANCELLED:
+                self._log.error("Entry order %s CANCELLED — aborting (no ATM fallback left)", order_id)
+                return
         except Exception as exc:
             self._log.error("Entry order failed: %s", exc)
             return
@@ -1619,7 +1656,8 @@ class TrapScannerEngine:
             "spot_at_entry":  round(spot, 2),
             "exec_key":       exec_key,      # Upstox key for 1-ITM contract
             "scan_key":       scan_key,      # Upstox key for tracking leg (SL monitoring)
-            "entry_price":    round(avg, 2),
+            "entry_price":    round(avg, 2),   # option fill premium
+            "fut_entry_ref":  ep if self._htf_source == "futures" else None,
             "sl_price":       sl_price,
             "trail_sl":       sl_price,      # steps up via trap-based trail after T1
             "last_5m_ts":     None,
@@ -2794,6 +2832,13 @@ class TrapScannerEngine:
                 "exec_key":      pos.get("exec_key", ""),
                 "signal_source": pos.get("signal_source", ""),
                 "entry_price":   pos["entry_price"],
+                "fut_entry_ref": pos.get("fut_entry_ref"),
+                "opt_ltp":       next(
+                    (self._ltp_cache.get(lb, 0) or 0
+                     for lb in ["CE1","CE2","PE1","PE2"]
+                     if getattr(self, f"_{lb.lower()}_key", "") == pos.get("exec_key","")),
+                    0.0
+                ),
                 "sl_price":      pos["sl_price"],
                 "trail_sl":      pos["trail_sl"],
                 "t1_price":      pos.get("t1_price", 0),
