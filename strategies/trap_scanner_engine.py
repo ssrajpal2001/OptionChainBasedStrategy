@@ -905,32 +905,33 @@ class TrapScannerEngine:
                 _ref = self._spot_cache if self._spot_cache > 0 else self._spot_open
                 _guard = 0.08 if self._cfg.exchange.is_mcx(self._und) else 0.04
                 if _ref > 0 and abs(raw_ltp - _ref) / _ref > _guard:
-                    import time as _time
-                    if self._spot_bad_cnt == 0:
-                        self._spot_bad_t0 = _time.monotonic()
+                    # If ALSO far from day-open (REST, reliable) -> hard-reject, no unstick.
+                    # Catches Upstox BSE SENSEX ~80000 garbage while real market is ~76700.
+                    if self._spot_open > 0 and abs(raw_ltp - self._spot_open) / self._spot_open > _guard:
+                        self._spot_bad_cnt += 1
+                        if self._spot_bad_cnt % 60 == 1:
+                            self._log.warning(
+                                "SPOT mis-decode rejected: ltp=%.2f is %.1f%% from "
+                                "day_open=%.2f (cnt=%d)",
+                                raw_ltp,
+                                abs(raw_ltp - self._spot_open) / self._spot_open * 100,
+                                self._spot_open, self._spot_bad_cnt,
+                            )
+                        continue
+                    # Far from rolling ref but plausible vs day-open: genuine move.
+                    # Accept after 5 consecutive (not a one-off spike).
                     self._spot_bad_cnt += 1
-                    if self._spot_bad_cnt < 10:
+                    if self._spot_bad_cnt < 5:
                         self._log.warning(
                             "SPOT tick rejected: ltp=%.2f deviates >%.1f%% from last=%.2f "
-                            "(mis-decode? consecutive=%d)",
+                            "(consecutive=%d)",
                             raw_ltp, _guard * 100, _ref, self._spot_bad_cnt,
                         )
                         continue
-                    # 10+ consecutive rejects — only accept if spread over >2s
-                    # (burst within 2s = Upstox reconnect dump, not a real regime change)
-                    elapsed = _time.monotonic() - self._spot_bad_t0
-                    if elapsed < 2.0:
-                        self._log.warning(
-                            "SPOT filter: rejecting burst of %d bad ticks in %.1fs "
-                            "(reconnect dump, not regime change; ltp=%.2f old_ref=%.2f)",
-                            self._spot_bad_cnt, elapsed, raw_ltp, _ref,
-                        )
-                        self._spot_bad_cnt = 0
-                        continue
                     self._log.info(
                         "SPOT filter unstick: accepting ltp=%.2f after %d consecutive rejects "
-                        "over %.1fs (old_ref=%.2f — confirmed regime change)",
-                        raw_ltp, self._spot_bad_cnt, elapsed, _ref,
+                        "(old_ref=%.2f day_open=%.2f)",
+                        raw_ltp, self._spot_bad_cnt, _ref, self._spot_open,
                     )
                 self._spot_bad_cnt = 0
                 self._spot_cache = raw_ltp
