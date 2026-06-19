@@ -584,7 +584,7 @@ class TrapScannerEngine:
         PE cascades if no bull zones OR nearest bull zone > 1.5×ATR from PE LTP.
         For futures/spot: single shared _intraday_mode (unchanged).
         """
-        threshold = 1.5 * self._htf_atr_val if self._htf_atr_val > 0 else None
+        threshold = 2.0 * self._htf_atr_val if self._htf_atr_val > 0 else None
 
         if self._htf_source == "option":
             ltp_ce = self._ltp_cache.get("CE1") or self._ltp_cache.get("CE2") or 0.0
@@ -1387,9 +1387,11 @@ class TrapScannerEngine:
                         self._log.info("PE cascade: %d/%d zones TRAPPED from %d 15m candles",
                                        len(bull_15), len(bu), len(htf_pe))
             if bear_15:
+                bear_15 = sorted(bear_15, key=lambda z: z.get("zone_high", 0), reverse=True)
                 self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE", require_closed=False)
                 self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE", require_closed=False)
             if bull_15:
+                bull_15 = sorted(bull_15, key=lambda z: z.get("zone_high", 0), reverse=True)
                 self._run_ltf_on("PE1", self._bars_pe1, bull_15, "PE", require_closed=False)
                 self._run_ltf_on("PE2", self._bars_pe2, bull_15, "PE", require_closed=False)
         else:  # "spot" cascade: spot 15-min for direction, option 15-min for entry zones
@@ -2609,11 +2611,33 @@ class TrapScannerEngine:
         fut_trapped  = sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED")
 
         def _best_zone_summary(zone_list: list) -> Optional[dict]:
-            """Nearest TRAPPED zone for UI display — closest trigger to current option LTP."""
+            """
+            Pick zone closest to LTP:
+              1. LTP inside zone (zone_low <= LTP <= zone_high) -> best match
+              2. Nearest zone_high above LTP
+              3. Nearest zone_high below LTP (fallback)
+            Skips dead zones where LTP < zone_low.
+            """
             trapped = [z for z in zone_list if z["status"] == "TRAPPED"]
+            if zone_ltp > 0:
+                trapped = [z for z in trapped if zone_ltp >= z.get("zone_low", 0)]
             if not trapped:
                 return None
-            z = min(trapped, key=lambda z: abs(zone_ltp - z.get("zone_trigger", z.get("entry", zone_ltp))))
+
+            if zone_ltp > 0:
+                inside = [z for z in trapped
+                          if z.get("zone_low", 0) <= zone_ltp <= z.get("zone_high", 0)]
+                if inside:
+                    z = max(inside, key=lambda z: z.get("zone_high", 0))
+                else:
+                    above = [z for z in trapped if z.get("zone_high", 0) > zone_ltp]
+                    if above:
+                        z = min(above, key=lambda z: z.get("zone_high", 0) - zone_ltp)
+                    else:
+                        z = max(trapped, key=lambda z: z.get("zone_high", 0))
+            else:
+                z = trapped[-1]
+
             uid = _zone_uid(z)
             trig = round(z.get("zone_trigger", z.get("entry", 0)), 2)
             dist = round(abs(zone_ltp - trig), 1) if zone_ltp else None
