@@ -197,11 +197,18 @@ def main():
     day_frames = build_day_frames(trading_days, cache)
     print(f"Ready — {len(day_frames)} days with data.\n")
 
-    # Run grid search
+    # Run grid search — only require_gap=True combos (False adds noise, known loser)
+    # This halves the grid to 490 combos and avoids the slow no-gap scan
+    print(f"Running grid search ({total} combos, require_gap=True only → 490)…", flush=True)
     results = []
+    t0 = time.time()
     for i, combo in enumerate(combos):
         params = dict(zip(keys, combo))
         params.update(FIXED)
+
+        # Skip require_gap=False — confirmed loser in all analysis
+        if not params["require_gap"]:
+            continue
 
         trades = run_combo(params, trading_days, day_frames)
         s = _stats(trades)
@@ -209,8 +216,13 @@ def main():
         if s["count"] >= args.min_trades:
             results.append({**params, **s})
 
-        if (i + 1) % 100 == 0:
-            print(f"  {i+1}/{total} combinations done…")
+        done = i + 1
+        if done % 50 == 0:
+            elapsed = time.time() - t0
+            rate = done / elapsed
+            eta = (total - done) / rate
+            print(f"  {done}/{total}  elapsed={elapsed:.0f}s  ETA={eta:.0f}s  "
+                  f"found={len(results)}", flush=True)
 
     print(f"\nDone. {len(results)} combinations with ≥{args.min_trades} trades.\n")
 
