@@ -225,9 +225,9 @@
 
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <p class="sec-label mb-1.5">Gap % Threshold</p>
+          <p class="sec-label mb-1.5">Min Gap % to Trade</p>
           <input type="number" class="t-input" x-model="gapPct" step="0.1" min="0.1" max="2" />
-          <p class="text-t-muted text-xs mt-1">Gap if open moves &gt; <span x-text="gapPct" class="text-t-cyan font-mono"></span>% from prev close</p>
+          <p class="text-t-muted text-xs mt-1">Skip weak gaps &lt; <span x-text="gapPct" class="text-t-cyan font-mono"></span>% (0.8% filters Jun 5 +0.58%)</p>
         </div>
         <div>
           <p class="sec-label mb-1.5">SL Buffer (Rs)</p>
@@ -578,7 +578,7 @@ function backtestApp() {
     combo:       'all',
     htfZone:     60,
     htfCascade:  30,
-    gapPct:      0.5,
+    gapPct:      0.8,
     slBuf:         20,
     minZoneWidth:  30,
     maxZoneAge:    5,
@@ -624,14 +624,15 @@ function backtestApp() {
       this.startDate = fmt(twoMonthsAgo)
       this.endDate   = fmt(today)
 
-      // Default settings for CrudeOil 2-month run
-      this.gapPct       = 0.5
+      // Default settings for CrudeOil — tuned from backtest analysis
+      // 0.8% gap threshold: filters weak gaps (Jun 5 +0.58% skipped, Jun 10 +0.93% traded)
+      this.gapPct       = 0.8
       this.slBuf        = 20
       this.minZoneWidth = 30
       this.maxZoneAge   = 5
       this.ltfSource    = 'futures'
-      this.gapDirFilter = false
-      this.requireGap   = true
+      this.gapDirFilter = true   // gap direction filter ON (saves May 26 Rs -1,02,000)
+      this.requireGap   = true   // require gap ON (cascade only on gap days)
       this.lots         = 2
       this.htfZone      = 60
       this.htfCascade   = 30

@@ -389,7 +389,7 @@ try:
         token:           str
         days:            int   = 7
         lots:            int   = 2
-        gap_threshold:   float = 0.003
+        gap_threshold:   float = 0.008
         htf_min_zone:    int   = 60
         htf_min_cascade: int   = 30
         sl_buf:          float = 20.0
