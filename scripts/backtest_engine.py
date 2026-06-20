@@ -285,41 +285,138 @@ def _run_day(
     entry_open = pd.Timestamp(f"{trade_date} {ENTRY_OPEN}").tz_localize(None)
     gap_label  = f"{gap_info['direction']} {gap_info['pct']:+.2f}%" if has_gap else "none"
 
-    def _simulate_exit(entry_ts, entry_p, sl_p, t1_p, kind):
-        """Simulate exit on 1m bars. Returns (reason, exit_price, exit_ts)."""
+    def _simulate_exit(entry_ts, entry_p, sl_p, t1_p, kind, ltf_min):
+        """
+        Two-stage exit:
+        Stage 1 (full qty): scan 1m bars for SL or T1.
+          - SL hit → exit 100%, done.
+          - T1 hit → exit 50% at T1 price, move to Stage 2.
+          - EOD    → exit 100% at close.
+
+        Stage 2 (remaining 50%): TSL on LTF candle lows (BEAR) / highs (BULL).
+          - TSL = trailing LTF candle low/high, stepped in our direction.
+          - Exit when price breaks TSL or EOD.
+
+        Returns dict with full exit details for both halves.
+        """
         fwd = today_df[today_df["datetime"] > entry_ts]
-        t1_hit = False
+
+        # ── Stage 1: SL or T1 ──────────────────────────────────────────────
+        t1_price, t1_ts = None, None
         for _, fb in fwd.iterrows():
             flo, fhi, fts = float(fb["low"]), float(fb["high"]), fb["datetime"]
             if fts >= sq_time:
                 ob = today_df[today_df["datetime"] <= fts]
                 ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
-                return ("EOD", ep, fts)
-            if not t1_hit:
-                t1h = (fhi >= t1_p) if kind == "BEAR" else (flo <= t1_p)
-                if t1h:
-                    t1_hit = True
-                    ob = today_df[today_df["datetime"] <= fts]
-                    ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
-                    return ("T1", ep, fts)
+                return _exit_result("EOD+EOD", entry_p, ep, fts, ep, fts, lot_size, kind)
+            # SL check first (priority)
             slh = (flo <= sl_p) if kind == "BEAR" else (fhi >= sl_p)
             if slh:
                 ob = today_df[today_df["datetime"] <= fts]
                 ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
-                return ("SL", ep, fts)
-        ob = today_df[today_df["datetime"] <= sq_time]
-        ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
-        return ("EOD", ep, sq_time)
+                return _exit_result("SL", entry_p, ep, fts, None, None, lot_size, kind)
+            # T1 check
+            t1h = (fhi >= t1_p) if kind == "BEAR" else (flo <= t1_p)
+            if t1h:
+                ob = today_df[today_df["datetime"] <= fts]
+                t1_price = float(ob.iloc[-1]["close"]) if not ob.empty else t1_p
+                t1_ts    = fts
+                break
+
+        if t1_price is None:
+            # Never hit T1 — EOD on full qty
+            ob = today_df[today_df["datetime"] <= sq_time]
+            ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
+            return _exit_result("EOD+EOD", entry_p, ep, sq_time, ep, sq_time, lot_size, kind)
+
+        # ── Stage 2: TSL on LTF for remaining 50% ──────────────────────────
+        after_t1 = today_df[today_df["datetime"] > t1_ts]
+        ltf_after = resample(after_t1, ltf_min) if not after_t1.empty else pd.DataFrame()
+
+        # TSL starts at entry_p (break-even protection) after T1 hit
+        tsl = entry_p
+        tsl_p, tsl_ts = t1_price, t1_ts   # default: EOD at T1 price if no bars
+
+        for _, lb in ltf_after.iterrows():
+            lts  = lb["datetime"]
+            llow = float(lb["low"])
+            lhigh= float(lb["high"])
+            lclose=float(lb["close"])
+
+            if lts >= sq_time:
+                ob = today_df[today_df["datetime"] <= lts]
+                tsl_p = float(ob.iloc[-1]["close"]) if not ob.empty else lclose
+                tsl_ts = lts
+                break
+
+            if kind == "BEAR":
+                # Trail TSL up to each new LTF candle low (only move up, never down)
+                if llow > tsl:
+                    tsl = llow
+                # Check if close broke below TSL
+                if lclose < tsl:
+                    tsl_p = lclose
+                    tsl_ts = lts
+                    break
+            else:
+                # BULL (short): trail TSL down to each LTF candle high
+                if lhigh < tsl or tsl == entry_p:
+                    tsl = lhigh
+                if lclose > tsl:
+                    tsl_p = lclose
+                    tsl_ts = lts
+                    break
+        else:
+            # EOD for remaining half
+            ob = today_df[today_df["datetime"] <= sq_time]
+            tsl_p = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
+            tsl_ts = sq_time
+
+        return _exit_result("T1+TSL", entry_p, t1_price, t1_ts, tsl_p, tsl_ts, lot_size, kind)
+
+    def _exit_result(reason, entry_p, exit1_p, exit1_ts, exit2_p, exit2_ts, lot_size, kind):
+        """Compute combined P&L for two-stage exit (50%+50% or 100%+0)."""
+        half = lot_size // 2
+        rest = lot_size - half
+
+        if reason == "SL":
+            pts1 = (exit1_p - entry_p) if kind == "BEAR" else (entry_p - exit1_p)
+            return {
+                "reason":     "SL",
+                "exit1_p":    round(exit1_p, 1),
+                "exit1_ts":   _ts_fmt(exit1_ts),
+                "exit2_p":    None,
+                "exit2_ts":   None,
+                "pnl_pts":    round(pts1, 1),
+                "pnl_rs":     round(pts1 * lot_size, 0),
+                "half1_rs":   round(pts1 * lot_size, 0),
+                "half2_rs":   0,
+            }
+        pts1 = (exit1_p - entry_p) if kind == "BEAR" else (entry_p - exit1_p)
+        pts2 = (exit2_p - entry_p) if (exit2_p and kind == "BEAR") else \
+               ((entry_p - exit2_p) if exit2_p else 0)
+        total_rs = round(pts1 * half + pts2 * rest, 0)
+        return {
+            "reason":   reason,
+            "exit1_p":  round(exit1_p, 1),
+            "exit1_ts": _ts_fmt(exit1_ts),
+            "exit2_p":  round(exit2_p, 1) if exit2_p else None,
+            "exit2_ts": _ts_fmt(exit2_ts) if exit2_ts else None,
+            "pnl_pts":  round((pts1 * half + pts2 * rest) / lot_size, 1) if lot_size else 0,
+            "pnl_rs":   int(total_rs),
+            "half1_rs": round(pts1 * half, 0),
+            "half2_rs": round(pts2 * rest, 0),
+        }
 
     def _record(kind, zone, zone_src, touch_ts, entry_ts, entry_p,
-                sl_p, t1_p, ltf_label, trap_label, combo):
-        reason, exit_p, exit_ts = _simulate_exit(entry_ts, entry_p, sl_p, t1_p, kind)
-        pnl_pts = (exit_p - entry_p) if kind == "BEAR" else (entry_p - exit_p)
+                sl_p, t1_p, ltf_label, trap_label, combo, ltf_min):
+        ex = _simulate_exit(entry_ts, entry_p, sl_p, t1_p, kind, ltf_min)
         trades.append({
             "date":        trade_date,
-            "htf_touch":   _ts_fmt(touch_ts),      # when price entered HTF zone
-            "entry_ts":    _ts_fmt(entry_ts),       # actual entry (after LTF confirmation)
-            "exit_ts":     _ts_fmt(exit_ts),
+            "htf_touch":   _ts_fmt(touch_ts),
+            "entry_ts":    _ts_fmt(entry_ts),
+            "exit1_ts":    ex["exit1_ts"],           # T1 / SL / EOD exit time
+            "exit2_ts":    ex.get("exit2_ts") or "", # TSL exit time (if T1 hit)
             "direction":   "CE" if kind == "BEAR" else "PE",
             "kind":        kind,
             "zone_low":    round(zone.get("zone_low", 0), 1),
@@ -328,17 +425,18 @@ def _run_day(
             "zone_src":    zone_src,
             "gap":         gap_label,
             "entry":       round(entry_p, 1),
-            "exit":        round(exit_p, 1),
+            "exit1_p":     ex["exit1_p"],            # price at T1/SL/EOD
+            "exit2_p":     ex.get("exit2_p") or "",  # price at TSL exit
             "sl":          round(sl_p, 1),
             "t1":          round(t1_p, 1),
-            "t1_hit":      reason == "T1",
-            "reason":      reason,
+            "reason":      ex["reason"],             # SL / T1+TSL / EOD+EOD
+            "half1_rs":    ex["half1_rs"],           # 50% qty P&L at T1
+            "half2_rs":    ex["half2_rs"],           # 50% qty P&L at TSL
             "ltf":         ltf_label,
             "trap_entry":  trap_label,
-            "pnl_pts":     round(pnl_pts, 1),
-            "pnl_rs":      round(pnl_pts * lot_size, 0),
+            "pnl_pts":     ex["pnl_pts"],
+            "pnl_rs":      ex["pnl_rs"],
             "combo":       f"{combo}+{ltf_label}+{trap_label}",
-            "exit_method": "SL+T1+EOD",   # exits currently implemented
         })
 
     # Track which (kind, zone_uid, ltf, trap) combos already recorded
@@ -374,8 +472,8 @@ def _run_day(
             zone_uid = f"{kind}_{zone.get('zone_low',0):.0f}_{zone.get('zone_high',0):.0f}"
             sl_p = round(zone["zone_low"] - sl_buf, 1) if kind == "BEAR" \
                    else round(zone["zone_high"] + sl_buf, 1)
-            t1_p = zone.get("sl", zone["zone_high"] + 50) if kind == "BEAR" \
-                   else zone.get("sl", zone["zone_low"] - 50)
+            # T1 = HTF zone high (BEAR: where bears' SL sat) / zone low (BULL)
+            t1_p = zone["zone_high"] if kind == "BEAR" else zone["zone_low"]
 
             # ── LTF sub-trap comparison ────────────────────────────────────
             for ltf_min in ltf_minutes:
@@ -405,14 +503,14 @@ def _run_day(
                         if ep <= 0:
                             continue
                         _record(kind, zone, zone_src, bar_ts, bar_ts, ep,
-                                sl_p, t1_p, ltf_label, trap_label, combo_base)
+                                sl_p, t1_p, ltf_label, trap_label, combo_base, ltf_min)
                     else:
                         entry_ts = ltf_entry["ts"]
                         ep       = ltf_entry["price"]
                         if ep <= 0 or entry_ts >= sq_time:
                             continue
                         _record(kind, zone, zone_src, bar_ts, entry_ts, ep,
-                                sl_p, t1_p, ltf_label, trap_label, combo_base)
+                                sl_p, t1_p, ltf_label, trap_label, combo_base, ltf_min)
 
     _run_direction("BEAR")
     _run_direction("BULL")
