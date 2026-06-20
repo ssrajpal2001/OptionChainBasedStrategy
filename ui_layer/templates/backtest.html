@@ -159,7 +159,7 @@
     <div class="text-xs text-t-muted font-mono" x-text="period || 'no run yet'"></div>
   </div>
 
-  <div class="flex h-full" style="min-height: calc(100vh - 49px)">
+  <div class="flex" style="height: calc(100vh - 49px); overflow: hidden;">
 
     <!-- ── LEFT: Controls ─────────────────────────────────────────────────── -->
     <div class="w-72 flex-shrink-0 border-r border-t-border p-4 flex flex-col gap-4 overflow-y-auto" style="background:var(--t-surface)">
@@ -333,7 +333,7 @@
           </div>
         </div>
         <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
-        <div x-show="trades.length > 0" class="overflow-x-auto overflow-y-auto" style="max-height:480px;">
+        <div x-show="trades.length > 0" class="overflow-x-auto">
           <table class="bt-table">
               <thead>
                 <tr>
