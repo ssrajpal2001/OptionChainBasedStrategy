@@ -341,15 +341,15 @@
       </template>
 
       <!-- Trade log -->
-      <div x-show="ran" class="t-card overflow-hidden">
+      <div x-show="ran" class="t-card overflow-hidden" id="trade-log">
         <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
           <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
           <div class="flex gap-2">
             <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter" />
           </div>
         </div>
-        <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
-        <div x-show="trades.length > 0" class="overflow-x-auto">
+        <div x-show="filteredTrades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
+        <div x-show="filteredTrades.length > 0" class="overflow-x-auto">
           <table class="bt-table">
               <thead>
                 <tr>
@@ -513,9 +513,11 @@ function backtestApp() {
       const q = this.tradeFilter.toLowerCase().trim()
       if (!q) return this.trades
       return this.trades.filter(t =>
-        t.date.includes(q) || t.direction.toLowerCase().includes(q) ||
-        t.combo.toLowerCase().includes(q) || t.reason.toLowerCase().includes(q) ||
-        t.zone_src.toLowerCase().includes(q)
+        (t.date||'').includes(q) ||
+        (t.direction||'').toLowerCase().includes(q) ||
+        (t.combo||'').toLowerCase().includes(q) ||
+        (t.reason||'').toLowerCase().includes(q) ||
+        (t.zone_src||'').toLowerCase().includes(q)
       )
     },
 
@@ -571,7 +573,13 @@ function backtestApp() {
         this.period  = data.period
         this.ran     = true
 
-        this.$nextTick(() => this._drawChart())
+        this.$nextTick(() => {
+          this._drawChart()
+          // Auto-scroll to trade log so user sees it immediately
+          setTimeout(() => {
+            document.getElementById('trade-log')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+          }, 300)
+        })
       } catch (e) {
         this.error = e.message || 'Request failed'
       } finally {
