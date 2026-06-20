@@ -312,9 +312,9 @@
         🔍 SHOW 1HR TRAPS (use single date)
       </button>
 
-      <button class="btn-primary mt-2"
+      <button type="button" class="btn-primary mt-2"
               @click="runBacktest"
-              :disabled="running || !tokenOk">
+              :disabled="running || batchRunning || !tokenOk">
         <span x-show="!running">▶ RUN BACKTEST</span>
         <span x-show="running" class="flex items-center justify-center gap-2">
           <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -324,7 +324,7 @@
         </span>
       </button>
 
-      <button class="w-full py-2 rounded border border-t-amber text-t-amber text-xs font-bold tracking-widest hover:bg-amber-950/30 transition-colors mt-1"
+      <button type="button" class="w-full py-2 rounded border border-t-amber text-t-amber text-xs font-bold tracking-widest hover:bg-amber-950/30 transition-colors mt-1"
               @click="runBatch"
               :disabled="running || batchRunning || !tokenOk">
         <span x-show="!batchRunning">⚡ BATCH RUN — Zone Width 10/20/30/40/50</span>
