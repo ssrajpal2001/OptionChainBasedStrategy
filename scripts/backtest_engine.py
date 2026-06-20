@@ -139,154 +139,276 @@ def _price_in_zone(price: float, zone: dict) -> bool:
     return zone.get("zone_low", 0) <= price <= zone.get("zone_high", 0)
 
 
+def _price_near_zone(price: float, zone: dict, buffer_pct: float = 0.005) -> bool:
+    """True if price is within buffer% above zone_high (approaching from below for BEAR)
+    or within buffer% below zone_low (approaching from above for BULL)."""
+    zl, zh = zone.get("zone_low", 0), zone.get("zone_high", 0)
+    buf = (zh - zl) * buffer_pct + buffer_pct * price
+    return (zl - buf) <= price <= (zh + buf)
+
+
 def _ts_fmt(ts) -> str:
     return ts.strftime("%H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
+
+
+def _find_ltf_trap_entries(
+    today_df: pd.DataFrame,
+    htf_zone: dict,
+    touch_ts,
+    direction: str,
+    sq_time,
+    ltf_min: int,
+) -> list[dict]:
+    """
+    After price enters an HTF zone at touch_ts, scan LTF bars within the zone
+    for sub-traps. Returns list of {ts, price} for each sub-trap completion,
+    sorted by time. Caller picks first/middle/last for entry comparison.
+
+    direction: "BEAR" (expecting bounce up) or "BULL" (expecting drop down)
+    """
+    zl = htf_zone.get("zone_low", 0)
+    zh = htf_zone.get("zone_high", 0)
+    # Use a slightly wider window (zone ± 1%) to catch LTF traps near boundaries
+    buf = (zh - zl) * 0.15
+    zone_min = zl - buf
+    zone_max = zh + buf
+
+    # Bars from touch_ts up to sq_time, within zone price range
+    window = today_df[
+        (today_df["datetime"] >= touch_ts) &
+        (today_df["datetime"] < sq_time) &
+        (today_df["close"] >= zone_min) &
+        (today_df["close"] <= zone_max)
+    ]
+    if len(window) < ltf_min * 2:  # Need at least 2 LTF candles
+        return []
+
+    ltf = resample(window, ltf_min)
+    if len(ltf) < 2:
+        return []
+
+    try:
+        _, zones = scanner.scan_htf_spot(ltf)
+    except Exception:
+        return []
+
+    # Sub-traps of same direction within this zone
+    sub_traps = [z for z in zones
+                 if z.get("kind") == direction and z.get("status") == "TRAPPED"]
+
+    entries = []
+    for z in sub_traps:
+        # Entry timestamp = sub-zone zone_high if BEAR (price broke above = sellers trapped)
+        # Use the zone's sl field timestamp if available, else approximate from LTF bars
+        # We use the bar closest to the sub-zone high/low as entry point
+        sub_high = z.get("zone_high", zh)
+        sub_low  = z.get("zone_low", zl)
+        # Find first LTF bar where price re-enters the sub-zone after being above (BEAR) or below (BULL)
+        if direction == "BEAR":
+            # Sellers trapped above sub_high — entry when price returns to sub_high area
+            match = ltf[ltf["close"] <= sub_high]
+        else:
+            match = ltf[ltf["close"] >= sub_low]
+        if match.empty:
+            continue
+        entry_bar = match.iloc[-1]
+        entries.append({
+            "ts":    entry_bar["datetime"],
+            "price": float(entry_bar["close"]),
+            "zone":  f"{sub_low:.0f}→{sub_high:.0f}",
+        })
+
+    # Sort by time, deduplicate
+    seen = set()
+    result = []
+    for e in sorted(entries, key=lambda x: x["ts"]):
+        key = f"{e['ts']}"
+        if key not in seen:
+            seen.add(key)
+            result.append(e)
+    return result
 
 
 # ── Per-day backtest ──────────────────────────────────────────────────────────
 def _run_day(
     trade_date: str,
     today_df: pd.DataFrame,
-    lookback_df: pd.DataFrame,   # multi-day historical bars (prev week + current week)
+    lookback_df: pd.DataFrame,
     htf_min_zone: int,
     htf_min_cascade: int,
     sl_buf: float,
     gap_threshold: float,
     combo_filter: str,
     lot_size: int,
+    ltf_minutes: list[int],    # e.g. [5, 15]
 ) -> list[dict]:
-    """Run one day's backtest. Returns list of trade records."""
+    """Run one day's backtest with LTF sub-trap comparison. Returns list of trade records."""
     trades: list[dict] = []
     if today_df.empty:
         return trades
 
     today_open = float(today_df.iloc[0]["open"])
-    # prev_close = last bar of the most-recent previous day in lookback_df
     prev_date  = today_df.iloc[0]["datetime"].date()
     prev_bars  = lookback_df[lookback_df["datetime"].dt.date < prev_date]
     prev_close = float(prev_bars.iloc[-1]["close"]) if not prev_bars.empty else 0.0
     gap_info   = detect_gap(today_open, prev_close, gap_threshold)
     has_gap    = gap_info["gap"]
 
-    # HTF zones from ALL historical bars (prev week + earlier this week)
-    # This captures zones from multiple days back, not just yesterday
-    htf_zones_pre  = _get_prev_day_htf_zones(lookback_df, htf_min_zone)
-    has_htf_zone   = len(htf_zones_pre) > 0
+    # Historical HTF zones from lookback window
+    htf_zones_hist = _get_prev_day_htf_zones(lookback_df, htf_min_zone)
 
-    combo = _combo_label(has_gap, has_htf_zone)
+    # Gap-through detection: if price gapped past ALL historical zones, skip them
+    # and use intraday cascade only (fresh traps at current price level)
+    def _zones_reachable(zones, price):
+        """Return zones where price is within 3% of the zone (reachable today)."""
+        result = []
+        for z in zones:
+            zh, zl = z.get("zone_high", 0), z.get("zone_low", 0)
+            center = (zh + zl) / 2
+            if abs(price - center) / max(center, 1) <= 0.03:
+                result.append(z)
+        return result
 
-    # Apply combo filter
+    reachable_hist = _zones_reachable(htf_zones_hist, today_open)
+    # If gap day and no reachable historical zones → intraday cascade only
+    use_cascade_only = has_gap and len(reachable_hist) == 0
+    has_htf_zone     = len(reachable_hist) > 0
+
+    combo_base = _combo_label(has_gap, has_htf_zone)
+
     if combo_filter != "all":
         wanted = combo_filter.upper().replace("-", "_")
-        if combo.upper() != wanted:
+        if combo_base.upper() != wanted:
             return trades
 
     sq_time    = pd.Timestamp(f"{trade_date} {SQ_OFF}").tz_localize(None)
     entry_open = pd.Timestamp(f"{trade_date} {ENTRY_OPEN}").tz_localize(None)
+    gap_label  = f"{gap_info['direction']} {gap_info['pct']:+.2f}%" if has_gap else "none"
+
+    def _simulate_exit(entry_ts, entry_p, sl_p, t1_p, kind):
+        """Simulate exit on 1m bars. Returns (reason, exit_price, exit_ts)."""
+        fwd = today_df[today_df["datetime"] > entry_ts]
+        t1_hit = False
+        for _, fb in fwd.iterrows():
+            flo, fhi, fts = float(fb["low"]), float(fb["high"]), fb["datetime"]
+            if fts >= sq_time:
+                ob = today_df[today_df["datetime"] <= fts]
+                ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
+                return ("EOD", ep, fts)
+            if not t1_hit:
+                t1h = (fhi >= t1_p) if kind == "BEAR" else (flo <= t1_p)
+                if t1h:
+                    t1_hit = True
+                    ob = today_df[today_df["datetime"] <= fts]
+                    ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
+                    return ("T1", ep, fts)
+            slh = (flo <= sl_p) if kind == "BEAR" else (fhi >= sl_p)
+            if slh:
+                ob = today_df[today_df["datetime"] <= fts]
+                ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
+                return ("SL", ep, fts)
+        ob = today_df[today_df["datetime"] <= sq_time]
+        ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
+        return ("EOD", ep, sq_time)
+
+    def _record(kind, zone, zone_src, touch_ts, entry_ts, entry_p,
+                sl_p, t1_p, ltf_label, trap_label, combo):
+        reason, exit_p, exit_ts = _simulate_exit(entry_ts, entry_p, sl_p, t1_p, kind)
+        pnl_pts = (exit_p - entry_p) if kind == "BEAR" else (entry_p - exit_p)
+        trades.append({
+            "date":       trade_date,
+            "entry_ts":   _ts_fmt(entry_ts),
+            "exit_ts":    _ts_fmt(exit_ts),
+            "direction":  "CE" if kind == "BEAR" else "PE",
+            "kind":       kind,
+            "zone":       f"{zone.get('zone_low',0):.0f}→{zone.get('zone_high',0):.0f}",
+            "zone_src":   zone_src,
+            "gap":        gap_label,
+            "entry":      round(entry_p, 1),
+            "exit":       round(exit_p, 1),
+            "sl":         round(sl_p, 1),
+            "t1":         round(t1_p, 1),
+            "t1_hit":     reason == "T1",
+            "reason":     reason,
+            "ltf":        ltf_label,
+            "trap_entry": trap_label,
+            "pnl_pts":    round(pnl_pts, 1),
+            "pnl_rs":     round(pnl_pts * lot_size, 0),
+            "combo":      f"{combo}+{ltf_label}+{trap_label}",
+        })
+
+    # Track which (kind, zone_uid, ltf, trap) combos already recorded
+    recorded: set = set()
 
     def _run_direction(kind: str):
-        """kind = BEAR (→ CE, bullish) or BULL (→ PE, bearish)."""
-        nonlocal trades
-        in_trade  = None
-        notified  = set()
-
-        scan_min = htf_min_cascade
-        htf_bars = resample(today_df, scan_min)
+        htf_bars = resample(today_df, htf_min_cascade)
 
         for _, row in htf_bars.iterrows():
             bar_ts  = row["datetime"]
             cur_fut = float(row["close"])
-
-            if bar_ts < entry_open:
-                continue
-            if bar_ts >= sq_time:
-                if in_trade:
-                    ob = today_df[today_df["datetime"] <= bar_ts]
-                    ep = float(ob.iloc[-1]["close"]) if not ob.empty else in_trade["entry"]
-                    _record_exit(in_trade, ep, bar_ts, "EOD", trades, lot_size, combo)
-                    in_trade = None
-                break
-
-            # ── Exit check ─────────────────────────────────────────────────
-            if in_trade:
-                fwd = today_df[(today_df["datetime"] > in_trade["entry_ts"]) &
-                               (today_df["datetime"] <= bar_ts)]
-                result = None
-                for _, fb in fwd.iterrows():
-                    flo, fhi, fts = float(fb["low"]), float(fb["high"]), fb["datetime"]
-                    if fts >= sq_time:
-                        ob = today_df[today_df["datetime"] <= fts]
-                        ep = float(ob.iloc[-1]["close"]) if not ob.empty else in_trade["entry"]
-                        result = ("EOD", ep, fts); break
-                    if not in_trade["t1_hit"]:
-                        t1h = (fhi >= in_trade["t1"]) if kind == "BEAR" \
-                              else (flo <= in_trade["t1"])
-                        if t1h:
-                            in_trade["t1_hit"] = True
-                            ob = today_df[today_df["datetime"] <= fts]
-                            ep = float(ob.iloc[-1]["close"]) if not ob.empty else in_trade["entry"]
-                            result = ("T1", ep, fts); break
-                    slh = (flo <= in_trade["sl"]) if kind == "BEAR" \
-                          else (fhi >= in_trade["sl"])
-                    if slh:
-                        ob = today_df[today_df["datetime"] <= fts]
-                        ep = float(ob.iloc[-1]["close"]) if not ob.empty else in_trade["entry"]
-                        result = ("SL", ep, fts); break
-                if result:
-                    _record_exit(in_trade, result[1], result[2], result[0], trades, lot_size, combo)
-                    in_trade = None
+            if bar_ts < entry_open or bar_ts >= sq_time:
                 continue
 
             # ── Zone selection ─────────────────────────────────────────────
-            # Always combine: all historical bars + today up to this bar
-            # This gives zones from prev week, yesterday, AND intraday so far
-            live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_zone)
-            # Cascade fallback: also check shorter TF if no HTF zone
-            if not live_zones:
-                live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_cascade)
-            kind_zones = _zones_for_direction(live_zones, kind)
-            active = [z for z in kind_zones if _price_in_zone(cur_fut, z)]
-            zone_src = "HTF" if has_htf_zone else "CASCADE"
+            if use_cascade_only:
+                # Gap-through: only use intraday zones forming today
+                live_zones = _get_combined_zones_at(pd.DataFrame(), today_df, bar_ts, htf_min_cascade)
+                zone_src   = "CASCADE"
+            else:
+                # Combined: 10-day lookback + today intraday
+                live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_zone)
+                if not live_zones:
+                    live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_cascade)
+                zone_src = "HTF" if has_htf_zone else "CASCADE"
 
+            kind_zones = _zones_for_direction(live_zones, kind)
+            active = [z for z in kind_zones if _price_near_zone(cur_fut, z)]
             if not active:
                 continue
 
             zone = min(active, key=lambda z: abs(cur_fut - z.get("zone_low", cur_fut)))
-            uid  = f"{kind}_{zone.get('zone_low',0):.0f}_{zone.get('zone_high',0):.0f}"
-            if uid in notified:
-                continue
-            notified.add(uid)
+            zone_uid = f"{kind}_{zone.get('zone_low',0):.0f}_{zone.get('zone_high',0):.0f}"
+            sl_p = round(zone["zone_low"] - sl_buf, 1) if kind == "BEAR" \
+                   else round(zone["zone_high"] + sl_buf, 1)
+            t1_p = zone.get("sl", zone["zone_high"] + 50) if kind == "BEAR" \
+                   else zone.get("sl", zone["zone_low"] - 50)
 
-            ob = today_df[today_df["datetime"] <= bar_ts]
-            if ob.empty:
-                continue
-            entry_p = float(ob.iloc[-1]["close"])
-            if entry_p <= 0:
-                continue
+            # ── LTF sub-trap comparison ────────────────────────────────────
+            for ltf_min in ltf_minutes:
+                ltf_label = f"LTF{ltf_min}"
+                sub_traps = _find_ltf_trap_entries(
+                    today_df, zone, bar_ts, kind, sq_time, ltf_min
+                )
 
-            sl_p  = round(zone["zone_low"] - sl_buf, 1) if kind == "BEAR" \
-                    else round(zone["zone_high"] + sl_buf, 1)
-            t1_p  = zone.get("sl", zone["zone_high"] + 50) if kind == "BEAR" \
-                    else zone.get("sl", zone["zone_low"] - 50)
+                # Variants: FIRST / MIDDLE / LAST sub-trap, and IMMEDIATE (no LTF wait)
+                variants: dict[str, dict | None] = {"IMMEDIATE": None}
+                if sub_traps:
+                    variants["FIRST"]  = sub_traps[0]
+                    variants["LAST"]   = sub_traps[-1]
+                    if len(sub_traps) >= 3:
+                        variants["MIDDLE"] = sub_traps[len(sub_traps) // 2]
 
-            in_trade = {
-                "entry_ts":  bar_ts,
-                "entry":     entry_p,
-                "sl":        sl_p,
-                "t1":        t1_p,
-                "t1_hit":    False,
-                "kind":      kind,
-                "direction": "CE" if kind == "BEAR" else "PE",
-                "zone":      f"{zone.get('zone_low',0):.0f}→{zone.get('zone_high',0):.0f}",
-                "zone_src":  zone_src,
-                "date":      trade_date,
-                "gap":       f"{gap_info['direction']} {gap_info['pct']:+.2f}%" if has_gap else "none",
-            }
+                for trap_label, ltf_entry in variants.items():
+                    key = (zone_uid, ltf_label, trap_label)
+                    if key in recorded:
+                        continue
+                    recorded.add(key)
 
-        if in_trade:
-            ob = today_df[today_df["datetime"] <= sq_time]
-            ep = float(ob.iloc[-1]["close"]) if not ob.empty else in_trade["entry"]
-            _record_exit(in_trade, ep, sq_time, "EOD", trades, lot_size, combo)
+                    if ltf_entry is None:
+                        # IMMEDIATE: enter at HTF zone touch
+                        ob = today_df[today_df["datetime"] <= bar_ts]
+                        ep = float(ob.iloc[-1]["close"]) if not ob.empty else 0.0
+                        if ep <= 0:
+                            continue
+                        _record(kind, zone, zone_src, bar_ts, bar_ts, ep,
+                                sl_p, t1_p, ltf_label, trap_label, combo_base)
+                    else:
+                        entry_ts = ltf_entry["ts"]
+                        ep       = ltf_entry["price"]
+                        if ep <= 0 or entry_ts >= sq_time:
+                            continue
+                        _record(kind, zone, zone_src, bar_ts, entry_ts, ep,
+                                sl_p, t1_p, ltf_label, trap_label, combo_base)
 
     _run_direction("BEAR")
     _run_direction("BULL")
@@ -295,10 +417,9 @@ def _run_day(
 
 def _record_exit(trade: dict, exit_p: float, exit_ts, reason: str,
                  out: list, lot_size: int, combo: str):
+    # Legacy helper kept for compatibility — not used by new _run_day
     ep   = trade["entry"]
     kind = trade["kind"]
-    # BEAR = bought futures (bullish): profit when price rises
-    # BULL = sold futures (bearish): profit when price falls
     pnl_pts = (exit_p - ep) if kind == "BEAR" else (ep - exit_p)
     out.append({
         "date":      trade["date"],
@@ -318,6 +439,8 @@ def _record_exit(trade: dict, exit_p: float, exit_ts, reason: str,
         "pnl_pts":   round(pnl_pts, 1),
         "pnl_rs":    round(pnl_pts * lot_size, 0),
         "combo":     combo,
+        "ltf":       "",
+        "trap_entry": "",
     })
 
 
@@ -340,6 +463,7 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     sl_buf       = float(params.get("sl_buf", SL_BUF))
     combo_filter = str(params.get("combo", "all")).lower()
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
+    ltf_minutes  = [5, 15]   # always compare both LTF timeframes
     lot_size     = CRUDE_LOT * lots
 
     LOOKBACK_DAYS = 10   # how many calendar-trading-days back to scan for zones
@@ -381,7 +505,8 @@ def run_crude_backtest(params: dict, token: str) -> dict:
 
         day_trades = _run_day(
             trade_date, today_df, lookback_df,
-            htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size
+            htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
+            ltf_minutes
         )
         all_trades.extend(day_trades)
         day_pnl = sum(t["pnl_rs"] for t in day_trades)
@@ -404,11 +529,19 @@ def run_crude_backtest(params: dict, token: str) -> dict:
             "avg_loss": int(sum(t["pnl_rs"] for t in losses) / len(losses)) if losses else 0,
         }
 
-    combos = ["GAP+HTF_ZONE", "GAP+NO_ZONE", "NO_GAP+HTF_ZONE", "NO_GAP+NO_ZONE"]
-    by_combo = {
-        c: _stats([t for t in all_trades if t["combo"] == c])
-        for c in combos
-    }
+    # Dynamic combo keys — includes LTF+trap variants
+    # Ordered: base combos first, then LTF breakdown
+    base_combos = ["GAP+HTF_ZONE", "GAP+NO_ZONE", "NO_GAP+HTF_ZONE", "NO_GAP+NO_ZONE"]
+    seen_combos = []
+    for t in all_trades:
+        if t["combo"] not in seen_combos:
+            seen_combos.append(t["combo"])
+    # Sort: base combos first (no LTF suffix), then LTF variants alphabetically
+    all_combos = sorted(seen_combos, key=lambda c: (
+        0 if not any(x in c for x in ["LTF", "FIRST", "MIDDLE", "LAST", "IMMEDIATE"]) else 1,
+        c
+    ))
+    by_combo = {c: _stats([t for t in all_trades if t["combo"] == c]) for c in all_combos}
 
     # Equity curve: cumulative P&L per trade in time order
     equity = []
