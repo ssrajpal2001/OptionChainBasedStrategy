@@ -844,7 +844,7 @@ function backtestApp() {
                              : `<span class="pnl-loss">Rs ${v.toLocaleString()}</span>`
       const tag = (txt,cls) => `<span class="tag ${cls} text-xs">${txt}</span>`
       let html = `<table class="bt-table"><thead><tr>
-        <th>DATE</th><th>HTF TOUCH</th><th>LTF ENTRY</th><th>DIR</th>
+        <th>DATE</th><th>MODE</th><th>HTF TOUCH</th><th>LTF ENTRY</th><th>DIR</th>
         <th>LTF</th><th>TRAP#</th><th>SRC</th>
         <th>ZONE LOW</th><th>ZONE HIGH</th><th>ENTRY</th><th>SL</th><th>T1</th>
         <th>T1 EXIT</th><th>T1 P&L</th><th>TSL EXIT</th><th>TSL P&L</th>
@@ -857,8 +857,10 @@ function backtestApp() {
         const rsnCls  = t.reason==='SL'?'tag-sl':t.reason&&t.reason.includes('TSL')?'tag-t1':'tag-eod'
         const h1 = t.half1_rs ? (t.half1_rs>0?`<span class="pnl-win">Rs +${t.half1_rs.toLocaleString()}</span>`:`<span class="pnl-loss">Rs ${t.half1_rs.toLocaleString()}</span>`) : '-'
         const h2 = t.half2_rs ? (t.half2_rs>0?`<span class="pnl-win">Rs +${t.half2_rs.toLocaleString()}</span>`:`<span class="pnl-loss">Rs ${t.half2_rs.toLocaleString()}</span>`) : (t.reason==='SL'?'—':'-')
+        const modeCls = t.ltf_mode==='option' ? 'tag-pe' : 'tag-htf'
         html += `<tr>
           <td class="font-mono text-xs text-t-muted">${t.date}</td>
+          <td>${tag(t.ltf_mode==='option'?'L2-OPT':'L1-FUT', modeCls)}</td>
           <td class="font-mono text-xs text-t-muted">${t.htf_touch||t.entry_ts}</td>
           <td class="font-mono text-xs">${t.entry_ts}</td>
           <td>${tag(t.direction,dirCls)}</td>

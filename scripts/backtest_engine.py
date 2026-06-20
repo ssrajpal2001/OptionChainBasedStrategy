@@ -322,6 +322,53 @@ def _find_ltf_trap_entries(
     return result
 
 
+# ── Option bar fetching for Logic 2 ──────────────────────────────────────────
+_MCX_MASTER_CACHE: list = []
+
+def _load_mcx_master() -> list:
+    global _MCX_MASTER_CACHE
+    if _MCX_MASTER_CACHE:
+        return _MCX_MASTER_CACHE
+    import gzip, json
+    try:
+        r = requests.get("https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz", timeout=30)
+        _MCX_MASTER_CACHE = json.loads(gzip.decompress(r.content))
+    except Exception:
+        _MCX_MASTER_CACHE = []
+    return _MCX_MASTER_CACHE
+
+def _find_crude_option_key(strike: int, otype: str, min_expiry) -> str:
+    """Find Upstox instrument key for CrudeOil option at given strike/type/expiry."""
+    master = _load_mcx_master()
+    ot = otype.upper()
+    candidates = []
+    for row in master:
+        itype     = str(row.get("instrument_type", "")).upper()
+        row_otype = itype if itype in ("CE", "PE") else str(row.get("option_type", "")).upper()
+        if row_otype != ot:
+            continue
+        if abs(float(row.get("strike", 0) or 0) - strike) > 0.5:
+            continue
+        sym = str(row.get("tradingsymbol", "") or row.get("name", "")).upper()
+        und = str(row.get("underlying_symbol", "") or "").upper()
+        if "CRUDE" not in sym and "CRUDE" not in und:
+            continue
+        exp_str = str(row.get("expiry", "") or "")
+        try:
+            exp_dt = date.fromisoformat(exp_str[:10])
+        except Exception:
+            continue
+        if exp_dt < min_expiry:
+            continue
+        key = str(row.get("instrument_key", ""))
+        if key:
+            candidates.append((exp_dt, key))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
+
+
 # ── Per-day backtest ──────────────────────────────────────────────────────────
 def _run_day(
     trade_date: str,
@@ -336,6 +383,8 @@ def _run_day(
     ltf_minutes: list[int],    # e.g. [5, 15]
     min_width: float = 30.0,
     max_age_days: int = 5,
+    ltf_source: str = "futures",  # "futures"=Logic1 | "option"=Logic2
+    itm_offset: int = 300,
 ) -> list[dict]:
     """Run one day's backtest with LTF sub-trap comparison. Returns list of trade records."""
     trades: list[dict] = []
@@ -579,6 +628,7 @@ def _run_day(
             "pnl_pts":     ex["pnl_pts"],
             "pnl_rs":      ex["pnl_rs"],
             "combo":       f"{combo}+{ltf_label}+{trap_label}",
+            "ltf_mode":    ltf_source,   # "futures" or "option"
         })
 
     # Track which (kind, zone_uid, ltf, trap) combos already recorded
@@ -632,10 +682,26 @@ def _run_day(
                         t2_p = hz_t1
 
             # ── LTF sub-trap comparison ────────────────────────────────────
+            # Logic 2: fetch deep ITM option bars for LTF detection
+            # CE=BEAR direction: deep ITM CE = strike BELOW futures (put-call reversal: CE ITM when strike < spot)
+            # PE=BULL direction: deep ITM PE = strike ABOVE futures
+            if ltf_source == "option":
+                trade_dt_obj = date.fromisoformat(trade_date)
+                if kind == "BEAR":
+                    det_strike = int(round((cur_fut - itm_offset) / CRUDE_STEP) * CRUDE_STEP)
+                    opt_key    = _find_crude_option_key(det_strike, "CE", trade_dt_obj)
+                else:
+                    det_strike = int(round((cur_fut + itm_offset) / CRUDE_STEP) * CRUDE_STEP)
+                    opt_key    = _find_crude_option_key(det_strike, "PE", trade_dt_obj)
+                opt_df = fetch_1m(opt_key, trade_date) if opt_key else pd.DataFrame()
+                ltf_src_df = opt_df if not opt_df.empty else today_df
+            else:
+                ltf_src_df = today_df
+
             for ltf_min in ltf_minutes:
                 ltf_label = f"LTF{ltf_min}"
                 sub_traps = _find_ltf_trap_entries(
-                    today_df, zone, bar_ts, kind, sq_time, ltf_min
+                    ltf_src_df, zone, bar_ts, kind, sq_time, ltf_min
                 )
 
                 # Variants: FIRST / MIDDLE / LAST sub-trap, and IMMEDIATE (no LTF wait)
@@ -779,7 +845,7 @@ def run_crude_backtest(params: dict, token: str) -> dict:
         day_trades = _run_day(
             trade_date, today_df, lookback_df,
             htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
-            ltf_minutes, min_width, max_age_days
+            ltf_minutes, min_width, max_age_days, ltf_source, itm_offset
         )
         all_trades.extend(day_trades)
         day_pnl = sum(t["pnl_rs"] for t in day_trades)
@@ -926,7 +992,8 @@ def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> 
             day_trades = _run_day(
                 trade_date, today_df, lookback_df,
                 htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
-                ltf_minutes, min_width=w, max_age_days=max_age_days
+                ltf_minutes, min_width=w, max_age_days=max_age_days,
+                ltf_source=ltf_source, itm_offset=itm_offset
             )
             all_trades.extend(day_trades)
 
