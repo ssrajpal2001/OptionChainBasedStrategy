@@ -188,10 +188,11 @@ def scan_zones_consecutive(htf_df: pd.DataFrame) -> list[dict]:
     return zones
 
 
-def _trapped_zones(htf_df: pd.DataFrame) -> list[dict]:
-    """Return only zones that reached TRAPPED or ENTRY_READY."""
+def _trapped_zones(htf_df: pd.DataFrame, min_width: float = 30.0) -> list[dict]:
+    """Return only zones that reached TRAPPED or ENTRY_READY and are wide enough."""
     return [z for z in scan_zones_consecutive(htf_df)
-            if z["status"] in ("TRAPPED", "ENTRY_READY")]
+            if z["status"] in ("TRAPPED", "ENTRY_READY")
+            and (z["zone_high"] - z["zone_low"]) >= min_width]
 
 
 # ── Zone helpers ──────────────────────────────────────────────────────────────
@@ -831,9 +832,10 @@ def run_zone_debug(params: dict, token: str) -> dict:
     global _HEADERS
     _HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    trade_date = params.get("trade_date", "")
-    htf_min    = int(params.get("htf_min_zone", 60))
-    fut_key    = str(params.get("fut_key", "MCX_FO|520702"))
+    trade_date  = params.get("trade_date", "")
+    htf_min     = int(params.get("htf_min_zone", 60))
+    fut_key     = str(params.get("fut_key", "MCX_FO|520702"))
+    min_width   = float(params.get("min_zone_width", 30.0))
     LOOKBACK_DAYS = 10
 
     if not trade_date:
@@ -867,7 +869,8 @@ def run_zone_debug(params: dict, token: str) -> dict:
             return "-"
         return ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
 
-    all_zones = scan_zones_consecutive(htf)
+    all_zones = [z for z in scan_zones_consecutive(htf)
+                 if (z["zone_high"] - z["zone_low"]) >= min_width]
 
     zone_rows = []
     for z in all_zones:

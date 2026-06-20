@@ -232,6 +232,16 @@
           <p class="sec-label mb-1.5">SL Buffer (Rs)</p>
           <input type="number" class="t-input" x-model="slBuf" step="5" min="5" max="100" />
         </div>
+        <div>
+          <p class="sec-label mb-1.5">Min Zone Width (pts)</p>
+          <select class="t-input" x-model="minZoneWidth">
+            <option value="10">10 pts</option>
+            <option value="20">20 pts</option>
+            <option value="30" selected>30 pts</option>
+            <option value="40">40 pts</option>
+            <option value="50">50 pts</option>
+          </select>
+        </div>
       </div>
 
       <div>
@@ -459,8 +469,9 @@ function backtestApp() {
     htfZone:     60,
     htfCascade:  30,
     gapPct:      0.3,
-    slBuf:       20,
-    lots:        2,
+    slBuf:         20,
+    minZoneWidth:  30,
+    lots:          2,
     futKey:      'MCX_FO|520702',
     startDate:   '',
     endDate:     '',
@@ -530,11 +541,12 @@ function backtestApp() {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
-            token:        this.token,
-            start_date:   this.startDate,
-            end_date:     this.startDate,
-            htf_min_zone: parseInt(this.htfZone),
-            fut_key:      this.futKey,
+            token:          this.token,
+            start_date:     this.startDate,
+            end_date:       this.startDate,
+            htf_min_zone:   parseInt(this.htfZone),
+            fut_key:        this.futKey,
+            min_zone_width: parseFloat(this.minZoneWidth),
             days: 1, lots: 1, gap_threshold: 0.003,
             htf_min_cascade: 30, sl_buf: 20, combo: 'all',
           })
@@ -580,6 +592,7 @@ function backtestApp() {
             fut_key:        this.futKey,
             start_date:     this.startDate,
             end_date:       this.endDate,
+            min_zone_width: parseFloat(this.minZoneWidth),
           })
         })
         clearTimeout(tid)

@@ -393,6 +393,7 @@ try:
         htf_min_zone:    int   = 60
         htf_min_cascade: int   = 30
         sl_buf:          float = 20.0
+        min_zone_width:  float = 30.0
         combo:           str   = "all"
         fut_key:         str   = "MCX_FO|520702"
         start_date:      str   = ""   # YYYY-MM-DD; overrides days when set with end_date
