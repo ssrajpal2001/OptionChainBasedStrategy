@@ -232,11 +232,11 @@
               @click="runBacktest"
               :disabled="running || !tokenOk">
         <span x-show="!running">▶ RUN BACKTEST</span>
-        <span x-show="running" class="flex items-center justify-center gap-2">
+        <span x-show="running" class="flex items-center justify-center gap-2" title="Fetching 10-day lookback for each trade day — may take 3-5 minutes">
           <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
           </svg>
-          RUNNING…
+          RUNNING… (may take 3-5 min)
         </span>
       </button>
 
@@ -515,9 +515,12 @@ function backtestApp() {
       this.ran     = false
 
       try {
+        const ctrl = new AbortController()
+        const tid  = setTimeout(() => ctrl.abort(), 600000) // 10 min
         const res = await fetch('/api/backtest/crude', {
           method:  'POST',
           headers: {'Content-Type': 'application/json'},
+          signal:  ctrl.signal,
           body: JSON.stringify({
             token:          this.token,
             days:           parseInt(this.days),
@@ -530,6 +533,7 @@ function backtestApp() {
             fut_key:        this.futKey,
           })
         })
+        clearTimeout(tid)
         const data = await res.json()
         if (!data.ok) { this.error = data.error || 'Backend error'; return }
 

@@ -5420,8 +5420,9 @@ class DashboardServer:
                 if _scripts not in _sys.path:
                     _sys.path.insert(0, _scripts)
                 from backtest_engine import run_crude_backtest as _run
-                result = await asyncio.to_thread(
-                    _run, params.dict(exclude={"token"}), token
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_run, params.dict(exclude={"token"}), token),
+                    timeout=600.0,   # 10 min — 10-day lookback needs many API calls
                 )
                 return result
             except Exception as exc:
