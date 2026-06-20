@@ -352,55 +352,6 @@
         <div style="overflow:auto; max-height:60vh; min-height:0;" id="zone-tbody-wrap"></div>
       </div>
 
-      <!-- Batch comparison table -->
-      <div id="batch-table-anchor"></div>
-      <div x-show="batchRows && batchRows.length" class="t-card overflow-hidden">
-        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
-          <p class="sec-label text-t-amber">⚡ BATCH — ZONE WIDTH COMPARISON</p>
-          <span class="text-xs text-t-muted" x-text="period"></span>
-        </div>
-        <div class="overflow-x-auto">
-          <table class="bt-table">
-            <thead>
-              <tr>
-                <th>WIDTH</th>
-                <th>TRADES</th>
-                <th>WIN%</th>
-                <th>TOTAL P&L</th>
-                <th>AVG WIN</th>
-                <th>AVG LOSS</th>
-                <th>BEST COMBO</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for="row in batchRows" :key="row.width">
-                <tr class="cursor-pointer hover:bg-white/5 transition-colors"
-                    :class="batchSelected===row.width ? 'ring-1 ring-t-amber' : ''"
-                    @click="loadBatchRow(row)">
-                  <td class="font-mono text-t-amber font-bold" x-text="row.width + ' pts'"></td>
-                  <td x-text="row.count"></td>
-                  <td :class="row.win_pct>=50?'text-t-green':'text-t-red'" x-text="row.win_pct+'%'"></td>
-                  <td :class="row.total_rs>=0?'text-t-green':'text-t-red'"
-                      x-text="'Rs '+(row.total_rs>=0?'+':'')+row.total_rs.toLocaleString()"></td>
-                  <td class="text-t-green" x-text="'Rs +'+(row.avg_win||0).toLocaleString()"></td>
-                  <td class="text-t-red" x-text="'Rs '+(row.avg_loss||0).toLocaleString()"></td>
-                  <td class="text-xs text-t-cyan font-mono" x-text="row.best_combo"></td>
-                  <td class="text-xs text-t-muted">click to load ↓</td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
-        <div x-show="batchSelected" class="px-4 py-2 text-xs text-t-muted border-t border-t-border flex items-center justify-between">
-          <span>Showing full drill-down for <span class="text-t-amber font-bold" x-text="batchSelected + ' pt'"></span> zone width below ↓</span>
-          <a href="#trade-log-anchor" class="text-t-cyan underline font-semibold hover:text-cyan-400 transition-colors"
-             @click.prevent="document.getElementById('trade-log-anchor').scrollIntoView({behavior:'smooth'})">
-            ↓ Jump to Trade Log
-          </a>
-        </div>
-      </div>
-
       <!-- Summary cards -->
       <div x-show="summary">
           <p class="sec-label mb-3">SUMMARY — <span x-text="period"></span></p>
@@ -472,6 +423,51 @@
             </div>
           </div>
         </div><!-- end x-show="summary" -->
+
+      <!-- Batch comparison table — sits between by-combo and trade log -->
+      <div id="batch-table-anchor"></div>
+      <div x-show="batchRows && batchRows.length" class="t-card overflow-hidden">
+        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
+          <p class="sec-label text-t-amber">⚡ BATCH — ZONE WIDTH COMPARISON (click row to load trades)</p>
+          <span class="text-xs text-t-muted" x-text="period"></span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="bt-table">
+            <thead>
+              <tr>
+                <th>WIDTH</th>
+                <th>TRADES</th>
+                <th>WIN%</th>
+                <th>TOTAL P&L</th>
+                <th>AVG WIN</th>
+                <th>AVG LOSS</th>
+                <th>BEST COMBO</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="row in batchRows" :key="row.width">
+                <tr class="cursor-pointer hover:bg-white/5 transition-colors"
+                    :class="batchSelected===row.width ? 'ring-1 ring-t-amber bg-amber-950/20' : ''"
+                    @click="loadBatchRow(row)">
+                  <td class="font-mono text-t-amber font-bold" x-text="row.width + ' pts'"></td>
+                  <td x-text="row.count"></td>
+                  <td :class="row.win_pct>=50?'text-t-green':'text-t-red'" x-text="row.win_pct+'%'"></td>
+                  <td :class="row.total_rs>=0?'pnl-win':'pnl-loss'"
+                      x-text="'Rs '+(row.total_rs>=0?'+':'')+row.total_rs.toLocaleString()"></td>
+                  <td class="text-t-green" x-text="'Rs +'+(row.avg_win||0).toLocaleString()"></td>
+                  <td class="text-t-red" x-text="'Rs '+(row.avg_loss||0).toLocaleString()"></td>
+                  <td class="text-xs text-t-cyan font-mono" x-text="row.best_combo"></td>
+                  <td class="text-xs text-t-muted">↓ load</td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <div x-show="batchSelected" class="px-4 py-2 text-xs text-t-muted border-t border-t-border">
+          Showing trades for <span class="text-t-amber font-bold" x-text="batchSelected + ' pt'"></span> zone width ↓
+        </div>
+      </div>
 
       <!-- Trade log anchor — "Jump to Trade Log" links point here -->
       <div id="trade-log-anchor"></div>
