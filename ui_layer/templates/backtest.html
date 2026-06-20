@@ -428,49 +428,26 @@
           </div>
         </div><!-- end x-show="summary" -->
 
-      <!-- Batch comparison table — sits between by-combo and trade log -->
+      <!-- Batch comparison table — rendered via JS to avoid Alpine x-show reactivity issues -->
       <div id="batch-table-anchor"></div>
-      <div x-show="batchRows.length > 0" style="display:none" class="t-card overflow-hidden">
+      <div id="batch-table-wrap" style="display:none" class="t-card overflow-hidden">
         <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
           <p class="sec-label text-t-amber">⚡ BATCH — ZONE WIDTH COMPARISON (click row to load trades)</p>
-          <span class="text-xs text-t-muted" x-text="period"></span>
+          <span class="text-xs text-t-muted" id="batch-period-label"></span>
         </div>
         <div class="overflow-x-auto">
           <table class="bt-table">
             <thead>
               <tr>
-                <th>WIDTH</th>
-                <th>TRADES</th>
-                <th>WIN%</th>
-                <th>TOTAL P&L</th>
-                <th>AVG WIN</th>
-                <th>AVG LOSS</th>
-                <th>BEST COMBO</th>
-                <th></th>
+                <th>WIDTH</th><th>TRADES</th><th>WIN%</th>
+                <th>TOTAL P&L</th><th>AVG WIN</th><th>AVG LOSS</th>
+                <th>BEST COMBO</th><th></th>
               </tr>
             </thead>
-            <tbody>
-              <template x-for="row in batchRows" :key="row.width">
-                <tr class="cursor-pointer hover:bg-white/5 transition-colors"
-                    :class="batchSelected===row.width ? 'ring-1 ring-t-amber bg-amber-950/20' : ''"
-                    @click="loadBatchRow(row)">
-                  <td class="font-mono text-t-amber font-bold" x-text="row.width + ' pts'"></td>
-                  <td x-text="row.count"></td>
-                  <td :class="row.win_pct>=50?'text-t-green':'text-t-red'" x-text="row.win_pct+'%'"></td>
-                  <td :class="row.total_rs>=0?'pnl-win':'pnl-loss'"
-                      x-text="'Rs '+(row.total_rs>=0?'+':'')+row.total_rs.toLocaleString()"></td>
-                  <td class="text-t-green" x-text="'Rs +'+(row.avg_win||0).toLocaleString()"></td>
-                  <td class="text-t-red" x-text="'Rs '+(row.avg_loss||0).toLocaleString()"></td>
-                  <td class="text-xs text-t-cyan font-mono" x-text="row.best_combo"></td>
-                  <td class="text-xs text-t-muted">↓ load</td>
-                </tr>
-              </template>
-            </tbody>
+            <tbody id="batch-tbody"></tbody>
           </table>
         </div>
-        <div x-show="batchSelected" class="px-4 py-2 text-xs text-t-muted border-t border-t-border">
-          Showing trades for <span class="text-t-amber font-bold" x-text="batchSelected + ' pt'"></span> zone width ↓
-        </div>
+        <div id="batch-selected-label" style="display:none" class="px-4 py-2 text-xs text-t-muted border-t border-t-border"></div>
       </div>
 
       <!-- Trade log anchor — "Jump to Trade Log" links point here -->
@@ -622,18 +599,26 @@ function backtestApp() {
     tradeFilter: '',
 
     init() {
-      // Auto-fill: prev Monday → today (always spans 2 Mondays)
-      // e.g. Fri Jun 20 → Jun 9 to Jun 20; Mon Jun 23 → Jun 16 to Jun 23
+      window._batchApp = this   // expose for batch table row clicks
+
+      // Default: 2 months back → today
       const today = new Date()
-      const day   = today.getDay()                    // 0=Sun … 6=Sat
-      const daysToThisMon = day === 0 ? 6 : day - 1  // days since this week's Monday
-      const thisMon = new Date(today)
-      thisMon.setDate(today.getDate() - daysToThisMon)
-      const prevMon = new Date(thisMon)
-      prevMon.setDate(thisMon.getDate() - 7)          // one week earlier = prev Monday
+      const twoMonthsAgo = new Date(today)
+      twoMonthsAgo.setMonth(today.getMonth() - 2)
       const fmt = d => d.toISOString().slice(0, 10)
-      this.startDate = fmt(prevMon)
+      this.startDate = fmt(twoMonthsAgo)
       this.endDate   = fmt(today)
+
+      // Default settings for CrudeOil 2-month run
+      this.gapPct       = 0.5
+      this.slBuf        = 20
+      this.minZoneWidth = 30
+      this.maxZoneAge   = 5
+      this.ltfSource    = 'futures'
+      this.gapDirFilter = false
+      this.lots         = 2
+      this.htfZone      = 60
+      this.htfCascade   = 30
 
       fetch('/api/backtest/token')
         .then(r => r.json())
@@ -831,14 +816,38 @@ function backtestApp() {
         })
         this.period = data.period || ''
         const best = [...this.batchRows].filter(r=>r._data).sort((a,b) => b.total_rs - a.total_rs)[0]
-        if (best) this.loadBatchRow(best, false)  // don't scroll past batch table
-        // Scroll batch table into view
-        this.$nextTick(() => {
-          const el = document.getElementById('batch-table-anchor')
-          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-        })
+        if (best) this.loadBatchRow(best, false)
+        this.renderBatchTable()
+        document.getElementById('batch-table-anchor')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       } catch(e) { this.error = e.message || 'Batch failed' }
       finally { this.batchRunning = false; this.batchStatus = '' }
+    },
+
+    renderBatchTable() {
+      const wrap = document.getElementById('batch-table-wrap')
+      const tbody = document.getElementById('batch-tbody')
+      const periodEl = document.getElementById('batch-period-label')
+      if (!wrap || !tbody) return
+      if (!this.batchRows.length) { wrap.style.display = 'none'; return }
+      if (periodEl) periodEl.textContent = this.period
+      tbody.innerHTML = this.batchRows.map(row => {
+        const pnl = row.total_rs >= 0 ? `+${row.total_rs.toLocaleString()}` : row.total_rs.toLocaleString()
+        const pnlClass = row.total_rs >= 0 ? 'pnl-win' : 'pnl-loss'
+        const wpClass = row.win_pct >= 50 ? 'text-t-green' : 'text-t-red'
+        const sel = this.batchSelected === row.width ? 'style="background:rgba(245,158,11,0.1);outline:1px solid rgba(245,158,11,0.4)"' : ''
+        return `<tr class="cursor-pointer hover:bg-white/5 transition-colors" ${sel}
+                    onclick="window._batchApp.loadBatchRow(window._batchApp.batchRows.find(r=>r.width===${row.width}))">`
+          <td class="font-mono text-t-amber font-bold">${row.width} pts</td>
+          <td>${row.count}</td>
+          <td class="${wpClass}">${row.win_pct}%</td>
+          <td class="${pnlClass}">Rs ${pnl}</td>
+          <td class="text-t-green">Rs +${(row.avg_win||0).toLocaleString()}</td>
+          <td class="text-t-red">Rs ${(row.avg_loss||0).toLocaleString()}</td>
+          <td class="text-xs text-t-cyan font-mono">${row.best_combo||'-'}</td>
+          <td class="text-xs text-t-muted">↓ load</td>
+        </tr>`
+      }).join('')
+      wrap.style.display = 'block'
     },
 
     loadBatchRow(row, autoScroll = true) {
