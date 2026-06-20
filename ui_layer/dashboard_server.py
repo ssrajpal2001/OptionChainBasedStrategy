@@ -402,6 +402,7 @@ try:
         ltf_source:      str   = "futures"
         itm_offset:      int   = 300
         gap_dir_filter:  bool  = True        # True = on gap day trade only with gap direction
+        require_gap:     bool  = True        # False = cascade on ALL days (no gap filter)
 
 except ImportError:
     _HAS_FASTAPI = False

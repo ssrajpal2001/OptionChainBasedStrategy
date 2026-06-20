@@ -281,6 +281,20 @@
         </div>
       </div>
 
+      <!-- Require Gap toggle -->
+      <div class="flex items-center justify-between py-2 px-3 rounded border border-t-border" style="background:var(--t-surface)">
+        <div>
+          <p class="sec-label">Require Gap</p>
+          <p class="text-t-muted text-xs mt-0.5">OFF = cascade every day (no gap filter)</p>
+        </div>
+        <button type="button" @click="requireGap = !requireGap"
+                class="w-11 h-6 rounded-full transition-colors relative flex-shrink-0"
+                :class="requireGap ? 'bg-green-500' : 'bg-gray-500'">
+          <span class="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform"
+                :class="requireGap ? 'translate-x-5' : 'translate-x-0.5'"></span>
+        </button>
+      </div>
+
       <!-- Gap direction filter toggle -->
       <div class="flex items-center justify-between py-2 px-3 rounded border border-t-border" style="background:var(--t-surface)">
         <div>
@@ -571,6 +585,7 @@ function backtestApp() {
     ltfSource:     'futures',
     itmOffset:     300,
     gapDirFilter:  true,
+    requireGap:    true,
     batchRows:     [],
     batchSelected: null,
     batchStatus:   '',
@@ -616,6 +631,7 @@ function backtestApp() {
       this.maxZoneAge   = 5
       this.ltfSource    = 'futures'
       this.gapDirFilter = false
+      this.requireGap   = true
       this.lots         = 2
       this.htfZone      = 60
       this.htfCascade   = 30
@@ -723,6 +739,7 @@ function backtestApp() {
             ltf_source:      this.ltfSource,
             itm_offset:      parseInt(this.itmOffset),
             gap_dir_filter:  this.gapDirFilter,
+            require_gap:     this.requireGap,
           })
         })
         clearTimeout(tid)

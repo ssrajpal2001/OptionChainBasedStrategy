@@ -385,7 +385,8 @@ def _run_day(
     max_age_days: int = 5,
     ltf_source: str = "futures",
     itm_offset: int = 300,
-    gap_dir_filter: bool = True,   # True = on gap day only trade WITH gap direction
+    gap_dir_filter: bool = True,
+    require_gap:    bool = True,   # False = cascade on ALL days regardless of gap
 ) -> list[dict]:
     """Run one day's backtest with LTF sub-trap comparison. Returns list of trade records."""
     trades: list[dict] = []
@@ -415,17 +416,21 @@ def _run_day(
         return result
 
     reachable_hist = _zones_reachable(htf_zones_hist, today_open)
-    # If gap day and no reachable historical zones → intraday cascade only
-    # Any gap (up or down) → old historical zones are at yesterday's price,
-    # market has moved away → ignore them, use fresh intraday 30min cascade only
-    use_cascade_only = has_gap
-    has_htf_zone     = (not has_gap) and len(reachable_hist) > 0
 
-    combo_base = _combo_label(has_gap, has_htf_zone)
-
-    # NO_GAP+NO_ZONE = no directional bias at all → skip entirely (consistently unprofitable)
-    if combo_base == "NO_GAP+NO_ZONE":
-        return trades
+    if not require_gap:
+        # Pure intraday mode: cascade on ALL days, no gap filter
+        # Direction comes entirely from zone (who is trapped), not from gap
+        use_cascade_only = True
+        has_htf_zone     = False
+        combo_base       = "CASCADE" + ("+GAP" if has_gap else "+NOGAP")
+    else:
+        # Gap-required mode (default): cascade only on gap days
+        use_cascade_only = has_gap
+        has_htf_zone     = (not has_gap) and len(reachable_hist) > 0
+        combo_base       = _combo_label(has_gap, has_htf_zone)
+        # NO_GAP+NO_ZONE = no directional bias → skip
+        if combo_base == "NO_GAP+NO_ZONE":
+            return trades
 
     if combo_filter != "all":
         wanted = combo_filter.upper().replace("-", "_")
@@ -823,6 +828,7 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     ltf_source      = str(params.get("ltf_source", "futures"))
     itm_offset      = int(params.get("itm_offset", 300))
     gap_dir_filter  = bool(params.get("gap_dir_filter", True))
+    require_gap     = bool(params.get("require_gap", True))
     ltf_minutes     = [5, 30]
     lot_size        = CRUDE_LOT * lots
 
@@ -878,7 +884,7 @@ def run_crude_backtest(params: dict, token: str) -> dict:
         day_trades = _run_day(
             trade_date, today_df, lookback_df,
             htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
-            ltf_minutes, min_width, max_age_days, ltf_source, itm_offset, gap_dir_filter
+            ltf_minutes, min_width, max_age_days, ltf_source, itm_offset, gap_dir_filter, require_gap
         )
         all_trades.extend(day_trades)
         day_pnl = sum(t["pnl_rs"] for t in day_trades)
@@ -957,6 +963,7 @@ def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> 
     ltf_source      = str(params.get("ltf_source", "futures"))
     itm_offset      = int(params.get("itm_offset", 300))
     gap_dir_filter  = bool(params.get("gap_dir_filter", True))
+    require_gap     = bool(params.get("require_gap", True))
     ltf_minutes     = [5, 30]
     lot_size        = CRUDE_LOT * lots
     LOOKBACK_DAYS   = 10
