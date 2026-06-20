@@ -242,6 +242,16 @@
             <option value="50">50 pts</option>
           </select>
         </div>
+        <div>
+          <p class="sec-label mb-1.5">Zone Age (days)</p>
+          <select class="t-input" x-model="maxZoneAge">
+            <option value="3">3 days</option>
+            <option value="5" selected>5 days</option>
+            <option value="7">7 days</option>
+            <option value="10">10 days</option>
+            <option value="0">No limit</option>
+          </select>
+        </div>
       </div>
 
       <div>
@@ -527,6 +537,7 @@ function backtestApp() {
     gapPct:      0.3,
     slBuf:         20,
     minZoneWidth:  30,
+    maxZoneAge:    5,
     batchRows:     [],
     batchSelected: null,
     batchStatus:   '',
@@ -605,7 +616,8 @@ function backtestApp() {
             end_date:       this.startDate,
             htf_min_zone:   parseInt(this.htfZone),
             fut_key:        this.futKey,
-            min_zone_width: parseFloat(this.minZoneWidth),
+            min_zone_width:    parseFloat(this.minZoneWidth),
+            max_zone_age_days: 0,
             days: 1, lots: 1, gap_threshold: 0.003,
             htf_min_cascade: 30, sl_buf: 20, combo: 'all',
           })
@@ -693,7 +705,8 @@ function backtestApp() {
         fut_key:         this.futKey,
         start_date:      this.startDate,
         end_date:        this.endDate,
-        min_zone_width:  width,
+        min_zone_width:    width,
+        max_zone_age_days: parseInt(this.maxZoneAge),
       }
     },
 

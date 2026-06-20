@@ -188,28 +188,34 @@ def scan_zones_consecutive(htf_df: pd.DataFrame) -> list[dict]:
     return zones
 
 
-def _trapped_zones(htf_df: pd.DataFrame, min_width: float = 30.0) -> list[dict]:
-    """Return only zones that reached TRAPPED or ENTRY_READY and are wide enough."""
-    return [z for z in scan_zones_consecutive(htf_df)
-            if z["status"] in ("TRAPPED", "ENTRY_READY")
-            and (z["zone_high"] - z["zone_low"]) >= min_width]
+def _trapped_zones(htf_df: pd.DataFrame, min_width: float = 30.0,
+                   max_age_days: int = 0, trade_date: str = "") -> list[dict]:
+    """Return only zones that reached TRAPPED or ENTRY_READY, wide enough, and not too old."""
+    zones = [z for z in scan_zones_consecutive(htf_df)
+             if z["status"] in ("TRAPPED", "ENTRY_READY")
+             and (z["zone_high"] - z["zone_low"]) >= min_width]
+    if max_age_days > 0 and trade_date:
+        cutoff = pd.Timestamp(trade_date) - pd.Timedelta(days=max_age_days)
+        zones = [z for z in zones if pd.Timestamp(z["ref_dt"]) >= cutoff]
+    return zones
 
 
 # ── Zone helpers ──────────────────────────────────────────────────────────────
-def _get_prev_day_htf_zones(prev_df: pd.DataFrame, htf_min: int, min_width: float = 30.0) -> list[dict]:
+def _get_prev_day_htf_zones(prev_df: pd.DataFrame, htf_min: int,
+                             min_width: float = 30.0, max_age_days: int = 0,
+                             trade_date: str = "") -> list[dict]:
     """Scan previous day's bars at htf_min resolution → return TRAPPED zones."""
     if prev_df.empty:
         return []
     htf = resample(prev_df, htf_min)
-    return _trapped_zones(htf, min_width)
+    return _trapped_zones(htf, min_width, max_age_days, trade_date)
 
 
 def _get_combined_zones_at(prev_df: pd.DataFrame, today_df: pd.DataFrame,
-                            bar_ts, htf_min: int, min_width: float = 30.0) -> list[dict]:
+                            bar_ts, htf_min: int, min_width: float = 30.0,
+                            max_age_days: int = 0, trade_date: str = "") -> list[dict]:
     """
     Scan BOTH previous day bars + today's bars up to bar_ts combined.
-    This ensures prev-day zones AND intraday zones forming during the day
-    are both visible — giving a continuous picture of trapped zones.
     """
     today_date = bar_ts.date()
     today_hist = today_df[(today_df["datetime"].dt.date == today_date) &
@@ -220,7 +226,7 @@ def _get_combined_zones_at(prev_df: pd.DataFrame, today_df: pd.DataFrame,
     if combined.empty:
         return []
     htf = resample(combined, htf_min)
-    return _trapped_zones(htf, min_width)
+    return _trapped_zones(htf, min_width, max_age_days, trade_date)
 
 
 def _zones_for_direction(zones: list[dict], direction: str) -> list[dict]:
@@ -329,6 +335,7 @@ def _run_day(
     lot_size: int,
     ltf_minutes: list[int],    # e.g. [5, 15]
     min_width: float = 30.0,
+    max_age_days: int = 5,
 ) -> list[dict]:
     """Run one day's backtest with LTF sub-trap comparison. Returns list of trade records."""
     trades: list[dict] = []
@@ -343,7 +350,7 @@ def _run_day(
     has_gap    = gap_info["gap"]
 
     # Historical HTF zones from lookback window
-    htf_zones_hist = _get_prev_day_htf_zones(lookback_df, htf_min_zone, min_width)
+    htf_zones_hist = _get_prev_day_htf_zones(lookback_df, htf_min_zone, min_width, max_age_days, trade_date)
 
     # Gap-through detection: if price gapped past ALL historical zones, skip them
     # and use intraday cascade only (fresh traps at current price level)
@@ -589,13 +596,13 @@ def _run_day(
             # ── Zone selection ─────────────────────────────────────────────
             if use_cascade_only:
                 # Gap-through: only use intraday zones forming today
-                live_zones = _get_combined_zones_at(pd.DataFrame(), today_df, bar_ts, htf_min_cascade, min_width)
+                live_zones = _get_combined_zones_at(pd.DataFrame(), today_df, bar_ts, htf_min_cascade, min_width, max_age_days, trade_date)
                 zone_src   = "CASCADE"
             else:
                 # Combined: 10-day lookback + today intraday
-                live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_zone, min_width)
+                live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_zone, min_width, max_age_days, trade_date)
                 if not live_zones:
-                    live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_cascade, min_width)
+                    live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_cascade, min_width, max_age_days, trade_date)
                 zone_src = "HTF" if has_htf_zone else "CASCADE"
 
             kind_zones = _zones_for_direction(live_zones, kind)
@@ -713,6 +720,8 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     sl_buf       = float(params.get("sl_buf", SL_BUF))
     combo_filter = str(params.get("combo", "all")).lower()
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
+    min_width    = float(params.get("min_zone_width", 30.0))
+    max_age_days = int(params.get("max_zone_age_days", 5))
     ltf_minutes  = [5, 15]   # always compare both LTF timeframes
     lot_size     = CRUDE_LOT * lots
 
@@ -768,7 +777,7 @@ def run_crude_backtest(params: dict, token: str) -> dict:
         day_trades = _run_day(
             trade_date, today_df, lookback_df,
             htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
-            ltf_minutes
+            ltf_minutes, min_width, max_age_days
         )
         all_trades.extend(day_trades)
         day_pnl = sum(t["pnl_rs"] for t in day_trades)
@@ -843,6 +852,7 @@ def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> 
     sl_buf       = float(params.get("sl_buf", SL_BUF))
     combo_filter = "all"
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
+    max_age_days = int(params.get("max_zone_age_days", 5))
     ltf_minutes  = [5, 15]
     lot_size     = CRUDE_LOT * lots
     LOOKBACK_DAYS = 10
@@ -912,7 +922,7 @@ def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> 
             day_trades = _run_day(
                 trade_date, today_df, lookback_df,
                 htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
-                ltf_minutes, min_width=w
+                ltf_minutes, min_width=w, max_age_days=max_age_days
             )
             all_trades.extend(day_trades)
 
@@ -952,10 +962,11 @@ def run_zone_debug(params: dict, token: str) -> dict:
     global _HEADERS
     _HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    trade_date  = params.get("trade_date", "")
-    htf_min     = int(params.get("htf_min_zone", 60))
-    fut_key     = str(params.get("fut_key", "MCX_FO|520702"))
-    min_width   = float(params.get("min_zone_width", 30.0))
+    trade_date   = params.get("trade_date", "")
+    htf_min      = int(params.get("htf_min_zone", 60))
+    fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
+    min_width    = float(params.get("min_zone_width", 30.0))
+    max_age_days = int(params.get("max_zone_age_days", 0))   # 0 = show all in debug
     LOOKBACK_DAYS = 10
 
     if not trade_date:
@@ -989,8 +1000,10 @@ def run_zone_debug(params: dict, token: str) -> dict:
             return "-"
         return ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
 
+    cutoff = pd.Timestamp(trade_date) - pd.Timedelta(days=max_age_days) if max_age_days > 0 else None
     all_zones = [z for z in scan_zones_consecutive(htf)
-                 if (z["zone_high"] - z["zone_low"]) >= min_width]
+                 if (z["zone_high"] - z["zone_low"]) >= min_width
+                 and (cutoff is None or pd.Timestamp(z["ref_dt"]) >= cutoff)]
 
     zone_rows = []
     for z in all_zones:
