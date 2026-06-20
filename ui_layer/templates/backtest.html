@@ -831,7 +831,7 @@ function backtestApp() {
         })
         this.period = data.period || ''
         const best = [...this.batchRows].filter(r=>r._data).sort((a,b) => b.total_rs - a.total_rs)[0]
-        if (best) this.loadBatchRow(best)
+        if (best) this.loadBatchRow(best, false)  // don't scroll past batch table
         // Scroll batch table into view
         this.$nextTick(() => {
           const el = document.getElementById('batch-table-anchor')
@@ -841,7 +841,7 @@ function backtestApp() {
       finally { this.batchRunning = false; this.batchStatus = '' }
     },
 
-    loadBatchRow(row) {
+    loadBatchRow(row, autoScroll = true) {
       if (!row._data) return
       this.batchSelected = row.width
       this.minZoneWidth  = row.width
@@ -856,7 +856,8 @@ function backtestApp() {
       this.$nextTick(() => {
         this._drawChart()
         this.renderTradeTable()
-        document.getElementById('trade-log')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        if (autoScroll)
+          document.getElementById('trade-log')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       })
     },
 
