@@ -722,6 +722,8 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
     min_width    = float(params.get("min_zone_width", 30.0))
     max_age_days = int(params.get("max_zone_age_days", 5))
+    ltf_source   = str(params.get("ltf_source", "futures"))   # "futures"=Logic1 | "option"=Logic2
+    itm_offset   = int(params.get("itm_offset", 300))
     ltf_minutes  = [5, 15]   # always compare both LTF timeframes
     lot_size     = CRUDE_LOT * lots
 
@@ -853,6 +855,8 @@ def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> 
     combo_filter = "all"
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
     max_age_days = int(params.get("max_zone_age_days", 5))
+    ltf_source   = str(params.get("ltf_source", "futures"))
+    itm_offset   = int(params.get("itm_offset", 300))
     ltf_minutes  = [5, 15]
     lot_size     = CRUDE_LOT * lots
     LOOKBACK_DAYS = 10

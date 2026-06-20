@@ -254,6 +254,33 @@
         </div>
       </div>
 
+      <!-- LTF Source (Logic 1 vs Logic 2) -->
+      <div>
+        <p class="sec-label mb-1.5">LTF Source</p>
+        <div class="grid grid-cols-1 gap-1.5">
+          <div class="combo-pill">
+            <input type="radio" id="ltf_fut" value="futures" x-model="ltfSource" />
+            <label for="ltf_fut">
+              <span class="font-bold">Logic 1</span>
+              <span class="text-t-muted text-xs ml-1">— LTF on Futures chart</span>
+            </label>
+          </div>
+          <div class="combo-pill">
+            <input type="radio" id="ltf_opt" value="option" x-model="ltfSource" />
+            <label for="ltf_opt">
+              <span class="font-bold">Logic 2</span>
+              <span class="text-t-muted text-xs ml-1">— LTF on Deep ITM option</span>
+            </label>
+          </div>
+        </div>
+        <div x-show="ltfSource==='option'" class="mt-2">
+          <p class="sec-label mb-1">ITM Offset (pts)</p>
+          <input type="number" class="t-input text-xs" x-model="itmOffset" step="100" min="100" max="1000"
+                 title="How deep ITM for LTF detection (e.g. 300 = 300 pts in-the-money)" />
+          <p class="text-t-muted text-xs mt-1">Detection: <span x-text="itmOffset"></span> ITM · Execute: 1 ITM</p>
+        </div>
+      </div>
+
       <div>
         <p class="sec-label mb-1.5">Lots</p>
         <input type="number" class="t-input" x-model="lots" step="1" min="1" max="50" />
@@ -350,8 +377,12 @@
             </tbody>
           </table>
         </div>
-        <div x-show="batchSelected" class="px-4 py-2 text-xs text-t-muted border-t border-t-border">
-          Showing full drill-down for <span class="text-t-amber font-bold" x-text="batchSelected + ' pt'"></span> zone width below ↓
+        <div x-show="batchSelected" class="px-4 py-2 text-xs text-t-muted border-t border-t-border flex items-center justify-between">
+          <span>Showing full drill-down for <span class="text-t-amber font-bold" x-text="batchSelected + ' pt'"></span> zone width below ↓</span>
+          <a href="#trade-log-anchor" class="text-t-cyan underline font-semibold hover:text-cyan-400 transition-colors"
+             @click.prevent="document.getElementById('trade-log-anchor').scrollIntoView({behavior:'smooth'})">
+            ↓ Jump to Trade Log
+          </a>
         </div>
       </div>
 
@@ -384,8 +415,12 @@
 
           <!-- Per-combo table -->
           <div class="t-card overflow-hidden mb-4">
-            <div class="px-4 py-3 border-b border-t-border">
+            <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
               <p class="sec-label">BY COMBINATION</p>
+              <a class="text-t-cyan text-xs underline font-semibold hover:text-cyan-400 transition-colors cursor-pointer"
+                 @click="document.getElementById('trade-log-anchor').scrollIntoView({behavior:'smooth'})">
+                ↓ Jump to Trade Log
+              </a>
             </div>
             <div class="overflow-x-auto">
               <table class="bt-table">
@@ -424,18 +459,21 @@
         </div>
       </div>
 
+      <!-- Trade log anchor — "Jump to Trade Log" links point here -->
+      <div id="trade-log-anchor"></div>
+
       <!-- Trade log rendered via innerHTML (avoids Alpine x-for rendering bug) -->
-      <div x-show="ran" class="t-card flex flex-col" id="trade-log" style="max-height:70vh; min-height:0; min-width:0;">
-        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between flex-shrink-0">
+      <div x-show="ran" class="t-card" id="trade-log" style="min-width:0;">
+        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
           <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
-          <div class="flex gap-2">
+          <div class="flex gap-2 items-center">
             <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter"
                    @input="renderTradeTable()" />
           </div>
         </div>
-        <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm flex-shrink-0">No trades in this period.</div>
-        <!-- overflow-x:auto = horizontal scroll; overflow-y:auto = vertical scroll within card -->
-        <div x-show="trades.length > 0" style="overflow-x:auto; overflow-y:auto; flex:1; min-height:0; min-width:0;" id="trade-tbody-wrap"></div>
+        <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
+        <!-- Fixed height box — scrolls horizontally (19 cols) + vertically independently of rest of page -->
+        <div x-show="trades.length > 0" style="overflow-x:auto; overflow-y:auto; height:480px;" id="trade-tbody-wrap"></div>
       </div>
 
       <!-- DEAD CODE kept for structure reference — actual rendering is via innerHTML -->
@@ -539,6 +577,8 @@ function backtestApp() {
     slBuf:         20,
     minZoneWidth:  30,
     maxZoneAge:    5,
+    ltfSource:     'futures',
+    itmOffset:     300,
     batchRows:     [],
     batchSelected: null,
     batchStatus:   '',
@@ -678,6 +718,8 @@ function backtestApp() {
             start_date:     this.startDate,
             end_date:       this.endDate,
             min_zone_width: parseFloat(this.minZoneWidth),
+            ltf_source:     this.ltfSource,
+            itm_offset:     parseInt(this.itmOffset),
           })
         })
         clearTimeout(tid)
@@ -721,6 +763,8 @@ function backtestApp() {
         end_date:        this.endDate,
         min_zone_width:    width,
         max_zone_age_days: parseInt(this.maxZoneAge),
+        ltf_source:        this.ltfSource,
+        itm_offset:        parseInt(this.itmOffset),
       }
     },
 
