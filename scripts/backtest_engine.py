@@ -421,58 +421,64 @@ def _run_day(
         tsl      = entry_p    # TSL starts at break-even
         tsl_p    = t1_price
         tsl_ts   = sq_time
+        exit2_reason = "T1+EOD"
 
         if after_t1.empty:
             ob = today_df[today_df["datetime"] <= sq_time]
             tsl_p = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
             return _exit_result("T1+EOD", entry_p, t1_price, t1_ts, tsl_p, sq_time, lot_size, kind, t2_p)
 
-        accumulated_1m = list(after_t1.itertuples(index=False))
         acc_rows: list = []
 
-        for row in accumulated_1m:
-            fts    = row.datetime
-            fclose = float(row.close)
-            acc_rows.append(row)
+        for _, fb in after_t1.iterrows():
+            fts    = fb["datetime"]
+            flo    = float(fb["low"])
+            fhi    = float(fb["high"])
+            fclose = float(fb["close"])
+            acc_rows.append(fb)
 
             if fts >= sq_time:
-                tsl_p, tsl_ts = fclose, fts
+                tsl_p, tsl_ts, exit2_reason = fclose, fts, "T1+EOD"
                 break
+
+            # T2 hit → close all remaining, done
+            if t2_p is not None:
+                t2_hit = (fhi >= t2_p) if kind == "BEAR" else (flo <= t2_p)
+                if t2_hit:
+                    ob = today_df[today_df["datetime"] <= fts]
+                    tsl_p = float(ob.iloc[-1]["close"]) if not ob.empty else t2_p
+                    tsl_ts, exit2_reason = fts, "T1+T2"
+                    break
 
             # TSL hit check (on 1m close)
             if (kind == "BEAR" and fclose < tsl) or (kind == "BULL" and fclose > tsl):
-                tsl_p, tsl_ts = fclose, fts
+                tsl_p, tsl_ts, exit2_reason = fclose, fts, "T1+TSL"
                 break
 
-            # Every ltf_min*2 bars, resample accumulated 1m and scan for zones
+            # Every ltf_min*2 rows, scan for fresh LTF zones ABOVE entry → update TSL
             if len(acc_rows) >= ltf_min * 2:
                 try:
-                    acc_df = pd.DataFrame(acc_rows, columns=after_t1.columns)
+                    acc_df   = pd.DataFrame(acc_rows)
                     ltf_bars = resample(acc_df, ltf_min)
                     if len(ltf_bars) >= 3:
-                        new_zones = scan_zones_consecutive(ltf_bars)
-                        for z in new_zones:
-                            if z["kind"] != kind:
+                        for z in scan_zones_consecutive(ltf_bars):
+                            if z["kind"] != kind or z["status"] != "ENTRY_READY":
                                 continue
-                            if z["status"] != "ENTRY_READY":
-                                continue
-                            # Zone must be ABOVE entry (BEAR: zone above our long entry)
                             if kind == "BEAR" and z["zone_low"] > entry_p:
-                                candidate = z["zone_low"]  # lowest exit of those bears
-                                if candidate > tsl:
-                                    tsl = candidate
+                                if z["zone_low"] > tsl:
+                                    tsl = z["zone_low"]
                             elif kind == "BULL" and z["zone_high"] < entry_p:
-                                candidate = z["zone_high"]
-                                if candidate < tsl:
-                                    tsl = candidate
+                                if z["zone_high"] < tsl:
+                                    tsl = z["zone_high"]
                 except Exception:
                     pass
         else:
             ob = today_df[today_df["datetime"] <= sq_time]
-            tsl_p  = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
-            tsl_ts = sq_time
+            tsl_p     = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
+            tsl_ts    = sq_time
+            exit2_reason = "T1+EOD"
 
-        return _exit_result("T1+TSL", entry_p, t1_price, t1_ts, tsl_p, tsl_ts, lot_size, kind, t2_p)
+        return _exit_result(exit2_reason, entry_p, t1_price, t1_ts, tsl_p, tsl_ts, lot_size, kind, t2_p)
 
     def _exit_result(reason, entry_p, exit1_p, exit1_ts, exit2_p, exit2_ts, lot_size, kind, t2_p=None):
         """
