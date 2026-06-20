@@ -159,7 +159,7 @@
     <div class="text-xs text-t-muted font-mono" x-text="period || 'no run yet'"></div>
   </div>
 
-  <div class="flex" style="height: calc(100vh - 49px); overflow: hidden;">
+  <div class="flex" style="height: calc(100vh - 49px); overflow: hidden; min-height: 0;">
 
     <!-- ── LEFT: Controls ─────────────────────────────────────────────────── -->
     <div class="w-72 flex-shrink-0 border-r border-t-border p-4 flex flex-col gap-4 overflow-y-auto" style="background:var(--t-surface)">
@@ -260,11 +260,10 @@
     </div>
 
     <!-- ── RIGHT: Results ─────────────────────────────────────────────────── -->
-    <div class="flex-1 overflow-y-auto p-5 flex flex-col gap-5">
+    <div class="flex-1 p-5 flex flex-col gap-5" style="overflow-y: auto; min-height: 0;">
 
       <!-- Summary cards -->
-      <template x-if="summary">
-        <div>
+      <div x-show="summary">
           <p class="sec-label mb-3">SUMMARY — <span x-text="period"></span></p>
           <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
             <div class="stat-card">
@@ -330,7 +329,7 @@
             </div>
           </div>
         </div>
-      </template>
+      </div>
 
       <!-- Trade log (BEFORE equity curve so it's immediately visible) -->
       <div x-show="ran" class="t-card overflow-hidden" id="trade-log">
@@ -404,20 +403,16 @@
       </div>
 
       <!-- Equity curve (after trade log) -->
-      <template x-if="equity && equity.length">
-        <div class="t-card p-4">
-          <p class="sec-label mb-3">EQUITY CURVE</p>
-          <canvas id="equityChart" height="120"></canvas>
-        </div>
-      </template>
+      <div x-show="equity && equity.length" class="t-card p-4">
+        <p class="sec-label mb-3">EQUITY CURVE</p>
+        <canvas id="equityChart" height="120"></canvas>
+      </div>
 
       <!-- Log -->
-      <template x-if="log && log.length">
-        <div>
-          <p class="sec-label mb-2">RUN LOG</p>
-          <div class="log-box" x-text="log.join('\n')"></div>
-        </div>
-      </template>
+      <div x-show="log && log.length">
+        <p class="sec-label mb-2">RUN LOG</p>
+        <div class="log-box" x-text="(log||[]).join('\n')"></div>
+      </div>
 
       <!-- Placeholder -->
       <template x-if="!ran && !running">
