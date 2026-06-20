@@ -329,47 +329,90 @@ def _run_day(
             ep = float(ob.iloc[-1]["close"]) if not ob.empty else entry_p
             return _exit_result("EOD+EOD", entry_p, ep, sq_time, ep, sq_time, lot_size, kind)
 
-        # ── Stage 2: TSL on LTF for remaining 50% ──────────────────────────
-        after_t1 = today_df[today_df["datetime"] > t1_ts]
-        ltf_after = resample(after_t1, ltf_min) if not after_t1.empty else pd.DataFrame()
+        # ── Stage 2: Trap-based TSL for remaining 50% ─────────────────────
+        # TSL only moves when a NEW LTF trap of same kind completes:
+        #   BEAR trade: LTF bears enter (zone_low) → get trapped → SL hit (zone_high)
+        #               → our TSL jumps to zone_low of that trap
+        #   BULL trade: LTF bulls enter (zone_high) → get trapped → SL hit (zone_low)
+        #               → our TSL jumps to zone_high of that trap
+        #
+        # TSL starts at entry_p (break-even) and only moves in our favour.
+        # Exit when 1m close breaks below TSL (BEAR) or above TSL (BULL).
 
-        # TSL starts at entry_p (break-even protection) after T1 hit
-        tsl = entry_p
-        tsl_p, tsl_ts = t1_price, t1_ts   # default: EOD at T1 price if no bars
+        after_t1  = today_df[today_df["datetime"] > t1_ts]
+        tsl       = entry_p          # current TSL level
+        tsl_p     = t1_price
+        tsl_ts    = sq_time
+        pending_traps: list[dict] = []   # LTF traps detected, waiting for SL clear
 
+        if after_t1.empty:
+            ob = today_df[today_df["datetime"] <= sq_time]
+            tsl_p = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
+            return _exit_result("T1+EOD", entry_p, t1_price, t1_ts, tsl_p, sq_time, lot_size, kind)
+
+        ltf_after = resample(after_t1, ltf_min)
+
+        # Incrementally build LTF bars, scan for traps each step
+        accumulated = []
         for _, lb in ltf_after.iterrows():
-            lts  = lb["datetime"]
-            llow = float(lb["low"])
-            lhigh= float(lb["high"])
-            lclose=float(lb["close"])
+            lts    = lb["datetime"]
+            lclose = float(lb["close"])
+            llow   = float(lb["low"])
+            lhigh  = float(lb["high"])
+            accumulated.append(lb)
 
             if lts >= sq_time:
                 ob = today_df[today_df["datetime"] <= lts]
-                tsl_p = float(ob.iloc[-1]["close"]) if not ob.empty else lclose
+                tsl_p  = float(ob.iloc[-1]["close"]) if not ob.empty else lclose
                 tsl_ts = lts
                 break
 
-            if kind == "BEAR":
-                # Trail TSL up to each new LTF candle low (only move up, never down)
-                if llow > tsl:
-                    tsl = llow
-                # Check if close broke below TSL
-                if lclose < tsl:
-                    tsl_p = lclose
-                    tsl_ts = lts
-                    break
-            else:
-                # BULL (short): trail TSL down to each LTF candle high
-                if lhigh < tsl or tsl == entry_p:
-                    tsl = lhigh
-                if lclose > tsl:
-                    tsl_p = lclose
-                    tsl_ts = lts
-                    break
+            # Check if current price breaks TSL
+            if kind == "BEAR" and lclose < tsl:
+                tsl_p, tsl_ts = lclose, lts
+                break
+            if kind == "BULL" and lclose > tsl:
+                tsl_p, tsl_ts = lclose, lts
+                break
+
+            # Scan accumulated LTF bars for new same-kind traps
+            if len(accumulated) >= 2:
+                try:
+                    ltf_df = pd.DataFrame(accumulated)
+                    _, zones = scanner.scan_htf_spot(ltf_df)
+                    for z in zones:
+                        if z.get("kind") != kind:
+                            continue
+                        zl, zh = z.get("zone_low", 0), z.get("zone_high", 0)
+                        uid = f"{zl:.0f}_{zh:.0f}"
+                        already = any(p["uid"] == uid for p in pending_traps)
+                        if not already and z.get("status") in ("TRAPPED", "ACTIVE"):
+                            pending_traps.append({"uid": uid, "zone_low": zl, "zone_high": zh,
+                                                  "status": z.get("status")})
+                        # If a pending trap's SL level is now hit → advance TSL
+                        for pt in list(pending_traps):
+                            if pt["status"] == "TRAPPED":
+                                sl_cleared = (lhigh >= pt["zone_high"]) if kind == "BEAR" \
+                                             else (llow <= pt["zone_low"])
+                                if sl_cleared:
+                                    # Trap fully cleared — move TSL to where they entered
+                                    new_tsl = pt["zone_low"] if kind == "BEAR" else pt["zone_high"]
+                                    if kind == "BEAR" and new_tsl > tsl:
+                                        tsl = new_tsl
+                                    elif kind == "BULL" and new_tsl < tsl:
+                                        tsl = new_tsl
+                                    pending_traps.remove(pt)
+                            elif pt["status"] == "ACTIVE":
+                                # Update status if now trapped
+                                trapped = (lhigh > pt["zone_high"]) if kind == "BEAR" \
+                                          else (llow < pt["zone_low"])
+                                if trapped:
+                                    pt["status"] = "TRAPPED"
+                except Exception:
+                    pass
         else:
-            # EOD for remaining half
             ob = today_df[today_df["datetime"] <= sq_time]
-            tsl_p = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
+            tsl_p  = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
             tsl_ts = sq_time
 
         return _exit_result("T1+TSL", entry_p, t1_price, t1_ts, tsl_p, tsl_ts, lot_size, kind)
@@ -650,7 +693,7 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     cum = 0
     for t in all_trades:
         cum += t["pnl_rs"]
-        equity.append({"ts": f"{t['date']} {t['exit_ts']}", "cum": cum})
+        equity.append({"ts": f"{t['date']} {t.get('exit2_ts') or t.get('exit1_ts','')}", "cum": cum})
 
     return {
         "ok":      True,
@@ -699,6 +742,6 @@ if __name__ == "__main__":
             print(f"  {c}: {s['count']} trades  W={s['wins']} L={s['losses']}  Rs{s['total_rs']:+,}")
     print("\nTRADES:")
     for t in result["trades"]:
-        print(f"  {t['date']} {t['entry_ts']}→{t['exit_ts']}  {t['direction']}  "
-              f"entry={t['entry']}  exit={t['exit']}  {t['reason']}  "
+        print(f"  {t['date']} {t['entry_ts']}→{t.get('exit1_ts','')}  {t['direction']}  "
+              f"entry={t['entry']}  exit={t.get('exit1_p','')}  {t['reason']}  "
               f"Rs{t['pnl_rs']:+.0f}  [{t['combo']}]")
