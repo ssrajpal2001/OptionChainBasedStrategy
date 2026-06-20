@@ -103,19 +103,21 @@ def scan_zones_consecutive(htf_df: pd.DataFrame) -> list[dict]:
 
     BEAR zone (sellers trapped → we BUY):
       C1 = reference candle.  C2.low < C1.low → sellers entered short at C1.
-      zone_high = C1.low  (where sellers entered — zone top)
+      zone_high = C1.body_bottom = min(C1.open,C1.close)  (body-based, excludes wick)
+                  Red C1: C1.close.  Green C1: C1.open.
       zone_low  = C2.low  (how far price fell   — zone bottom)
       t1        = C1.high  (sellers' SL = our profit target)
       TRAPPED   = any bar's high  > C1.high
-      ENTRY_READY = after TRAPPED, price re-enters [zone_low, zone_high]
+      ENTRY_READY = after TRAPPED, price re-enters zone (low ≤ price ≤ zone_high)
 
-    BULL zone (buyers trapped → we SELL):
+    BULL zone (buyers trapped → we SELL / PE):
       C1 = reference candle.  C2.high > C1.high → buyers entered long at C1.
-      zone_low  = C1.high  (where buyers entered — zone bottom)
+      zone_low  = C1.body_top = max(C1.open,C1.close)  (body-based, excludes wick)
+                  Red C1: C1.open.  Green C1: C1.close.
       zone_high = C2.high  (how far price rose   — zone top)
       t1        = C1.low   (buyers' SL = our profit target)
       TRAPPED   = any bar's low   < C1.low
-      ENTRY_READY = after TRAPPED, price re-enters [zone_low, zone_high]
+      ENTRY_READY = after TRAPPED, price re-enters zone (zone_low ≤ price ≤ zone_high)
     """
     if len(htf_df) < 3:
         return []
@@ -126,16 +128,24 @@ def scan_zones_consecutive(htf_df: pd.DataFrame) -> list[dict]:
     for i in range(1, len(bars)):
         prev = bars.iloc[i - 1]
         curr = bars.iloc[i]
-        p_low, p_high = float(prev["low"]), float(prev["high"])
-        c_low, c_high = float(curr["low"]), float(curr["high"])
+        p_open, p_close = float(prev["open"]), float(prev["close"])
+        p_low,  p_high  = float(prev["low"]),  float(prev["high"])
+        c_low,  c_high  = float(curr["low"]),  float(curr["high"])
 
-        # ── BEAR zone ──────────────────────────────────────────────────────
+        # Body boundaries (exclude wicks — use candle body for zone boundary)
+        # Red C1:   body_top = open,  body_bottom = close
+        # Green C1: body_top = close, body_bottom = open
+        p_body_top    = max(p_open, p_close)   # where price was at end of C1's push
+        p_body_bottom = min(p_open, p_close)
+
+        # ── BEAR zone (sellers trapped → CE trade) ─────────────────────────
+        # C2.low < C1.low → sellers entered short below C1.body_bottom
         if c_low < p_low:
             z: dict = {
                 "kind":      "BEAR",
-                "zone_high": p_low,    # C1.low = zone top
-                "zone_low":  c_low,    # C2.low = zone bottom
-                "t1":        p_high,   # C1.high = sellers' SL = our T1
+                "zone_high": p_body_bottom,  # C1 body bottom = where sellers entered
+                "zone_low":  c_low,          # C2.low = how far price dropped
+                "t1":        p_high,         # C1.high = sellers' SL = our T1
                 "ref_dt":    prev["datetime"],
                 "sellers_in_dt": curr["datetime"],
                 "trapped_dt":    None,
@@ -146,24 +156,25 @@ def scan_zones_consecutive(htf_df: pd.DataFrame) -> list[dict]:
             for j in range(i + 1, len(bars)):
                 b = bars.iloc[j]
                 if not trapped:
-                    if float(b["high"]) > p_high:
+                    if float(b["high"]) > p_high:    # price breaks C1.high → sellers TRAPPED
                         trapped = True
                         z["trapped_dt"] = b["datetime"]
                         z["status"]     = "TRAPPED"
                 else:
-                    if float(b["low"]) <= p_low:
+                    if float(b["low"]) <= p_body_bottom:  # price returns to zone_high
                         z["entry_ready_dt"] = b["datetime"]
                         z["status"]         = "ENTRY_READY"
                         break
             zones.append(z)
 
-        # ── BULL zone ──────────────────────────────────────────────────────
+        # ── BULL zone (buyers trapped → PE trade) ──────────────────────────
+        # C2.high > C1.high → buyers entered long above C1.body_top
         if c_high > p_high:
             z = {
                 "kind":      "BULL",
-                "zone_low":  p_high,   # C1.high = zone bottom
-                "zone_high": c_high,   # C2.high = zone top
-                "t1":        p_low,    # C1.low  = buyers' SL = our T1
+                "zone_low":  p_body_top,   # C1 body top = where buyers entered
+                "zone_high": c_high,       # C2.high = how far price rose
+                "t1":        p_low,        # C1.low = buyers' SL = our T1
                 "ref_dt":    prev["datetime"],
                 "sellers_in_dt": curr["datetime"],   # buyers_in for BULL
                 "trapped_dt":    None,
@@ -174,12 +185,12 @@ def scan_zones_consecutive(htf_df: pd.DataFrame) -> list[dict]:
             for j in range(i + 1, len(bars)):
                 b = bars.iloc[j]
                 if not trapped:
-                    if float(b["low"]) < p_low:
+                    if float(b["low"]) < p_low:       # price breaks C1.low → buyers TRAPPED
                         trapped = True
                         z["trapped_dt"] = b["datetime"]
                         z["status"]     = "TRAPPED"
                 else:
-                    if float(b["high"]) >= p_high:
+                    if float(b["high"]) >= p_body_top:  # price returns to zone_low
                         z["entry_ready_dt"] = b["datetime"]
                         z["status"]         = "ENTRY_READY"
                         break
@@ -257,18 +268,19 @@ def _find_ltf_trap_entries(
     direction: str,
     sq_time,
     ltf_min: int,
+    wide_zone: bool = False,
 ) -> list[dict]:
     """
-    After price enters an HTF zone at touch_ts, scan LTF bars within the zone
-    for sub-traps. Returns list of {ts, price} for each sub-trap completion,
-    sorted by time. Caller picks first/middle/last for entry comparison.
+    Scan LTF bars from touch_ts for sub-traps in `direction` within the HTF zone area.
+    wide_zone=True uses a 50% buffer (for opposite-direction scans above/below the zone).
+    Returns list of {ts, price, zone, t1} sorted by time.
 
-    direction: "BEAR" (expecting bounce up) or "BULL" (expecting drop down)
+    direction: "BEAR" (sub-sellers trapped → CE) or "BULL" (sub-buyers trapped → PE)
     """
     zl = htf_zone.get("zone_low", 0)
     zh = htf_zone.get("zone_high", 0)
-    # Use a slightly wider window (zone ± 1%) to catch LTF traps near boundaries
-    buf = (zh - zl) * 0.15
+    buf_pct  = 0.50 if wide_zone else 0.15
+    buf = (zh - zl) * buf_pct
     zone_min = zl - buf
     zone_max = zh + buf
 
@@ -727,20 +739,40 @@ def _run_day(
 
             for ltf_min in ltf_minutes:
                 ltf_label = f"LTF{ltf_min}"
-                sub_traps = _find_ltf_trap_entries(
-                    ltf_src_df, zone, bar_ts, kind, sq_time, ltf_min
+
+                # LTF scan starts from HTF TRAPPED time (catches sub-traps before ENTRY_READY)
+                ltf_scan_start = zone.get("trapped_dt") or bar_ts
+                opp_kind = "BULL" if kind == "BEAR" else "BEAR"
+
+                # ── Same-direction sub-traps ───────────────────────────────
+                same_traps = _find_ltf_trap_entries(
+                    ltf_src_df, zone, ltf_scan_start, kind, sq_time, ltf_min
+                )
+                # ── Opposite-direction sub-traps (wide buffer above/below zone) ─
+                # e.g. BULL sub-trap within BEAR zone = last buyers trapped → PE
+                opp_traps = _find_ltf_trap_entries(
+                    ltf_src_df, zone, ltf_scan_start, opp_kind, sq_time, ltf_min,
+                    wide_zone=True
                 )
 
-                # Variants: FIRST / MIDDLE / LAST sub-trap, and IMMEDIATE (no LTF wait)
-                variants: dict[str, dict | None] = {"IMMEDIATE": None}
-                if sub_traps:
-                    variants["FIRST"]  = sub_traps[0]
-                    variants["LAST"]   = sub_traps[-1]
-                    if len(sub_traps) >= 3:
-                        variants["MIDDLE"] = sub_traps[len(sub_traps) // 2]
+                # Build IMMEDIATE + same-dir FIRST/LAST
+                same_variants: dict[str, dict | None] = {"IMMEDIATE": None}
+                if same_traps:
+                    same_variants["FIRST"] = same_traps[0]
+                    same_variants["LAST"]  = same_traps[-1]
+                    if len(same_traps) >= 3:
+                        same_variants["MIDDLE"] = same_traps[len(same_traps) // 2]
 
-                for trap_label, ltf_entry in variants.items():
-                    key = (zone_uid, ltf_label, trap_label)
+                # Opposite-dir FIRST/LAST only (no IMMEDIATE)
+                opp_variants: dict[str, dict] = {}
+                if opp_traps:
+                    opp_variants["FIRST+OPP"] = opp_traps[0]
+                    opp_variants["LAST+OPP"]  = opp_traps[-1]
+
+                # ── Process same-direction entries ─────────────────────────
+                for trap_label, ltf_entry in same_variants.items():
+                    ts_key = _ts_fmt(ltf_entry["ts"]) if ltf_entry else _ts_fmt(bar_ts)
+                    key = (zone_uid, kind, ltf_label, trap_label, ts_key)
                     if key in recorded:
                         continue
                     recorded.add(key)
@@ -750,14 +782,13 @@ def _run_day(
                         ep = float(ob.iloc[-1]["close"]) if not ob.empty else 0.0
                         if ep <= 0:
                             continue
-                        # Entry validation: price must be inside zone AND SL/T1 on correct sides
                         zl, zh = zone["zone_low"], zone["zone_high"]
                         if not (zl <= ep <= zh):
-                            continue   # price slipped outside zone by bar close — skip
+                            continue
                         if kind == "BEAR" and (sl_p >= ep or t1_p <= ep):
-                            continue   # SL must be below entry, T1 must be above
+                            continue
                         if kind == "BULL" and (sl_p <= ep or t1_p >= ep):
-                            continue   # SL must be above entry, T1 must be below
+                            continue
                         _record(kind, zone, zone_src, bar_ts, bar_ts, ep,
                                 sl_p, t1_p, t2_p, ltf_label, trap_label, combo_base, ltf_min)
                     else:
@@ -765,7 +796,6 @@ def _run_day(
                         ep       = ltf_entry["price"]
                         if ep <= 0 or entry_ts >= sq_time:
                             continue
-                        # Entry validation: same rules for FIRST/MIDDLE/LAST
                         zl, zh = zone["zone_low"], zone["zone_high"]
                         if not (zl <= ep <= zh):
                             continue
@@ -775,6 +805,44 @@ def _run_day(
                             continue
                         _record(kind, zone, zone_src, bar_ts, entry_ts, ep,
                                 sl_p, t1_p, t2_p, ltf_label, trap_label, combo_base, ltf_min)
+
+                # ── Process opposite-direction entries ─────────────────────
+                for trap_label, ltf_entry in opp_variants.items():
+                    entry_ts = ltf_entry["ts"]
+                    ts_key   = _ts_fmt(entry_ts)
+                    key = (zone_uid, opp_kind, ltf_label, trap_label, ts_key)
+                    if key in recorded:
+                        continue
+                    recorded.add(key)
+
+                    ep = ltf_entry["price"]
+                    if ep <= 0 or entry_ts >= sq_time:
+                        continue
+
+                    # SL/T1 come from the sub-trap's own zone boundaries
+                    sub_t1 = ltf_entry.get("t1", 0)
+                    if sub_t1 <= 0:
+                        continue
+                    sub_zone_str = ltf_entry.get("zone", "0→0")
+                    try:
+                        sub_zl = float(sub_zone_str.split("→")[0])
+                        sub_zh = float(sub_zone_str.split("→")[1])
+                    except Exception:
+                        continue
+
+                    if opp_kind == "BEAR":
+                        # 5min sellers trapped → CE (buy)
+                        sub_sl = round(sub_zl - sl_buf, 1)
+                        if sub_sl >= ep or sub_t1 <= ep:
+                            continue
+                    else:
+                        # 5min buyers trapped → PE (sell)
+                        sub_sl = round(sub_zh + sl_buf, 1)
+                        if sub_sl <= ep or sub_t1 >= ep:
+                            continue
+
+                    _record(opp_kind, zone, zone_src, bar_ts, entry_ts, ep,
+                            sub_sl, sub_t1, t2_p, ltf_label, trap_label, combo_base, ltf_min)
 
     _run_direction("BEAR")
     _run_direction("BULL")
