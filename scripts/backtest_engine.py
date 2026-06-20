@@ -731,10 +731,19 @@ def run_crude_backtest(params: dict, token: str) -> dict:
 
 def run_zone_debug(params: dict, token: str) -> dict:
     """
-    For a given trade_date, show ALL HTF zones detected from the 10-day lookback.
-    Returns a table: formation_date, formation_time, kind, zone_low, zone_high, status, bar_index
-    So user can cross-check against chart.
+    For a given trade_date, replay the 1hr bars bar-by-bar using SellerTrapDetector
+    and capture exact timestamps for all 3 trap events per zone:
+      1. ENTRY_ZONE  — the reference candle (zone_low=candle_low, zone_high=candle_high)
+      2. SELLERS_IN  — when price first broke BELOW zone_low  (bears entered short)
+      3. TRAPPED     — when price broke ABOVE zone_high        (bears' SL hit, trapped)
+      4. ENTRY_READY — when price returned to zone_low         (bears exited at 0)
     """
+    import sys as _sys, os as _os
+    _strat = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "strategies")
+    if _strat not in _sys.path:
+        _sys.path.insert(0, _strat)
+    from trap_seller_detection import SellerTrapDetector, State
+
     global _HEADERS
     _HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
@@ -767,35 +776,110 @@ def run_zone_debug(params: dict, token: str) -> dict:
         return {"ok": False, "error": "No lookback data"}
 
     lookback_df = pd.concat(lb_frames, ignore_index=True).sort_values("datetime").reset_index(drop=True)
-
-    # Resample to HTF and scan — but keep track of which HTF bar each zone came from
     htf = resample(lookback_df, htf_min)
-    _, zones = scanner.scan_htf_spot(htf)
+
+    # ── Replay bar-by-bar with TWO detectors (BEAR = sellers, BULL = buyers) ──
+    # Each detector tracks a different direction
+    bear_det = SellerTrapDetector()   # detects seller (bear) traps → we BUY
+    bull_det = SellerTrapDetector()   # detects buyer (bull) traps → we SELL
+    # Bull detector uses inverted price (high↔low) — buyers fail when price breaks ABOVE high
+    # Implemented by passing -price to the bull detector with flipped candle
 
     zone_rows = []
-    for z in zones:
-        zl    = z.get("zone_low", 0)
-        zh    = z.get("zone_high", 0)
-        kind  = z.get("kind", "")
-        status= z.get("status", "")
-        # Find the HTF bar closest to zone center
-        center = (zl + zh) / 2
-        diffs  = (htf["close"] - center).abs()
-        closest_idx = diffs.idxmin()
-        closest_bar = htf.loc[closest_idx]
-        bar_dt = closest_bar["datetime"]
-        zone_rows.append({
-            "date":      bar_dt.strftime("%Y-%m-%d") if hasattr(bar_dt, "strftime") else str(bar_dt)[:10],
-            "time":      bar_dt.strftime("%H:%M")    if hasattr(bar_dt, "strftime") else str(bar_dt)[11:16],
-            "kind":      kind,
-            "zone_low":  round(zl, 1),
-            "zone_high": round(zh, 1),
-            "status":    status,
-            "width":     round(zh - zl, 1),
-        })
 
-    # Sort by date+time
-    zone_rows.sort(key=lambda r: (r["date"], r["time"]))
+    def _fmt(ts) -> str:
+        return ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
+
+    # Track per-candle events manually
+    bear_state_prev = State.WATCH
+    bull_state_prev = State.WATCH
+
+    # Current pending zone being built
+    pending_bear: dict = {}
+    pending_bull: dict = {}
+
+    for _, bar in htf.iterrows():
+        ts    = bar["datetime"]
+        o, h, l, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
+
+        # ── BEAR detector (sellers enter below candle low) ──
+        bear_det.on_candle({"high": h, "low": l})
+        lvl = bear_det.active_level
+        if lvl:
+            # New reference candle registered
+            if bear_det.state == State.WATCH:
+                pending_bear = {
+                    "kind":       "BEAR",
+                    "zone_low":   round(lvl.entry_l, 1),
+                    "zone_high":  round(lvl.sl_h, 1),
+                    "candle_dt":  _fmt(ts),
+                    "sellers_in": "",
+                    "trapped":    "",
+                    "entry_ready":"",
+                    "status":     "WATCH",
+                }
+
+        # Feed tick = candle close to advance state
+        prev_state = bear_det.state
+        bear_det.on_tick(c)
+        new_state = bear_det.state
+
+        if pending_bear:
+            pending_bear["zone_low"]  = round(bear_det.active_level.entry_l, 1) if bear_det.active_level else pending_bear["zone_low"]
+            pending_bear["zone_high"] = round(bear_det.active_level.sl_h, 1) if bear_det.active_level else pending_bear["zone_high"]
+            if new_state == State.SELLERS_IN and prev_state == State.WATCH:
+                pending_bear["sellers_in"] = _fmt(ts)
+                pending_bear["status"]     = "SELLERS_IN"
+            elif new_state == State.TRAPPED and prev_state == State.SELLERS_IN:
+                pending_bear["trapped"] = _fmt(ts)
+                pending_bear["status"]  = "TRAPPED"
+                # Trap confirmed — record it
+                zone_rows.append(dict(pending_bear))
+            elif new_state == State.ENTRY_READY and prev_state == State.TRAPPED:
+                # Update the already-recorded row
+                for r in zone_rows:
+                    if r["kind"]=="BEAR" and r["trapped"]==pending_bear["trapped"]:
+                        r["entry_ready"] = _fmt(ts)
+                        r["status"] = "ENTRY_READY"
+                pending_bear["status"] = "ENTRY_READY"
+
+        # ── BULL detector (buyers enter above candle high, fail below candle low) ──
+        # Invert: treat -high as "low" and -low as "high" so same detector logic applies
+        bull_det.on_candle({"high": -l, "low": -h})
+        blvl = bull_det.active_level
+        if blvl and bull_det.state == State.WATCH:
+            pending_bull = {
+                "kind":       "BULL",
+                "zone_low":   round(l, 1),
+                "zone_high":  round(h, 1),
+                "candle_dt":  _fmt(ts),
+                "sellers_in": "",   # = buyers_in for BULL
+                "trapped":    "",
+                "entry_ready":"",
+                "status":     "WATCH",
+            }
+
+        prev_bstate = bull_det.state
+        bull_det.on_tick(-c)
+        new_bstate = bull_det.state
+
+        if pending_bull:
+            if new_bstate == State.SELLERS_IN and prev_bstate == State.WATCH:
+                pending_bull["sellers_in"] = _fmt(ts)
+                pending_bull["status"]     = "BUYERS_IN"
+            elif new_bstate == State.TRAPPED and prev_bstate == State.SELLERS_IN:
+                pending_bull["trapped"] = _fmt(ts)
+                pending_bull["status"]  = "TRAPPED"
+                zone_rows.append(dict(pending_bull))
+            elif new_bstate == State.ENTRY_READY and prev_bstate == State.TRAPPED:
+                for r in zone_rows:
+                    if r["kind"]=="BULL" and r["trapped"]==pending_bull["trapped"]:
+                        r["entry_ready"] = _fmt(ts)
+                        r["status"] = "ENTRY_READY"
+                pending_bull["status"] = "ENTRY_READY"
+
+    # Sort by candle_dt
+    zone_rows.sort(key=lambda r: r.get("candle_dt", ""))
 
     return {
         "ok":         True,

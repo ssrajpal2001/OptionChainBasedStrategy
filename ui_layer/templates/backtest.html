@@ -662,20 +662,28 @@ function backtestApp() {
       const wrap = document.getElementById('zone-tbody-wrap')
       if (!wrap) return
       let html = `<table class="bt-table"><thead><tr>
-        <th>FORMED DATE</th><th>FORMED TIME</th><th>KIND</th>
-        <th>ZONE LOW</th><th>ZONE HIGH</th><th>WIDTH</th><th>STATUS</th>
+        <th>KIND</th>
+        <th>ZONE LOW</th><th>ZONE HIGH</th>
+        <th>① REFERENCE CANDLE</th>
+        <th>② SELLERS/BUYERS IN</th>
+        <th>③ TRAPPED</th>
+        <th>④ ENTRY READY</th>
+        <th>STATUS</th>
       </tr></thead><tbody>`
       for (const z of this.zones) {
-        const cls = z.kind==='BEAR'?'tag-ce':'tag-pe'
-        const lbl = z.kind==='BEAR'?'BEAR (BUY)':'BULL (SELL)'
+        const cls   = z.kind==='BEAR'?'tag-ce':'tag-pe'
+        const lbl   = z.kind==='BEAR'?'BEAR → BUY':'BULL → SELL'
+        const sin   = z.kind==='BEAR'?'SELLERS IN':'BUYERS IN'
+        const stCls = z.status==='ENTRY_READY'?'tag-t1':z.status==='TRAPPED'?'tag-htf':'tag-eod'
         html += `<tr>
-          <td class="font-mono text-xs text-t-muted">${z.date}</td>
-          <td class="font-mono text-xs font-bold">${z.time}</td>
           <td><span class="tag ${cls} text-xs">${lbl}</span></td>
-          <td class="font-mono text-xs text-t-red">${z.zone_low}</td>
-          <td class="font-mono text-xs text-t-green">${z.zone_high}</td>
-          <td class="font-mono text-xs text-t-muted">${z.width}</td>
-          <td><span class="tag tag-t1 text-xs">${z.status}</span></td>
+          <td class="font-mono text-xs text-t-red font-bold">${z.zone_low}</td>
+          <td class="font-mono text-xs text-t-green font-bold">${z.zone_high}</td>
+          <td class="font-mono text-xs text-t-muted">${z.candle_dt||'-'}</td>
+          <td class="font-mono text-xs text-t-amber">${z.sellers_in ? '⬇ '+z.sellers_in : '-'}</td>
+          <td class="font-mono text-xs text-t-red">${z.trapped ? '🔒 '+z.trapped : '-'}</td>
+          <td class="font-mono text-xs text-t-cyan">${z.entry_ready ? '✓ '+z.entry_ready : '-'}</td>
+          <td><span class="tag ${stCls} text-xs">${z.status}</span></td>
         </tr>`
       }
       html += '</tbody></table>'
