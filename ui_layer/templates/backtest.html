@@ -338,18 +338,20 @@
               <thead>
                 <tr>
                   <th>DATE</th>
-                  <th>ENTRY</th>
+                  <th>HTF TOUCH</th>
+                  <th>LTF ENTRY</th>
                   <th>EXIT</th>
                   <th>DIR</th>
                   <th>LTF</th>
-                  <th>TRAP</th>
-                  <th>ZONE SRC</th>
-                  <th>ZONE</th>
+                  <th>TRAP#</th>
+                  <th>SRC</th>
+                  <th>ZONE LOW</th>
+                  <th>ZONE HIGH</th>
                   <th>ENTRY Rs</th>
                   <th>EXIT Rs</th>
                   <th>SL</th>
                   <th>T1</th>
-                  <th>RESULT</th>
+                  <th>EXIT TYPE</th>
                   <th>P&L PTS</th>
                   <th>P&L Rs</th>
                   <th>GAP</th>
@@ -358,17 +360,19 @@
               <tbody>
                 <template x-for="t in filteredTrades" :key="t.date+t.entry_ts+t.direction">
                   <tr>
-                    <td class="text-t-muted" x-text="t.date"></td>
-                    <td x-text="t.entry_ts"></td>
-                    <td x-text="t.exit_ts"></td>
+                    <td class="text-t-muted font-mono text-xs" x-text="t.date"></td>
+                    <td class="font-mono text-xs" x-text="t.htf_touch || t.entry_ts"></td>
+                    <td class="font-mono text-xs" :class="t.trap_entry!=='IMMEDIATE'?'text-t-cyan':'text-t-muted'" x-text="t.entry_ts"></td>
+                    <td class="font-mono text-xs" x-text="t.exit_ts"></td>
                     <td><span class="tag" :class="t.direction==='CE'?'tag-ce':'tag-pe'" x-text="t.direction"></span></td>
-                    <td class="font-mono text-xs" x-text="t.ltf || '-'"></td>
+                    <td class="font-mono text-xs font-bold" x-text="t.ltf || '-'"></td>
                     <td><span class="tag text-xs"
                           :class="t.trap_entry==='FIRST'?'tag-ce':t.trap_entry==='LAST'?'tag-pe':t.trap_entry==='MIDDLE'?'tag-htf':'tag-cas'"
                           x-text="t.trap_entry || '-'"></span></td>
                     <td><span class="tag" :class="t.zone_src==='HTF'?'tag-htf':'tag-cas'" x-text="t.zone_src"></span></td>
-                    <td class="font-mono text-xs text-t-muted" x-text="t.zone"></td>
-                    <td class="font-mono" x-text="t.entry"></td>
+                    <td class="font-mono text-xs text-t-red" x-text="t.zone_low"></td>
+                    <td class="font-mono text-xs text-t-green" x-text="t.zone_high"></td>
+                    <td class="font-mono font-bold" x-text="t.entry"></td>
                     <td class="font-mono" x-text="t.exit"></td>
                     <td class="font-mono text-t-red text-xs" x-text="t.sl"></td>
                     <td class="font-mono text-t-green text-xs" x-text="t.t1"></td>

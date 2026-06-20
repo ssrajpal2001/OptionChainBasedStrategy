@@ -316,25 +316,29 @@ def _run_day(
         reason, exit_p, exit_ts = _simulate_exit(entry_ts, entry_p, sl_p, t1_p, kind)
         pnl_pts = (exit_p - entry_p) if kind == "BEAR" else (entry_p - exit_p)
         trades.append({
-            "date":       trade_date,
-            "entry_ts":   _ts_fmt(entry_ts),
-            "exit_ts":    _ts_fmt(exit_ts),
-            "direction":  "CE" if kind == "BEAR" else "PE",
-            "kind":       kind,
-            "zone":       f"{zone.get('zone_low',0):.0f}→{zone.get('zone_high',0):.0f}",
-            "zone_src":   zone_src,
-            "gap":        gap_label,
-            "entry":      round(entry_p, 1),
-            "exit":       round(exit_p, 1),
-            "sl":         round(sl_p, 1),
-            "t1":         round(t1_p, 1),
-            "t1_hit":     reason == "T1",
-            "reason":     reason,
-            "ltf":        ltf_label,
-            "trap_entry": trap_label,
-            "pnl_pts":    round(pnl_pts, 1),
-            "pnl_rs":     round(pnl_pts * lot_size, 0),
-            "combo":      f"{combo}+{ltf_label}+{trap_label}",
+            "date":        trade_date,
+            "htf_touch":   _ts_fmt(touch_ts),      # when price entered HTF zone
+            "entry_ts":    _ts_fmt(entry_ts),       # actual entry (after LTF confirmation)
+            "exit_ts":     _ts_fmt(exit_ts),
+            "direction":   "CE" if kind == "BEAR" else "PE",
+            "kind":        kind,
+            "zone_low":    round(zone.get("zone_low", 0), 1),
+            "zone_high":   round(zone.get("zone_high", 0), 1),
+            "zone":        f"{zone.get('zone_low',0):.0f}→{zone.get('zone_high',0):.0f}",
+            "zone_src":    zone_src,
+            "gap":         gap_label,
+            "entry":       round(entry_p, 1),
+            "exit":        round(exit_p, 1),
+            "sl":          round(sl_p, 1),
+            "t1":          round(t1_p, 1),
+            "t1_hit":      reason == "T1",
+            "reason":      reason,
+            "ltf":         ltf_label,
+            "trap_entry":  trap_label,
+            "pnl_pts":     round(pnl_pts, 1),
+            "pnl_rs":      round(pnl_pts * lot_size, 0),
+            "combo":       f"{combo}+{ltf_label}+{trap_label}",
+            "exit_method": "SL+T1+EOD",   # exits currently implemented
         })
 
     # Track which (kind, zone_uid, ltf, trap) combos already recorded
