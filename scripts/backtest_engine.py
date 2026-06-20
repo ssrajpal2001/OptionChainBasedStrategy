@@ -729,6 +729,83 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     }
 
 
+def run_zone_debug(params: dict, token: str) -> dict:
+    """
+    For a given trade_date, show ALL HTF zones detected from the 10-day lookback.
+    Returns a table: formation_date, formation_time, kind, zone_low, zone_high, status, bar_index
+    So user can cross-check against chart.
+    """
+    global _HEADERS
+    _HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    trade_date = params.get("trade_date", "")
+    htf_min    = int(params.get("htf_min_zone", 60))
+    fut_key    = str(params.get("fut_key", "MCX_FO|520702"))
+    LOOKBACK_DAYS = 10
+
+    if not trade_date:
+        return {"ok": False, "error": "trade_date required"}
+
+    def _lookback_dates(td: str, n: int) -> list[str]:
+        result = []
+        d = date.fromisoformat(td) - timedelta(days=1)
+        while len(result) < n:
+            if d.weekday() < 5:
+                result.append(d.isoformat())
+            d -= timedelta(days=1)
+        return list(reversed(result))
+
+    lb_dates = _lookback_dates(trade_date, LOOKBACK_DAYS)
+    lb_frames = []
+    for lb_dt in lb_dates:
+        df = fetch_1m(fut_key, lb_dt)
+        time.sleep(0.2)
+        if not df.empty:
+            lb_frames.append(df)
+
+    if not lb_frames:
+        return {"ok": False, "error": "No lookback data"}
+
+    lookback_df = pd.concat(lb_frames, ignore_index=True).sort_values("datetime").reset_index(drop=True)
+
+    # Resample to HTF and scan — but keep track of which HTF bar each zone came from
+    htf = resample(lookback_df, htf_min)
+    _, zones = scanner.scan_htf_spot(htf)
+
+    zone_rows = []
+    for z in zones:
+        zl    = z.get("zone_low", 0)
+        zh    = z.get("zone_high", 0)
+        kind  = z.get("kind", "")
+        status= z.get("status", "")
+        # Find the HTF bar closest to zone center
+        center = (zl + zh) / 2
+        diffs  = (htf["close"] - center).abs()
+        closest_idx = diffs.idxmin()
+        closest_bar = htf.loc[closest_idx]
+        bar_dt = closest_bar["datetime"]
+        zone_rows.append({
+            "date":      bar_dt.strftime("%Y-%m-%d") if hasattr(bar_dt, "strftime") else str(bar_dt)[:10],
+            "time":      bar_dt.strftime("%H:%M")    if hasattr(bar_dt, "strftime") else str(bar_dt)[11:16],
+            "kind":      kind,
+            "zone_low":  round(zl, 1),
+            "zone_high": round(zh, 1),
+            "status":    status,
+            "width":     round(zh - zl, 1),
+        })
+
+    # Sort by date+time
+    zone_rows.sort(key=lambda r: (r["date"], r["time"]))
+
+    return {
+        "ok":         True,
+        "trade_date": trade_date,
+        "lookback":   lb_dates,
+        "htf_min":    htf_min,
+        "zones":      zone_rows,
+    }
+
+
 if __name__ == "__main__":
     import argparse, sqlite3, json
     parser = argparse.ArgumentParser()

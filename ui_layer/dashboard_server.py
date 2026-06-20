@@ -5405,6 +5405,33 @@ class DashboardServer:
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
+        @app.post("/api/backtest/zones", tags=["Backtest"])
+        async def backtest_zone_debug(params: _BacktestCrudeSchema):
+            """Show every HTF zone detected from 10-day lookback for a given trade_date."""
+            try:
+                token = params.token
+                if not token:
+                    creds = await asyncio.to_thread(
+                        _srv._client_db.get_feeder_creds_sync, "upstox"
+                    )
+                    token = (creds or {}).get("access_token", "")
+                if not token:
+                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
+                import sys as _sys, os as _os
+                _scripts = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "scripts")
+                if _scripts not in _sys.path:
+                    _sys.path.insert(0, _scripts)
+                from backtest_engine import run_zone_debug as _zdbg
+                p = params.dict(exclude={"token"})
+                p["trade_date"] = p.get("start_date") or ""
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_zdbg, p, token),
+                    timeout=300.0,
+                )
+                return result
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
         @app.post("/api/backtest/crude", tags=["Backtest"])
         async def run_crude_backtest_api(params: _BacktestCrudeSchema):
             try:

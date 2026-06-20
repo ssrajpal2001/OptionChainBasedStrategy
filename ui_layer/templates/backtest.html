@@ -244,6 +244,13 @@
         <input type="text" class="t-input font-mono text-xs" x-model="futKey" />
       </div>
 
+      <!-- Zone debug — show all HTF traps from 10-day lookback for a single day -->
+      <button class="w-full py-2 rounded border border-t-cyan text-t-cyan text-xs font-bold tracking-widest hover:bg-cyan-50 transition-colors mt-1"
+              @click="runZoneDebug"
+              :disabled="running || !tokenOk || !startDate">
+        🔍 SHOW 1HR TRAPS (use single date)
+      </button>
+
       <button class="btn-primary mt-2"
               @click="runBacktest"
               :disabled="running || !tokenOk">
@@ -261,6 +268,42 @@
 
     <!-- ── RIGHT: Results ─────────────────────────────────────────────────── -->
     <div class="flex-1 p-5 flex flex-col gap-5" style="overflow-y: auto; min-height: 0;">
+
+      <!-- Zone debug table -->
+      <div x-show="zones && zones.length" class="t-card overflow-hidden" id="zone-table">
+        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
+          <p class="sec-label">1HR HTF TRAPS FROM 10-DAY LOOKBACK — <span x-text="zoneDate" class="text-t-cyan font-mono"></span></p>
+          <span class="text-xs text-t-muted" x-text="zones.length + ' zones'"></span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="bt-table">
+            <thead>
+              <tr>
+                <th>FORMED DATE</th>
+                <th>FORMED TIME</th>
+                <th>KIND</th>
+                <th>ZONE LOW</th>
+                <th>ZONE HIGH</th>
+                <th>WIDTH</th>
+                <th>STATUS</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="z in zones" :key="z.date+z.time+z.zone_low">
+                <tr>
+                  <td class="font-mono text-xs text-t-muted" x-text="z.date"></td>
+                  <td class="font-mono text-xs font-bold" x-text="z.time"></td>
+                  <td><span class="tag" :class="z.kind==='BEAR'?'tag-ce':'tag-pe'" x-text="z.kind==='BEAR'?'BEAR (BUY)':'BULL (SELL)'"></span></td>
+                  <td class="font-mono text-xs text-t-red" x-text="z.zone_low"></td>
+                  <td class="font-mono text-xs text-t-green" x-text="z.zone_high"></td>
+                  <td class="font-mono text-xs text-t-muted" x-text="z.width"></td>
+                  <td><span class="tag tag-t1 text-xs" x-text="z.status"></span></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
 
       <!-- Summary cards -->
       <div x-show="summary">
@@ -463,6 +506,10 @@ function backtestApp() {
     startDate:   '',
     endDate:     '',
 
+    // zone debug
+    zones:    [],
+    zoneDate: '',
+
     // state
     running: false,
     ran:     false,
@@ -514,6 +561,32 @@ function backtestApp() {
       if (c.includes('GAP') && c.includes('NO_ZONE')) return 'text-t-amber'
       if (c.includes('NO_GAP') && c.includes('HTF')) return 'text-t-green'
       return 'text-t-muted'
+    },
+
+    async runZoneDebug() {
+      if (!this.startDate) { this.error = 'Set a From date first'; return }
+      this.running = true; this.error = ''; this.zones = []; this.zoneDate = ''
+      try {
+        const res = await fetch('/api/backtest/zones', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            token:        this.token,
+            start_date:   this.startDate,
+            end_date:     this.startDate,
+            htf_min_zone: parseInt(this.htfZone),
+            fut_key:      this.futKey,
+            days: 1, lots: 1, gap_threshold: 0.003,
+            htf_min_cascade: 30, sl_buf: 20, combo: 'all',
+          })
+        })
+        const data = await res.json()
+        if (!data.ok) { this.error = data.error || 'Zone debug error'; return }
+        this.zones    = data.zones || []
+        this.zoneDate = data.trade_date || this.startDate
+        this.$nextTick(() => document.getElementById('zone-table')?.scrollIntoView({behavior:'smooth'}))
+      } catch(e) { this.error = e.message }
+      finally { this.running = false }
     },
 
     async runBacktest() {
