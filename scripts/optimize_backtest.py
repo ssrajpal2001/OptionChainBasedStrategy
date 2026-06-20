@@ -38,7 +38,10 @@ FIXED = {
     "max_age_days":    5,
     "ltf_source":      "futures",
     "itm_offset":      300,
-    "combo_filter":    "all",
+    # Force GAP+NO_ZONE only — when gap_threshold > day's actual gap%,
+    # that day becomes NO_GAP and the HTF-zone path runs (slow + not our strategy).
+    # Locking to GAP+NO_ZONE makes non-gap days return instantly → 10× faster.
+    "combo_filter":    "gap+no_zone",
     "fut_key":         "MCX_FO|520702",
     "require_gap":     True,
 }
