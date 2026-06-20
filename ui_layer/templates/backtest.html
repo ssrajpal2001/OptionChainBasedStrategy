@@ -354,7 +354,11 @@
 
       <!-- Summary cards -->
       <div x-show="summary">
-          <p class="sec-label mb-3">SUMMARY — <span x-text="period"></span></p>
+          <p class="sec-label mb-3">SUMMARY — <span x-text="period"></span>
+            <span x-show="batchRows.length" class="ml-3 px-2 py-0.5 rounded text-xs font-bold bg-amber-500/20 text-t-amber border border-amber-500/40">
+              ⚡ BATCH LOADED: <span x-text="batchRows.length"></span> WIDTHS ↓ scroll down
+            </span>
+          </p>
           <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
             <div class="stat-card">
               <p class="sec-label mb-1">TRADES</p>
@@ -814,7 +818,9 @@ function backtestApp() {
         })
         clearTimeout(tid)
         const data = await res.json()
+        console.log('BATCH RESPONSE:', data.ok, 'results:', (data.results||[]).length, data.error||'')
         if (!data.ok) { this.error = data.error || 'Batch failed'; return }
+        if (!data.results || data.results.length === 0) { this.error = 'Batch returned 0 results — check server logs'; return }
         this.batchRows = (data.results || []).map(r => {
           const s = r.summary || {}
           return {
