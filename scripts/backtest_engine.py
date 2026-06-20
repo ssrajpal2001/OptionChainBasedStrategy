@@ -429,6 +429,7 @@ def _run_day(
             return _exit_result("T1+EOD", entry_p, t1_price, t1_ts, tsl_p, sq_time, lot_size, kind, t2_p)
 
         acc_rows: list = []
+        _tsl_pending: dict = {}   # uid → zone at ENTRY_READY, waiting for price to re-hit t1
 
         for _, fb in after_t1.iterrows():
             fts    = fb["datetime"]
@@ -455,23 +456,42 @@ def _run_day(
                 tsl_p, tsl_ts, exit2_reason = fclose, fts, "T1+TSL"
                 break
 
-            # Every ltf_min*2 rows, scan for fresh LTF zones ABOVE entry → update TSL
+            # Zone-based TSL — full 5-step cycle:
+            # ① SELLERS_IN  ② TRAPPED  ③ ENTRY_READY  ④ price re-hits C1.high
+            # → ONLY at step ④ TSL jumps to zone_low (C2.low)
+            # pending_tsl_zones: zones at ENTRY_READY, waiting for price to re-hit t1
             if len(acc_rows) >= ltf_min * 2:
                 try:
                     acc_df   = pd.DataFrame(acc_rows)
                     ltf_bars = resample(acc_df, ltf_min)
                     if len(ltf_bars) >= 3:
                         for z in scan_zones_consecutive(ltf_bars):
-                            if z["kind"] != kind or z["status"] != "ENTRY_READY":
+                            if z["kind"] != kind:
                                 continue
-                            if kind == "BEAR" and z["zone_low"] > entry_p:
-                                if z["zone_low"] > tsl:
-                                    tsl = z["zone_low"]
-                            elif kind == "BULL" and z["zone_high"] < entry_p:
-                                if z["zone_high"] < tsl:
-                                    tsl = z["zone_high"]
+                            if z["status"] != "ENTRY_READY":
+                                continue
+                            # Zone must be above our entry
+                            if kind == "BEAR" and z["zone_low"] <= entry_p:
+                                continue
+                            if kind == "BULL" and z["zone_high"] >= entry_p:
+                                continue
+                            uid = f"{z['zone_low']:.1f}_{z['zone_high']:.1f}"
+                            if uid not in _tsl_pending:
+                                _tsl_pending[uid] = z  # register for step ④ check
                 except Exception:
                     pass
+
+            # Step ④: for each pending zone, check if price re-hit t1 (C1.high for BEAR)
+            for uid, z in list(_tsl_pending.items()):
+                z_t1 = z.get("t1", 0)
+                re_hit = (fhi >= z_t1) if kind == "BEAR" else (flo <= z_t1)
+                if re_hit:
+                    new_tsl = z["zone_low"] if kind == "BEAR" else z["zone_high"]
+                    if kind == "BEAR" and new_tsl > tsl:
+                        tsl = new_tsl
+                    elif kind == "BULL" and new_tsl < tsl:
+                        tsl = new_tsl
+                    del _tsl_pending[uid]
         else:
             ob = today_df[today_df["datetime"] <= sq_time]
             tsl_p     = float(ob.iloc[-1]["close"]) if not ob.empty else t1_price
