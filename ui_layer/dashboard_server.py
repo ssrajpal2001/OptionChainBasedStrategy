@@ -385,11 +385,23 @@ try:
         opt_type:     str = "CE"
         qty:          int = 1                # in lots (1 lot = exchange lot_size)
 
+    class _BacktestCrudeSchema(_PydanticBase):
+        token:           str
+        days:            int   = 7
+        lots:            int   = 2
+        gap_threshold:   float = 0.003
+        htf_min_zone:    int   = 60
+        htf_min_cascade: int   = 30
+        sl_buf:          float = 20.0
+        combo:           str   = "all"
+        fut_key:         str   = "MCX_FO|520702"
+
 except ImportError:
     _HAS_FASTAPI = False
 
 _TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
-_MONITOR_HTML = os.path.join(_TEMPLATE_DIR, "monitor.html")
+_MONITOR_HTML  = os.path.join(_TEMPLATE_DIR, "monitor.html")
+_BACKTEST_HTML = os.path.join(_TEMPLATE_DIR, "backtest.html")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Historical replay helpers  (pure functions — no I/O, no imports at module level)
@@ -716,6 +728,12 @@ class DashboardServer:
                     status_code=503,
                 )
             return FileResponse(_MONITOR_HTML, media_type="text/html")
+
+        @app.get("/backtest", include_in_schema=False)
+        async def backtest_ui():
+            if not os.path.exists(_BACKTEST_HTML):
+                return HTMLResponse("<h1>backtest.html not found</h1>", status_code=503)
+            return FileResponse(_BACKTEST_HTML, media_type="text/html")
 
         # ── PUBLIC — Authentication ───────────────────────────────────────────
 
@@ -5368,6 +5386,24 @@ class DashboardServer:
             cid = user.get("client_id") or user.get("username")
             books = [b for b in mgr.telemetry_all() if b.get("client_id") == cid]
             return {"ok": True, "books": books}
+
+        # ── Backtest ──────────────────────────────────────────────────────────
+
+        @app.post("/api/backtest/crude", tags=["Backtest"])
+        async def run_crude_backtest_api(params: _BacktestCrudeSchema):
+            try:
+                import sys as _sys
+                import os as _os
+                _scripts = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "scripts")
+                if _scripts not in _sys.path:
+                    _sys.path.insert(0, _scripts)
+                from backtest_engine import run_crude_backtest as _run
+                result = await asyncio.to_thread(
+                    _run, params.dict(exclude={"token"}), params.token
+                )
+                return result
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
 
         return app
 

@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CrudeOil Backtest — AlgoTrader</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono:    ['JetBrains Mono', 'monospace'],
+            display: ['Plus Jakarta Sans', 'sans-serif'],
+            ui:      ['Plus Jakarta Sans', 'sans-serif'],
+          },
+          colors: {
+            t: {
+              bg:      'var(--t-bg)',
+              surface: 'var(--t-surface)',
+              card:    'var(--t-card)',
+              border:  'var(--t-border)',
+              dim:     'var(--t-dim)',
+              cyan:    'var(--t-cyan)',
+              green:   'var(--t-green)',
+              red:     'var(--t-red)',
+              amber:   'var(--t-amber)',
+              muted:   'var(--t-muted)',
+              text:    'var(--t-text)',
+              bright:  'var(--t-bright)',
+            }
+          },
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --t-bg:       #0d0d0f;
+      --t-surface:  #141417;
+      --t-card:     #1a1a1f;
+      --t-border:   #2a2a32;
+      --t-dim:      #35353f;
+      --t-cyan:     #00d4ff;
+      --t-green:    #00e676;
+      --t-red:      #ff4757;
+      --t-amber:    #ffa726;
+      --t-muted:    #6b7280;
+      --t-text:     #c8cdd8;
+      --t-bright:   #f0f2f5;
+      --t-cyan-rgb:  0, 212, 255;
+      --t-green-rgb: 0, 230, 118;
+      --t-red-rgb:   255, 71, 87;
+      --t-amber-rgb: 255, 167, 38;
+    }
+
+    [x-cloak] { display: none !important; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background-color: var(--t-bg);
+      color: var(--t-text);
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 14px;
+    }
+
+    .t-card {
+      background: var(--t-card);
+      border: 1px solid var(--t-border);
+      border-radius: 10px;
+    }
+    .sec-label {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--t-muted);
+    }
+    .t-input {
+      font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px;
+      background: var(--t-surface); border: 1px solid var(--t-border);
+      color: var(--t-bright); padding: 7px 10px; border-radius: 6px; width: 100%;
+      outline: none; transition: border-color 0.15s;
+    }
+    .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.5); box-shadow: 0 0 0 3px rgba(var(--t-cyan-rgb),0.10); }
+    .t-input option { background: var(--t-card); color: var(--t-bright); }
+    .btn-primary {
+      font-size: 13px; font-weight: 700; letter-spacing: 0.04em;
+      padding: 10px 24px; border-radius: 7px;
+      background: var(--t-cyan); border: none;
+      color: #000; cursor: pointer; transition: all 0.15s; width: 100%;
+    }
+    .btn-primary:hover { opacity: 0.85; box-shadow: 0 0 18px rgba(var(--t-cyan-rgb),0.35); }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* combo radio pills */
+    .combo-pill input[type=radio] { display: none; }
+    .combo-pill label {
+      display: block; cursor: pointer; padding: 7px 12px;
+      border: 1px solid var(--t-border); border-radius: 6px;
+      font-size: 12px; font-weight: 600; color: var(--t-muted);
+      transition: all 0.15s; text-align: center;
+    }
+    .combo-pill input[type=radio]:checked + label {
+      border-color: var(--t-cyan); color: var(--t-cyan);
+      background: rgba(var(--t-cyan-rgb),0.08);
+    }
+    .combo-pill label:hover { border-color: rgba(var(--t-cyan-rgb),0.4); color: var(--t-text); }
+
+    /* trade table */
+    .bt-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+    .bt-table th { padding: 8px 10px; text-align: left; color: var(--t-muted); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--t-border); }
+    .bt-table td { padding: 7px 10px; border-bottom: 1px solid rgba(42,42,50,0.6); white-space: nowrap; }
+    .bt-table tr:last-child td { border-bottom: none; }
+    .bt-table tr:hover td { background: rgba(var(--t-cyan-rgb),0.03); }
+
+    .pnl-win  { color: var(--t-green); font-weight: 600; }
+    .pnl-loss { color: var(--t-red);   font-weight: 600; }
+    .tag {
+      display: inline-block; padding: 2px 7px; border-radius: 4px;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+    }
+    .tag-ce  { background: rgba(var(--t-green-rgb),0.12); color: var(--t-green); }
+    .tag-pe  { background: rgba(var(--t-red-rgb),0.12);   color: var(--t-red);   }
+    .tag-htf { background: rgba(var(--t-cyan-rgb),0.12);  color: var(--t-cyan);  }
+    .tag-cas { background: rgba(var(--t-amber-rgb),0.12); color: var(--t-amber); }
+    .tag-t1  { background: rgba(var(--t-green-rgb),0.15); color: var(--t-green); }
+    .tag-sl  { background: rgba(var(--t-red-rgb),0.15);   color: var(--t-red);   }
+    .tag-eod { background: rgba(42,42,50,0.8);            color: var(--t-muted); }
+
+    /* summary card */
+    .stat-card { background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 8px; padding: 14px 16px; }
+    .stat-val  { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700; }
+
+    /* log */
+    .log-box { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--t-muted); background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 6px; padding: 10px 12px; max-height: 160px; overflow-y: auto; white-space: pre-wrap; }
+
+    /* scrollbar */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--t-dim); border-radius: 4px; }
+  </style>
+</head>
+
+<body x-data="backtestApp()" x-cloak>
+
+  <!-- Header -->
+  <div class="flex items-center justify-between px-6 py-3 border-b border-t-border" style="background:var(--t-surface)">
+    <div class="flex items-center gap-3">
+      <a href="/" class="text-t-muted hover:text-t-cyan transition-colors text-sm">← Dashboard</a>
+      <span class="text-t-dim">|</span>
+      <span class="font-mono text-xs text-t-cyan font-bold tracking-widest">CRUDEOIL BACKTEST</span>
+    </div>
+    <div class="text-xs text-t-muted font-mono" x-text="period || 'no run yet'"></div>
+  </div>
+
+  <div class="flex h-full" style="min-height: calc(100vh - 49px)">
+
+    <!-- ── LEFT: Controls ─────────────────────────────────────────────────── -->
+    <div class="w-72 flex-shrink-0 border-r border-t-border p-4 flex flex-col gap-4 overflow-y-auto" style="background:var(--t-surface)">
+
+      <div>
+        <p class="sec-label mb-3">Upstox Token</p>
+        <input type="password" class="t-input" x-model="token" placeholder="Bearer token…" autocomplete="off" />
+        <p class="text-xs text-t-muted mt-1">Stored in session only — never sent to server in logs</p>
+      </div>
+
+      <div>
+        <p class="sec-label mb-2">Trading Days: <span class="text-t-cyan font-mono" x-text="days"></span></p>
+        <input type="range" min="3" max="30" step="1" x-model="days" class="w-full accent-cyan-400" />
+        <div class="flex justify-between text-xs text-t-muted mt-1"><span>3</span><span>30</span></div>
+      </div>
+
+      <div>
+        <p class="sec-label mb-2">Combo Filter</p>
+        <div class="grid grid-cols-1 gap-1.5">
+          <template x-for="opt in comboOptions" :key="opt.val">
+            <div class="combo-pill">
+              <input type="radio" :id="'c_'+opt.val" :value="opt.val" x-model="combo" />
+              <label :for="'c_'+opt.val" x-text="opt.label"></label>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <p class="sec-label mb-1.5">HTF Zone (min)</p>
+          <select class="t-input" x-model="htfZone">
+            <option value="45">45</option>
+            <option value="60" selected>60</option>
+            <option value="90">90</option>
+            <option value="120">120</option>
+          </select>
+        </div>
+        <div>
+          <p class="sec-label mb-1.5">Cascade (min)</p>
+          <select class="t-input" x-model="htfCascade">
+            <option value="15">15</option>
+            <option value="30" selected>30</option>
+            <option value="60">60</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <p class="sec-label mb-1.5">Gap % Threshold</p>
+          <input type="number" class="t-input" x-model="gapPct" step="0.1" min="0.1" max="2" />
+        </div>
+        <div>
+          <p class="sec-label mb-1.5">SL Buffer (Rs)</p>
+          <input type="number" class="t-input" x-model="slBuf" step="5" min="5" max="100" />
+        </div>
+      </div>
+
+      <div>
+        <p class="sec-label mb-1.5">Lots</p>
+        <input type="number" class="t-input" x-model="lots" step="1" min="1" max="50" />
+      </div>
+
+      <div>
+        <p class="sec-label mb-1.5">Futures Key</p>
+        <input type="text" class="t-input font-mono text-xs" x-model="futKey" />
+      </div>
+
+      <button class="btn-primary mt-2"
+              @click="runBacktest"
+              :disabled="running || !token">
+        <span x-show="!running">▶ RUN BACKTEST</span>
+        <span x-show="running" class="flex items-center justify-center gap-2">
+          <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+          </svg>
+          RUNNING…
+        </span>
+      </button>
+
+      <div x-show="error" class="text-t-red text-xs font-mono p-2 rounded border border-t-red/30 bg-red-950/20" x-text="error"></div>
+    </div>
+
+    <!-- ── RIGHT: Results ─────────────────────────────────────────────────── -->
+    <div class="flex-1 overflow-y-auto p-5 flex flex-col gap-5">
+
+      <!-- Summary cards -->
+      <template x-if="summary">
+        <div>
+          <p class="sec-label mb-3">SUMMARY — <span x-text="period"></span></p>
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+            <div class="stat-card">
+              <p class="sec-label mb-1">TRADES</p>
+              <p class="stat-val text-t-bright" x-text="summary.count"></p>
+            </div>
+            <div class="stat-card">
+              <p class="sec-label mb-1">WIN %</p>
+              <p class="stat-val" :class="summary.win_pct>=50?'text-t-green':'text-t-red'" x-text="summary.win_pct+'%'"></p>
+            </div>
+            <div class="stat-card">
+              <p class="sec-label mb-1">TOTAL P&L</p>
+              <p class="stat-val" :class="summary.total_rs>=0?'text-t-green':'text-t-red'"
+                 x-text="'Rs '+(summary.total_rs>=0?'+':'')+summary.total_rs.toLocaleString()"></p>
+            </div>
+            <div class="stat-card">
+              <p class="sec-label mb-1">AVG WIN</p>
+              <p class="stat-val text-t-green" x-text="'Rs +'+(summary.avg_win||0).toLocaleString()"></p>
+            </div>
+            <div class="stat-card">
+              <p class="sec-label mb-1">AVG LOSS</p>
+              <p class="stat-val text-t-red" x-text="'Rs '+(summary.avg_loss||0).toLocaleString()"></p>
+            </div>
+          </div>
+
+          <!-- Per-combo table -->
+          <div class="t-card overflow-hidden mb-4">
+            <div class="px-4 py-3 border-b border-t-border">
+              <p class="sec-label">BY COMBINATION</p>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="bt-table">
+                <thead>
+                  <tr>
+                    <th>COMBO</th>
+                    <th>TRADES</th>
+                    <th>W</th>
+                    <th>L</th>
+                    <th>WIN%</th>
+                    <th>TOTAL P&L</th>
+                    <th>AVG WIN</th>
+                    <th>AVG LOSS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="[combo, s] in Object.entries(byCombo)" :key="combo">
+                    <tr>
+                      <td>
+                        <span class="font-mono text-xs" :class="comboColor(combo)" x-text="combo"></span>
+                      </td>
+                      <td x-text="s.count"></td>
+                      <td class="text-t-green" x-text="s.wins"></td>
+                      <td class="text-t-red" x-text="s.losses"></td>
+                      <td :class="s.win_pct>=50?'text-t-green':'text-t-red'" x-text="s.win_pct+'%'"></td>
+                      <td :class="s.total_rs>=0?'pnl-win':'pnl-loss'"
+                          x-text="'Rs '+(s.total_rs>=0?'+':'')+s.total_rs.toLocaleString()"></td>
+                      <td class="text-t-green" x-text="s.avg_win?'Rs +'+s.avg_win.toLocaleString():'-'"></td>
+                      <td class="text-t-red"  x-text="s.avg_loss?'Rs '+s.avg_loss.toLocaleString():'-'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Equity curve -->
+      <template x-if="equity && equity.length">
+        <div class="t-card p-4">
+          <p class="sec-label mb-3">EQUITY CURVE</p>
+          <canvas id="equityChart" height="120"></canvas>
+        </div>
+      </template>
+
+      <!-- Trade log -->
+      <template x-if="trades && trades.length">
+        <div class="t-card overflow-hidden">
+          <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
+            <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
+            <div class="flex gap-2">
+              <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter" />
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="bt-table">
+              <thead>
+                <tr>
+                  <th>DATE</th>
+                  <th>ENTRY</th>
+                  <th>EXIT</th>
+                  <th>DIR</th>
+                  <th>ZONE SRC</th>
+                  <th>ZONE</th>
+                  <th>ENTRY Rs</th>
+                  <th>EXIT Rs</th>
+                  <th>SL</th>
+                  <th>T1</th>
+                  <th>RESULT</th>
+                  <th>P&L PTS</th>
+                  <th>P&L Rs</th>
+                  <th>COMBO</th>
+                  <th>GAP</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="t in filteredTrades" :key="t.date+t.entry_ts+t.direction">
+                  <tr>
+                    <td class="text-t-muted" x-text="t.date"></td>
+                    <td x-text="t.entry_ts"></td>
+                    <td x-text="t.exit_ts"></td>
+                    <td><span class="tag" :class="t.direction==='CE'?'tag-ce':'tag-pe'" x-text="t.direction"></span></td>
+                    <td><span class="tag" :class="t.zone_src==='HTF'?'tag-htf':'tag-cas'" x-text="t.zone_src"></span></td>
+                    <td class="font-mono text-xs text-t-muted" x-text="t.zone"></td>
+                    <td class="font-mono" x-text="t.entry"></td>
+                    <td class="font-mono" x-text="t.exit"></td>
+                    <td class="font-mono text-t-red text-xs" x-text="t.sl"></td>
+                    <td class="font-mono text-t-green text-xs" x-text="t.t1"></td>
+                    <td>
+                      <span class="tag"
+                        :class="t.reason==='T1'?'tag-t1':t.reason==='SL'?'tag-sl':'tag-eod'"
+                        x-text="t.reason"></span>
+                    </td>
+                    <td :class="t.pnl_pts>0?'pnl-win':'pnl-loss'" x-text="(t.pnl_pts>0?'+':'')+t.pnl_pts"></td>
+                    <td :class="t.pnl_rs>0?'pnl-win':'pnl-loss'"
+                        x-text="'Rs '+(t.pnl_rs>0?'+':'')+t.pnl_rs.toLocaleString()"></td>
+                    <td class="font-mono text-xs" :class="comboColor(t.combo)" x-text="t.combo"></td>
+                    <td class="text-t-muted text-xs" x-text="t.gap"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+
+      <!-- No trades -->
+      <template x-if="ran && trades && trades.length===0">
+        <div class="t-card p-8 text-center text-t-muted">
+          <p class="text-2xl mb-2">📭</p>
+          <p class="font-semibold">No trades found</p>
+          <p class="text-xs mt-1">Try increasing days or changing the combo filter</p>
+        </div>
+      </template>
+
+      <!-- Log -->
+      <template x-if="log && log.length">
+        <div>
+          <p class="sec-label mb-2">RUN LOG</p>
+          <div class="log-box" x-text="log.join('\n')"></div>
+        </div>
+      </template>
+
+      <!-- Placeholder -->
+      <template x-if="!ran && !running">
+        <div class="flex-1 flex flex-col items-center justify-center text-t-muted py-20">
+          <div class="text-5xl mb-4 opacity-30">📊</div>
+          <p class="font-semibold text-lg">CrudeOil Futures Backtest</p>
+          <p class="text-sm mt-2 text-center max-w-sm">
+            Set your parameters on the left and click <span class="text-t-cyan font-bold">RUN BACKTEST</span> to compare four zone combinations on futures P&L.
+          </p>
+          <div class="mt-6 grid grid-cols-2 gap-3 text-xs text-center max-w-md">
+            <div class="p-3 rounded border border-t-border">
+              <p class="text-t-cyan font-bold mb-1">GAP + HTF ZONE</p>
+              <p>Previous gap + 1-hr pre-day zone exists</p>
+            </div>
+            <div class="p-3 rounded border border-t-border">
+              <p class="text-t-amber font-bold mb-1">GAP + NO ZONE</p>
+              <p>Gap open, no pre-day zone → 30-min cascade</p>
+            </div>
+            <div class="p-3 rounded border border-t-border">
+              <p class="text-t-green font-bold mb-1">NO GAP + HTF ZONE</p>
+              <p>No gap, 1-hr zone present</p>
+            </div>
+            <div class="p-3 rounded border border-t-border">
+              <p class="text-t-muted font-bold mb-1">NO GAP + NO ZONE</p>
+              <p>No gap, no zone → intraday 30-min only</p>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+<script>
+function backtestApp() {
+  return {
+    // params
+    token:       sessionStorage.getItem('bt_token') || '',
+    days:        7,
+    combo:       'all',
+    htfZone:     60,
+    htfCascade:  30,
+    gapPct:      0.3,
+    slBuf:       20,
+    lots:        2,
+    futKey:      'MCX_FO|520702',
+
+    // state
+    running: false,
+    ran:     false,
+    error:   '',
+
+    // results
+    summary:  null,
+    byCombo:  {},
+    trades:   [],
+    equity:   [],
+    log:      [],
+    period:   '',
+    tradeFilter: '',
+
+    comboOptions: [
+      { val: 'all',           label: 'All Combinations' },
+      { val: 'gap+htf_zone',  label: 'GAP + HTF ZONE' },
+      { val: 'gap+no_zone',   label: 'GAP + NO ZONE' },
+      { val: 'nogap+htf_zone',label: 'NO GAP + HTF ZONE' },
+      { val: 'nogap+no_zone', label: 'NO GAP + NO ZONE' },
+    ],
+
+    get filteredTrades() {
+      const q = this.tradeFilter.toLowerCase().trim()
+      if (!q) return this.trades
+      return this.trades.filter(t =>
+        t.date.includes(q) || t.direction.toLowerCase().includes(q) ||
+        t.combo.toLowerCase().includes(q) || t.reason.toLowerCase().includes(q) ||
+        t.zone_src.toLowerCase().includes(q)
+      )
+    },
+
+    comboColor(combo) {
+      if (!combo) return ''
+      const c = combo.toUpperCase()
+      if (c.includes('GAP') && c.includes('HTF')) return 'text-t-cyan'
+      if (c.includes('GAP') && c.includes('NO_ZONE')) return 'text-t-amber'
+      if (c.includes('NO_GAP') && c.includes('HTF')) return 'text-t-green'
+      return 'text-t-muted'
+    },
+
+    async runBacktest() {
+      if (!this.token) { this.error = 'Token required'; return }
+      this.running = true
+      this.error   = ''
+      this.summary = null
+      this.trades  = []
+      this.equity  = []
+      this.log     = []
+      this.ran     = false
+      sessionStorage.setItem('bt_token', this.token)
+
+      try {
+        const res = await fetch('/api/backtest/crude', {
+          method:  'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            token:          this.token,
+            days:           parseInt(this.days),
+            lots:           parseInt(this.lots),
+            gap_threshold:  parseFloat(this.gapPct) / 100,
+            htf_min_zone:   parseInt(this.htfZone),
+            htf_min_cascade: parseInt(this.htfCascade),
+            sl_buf:         parseFloat(this.slBuf),
+            combo:          this.combo,
+            fut_key:        this.futKey,
+          })
+        })
+        const data = await res.json()
+        if (!data.ok) { this.error = data.error || 'Backend error'; return }
+
+        this.summary = data.summary
+        this.byCombo = data.by_combo
+        this.trades  = data.trades
+        this.equity  = data.equity
+        this.log     = data.log
+        this.period  = data.period
+        this.ran     = true
+
+        this.$nextTick(() => this._drawChart())
+      } catch (e) {
+        this.error = e.message || 'Request failed'
+      } finally {
+        this.running = false
+      }
+    },
+
+    _chart: null,
+    _drawChart() {
+      if (!this.equity || !this.equity.length) return
+      const canvas = document.getElementById('equityChart')
+      if (!canvas) return
+      if (this._chart) { this._chart.destroy(); this._chart = null }
+
+      const labels = this.equity.map(e => e.ts)
+      const data   = this.equity.map(e => e.cum)
+      const pos    = data[data.length - 1] >= 0
+
+      this._chart = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Cumulative P&L (Rs)',
+            data,
+            borderColor: pos ? '#00e676' : '#ff4757',
+            backgroundColor: pos
+              ? 'rgba(0,230,118,0.07)'
+              : 'rgba(255,71,87,0.07)',
+            borderWidth: 2,
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            fill: true,
+            tension: 0.3,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => `Rs ${ctx.parsed.y >= 0 ? '+' : ''}${ctx.parsed.y.toLocaleString()}`
+              }
+            }
+          },
+          scales: {
+            x: {
+              ticks: { color: '#6b7280', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 10 },
+              grid:  { color: 'rgba(42,42,50,0.8)' }
+            },
+            y: {
+              ticks: { color: '#6b7280', font: { family: 'JetBrains Mono', size: 10 },
+                       callback: v => 'Rs '+(v>=0?'+':'')+v.toLocaleString() },
+              grid:  { color: 'rgba(42,42,50,0.8)' }
+            }
+          }
+        }
+      })
+    }
+  }
+}
+</script>
+</body>
+</html>
