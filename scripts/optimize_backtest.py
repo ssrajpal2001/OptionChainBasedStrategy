@@ -210,7 +210,15 @@ def main():
         if not params["require_gap"]:
             continue
 
+        if i == 0:
+            print(f"  DEBUG first combo: gap={params['gap_threshold']:.3f} "
+                  f"width={params['min_zone_width']} sl={params['sl_buf']} "
+                  f"dir={params['gap_dir_filter']}", flush=True)
+
         trades = run_combo(params, trading_days, day_frames)
+
+        if i == 0:
+            print(f"  DEBUG first combo done: {len(trades)} trades", flush=True)
         s = _stats(trades)
 
         if s["count"] >= args.min_trades:

@@ -530,7 +530,8 @@ def _run_day(
             # ① SELLERS_IN  ② TRAPPED  ③ ENTRY_READY  ④ price re-hits C1.high
             # → ONLY at step ④ TSL jumps to zone_low (C2.low)
             # pending_tsl_zones: zones at ENTRY_READY, waiting for price to re-hit t1
-            if len(acc_rows) >= ltf_min * 2:
+            # Only rebuild LTF bars every ltf_min rows (not every 1m bar) — O(n) not O(n²)
+            if len(acc_rows) >= ltf_min * 2 and len(acc_rows) % ltf_min == 0:
                 try:
                     acc_df   = pd.DataFrame(acc_rows)
                     ltf_bars = resample(acc_df, ltf_min)
