@@ -467,12 +467,19 @@ async def _run_live(
         if not _is_mcx and not _upstox_token:
             continue
         try:
-            await asyncio.to_thread(_instrument_registry.load_sync, _idx, _upstox_token)
+            await asyncio.wait_for(
+                asyncio.to_thread(_instrument_registry.load_sync, _idx, _upstox_token),
+                timeout=30.0,
+            )
             _upstox_map = _instrument_registry.build_instrument_map(_idx)
             for _brokers_by_binding in router._brokers.values():
                 for _broker in _brokers_by_binding.values():
                     if hasattr(_broker, "inject_instrument_map"):
                         _broker.inject_instrument_map(_upstox_map)
+        except asyncio.TimeoutError:
+            logging.getLogger(__name__).warning(
+                "InstrumentRegistry: load [%s] timed out (30s) — skipping, will use constructed symbols", _idx
+            )
         except Exception as _exc:
             logging.getLogger(__name__).warning(
                 "InstrumentRegistry: failed to load [%s]: %s", _idx, _exc
