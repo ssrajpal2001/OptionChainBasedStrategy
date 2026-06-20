@@ -326,9 +326,9 @@
 
       <button class="w-full py-2 rounded border border-t-amber text-t-amber text-xs font-bold tracking-widest hover:bg-amber-950/30 transition-colors mt-1"
               @click="runBatch"
-              :disabled="running || !tokenOk">
-        <span x-show="!running">⚡ BATCH RUN — Zone Width 10/20/30/40/50</span>
-        <span x-show="running" class="flex items-center justify-center gap-2">
+              :disabled="running || batchRunning || !tokenOk">
+        <span x-show="!batchRunning">⚡ BATCH RUN — Zone Width 10/20/30/40/50</span>
+        <span x-show="batchRunning" class="flex items-center justify-center gap-2">
           <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
           </svg>
@@ -607,6 +607,7 @@ function backtestApp() {
 
     // state
     running: false,
+    batchRunning: false,
     ran:     false,
     error:   '',
 
@@ -796,8 +797,8 @@ function backtestApp() {
 
     async runBatch() {
       if (!this.token) { this.error = 'Upstox token not loaded yet'; return }
-      if (this.running) { this.error = 'Already running — wait for it to finish'; return }
-      this.running = true
+      if (this.running || this.batchRunning) { this.error = 'Already running — wait for it to finish'; return }
+      this.batchRunning = true
       this.error   = ''
       this.batchRows = []
       this.batchSelected = null
@@ -829,7 +830,7 @@ function backtestApp() {
         const best = [...this.batchRows].filter(r=>r._data).sort((a,b) => b.total_rs - a.total_rs)[0]
         if (best) this.loadBatchRow(best)
       } catch(e) { this.error = e.message || 'Batch failed' }
-      finally { this.running = false; this.batchStatus = '' }
+      finally { this.batchRunning = false; this.batchStatus = '' }
     },
 
     loadBatchRow(row) {
