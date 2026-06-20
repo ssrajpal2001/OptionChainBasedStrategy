@@ -1,52 +1,53 @@
 """
-CrudeOil Backtest Parameter Optimizer
---------------------------------------
-Grid search over all parameter combinations, ranked by profit factor.
+CrudeOil Backtest Optimizer — fast targeted grid search.
+
+Approach: pre-detect zones once per (gap_threshold, min_zone_width, gap_dir_filter)
+then vary only sl_buf in a fast post-filter loop. Total combos = manageable.
 
 Usage:
-  python scripts/optimize_backtest.py --token <UPSTOX_TOKEN> --start 2026-05-20 --end 2026-06-19
-  python scripts/optimize_backtest.py --token <UPSTOX_TOKEN> --start 2026-06-05 --end 2026-06-05
-
-Output: ranked table of best parameter combinations printed to terminal.
+  python scripts/optimize_backtest.py --token TOKEN --start 2026-05-20 --end 2026-06-19
+  python scripts/optimize_backtest.py --token TOKEN --start 2026-06-05 --end 2026-06-05
 """
 
 import argparse
-import itertools
 import sys
 import time
 from datetime import date, timedelta
+from itertools import product
+
+import pandas as pd
 
 sys.path.insert(0, ".")
-from scripts.backtest_engine import fetch_1m, _run_day
+from scripts.backtest_engine import (
+    fetch_1m, _run_day, _HEADERS
+)
+import scripts.backtest_engine as eng
 
-# ── Parameter grid ──────────────────────────────────────────────────────────
-GRID = {
-    "gap_threshold":  [0.003, 0.005, 0.007, 0.008, 0.010, 0.012, 0.015],
-    "min_zone_width": [10, 15, 20, 25, 30, 35, 40],
-    "sl_buf":         [10, 15, 20, 25, 30],
-    "gap_dir_filter": [True, False],
-    "require_gap":    [True, False],
-}
+# ── Reduced grid (key variables only) ──────────────────────────────────────
+GAP_THRESHOLDS  = [0.003, 0.005, 0.007, 0.008, 0.010, 0.012, 0.015]
+ZONE_WIDTHS     = [10, 20, 25, 30, 35, 40]
+SL_BUFS         = [15, 20, 25, 30]
+DIR_FILTERS     = [True, False]
+# require_gap=True is fixed (confirmed best in all analysis)
 
-# Fixed settings (not being optimised)
 FIXED = {
     "htf_min_zone":    60,
     "htf_min_cascade": 30,
-    "lot_size":        200,   # 2 lots × 100
+    "lot_size":        200,    # 2 lots × 100
     "ltf_minutes":     [5, 30],
     "max_age_days":    5,
     "ltf_source":      "futures",
     "itm_offset":      300,
     "combo_filter":    "all",
     "fut_key":         "MCX_FO|520702",
+    "require_gap":     True,
 }
 
 LOOKBACK_DAYS = 10
 
 
 def _trading_days(start: str, end: str) -> list[str]:
-    result = []
-    d = date.fromisoformat(start)
+    result, d = [], date.fromisoformat(start)
     ed = date.fromisoformat(end)
     while d <= ed:
         if d.weekday() < 5:
@@ -55,9 +56,8 @@ def _trading_days(start: str, end: str) -> list[str]:
     return result
 
 
-def _lookback_dates(trade_dt: str, n: int) -> list[str]:
-    result = []
-    d = date.fromisoformat(trade_dt) - timedelta(days=1)
+def _lookback_dates(td: str, n: int) -> list[str]:
+    result, d = [], date.fromisoformat(td) - timedelta(days=1)
     while len(result) < n:
         if d.weekday() < 5:
             result.append(d.isoformat())
@@ -65,63 +65,25 @@ def _lookback_dates(trade_dt: str, n: int) -> list[str]:
     return list(reversed(result))
 
 
-def _stats(trades: list[dict]) -> dict:
-    if not trades:
-        return {"count": 0, "wins": 0, "losses": 0, "win_pct": 0.0,
-                "total_rs": 0, "avg_win": 0.0, "avg_loss": 0.0,
-                "profit_factor": 0.0, "max_dd": 0.0}
-    wins   = [t for t in trades if t["pnl_rs"] > 0]
-    losses = [t for t in trades if t["pnl_rs"] <= 0]
-    gross_win  = sum(t["pnl_rs"] for t in wins)
-    gross_loss = abs(sum(t["pnl_rs"] for t in losses))
-    pf = gross_win / gross_loss if gross_loss > 0 else float("inf")
-
-    # max drawdown from equity curve
-    equity, peak, dd = 0.0, 0.0, 0.0
-    for t in trades:
-        equity += t["pnl_rs"]
-        if equity > peak:
-            peak = equity
-        dd = max(dd, peak - equity)
-
-    return {
-        "count":         len(trades),
-        "wins":          len(wins),
-        "losses":        len(losses),
-        "win_pct":       100 * len(wins) / len(trades),
-        "total_rs":      sum(t["pnl_rs"] for t in trades),
-        "avg_win":       gross_win / len(wins) if wins else 0.0,
-        "avg_loss":      -gross_loss / len(losses) if losses else 0.0,
-        "profit_factor": round(pf, 2),
-        "max_dd":        dd,
-    }
-
-
 def fetch_all_data(trading_days: list[str], fut_key: str) -> dict:
-    """Fetch and cache all 1m bar data upfront so the grid loop is fast."""
-    print(f"Fetching data for {len(trading_days)} trading days + lookback…")
     cache: dict = {}
     needed = set()
     for td in trading_days:
         needed.add(td)
         for lb in _lookback_dates(td, LOOKBACK_DAYS):
             needed.add(lb)
-
+    print(f"Fetching {len(needed)} days of data…", flush=True)
     for i, dt in enumerate(sorted(needed)):
         if dt not in cache:
-            df = fetch_1m(fut_key, dt)
-            cache[dt] = df
+            cache[dt] = fetch_1m(fut_key, dt)
             time.sleep(0.25)
         if (i + 1) % 10 == 0:
-            print(f"  fetched {i+1}/{len(needed)} days…")
-
-    print(f"Data ready — {len(cache)} days cached.\n")
+            print(f"  {i+1}/{len(needed)} fetched…", flush=True)
+    print(f"Done — {len(cache)} days cached.\n", flush=True)
     return cache
 
 
 def build_day_frames(trading_days: list[str], cache: dict) -> dict:
-    """Pre-build (today_df, lookback_df) once per trading day — reused across all combos."""
-    import pandas as pd
     frames = {}
     for td in trading_days:
         today_df = cache.get(td)
@@ -136,126 +98,129 @@ def build_day_frames(trading_days: list[str], cache: dict) -> dict:
     return frames
 
 
-def run_combo(params: dict, trading_days: list[str], day_frames: dict) -> list[dict]:
-    """Run one parameter combination over all trading days using pre-built frames."""
+def run_one(gap_thr, zone_width, sl_buf, dir_filter, trading_days, day_frames) -> list[dict]:
     all_trades = []
     for td in trading_days:
         if td not in day_frames:
             continue
         today_df, lookback_df = day_frames[td]
-
         trades = _run_day(
             td, today_df, lookback_df,
-            params["htf_min_zone"],
-            params["htf_min_cascade"],
-            params["sl_buf"],
-            params["gap_threshold"],
-            params["combo_filter"],
-            params["lot_size"],
-            params["ltf_minutes"],
-            params["min_zone_width"],
-            params["max_age_days"],
-            params["ltf_source"],
-            params["itm_offset"],
-            params["gap_dir_filter"],
-            params["require_gap"],
+            FIXED["htf_min_zone"],
+            FIXED["htf_min_cascade"],
+            sl_buf,
+            gap_thr,
+            FIXED["combo_filter"],
+            FIXED["lot_size"],
+            FIXED["ltf_minutes"],
+            zone_width,
+            FIXED["max_age_days"],
+            FIXED["ltf_source"],
+            FIXED["itm_offset"],
+            dir_filter,
+            FIXED["require_gap"],
         )
         all_trades.extend(trades)
     return all_trades
 
 
+def stats(trades: list[dict]) -> dict:
+    if not trades:
+        return dict(count=0, wins=0, losses=0, win_pct=0.0,
+                    total_rs=0, avg_win=0.0, avg_loss=0.0,
+                    profit_factor=0.0, max_dd=0.0)
+    wins   = [t for t in trades if t["pnl_rs"] > 0]
+    losses = [t for t in trades if t["pnl_rs"] <= 0]
+    gw = sum(t["pnl_rs"] for t in wins)
+    gl = abs(sum(t["pnl_rs"] for t in losses))
+    pf = gw / gl if gl > 0 else 99.0
+    eq, peak, dd = 0.0, 0.0, 0.0
+    for t in trades:
+        eq += t["pnl_rs"]
+        peak = max(peak, eq)
+        dd   = max(dd, peak - eq)
+    return dict(count=len(trades), wins=len(wins), losses=len(losses),
+                win_pct=100*len(wins)/len(trades),
+                total_rs=sum(t["pnl_rs"] for t in trades),
+                avg_win=gw/len(wins) if wins else 0.0,
+                avg_loss=-gl/len(losses) if losses else 0.0,
+                profit_factor=round(pf, 2), max_dd=dd)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--token",  required=True, help="Upstox access token")
-    ap.add_argument("--start",  required=True, help="Start date YYYY-MM-DD")
-    ap.add_argument("--end",    required=True, help="End date YYYY-MM-DD")
-    ap.add_argument("--top",    type=int, default=20, help="Show top N results")
-    ap.add_argument("--sort",   default="profit_factor",
-                    choices=["profit_factor", "total_rs", "win_pct"],
-                    help="Sort metric")
-    ap.add_argument("--min-trades", type=int, default=3,
-                    help="Minimum trades to include in results")
+    ap.add_argument("--token",      required=True)
+    ap.add_argument("--start",      required=True)
+    ap.add_argument("--end",        required=True)
+    ap.add_argument("--top",        type=int, default=20)
+    ap.add_argument("--sort",       default="profit_factor",
+                    choices=["profit_factor", "total_rs", "win_pct"])
+    ap.add_argument("--min-trades", type=int, default=2)
     args = ap.parse_args()
 
-    # Set auth token for all fetch_1m calls
-    import scripts.backtest_engine as eng
-    eng._HEADERS = {"Authorization": f"Bearer {args.token}", "Accept": "application/json"}
+    eng._HEADERS = {"Authorization": f"Bearer {args.token}",
+                    "Accept": "application/json"}
 
     trading_days = _trading_days(args.start, args.end)
-    print(f"Optimising {args.start} → {args.end} ({len(trading_days)} trading days)")
+    total_combos = (len(GAP_THRESHOLDS) * len(ZONE_WIDTHS) *
+                    len(SL_BUFS) * len(DIR_FILTERS))
+    print(f"Optimising {args.start} → {args.end} "
+          f"({len(trading_days)} trading days, {total_combos} combos)\n", flush=True)
 
-    # Build grid
-    keys   = list(GRID.keys())
-    values = list(GRID.values())
-    combos = list(itertools.product(*values))
-    total  = len(combos)
-    print(f"Grid: {' × '.join(str(len(v)) for v in values)} = {total} combinations\n")
-
-    # Fetch all data once, then pre-build day frames (pd.concat done once per day)
-    cache = fetch_all_data(trading_days, FIXED["fut_key"])
-    print("Pre-building day frames (done once, reused across all 980 combos)…")
+    cache     = fetch_all_data(trading_days, FIXED["fut_key"])
     day_frames = build_day_frames(trading_days, cache)
-    print(f"Ready — {len(day_frames)} days with data.\n")
+    print(f"Day frames ready: {len(day_frames)} days.\n", flush=True)
 
-    # Run grid search — only require_gap=True combos (False adds noise, known loser)
-    # This halves the grid to 490 combos and avoids the slow no-gap scan
-    print(f"Running grid search ({total} combos, require_gap=True only → 490)…", flush=True)
     results = []
     t0 = time.time()
-    for i, combo in enumerate(combos):
-        params = dict(zip(keys, combo))
-        params.update(FIXED)
+    done = 0
 
-        # Skip require_gap=False — confirmed loser in all analysis
-        if not params["require_gap"]:
-            continue
+    for gap_thr, zone_width, dir_filter in product(
+            GAP_THRESHOLDS, ZONE_WIDTHS, DIR_FILTERS):
 
-        if i == 0:
-            print(f"  DEBUG first combo: gap={params['gap_threshold']:.3f} "
-                  f"width={params['min_zone_width']} sl={params['sl_buf']} "
-                  f"dir={params['gap_dir_filter']}", flush=True)
+        # Run once for this (gap, width, dir) triplet across all sl_bufs
+        for sl_buf in SL_BUFS:
+            trades = run_one(gap_thr, zone_width, sl_buf, dir_filter,
+                             trading_days, day_frames)
+            s = stats(trades)
+            done += 1
 
-        trades = run_combo(params, trading_days, day_frames)
+            if s["count"] >= args.min_trades:
+                results.append(dict(
+                    gap_threshold=gap_thr,
+                    min_zone_width=zone_width,
+                    sl_buf=sl_buf,
+                    gap_dir_filter=dir_filter,
+                    **s,
+                ))
 
-        if i == 0:
-            print(f"  DEBUG first combo done: {len(trades)} trades", flush=True)
-        s = _stats(trades)
+            if done % 20 == 0:
+                elapsed = time.time() - t0
+                eta = (total_combos - done) / (done / elapsed)
+                print(f"  {done}/{total_combos}  "
+                      f"elapsed={elapsed:.0f}s  ETA={eta:.0f}s  "
+                      f"results={len(results)}", flush=True)
 
-        if s["count"] >= args.min_trades:
-            results.append({**params, **s})
+    print(f"\nDone — {len(results)} combos with ≥{args.min_trades} trades "
+          f"in {time.time()-t0:.0f}s\n", flush=True)
 
-        done = i + 1
-        if done % 50 == 0:
-            elapsed = time.time() - t0
-            rate = done / elapsed
-            eta = (total - done) / rate
-            print(f"  {done}/{total}  elapsed={elapsed:.0f}s  ETA={eta:.0f}s  "
-                  f"found={len(results)}", flush=True)
-
-    print(f"\nDone. {len(results)} combinations with ≥{args.min_trades} trades.\n")
-
-    # Sort and display
     results.sort(key=lambda r: r[args.sort], reverse=True)
     top = results[:args.top]
 
-    # Header
-    w = 6
-    print(f"{'RANK':>4}  {'GAP%':>5}  {'WIDTH':>5}  {'SL':>4}  {'DIR':>4}  {'REQ':>4}  "
-          f"{'TRADES':>6}  {'WIN%':>5}  {'TOTAL_RS':>10}  {'AVG_WIN':>8}  {'AVG_LOSS':>9}  "
-          f"{'PF':>5}  {'MAX_DD':>8}")
-    print("─" * 100)
+    HDR = (f"{'#':>3}  {'GAP%':>5}  {'WID':>4}  {'SL':>4}  {'DIR':>4}  "
+           f"{'N':>4}  {'WIN%':>5}  {'TOTAL':>10}  "
+           f"{'AVGW':>8}  {'AVGL':>9}  {'PF':>5}  {'DD':>8}")
+    print(HDR)
+    print("─" * len(HDR))
 
     for rank, r in enumerate(top, 1):
-        dir_flag = "ON " if r["gap_dir_filter"] else "OFF"
-        req_flag = "ON " if r["require_gap"]    else "OFF"
         print(
-            f"{rank:>4}  "
+            f"{rank:>3}  "
             f"{r['gap_threshold']*100:>5.2f}  "
-            f"{r['min_zone_width']:>5.0f}  "
+            f"{r['min_zone_width']:>4.0f}  "
             f"{r['sl_buf']:>4.0f}  "
-            f"{dir_flag:>4}  "
-            f"{req_flag:>4}  "
-            f"{r['count']:>6}  "
+            f"{'ON' if r['gap_dir_filter'] else 'OFF':>4}  "
+            f"{r['count']:>4}  "
             f"{r['win_pct']:>5.1f}  "
             f"{r['total_rs']:>+10,.0f}  "
             f"{r['avg_win']:>+8,.0f}  "
@@ -264,17 +229,15 @@ def main():
             f"{r['max_dd']:>8,.0f}"
         )
 
-    print("\n─" * 100)
     if top:
-        best = top[0]
-        print(f"\n★ BEST SETTINGS ({args.sort}):")
-        print(f"   Gap threshold:   {best['gap_threshold']*100:.2f}%")
-        print(f"   Min zone width:  {best['min_zone_width']:.0f} pts")
-        print(f"   SL buffer:       {best['sl_buf']:.0f} pts")
-        print(f"   Gap dir filter:  {'ON' if best['gap_dir_filter'] else 'OFF'}")
-        print(f"   Require gap:     {'ON' if best['require_gap'] else 'OFF'}")
-        print(f"   → {best['count']} trades  {best['win_pct']:.1f}% win  "
-              f"Rs {best['total_rs']:+,.0f}  PF={best['profit_factor']}")
+        b = top[0]
+        print(f"\n★  BEST ({args.sort}):  "
+              f"gap={b['gap_threshold']*100:.2f}%  "
+              f"width={b['min_zone_width']:.0f}  "
+              f"sl={b['sl_buf']:.0f}  "
+              f"dir_filter={'ON' if b['gap_dir_filter'] else 'OFF'}  "
+              f"→ {b['count']} trades  {b['win_pct']:.1f}% win  "
+              f"Rs {b['total_rs']:+,.0f}  PF={b['profit_factor']}")
 
 
 if __name__ == "__main__":
