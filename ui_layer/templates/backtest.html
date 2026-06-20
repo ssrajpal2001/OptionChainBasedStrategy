@@ -565,6 +565,16 @@ function backtestApp() {
     tradeFilter: '',
 
     init() {
+      // Auto-fill: last Monday → today
+      const today = new Date()
+      const day   = today.getDay()                          // 0=Sun … 6=Sat
+      const diffToMon = day === 0 ? 6 : day - 1            // days since last Monday
+      const lastMon = new Date(today)
+      lastMon.setDate(today.getDate() - diffToMon)
+      const fmt = d => d.toISOString().slice(0, 10)
+      this.startDate = fmt(lastMon)
+      this.endDate   = fmt(today)
+
       fetch('/api/backtest/token')
         .then(r => r.json())
         .then(d => {
