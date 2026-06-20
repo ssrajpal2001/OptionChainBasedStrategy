@@ -353,6 +353,7 @@
       </div>
 
       <!-- Batch comparison table -->
+      <div id="batch-table-anchor"></div>
       <div x-show="batchRows && batchRows.length" class="t-card overflow-hidden">
         <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
           <p class="sec-label text-t-amber">⚡ BATCH — ZONE WIDTH COMPARISON</p>
@@ -829,6 +830,11 @@ function backtestApp() {
         this.period = data.period || ''
         const best = [...this.batchRows].filter(r=>r._data).sort((a,b) => b.total_rs - a.total_rs)[0]
         if (best) this.loadBatchRow(best)
+        // Scroll batch table into view
+        this.$nextTick(() => {
+          const el = document.getElementById('batch-table-anchor')
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        })
       } catch(e) { this.error = e.message || 'Batch failed' }
       finally { this.batchRunning = false; this.batchStatus = '' }
     },
