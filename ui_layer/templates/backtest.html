@@ -169,7 +169,23 @@
            :class="tokenOk ? 'border-green-300 text-green-700 bg-green-50' : 'border-red-300 text-red-700 bg-red-50'"
            x-text="tokenStatus"></div>
 
+      <!-- Date range (overrides days slider when both filled) -->
       <div>
+        <p class="sec-label mb-1.5">Date Range <span class="text-t-muted text-xs">(overrides days slider)</span></p>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <p class="text-xs text-t-muted mb-1">From</p>
+            <input type="date" class="t-input text-xs" x-model="startDate" />
+          </div>
+          <div>
+            <p class="text-xs text-t-muted mb-1">To</p>
+            <input type="date" class="t-input text-xs" x-model="endDate" />
+          </div>
+        </div>
+        <button class="text-xs text-t-muted underline mt-1" @click="startDate=''; endDate=''">Clear dates</button>
+      </div>
+
+      <div x-show="!startDate || !endDate">
         <p class="sec-label mb-2">Trading Days: <span class="text-t-cyan font-mono" x-text="days"></span></p>
         <input type="range" min="3" max="30" step="1" x-model="days" class="w-full accent-cyan-400" />
         <div class="flex justify-between text-xs text-t-muted mt-1"><span>3</span><span>30</span></div>
@@ -458,6 +474,8 @@ function backtestApp() {
     slBuf:       20,
     lots:        2,
     futKey:      'MCX_FO|520702',
+    startDate:   '',
+    endDate:     '',
 
     // state
     running: false,
@@ -537,6 +555,8 @@ function backtestApp() {
             sl_buf:         parseFloat(this.slBuf),
             combo:          this.combo,
             fut_key:        this.futKey,
+            start_date:     this.startDate,
+            end_date:       this.endDate,
           })
         })
         clearTimeout(tid)

@@ -623,7 +623,19 @@ def run_crude_backtest(params: dict, token: str) -> dict:
 
     LOOKBACK_DAYS = 10   # how many calendar-trading-days back to scan for zones
 
-    trading_days = get_trading_days(days)
+    # Support explicit date range (start_date / end_date) for single-day drill-down
+    start_date = params.get("start_date", "")
+    end_date   = params.get("end_date", "")
+    if start_date and end_date:
+        sd, ed = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        trading_days = []
+        d = sd
+        while d <= ed:
+            if d.weekday() < 5:
+                trading_days.append(d.isoformat())
+            d += timedelta(days=1)
+    else:
+        trading_days = get_trading_days(days)
     all_trades: list[dict] = []
     log: list[str] = []
 

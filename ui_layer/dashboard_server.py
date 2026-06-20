@@ -395,6 +395,8 @@ try:
         sl_buf:          float = 20.0
         combo:           str   = "all"
         fut_key:         str   = "MCX_FO|520702"
+        start_date:      str   = ""   # YYYY-MM-DD; overrides days when set with end_date
+        end_date:        str   = ""   # YYYY-MM-DD
 
 except ImportError:
     _HAS_FASTAPI = False
