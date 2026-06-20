@@ -44,22 +44,22 @@
 
   <style>
     :root {
-      --t-bg:       #0d0d0f;
-      --t-surface:  #141417;
-      --t-card:     #1a1a1f;
-      --t-border:   #2a2a32;
-      --t-dim:      #35353f;
-      --t-cyan:     #00d4ff;
-      --t-green:    #00e676;
-      --t-red:      #ff4757;
-      --t-amber:    #ffa726;
-      --t-muted:    #6b7280;
-      --t-text:     #c8cdd8;
-      --t-bright:   #f0f2f5;
-      --t-cyan-rgb:  0, 212, 255;
-      --t-green-rgb: 0, 230, 118;
-      --t-red-rgb:   255, 71, 87;
-      --t-amber-rgb: 255, 167, 38;
+      --t-bg:       #ffffff;
+      --t-surface:  #f9f9f9;
+      --t-card:     #ffffff;
+      --t-border:   #e9e9ed;
+      --t-dim:      #d8d8dd;
+      --t-cyan:     #387ED1;
+      --t-green:    #4CA64C;
+      --t-red:      #FF5722;
+      --t-amber:    #F5A623;
+      --t-muted:    #9b9b9b;
+      --t-text:     #3c3c3c;
+      --t-bright:   #1a1a1a;
+      --t-cyan-rgb:  56, 126, 209;
+      --t-green-rgb: 76, 166, 76;
+      --t-red-rgb:   255, 87, 34;
+      --t-amber-rgb: 245, 166, 35;
     }
 
     [x-cloak] { display: none !important; }
@@ -115,7 +115,7 @@
     /* trade table */
     .bt-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
     .bt-table th { padding: 8px 10px; text-align: left; color: var(--t-muted); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--t-border); }
-    .bt-table td { padding: 7px 10px; border-bottom: 1px solid rgba(42,42,50,0.6); white-space: nowrap; }
+    .bt-table td { padding: 7px 10px; border-bottom: 1px solid var(--t-border); white-space: nowrap; }
     .bt-table tr:last-child td { border-bottom: none; }
     .bt-table tr:hover td { background: rgba(var(--t-cyan-rgb),0.03); }
 
@@ -131,7 +131,7 @@
     .tag-cas { background: rgba(var(--t-amber-rgb),0.12); color: var(--t-amber); }
     .tag-t1  { background: rgba(var(--t-green-rgb),0.15); color: var(--t-green); }
     .tag-sl  { background: rgba(var(--t-red-rgb),0.15);   color: var(--t-red);   }
-    .tag-eod { background: rgba(42,42,50,0.8);            color: var(--t-muted); }
+    .tag-eod { background: var(--t-surface); border: 1px solid var(--t-border); color: var(--t-muted); }
 
     /* summary card */
     .stat-card { background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 8px; padding: 14px 16px; }
@@ -164,11 +164,10 @@
     <!-- ── LEFT: Controls ─────────────────────────────────────────────────── -->
     <div class="w-72 flex-shrink-0 border-r border-t-border p-4 flex flex-col gap-4 overflow-y-auto" style="background:var(--t-surface)">
 
-      <div>
-        <p class="sec-label mb-3">Upstox Token</p>
-        <input type="password" class="t-input" x-model="token" placeholder="Bearer token…" autocomplete="off" />
-        <p class="text-xs text-t-muted mt-1">Stored in session only — never sent to server in logs</p>
-      </div>
+      <!-- token status -->
+      <div x-show="tokenStatus" class="text-xs px-2 py-1.5 rounded border"
+           :class="tokenOk ? 'border-green-300 text-green-700 bg-green-50' : 'border-red-300 text-red-700 bg-red-50'"
+           x-text="tokenStatus"></div>
 
       <div>
         <p class="sec-label mb-2">Trading Days: <span class="text-t-cyan font-mono" x-text="days"></span></p>
@@ -231,7 +230,7 @@
 
       <button class="btn-primary mt-2"
               @click="runBacktest"
-              :disabled="running || !token">
+              :disabled="running || !tokenOk">
         <span x-show="!running">▶ RUN BACKTEST</span>
         <span x-show="running" class="flex items-center justify-center gap-2">
           <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -438,7 +437,9 @@
 function backtestApp() {
   return {
     // params
-    token:       sessionStorage.getItem('bt_token') || '',
+    token:       '',
+    tokenStatus: 'Fetching Upstox token…',
+    tokenOk:     false,
     days:        7,
     combo:       'all',
     htfZone:     60,
@@ -461,6 +462,16 @@ function backtestApp() {
     log:      [],
     period:   '',
     tradeFilter: '',
+
+    init() {
+      fetch('/api/backtest/token')
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) { this.token = d.token; this.tokenOk = true; this.tokenStatus = 'Upstox token loaded ✓' }
+          else       { this.tokenOk = false; this.tokenStatus = 'Token error: ' + d.error }
+        })
+        .catch(() => { this.tokenOk = false; this.tokenStatus = 'Could not fetch token' })
+    },
 
     comboOptions: [
       { val: 'all',           label: 'All Combinations' },
@@ -490,7 +501,7 @@ function backtestApp() {
     },
 
     async runBacktest() {
-      if (!this.token) { this.error = 'Token required'; return }
+      if (!this.token) { this.error = 'Upstox token not loaded yet'; return }
       this.running = true
       this.error   = ''
       this.summary = null
@@ -498,7 +509,6 @@ function backtestApp() {
       this.equity  = []
       this.log     = []
       this.ran     = false
-      sessionStorage.setItem('bt_token', this.token)
 
       try {
         const res = await fetch('/api/backtest/crude', {

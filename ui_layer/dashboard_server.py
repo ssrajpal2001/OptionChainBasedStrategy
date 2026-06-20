@@ -5389,9 +5389,31 @@ class DashboardServer:
 
         # ── Backtest ──────────────────────────────────────────────────────────
 
+        @app.get("/api/backtest/token", tags=["Backtest"])
+        async def get_backtest_token():
+            """Return live Upstox access token from feeder credentials."""
+            try:
+                creds = await asyncio.to_thread(
+                    _srv._client_db.get_feeder_creds_sync, "upstox"
+                )
+                token = (creds or {}).get("access_token", "")
+                if not token:
+                    return {"ok": False, "error": "No Upstox token found — connect feeder first"}
+                return {"ok": True, "token": token}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
         @app.post("/api/backtest/crude", tags=["Backtest"])
         async def run_crude_backtest_api(params: _BacktestCrudeSchema):
             try:
+                token = params.token
+                if not token:
+                    creds = await asyncio.to_thread(
+                        _srv._client_db.get_feeder_creds_sync, "upstox"
+                    )
+                    token = (creds or {}).get("access_token", "")
+                if not token:
+                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
                 import sys as _sys
                 import os as _os
                 _scripts = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "scripts")
@@ -5399,7 +5421,7 @@ class DashboardServer:
                     _sys.path.insert(0, _scripts)
                 from backtest_engine import run_crude_backtest as _run
                 result = await asyncio.to_thread(
-                    _run, params.dict(exclude={"token"}), params.token
+                    _run, params.dict(exclude={"token"}), token
                 )
                 return result
             except Exception as exc:
