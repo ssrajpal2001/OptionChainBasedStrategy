@@ -325,16 +325,16 @@
       </template>
 
       <!-- Trade log -->
-      <template x-if="trades && trades.length">
-        <div class="t-card overflow-hidden">
-          <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
-            <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
-            <div class="flex gap-2">
-              <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter" />
-            </div>
+      <div x-show="ran" class="t-card overflow-hidden">
+        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
+          <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
+          <div class="flex gap-2">
+            <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter" />
           </div>
-          <div class="overflow-x-auto">
-            <table class="bt-table">
+        </div>
+        <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
+        <div x-show="trades.length > 0" class="overflow-x-auto">
+          <table class="bt-table">
               <thead>
                 <tr>
                   <th>DATE</th>
@@ -383,10 +383,10 @@
             </table>
           </div>
         </div>
-      </template>
+      </div>
 
-      <!-- No trades -->
-      <template x-if="ran && trades && trades.length===0">
+      <!-- No trades (legacy fallback, hidden) -->
+      <template x-if="false">
         <div class="t-card p-8 text-center text-t-muted">
           <p class="text-2xl mb-2">📭</p>
           <p class="font-semibold">No trades found</p>
