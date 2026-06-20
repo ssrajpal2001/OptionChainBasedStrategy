@@ -565,14 +565,17 @@ function backtestApp() {
     tradeFilter: '',
 
     init() {
-      // Auto-fill: last Monday → today
+      // Auto-fill: prev Monday → today (always spans 2 Mondays)
+      // e.g. Fri Jun 20 → Jun 9 to Jun 20; Mon Jun 23 → Jun 16 to Jun 23
       const today = new Date()
-      const day   = today.getDay()                          // 0=Sun … 6=Sat
-      const diffToMon = day === 0 ? 6 : day - 1            // days since last Monday
-      const lastMon = new Date(today)
-      lastMon.setDate(today.getDate() - diffToMon)
+      const day   = today.getDay()                    // 0=Sun … 6=Sat
+      const daysToThisMon = day === 0 ? 6 : day - 1  // days since this week's Monday
+      const thisMon = new Date(today)
+      thisMon.setDate(today.getDate() - daysToThisMon)
+      const prevMon = new Date(thisMon)
+      prevMon.setDate(thisMon.getDate() - 7)          // one week earlier = prev Monday
       const fmt = d => d.toISOString().slice(0, 10)
-      this.startDate = fmt(lastMon)
+      this.startDate = fmt(prevMon)
       this.endDate   = fmt(today)
 
       fetch('/api/backtest/token')
