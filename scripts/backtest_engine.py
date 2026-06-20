@@ -376,6 +376,13 @@ def _run_day(
                 break
 
             # Scan accumulated LTF bars for new same-kind traps
+            # TSL moves only at ENTRY_READY — full cycle:
+            #   BEAR long:  sellers in (< zone_low) → trapped (> zone_high)
+            #               → price retests zone_low → bounces up → ENTRY_READY
+            #               → TSL = zone_low (sellers' entry = now confirmed support)
+            #   BULL short: buyers in (> zone_high) → trapped (< zone_low)
+            #               → price retests zone_high → drops → ENTRY_READY
+            #               → TSL = zone_high (buyers' entry = now confirmed resistance)
             if len(accumulated) >= 2:
                 try:
                     ltf_df = pd.DataFrame(accumulated)
@@ -384,30 +391,31 @@ def _run_day(
                         if z.get("kind") != kind:
                             continue
                         zl, zh = z.get("zone_low", 0), z.get("zone_high", 0)
-                        uid = f"{zl:.0f}_{zh:.0f}"
-                        already = any(p["uid"] == uid for p in pending_traps)
-                        if not already and z.get("status") in ("TRAPPED", "ACTIVE"):
-                            pending_traps.append({"uid": uid, "zone_low": zl, "zone_high": zh,
-                                                  "status": z.get("status")})
-                        # If a pending trap's SL level is now hit → advance TSL
-                        for pt in list(pending_traps):
-                            if pt["status"] == "TRAPPED":
-                                sl_cleared = (lhigh >= pt["zone_high"]) if kind == "BEAR" \
-                                             else (llow <= pt["zone_low"])
-                                if sl_cleared:
-                                    # Trap fully cleared — move TSL to where they entered
-                                    new_tsl = pt["zone_low"] if kind == "BEAR" else pt["zone_high"]
-                                    if kind == "BEAR" and new_tsl > tsl:
-                                        tsl = new_tsl
-                                    elif kind == "BULL" and new_tsl < tsl:
-                                        tsl = new_tsl
-                                    pending_traps.remove(pt)
-                            elif pt["status"] == "ACTIVE":
-                                # Update status if now trapped
-                                trapped = (lhigh > pt["zone_high"]) if kind == "BEAR" \
-                                          else (llow < pt["zone_low"])
-                                if trapped:
-                                    pt["status"] = "TRAPPED"
+                        uid    = f"{zl:.0f}_{zh:.0f}"
+                        status = z.get("status", "")
+
+                        # Register new zones
+                        existing = next((p for p in pending_traps if p["uid"] == uid), None)
+                        if not existing:
+                            if status in ("ACTIVE", "TRAPPED", "ENTRY_READY"):
+                                pending_traps.append({
+                                    "uid": uid, "zone_low": zl, "zone_high": zh,
+                                    "status": status
+                                })
+                        else:
+                            existing["status"] = status   # update state
+
+                    # Check for ENTRY_READY — retest confirmed, move TSL
+                    for pt in list(pending_traps):
+                        if pt["status"] == "ENTRY_READY":
+                            # BEAR long: TSL = zone_low (sellers' entry = support after retest)
+                            # BULL short: TSL = zone_high (buyers' entry = resistance after retest)
+                            new_tsl = pt["zone_low"] if kind == "BEAR" else pt["zone_high"]
+                            if kind == "BEAR" and new_tsl > tsl:
+                                tsl = new_tsl
+                            elif kind == "BULL" and new_tsl < tsl:
+                                tsl = new_tsl
+                            pending_traps.remove(pt)
                 except Exception:
                     pass
         else:
