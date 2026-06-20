@@ -430,7 +430,7 @@
 
       <!-- Batch comparison table — sits between by-combo and trade log -->
       <div id="batch-table-anchor"></div>
-      <div x-show="batchRows && batchRows.length" class="t-card overflow-hidden">
+      <div x-show="batchRows.length > 0" style="display:none" class="t-card overflow-hidden">
         <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
           <p class="sec-label text-t-amber">⚡ BATCH — ZONE WIDTH COMPARISON (click row to load trades)</p>
           <span class="text-xs text-t-muted" x-text="period"></span>
