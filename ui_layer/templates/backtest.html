@@ -348,8 +348,8 @@
             <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter" />
           </div>
         </div>
-        <div x-show="filteredTrades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
-        <div x-show="filteredTrades.length > 0" class="overflow-x-auto">
+        <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
+        <div x-show="trades.length > 0" class="overflow-x-auto">
           <table class="bt-table">
               <thead>
                 <tr>
@@ -375,7 +375,7 @@
                 </tr>
               </thead>
               <tbody>
-                <template x-for="t in filteredTrades" :key="t.date+t.entry_ts+t.direction">
+                <template x-for="t in filteredTrades()" :key="t.date+(t.entry_ts||'')+t.direction+(t.combo||'')+Math.random()">
                   <tr>
                     <td class="text-t-muted font-mono text-xs" x-text="t.date"></td>
                     <td class="font-mono text-xs text-t-muted" x-text="t.htf_touch || t.entry_ts"></td>
@@ -509,8 +509,8 @@ function backtestApp() {
       { val: 'nogap+no_zone', label: 'NO GAP + NO ZONE' },
     ],
 
-    get filteredTrades() {
-      const q = this.tradeFilter.toLowerCase().trim()
+    filteredTrades() {
+      const q = (this.tradeFilter || '').toLowerCase().trim()
       if (!q) return this.trades
       return this.trades.filter(t =>
         (t.date||'').includes(q) ||
