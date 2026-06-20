@@ -415,8 +415,10 @@ def _run_day(
 
     reachable_hist = _zones_reachable(htf_zones_hist, today_open)
     # If gap day and no reachable historical zones → intraday cascade only
-    use_cascade_only = has_gap and len(reachable_hist) == 0
-    has_htf_zone     = len(reachable_hist) > 0
+    # Any gap (up or down) → old historical zones are at yesterday's price,
+    # market has moved away → ignore them, use fresh intraday 30min cascade only
+    use_cascade_only = has_gap
+    has_htf_zone     = (not has_gap) and len(reachable_hist) > 0
 
     combo_base = _combo_label(has_gap, has_htf_zone)
 
