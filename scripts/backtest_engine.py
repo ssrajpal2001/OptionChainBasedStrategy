@@ -725,12 +725,28 @@ def _run_day(
                         ep = float(ob.iloc[-1]["close"]) if not ob.empty else 0.0
                         if ep <= 0:
                             continue
+                        # Entry validation: price must be inside zone AND SL/T1 on correct sides
+                        zl, zh = zone["zone_low"], zone["zone_high"]
+                        if not (zl <= ep <= zh):
+                            continue   # price slipped outside zone by bar close — skip
+                        if kind == "BEAR" and (sl_p >= ep or t1_p <= ep):
+                            continue   # SL must be below entry, T1 must be above
+                        if kind == "BULL" and (sl_p <= ep or t1_p >= ep):
+                            continue   # SL must be above entry, T1 must be below
                         _record(kind, zone, zone_src, bar_ts, bar_ts, ep,
                                 sl_p, t1_p, t2_p, ltf_label, trap_label, combo_base, ltf_min)
                     else:
                         entry_ts = ltf_entry["ts"]
                         ep       = ltf_entry["price"]
                         if ep <= 0 or entry_ts >= sq_time:
+                            continue
+                        # Entry validation: same rules for FIRST/MIDDLE/LAST
+                        zl, zh = zone["zone_low"], zone["zone_high"]
+                        if not (zl <= ep <= zh):
+                            continue
+                        if kind == "BEAR" and (sl_p >= ep or t1_p <= ep):
+                            continue
+                        if kind == "BULL" and (sl_p <= ep or t1_p >= ep):
                             continue
                         _record(kind, zone, zone_src, bar_ts, entry_ts, ep,
                                 sl_p, t1_p, t2_p, ltf_label, trap_label, combo_base, ltf_min)
