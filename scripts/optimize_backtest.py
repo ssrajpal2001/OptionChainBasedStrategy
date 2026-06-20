@@ -119,19 +119,30 @@ def fetch_all_data(trading_days: list[str], fut_key: str) -> dict:
     return cache
 
 
-def run_combo(params: dict, trading_days: list[str], cache: dict) -> list[dict]:
-    """Run one parameter combination over all trading days."""
-    all_trades = []
+def build_day_frames(trading_days: list[str], cache: dict) -> dict:
+    """Pre-build (today_df, lookback_df) once per trading day — reused across all combos."""
+    import pandas as pd
+    frames = {}
     for td in trading_days:
         today_df = cache.get(td)
         if today_df is None or today_df.empty:
             continue
         lb_frames = [cache[d] for d in _lookback_dates(td, LOOKBACK_DAYS)
                      if d in cache and not cache[d].empty]
-        import pandas as pd
         lookback_df = (pd.concat(lb_frames, ignore_index=True)
                        .sort_values("datetime").reset_index(drop=True)
                        if lb_frames else pd.DataFrame())
+        frames[td] = (today_df, lookback_df)
+    return frames
+
+
+def run_combo(params: dict, trading_days: list[str], day_frames: dict) -> list[dict]:
+    """Run one parameter combination over all trading days using pre-built frames."""
+    all_trades = []
+    for td in trading_days:
+        if td not in day_frames:
+            continue
+        today_df, lookback_df = day_frames[td]
 
         trades = _run_day(
             td, today_df, lookback_df,
@@ -180,8 +191,11 @@ def main():
     total  = len(combos)
     print(f"Grid: {' × '.join(str(len(v)) for v in values)} = {total} combinations\n")
 
-    # Fetch all data once
+    # Fetch all data once, then pre-build day frames (pd.concat done once per day)
     cache = fetch_all_data(trading_days, FIXED["fut_key"])
+    print("Pre-building day frames (done once, reused across all 980 combos)…")
+    day_frames = build_day_frames(trading_days, cache)
+    print(f"Ready — {len(day_frames)} days with data.\n")
 
     # Run grid search
     results = []
@@ -189,7 +203,7 @@ def main():
         params = dict(zip(keys, combo))
         params.update(FIXED)
 
-        trades = run_combo(params, trading_days, cache)
+        trades = run_combo(params, trading_days, day_frames)
         s = _stats(trades)
 
         if s["count"] >= args.min_trades:
