@@ -377,12 +377,12 @@ def _run_day(
 
             # Scan accumulated LTF bars for new same-kind traps
             # TSL moves only at ENTRY_READY — full cycle:
-            #   BEAR long:  sellers in (< zone_low) → trapped (> zone_high)
-            #               → price retests zone_low → bounces up → ENTRY_READY
-            #               → TSL = zone_low (sellers' entry = now confirmed support)
-            #   BULL short: buyers in (> zone_high) → trapped (< zone_low)
-            #               → price retests zone_high → drops → ENTRY_READY
-            #               → TSL = zone_high (buyers' entry = now confirmed resistance)
+            # TSL full cycle (BEAR long example):
+            #   Bears enter at 6900, SL=6950 → price hits 6950 (TRAPPED)
+            #   → price retraces to 6900 (bears exit at 0 P&L = ENTRY_READY)
+            #   → price bounces from 6900 back up to 6950 (sl_re_hit)
+            #   → NOW TSL = 6900  (6900 confirmed as support)
+            # Mirror for BULL short: bulls exit at 0 at zone_high, price drops to zone_low again → TSL = zone_high
             if len(accumulated) >= 2:
                 try:
                     ltf_df = pd.DataFrame(accumulated)
@@ -405,17 +405,19 @@ def _run_day(
                         else:
                             existing["status"] = status   # update state
 
-                    # Check for ENTRY_READY — retest confirmed, move TSL
+                    # After ENTRY_READY: wait for price to re-hit the original SL level
+                    # That confirms the retest held → advance TSL to bears' entry (zone_low)
                     for pt in list(pending_traps):
                         if pt["status"] == "ENTRY_READY":
-                            # BEAR long: TSL = zone_low (sellers' entry = support after retest)
-                            # BULL short: TSL = zone_high (buyers' entry = resistance after retest)
-                            new_tsl = pt["zone_low"] if kind == "BEAR" else pt["zone_high"]
-                            if kind == "BEAR" and new_tsl > tsl:
-                                tsl = new_tsl
-                            elif kind == "BULL" and new_tsl < tsl:
-                                tsl = new_tsl
-                            pending_traps.remove(pt)
+                            sl_re_hit = (lhigh >= pt["zone_high"]) if kind == "BEAR" \
+                                        else (llow <= pt["zone_low"])
+                            if sl_re_hit:
+                                new_tsl = pt["zone_low"] if kind == "BEAR" else pt["zone_high"]
+                                if kind == "BEAR" and new_tsl > tsl:
+                                    tsl = new_tsl
+                                elif kind == "BULL" and new_tsl < tsl:
+                                    tsl = new_tsl
+                                pending_traps.remove(pt)
                 except Exception:
                     pass
         else:
