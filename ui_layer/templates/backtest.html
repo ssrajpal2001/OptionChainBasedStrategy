@@ -353,7 +353,7 @@
       </div>
 
       <!-- Summary cards -->
-      <div x-show="summary">
+      <div x-show="ran">
           <p class="sec-label mb-3">SUMMARY — <span x-text="period"></span>
             <span x-show="batchRows.length" class="ml-3 px-2 py-0.5 rounded text-xs font-bold bg-amber-500/20 text-t-amber border border-amber-500/40">
               ⚡ BATCH LOADED: <span x-text="batchRows.length"></span> WIDTHS ↓ scroll down
@@ -590,7 +590,7 @@ function backtestApp() {
     error:   '',
 
     // results
-    summary:  null,
+    summary:  {count:0, win_pct:0, total_rs:0, avg_win:0, avg_loss:0},
     byCombo:  {},
     trades:   [],
     equity:   [],
