@@ -704,6 +704,7 @@ function backtestApp() {
 
     async runBacktest() {
       if (!this.token) { this.error = 'Upstox token not loaded yet'; return }
+      if (this.running) { this.error = 'Already running — wait for it to finish'; return }
       this.running = true
       this.error   = ''
       this.summary = null
@@ -795,6 +796,7 @@ function backtestApp() {
 
     async runBatch() {
       if (!this.token) { this.error = 'Upstox token not loaded yet'; return }
+      if (this.running) { this.error = 'Already running — wait for it to finish'; return }
       this.running = true
       this.error   = ''
       this.batchRows = []
