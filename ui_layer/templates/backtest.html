@@ -114,7 +114,7 @@
 
     /* trade table */
     .bt-table { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
-    .bt-table th { padding: 8px 10px; text-align: left; color: var(--t-muted); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--t-border); }
+    .bt-table th { padding: 8px 10px; text-align: left; color: var(--t-muted); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--t-border); position: sticky; top: 0; background: var(--t-card); z-index: 1; }
     .bt-table td { padding: 7px 10px; border-bottom: 1px solid var(--t-border); white-space: nowrap; }
     .bt-table tr:last-child td { border-bottom: none; }
     .bt-table tr:hover td { background: rgba(var(--t-cyan-rgb),0.03); }
@@ -333,7 +333,7 @@
           </div>
         </div>
         <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
-        <div x-show="trades.length > 0" class="overflow-x-auto">
+        <div x-show="trades.length > 0" class="overflow-x-auto overflow-y-auto" style="max-height:480px;">
           <table class="bt-table">
               <thead>
                 <tr>
