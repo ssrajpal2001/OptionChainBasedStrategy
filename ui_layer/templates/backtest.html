@@ -425,16 +425,16 @@
       </div>
 
       <!-- Trade log rendered via innerHTML (avoids Alpine x-for rendering bug) -->
-      <div x-show="ran" class="t-card overflow-hidden" id="trade-log">
-        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
+      <div x-show="ran" class="t-card flex flex-col" id="trade-log" style="max-height:70vh; min-height:0;">
+        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between flex-shrink-0">
           <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
           <div class="flex gap-2">
             <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter"
                    @input="renderTradeTable()" />
           </div>
         </div>
-        <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
-        <div x-show="trades.length > 0" class="overflow-x-auto" id="trade-tbody-wrap"></div>
+        <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm flex-shrink-0">No trades in this period.</div>
+        <div x-show="trades.length > 0" style="overflow:auto; flex:1; min-height:0;" id="trade-tbody-wrap"></div>
       </div>
 
       <!-- DEAD CODE kept for structure reference — actual rendering is via innerHTML -->
