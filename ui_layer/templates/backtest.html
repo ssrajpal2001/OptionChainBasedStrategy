@@ -332,15 +332,7 @@
         </div>
       </template>
 
-      <!-- Equity curve -->
-      <template x-if="equity && equity.length">
-        <div class="t-card p-4">
-          <p class="sec-label mb-3">EQUITY CURVE</p>
-          <canvas id="equityChart" height="120"></canvas>
-        </div>
-      </template>
-
-      <!-- Trade log -->
+      <!-- Trade log (BEFORE equity curve so it's immediately visible) -->
       <div x-show="ran" class="t-card overflow-hidden" id="trade-log">
         <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
           <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
@@ -411,12 +403,11 @@
         </div>
       </div>
 
-      <!-- No trades (legacy fallback, hidden) -->
-      <template x-if="false">
-        <div class="t-card p-8 text-center text-t-muted">
-          <p class="text-2xl mb-2">📭</p>
-          <p class="font-semibold">No trades found</p>
-          <p class="text-xs mt-1">Try increasing days or changing the combo filter</p>
+      <!-- Equity curve (after trade log) -->
+      <template x-if="equity && equity.length">
+        <div class="t-card p-4">
+          <p class="sec-label mb-3">EQUITY CURVE</p>
+          <canvas id="equityChart" height="120"></canvas>
         </div>
       </template>
 
