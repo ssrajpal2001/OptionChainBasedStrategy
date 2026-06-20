@@ -265,11 +265,23 @@
               @click="runBacktest"
               :disabled="running || !tokenOk">
         <span x-show="!running">▶ RUN BACKTEST</span>
-        <span x-show="running" class="flex items-center justify-center gap-2" title="Fetching 10-day lookback for each trade day — may take 3-5 minutes">
+        <span x-show="running" class="flex items-center justify-center gap-2">
           <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
           </svg>
           RUNNING… (may take 3-5 min)
+        </span>
+      </button>
+
+      <button class="w-full py-2 rounded border border-t-amber text-t-amber text-xs font-bold tracking-widest hover:bg-amber-950/30 transition-colors mt-1"
+              @click="runBatch"
+              :disabled="running || !tokenOk">
+        <span x-show="!running">⚡ BATCH RUN — Zone Width 10/20/30/40/50</span>
+        <span x-show="running" class="flex items-center justify-center gap-2">
+          <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+          </svg>
+          <span x-text="batchStatus || 'RUNNING BATCH…'"></span>
         </span>
       </button>
 
@@ -287,6 +299,50 @@
           <span class="text-xs text-t-muted" x-text="zones.length + ' zones'"></span>
         </div>
         <div style="overflow:auto; max-height:60vh; min-height:0;" id="zone-tbody-wrap"></div>
+      </div>
+
+      <!-- Batch comparison table -->
+      <div x-show="batchRows && batchRows.length" class="t-card overflow-hidden">
+        <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
+          <p class="sec-label text-t-amber">⚡ BATCH — ZONE WIDTH COMPARISON</p>
+          <span class="text-xs text-t-muted" x-text="period"></span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="bt-table">
+            <thead>
+              <tr>
+                <th>WIDTH</th>
+                <th>TRADES</th>
+                <th>WIN%</th>
+                <th>TOTAL P&L</th>
+                <th>AVG WIN</th>
+                <th>AVG LOSS</th>
+                <th>BEST COMBO</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="row in batchRows" :key="row.width">
+                <tr class="cursor-pointer hover:bg-white/5 transition-colors"
+                    :class="batchSelected===row.width ? 'ring-1 ring-t-amber' : ''"
+                    @click="loadBatchRow(row)">
+                  <td class="font-mono text-t-amber font-bold" x-text="row.width + ' pts'"></td>
+                  <td x-text="row.count"></td>
+                  <td :class="row.win_pct>=50?'text-t-green':'text-t-red'" x-text="row.win_pct+'%'"></td>
+                  <td :class="row.total_rs>=0?'text-t-green':'text-t-red'"
+                      x-text="'Rs '+(row.total_rs>=0?'+':'')+row.total_rs.toLocaleString()"></td>
+                  <td class="text-t-green" x-text="'Rs +'+(row.avg_win||0).toLocaleString()"></td>
+                  <td class="text-t-red" x-text="'Rs '+(row.avg_loss||0).toLocaleString()"></td>
+                  <td class="text-xs text-t-cyan font-mono" x-text="row.best_combo"></td>
+                  <td class="text-xs text-t-muted">click to load ↓</td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <div x-show="batchSelected" class="px-4 py-2 text-xs text-t-muted border-t border-t-border">
+          Showing full drill-down for <span class="text-t-amber font-bold" x-text="batchSelected + ' pt'"></span> zone width below ↓
+        </div>
       </div>
 
       <!-- Summary cards -->
@@ -471,6 +527,9 @@ function backtestApp() {
     gapPct:      0.3,
     slBuf:         20,
     minZoneWidth:  30,
+    batchRows:     [],
+    batchSelected: null,
+    batchStatus:   '',
     lots:          2,
     futKey:      'MCX_FO|520702',
     startDate:   '',
@@ -619,6 +678,92 @@ function backtestApp() {
       } finally {
         this.running = false
       }
+    },
+
+    _backtestPayload(width) {
+      return {
+        token:           this.token,
+        days:            parseInt(this.days),
+        lots:            parseInt(this.lots),
+        gap_threshold:   parseFloat(this.gapPct) / 100,
+        htf_min_zone:    parseInt(this.htfZone),
+        htf_min_cascade: parseInt(this.htfCascade),
+        sl_buf:          parseFloat(this.slBuf),
+        combo:           'all',
+        fut_key:         this.futKey,
+        start_date:      this.startDate,
+        end_date:        this.endDate,
+        min_zone_width:  width,
+      }
+    },
+
+    _bestCombo(byCombo) {
+      if (!byCombo) return '—'
+      let best = null, bestPnl = -Infinity
+      for (const [key, val] of Object.entries(byCombo)) {
+        if ((val.total_rs || 0) > bestPnl) { bestPnl = val.total_rs; best = key }
+      }
+      return best || '—'
+    },
+
+    async runBatch() {
+      if (!this.token) { this.error = 'Upstox token not loaded yet'; return }
+      this.running = true
+      this.error   = ''
+      this.batchRows = []
+      this.batchSelected = null
+      const widths = [10, 20, 30, 40, 50]
+      try {
+        for (const w of widths) {
+          this.batchStatus = `Running width ${w} pts… (${widths.indexOf(w)+1}/${widths.length})`
+          const ctrl = new AbortController()
+          const tid  = setTimeout(() => ctrl.abort(), 600000)
+          const res  = await fetch('/api/backtest/crude', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            signal: ctrl.signal,
+            body: JSON.stringify(this._backtestPayload(w))
+          })
+          clearTimeout(tid)
+          const data = await res.json()
+          if (!data.ok) { this.batchRows.push({ width: w, count: 0, win_pct: 0, total_rs: 0, avg_win: 0, avg_loss: 0, best_combo: 'ERROR', _data: null }); continue }
+          const s = data.summary || {}
+          this.batchRows.push({
+            width:      w,
+            count:      s.count     || 0,
+            win_pct:    s.win_pct   || 0,
+            total_rs:   s.total_rs  || 0,
+            avg_win:    s.avg_win   || 0,
+            avg_loss:   s.avg_loss  || 0,
+            best_combo: this._bestCombo(data.by_combo),
+            _data:      data,
+          })
+        }
+        this.period = this.batchRows[0]?._data?.period || ''
+        // auto-select best P&L row
+        const best = [...this.batchRows].sort((a,b) => b.total_rs - a.total_rs)[0]
+        if (best) this.loadBatchRow(best)
+      } catch(e) { this.error = e.message || 'Batch failed' }
+      finally { this.running = false; this.batchStatus = '' }
+    },
+
+    loadBatchRow(row) {
+      if (!row._data) return
+      this.batchSelected = row.width
+      this.minZoneWidth  = row.width
+      const data = row._data
+      this.summary = data.summary
+      this.byCombo = data.by_combo
+      this.trades  = data.trades
+      this.equity  = data.equity
+      this.log     = data.log
+      this.period  = data.period
+      this.ran     = true
+      this.$nextTick(() => {
+        this._drawChart()
+        this.renderTradeTable()
+        document.getElementById('trade-log')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
     },
 
     renderTradeTable() {
