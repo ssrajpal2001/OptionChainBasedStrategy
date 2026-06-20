@@ -712,37 +712,39 @@ function backtestApp() {
       this.error   = ''
       this.batchRows = []
       this.batchSelected = null
+      this.batchStatus = 'Running all 5 widths in parallel…'
       const widths = [10, 20, 30, 40, 50]
       try {
-        for (const w of widths) {
-          this.batchStatus = `Running width ${w} pts… (${widths.indexOf(w)+1}/${widths.length})`
+        const results = await Promise.all(widths.map(async w => {
           const ctrl = new AbortController()
           const tid  = setTimeout(() => ctrl.abort(), 600000)
-          const res  = await fetch('/api/backtest/crude', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            signal: ctrl.signal,
-            body: JSON.stringify(this._backtestPayload(w))
-          })
-          clearTimeout(tid)
-          const data = await res.json()
-          if (!data.ok) { this.batchRows.push({ width: w, count: 0, win_pct: 0, total_rs: 0, avg_win: 0, avg_loss: 0, best_combo: 'ERROR', _data: null }); continue }
-          const s = data.summary || {}
-          this.batchRows.push({
-            width:      w,
-            count:      s.count     || 0,
-            win_pct:    s.win_pct   || 0,
-            total_rs:   s.total_rs  || 0,
-            avg_win:    s.avg_win   || 0,
-            avg_loss:   s.avg_loss  || 0,
-            best_combo: this._bestCombo(data.by_combo),
-            _data:      data,
-          })
-        }
-        this.period = this.batchRows[0]?._data?.period || ''
-        // auto-select best P&L row
+          try {
+            const res  = await fetch('/api/backtest/crude', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              signal: ctrl.signal,
+              body: JSON.stringify(this._backtestPayload(w))
+            })
+            clearTimeout(tid)
+            const data = await res.json()
+            if (!data.ok) return { width: w, count: 0, win_pct: 0, total_rs: 0, avg_win: 0, avg_loss: 0, best_combo: 'ERROR', _data: null }
+            const s = data.summary || {}
+            return {
+              width:      w,
+              count:      s.count     || 0,
+              win_pct:    s.win_pct   || 0,
+              total_rs:   s.total_rs  || 0,
+              avg_win:    s.avg_win   || 0,
+              avg_loss:   s.avg_loss  || 0,
+              best_combo: this._bestCombo(data.by_combo),
+              _data:      data,
+            }
+          } catch(e) { clearTimeout(tid); return { width: w, count: 0, win_pct: 0, total_rs: 0, avg_win: 0, avg_loss: 0, best_combo: 'ERROR', _data: null } }
+        }))
+        this.batchRows = results.sort((a,b) => a.width - b.width)
+        this.period = this.batchRows.find(r=>r._data)?._data?.period || ''
         const best = [...this.batchRows].sort((a,b) => b.total_rs - a.total_rs)[0]
-        if (best) this.loadBatchRow(best)
+        if (best?._data) this.loadBatchRow(best)
       } catch(e) { this.error = e.message || 'Batch failed' }
       finally { this.running = false; this.batchStatus = '' }
     },
