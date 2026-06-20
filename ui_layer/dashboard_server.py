@@ -5452,7 +5452,33 @@ class DashboardServer:
                 from backtest_engine import run_crude_backtest as _run
                 result = await asyncio.wait_for(
                     asyncio.to_thread(_run, params.dict(exclude={"token"}), token),
-                    timeout=600.0,   # 10 min — 10-day lookback needs many API calls
+                    timeout=600.0,
+                )
+                return result
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        @app.post("/api/backtest/batch", tags=["Backtest"])
+        async def run_batch_backtest_api(params: _BacktestCrudeSchema):
+            """Fetch data ONCE, apply zone widths [10,20,30,40,50] in memory. ~3-5min total."""
+            try:
+                token = params.token
+                if not token:
+                    creds = await asyncio.to_thread(
+                        _srv._client_db.get_feeder_creds_sync, "upstox"
+                    )
+                    token = (creds or {}).get("access_token", "")
+                if not token:
+                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
+                import sys as _sys
+                import os as _os
+                _scripts = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "scripts")
+                if _scripts not in _sys.path:
+                    _sys.path.insert(0, _scripts)
+                from backtest_engine import run_batch_backtest as _run_batch
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_run_batch, params.dict(exclude={"token"}), token),
+                    timeout=900.0,   # 15 min — one fetch, 5 width passes
                 )
                 return result
             except Exception as exc:

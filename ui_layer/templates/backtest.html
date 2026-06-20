@@ -715,43 +715,28 @@ function backtestApp() {
       const widths = [10, 20, 30, 40, 50]
       const done = []
 
-      const runOne = async (w) => {
-        this.batchStatus = `Running… (${done.length}/${widths.length} done)`
-        const ctrl = new AbortController()
-        // 8-min per-request timeout
-        const tid  = setTimeout(() => ctrl.abort(), 480000)
-        try {
-          const res  = await fetch('/api/backtest/crude', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            signal: ctrl.signal,
-            body: JSON.stringify(this._backtestPayload(w))
-          })
-          clearTimeout(tid)
-          const data = await res.json()
-          done.push(w)
-          this.batchStatus = `Running… (${done.length}/${widths.length} done)`
-          if (!data.ok) return { width: w, count: 0, win_pct: 0, total_rs: 0, avg_win: 0, avg_loss: 0, best_combo: 'ERROR', _data: null }
-          const s = data.summary || {}
-          return {
-            width: w, count: s.count||0, win_pct: s.win_pct||0,
-            total_rs: s.total_rs||0, avg_win: s.avg_win||0, avg_loss: s.avg_loss||0,
-            best_combo: this._bestCombo(data.by_combo), _data: data,
-          }
-        } catch(e) {
-          clearTimeout(tid)
-          done.push(w)
-          this.batchStatus = `Running… (${done.length}/${widths.length} done)`
-          return { width: w, count: 0, win_pct: 0, total_rs: 0, avg_win: 0, avg_loss: 0, best_combo: 'TIMEOUT', _data: null }
-        }
-      }
-
       try {
-        // Run 3 first, then 2 — avoids Upstox rate-limit on 5 simultaneous historical pulls
-        const [r1,r2,r3] = await Promise.all([runOne(10), runOne(20), runOne(30)])
-        const [r4,r5]    = await Promise.all([runOne(40), runOne(50)])
-        this.batchRows = [r1,r2,r3,r4,r5].sort((a,b) => a.width - b.width)
-        this.period = this.batchRows.find(r=>r._data)?._data?.period || ''
+        // Single request — backend fetches data ONCE, applies all 5 widths in memory
+        const ctrl = new AbortController()
+        const tid  = setTimeout(() => ctrl.abort(), 900000) // 15 min
+        const res  = await fetch('/api/backtest/batch', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          signal: ctrl.signal,
+          body: JSON.stringify(this._backtestPayload(this.minZoneWidth))
+        })
+        clearTimeout(tid)
+        const data = await res.json()
+        if (!data.ok) { this.error = data.error || 'Batch failed'; return }
+        this.batchRows = (data.results || []).map(r => {
+          const s = r.summary || {}
+          return {
+            width: r.width, count: s.count||0, win_pct: s.win_pct||0,
+            total_rs: s.total_rs||0, avg_win: s.avg_win||0, avg_loss: s.avg_loss||0,
+            best_combo: this._bestCombo(r.by_combo), _data: r,
+          }
+        })
+        this.period = data.period || ''
         const best = [...this.batchRows].filter(r=>r._data).sort((a,b) => b.total_rs - a.total_rs)[0]
         if (best) this.loadBatchRow(best)
       } catch(e) { this.error = e.message || 'Batch failed' }

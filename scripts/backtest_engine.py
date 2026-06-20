@@ -196,16 +196,16 @@ def _trapped_zones(htf_df: pd.DataFrame, min_width: float = 30.0) -> list[dict]:
 
 
 # ── Zone helpers ──────────────────────────────────────────────────────────────
-def _get_prev_day_htf_zones(prev_df: pd.DataFrame, htf_min: int) -> list[dict]:
+def _get_prev_day_htf_zones(prev_df: pd.DataFrame, htf_min: int, min_width: float = 30.0) -> list[dict]:
     """Scan previous day's bars at htf_min resolution → return TRAPPED zones."""
     if prev_df.empty:
         return []
     htf = resample(prev_df, htf_min)
-    return _trapped_zones(htf)
+    return _trapped_zones(htf, min_width)
 
 
 def _get_combined_zones_at(prev_df: pd.DataFrame, today_df: pd.DataFrame,
-                            bar_ts, htf_min: int) -> list[dict]:
+                            bar_ts, htf_min: int, min_width: float = 30.0) -> list[dict]:
     """
     Scan BOTH previous day bars + today's bars up to bar_ts combined.
     This ensures prev-day zones AND intraday zones forming during the day
@@ -220,7 +220,7 @@ def _get_combined_zones_at(prev_df: pd.DataFrame, today_df: pd.DataFrame,
     if combined.empty:
         return []
     htf = resample(combined, htf_min)
-    return _trapped_zones(htf)
+    return _trapped_zones(htf, min_width)
 
 
 def _zones_for_direction(zones: list[dict], direction: str) -> list[dict]:
@@ -328,6 +328,7 @@ def _run_day(
     combo_filter: str,
     lot_size: int,
     ltf_minutes: list[int],    # e.g. [5, 15]
+    min_width: float = 30.0,
 ) -> list[dict]:
     """Run one day's backtest with LTF sub-trap comparison. Returns list of trade records."""
     trades: list[dict] = []
@@ -342,7 +343,7 @@ def _run_day(
     has_gap    = gap_info["gap"]
 
     # Historical HTF zones from lookback window
-    htf_zones_hist = _get_prev_day_htf_zones(lookback_df, htf_min_zone)
+    htf_zones_hist = _get_prev_day_htf_zones(lookback_df, htf_min_zone, min_width)
 
     # Gap-through detection: if price gapped past ALL historical zones, skip them
     # and use intraday cascade only (fresh traps at current price level)
@@ -588,13 +589,13 @@ def _run_day(
             # ── Zone selection ─────────────────────────────────────────────
             if use_cascade_only:
                 # Gap-through: only use intraday zones forming today
-                live_zones = _get_combined_zones_at(pd.DataFrame(), today_df, bar_ts, htf_min_cascade)
+                live_zones = _get_combined_zones_at(pd.DataFrame(), today_df, bar_ts, htf_min_cascade, min_width)
                 zone_src   = "CASCADE"
             else:
                 # Combined: 10-day lookback + today intraday
-                live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_zone)
+                live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_zone, min_width)
                 if not live_zones:
-                    live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_cascade)
+                    live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_cascade, min_width)
                 zone_src = "HTF" if has_htf_zone else "CASCADE"
 
             kind_zones = _zones_for_direction(live_zones, kind)
@@ -821,6 +822,125 @@ def run_crude_backtest(params: dict, token: str) -> dict:
         "equity":  equity,
         "log":     log,
     }
+
+
+def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> dict:
+    """
+    Run backtest once with shared data fetching, then apply each zone width filter.
+    Returns all width results from a single set of Upstox API calls.
+    """
+    if widths is None:
+        widths = [10.0, 20.0, 30.0, 40.0, 50.0]
+
+    global _HEADERS
+    _HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    days         = int(params.get("days", 7))
+    lots         = int(params.get("lots", 2))
+    gap_thr      = float(params.get("gap_threshold", GAP_PCT))
+    htf_zone     = int(params.get("htf_min_zone", 60))
+    htf_cascade  = int(params.get("htf_min_cascade", 30))
+    sl_buf       = float(params.get("sl_buf", SL_BUF))
+    combo_filter = "all"
+    fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
+    ltf_minutes  = [5, 15]
+    lot_size     = CRUDE_LOT * lots
+    LOOKBACK_DAYS = 10
+
+    start_date = params.get("start_date", "")
+    end_date   = params.get("end_date", "")
+    if start_date and end_date:
+        sd, ed = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        trading_days = []
+        d = sd
+        while d <= ed:
+            if d.weekday() < 5:
+                trading_days.append(d.isoformat())
+            d += timedelta(days=1)
+    else:
+        trading_days = get_trading_days(days)
+
+    def _lookback_dates(trade_dt: str, n: int) -> list[str]:
+        result = []
+        d = date.fromisoformat(trade_dt) - timedelta(days=1)
+        while len(result) < n:
+            if d.weekday() < 5:
+                result.append(d.isoformat())
+            d -= timedelta(days=1)
+        return list(reversed(result))
+
+    # ── Fetch all data ONCE ──────────────────────────────────────────────────
+    day_data: list[tuple] = []   # (trade_date, today_df, lookback_df)
+    for trade_date in trading_days:
+        today_df = fetch_1m(fut_key, trade_date)
+        time.sleep(0.3)
+        if today_df.empty:
+            continue
+        lb_dates = _lookback_dates(trade_date, LOOKBACK_DAYS)
+        lb_frames = []
+        for lb_dt in lb_dates:
+            df = fetch_1m(fut_key, lb_dt)
+            time.sleep(0.2)
+            if not df.empty:
+                lb_frames.append(df)
+        lookback_df = pd.concat(lb_frames, ignore_index=True).sort_values("datetime").reset_index(drop=True) \
+                      if lb_frames else pd.DataFrame()
+        day_data.append((trade_date, today_df, lookback_df))
+
+    def _stats(trades: list[dict]) -> dict:
+        if not trades:
+            return {"count": 0, "wins": 0, "losses": 0, "win_pct": 0,
+                    "total_rs": 0, "avg_win": 0, "avg_loss": 0}
+        wins   = [t for t in trades if t["pnl_rs"] > 0]
+        losses = [t for t in trades if t["pnl_rs"] <= 0]
+        return {
+            "count":    len(trades),
+            "wins":     len(wins),
+            "losses":   len(losses),
+            "win_pct":  round(len(wins) / len(trades) * 100, 1),
+            "total_rs": int(sum(t["pnl_rs"] for t in trades)),
+            "avg_win":  int(sum(t["pnl_rs"] for t in wins) / len(wins)) if wins else 0,
+            "avg_loss": int(sum(t["pnl_rs"] for t in losses) / len(losses)) if losses else 0,
+        }
+
+    # ── Apply each width on the cached data ─────────────────────────────────
+    period = f"{trading_days[0]} → {trading_days[-1]}" if trading_days else ""
+    results: list[dict] = []
+    for w in widths:
+        all_trades: list[dict] = []
+        for (trade_date, today_df, lookback_df) in day_data:
+            day_trades = _run_day(
+                trade_date, today_df, lookback_df,
+                htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
+                ltf_minutes, min_width=w
+            )
+            all_trades.extend(day_trades)
+
+        seen: list[str] = []
+        for t in all_trades:
+            if t["combo"] not in seen:
+                seen.append(t["combo"])
+        all_combos = sorted(seen, key=lambda c: (
+            0 if not any(x in c for x in ["LTF","FIRST","MIDDLE","LAST","IMMEDIATE"]) else 1, c
+        ))
+        by_combo = {c: _stats([t for t in all_trades if t["combo"] == c]) for c in all_combos}
+
+        equity = []
+        cum = 0
+        for t in all_trades:
+            cum += t["pnl_rs"]
+            equity.append({"ts": f"{t['date']} {t.get('exit2_ts') or t.get('exit1_ts','')}", "cum": cum})
+
+        results.append({
+            "width":    w,
+            "summary":  _stats(all_trades),
+            "by_combo": by_combo,
+            "trades":   all_trades,
+            "equity":   equity,
+            "period":   period,
+        })
+
+    return {"ok": True, "period": period, "results": results}
 
 
 def run_zone_debug(params: dict, token: str) -> dict:
