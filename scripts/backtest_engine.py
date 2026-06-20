@@ -96,16 +96,111 @@ def _combo_label(has_gap: bool, has_zone: bool) -> str:
     return f"{g}+{z}"
 
 
+# ── Zone detection (correct 2-candle algorithm) ───────────────────────────────
+def scan_zones_consecutive(htf_df: pd.DataFrame) -> list[dict]:
+    """
+    Detect BEAR and BULL traps using consecutive candle lows/highs.
+
+    BEAR zone (sellers trapped → we BUY):
+      C1 = reference candle.  C2.low < C1.low → sellers entered short at C1.
+      zone_high = C1.low  (where sellers entered — zone top)
+      zone_low  = C2.low  (how far price fell   — zone bottom)
+      t1        = C1.high  (sellers' SL = our profit target)
+      TRAPPED   = any bar's high  > C1.high
+      ENTRY_READY = after TRAPPED, price re-enters [zone_low, zone_high]
+
+    BULL zone (buyers trapped → we SELL):
+      C1 = reference candle.  C2.high > C1.high → buyers entered long at C1.
+      zone_low  = C1.high  (where buyers entered — zone bottom)
+      zone_high = C2.high  (how far price rose   — zone top)
+      t1        = C1.low   (buyers' SL = our profit target)
+      TRAPPED   = any bar's low   < C1.low
+      ENTRY_READY = after TRAPPED, price re-enters [zone_low, zone_high]
+    """
+    if len(htf_df) < 3:
+        return []
+
+    bars   = htf_df.reset_index(drop=True)
+    zones  = []
+
+    for i in range(1, len(bars)):
+        prev = bars.iloc[i - 1]
+        curr = bars.iloc[i]
+        p_low, p_high = float(prev["low"]), float(prev["high"])
+        c_low, c_high = float(curr["low"]), float(curr["high"])
+
+        # ── BEAR zone ──────────────────────────────────────────────────────
+        if c_low < p_low:
+            z: dict = {
+                "kind":      "BEAR",
+                "zone_high": p_low,    # C1.low = zone top
+                "zone_low":  c_low,    # C2.low = zone bottom
+                "t1":        p_high,   # C1.high = sellers' SL = our T1
+                "ref_dt":    prev["datetime"],
+                "sellers_in_dt": curr["datetime"],
+                "trapped_dt":    None,
+                "entry_ready_dt": None,
+                "status":    "SELLERS_IN",
+            }
+            trapped = False
+            for j in range(i + 1, len(bars)):
+                b = bars.iloc[j]
+                if not trapped:
+                    if float(b["high"]) > p_high:
+                        trapped = True
+                        z["trapped_dt"] = b["datetime"]
+                        z["status"]     = "TRAPPED"
+                else:
+                    if float(b["low"]) <= p_low:
+                        z["entry_ready_dt"] = b["datetime"]
+                        z["status"]         = "ENTRY_READY"
+                        break
+            zones.append(z)
+
+        # ── BULL zone ──────────────────────────────────────────────────────
+        if c_high > p_high:
+            z = {
+                "kind":      "BULL",
+                "zone_low":  p_high,   # C1.high = zone bottom
+                "zone_high": c_high,   # C2.high = zone top
+                "t1":        p_low,    # C1.low  = buyers' SL = our T1
+                "ref_dt":    prev["datetime"],
+                "sellers_in_dt": curr["datetime"],   # buyers_in for BULL
+                "trapped_dt":    None,
+                "entry_ready_dt": None,
+                "status":    "BUYERS_IN",
+            }
+            trapped = False
+            for j in range(i + 1, len(bars)):
+                b = bars.iloc[j]
+                if not trapped:
+                    if float(b["low"]) < p_low:
+                        trapped = True
+                        z["trapped_dt"] = b["datetime"]
+                        z["status"]     = "TRAPPED"
+                else:
+                    if float(b["high"]) >= p_high:
+                        z["entry_ready_dt"] = b["datetime"]
+                        z["status"]         = "ENTRY_READY"
+                        break
+            zones.append(z)
+
+    return zones
+
+
+def _trapped_zones(htf_df: pd.DataFrame) -> list[dict]:
+    """Return only zones that reached TRAPPED or ENTRY_READY."""
+    return [z for z in scan_zones_consecutive(htf_df)
+            if z["status"] in ("TRAPPED", "ENTRY_READY")]
+
+
 # ── Zone helpers ──────────────────────────────────────────────────────────────
 def _get_prev_day_htf_zones(prev_df: pd.DataFrame, htf_min: int) -> list[dict]:
     """Scan previous day's bars at htf_min resolution → return TRAPPED zones."""
     if prev_df.empty:
         return []
     htf = resample(prev_df, htf_min)
-    if len(htf) < 2:
-        return []
-    _, zones = scanner.scan_htf_spot(htf)
-    return [z for z in zones if z["status"] == "TRAPPED"]
+    return _trapped_zones(htf)
 
 
 def _get_combined_zones_at(prev_df: pd.DataFrame, today_df: pd.DataFrame,
@@ -124,10 +219,7 @@ def _get_combined_zones_at(prev_df: pd.DataFrame, today_df: pd.DataFrame,
     if combined.empty:
         return []
     htf = resample(combined, htf_min)
-    if len(htf) < 2:
-        return []
-    _, zones = scanner.scan_htf_spot(htf)
-    return [z for z in zones if z["status"] == "TRAPPED"]
+    return _trapped_zones(htf)
 
 
 def _zones_for_direction(zones: list[dict], direction: str) -> list[dict]:
@@ -187,35 +279,29 @@ def _find_ltf_trap_entries(
     if len(ltf) < 2:
         return []
 
-    try:
-        _, zones = scanner.scan_htf_spot(ltf)
-    except Exception:
-        return []
-
-    # Sub-traps of same direction within this zone
-    sub_traps = [z for z in zones
-                 if z.get("kind") == direction and z.get("status") == "TRAPPED"]
+    sub_zones = _trapped_zones(ltf)
+    # Sub-traps of same direction within this zone — only ENTRY_READY
+    # (price already returned to zone after sellers trapped)
+    sub_traps = [z for z in sub_zones
+                 if z.get("kind") == direction and z.get("status") == "ENTRY_READY"]
 
     entries = []
     for z in sub_traps:
-        # Entry timestamp = sub-zone zone_high if BEAR (price broke above = sellers trapped)
-        # Use the zone's sl field timestamp if available, else approximate from LTF bars
-        # We use the bar closest to the sub-zone high/low as entry point
-        sub_high = z.get("zone_high", zh)
-        sub_low  = z.get("zone_low", zl)
-        # Find first LTF bar where price re-enters the sub-zone after being above (BEAR) or below (BULL)
-        if direction == "BEAR":
-            # Sellers trapped above sub_high — entry when price returns to sub_high area
-            match = ltf[ltf["close"] <= sub_high]
-        else:
-            match = ltf[ltf["close"] >= sub_low]
+        sub_zl   = z.get("zone_low", zl)
+        sub_zh   = z.get("zone_high", zh)
+        entry_dt = z.get("entry_ready_dt")
+        if entry_dt is None:
+            continue
+        # Get price at ENTRY_READY moment
+        match = ltf[ltf["datetime"] <= entry_dt]
         if match.empty:
             continue
         entry_bar = match.iloc[-1]
         entries.append({
             "ts":    entry_bar["datetime"],
             "price": float(entry_bar["close"]),
-            "zone":  f"{sub_low:.0f}→{sub_high:.0f}",
+            "zone":  f"{sub_zl:.0f}→{sub_zh:.0f}",
+            "t1":    z.get("t1", sub_zh if direction == "BEAR" else sub_zl),
         })
 
     # Sort by time, deduplicate
@@ -525,8 +611,8 @@ def _run_day(
             zone_uid = f"{kind}_{zone.get('zone_low',0):.0f}_{zone.get('zone_high',0):.0f}"
             sl_p = round(zone["zone_low"] - sl_buf, 1) if kind == "BEAR" \
                    else round(zone["zone_high"] + sl_buf, 1)
-            # T1 = HTF zone high (BEAR: where bears' SL sat) / zone low (BULL)
-            t1_p = zone["zone_high"] if kind == "BEAR" else zone["zone_low"]
+            # T1 = C1.high for BEAR (sellers' SL), C1.low for BULL (buyers' SL)
+            t1_p = zone.get("t1", zone["zone_high"] if kind == "BEAR" else zone["zone_low"])
 
             # ── LTF sub-trap comparison ────────────────────────────────────
             for ltf_min in ltf_minutes:
@@ -731,19 +817,10 @@ def run_crude_backtest(params: dict, token: str) -> dict:
 
 def run_zone_debug(params: dict, token: str) -> dict:
     """
-    For a given trade_date, replay the 1hr bars bar-by-bar using SellerTrapDetector
-    and capture exact timestamps for all 3 trap events per zone:
-      1. ENTRY_ZONE  — the reference candle (zone_low=candle_low, zone_high=candle_high)
-      2. SELLERS_IN  — when price first broke BELOW zone_low  (bears entered short)
-      3. TRAPPED     — when price broke ABOVE zone_high        (bears' SL hit, trapped)
-      4. ENTRY_READY — when price returned to zone_low         (bears exited at 0)
+    Show all BEAR and BULL trap zones from the 10-day lookback using the
+    correct 2-candle consecutive algorithm. Shows each lifecycle event with
+    exact timestamp.
     """
-    import sys as _sys, os as _os
-    _strat = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "strategies")
-    if _strat not in _sys.path:
-        _sys.path.insert(0, _strat)
-    from trap_seller_detection import SellerTrapDetector, State
-
     global _HEADERS
     _HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
@@ -778,108 +855,28 @@ def run_zone_debug(params: dict, token: str) -> dict:
     lookback_df = pd.concat(lb_frames, ignore_index=True).sort_values("datetime").reset_index(drop=True)
     htf = resample(lookback_df, htf_min)
 
-    # ── Replay bar-by-bar with TWO detectors (BEAR = sellers, BULL = buyers) ──
-    # Each detector tracks a different direction
-    bear_det = SellerTrapDetector()   # detects seller (bear) traps → we BUY
-    bull_det = SellerTrapDetector()   # detects buyer (bull) traps → we SELL
-    # Bull detector uses inverted price (high↔low) — buyers fail when price breaks ABOVE high
-    # Implemented by passing -price to the bull detector with flipped candle
-
-    zone_rows = []
-
     def _fmt(ts) -> str:
+        if ts is None:
+            return "-"
         return ts.strftime("%Y-%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
 
-    # Track per-candle events manually
-    bear_state_prev = State.WATCH
-    bull_state_prev = State.WATCH
+    all_zones = scan_zones_consecutive(htf)
 
-    # Current pending zone being built
-    pending_bear: dict = {}
-    pending_bull: dict = {}
+    zone_rows = []
+    for z in all_zones:
+        zone_rows.append({
+            "kind":          z["kind"],
+            "zone_low":      round(z["zone_low"], 1),
+            "zone_high":     round(z["zone_high"], 1),
+            "t1":            round(z["t1"], 1),
+            "ref_candle":    _fmt(z["ref_dt"]),          # ① C1 — reference candle
+            "sellers_in":    _fmt(z["sellers_in_dt"]),   # ② C2 — next candle breaks C1 low
+            "trapped":       _fmt(z.get("trapped_dt")),  # ③ price breaks C1 high
+            "entry_ready":   _fmt(z.get("entry_ready_dt")), # ④ price returns to zone
+            "status":        z["status"],
+        })
 
-    for _, bar in htf.iterrows():
-        ts    = bar["datetime"]
-        o, h, l, c = float(bar["open"]), float(bar["high"]), float(bar["low"]), float(bar["close"])
-
-        # ── BEAR detector (sellers enter below candle low) ──
-        bear_det.on_candle({"high": h, "low": l})
-        lvl = bear_det.active_level
-        if lvl:
-            # New reference candle registered
-            if bear_det.state == State.WATCH:
-                pending_bear = {
-                    "kind":       "BEAR",
-                    "zone_low":   round(lvl.entry_l, 1),
-                    "zone_high":  round(lvl.sl_h, 1),
-                    "candle_dt":  _fmt(ts),
-                    "sellers_in": "",
-                    "trapped":    "",
-                    "entry_ready":"",
-                    "status":     "WATCH",
-                }
-
-        # Feed tick = candle close to advance state
-        prev_state = bear_det.state
-        bear_det.on_tick(c)
-        new_state = bear_det.state
-
-        if pending_bear:
-            pending_bear["zone_low"]  = round(bear_det.active_level.entry_l, 1) if bear_det.active_level else pending_bear["zone_low"]
-            pending_bear["zone_high"] = round(bear_det.active_level.sl_h, 1) if bear_det.active_level else pending_bear["zone_high"]
-            if new_state == State.SELLERS_IN and prev_state == State.WATCH:
-                pending_bear["sellers_in"] = _fmt(ts)
-                pending_bear["status"]     = "SELLERS_IN"
-            elif new_state == State.TRAPPED and prev_state == State.SELLERS_IN:
-                pending_bear["trapped"] = _fmt(ts)
-                pending_bear["status"]  = "TRAPPED"
-                # Trap confirmed — record it
-                zone_rows.append(dict(pending_bear))
-            elif new_state == State.ENTRY_READY and prev_state == State.TRAPPED:
-                # Update the already-recorded row
-                for r in zone_rows:
-                    if r["kind"]=="BEAR" and r["trapped"]==pending_bear["trapped"]:
-                        r["entry_ready"] = _fmt(ts)
-                        r["status"] = "ENTRY_READY"
-                pending_bear["status"] = "ENTRY_READY"
-
-        # ── BULL detector (buyers enter above candle high, fail below candle low) ──
-        # Invert: treat -high as "low" and -low as "high" so same detector logic applies
-        bull_det.on_candle({"high": -l, "low": -h})
-        blvl = bull_det.active_level
-        if blvl and bull_det.state == State.WATCH:
-            pending_bull = {
-                "kind":       "BULL",
-                "zone_low":   round(l, 1),
-                "zone_high":  round(h, 1),
-                "candle_dt":  _fmt(ts),
-                "sellers_in": "",   # = buyers_in for BULL
-                "trapped":    "",
-                "entry_ready":"",
-                "status":     "WATCH",
-            }
-
-        prev_bstate = bull_det.state
-        bull_det.on_tick(-c)
-        new_bstate = bull_det.state
-
-        if pending_bull:
-            if new_bstate == State.SELLERS_IN and prev_bstate == State.WATCH:
-                pending_bull["sellers_in"] = _fmt(ts)
-                pending_bull["status"]     = "BUYERS_IN"
-            elif new_bstate == State.TRAPPED and prev_bstate == State.SELLERS_IN:
-                pending_bull["trapped"] = _fmt(ts)
-                pending_bull["status"]  = "TRAPPED"
-                zone_rows.append(dict(pending_bull))
-            elif new_bstate == State.ENTRY_READY and prev_bstate == State.TRAPPED:
-                for r in zone_rows:
-                    if r["kind"]=="BULL" and r["trapped"]==pending_bull["trapped"]:
-                        r["entry_ready"] = _fmt(ts)
-                        r["status"] = "ENTRY_READY"
-                pending_bull["status"] = "ENTRY_READY"
-
-    # Sort by candle_dt
-    zone_rows.sort(key=lambda r: r.get("candle_dt", ""))
+    zone_rows.sort(key=lambda r: r["ref_candle"])
 
     return {
         "ok":         True,

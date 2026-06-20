@@ -663,26 +663,31 @@ function backtestApp() {
       if (!wrap) return
       let html = `<table class="bt-table"><thead><tr>
         <th>KIND</th>
-        <th>ZONE LOW</th><th>ZONE HIGH</th>
-        <th>① REFERENCE CANDLE</th>
-        <th>② SELLERS/BUYERS IN</th>
-        <th>③ TRAPPED</th>
-        <th>④ ENTRY READY</th>
+        <th>ZONE LOW<br><small style="opacity:.6">C2.low · zone bottom</small></th>
+        <th>ZONE HIGH<br><small style="opacity:.6">C1.low · zone top</small></th>
+        <th>T1<br><small style="opacity:.6">C1.high · sellers SL</small></th>
+        <th>① C1 REF CANDLE<br><small style="opacity:.6">sellers built here</small></th>
+        <th>② SELLERS IN<br><small style="opacity:.6">C2 broke C1.low</small></th>
+        <th>③ TRAPPED<br><small style="opacity:.6">price &gt; C1.high</small></th>
+        <th>④ ENTRY READY<br><small style="opacity:.6">price back in zone</small></th>
         <th>STATUS</th>
       </tr></thead><tbody>`
       for (const z of this.zones) {
         const cls   = z.kind==='BEAR'?'tag-ce':'tag-pe'
         const lbl   = z.kind==='BEAR'?'BEAR → BUY':'BULL → SELL'
-        const sin   = z.kind==='BEAR'?'SELLERS IN':'BUYERS IN'
         const stCls = z.status==='ENTRY_READY'?'tag-t1':z.status==='TRAPPED'?'tag-htf':'tag-eod'
+        const si    = z.sellers_in && z.sellers_in!=='-' ? '⬇ '+z.sellers_in : '-'
+        const tr    = z.trapped    && z.trapped   !=='-' ? '🔒 '+z.trapped    : '-'
+        const er    = z.entry_ready&& z.entry_ready!=='-'? '✓ '+z.entry_ready : '-'
         html += `<tr>
           <td><span class="tag ${cls} text-xs">${lbl}</span></td>
           <td class="font-mono text-xs text-t-red font-bold">${z.zone_low}</td>
-          <td class="font-mono text-xs text-t-green font-bold">${z.zone_high}</td>
-          <td class="font-mono text-xs text-t-muted">${z.candle_dt||'-'}</td>
-          <td class="font-mono text-xs text-t-amber">${z.sellers_in ? '⬇ '+z.sellers_in : '-'}</td>
-          <td class="font-mono text-xs text-t-red">${z.trapped ? '🔒 '+z.trapped : '-'}</td>
-          <td class="font-mono text-xs text-t-cyan">${z.entry_ready ? '✓ '+z.entry_ready : '-'}</td>
+          <td class="font-mono text-xs text-t-cyan font-bold">${z.zone_high}</td>
+          <td class="font-mono text-xs text-t-green font-bold">${z.t1||'-'}</td>
+          <td class="font-mono text-xs text-t-muted">${z.ref_candle||'-'}</td>
+          <td class="font-mono text-xs text-t-amber">${si}</td>
+          <td class="font-mono text-xs text-t-red">${tr}</td>
+          <td class="font-mono text-xs text-t-cyan">${er}</td>
           <td><span class="tag ${stCls} text-xs">${z.status}</span></td>
         </tr>`
       }
