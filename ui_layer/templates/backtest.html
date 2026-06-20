@@ -276,10 +276,23 @@
         </div>
         <div x-show="ltfSource==='option'" class="mt-2">
           <p class="sec-label mb-1">ITM Offset (pts)</p>
-          <input type="number" class="t-input text-xs" x-model="itmOffset" step="100" min="100" max="1000"
-                 title="How deep ITM for LTF detection (e.g. 300 = 300 pts in-the-money)" />
+          <input type="number" class="t-input text-xs" x-model="itmOffset" step="100" min="100" max="1000" />
           <p class="text-t-muted text-xs mt-1">Detection: <span x-text="itmOffset"></span> ITM · Execute: 1 ITM</p>
         </div>
+      </div>
+
+      <!-- Gap direction filter toggle -->
+      <div class="flex items-center justify-between py-2 px-3 rounded border border-t-border" style="background:var(--t-surface)">
+        <div>
+          <p class="sec-label">Gap Dir Filter</p>
+          <p class="text-t-muted text-xs mt-0.5">GAP↓=PE only · GAP↑=CE only</p>
+        </div>
+        <button @click="gapDirFilter = !gapDirFilter"
+                class="w-11 h-6 rounded-full transition-colors relative flex-shrink-0"
+                :class="gapDirFilter ? 'bg-green-500' : 'bg-gray-300'">
+          <span class="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform"
+                :class="gapDirFilter ? 'translate-x-5' : 'translate-x-0.5'"></span>
+        </button>
       </div>
 
       <div>
@@ -579,6 +592,7 @@ function backtestApp() {
     maxZoneAge:    5,
     ltfSource:     'futures',
     itmOffset:     300,
+    gapDirFilter:  true,
     batchRows:     [],
     batchSelected: null,
     batchStatus:   '',
@@ -717,9 +731,10 @@ function backtestApp() {
             fut_key:        this.futKey,
             start_date:     this.startDate,
             end_date:       this.endDate,
-            min_zone_width: parseFloat(this.minZoneWidth),
-            ltf_source:     this.ltfSource,
-            itm_offset:     parseInt(this.itmOffset),
+            min_zone_width:  parseFloat(this.minZoneWidth),
+            ltf_source:      this.ltfSource,
+            itm_offset:      parseInt(this.itmOffset),
+            gap_dir_filter:  this.gapDirFilter,
           })
         })
         clearTimeout(tid)
@@ -765,6 +780,7 @@ function backtestApp() {
         max_zone_age_days: parseInt(this.maxZoneAge),
         ltf_source:        this.ltfSource,
         itm_offset:        parseInt(this.itmOffset),
+        gap_dir_filter:    this.gapDirFilter,
       }
     },
 

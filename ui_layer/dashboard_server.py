@@ -399,8 +399,9 @@ try:
         fut_key:         str   = "MCX_FO|520702"
         start_date:      str   = ""   # YYYY-MM-DD; overrides days when set with end_date
         end_date:        str   = ""   # YYYY-MM-DD
-        ltf_source:      str   = "futures"   # "futures" = Logic 1 | "option" = Logic 2
-        itm_offset:      int   = 300         # pts ITM for deep-ITM LTF detection (Logic 2 only)
+        ltf_source:      str   = "futures"
+        itm_offset:      int   = 300
+        gap_dir_filter:  bool  = True        # True = on gap day trade only with gap direction
 
 except ImportError:
     _HAS_FASTAPI = False

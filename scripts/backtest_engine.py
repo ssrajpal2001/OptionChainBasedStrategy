@@ -383,8 +383,9 @@ def _run_day(
     ltf_minutes: list[int],    # e.g. [5, 15]
     min_width: float = 30.0,
     max_age_days: int = 5,
-    ltf_source: str = "futures",  # "futures"=Logic1 | "option"=Logic2
+    ltf_source: str = "futures",
     itm_offset: int = 300,
+    gap_dir_filter: bool = True,   # True = on gap day only trade WITH gap direction
 ) -> list[dict]:
     """Run one day's backtest with LTF sub-trap comparison. Returns list of trade records."""
     trades: list[dict] = []
@@ -421,6 +422,10 @@ def _run_day(
     has_htf_zone     = (not has_gap) and len(reachable_hist) > 0
 
     combo_base = _combo_label(has_gap, has_htf_zone)
+
+    # NO_GAP+NO_ZONE = no directional bias at all → skip entirely (consistently unprofitable)
+    if combo_base == "NO_GAP+NO_ZONE":
+        return trades
 
     if combo_filter != "all":
         wanted = combo_filter.upper().replace("-", "_")
@@ -637,6 +642,15 @@ def _run_day(
     recorded: set = set()
 
     def _run_direction(kind: str):
+        # Gap direction filter: on gap days only trade WITH the gap direction
+        # GAP DOWN → only PE (bearish), GAP UP → only CE (bullish)
+        if gap_dir_filter and has_gap:
+            gap_dir = gap_info.get("direction", "NONE")
+            if gap_dir == "DOWN" and kind == "BEAR":   # BEAR=CE=bullish → skip on down gap
+                return
+            if gap_dir == "UP" and kind == "BULL":     # BULL=PE=bearish → skip on up gap
+                return
+
         htf_bars = resample(today_df, htf_min_cascade)
 
         for _, row in htf_bars.iterrows():
@@ -806,12 +820,13 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
     min_width    = float(params.get("min_zone_width", 30.0))
     max_age_days = int(params.get("max_zone_age_days", 5))
-    ltf_source   = str(params.get("ltf_source", "futures"))   # "futures"=Logic1 | "option"=Logic2
-    itm_offset   = int(params.get("itm_offset", 300))
-    ltf_minutes  = [5, 15]   # always compare both LTF timeframes
-    lot_size     = CRUDE_LOT * lots
+    ltf_source      = str(params.get("ltf_source", "futures"))
+    itm_offset      = int(params.get("itm_offset", 300))
+    gap_dir_filter  = bool(params.get("gap_dir_filter", True))
+    ltf_minutes     = [5, 30]
+    lot_size        = CRUDE_LOT * lots
 
-    LOOKBACK_DAYS = 10   # how many calendar-trading-days back to scan for zones
+    LOOKBACK_DAYS = 10
 
     # Support explicit date range (start_date / end_date) for single-day drill-down
     start_date = params.get("start_date", "")
@@ -863,7 +878,7 @@ def run_crude_backtest(params: dict, token: str) -> dict:
         day_trades = _run_day(
             trade_date, today_df, lookback_df,
             htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
-            ltf_minutes, min_width, max_age_days, ltf_source, itm_offset
+            ltf_minutes, min_width, max_age_days, ltf_source, itm_offset, gap_dir_filter
         )
         all_trades.extend(day_trades)
         day_pnl = sum(t["pnl_rs"] for t in day_trades)
@@ -939,11 +954,12 @@ def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> 
     combo_filter = "all"
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
     max_age_days = int(params.get("max_zone_age_days", 5))
-    ltf_source   = str(params.get("ltf_source", "futures"))
-    itm_offset   = int(params.get("itm_offset", 300))
-    ltf_minutes  = [5, 15]
-    lot_size     = CRUDE_LOT * lots
-    LOOKBACK_DAYS = 10
+    ltf_source      = str(params.get("ltf_source", "futures"))
+    itm_offset      = int(params.get("itm_offset", 300))
+    gap_dir_filter  = bool(params.get("gap_dir_filter", True))
+    ltf_minutes     = [5, 30]
+    lot_size        = CRUDE_LOT * lots
+    LOOKBACK_DAYS   = 10
 
     start_date = params.get("start_date", "")
     end_date   = params.get("end_date", "")
@@ -1011,7 +1027,7 @@ def run_batch_backtest(params: dict, token: str, widths: list[float] = None) -> 
                 trade_date, today_df, lookback_df,
                 htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size,
                 ltf_minutes, min_width=w, max_age_days=max_age_days,
-                ltf_source=ltf_source, itm_offset=itm_offset
+                ltf_source=ltf_source, itm_offset=itm_offset, gap_dir_filter=gap_dir_filter
             )
             all_trades.extend(day_trades)
 
