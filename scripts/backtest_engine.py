@@ -108,14 +108,22 @@ def _get_prev_day_htf_zones(prev_df: pd.DataFrame, htf_min: int) -> list[dict]:
     return [z for z in zones if z["status"] == "TRAPPED"]
 
 
-def _get_intraday_zones_at(today_df: pd.DataFrame, bar_ts, htf_min: int) -> list[dict]:
-    """Scan today's bars UP TO bar_ts at htf_min → return TRAPPED zones."""
+def _get_combined_zones_at(prev_df: pd.DataFrame, today_df: pd.DataFrame,
+                            bar_ts, htf_min: int) -> list[dict]:
+    """
+    Scan BOTH previous day bars + today's bars up to bar_ts combined.
+    This ensures prev-day zones AND intraday zones forming during the day
+    are both visible — giving a continuous picture of trapped zones.
+    """
     today_date = bar_ts.date()
-    hist = today_df[(today_df["datetime"].dt.date == today_date) &
-                    (today_df["datetime"] <= bar_ts)]
-    if hist.empty:
+    today_hist = today_df[(today_df["datetime"].dt.date == today_date) &
+                          (today_df["datetime"] <= bar_ts)]
+
+    combined = pd.concat([prev_df, today_hist], ignore_index=True)
+    combined = combined.sort_values("datetime").reset_index(drop=True)
+    if combined.empty:
         return []
-    htf = resample(hist, htf_min)
+    htf = resample(combined, htf_min)
     if len(htf) < 2:
         return []
     _, zones = scanner.scan_htf_spot(htf)
@@ -139,7 +147,7 @@ def _ts_fmt(ts) -> str:
 def _run_day(
     trade_date: str,
     today_df: pd.DataFrame,
-    prev_df: pd.DataFrame,
+    lookback_df: pd.DataFrame,   # multi-day historical bars (prev week + current week)
     htf_min_zone: int,
     htf_min_cascade: int,
     sl_buf: float,
@@ -152,14 +160,18 @@ def _run_day(
     if today_df.empty:
         return trades
 
-    today_open   = float(today_df.iloc[0]["open"])
-    prev_close   = float(prev_df.iloc[-1]["close"]) if not prev_df.empty else 0.0
-    gap_info     = detect_gap(today_open, prev_close, gap_threshold)
-    has_gap      = gap_info["gap"]
+    today_open = float(today_df.iloc[0]["open"])
+    # prev_close = last bar of the most-recent previous day in lookback_df
+    prev_date  = today_df.iloc[0]["datetime"].date()
+    prev_bars  = lookback_df[lookback_df["datetime"].dt.date < prev_date]
+    prev_close = float(prev_bars.iloc[-1]["close"]) if not prev_bars.empty else 0.0
+    gap_info   = detect_gap(today_open, prev_close, gap_threshold)
+    has_gap    = gap_info["gap"]
 
-    # Pre-day 1-hour zones from previous day
-    prev_day_zones = _get_prev_day_htf_zones(prev_df, htf_min_zone)
-    has_htf_zone   = len(prev_day_zones) > 0
+    # HTF zones from ALL historical bars (prev week + earlier this week)
+    # This captures zones from multiple days back, not just yesterday
+    htf_zones_pre  = _get_prev_day_htf_zones(lookback_df, htf_min_zone)
+    has_htf_zone   = len(htf_zones_pre) > 0
 
     combo = _combo_label(has_gap, has_htf_zone)
 
@@ -178,12 +190,7 @@ def _run_day(
         in_trade  = None
         notified  = set()
 
-        # Decide scan mode
-        use_prev_zones = has_htf_zone and len(_zones_for_direction(prev_day_zones, kind)) > 0
-
-        # Iterate 30-min bars (cascade) or use prev-day zones differently
-        scan_min = htf_min_cascade  # always iterate on cascade grid
-
+        scan_min = htf_min_cascade
         htf_bars = resample(today_df, scan_min)
 
         for _, row in htf_bars.iterrows():
@@ -231,15 +238,15 @@ def _run_day(
                 continue
 
             # ── Zone selection ─────────────────────────────────────────────
-            if use_prev_zones:
-                # Use pre-day 1-hour zones: check if price is inside
-                kind_zones = _zones_for_direction(prev_day_zones, kind)
-                active = [z for z in kind_zones if _price_in_zone(cur_fut, z)]
-            else:
-                # Intraday cascade: build zones from today's bars up to now
-                intra = _get_intraday_zones_at(today_df, bar_ts, scan_min)
-                kind_zones = _zones_for_direction(intra, kind)
-                active = [z for z in kind_zones if _price_in_zone(cur_fut, z)]
+            # Always combine: all historical bars + today up to this bar
+            # This gives zones from prev week, yesterday, AND intraday so far
+            live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_zone)
+            # Cascade fallback: also check shorter TF if no HTF zone
+            if not live_zones:
+                live_zones = _get_combined_zones_at(lookback_df, today_df, bar_ts, htf_min_cascade)
+            kind_zones = _zones_for_direction(live_zones, kind)
+            active = [z for z in kind_zones if _price_in_zone(cur_fut, z)]
+            zone_src = "HTF" if has_htf_zone else "CASCADE"
 
             if not active:
                 continue
@@ -271,7 +278,7 @@ def _run_day(
                 "kind":      kind,
                 "direction": "CE" if kind == "BEAR" else "PE",
                 "zone":      f"{zone.get('zone_low',0):.0f}→{zone.get('zone_high',0):.0f}",
-                "zone_src":  "HTF" if use_prev_zones else "CASCADE",
+                "zone_src":  zone_src,
                 "date":      trade_date,
                 "gap":       f"{gap_info['direction']} {gap_info['pct']:+.2f}%" if has_gap else "none",
             }
@@ -335,35 +342,45 @@ def run_crude_backtest(params: dict, token: str) -> dict:
     fut_key      = str(params.get("fut_key", "MCX_FO|520702"))
     lot_size     = CRUDE_LOT * lots
 
+    LOOKBACK_DAYS = 10   # how many calendar-trading-days back to scan for zones
+
     trading_days = get_trading_days(days)
     all_trades: list[dict] = []
     log: list[str] = []
 
+    # Pre-build list of lookback dates for each trade date (10 trading days back)
+    def _lookback_dates(trade_dt: str, n: int) -> list[str]:
+        result = []
+        d = date.fromisoformat(trade_dt) - timedelta(days=1)
+        while len(result) < n:
+            if d.weekday() < 5:
+                result.append(d.isoformat())
+            d -= timedelta(days=1)
+        return list(reversed(result))
+
     for i, trade_date in enumerate(trading_days):
         log.append(f"Fetching {trade_date}...")
         today_df = fetch_1m(fut_key, trade_date)
-        time.sleep(0.4)
-
-        # Fetch previous trading day
-        prev_dt = trading_days[i - 1] if i > 0 else (
-            date.fromisoformat(trade_date) - timedelta(days=3)
-        ).isoformat()
-        if i == 0:
-            # Go back to find prev trading day
-            d = date.fromisoformat(trade_date) - timedelta(days=1)
-            while d.weekday() >= 5:
-                d -= timedelta(days=1)
-            prev_dt = d.isoformat()
-
-        prev_df = fetch_1m(fut_key, prev_dt)
-        time.sleep(0.4)
+        time.sleep(0.3)
 
         if today_df.empty:
             log.append(f"  {trade_date}: no data — skip")
             continue
 
+        # Fetch 10 trading days of lookback bars and concatenate
+        lb_dates = _lookback_dates(trade_date, LOOKBACK_DAYS)
+        lb_frames = []
+        for lb_dt in lb_dates:
+            df = fetch_1m(fut_key, lb_dt)
+            time.sleep(0.2)
+            if not df.empty:
+                lb_frames.append(df)
+
+        lookback_df = pd.concat(lb_frames, ignore_index=True).sort_values("datetime").reset_index(drop=True) \
+                      if lb_frames else pd.DataFrame()
+
         day_trades = _run_day(
-            trade_date, today_df, prev_df,
+            trade_date, today_df, lookback_df,
             htf_zone, htf_cascade, sl_buf, gap_thr, combo_filter, lot_size
         )
         all_trades.extend(day_trades)
