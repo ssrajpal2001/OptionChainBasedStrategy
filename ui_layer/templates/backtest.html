@@ -269,40 +269,14 @@
     <!-- ── RIGHT: Results ─────────────────────────────────────────────────── -->
     <div class="flex-1 p-5 flex flex-col gap-5" style="overflow-y: auto; min-height: 0;">
 
-      <!-- Zone debug table -->
+      <!-- Zone debug table — rendered via innerHTML to avoid Alpine x-for issues -->
       <div x-show="zones && zones.length" class="t-card overflow-hidden" id="zone-table">
         <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
-          <p class="sec-label">1HR HTF TRAPS FROM 10-DAY LOOKBACK — <span x-text="zoneDate" class="text-t-cyan font-mono"></span></p>
+          <p class="sec-label">1HR HTF TRAPS — <span x-text="zoneDate" class="text-t-cyan font-mono"></span>
+            &nbsp;<span class="text-t-muted text-xs">(10-day lookback)</span></p>
           <span class="text-xs text-t-muted" x-text="zones.length + ' zones'"></span>
         </div>
-        <div class="overflow-x-auto">
-          <table class="bt-table">
-            <thead>
-              <tr>
-                <th>FORMED DATE</th>
-                <th>FORMED TIME</th>
-                <th>KIND</th>
-                <th>ZONE LOW</th>
-                <th>ZONE HIGH</th>
-                <th>WIDTH</th>
-                <th>STATUS</th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for="z in zones" :key="z.date+z.time+z.zone_low">
-                <tr>
-                  <td class="font-mono text-xs text-t-muted" x-text="z.date"></td>
-                  <td class="font-mono text-xs font-bold" x-text="z.time"></td>
-                  <td><span class="tag" :class="z.kind==='BEAR'?'tag-ce':'tag-pe'" x-text="z.kind==='BEAR'?'BEAR (BUY)':'BULL (SELL)'"></span></td>
-                  <td class="font-mono text-xs text-t-red" x-text="z.zone_low"></td>
-                  <td class="font-mono text-xs text-t-green" x-text="z.zone_high"></td>
-                  <td class="font-mono text-xs text-t-muted" x-text="z.width"></td>
-                  <td><span class="tag tag-t1 text-xs" x-text="z.status"></span></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
+        <div class="overflow-x-auto" id="zone-tbody-wrap"></div>
       </div>
 
       <!-- Summary cards -->
@@ -374,42 +348,26 @@
         </div>
       </div>
 
-      <!-- Trade log (BEFORE equity curve so it's immediately visible) -->
+      <!-- Trade log rendered via innerHTML (avoids Alpine x-for rendering bug) -->
       <div x-show="ran" class="t-card overflow-hidden" id="trade-log">
         <div class="px-4 py-3 border-b border-t-border flex items-center justify-between">
           <p class="sec-label">TRADE LOG (<span x-text="trades.length"></span> trades)</p>
           <div class="flex gap-2">
-            <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter" />
+            <input type="text" class="t-input w-40 text-xs" placeholder="Filter…" x-model="tradeFilter"
+                   @input="renderTradeTable()" />
           </div>
         </div>
         <div x-show="trades.length === 0" class="p-6 text-center text-t-muted text-sm">No trades in this period.</div>
-        <div x-show="trades.length > 0" class="overflow-x-auto">
+        <div x-show="trades.length > 0" class="overflow-x-auto" id="trade-tbody-wrap"></div>
+      </div>
+
+      <!-- DEAD CODE kept for structure reference — actual rendering is via innerHTML -->
+      <div style="display:none">
+        <div x-show="false" class="overflow-x-auto">
           <table class="bt-table">
-              <thead>
-                <tr>
-                  <th>DATE</th>
-                  <th>HTF TOUCH</th>
-                  <th>LTF ENTRY</th>
-                  <th>DIR</th>
-                  <th>LTF</th>
-                  <th>TRAP#</th>
-                  <th>SRC</th>
-                  <th>ZONE LOW</th>
-                  <th>ZONE HIGH</th>
-                  <th>ENTRY</th>
-                  <th>SL</th>
-                  <th>T1 (50%)</th>
-                  <th>T1 EXIT</th>
-                  <th>T1 P&L</th>
-                  <th>TSL EXIT</th>
-                  <th>TSL P&L</th>
-                  <th>REASON</th>
-                  <th>TOTAL P&L</th>
-                  <th>GAP</th>
-                </tr>
-              </thead>
+              <thead><tr></tr></thead>
               <tbody>
-                <template x-for="t in filteredTrades()" :key="t.date+(t.entry_ts||'')+t.direction+(t.combo||'')+Math.random()">
+                <template x-for="t in []">
                   <tr>
                     <td class="text-t-muted font-mono text-xs" x-text="t.date"></td>
                     <td class="font-mono text-xs text-t-muted" x-text="t.htf_touch || t.entry_ts"></td>
@@ -444,6 +402,7 @@
           </div>
         </div>
       </div>
+      </div><!-- end dead-code wrapper -->
 
       <!-- Equity curve (after trade log) -->
       <div x-show="equity && equity.length" class="t-card p-4">
@@ -584,7 +543,10 @@ function backtestApp() {
         if (!data.ok) { this.error = data.error || 'Zone debug error'; return }
         this.zones    = data.zones || []
         this.zoneDate = data.trade_date || this.startDate
-        this.$nextTick(() => document.getElementById('zone-table')?.scrollIntoView({behavior:'smooth'}))
+        this.$nextTick(() => {
+          this.renderZoneTable()
+          document.getElementById('zone-table')?.scrollIntoView({behavior:'smooth'})
+        })
       } catch(e) { this.error = e.message }
       finally { this.running = false }
     },
@@ -634,7 +596,7 @@ function backtestApp() {
 
         this.$nextTick(() => {
           this._drawChart()
-          // Auto-scroll to trade log so user sees it immediately
+          this.renderTradeTable()
           setTimeout(() => {
             document.getElementById('trade-log')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
           }, 300)
@@ -644,6 +606,80 @@ function backtestApp() {
       } finally {
         this.running = false
       }
+    },
+
+    renderTradeTable() {
+      const wrap = document.getElementById('trade-tbody-wrap')
+      if (!wrap) return
+      const q = (this.tradeFilter||'').toLowerCase().trim()
+      const rows = this.trades.filter(t => !q ||
+        (t.date||'').includes(q)||(t.direction||'').toLowerCase().includes(q)||
+        (t.combo||'').toLowerCase().includes(q)||(t.reason||'').toLowerCase().includes(q))
+      const pnl = v => v > 0 ? `<span class="pnl-win">Rs +${v.toLocaleString()}</span>`
+                             : `<span class="pnl-loss">Rs ${v.toLocaleString()}</span>`
+      const tag = (txt,cls) => `<span class="tag ${cls} text-xs">${txt}</span>`
+      let html = `<table class="bt-table"><thead><tr>
+        <th>DATE</th><th>HTF TOUCH</th><th>LTF ENTRY</th><th>DIR</th>
+        <th>LTF</th><th>TRAP#</th><th>SRC</th>
+        <th>ZONE LOW</th><th>ZONE HIGH</th><th>ENTRY</th><th>SL</th><th>T1</th>
+        <th>T1 EXIT</th><th>T1 P&L</th><th>TSL EXIT</th><th>TSL P&L</th>
+        <th>REASON</th><th>TOTAL P&L</th><th>GAP</th>
+      </tr></thead><tbody>`
+      for (const t of rows) {
+        const dirCls  = t.direction==='CE'?'tag-ce':'tag-pe'
+        const trapCls = t.trap_entry==='FIRST'?'tag-ce':t.trap_entry==='LAST'?'tag-pe':t.trap_entry==='MIDDLE'?'tag-htf':'tag-cas'
+        const srcCls  = t.zone_src==='HTF'?'tag-htf':'tag-cas'
+        const rsnCls  = t.reason==='SL'?'tag-sl':t.reason&&t.reason.includes('TSL')?'tag-t1':'tag-eod'
+        const h1 = t.half1_rs ? (t.half1_rs>0?`<span class="pnl-win">Rs +${t.half1_rs.toLocaleString()}</span>`:`<span class="pnl-loss">Rs ${t.half1_rs.toLocaleString()}</span>`) : '-'
+        const h2 = t.half2_rs ? (t.half2_rs>0?`<span class="pnl-win">Rs +${t.half2_rs.toLocaleString()}</span>`:`<span class="pnl-loss">Rs ${t.half2_rs.toLocaleString()}</span>`) : (t.reason==='SL'?'—':'-')
+        html += `<tr>
+          <td class="font-mono text-xs text-t-muted">${t.date}</td>
+          <td class="font-mono text-xs text-t-muted">${t.htf_touch||t.entry_ts}</td>
+          <td class="font-mono text-xs">${t.entry_ts}</td>
+          <td>${tag(t.direction,dirCls)}</td>
+          <td class="font-mono text-xs font-bold">${t.ltf||'-'}</td>
+          <td>${tag(t.trap_entry||'-',trapCls)}</td>
+          <td>${tag(t.zone_src,srcCls)}</td>
+          <td class="font-mono text-xs text-t-red">${t.zone_low}</td>
+          <td class="font-mono text-xs text-t-green">${t.zone_high}</td>
+          <td class="font-mono text-xs font-bold">${t.entry}</td>
+          <td class="font-mono text-xs text-t-red">${t.sl}</td>
+          <td class="font-mono text-xs text-t-green">${t.t1}</td>
+          <td class="font-mono text-xs">${t.exit1_ts||'-'}</td>
+          <td>${h1}</td>
+          <td class="font-mono text-xs">${t.exit2_ts||(t.reason==='SL'?'—':'-')}</td>
+          <td>${h2}</td>
+          <td>${tag(t.reason,rsnCls)}</td>
+          <td class="font-bold">${pnl(t.pnl_rs)}</td>
+          <td class="text-t-muted text-xs">${t.gap}</td>
+        </tr>`
+      }
+      html += '</tbody></table>'
+      wrap.innerHTML = html
+    },
+
+    renderZoneTable() {
+      const wrap = document.getElementById('zone-tbody-wrap')
+      if (!wrap) return
+      let html = `<table class="bt-table"><thead><tr>
+        <th>FORMED DATE</th><th>FORMED TIME</th><th>KIND</th>
+        <th>ZONE LOW</th><th>ZONE HIGH</th><th>WIDTH</th><th>STATUS</th>
+      </tr></thead><tbody>`
+      for (const z of this.zones) {
+        const cls = z.kind==='BEAR'?'tag-ce':'tag-pe'
+        const lbl = z.kind==='BEAR'?'BEAR (BUY)':'BULL (SELL)'
+        html += `<tr>
+          <td class="font-mono text-xs text-t-muted">${z.date}</td>
+          <td class="font-mono text-xs font-bold">${z.time}</td>
+          <td><span class="tag ${cls} text-xs">${lbl}</span></td>
+          <td class="font-mono text-xs text-t-red">${z.zone_low}</td>
+          <td class="font-mono text-xs text-t-green">${z.zone_high}</td>
+          <td class="font-mono text-xs text-t-muted">${z.width}</td>
+          <td><span class="tag tag-t1 text-xs">${z.status}</span></td>
+        </tr>`
+      }
+      html += '</tbody></table>'
+      wrap.innerHTML = html
     },
 
     _chart: null,
