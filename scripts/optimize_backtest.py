@@ -182,10 +182,15 @@ def main():
     results = []
     t0 = time.time()
 
+    first_combo_trades = None   # save trades from first combo for timeline print
+
     for i, (zone_width, sl_buf) in enumerate(product(ZONE_WIDTHS, SL_BUFS)):
         trades = run_one(zone_width, sl_buf, trading_days, day_frames)
         s      = stats(trades)
         by_e   = stats_by_entry(trades)
+
+        if i == 0:
+            first_combo_trades = trades   # save for timeline
 
         done = i + 1
         elapsed = time.time() - t0
@@ -251,6 +256,37 @@ def main():
               f"Rs {b['first_rs']:+,.0f}")
         print(f"   LAST:       {b['last_trades']} trades  {b['last_win']:.0f}% win  "
               f"Rs {b['last_rs']:+,.0f}")
+
+    # ── Trap timeline for all trades (first combo) ─────────────────────────
+    if first_combo_trades:
+        print(f"\n{'─'*90}")
+        print(f"TRAP TIMELINE (zone_width={ZONE_WIDTHS[0]} sl={SL_BUFS[0]}) "
+              f"— verify on chart:")
+        print(f"{'─'*90}")
+        for t in first_combo_trades:
+            dir_arrow = "↑ CE (sellers trapped)" if t['direction'] == "CE" \
+                        else "↓ PE (buyers trapped)"
+            print(f"\nTRADE {t['date']}  {dir_arrow}  [{t['trap_entry']}]  "
+                  f"Zone {t['zone_low']}→{t['zone_high']}")
+            print(f"  30min timeline:")
+            print(f"    {t.get('htf_ref_dt','?'):16s}  C1 reference candle "
+                  f"({'sellers entered short above' if t['direction']=='CE' else 'buyers entered long below'} "
+                  f"{t['zone_high'] if t['direction']=='CE' else t['zone_low']:.0f})")
+            print(f"    {t.get('htf_sellers_in_dt','?'):16s}  SELLERS_IN / BUYERS_IN "
+                  f"(price moved {'below' if t['direction']=='CE' else 'above'} zone)")
+            print(f"    {t.get('htf_trapped_dt','?'):16s}  TRAPPED "
+                  f"(price broke {'above' if t['direction']=='CE' else 'below'} zone_high/low)")
+            print(f"    {t.get('htf_entry_ready_dt','?'):16s}  ENTRY_READY "
+                  f"(price returned into zone) ← HTF touch")
+            print(f"  5min LTF:")
+            print(f"    {t['entry_ts']:16s}  ENTRY  @ {t['entry']:.0f}  "
+                  f"SL={t['sl']:.0f}  T1={t['t1']:.0f}")
+            print(f"    {t['exit1_ts']:16s}  EXIT1  @ {t['exit1_p']:.0f}  "
+                  f"Rs {t['half1_rs']:+,.0f}")
+            if t.get('exit2_ts'):
+                print(f"    {t['exit2_ts']:16s}  EXIT2  @ {t['exit2_p']:.0f}  "
+                      f"Rs {t['half2_rs']:+,.0f}")
+            print(f"    RESULT: {t['reason']}  Rs {t['pnl_rs']:+,.0f}")
 
 
 if __name__ == "__main__":

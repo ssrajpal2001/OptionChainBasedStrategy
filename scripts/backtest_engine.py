@@ -641,7 +641,12 @@ def _run_day(
             "pnl_pts":     ex["pnl_pts"],
             "pnl_rs":      ex["pnl_rs"],
             "combo":       f"{combo}+{ltf_label}+{trap_label}",
-            "ltf_mode":    ltf_source,   # "futures" or "option"
+            "ltf_mode":    ltf_source,
+            # ── Trap timeline (for chart verification) ──────────────────
+            "htf_ref_dt":         _ts_fmt(zone.get("ref_dt")),
+            "htf_sellers_in_dt":  _ts_fmt(zone.get("sellers_in_dt")),
+            "htf_trapped_dt":     _ts_fmt(zone.get("trapped_dt")),
+            "htf_entry_ready_dt": _ts_fmt(zone.get("entry_ready_dt")),
         })
 
     # Track which (kind, zone_uid, ltf, trap) combos already recorded
