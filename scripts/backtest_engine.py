@@ -24,7 +24,7 @@ from strategies.trap_scanner import scanner
 
 CRUDE_STEP   = 100
 CRUDE_LOT    = 100
-GAP_PCT      = 0.003   # 0.3%
+GAP_PCT      = 0.005   # 0.5% — CrudeOil MCX: overnight window only 9.5hr, normal drift < 0.3%
 SL_BUF       = 20.0
 SQ_OFF       = "23:00"
 MKT_OPEN     = "09:00"

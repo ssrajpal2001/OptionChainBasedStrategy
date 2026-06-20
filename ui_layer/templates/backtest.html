@@ -227,6 +227,7 @@
         <div>
           <p class="sec-label mb-1.5">Gap % Threshold</p>
           <input type="number" class="t-input" x-model="gapPct" step="0.1" min="0.1" max="2" />
+          <p class="text-t-muted text-xs mt-1">Gap if open moves &gt; <span x-text="gapPct" class="text-t-cyan font-mono"></span>% from prev close</p>
         </div>
         <div>
           <p class="sec-label mb-1.5">SL Buffer (Rs)</p>
@@ -572,7 +573,7 @@ function backtestApp() {
     combo:       'all',
     htfZone:     60,
     htfCascade:  30,
-    gapPct:      0.3,
+    gapPct:      0.5,
     slBuf:         20,
     minZoneWidth:  30,
     maxZoneAge:    5,
