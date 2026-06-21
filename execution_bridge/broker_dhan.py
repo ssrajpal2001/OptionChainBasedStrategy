@@ -238,9 +238,21 @@ class DhanBroker(BaseBroker):
     async def get_funds(self) -> Dict[str, float]:
         raw = await asyncio.to_thread(self._dhan.get_fund_limits)
         data = (raw or {}).get("data", {})
+        if isinstance(data, str) or not data:
+            data = {}
+        # Dhan v1.3 uses "availabelBalance" (their typo); try both spellings + net fields
+        avail = (data.get("availabelBalance")
+                 or data.get("availableBalance")
+                 or data.get("net")
+                 or data.get("availableLimit")
+                 or 0)
+        used = (data.get("utilizedAmount")
+                or data.get("utilisedAmount")
+                or data.get("usedAmount")
+                or 0)
         return {
-            "available": float(data.get("availabelBalance", 0) or 0),
-            "used": float(data.get("utilizedAmount", 0) or 0),
+            "available": float(avail or 0),
+            "used":      float(used  or 0),
         }
 
 
