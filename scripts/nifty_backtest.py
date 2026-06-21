@@ -290,7 +290,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                    spot_at_entry: float,
                    profit_cap_per_lot: float = 0.0,
                    profit_floor_per_lot: float = 0.0,
-                   df1m_scan: pd.DataFrame | None = None) -> Optional[dict]:
+                   df1m_scan: pd.DataFrame | None = None,
+                   force_exit_ts: pd.Timestamp | None = None) -> Optional[dict]:
     """
     df1m       = exec strike bars (prices for entry/exit P&L)
     df1m_scan  = scan strike bars (SL/T1/TSL trigger logic); if None, uses df1m (no 1ITM)
@@ -399,6 +400,13 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         bar_close = float(row["close"])
         # Exec price at this bar timestamp (for P&L calcs)
         exec_close = _price_at_ts(exec_bars, bar_ts) or bar_close
+
+        # Force exit: opposite side signal fired — close at this bar's exec price
+        if force_exit_ts is not None and bar_ts >= force_exit_ts:
+            exit_price  = round(exec_close, 2)
+            exit_reason = "OPP_SIGNAL"
+            exit_ts     = bar_ts
+            break
 
         # 1. T1 trigger from scan bar (high crosses zone_high)
         # T1 exit price read from exec bar at same timestamp
@@ -579,6 +587,9 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     cache = opt_bar_cache if opt_bar_cache is not None else {}
 
     trades = []
+    # One-trade-at-a-time: persists across CE and PE legs
+    # {exit_ts, opt_type, trade_idx} — trade_idx points to trades[] for re-simulation
+    day_running_trade: dict | None = None
 
     for opt_type, strike, key, depth in legs:
         # Bias filter: on gap days, skip the leg that opposes gap direction
@@ -753,14 +764,12 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             # Here just mark that 1ITM is active; resolution happens inside the zone loop.
             pass
 
-        # One-trade-at-a-time: sort all signals by their trap timestamp
+        # Sort signals by trap timestamp for chronological processing
         def _sig_ts(z):
             t = pd.to_datetime(z.get("closed_on") or z.get("trapped_on") or "NaT")
             return t.tz_localize(None) if (t is not pd.NaT and t.tzinfo) else t
 
         entry_signals.sort(key=_sig_ts)
-
-        running_trade = None   # {exit_ts, opt_type} of currently open trade
 
         for z in entry_signals:
             trap_ts = pd.to_datetime(z.get("closed_on") or z.get("trapped_on"))
@@ -769,15 +778,40 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 ts_naive = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
                 spot_val = _spot_at_ts(df_today, ts_naive)
 
-            # One-trade-at-a-time rule
             z_ts = _sig_ts(z)
-            if running_trade is not None:
-                if z_ts is pd.NaT or z_ts < running_trade["exit_ts"]:
-                    # Trade still running — if SAME side, skip; if OPPOSITE side, skip
-                    # (SL will hit naturally from opposite-side move)
-                    continue
+
+            # One-trade-at-a-time: check day_running_trade (spans CE+PE legs)
+            force_exit_ts_arg = None
+            if day_running_trade is not None:
+                rt = day_running_trade
+                if z_ts is pd.NaT or z_ts >= rt["exit_ts"]:
+                    day_running_trade = None   # previous trade already closed
+                elif rt["opt_type"] == opt_type:
+                    continue   # SAME side still running → skip
                 else:
-                    running_trade = None   # previous trade closed, can take new signal
+                    # OPPOSITE side fired while trade running → force-close running trade
+                    # Re-simulate the running trade with forced exit at z_ts
+                    prev_result = trades[rt["trade_idx"]]
+                    prev_z      = rt["z"]
+                    re_result = _simulate_exit(
+                        prev_z,
+                        rt["df_exec"], rt["df_exec_5m"],
+                        lot, sl_buf, rt["opt_type"], trade_date,
+                        strike=rt["exec_strike"], spot_at_entry=rt["spot_val"],
+                        profit_cap_per_lot=profit_cap_per_lot,
+                        profit_floor_per_lot=profit_floor_per_lot,
+                        df1m_scan=rt["scan_bars_arg"],
+                        force_exit_ts=z_ts,
+                    )
+                    if re_result:
+                        re_result["index"]       = index
+                        re_result["gap_pct"]     = round(gap_pct, 2)
+                        re_result["gap_fired"]   = gap_fired
+                        re_result["depth"]       = rt["depth"]
+                        re_result["mode"]        = re_result["mode"] + f" {rt['mode_tag']}"
+                        re_result["scan_strike"] = rt["scan_strike"]
+                        trades[rt["trade_idx"]]  = re_result   # replace with forced-exit version
+                    day_running_trade = None   # now open opposite side
 
             # 1 ITM: resolve exec strike from LIVE spot at entry time
             # CE → live ATM − step (1 step ITM), PE → live ATM + step
@@ -833,14 +867,27 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 if use_1itm and exec_strike != strike:
                     result["exec_mode"] = "1ITM"
                 trades.append(result)
-                # Track running trade for one-at-a-time rule
-                exit_ts_raw = result.get("exit_ts") or result.get("exit_time")
+                # Track for one-at-a-time + opposite-side force-close
+                exit_ts_raw = result.get("exit_ts")
                 if exit_ts_raw:
                     exit_ts_pd = pd.to_datetime(exit_ts_raw)
                     if exit_ts_pd is not pd.NaT:
                         if exit_ts_pd.tzinfo:
                             exit_ts_pd = exit_ts_pd.tz_localize(None)
-                        running_trade = {"exit_ts": exit_ts_pd, "opt_type": z.get("_opt_type", opt_type)}
+                        day_running_trade = {
+                            "exit_ts":     exit_ts_pd,
+                            "opt_type":    opt_type,
+                            "trade_idx":   len(trades) - 1,
+                            "z":           z,
+                            "df_exec":     df_exec_today,
+                            "df_exec_5m":  df_exec_5m,
+                            "exec_strike": exec_strike,
+                            "spot_val":    spot_val,
+                            "scan_bars_arg": scan_bars_arg,
+                            "depth":       depth,
+                            "mode_tag":    mode,
+                            "scan_strike": strike,
+                        }
 
     return trades
 
