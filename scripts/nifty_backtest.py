@@ -357,7 +357,10 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
         exit_reason = "EOD"
         exit_ts     = last["datetime"]
 
-    rem_pnl   = round((exit_price - entry_price) * rem_qty, 2)
+    # If T1 was never hit, full position (total_qty) exits together.
+    # If T1 was hit, only rem_qty remains (t1_qty already closed at T1).
+    exit_qty  = rem_qty if t1_hit else total_qty
+    rem_pnl   = round((exit_price - entry_price) * exit_qty, 2)
     total_pnl = round(t1_pnl + rem_pnl, 2)
 
     return {
