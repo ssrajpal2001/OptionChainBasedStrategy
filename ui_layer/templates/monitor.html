@@ -5205,7 +5205,16 @@ function histReplay() {
               <span style="color:var(--t-yellow);font-weight:700">Profit Floor ₹ (0 = off)</span>
               <input type="number" min="0" step="1000" class="t-input" placeholder="0"
                      x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].profit_floor??0)">
-              <span style="color:var(--t-dim);font-size:10px">Lock ₹N total once hit · exit at that tick if P&L drops back below · 10000 = ₹10K floor</span>
+              <span style="color:var(--t-dim);font-size:10px">Lock ₹N total once hit · exit at that tick if P&L drops back below · 12000 = ₹12K floor</span>
+            </label>
+            <label class="flex flex-col gap-1 col-span-2">
+              <span style="color:var(--t-yellow);font-weight:700">No Target / No TSL</span>
+              <div class="flex items-center gap-2 mt-1">
+                <input type="checkbox" class="accent-[var(--t-yellow)]"
+                       :checked="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].no_target_tsl??false)"
+                       @change="if(!trapScannerCfg.per_index) trapScannerCfg.per_index={}; if(!trapScannerCfg.per_index[adminSelectedIndex]) trapScannerCfg.per_index[adminSelectedIndex]={}; trapScannerCfg.per_index[adminSelectedIndex].no_target_tsl=$event.target.checked">
+                <span style="color:var(--t-dim);font-size:10px">Skip T1 half-exit + TSL · Exit only: SL · Opp-side signal · Floor · EOD</span>
+              </div>
             </label>
           </div>
         </div>
