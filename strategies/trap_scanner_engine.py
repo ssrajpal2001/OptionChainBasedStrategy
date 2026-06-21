@@ -176,6 +176,7 @@ class TrapScannerEngine:
         # Profit floor: lock ₹N once total P&L (T1+remainder) hits it.
         # If P&L drops back below floor → exit immediately at that tick. 0 = disabled.
         self._profit_floor  = float(_adm.get("profit_floor", 0.0))
+        self._next_week_exp = bool(_adm.get("next_week_expiry", False))
         # No-Target-TSL mode: skip T1 half-exit and TSL; floor locks from total P&L directly.
         # Exit only on: SL, OPP_SIGNAL (opposite side), Floor breach, EOD.
         self._no_target_tsl = bool(_adm.get("no_target_tsl", False))
@@ -2652,6 +2653,12 @@ class TrapScannerEngine:
             if REGISTRY.is_loaded(self._und):
                 exp_date = REGISTRY.get_active_expiry(self._und)
                 if exp_date is not None:
+                    if self._next_week_exp:
+                        # Skip current week — get the expiry after this one
+                        exp_date2 = REGISTRY.get_active_expiry(self._und, from_date=exp_date + timedelta(days=1))
+                        if exp_date2 is not None:
+                            exp_date = exp_date2
+                            self._log.info("_get_expiry %s → NEXT WEEK: %s", self._und, exp_date)
                     exp_str = exp_date.strftime("%d%b%y").upper()
                     self._log.info("_get_expiry %s → REGISTRY: %s (%s)", self._und, exp_str, exp_date)
                     return exp_str, exp_date
@@ -2682,6 +2689,8 @@ class TrapScannerEngine:
         d = date.today()
         for _ in range(7):
             if d.weekday() == weekday:
+                if self._next_week_exp:
+                    d += timedelta(days=7)
                 self._log.warning("_get_expiry %s → REGISTRY unavailable; weekday fallback: %s", self._und, d)
                 return d.strftime("%d%b%y").upper(), d
             d += timedelta(days=1)

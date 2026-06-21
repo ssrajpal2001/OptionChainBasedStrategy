@@ -5216,6 +5216,15 @@ function histReplay() {
                 <span style="color:var(--t-dim);font-size:10px">Skip T1 half-exit + TSL · Exit only: SL · Opp-side signal · Floor · EOD</span>
               </div>
             </label>
+            <label class="flex flex-col gap-1 col-span-2">
+              <span style="color:var(--t-cyan);font-weight:700">Next Week Expiry</span>
+              <div class="flex items-center gap-2 mt-1">
+                <input type="checkbox" class="accent-[var(--t-cyan)]"
+                       :checked="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].next_week_expiry??false)"
+                       @change="if(!trapScannerCfg.per_index) trapScannerCfg.per_index={}; if(!trapScannerCfg.per_index[adminSelectedIndex]) trapScannerCfg.per_index[adminSelectedIndex]={}; trapScannerCfg.per_index[adminSelectedIndex].next_week_expiry=$event.target.checked">
+                <span style="color:var(--t-dim);font-size:10px">Always trade NEXT week's expiry (skip current week) · Better premiums · Tighter bid-ask vs monthly</span>
+              </div>
+            </label>
           </div>
         </div>
 
