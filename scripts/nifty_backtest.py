@@ -545,7 +545,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              use_1itm: bool = False,
              profit_floor_per_lot: float = 0.0,
              no_target_tsl: bool = False,
-             rr_filter: bool = False) -> list[dict]:
+             rr_filter: bool = False,
+             rr_min_ratio: float = 1.0) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -918,8 +919,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     if mask_hist.any():
                         ce_at_hist = float(df_opt_today[mask_hist].iloc[-1]["close"])
                         ce_reward  = ce_at_hist - entry_est
-                        if ce_reward < my_risk:
-                            print(f"  R:R SKIP {opt_type} {strike}: target={ce_at_hist:.1f} entry={entry_est:.1f} reward={ce_reward:.1f} < risk={my_risk:.1f}")
+                        if ce_reward < my_risk * rr_min_ratio:
+                            print(f"  R:R SKIP {opt_type} {strike}: target={ce_at_hist:.1f} entry={entry_est:.1f} reward={ce_reward:.1f} < {rr_min_ratio}x risk={my_risk:.1f}")
                             continue
 
             # scan bars drive SL/T1 timing; exec bars (ATM-50) provide entry/exit prices
@@ -991,7 +992,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        profit_floor_per_lot: float = 0.0,
                        htf_min: int = 0,
                        no_target_tsl: bool = False,
-                       rr_filter: bool = False) -> dict:
+                       rr_filter: bool = False,
+                       rr_min_ratio: float = 1.0) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -1046,7 +1048,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
                               opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm,
-                              profit_floor_per_lot, no_target_tsl, rr_filter)
+                              profit_floor_per_lot, no_target_tsl, rr_filter, rr_min_ratio)
         all_trades.extend(day_trades)
 
     # Summary

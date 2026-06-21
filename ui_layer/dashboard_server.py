@@ -771,6 +771,7 @@ class DashboardServer:
             htf_min              = int(p.get("htf_min", 75))
             no_target_tsl        = bool(p.get("no_target_tsl", False))
             rr_filter            = bool(p.get("rr_filter", False))
+            rr_min_ratio         = float(p.get("rr_min_ratio", 1.0))
             if not token:
                 return {"ok": False, "error": "token required"}
             try:
@@ -778,7 +779,7 @@ class DashboardServer:
                 result = await asyncio.to_thread(
                     run_nifty_backtest, token, index, weeks, start, end, bias, sl_buf,
                     monthly, strike_depth, profit_cap_per_lot, use_1itm, profit_floor_per_lot,
-                    htf_min, no_target_tsl, rr_filter
+                    htf_min, no_target_tsl, rr_filter, rr_min_ratio
                 )
                 return result
             except Exception as exc:

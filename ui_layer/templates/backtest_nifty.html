@@ -299,8 +299,8 @@
         <!-- R:R Filter toggle -->
         <div class="flex items-center justify-between">
           <div>
-            <p class="text-sm font-600 text-t-bright">1:1 R:R Filter</p>
-            <p class="text-xs text-t-muted">Skip trade if opp zone target < SL risk · Uses historical opp LTP at zone_low time</p>
+            <p class="text-sm font-600 text-t-bright">R:R Filter</p>
+            <p class="text-xs text-t-muted">Skip trade if opp zone target &lt; min ratio × SL risk</p>
           </div>
           <label class="flex items-center gap-1 cursor-pointer">
             <input type="checkbox" x-model="rrFilter" class="accent-[var(--t-green)]" />
@@ -308,6 +308,16 @@
               :class="rrFilter ? 'text-[var(--t-green)]' : 'text-t-muted'"></span>
           </label>
         </div>
+        <template x-if="rrFilter">
+          <div class="flex items-center justify-between pl-3 border-l-2 border-[var(--t-green)]">
+            <div>
+              <p class="text-sm font-600 text-t-bright">Min R:R Ratio · <span x-text="rrMinRatio.toFixed(1)"></span>:1</p>
+              <p class="text-xs text-t-muted">0.5 = half reward vs risk · 1.0 = equal · 2.0 = double reward</p>
+            </div>
+            <input type="range" x-model.number="rrMinRatio" min="0.3" max="2.0" step="0.1"
+              class="w-28 accent-[var(--t-green)]" />
+          </div>
+        </template>
 
         <!-- 1 ITM Execution toggle -->
         <div class="flex items-center justify-between">
@@ -459,6 +469,7 @@ function backtestNifty() {
     profitFloor:   10000,
     noTargetTsl:   false,
     rrFilter:      false,
+    rrMinRatio:    1.0,
     use1itm:      false,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
@@ -506,6 +517,7 @@ function backtestNifty() {
         profit_floor_per_lot: this.profitFloorOn ? this.profitFloor : 0,
         no_target_tsl: this.noTargetTsl,
         rr_filter:     this.rrFilter,
+        rr_min_ratio:  this.rrMinRatio,
         use_1itm:             this.use1itm,
       }
       if (this.dateMode === 'weeks') {
