@@ -320,15 +320,50 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         return None
     trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
 
-    # Entry price:
-    #   1ITM mode → exec strike's actual price at trap_ts
-    #   Standard  → zone_trigger level (original behaviour)
-    if use_1itm_mode:
-        entry_price = _price_at_ts(exec_bars, trap_ts)
-        if entry_price <= 0:
-            entry_price = scan_entry
-    else:
-        entry_price = scan_entry
+    # ── 1min rejection-candle entry confirmation ─────────────────────────
+    # At zone_low, wait for a 1min candle to form (rejection candle):
+    #   small (< BIG_CANDLE_PTS): enter when next bar breaks above its HIGH
+    #   big  (>= BIG_CANDLE_PTS): enter when price reaches 50% from candle LOW
+    # If no confirmation within session → no trade.
+    BIG_CANDLE_PTS = 30.0   # NIFTY: 30pts separates small vs big rejection candle
+
+    entry_price  = None
+    actual_entry_ts = None
+    future_1m_all = exec_bars[exec_bars["datetime"] > trap_ts]
+
+    rejection_bar = None   # (high, low) of first 1min bar that touched zone_low area
+
+    for _, rb in future_1m_all.iterrows():
+        rb_ts    = rb["datetime"]
+        rb_high  = float(rb["high"])
+        rb_low   = float(rb["low"])
+        rb_range = rb_high - rb_low
+
+        if rejection_bar is None:
+            # Look for first 1min bar that touches zone_trigger (zone_low area)
+            if rb_low <= scan_entry:
+                rejection_bar = (rb_high, rb_low, rb_range, rb_ts)
+        else:
+            ph, pl, pr, _ = rejection_bar
+            if pr < BIG_CANDLE_PTS:
+                # Small candle: enter when this bar breaks ABOVE rejection candle high
+                if rb_high > ph:
+                    entry_price     = round(ph, 2)   # entry at rejection candle high
+                    actual_entry_ts = rb_ts
+                    break
+            else:
+                # Big candle: enter when price reaches 50% from candle low (midpoint)
+                midpoint = round(pl + pr * 0.5, 2)
+                if rb_low <= midpoint:
+                    entry_price     = midpoint
+                    actual_entry_ts = rb_ts
+                    break
+
+    if entry_price is None or entry_price <= 0:
+        return None   # no 1min confirmation → skip trade
+
+    # Update trap_ts to actual entry timestamp for simulation start
+    trap_ts = actual_entry_ts
 
     future_scan = scan_bars[scan_bars["datetime"] > trap_ts]
     if future_scan.empty:
@@ -637,13 +672,14 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                            and float(e.get("zone_low",  0)) >= zl * 0.98]
 
                 if ltf5_in:
-                    # Pick lowest zone_low 5min sub-trap (nearest to HTF zone_low)
-                    best = min(ltf5_in, key=lambda e: float(e.get("zone_low", 9999)))
-                    best["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m→5m"
-                    best["_trap_pos"] = "LOWEST-LTF"
-                    best["_htf_t1"]   = zh   # T1 = HTF zone_high (all bears' SL)
-                    best["_htf_sl"]   = zl   # SL = HTF zone_low (not 5min zone_low)
-                    entry_signals.append(best)
+                    # Take ALL valid 5min sub-traps inside HTF zone (more trade opportunities)
+                    ltf5_in.sort(key=lambda e: float(e.get("zone_low", 9999)))
+                    for idx, best in enumerate(ltf5_in):
+                        best["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m→5m"
+                        best["_trap_pos"] = f"LTF-{idx+1}"
+                        best["_htf_t1"]   = zh   # T1 = HTF zone_high (all bears' SL)
+                        best["_htf_sl"]   = zl   # SL = HTF zone_low (not 5min zone_low)
+                        entry_signals.append(best)
                     print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → 5m sub-trap at {best.get('zone_low'):.0f}-{best.get('zone_high'):.0f}")
                 else:
                     # No fresh 5min trap found inside HTF zone — skip (no trade).
@@ -684,13 +720,14 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                        and float(e.get("zone_low",  0)) >= zl * 0.98]
 
             if ltf5_in:
-                # Pick lowest 5min sub-trap; SL = 15min zone_low (not 5min zone_low)
-                best = min(ltf5_in, key=lambda e: float(e.get("zone_low", 9999)))
-                best["_mode"]     = "CASCADE-15m→5m"
-                best["_trap_pos"] = "LOWEST"
-                best["_htf_t1"]   = zh   # T1 = 15min zone_high
-                best["_htf_sl"]   = zl   # SL = 15min zone_low (parent zone)
-                entry_signals.append(best)
+                # Take ALL valid 5min sub-traps; SL = 15min zone_low (parent zone)
+                ltf5_in.sort(key=lambda e: float(e.get("zone_low", 9999)))
+                for idx, best in enumerate(ltf5_in):
+                    best["_mode"]     = "CASCADE-15m→5m"
+                    best["_trap_pos"] = f"LTF-{idx+1}"
+                    best["_htf_t1"]   = zh   # T1 = 15min zone_high
+                    best["_htf_sl"]   = zl   # SL = 15min zone_low
+                    entry_signals.append(best)
                 print(f"  {trade_date} {opt_type} {strike}: CASCADE 15m {zl:.0f}-{zh:.0f} → 5m sub-trap at {best.get('zone_low'):.0f}-{best.get('zone_high'):.0f}")
             else:
                 # No 5min sub-trap inside 15min zone → skip
