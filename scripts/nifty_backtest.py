@@ -335,7 +335,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     t1_pnl          = 0.0
     t1_exit_ts      = None
     trail_sl        = init_sl      # starts at zone_low (support floor)
-    sl_breach_close = None         # 1-min close that crossed below active_sl
+    sl_breach_close = None         # close of 1-min candle that crossed below active_sl
+    sl_breach_low   = None         # low of that same candle (used for step-2 confirm level)
     exit_price      = None
     exit_reason     = "OPEN"
     exit_ts         = None
@@ -355,7 +356,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             t1_exit_ts      = bar_ts
             t1_pnl          = round((t1_price - entry_price) * t1_qty, 2)
             trail_sl        = entry_price   # breakeven: TSL = where we entered
-            sl_breach_close = None          # reset any pending breach
+            sl_breach_close = None
+            sl_breach_low   = None
 
         # 2. Ratchet TSL up: each newly TRAPPED 5-min zone raises TSL to its zone_low
         if t1_hit:
@@ -365,7 +367,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                     break
                 if z_low > trail_sl:        # only ratchet UP
                     trail_sl        = z_low
-                    sl_breach_close = None  # old breach invalidated by higher TSL
+                    sl_breach_close = None
+                    sl_breach_low   = None  # old breach invalidated by higher TSL
                 trap_idx += 1
 
         # 3. T2: next 15-min zone_high → close all remaining
@@ -378,9 +381,12 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         # 4. Active SL = zone_low / TSL (support floor, no buffer yet)
         active_sl = trail_sl if t1_hit else init_sl
 
-        # 5. 2-step SL: close below active_sl (step 1) then tick to close−buf (step 2)
+        # 5. 2-step SL:
+        #    Step 1 — 1-min candle closes below active_sl (zone_low / TSL floor)
+        #    Step 2 — on any subsequent bar, if price ticks to breach_bar_low − sl_buf → exit
+        #    Recovery — if price closes back above active_sl before step 2 fires → reset
         if sl_breach_close is not None:
-            confirm = round(sl_breach_close - sl_buf, 2)
+            confirm = round(sl_breach_low - sl_buf, 2)   # breach candle's low − buffer
             if bar_low <= confirm:
                 exit_price  = confirm
                 exit_reason = "TRAIL_SL" if t1_hit else "SL"
@@ -388,8 +394,10 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 break
             if bar_close > active_sl:       # price recovered → breach cancelled
                 sl_breach_close = None
-        elif bar_close < active_sl:         # step 1: close below floor
+                sl_breach_low   = None
+        elif bar_close < active_sl:         # step 1: close below support floor
             sl_breach_close = bar_close
+            sl_breach_low   = bar_low
 
         # 6. EOD
         if bar_ts.time() >= pd.Timestamp("15:25").time():
