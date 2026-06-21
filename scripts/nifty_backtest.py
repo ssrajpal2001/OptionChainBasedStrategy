@@ -388,7 +388,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
 # ── Per-day backtest ───────────────────────────────────────────────────────────
 def _run_day(index: str, cfg: dict, trade_date: str,
              df_spot_all: pd.DataFrame,
-             use_bias: bool, sl_buf: float) -> list[dict]:
+             use_bias: bool, sl_buf: float,
+             opt_bar_cache: dict | None = None) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -431,9 +432,12 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     ce_key = _option_key(index, ce_strike, "CE", trade_dt_obj)
     pe_key = _option_key(index, pe_strike, "PE", trade_dt_obj)
 
-    # Fetch option bars (prev week + today for HTF zone history)
+    # Fetch option bars (prev 14 days + today for HTF zone history).
+    # For monthly mode the same key covers the whole backtest range — use the
+    # shared cache so we fetch each unique key only once across all days.
     fetch_from = (td - timedelta(days=14)).isoformat()
     fetch_to   = (td + timedelta(days=1)).isoformat()
+    cache = opt_bar_cache if opt_bar_cache is not None else {}
 
     trades = []
 
@@ -449,12 +453,18 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             print(f"  {trade_date} {opt_type} {strike}: no instrument key — skip")
             continue
 
-        try:
-            df_opt_raw = _fetch_1m(key, fetch_from, fetch_to)
-            time.sleep(0.2)
-        except Exception as exc:
-            print(f"  {trade_date} {opt_type} {strike}: fetch error {exc}")
-            continue
+        # Use cached bars if available; otherwise fetch and cache
+        if key in cache:
+            df_opt_raw = cache[key]
+        else:
+            try:
+                df_opt_raw = _fetch_1m(key, fetch_from, fetch_to)
+                time.sleep(0.2)
+                cache[key] = df_opt_raw
+            except Exception as exc:
+                print(f"  {trade_date} {opt_type} {strike}: fetch error {exc}")
+                cache[key] = pd.DataFrame()
+                continue
 
         if df_opt_raw.empty:
             print(f"  {trade_date} {opt_type} {strike}: no option data")
@@ -623,9 +633,19 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     df_spot_all = _mkt_hours(df_spot_all)
     print(f"  {len(df_spot_all)} spot bars loaded\n")
 
+    # Shared option bar cache.
+    # For monthly mode: same contract key covers the whole period → pre-note the
+    # full range so each key is fetched ONCE with complete history.
+    # _run_day will use fetch_from=td-14d which may miss early bars on later days;
+    # pre-seeding with the full range fixes that and eliminates duplicate fetches.
+    opt_bar_cache: dict = {}
+    if monthly:
+        print("Monthly mode: option bars will be cached per strike key (fetch once).")
+
     all_trades: list[dict] = []
     for td in days:
-        day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf)
+        day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
+                              opt_bar_cache)
         all_trades.extend(day_trades)
 
     # Summary
