@@ -276,32 +276,39 @@ def _spot_at_ts(df_spot: pd.DataFrame, ts: pd.Timestamp) -> float:
     return float(prior["close"].iloc[-1]) if not prior.empty else 0.0
 
 
+def _price_at_ts(df1m: pd.DataFrame, ts: pd.Timestamp) -> float:
+    """Return close price from df1m at the bar that contains ts (first bar >= ts)."""
+    if df1m.empty:
+        return 0.0
+    row = df1m[df1m["datetime"] >= ts]
+    return float(row["close"].iloc[0]) if not row.empty else float(df1m["close"].iloc[-1])
+
+
 def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                    lot: int, sl_buf: float,
                    opt_type: str, trade_date: str, strike: int,
                    spot_at_entry: float,
                    profit_cap_per_lot: float = 0.0,
-                   profit_floor_per_lot: float = 0.0) -> Optional[dict]:
+                   profit_floor_per_lot: float = 0.0,
+                   df1m_scan: pd.DataFrame | None = None) -> Optional[dict]:
     """
-    Exit rules:
-      T1    : 50% qty @ HTF zone_high (bears' SL). TSL starts at entry (breakeven).
-      TSL   : after T1, ratchets UP to zone_low of each newly TRAPPED 5-min zone.
-              TSL = zone_low (natural support floor). Buffer applied at exit confirmation.
-      T2    : next 15-min zone_high above T1 → close all remaining.
-      SL    : 2-step — 1-min close < active_sl → tick < close − sl_buf → exit.
-              (Prevents wick-based false triggers; active_sl = zone_low / TSL level.)
-      EOD   : square off at 15:25.
+    df1m       = exec strike bars (prices for entry/exit P&L)
+    df1m_scan  = scan strike bars (SL/T1/TSL trigger logic); if None, uses df1m (no 1ITM)
     """
+    # 1ITM: scan bars drive triggers, exec bars drive prices
+    scan_bars = df1m_scan if (df1m_scan is not None and not df1m_scan.empty) else df1m
+    exec_bars = df1m
+
     total_qty = lot * 2
     t1_qty    = total_qty // 2
     rem_qty   = total_qty - t1_qty
 
     zh = float(e["zone_high"])
     zl = float(e["zone_low"])
-    entry_price = _zone_trigger(e)
+    # Scan-zone trigger price (used for SL/T1 thresholds on scan bars)
+    scan_entry  = _zone_trigger(e)
     t1_price    = round(float(e["_htf_t1"]) if "_htf_t1" in e else zh, 2)
     t2_price    = float(e["_t2"]) if e.get("_t2") else None
-    # TSL tracks zone_low (support floor). Buffer applied only at confirmation exit.
     init_sl     = zl
 
     trap_ts = pd.to_datetime(e.get("closed_on") or e.get("trapped_on"))
@@ -309,12 +316,17 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         return None
     trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
 
-    future = df1m[df1m["datetime"] > trap_ts]
-    if future.empty:
+    # Entry price: exec bar close at entry timestamp
+    entry_price = _price_at_ts(exec_bars, trap_ts)
+    if entry_price <= 0:
+        # fallback to scan zone trigger if exec bars have no data at this ts
+        entry_price = scan_entry
+
+    future_scan = scan_bars[scan_bars["datetime"] > trap_ts]
+    if future_scan.empty:
         return None
 
-    # Pre-compute 5-min trap events for TSL: zones TRAPPED after entry with zone_low > entry
-    # When each fires, TSL jumps to that zone_low (seller support floor)
+    # Pre-compute 5-min TSL trap events (on scan strike bars — zone-level logic)
     trap_events: list[tuple[pd.Timestamp, float]] = []
     if not df5m.empty:
         df5m_post = df5m[df5m["datetime"] > trap_ts]
@@ -324,7 +336,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 if z5.get("status") not in ("TRAPPED", "CLOSED"):
                     continue
                 z5_low = float(z5.get("zone_low", 0))
-                if z5_low <= entry_price:
+                if z5_low <= scan_entry:
                     continue
                 ev_ts = pd.to_datetime(z5.get("trapped_on") or z5.get("closed_on"))
                 if ev_ts is pd.NaT:
@@ -341,27 +353,31 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     exit_reason     = "OPEN"
     exit_ts         = None
     trap_idx        = 0
-    floor_locked    = False   # True once total P&L first hits profit_floor_per_lot×lots
-    locked_floor_rs = 0.0    # the floor amount in ₹ once locked
+    floor_locked    = False
+    locked_floor_rs = 0.0
 
-    for _, row in future.iterrows():
+    for _, row in future_scan.iterrows():
         bar_ts    = row["datetime"]
         if not isinstance(bar_ts, pd.Timestamp):
             bar_ts = pd.Timestamp(bar_ts)
         bar_high  = float(row["high"])
         bar_low   = float(row["low"])
         bar_close = float(row["close"])
+        # Exec price at this bar timestamp (for P&L calcs)
+        exec_close = _price_at_ts(exec_bars, bar_ts) or bar_close
 
-        # 1. T1: 50% exit, TSL locks at entry (breakeven)
+        # 1. T1 trigger from scan bar (high crosses zone_high)
+        # T1 exit price read from exec bar at same timestamp
         if not t1_hit and bar_high >= t1_price:
-            t1_hit     = True
-            t1_exit_ts = bar_ts
-            t1_pnl     = round((t1_price - entry_price) * t1_qty, 2)
-            trail_sl   = entry_price   # breakeven: TSL = where we entered
+            t1_hit       = True
+            t1_exit_ts   = bar_ts
+            exec_t1_px   = _price_at_ts(exec_bars, bar_ts) or exec_close
+            t1_pnl       = round((exec_t1_px - entry_price) * t1_qty, 2)
+            trail_sl     = init_sl   # TSL resets to zone_low (breakeven anchor on scan)
 
-        # Profit cap: total trade P&L >= cap (per-trade total) → close all immediately
+        # Profit cap: triggered on exec_close P&L
         if t1_hit and profit_cap_per_lot > 0:
-            running_rem = (bar_close - entry_price) * rem_qty
+            running_rem = (exec_close - entry_price) * rem_qty
             if t1_pnl + running_rem >= profit_cap_per_lot:
                 rem_needed  = profit_cap_per_lot - t1_pnl
                 exit_price  = round(entry_price + rem_needed / rem_qty, 2)
@@ -369,65 +385,58 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 exit_ts     = bar_ts
                 break
 
-        # Profit floor: once TOTAL trade P&L (t1+running rem) hits the floor,
-        # LOCK that amount. Continue holding. Exit only if P&L drops back below floor.
-        # floor is per-TRADE (t1_pnl already includes T1 fill at T1_price).
+        # Profit floor: lock ₹floor once hit; exit at implied floor price on breach
         if t1_hit and profit_floor_per_lot > 0:
-            running_rem = (bar_close - entry_price) * rem_qty
-            current_pnl = t1_pnl + running_rem     # total trade P&L so far
+            running_rem = (exec_close - entry_price) * rem_qty
+            current_pnl = t1_pnl + running_rem
             if not floor_locked and current_pnl >= profit_floor_per_lot:
                 floor_locked    = True
-                locked_floor_rs = profit_floor_per_lot   # e.g. ₹10,000 per trade
+                locked_floor_rs = profit_floor_per_lot
             if floor_locked and current_pnl < locked_floor_rs:
-                # exit at implied tick price where P&L = floor (not bar_close)
-                # matches live: tick crosses floor → exit immediately at that price
                 floor_rem_needed = locked_floor_rs - t1_pnl
                 exit_price  = round(entry_price + floor_rem_needed / rem_qty, 2)
                 exit_reason = "FLOOR_SL"
                 exit_ts     = bar_ts
                 break
 
-        # 2. Ratchet TSL up: each newly TRAPPED 5-min zone raises TSL to its zone_low
+        # 2. Ratchet TSL: scan-zone 5-min traps raise TSL (zone_low levels)
         if t1_hit:
             while trap_idx < len(trap_events):
                 ev_ts, z_low = trap_events[trap_idx]
                 if bar_ts < ev_ts:
                     break
-                if z_low > trail_sl:        # only ratchet UP
-                    trail_sl        = z_low
-                    pass  # TSL ratcheted up
+                if z_low > trail_sl:
+                    trail_sl = z_low
                 trap_idx += 1
 
-        # 3. T2: next 15-min zone_high → close all remaining
+        # 3. T2: scan bar high crosses next zone → exit at exec price
         if t1_hit and t2_price and bar_high >= t2_price:
-            exit_price  = t2_price
+            exit_price  = _price_at_ts(exec_bars, bar_ts) or exec_close
             exit_reason = "T2"
             exit_ts     = bar_ts
             break
 
-        # 4. Active SL = zone_low / TSL (support floor, no buffer yet)
+        # 4. SL trigger on scan bar close; exit price from exec bar
         active_sl = trail_sl if t1_hit else init_sl
-
-        # 5. SL: 1-min close below zone_low − sl_buf → exit at that close
-        #    zone_low = actual support floor; buffer confirms genuine break (not wick noise)
         if bar_close < round(active_sl - sl_buf, 2):
-            exit_price  = bar_close
+            exit_price  = _price_at_ts(exec_bars, bar_ts) or exec_close
             exit_reason = "TRAIL_SL" if t1_hit else "SL"
             exit_ts     = bar_ts
             break
 
-        # 6. EOD
+        # 5. EOD
         if bar_ts.time() >= pd.Timestamp("15:25").time():
-            exit_price  = bar_close
+            exit_price  = exec_close
             exit_reason = "EOD"
             exit_ts     = bar_ts
             break
 
     if exit_price is None:
-        last        = future.iloc[-1]
-        exit_price  = round(float(last["close"]), 2)
+        last        = future_scan.iloc[-1]
+        last_ts     = last["datetime"]
+        exit_price  = _price_at_ts(exec_bars, last_ts) or float(last["close"])
         exit_reason = "EOD"
-        exit_ts     = last["datetime"]
+        exit_ts     = last_ts
 
     exit_qty    = rem_qty if t1_hit else total_qty
     rem_pnl     = round((exit_price - entry_price) * exit_qty, 2)
@@ -677,27 +686,20 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         if "df_5" not in dir():
             df_5 = _resample(df_opt_today, 5)
 
-        # ── 1 ITM mode: detect on scan strike, execute on ATM±1step ──────────
-        exec_strike = strike
-        df_exec_today = df_opt_today   # bars used for P&L simulation
+        # ── 1 ITM mode: detect on scan strike, execute on live-ATM ± 1 step ─
+        # SL/T1/TSL triggers come from scan strike bars (zone levels intact).
+        # Entry and exit PRICES come from exec strike bars (at same timestamps).
+        # exec_strike = live spot ATM at entry time ± 1 step (CE: ATM-step, PE: ATM+step)
+        exec_strike   = strike
+        df_exec_today = df_opt_today
         df_exec_5m    = df_5
-        if use_1itm and gap_fired:
-            atm = _round_strike(today_open, step)
-            exec_strike = atm - step if opt_type == "CE" else atm + step
-            if exec_strike != strike:
-                exec_key = _option_key(index, exec_strike, opt_type, td)
-                if exec_key not in cache:
-                    try:
-                        cache[exec_key] = _fetch_1m(exec_key, fetch_from, fetch_to)
-                        time.sleep(0.2)
-                    except Exception as exc:
-                        print(f"  {trade_date} {opt_type} {exec_strike} (1ITM exec): fetch error {exc}")
-                        cache[exec_key] = pd.DataFrame()
-                df_exec_raw = cache.get(exec_key, pd.DataFrame())
-                if not df_exec_raw.empty:
-                    df_exec_today = _mkt_hours(df_exec_raw)[
-                        _mkt_hours(df_exec_raw)["datetime"].dt.date == td].copy()
-                    df_exec_5m = _resample(df_exec_today, 5) if not df_exec_today.empty else df_5
+        _1itm_exec_bars: dict[int, pd.DataFrame] = {}  # strike → today bars
+
+        if use_1itm:
+            # Pre-fetch exec strike bars; actual exec_strike resolved per zone (live ATM)
+            # We need spot at each zone's entry time → compute per-zone below.
+            # Here just mark that 1ITM is active; resolution happens inside the zone loop.
+            pass
 
         for z in entry_signals:
             trap_ts = pd.to_datetime(z.get("closed_on") or z.get("trapped_on"))
@@ -706,12 +708,48 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 ts_naive = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
                 spot_val = _spot_at_ts(df_today, ts_naive)
 
+            # 1 ITM: resolve exec strike from LIVE spot at entry time
+            # CE → live ATM − step (1 step ITM), PE → live ATM + step
+            # SL/T1 triggers remain on scan strike (zone levels intact).
+            # Only entry/exit prices are read from exec strike bars.
+            exec_strike   = strike
+            df_exec_today = df_opt_today
+            df_exec_5m    = df_5
+            if use_1itm and spot_val > 0:
+                live_atm    = _round_strike(spot_val, step)
+                z_exec      = live_atm - step if opt_type == "CE" else live_atm + step
+                if z_exec != strike:
+                    if z_exec not in _1itm_exec_bars:
+                        exec_key = _option_key(index, z_exec, opt_type, td)
+                        if exec_key not in cache:
+                            try:
+                                cache[exec_key] = _fetch_1m(exec_key, fetch_from, fetch_to)
+                                time.sleep(0.2)
+                            except Exception as exc:
+                                print(f"  1ITM exec fetch {opt_type}{z_exec}: {exc}")
+                                cache[exec_key] = pd.DataFrame()
+                        raw = cache.get(exec_key, pd.DataFrame())
+                        if not raw.empty:
+                            _1itm_exec_bars[z_exec] = _mkt_hours(raw)[
+                                _mkt_hours(raw)["datetime"].dt.date == td].copy()
+                        else:
+                            _1itm_exec_bars[z_exec] = pd.DataFrame()
+                    df_exec = _1itm_exec_bars.get(z_exec, pd.DataFrame())
+                    if not df_exec.empty:
+                        exec_strike   = z_exec
+                        df_exec_today = df_exec
+                        df_exec_5m    = _resample(df_exec, 5)
+
+            # In 1ITM mode: scan bars (df_opt_today) drive triggers,
+            # exec bars (df_exec_today) drive entry/exit prices
+            scan_bars_arg = df_opt_today if (use_1itm and exec_strike != strike) else None
             result = _simulate_exit(
                 z, df_exec_today, df_exec_5m,
                 lot, sl_buf, opt_type, trade_date,
                 strike=exec_strike, spot_at_entry=spot_val,
                 profit_cap_per_lot=profit_cap_per_lot,
                 profit_floor_per_lot=profit_floor_per_lot,
+                df1m_scan=scan_bars_arg,
             )
             if result:
                 result["index"]        = index
