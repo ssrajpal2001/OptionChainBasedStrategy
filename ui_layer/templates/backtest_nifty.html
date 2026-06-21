@@ -428,8 +428,9 @@ function backtestNifty() {
           ? `<span class="tag-ce">${t.opt_type}</span>`
           : `<span class="tag-pe">${t.opt_type}</span>`
         const posColor = t.trap_pos === 'FIRST' ? '#22c55e' : t.trap_pos === 'LAST' ? '#f59e0b' : t.trap_pos === 'MIDDLE' ? '#06b6d4' : '#6b7280'
+        const depthTag = t.depth === 'FAR' ? '<span style="font-size:0.65rem;color:#f59e0b;font-weight:700">FAR</span>' : t.depth === 'NEAR' ? '<span style="font-size:0.65rem;color:#06b6d4;font-weight:700">NEAR</span>' : ''
         const modeTag  = t.gap_fired
-          ? `<span class="tag-gap">GAP</span>`
+          ? `<span class="tag-gap">GAP</span> ${depthTag}`
           : `<span class="tag-nogap">PIVOT</span>`
         const pnlCls   = t.pnl_rs > 0 ? 'pnl-pos' : t.pnl_rs < 0 ? 'pnl-neg' : 'pnl-zero'
         const pnlFmt   = '₹' + Number(t.pnl_rs).toLocaleString('en-IN', {signDisplay:'always'})

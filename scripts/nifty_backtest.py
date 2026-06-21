@@ -47,7 +47,8 @@ INDEX_CFG = {
         "spot_key":  "NSE_INDEX|Nifty 50",
         "step":      50,
         "lot":       65,
-        "gap_near":  50,   # 1 ITM = 1 step
+        "gap_near":  200,  # CE1=ATM-200, PE1=ATM+200  ← matches live scanner
+        "gap_far":   400,  # CE2=ATM-400, PE2=ATM+400  ← matches live scanner
         "gap_thresh": 0.5, # % gap to classify as gap day
         "htf_min":   75,
         "ltf_min":   5,
@@ -57,7 +58,8 @@ INDEX_CFG = {
         "spot_key":  "BSE_INDEX|SENSEX",
         "step":      100,
         "lot":       20,
-        "gap_near":  100,
+        "gap_near":  300,  # CE1=ATM-300, PE1=ATM+300
+        "gap_far":   600,  # CE2=ATM-600, PE2=ATM+600
         "gap_thresh": 0.5,
         "htf_min":   75,
         "ltf_min":   5,
@@ -417,37 +419,44 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     gap_fired  = gap_pct >= gap_thresh
     gap_dir    = "UP" if today_open >= prev_C else "DOWN"
 
-    # Strike selection
+    # Strike selection — mirrors live scanner CE1/CE2/PE1/PE2
     trade_dt_obj = td
     if gap_fired:
         atm        = _round_strike(today_open, step)
-        ce_strike  = atm - cfg["gap_near"]
-        pe_strike  = atm + cfg["gap_near"]
-        mode       = f"GAP {gap_dir} {gap_pct:.1f}%"
+        ce_near    = atm - cfg["gap_near"]         # CE1 = ATM-200
+        ce_far     = atm - cfg.get("gap_far", cfg["gap_near"] * 2)  # CE2 = ATM-400
+        pe_near    = atm + cfg["gap_near"]         # PE1 = ATM+200
+        pe_far     = atm + cfg.get("gap_far", cfg["gap_near"] * 2)  # PE2 = ATM+400
+        base_mode  = f"GAP {gap_dir} {gap_pct:.1f}%"
+        legs = [
+            ("CE", ce_near, _option_key(index, ce_near, "CE", trade_dt_obj), "NEAR"),
+            ("CE", ce_far,  _option_key(index, ce_far,  "CE", trade_dt_obj), "FAR"),
+            ("PE", pe_near, _option_key(index, pe_near, "PE", trade_dt_obj), "NEAR"),
+            ("PE", pe_far,  _option_key(index, pe_far,  "PE", trade_dt_obj), "FAR"),
+        ]
     else:
-        ce_strike   = _round_strike(piv["S1"], step)
-        pe_strike   = _round_strike(piv["R1"], step)
-        mode        = f"NOGAP pivot P={piv['P']:.0f} S1={piv['S1']:.0f} R1={piv['R1']:.0f}"
+        ce_strike  = _round_strike(piv["S1"], step)
+        pe_strike  = _round_strike(piv["R1"], step)
+        base_mode  = f"NOGAP pivot P={piv['P']:.0f} S1={piv['S1']:.0f} R1={piv['R1']:.0f}"
+        legs = [
+            ("CE", ce_strike, _option_key(index, ce_strike, "CE", trade_dt_obj), "S1"),
+            ("PE", pe_strike, _option_key(index, pe_strike, "PE", trade_dt_obj), "R1"),
+        ]
 
-    ce_key = _option_key(index, ce_strike, "CE", trade_dt_obj)
-    pe_key = _option_key(index, pe_strike, "PE", trade_dt_obj)
-
-    # Fetch option bars (prev 14 days + today for HTF zone history).
-    # For monthly mode the same key covers the whole backtest range — use the
-    # shared cache so we fetch each unique key only once across all days.
     fetch_from = (td - timedelta(days=14)).isoformat()
     fetch_to   = (td + timedelta(days=1)).isoformat()
     cache = opt_bar_cache if opt_bar_cache is not None else {}
 
     trades = []
 
-    for opt_type, strike, key in [("CE", ce_strike, ce_key), ("PE", pe_strike, pe_key)]:
+    for opt_type, strike, key, depth in legs:
         # Bias filter: on gap days, skip the leg that opposes gap direction
         if use_bias and gap_fired:
             if gap_dir == "UP" and opt_type == "PE":
                 continue
             if gap_dir == "DOWN" and opt_type == "CE":
                 continue
+        mode = f"{base_mode} {depth}"
 
         if not key:
             print(f"  {trade_date} {opt_type} {strike}: no instrument key — skip")
@@ -574,6 +583,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 result["index"]     = index
                 result["gap_pct"]   = round(gap_pct, 2)
                 result["gap_fired"] = gap_fired
+                result["depth"]     = depth   # NEAR/FAR/S1/R1
                 result["mode"]     += f" {mode}"
                 trades.append(result)
 
