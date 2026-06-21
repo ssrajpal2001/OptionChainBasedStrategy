@@ -2685,12 +2685,19 @@ class TrapScannerEngine:
                     d -= timedelta(days=1)
             self._log.warning("_get_expiry CRUDEOIL → REGISTRY unavailable; date-20 fallback: %s", d)
             return d.strftime("%d%b%y").upper(), d
+        # Calendar fallback — REGISTRY not loaded yet.
+        # next_week_expiry CANNOT be resolved without registry contract list;
+        # log an error and fall back to current-week expiry until REGISTRY loads.
+        if self._next_week_exp:
+            self._log.error(
+                "_get_expiry %s → next_week_expiry=True but REGISTRY not loaded; "
+                "falling back to nearest expiry from calendar — RESTART after REGISTRY loads",
+                self._und,
+            )
         weekday = _EXPIRY_DOW.get(self._und, 3)
         d = date.today()
         for _ in range(7):
             if d.weekday() == weekday:
-                if self._next_week_exp:
-                    d += timedelta(days=7)
                 self._log.warning("_get_expiry %s → REGISTRY unavailable; weekday fallback: %s", self._und, d)
                 return d.strftime("%d%b%y").upper(), d
             d += timedelta(days=1)

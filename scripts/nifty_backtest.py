@@ -231,13 +231,17 @@ def _get_expiry(index: str, from_date: date,
                     return exp2, exp2.strftime("%d%b%y").upper()
             else:
                 return exp, exp.strftime("%d%b%y").upper()
-    # Fallback: weekday math
+    # Fallback: weekday math (REGISTRY not loaded or no match).
+    # next_week cannot be resolved accurately without real contract list —
+    # calendar +7d can land on a holiday-shifted date; log warning.
     dow = _WEEKLY_DOW.get(index, 3)
     d = from_date
     for _ in range(7):
         if d.weekday() == dow:
             if next_week:
-                d += timedelta(days=7)   # skip to next week's expiry day
+                print(f"  [WARN] next_week expiry: REGISTRY not loaded for {index}; "
+                      f"calendar +7d fallback may be inaccurate — load REGISTRY first")
+                d += timedelta(days=7)
             return d, d.strftime("%d%b%y").upper()
         d += timedelta(days=1)
     return from_date, from_date.strftime("%d%b%y").upper()
