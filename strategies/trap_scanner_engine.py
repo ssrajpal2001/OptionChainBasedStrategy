@@ -203,7 +203,8 @@ class TrapScannerEngine:
         self._fut_key: Optional[str] = None
         self._expiry_str: Optional[str] = None
 
-        self._gap_fired  = False
+        self._gap_fired     = False
+        self._gap_direction = "FLAT"   # "UP" | "DOWN" | "FLAT" (no gap)
         self._spot_open  = 0.0
         self._spot_cache = 0.0
         self._spot_bad_cnt: int = 0  # consecutive SPOT filter rejections
@@ -419,13 +420,14 @@ class TrapScannerEngine:
             self._spot_open = today_open
             gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
             self._gap_fired = gap_pct >= self._gap_thresh
+            self._gap_direction = ("UP" if today_open >= C else "DOWN") if self._gap_fired else "FLAT"
 
             # Futures-mode underlyings (CrudeOil etc.) always use ATM ± fixed ITM offsets —
             # pivot-based S1/S2/R1/R2 is meaningless for commodity options.
             use_atm_offsets = self._htf_source == "futures" or self._gap_fired
 
             if use_atm_offsets:
-                direction = "UP" if today_open >= C else "DOWN"
+                direction = self._gap_direction if self._gap_fired else ("UP" if today_open >= C else "DOWN")
                 atm = _round_strike(today_open, self._step)
                 # Futures mode: always buy ITM options → CE = ATM-offset (ITM call),
                 # PE = ATM+offset (ITM put). Direction never flips strike assignment.
@@ -1161,13 +1163,19 @@ class TrapScannerEngine:
             bull_zones_2 = [e for e in self._htf_bull_zones_2 if e["status"] == "TRAPPED" and _alive_pe(e)]
 
         _rc = self._htf_source not in ("option", "spot")
-        if leg == "CE1" and bear_zones:
+
+        # Gap bias (option-mode only, always ON): UP gap → CE trades only; DOWN gap → PE trades only.
+        # Counter-trend leg is skipped — backtest shows 84.8% win vs 71.4% without bias.
+        _bias_ce_only = self._gap_fired and self._gap_direction == "UP"
+        _bias_pe_only = self._gap_fired and self._gap_direction == "DOWN"
+
+        if leg == "CE1" and bear_zones and not _bias_pe_only:
             self._run_ltf_on("CE1", self._bars_ce1, bear_zones, "CE", require_closed=_rc)
-        elif leg == "CE2" and bear_zones_2:
+        elif leg == "CE2" and bear_zones_2 and not _bias_pe_only:
             self._run_ltf_on("CE2", self._bars_ce2, bear_zones_2, "CE", require_closed=_rc)
-        elif leg == "PE1" and bull_zones:
+        elif leg == "PE1" and bull_zones and not _bias_ce_only:
             self._run_ltf_on("PE1", self._bars_pe1, bull_zones, "PE", require_closed=_rc)
-        elif leg == "PE2" and bull_zones_2:
+        elif leg == "PE2" and bull_zones_2 and not _bias_ce_only:
             self._run_ltf_on("PE2", self._bars_pe2, bull_zones_2, "PE", require_closed=_rc)
 
     def _run_ltf_on(self, leg_key: str, bars: List[dict],
@@ -2928,6 +2936,7 @@ class TrapScannerEngine:
             "cascade_ce":       self._intraday_mode_ce,
             "cascade_pe":       self._intraday_mode_pe,
             "gap_fired":        self._gap_fired,
+            "gap_direction":    self._gap_direction,
             "spot_ltp":         ltp,
             "htf_source":       self._htf_source,
             "htf_atr":          atr,
