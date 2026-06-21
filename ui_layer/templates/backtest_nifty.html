@@ -180,16 +180,29 @@
       <p class="sec-label mb-2">Strategy</p>
       <div class="flex flex-col gap-3">
 
-        <!-- Monthly expiry -->
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-sm font-600 text-t-bright">Monthly Expiry</p>
-            <p class="text-xs text-t-muted">Last Thu/Fri of month — data from day 1</p>
+        <!-- Expiry selection -->
+        <div>
+          <p class="text-sm font-600 text-t-bright mb-2">Expiry</p>
+          <div class="flex gap-2">
+            <label class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
+              :class="!monthly && !nextWeek ? 'border-[var(--t-cyan)] text-[var(--t-cyan)] bg-[var(--t-cyan)]/10' : 'border-t-border text-t-muted'"
+              @click="monthly=false; nextWeek=false">
+              <input type="radio" class="hidden" />
+              Current Week
+            </label>
+            <label class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
+              :class="nextWeek ? 'border-[var(--t-yellow)] text-[var(--t-yellow)] bg-[var(--t-yellow)]/10' : 'border-t-border text-t-muted'"
+              @click="monthly=false; nextWeek=true">
+              <input type="radio" class="hidden" />
+              Next Week
+            </label>
+            <label class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
+              :class="monthly ? 'border-[var(--t-green)] text-[var(--t-green)] bg-[var(--t-green)]/10' : 'border-t-border text-t-muted'"
+              @click="monthly=true; nextWeek=false">
+              <input type="radio" class="hidden" />
+              Monthly
+            </label>
           </div>
-          <label class="toggle-track">
-            <input type="checkbox" x-model="monthly" />
-            <span class="toggle-pip"></span>
-          </label>
         </div>
 
         <!-- Strike Depth -->
@@ -460,6 +473,7 @@ function backtestNifty() {
     endDate:   '',
     useBias:     true,
     monthly:     false,
+    nextWeek:    false,
     strikeDepth:  'both',
     gapThresh:    0.5,
     slBuf:        10.0,
@@ -511,6 +525,7 @@ function backtestNifty() {
         index:        this.index,
         use_bias:     this.useBias,
         monthly:      this.monthly,
+        next_week:    this.nextWeek,
         sl_buf:             this.slBuf,
         strike_depth:       this.strikeDepth,
         profit_cap_per_lot:   this.profitCapOn   ? this.profitCap   : 0,

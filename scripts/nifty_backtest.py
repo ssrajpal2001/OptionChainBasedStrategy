@@ -215,32 +215,42 @@ def _monthly_expiry(index: str, from_date: date) -> tuple[date, str]:
 
 
 def _get_expiry(index: str, from_date: date,
-                monthly: bool = False) -> tuple[date, str]:
-    """Return (expiry_date, expiry_str) for weekly or monthly expiry >= from_date."""
+                monthly: bool = False,
+                next_week: bool = False) -> tuple[date, str]:
+    """Return (expiry_date, expiry_str) for weekly / next-week / monthly expiry."""
     if monthly:
         return _monthly_expiry(index, from_date)
     # Weekly: try REGISTRY first (most reliable for BSE numeric keys)
     if REGISTRY.is_loaded(index):
         exp = REGISTRY.get_active_expiry(index, from_date=from_date)
         if exp:
-            return exp, exp.strftime("%d%b%y").upper()
+            if next_week:
+                # Skip current week — get the expiry AFTER this one
+                exp2 = REGISTRY.get_active_expiry(index, from_date=exp + timedelta(days=1))
+                if exp2:
+                    return exp2, exp2.strftime("%d%b%y").upper()
+            else:
+                return exp, exp.strftime("%d%b%y").upper()
     # Fallback: weekday math
     dow = _WEEKLY_DOW.get(index, 3)
     d = from_date
     for _ in range(7):
         if d.weekday() == dow:
+            if next_week:
+                d += timedelta(days=7)   # skip to next week's expiry day
             return d, d.strftime("%d%b%y").upper()
         d += timedelta(days=1)
     return from_date, from_date.strftime("%d%b%y").upper()
 
 
-# Module-level flag — set by run_nifty_backtest before _run_day is called
-_USE_MONTHLY: bool = False
+# Module-level flags — set by run_nifty_backtest before _run_day is called
+_USE_MONTHLY:   bool = False
+_USE_NEXT_WEEK: bool = False
 
 
 def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str:
     """Resolve Upstox instrument key for an option strike."""
-    exp_date, exp_str = _get_expiry(index, trade_date, monthly=_USE_MONTHLY)
+    exp_date, exp_str = _get_expiry(index, trade_date, monthly=_USE_MONTHLY, next_week=_USE_NEXT_WEEK)
     # REGISTRY lookup (required for BSE_FO numeric token)
     if REGISTRY.is_loaded(index):
         key = REGISTRY.get_upstox_key(index, exp_date, strike, opt_type)
@@ -993,11 +1003,13 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        htf_min: int = 0,
                        no_target_tsl: bool = False,
                        rr_filter: bool = False,
-                       rr_min_ratio: float = 1.0) -> dict:
+                       rr_min_ratio: float = 1.0,
+                       next_week: bool = False) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    _USE_MONTHLY = monthly
+    _USE_MONTHLY   = monthly
+    _USE_NEXT_WEEK = next_week
 
     cfg = dict(INDEX_CFG.get(index.upper(), {}))
     if not cfg:
@@ -1019,7 +1031,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         e_date = date.today()
         s_date = e_date - timedelta(weeks=weeks)
 
-    expiry_label = "MONTHLY" if monthly else "WEEKLY"
+    expiry_label = "MONTHLY" if monthly else ("NEXT_WEEK" if next_week else "WEEKLY")
     days = _trading_days(s_date, e_date)
     print(f"\n{index} backtest  {s_date} to {e_date}  ({len(days)} days)  "
           f"expiry={expiry_label}  bias={'ON' if use_bias else 'OFF'}  sl_buf={sl_buf}")
