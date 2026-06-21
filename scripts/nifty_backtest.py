@@ -196,26 +196,18 @@ def _spot_at_ts(df_spot: pd.DataFrame, ts: pd.Timestamp) -> float:
     return float(prior["close"].iloc[-1]) if not prior.empty else 0.0
 
 
-def _exec_strike(spot: float, step: int, opt_type: str) -> int:
-    """Resolve execution strike: 1 ITM from ATM at entry time."""
-    atm = _round_strike(spot, step)
-    return atm - step if opt_type == "CE" else atm + step
-
-
-def _simulate_exit(e: dict, df_scan: pd.DataFrame, df_exec: pd.DataFrame,
-                   lot: int, sl_buf: float,
-                   opt_type: str, trade_date: str,
-                   scan_strike: int, exec_strike: int,
+def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
+                   opt_type: str, trade_date: str, strike: int,
                    spot_at_entry: float) -> Optional[dict]:
     """
-    Detection runs on df_scan (S1/R1 strike option bars).
-    P&L is simulated on df_exec (1-ITM exec strike bars at entry time).
+    Scan strike = execution strike (same option bar used for detection and P&L).
+    Spot at entry is recorded for reference only (not used for levels).
 
-    Exit rules (on exec strike premium):
-      Entry  : zone_trigger of the detected zone, confirmed on exec bars
-      T1     : 50% qty @ zone_high of detected zone (bears' SL on scan chart)
-      SL     : zone_low - sl_buf on exec chart
-      T2     : ratchet trail SL up using prev 5min low on exec bars
+    Exit rules:
+      Entry  : zone_trigger (1/3 from zone_low into zone — scanner's rule)
+      T1     : 50% qty @ zone_high (bears' SL = option premium target)
+      SL     : zone_low - sl_buf (premium fell below zone = trap failed)
+      T2     : ratchet trail SL UP on 5min bars for remainder
     """
     total_qty = lot * 2
     t1_qty    = total_qty // 2
@@ -223,37 +215,19 @@ def _simulate_exit(e: dict, df_scan: pd.DataFrame, df_exec: pd.DataFrame,
 
     zh = float(e["zone_high"])
     zl = float(e["zone_low"])
-
-    # Entry/T1/SL levels derived from SCAN zone
     entry_price = _zone_trigger(e)
-    t1_price    = round(zh, 2)           # zone_high = bears' SL = T1
-    init_sl     = round(zl - sl_buf, 2) # below zone_low = SL
+    t1_price    = round(zh, 2)
+    init_sl     = round(zl - sl_buf, 2)
     trail_sl    = init_sl
 
-    # Entry timestamp from scan zone
     trap_ts = pd.to_datetime(e.get("closed_on") or e.get("trapped_on"))
     if trap_ts is pd.NaT:
         return None
     trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
 
-    # Use exec bars for P&L; fall back to scan bars if exec unavailable
-    sim_df = df_exec if df_exec is not None and not df_exec.empty else df_scan
-    future = sim_df[sim_df["datetime"] > trap_ts]
+    future = df1m[df1m["datetime"] > trap_ts]
     if future.empty:
         return None
-
-    # Scale entry/t1/sl from scan chart to exec chart via ratio at entry bar
-    # Find scan price at trap_ts to compute ratio
-    scan_at_entry = df_scan[df_scan["datetime"] <= trap_ts]
-    exec_at_entry = sim_df[sim_df["datetime"] <= trap_ts]
-    if not scan_at_entry.empty and not exec_at_entry.empty and sim_df is not df_scan:
-        scan_ref = float(scan_at_entry["close"].iloc[-1])
-        exec_ref = float(exec_at_entry["close"].iloc[-1])
-        ratio = exec_ref / scan_ref if scan_ref > 0 else 1.0
-        entry_price = round(entry_price * ratio, 2)
-        t1_price    = round(t1_price    * ratio, 2)
-        init_sl     = round(zl * ratio - sl_buf, 2)
-        trail_sl    = init_sl
 
     t1_hit     = False
     t1_pnl     = 0.0
@@ -270,8 +244,8 @@ def _simulate_exit(e: dict, df_scan: pd.DataFrame, df_exec: pd.DataFrame,
             bucket = bar_ts.floor("5min")
             if last_5m_ts is None or bucket > last_5m_ts:
                 last_5m_ts = bucket
-                prev5 = sim_df[(sim_df["datetime"] >= bucket - pd.Timedelta(minutes=5)) &
-                               (sim_df["datetime"] < bucket)]
+                prev5 = df1m[(df1m["datetime"] >= bucket - pd.Timedelta(minutes=5)) &
+                             (df1m["datetime"] < bucket)]
                 if not prev5.empty:
                     cand = round(float(prev5["low"].min()) - sl_buf, 2)
                     if cand > trail_sl:
@@ -307,30 +281,29 @@ def _simulate_exit(e: dict, df_scan: pd.DataFrame, df_exec: pd.DataFrame,
     total_pnl = round(t1_pnl + rem_pnl, 2)
 
     return {
-        "date":           trade_date,
-        "opt_type":       opt_type,
-        "scan_strike":    scan_strike,
-        "exec_strike":    exec_strike,
-        "spot_at_entry":  round(spot_at_entry, 1),
-        "trap_pos":       e.get("_trap_pos", ""),
-        "mode":           e.get("_mode", ""),
-        "entry":          round(entry_price, 2),
-        "t1":             round(t1_price, 2),
-        "sl":             round(init_sl, 2),
-        "entry_ts":       str(trap_ts)[:16],
-        "t1_ts":          str(t1_exit_ts)[:16] if t1_exit_ts else "",
-        "exit":           round(exit_price, 2),
-        "exit_ts":        str(exit_ts)[:16] if exit_ts is not None else "",
-        "reason":         exit_reason,
-        "t1_hit":         t1_hit,
-        "t1_pnl":         t1_pnl,
-        "rem_pnl":        rem_pnl,
-        "pnl_pts":        round(total_pnl / total_qty, 2) if total_qty else 0,
-        "pnl_rs":         int(total_pnl),
-        "zone_low":       round(zl, 2),
-        "zone_high":      round(zh, 2),
-        "zone":           f"{zl:.0f}-{zh:.0f}",
-        "kind":           e.get("kind", "BEAR"),
+        "date":          trade_date,
+        "opt_type":      opt_type,
+        "strike":        strike,
+        "spot_at_entry": round(spot_at_entry, 1),
+        "trap_pos":      e.get("_trap_pos", ""),
+        "mode":          e.get("_mode", ""),
+        "entry":         round(entry_price, 2),
+        "t1":            round(t1_price, 2),
+        "sl":            round(init_sl, 2),
+        "entry_ts":      str(trap_ts)[:16],
+        "t1_ts":         str(t1_exit_ts)[:16] if t1_exit_ts else "",
+        "exit":          round(exit_price, 2),
+        "exit_ts":       str(exit_ts)[:16] if exit_ts is not None else "",
+        "reason":        exit_reason,
+        "t1_hit":        t1_hit,
+        "t1_pnl":        t1_pnl,
+        "rem_pnl":       rem_pnl,
+        "pnl_pts":       round(total_pnl / total_qty, 2) if total_qty else 0,
+        "pnl_rs":        int(total_pnl),
+        "zone_low":      round(zl, 2),
+        "zone_high":     round(zh, 2),
+        "zone":          f"{zl:.0f}-{zh:.0f}",
+        "kind":          e.get("kind", "BEAR"),
     }
 
 
@@ -497,36 +470,17 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         # Merge zones at the same price level (within 10 pts) — keep earliest
         entry_signals = _dedup_zones(entry_signals, price_tol=10.0)
 
-        # ── Resolve exec_strike per entry (1 ITM from ATM at trap time) ──────
-        exec_bar_cache: dict[int, pd.DataFrame] = {}
-
         for z in entry_signals:
             trap_ts = pd.to_datetime(z.get("closed_on") or z.get("trapped_on"))
-            if trap_ts is pd.NaT:
-                continue
-            trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
-
-            spot_val  = _spot_at_ts(df_today, trap_ts)
-            ex_strike = _exec_strike(spot_val, step, opt_type) if spot_val > 0 else strike
-
-            # Fetch exec_strike bars if not already cached
-            if ex_strike not in exec_bar_cache:
-                ex_key = _option_key(index, ex_strike, opt_type, trade_dt_obj)
-                try:
-                    df_ex_raw = _fetch_1m(ex_key, fetch_from, fetch_to)
-                    time.sleep(0.15)
-                    df_ex = _mkt_hours(df_ex_raw)
-                    exec_bar_cache[ex_strike] = df_ex[df_ex["datetime"].dt.date == td].copy()
-                except Exception:
-                    exec_bar_cache[ex_strike] = pd.DataFrame()
-
-            df_exec = exec_bar_cache[ex_strike]
+            spot_val = 0.0
+            if trap_ts is not pd.NaT:
+                ts_naive = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
+                spot_val = _spot_at_ts(df_today, ts_naive)
 
             result = _simulate_exit(
-                z, df_opt_today, df_exec,
+                z, df_opt_today,
                 lot, sl_buf, opt_type, trade_date,
-                scan_strike=strike, exec_strike=ex_strike,
-                spot_at_entry=spot_val,
+                strike=strike, spot_at_entry=spot_val,
             )
             if result:
                 result["index"]     = index
@@ -618,23 +572,23 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         running += t["pnl_rs"]
         eq_map[t["date"]] = running
 
-    print(f"\n{'─'*90}")
+    print(f"\n{'─'*100}")
     print(f"{index}  {s_date} to {e_date}  Trades={len(all_trades)}  "
           f"Win={summary['win_pct']:.1f}%  Rs {total:+,.0f}  PF={pf}")
-    print(f"{'─'*90}")
-    hdr = (f"  {'DATE':<10}  {'OPT':<3}  {'SCAN':>5}  {'EXEC':>5}  {'SPOT':>7}  "
-           f"{'POS':<6}  {'MODE':<20}  {'TRAP':5}  {'ENTRY':5}  "
-           f"{'T1':5}  {'EXIT':5}  {'REASON':<10}  {'T1?':3}  {'P&L Rs':>9}")
-    print(hdr)
-    print(f"  {'─'*len(hdr)}")
+    print(f"{'─'*100}")
+    print(f"  {'DATE':<10}  {'OPT':<3}  {'STRIKE':>6}  {'SPOT':>7}  "
+          f"{'POS':<6}  {'MODE':<24}  {'TRAP@':5}  "
+          f"{'ENTRY':>6}  {'T1':>6}  {'EXIT':>6}  {'REASON':<10}  {'T1?':3}  {'P&L Rs':>9}")
+    print(f"  {'─'*98}")
     for t in all_trades:
         t1_flag = "Y" if t["t1_hit"] else "N"
+        spot_s = f"{t['spot_at_entry']:.0f}" if t.get("spot_at_entry", 0) > 0 else "-"
         print(f"  {t['date']}  {t['opt_type']:<3}  "
-              f"{t['scan_strike']:>5}  {t['exec_strike']:>5}  {t['spot_at_entry']:>7.0f}  "
-              f"{t['trap_pos']:<6}  {t['mode'][:20]:<20}  "
-              f"{t['entry_ts'][11:]:5}  {t['entry']:>6.1f}  "
-              f"{t['t1']:>6.1f}  {t['exit']:>6.1f}  {t['reason']:<10}  "
-              f"{t1_flag:<3}  Rs {t['pnl_rs']:>+8,.0f}")
+              f"{t['strike']:>6}  {spot_s:>7}  "
+              f"{t.get('trap_pos',''):<6}  {t['mode'][:24]:<24}  "
+              f"{t['entry_ts'][11:16]:5}  "
+              f"{t['entry']:>6.1f}  {t['t1']:>6.1f}  {t['exit']:>6.1f}  "
+              f"{t['reason']:<10}  {t1_flag:<3}  Rs {t['pnl_rs']:>+8,.0f}")
 
     return {
         "ok": True,

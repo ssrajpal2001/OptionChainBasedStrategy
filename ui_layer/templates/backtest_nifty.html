@@ -266,10 +266,9 @@
               <tr>
                 <th>Date</th>
                 <th>Opt</th>
-                <th title="Strike used for zone detection (S1/R1/ATM)">Scan</th>
-                <th title="Actual execution strike (1 ITM from ATM at trap time)">Exec</th>
-                <th title="Spot price at trap time">Spot</th>
-                <th title="Position of this trap among all 5min traps">Pos</th>
+                <th title="Scan + execution strike (same bar for detection and P&L)">Strike</th>
+                <th title="Spot at trap time (info only)">Spot</th>
+                <th title="FIRST/MIDDLE/LAST among 5min traps in this zone">Pos</th>
                 <th>Mode</th>
                 <th>Trap@</th>
                 <th>T1@</th>
@@ -290,12 +289,11 @@
                   <td>
                     <span :class="t.opt_type==='CE' ? 'tag-ce' : 'tag-pe'" x-text="t.opt_type"></span>
                   </td>
-                  <td x-text="t.scan_strike" class="font-mono text-t-muted"></td>
-                  <td x-text="t.exec_strike" class="font-mono font-700"></td>
-                  <td x-text="t.spot_at_entry" class="font-mono text-xs text-t-muted"></td>
+                  <td x-text="t.strike" class="font-mono font-700"></td>
+                  <td x-text="(t.spot_at_entry > 0) ? t.spot_at_entry : '-'" class="font-mono text-xs text-t-muted"></td>
                   <td>
                     <span class="text-xs font-700"
-                      :class="t.trap_pos==='FIRST' ? 'text-t-green' : t.trap_pos==='LAST' ? 'text-t-amber' : 'text-t-cyan'"
+                      :class="t.trap_pos==='FIRST' ? 'text-t-green' : t.trap_pos==='LAST' ? 'text-t-amber' : t.trap_pos==='MIDDLE' ? 'text-t-cyan' : 'text-t-muted'"
                       x-text="t.trap_pos || '-'"></span>
                   </td>
                   <td>
@@ -319,7 +317,7 @@
                 </tr>
               </template>
               <template x-if="result.trades.length === 0">
-                <tr><td colspan="17" class="text-center text-t-muted py-6 text-sm">No trades found in this period</td></tr>
+                <tr><td colspan="16" class="text-center text-t-muted py-6 text-sm">No trades found in this period</td></tr>
               </template>
             </tbody>
           </table>
