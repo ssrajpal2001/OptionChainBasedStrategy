@@ -276,18 +276,19 @@ def _spot_at_ts(df_spot: pd.DataFrame, ts: pd.Timestamp) -> float:
     return float(prior["close"].iloc[-1]) if not prior.empty else 0.0
 
 
-def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
+def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
+                   lot: int, sl_buf: float,
                    opt_type: str, trade_date: str, strike: int,
                    spot_at_entry: float) -> Optional[dict]:
     """
-    Scan strike = execution strike (same option bar used for detection and P&L).
-    Spot at entry is recorded for reference only (not used for levels).
-
     Exit rules:
-      Entry  : zone_trigger (1/3 from zone_low into zone — scanner's rule)
-      T1     : 50% qty @ zone_high (bears' SL = option premium target)
-      SL     : zone_low - sl_buf (premium fell below zone = trap failed)
-      T2     : ratchet trail SL UP on 5min bars for remainder
+      T1    : 50% qty @ HTF zone_high (bears' SL). TSL starts at entry (breakeven).
+      TSL   : after T1, ratchets UP to zone_low of each newly TRAPPED 5-min zone.
+              TSL = zone_low (natural support floor). Buffer applied at exit confirmation.
+      T2    : next 15-min zone_high above T1 → close all remaining.
+      SL    : 2-step — 1-min close < active_sl → tick < close − sl_buf → exit.
+              (Prevents wick-based false triggers; active_sl = zone_low / TSL level.)
+      EOD   : square off at 15:25.
     """
     total_qty = lot * 2
     t1_qty    = total_qty // 2
@@ -296,10 +297,10 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
     zh = float(e["zone_high"])
     zl = float(e["zone_low"])
     entry_price = _zone_trigger(e)
-    # T1 = parent HTF zone_high if this was a cascade/LTF entry, else own zone_high
     t1_price    = round(float(e["_htf_t1"]) if "_htf_t1" in e else zh, 2)
-    init_sl     = round(zl - sl_buf, 2)
-    trail_sl    = init_sl
+    t2_price    = float(e["_t2"]) if e.get("_t2") else None
+    # TSL tracks zone_low (support floor). Buffer applied only at confirmation exit.
+    init_sl     = zl
 
     trap_ts = pd.to_datetime(e.get("closed_on") or e.get("trapped_on"))
     if trap_ts is pd.NaT:
@@ -310,56 +311,99 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
     if future.empty:
         return None
 
-    t1_hit     = False
-    t1_pnl     = 0.0
-    t1_exit_ts = None
-    exit_price  = None
-    exit_reason = "OPEN"
-    exit_ts     = None
-    last_5m_ts  = None
+    # Pre-compute 5-min trap events for TSL: zones TRAPPED after entry with zone_low > entry
+    # When each fires, TSL jumps to that zone_low (seller support floor)
+    trap_events: list[tuple[pd.Timestamp, float]] = []
+    if not df5m.empty:
+        df5m_post = df5m[df5m["datetime"] > trap_ts]
+        if len(df5m_post) >= 2:
+            _, zones5 = scanner.scan_htf(df5m_post)
+            for z5 in zones5:
+                if z5.get("status") not in ("TRAPPED", "CLOSED"):
+                    continue
+                z5_low = float(z5.get("zone_low", 0))
+                if z5_low <= entry_price:
+                    continue
+                ev_ts = pd.to_datetime(z5.get("trapped_on") or z5.get("closed_on"))
+                if ev_ts is pd.NaT:
+                    continue
+                ev_ts = ev_ts.tz_localize(None) if ev_ts.tzinfo else ev_ts
+                trap_events.append((ev_ts, z5_low))
+    trap_events.sort(key=lambda x: x[0])
+
+    t1_hit          = False
+    t1_pnl          = 0.0
+    t1_exit_ts      = None
+    trail_sl        = init_sl      # starts at zone_low (support floor)
+    sl_breach_close = None         # 1-min close that crossed below active_sl
+    exit_price      = None
+    exit_reason     = "OPEN"
+    exit_ts         = None
+    trap_idx        = 0
 
     for _, row in future.iterrows():
-        bar_ts = row["datetime"]
+        bar_ts    = row["datetime"]
+        if not isinstance(bar_ts, pd.Timestamp):
+            bar_ts = pd.Timestamp(bar_ts)
+        bar_high  = float(row["high"])
+        bar_low   = float(row["low"])
+        bar_close = float(row["close"])
 
+        # 1. T1: 50% exit, TSL locks at entry (breakeven)
+        if not t1_hit and bar_high >= t1_price:
+            t1_hit          = True
+            t1_exit_ts      = bar_ts
+            t1_pnl          = round((t1_price - entry_price) * t1_qty, 2)
+            trail_sl        = entry_price   # breakeven: TSL = where we entered
+            sl_breach_close = None          # reset any pending breach
+
+        # 2. Ratchet TSL up: each newly TRAPPED 5-min zone raises TSL to its zone_low
         if t1_hit:
-            bucket = bar_ts.floor("5min")
-            if last_5m_ts is None or bucket > last_5m_ts:
-                last_5m_ts = bucket
-                prev5 = df1m[(df1m["datetime"] >= bucket - pd.Timedelta(minutes=5)) &
-                             (df1m["datetime"] < bucket)]
-                if not prev5.empty:
-                    cand = round(float(prev5["low"].min()) - sl_buf, 2)
-                    if cand > trail_sl:
-                        trail_sl = cand
+            while trap_idx < len(trap_events):
+                ev_ts, z_low = trap_events[trap_idx]
+                if bar_ts < ev_ts:
+                    break
+                if z_low > trail_sl:        # only ratchet UP
+                    trail_sl        = z_low
+                    sl_breach_close = None  # old breach invalidated by higher TSL
+                trap_idx += 1
 
-        active_sl = trail_sl if t1_hit else init_sl
-
-        if row["low"] <= active_sl:
-            exit_price  = active_sl
-            exit_reason = "TRAIL_SL" if t1_hit else "SL"
+        # 3. T2: next 15-min zone_high → close all remaining
+        if t1_hit and t2_price and bar_high >= t2_price:
+            exit_price  = t2_price
+            exit_reason = "T2"
             exit_ts     = bar_ts
             break
 
-        if not t1_hit and row["high"] >= t1_price:
-            t1_hit     = True
-            t1_exit_ts = bar_ts
-            t1_pnl     = round((t1_price - entry_price) * t1_qty, 2)
-            trail_sl   = round(entry_price - sl_buf, 2)
+        # 4. Active SL = zone_low / TSL (support floor, no buffer yet)
+        active_sl = trail_sl if t1_hit else init_sl
 
+        # 5. 2-step SL: close below active_sl (step 1) then tick to close−buf (step 2)
+        if sl_breach_close is not None:
+            confirm = round(sl_breach_close - sl_buf, 2)
+            if bar_low <= confirm:
+                exit_price  = confirm
+                exit_reason = "TRAIL_SL" if t1_hit else "SL"
+                exit_ts     = bar_ts
+                break
+            if bar_close > active_sl:       # price recovered → breach cancelled
+                sl_breach_close = None
+        elif bar_close < active_sl:         # step 1: close below floor
+            sl_breach_close = bar_close
+
+        # 6. EOD
         if bar_ts.time() >= pd.Timestamp("15:25").time():
-            exit_price  = round(float(row["close"]), 2)
+            exit_price  = bar_close
             exit_reason = "EOD"
             exit_ts     = bar_ts
             break
 
     if exit_price is None:
-        last = future.iloc[-1]
+        last        = future.iloc[-1]
         exit_price  = round(float(last["close"]), 2)
         exit_reason = "EOD"
         exit_ts     = last["datetime"]
 
-    # If T1 was never hit, full position (total_qty) exits together.
-    # If T1 was hit, only rem_qty remains (t1_qty already closed at T1).
     exit_qty  = rem_qty if t1_hit else total_qty
     rem_pnl   = round((exit_price - entry_price) * exit_qty, 2)
     total_pnl = round(t1_pnl + rem_pnl, 2)
@@ -373,7 +417,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
         "mode":          e.get("_mode", ""),
         "entry":         round(entry_price, 2),
         "t1":            round(t1_price, 2),
-        "sl":            round(init_sl, 2),
+        "t2":            round(t2_price, 2) if t2_price else None,
+        "sl":            round(init_sl - sl_buf, 2),   # display the real exit level
         "entry_ts":      str(trap_ts)[:16],
         "t1_ts":         str(t1_exit_ts)[:16] if t1_exit_ts else "",
         "exit":          round(exit_price, 2),
@@ -529,8 +574,11 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             df_15 = _resample(df_opt_today, 15)
             _, cas15 = scanner.scan_htf(df_15) if len(df_15) >= 2 else (None, [])
 
-            # TRAPPED or CLOSED on 15min intraday bars
-            cas_zones = [e for e in cas15 if e.get("status") in ("TRAPPED", "CLOSED")]
+            # TRAPPED or CLOSED on 15min intraday bars, sorted low→high for T2 lookup
+            cas_zones = sorted(
+                [e for e in cas15 if e.get("status") in ("TRAPPED", "CLOSED")],
+                key=lambda z: float(z["zone_high"])
+            )
 
             if not cas_zones:
                 print(f"  {trade_date} {opt_type} {strike}: no zones (HTF or 15m)")
@@ -539,9 +587,11 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             # ── Step 3: For each 15min zone → scan 5min bars for LTF entry ──
             df_5 = _resample(df_opt_today, 5)
 
-            for cz in cas_zones:
+            for ci, cz in enumerate(cas_zones):
                 zh = float(cz["zone_high"])
                 zl = float(cz["zone_low"])
+                # T2 = the NEXT 15-min zone's zone_high above this one (next bears' SL)
+                t2_val = float(cas_zones[ci + 1]["zone_high"]) if ci + 1 < len(cas_zones) else None
                 trap_ts = pd.to_datetime(cz.get("trapped_on") or cz.get("ref_ts"))
                 if trap_ts is not pd.NaT:
                     trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
@@ -558,19 +608,23 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
                 if not ltf5_in:
                     # No 5min sub-trap found — use the 15min zone itself as entry
-                    cz["_mode"] = "CASCADE-15m"
+                    cz["_mode"]     = "CASCADE-15m"
                     cz["_trap_pos"] = "ONLY"
+                    if t2_val:
+                        cz["_t2"] = t2_val
                     entry_signals.append(cz)
                 else:
                     n = len(ltf5_in)
                     for idx, le in enumerate(ltf5_in):
-                        le["_mode"] = "CASCADE-15m->5m"
+                        le["_mode"]     = "CASCADE-15m->5m"
                         le["_trap_pos"] = ("FIRST" if idx == 0
                                            else "LAST" if idx == n - 1
                                            else "MIDDLE")
                         # T1 = parent 15-min zone_high (bears' SL = real target)
-                        # NOT the 5-min zone_high which is tiny
-                        le["_htf_t1"] = float(cz["zone_high"])
+                        le["_htf_t1"] = zh
+                        # T2 = next 15-min zone_high above parent
+                        if t2_val:
+                            le["_t2"] = t2_val
                         entry_signals.append(le)
 
             print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} cascade entry(s)")
@@ -587,6 +641,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         entry_signals = [z for z in entry_signals
                          if (z.get("zone_high", 0) - z.get("zone_low", 0)) >= min_zone_width]
 
+        # 5-min bars for TSL trap events (may already exist from cascade path)
+        if "df_5" not in dir():
+            df_5 = _resample(df_opt_today, 5)
+
         for z in entry_signals:
             trap_ts = pd.to_datetime(z.get("closed_on") or z.get("trapped_on"))
             spot_val = 0.0
@@ -595,7 +653,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 spot_val = _spot_at_ts(df_today, ts_naive)
 
             result = _simulate_exit(
-                z, df_opt_today,
+                z, df_opt_today, df_5,
                 lot, sl_buf, opt_type, trade_date,
                 strike=strike, spot_at_entry=spot_val,
             )
