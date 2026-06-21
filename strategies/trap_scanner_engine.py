@@ -172,7 +172,10 @@ class TrapScannerEngine:
         self._gap_far    = int(_adm.get("gap_itm_far",  _def["gap_far"]))
         self._cutoff_str = _adm.get("entry_cutoff",     _def["cutoff"])
         self._sq_off_str = _adm.get("sq_off_time",      _def["sq_off"])
-        self._entry_win  = _adm.get("entry_window",     _def["window"])
+        self._entry_win    = _adm.get("entry_window",    _def["window"])
+        # Profit floor: lock ₹N once total P&L (T1+remainder) hits it.
+        # If P&L drops back below floor → exit immediately at that tick. 0 = disabled.
+        self._profit_floor = float(_adm.get("profit_floor", 0.0))
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
         self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 0.5))
@@ -1848,10 +1851,12 @@ class TrapScannerEngine:
         if not pos["t1_hit"] and ltp >= pos["t1_price"] and self._htf_source != "futures":
             pos["t1_hit"] = True
             pos["remaining_qty"] -= pos["t1_qty"]
-            # CTC: futures-mode uses spot_at_entry; option-mode uses entry_price
             pos["trail_sl"] = pos.get("spot_at_entry", pos["entry_price"])
-            self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d → trail_sl reset to CTC %.2f",
-                           ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"])
+            # Record T1 realised P&L for profit-floor tracking
+            pos["t1_realised_pnl"] = (ltp - pos["entry_price"]) * pos["t1_qty"]
+            self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d → trail_sl reset to CTC %.2f  t1_pnl=%.0f",
+                           ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"],
+                           pos["t1_realised_pnl"])
             oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
             pos["order_id_t1"] = oid
             self._record_closed_trade(pos, exit_price=ltp, exit_reason="T1", qty_override=pos["t1_qty"])
@@ -1860,6 +1865,28 @@ class TrapScannerEngine:
         # Advance 5m trail SL using OPTION bar lows (only after T1)
         if pos["t1_hit"] and ts is not None:
             self._update_trail_sl(pos, ts)
+
+        # Profit floor: once total P&L (T1 realised + running remainder) hits the floor,
+        # lock it. If P&L then drops back below the floor → exit immediately at this tick.
+        if pos["t1_hit"] and self._profit_floor > 0:
+            t1_pnl      = pos.get("t1_realised_pnl", 0.0)
+            rem_qty     = pos.get("remaining_qty", 0)
+            entry_px    = pos.get("entry_price", 0.0)
+            running_rem = (ltp - entry_px) * rem_qty if rem_qty > 0 else 0.0
+            current_pnl = t1_pnl + running_rem
+            if not pos.get("floor_locked") and current_pnl >= self._profit_floor:
+                pos["floor_locked"] = True
+                self._log.info("PROFIT FLOOR LOCKED ₹%.0f  (t1=%.0f + rem=%.0f)",
+                               self._profit_floor, t1_pnl, running_rem)
+            if pos.get("floor_locked") and current_pnl < self._profit_floor:
+                self._log.info("FLOOR_SL  ltp=%.2f  pnl=%.0f < floor=%.0f → exit",
+                               ltp, current_pnl, self._profit_floor)
+                remaining = pos["remaining_qty"]
+                await self._place_exit(remaining, ltp, "FLOOR_SL")
+                self._record_closed_trade(pos, exit_price=ltp, exit_reason="FLOOR_SL")
+                self._position = None
+                self._clear_persisted_position()
+                return
 
         # Exit check — direction-aware:
         # CE (futures): sl is floor → exit when FUT drops to/below sl

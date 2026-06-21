@@ -5201,6 +5201,12 @@ function histReplay() {
               <input type="text" class="t-input" placeholder='e.g. "18:45-19:15"'
                      x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].entry_window_str||'')">
             </label>
+            <label class="flex flex-col gap-1 col-span-2">
+              <span style="color:var(--t-yellow);font-weight:700">Profit Floor ₹ (0 = off)</span>
+              <input type="number" min="0" step="1000" class="t-input" placeholder="0"
+                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].profit_floor??0)">
+              <span style="color:var(--t-dim);font-size:10px">Lock ₹N total once hit · exit at that tick if P&L drops back below · 10000 = ₹10K floor</span>
+            </label>
           </div>
         </div>
 
