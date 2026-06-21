@@ -608,6 +608,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
         if htf_zones:
             # HTF zone fired today — use directly, entry at zone_trigger on 1min bars
+            # For small HTF (< 60min): multiple nearby zones → pick the LOWEST zone_low
+            # (tightest SL, closest to current price, cleanest entry).
+            if htf_min < 60 and len(htf_zones) > 1:
+                htf_zones = [min(htf_zones, key=lambda z: float(z.get("zone_low", 9999)))]
             n = len(htf_zones)
             for idx, z in enumerate(htf_zones):
                 z["_mode"] = f"HTF-{htf_min}m"
@@ -790,15 +794,18 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        strike_depth: str = "both",
                        profit_cap_per_lot: float = 0.0,
                        use_1itm: bool = False,
-                       profit_floor_per_lot: float = 0.0) -> dict:
+                       profit_floor_per_lot: float = 0.0,
+                       htf_min: int = 0) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     _USE_MONTHLY = monthly
 
-    cfg = INDEX_CFG.get(index.upper())
+    cfg = dict(INDEX_CFG.get(index.upper(), {}))
     if not cfg:
         return {"ok": False, "error": f"Unknown index {index}"}
+    if htf_min > 0:
+        cfg["htf_min"] = htf_min  # UI override
 
     # Load REGISTRY for instrument key lookup (BSE_FO needs numeric tokens)
     try:
