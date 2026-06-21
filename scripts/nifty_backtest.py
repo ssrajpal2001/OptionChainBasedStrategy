@@ -577,6 +577,12 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         # Merge zones at the same price level (within 10 pts) — keep earliest
         entry_signals = _dedup_zones(entry_signals, price_tol=10.0)
 
+        # Minimum zone width filter: T1 must be at least sl_buf pts above entry.
+        # Zones narrower than sl_buf have negative R:R — skip them.
+        min_zone_width = sl_buf  # e.g. 10pts: T1 profit must exceed 1 SL unit
+        entry_signals = [z for z in entry_signals
+                         if (z.get("zone_high", 0) - z.get("zone_low", 0)) >= min_zone_width]
+
         for z in entry_signals:
             trap_ts = pd.to_datetime(z.get("closed_on") or z.get("trapped_on"))
             spot_val = 0.0
