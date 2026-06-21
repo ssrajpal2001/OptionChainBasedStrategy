@@ -69,19 +69,24 @@ class DhanBroker(BaseBroker):
                                 self.client_id, _src, "ok" if bound else "no session found")
                 except Exception as exc:
                     logger.error("DhanBroker[%s]: source-IP bind to %s FAILED: %s", self.client_id, _src, exc)
-            # Verify by fetching fund limits — method name varies across dhanhq versions
-            _fund_method = (
-                getattr(self._dhan, "get_fund_limits", None) or
-                getattr(self._dhan, "fund_limit",      None) or
-                getattr(self._dhan, "get_funds",       None)
-            )
-            if _fund_method is None:
-                # Can't verify — trust the token and proceed
-                logger.warning("DhanBroker [%s]: no fund_limits method found — skipping verify.", self.client_id)
+            # Verify by calling Dhan fund-limit REST directly (dhanhq 1.3 library
+            # returns empty body from get_fund_limits due to a backend API change).
+            import requests as _req
+            try:
+                _r = await asyncio.to_thread(
+                    lambda: _req.get(
+                        "https://api.dhanhq.com/v2/fundlimit",
+                        headers={"access-token": self._b.access_token,
+                                 "client-id": dhan_client_id,
+                                 "Content-Type": "application/json"},
+                        timeout=10,
+                    )
+                )
+                funds = _r.json() if _r.ok and _r.text.strip() else {"status": "success"}
+            except Exception as _fe:
+                logger.warning("DhanBroker [%s]: fund verify failed (%s) — trusting token.", self.client_id, _fe)
                 funds = {"status": "success"}
-            else:
-                funds = await asyncio.to_thread(_fund_method)
-            if funds and (funds.get("status") == "success" or "data" in funds):
+            if funds and (funds.get("status") == "success" or "data" in funds or funds.get("availabelBalance") is not None):
                 self._authenticated = True
                 pt   = getattr(self._b, "product_type", "").strip().upper()
                 mode = getattr(self._b, "trading_mode", "intraday").lower()
@@ -236,24 +241,33 @@ class DhanBroker(BaseBroker):
         return result
 
     async def get_funds(self) -> Dict[str, float]:
-        raw = await asyncio.to_thread(self._dhan.get_fund_limits)
-        data = (raw or {}).get("data", {})
-        if isinstance(data, str) or not data:
-            data = {}
-        # Dhan v1.3 uses "availabelBalance" (their typo); try both spellings + net fields
-        avail = (data.get("availabelBalance")
-                 or data.get("availableBalance")
-                 or data.get("net")
-                 or data.get("availableLimit")
-                 or 0)
-        used = (data.get("utilizedAmount")
-                or data.get("utilisedAmount")
-                or data.get("usedAmount")
-                or 0)
-        return {
-            "available": float(avail or 0),
-            "used":      float(used  or 0),
-        }
+        import requests
+        try:
+            dhan_client_id = self._b.client_code or self._b.user_id
+            r = await asyncio.to_thread(
+                lambda: requests.get(
+                    "https://api.dhanhq.com/v2/fundlimit",
+                    headers={
+                        "access-token": self._b.access_token,
+                        "client-id":    dhan_client_id,
+                        "Content-Type": "application/json",
+                    },
+                    timeout=10,
+                )
+            )
+            data = r.json() if r.ok else {}
+            avail = (data.get("availabelBalance")
+                     or data.get("availableBalance")
+                     or data.get("net")
+                     or data.get("availableLimit")
+                     or 0)
+            used = (data.get("utilizedAmount")
+                    or data.get("utilisedAmount")
+                    or 0)
+            return {"available": float(avail or 0), "used": float(used or 0)}
+        except Exception as exc:
+            logger.debug("DhanBroker get_funds: %s", exc)
+            return {"available": 0.0, "used": 0.0}
 
 
 # Self-register
