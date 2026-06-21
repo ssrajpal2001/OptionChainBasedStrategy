@@ -296,6 +296,19 @@
           </label>
         </div>
 
+        <!-- R:R Filter toggle -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">1:1 R:R Filter</p>
+            <p class="text-xs text-t-muted">Skip trade if opp zone target < SL risk · Uses historical opp LTP at zone_low time</p>
+          </div>
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" x-model="rrFilter" class="accent-[var(--t-green)]" />
+            <span class="text-xs" x-text="rrFilter ? 'ON' : 'OFF'"
+              :class="rrFilter ? 'text-[var(--t-green)]' : 'text-t-muted'"></span>
+          </label>
+        </div>
+
         <!-- 1 ITM Execution toggle -->
         <div class="flex items-center justify-between">
           <div>
@@ -445,6 +458,7 @@ function backtestNifty() {
     profitFloorOn: false,
     profitFloor:   10000,
     noTargetTsl:   false,
+    rrFilter:      false,
     use1itm:      false,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
@@ -491,6 +505,7 @@ function backtestNifty() {
         profit_cap_per_lot:   this.profitCapOn   ? this.profitCap   : 0,
         profit_floor_per_lot: this.profitFloorOn ? this.profitFloor : 0,
         no_target_tsl: this.noTargetTsl,
+        rr_filter:     this.rrFilter,
         use_1itm:             this.use1itm,
       }
       if (this.dateMode === 'weeks') {

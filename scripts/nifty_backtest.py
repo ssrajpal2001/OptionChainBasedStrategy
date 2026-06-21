@@ -544,7 +544,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              profit_cap_per_lot: float = 0.0,
              use_1itm: bool = False,
              profit_floor_per_lot: float = 0.0,
-             no_target_tsl: bool = False) -> list[dict]:
+             no_target_tsl: bool = False,
+             rr_filter: bool = False) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -610,6 +611,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     # One-trade-at-a-time: persists across CE and PE legs
     # {exit_ts, opt_type, trade_idx} — trade_idx points to trades[] for re-simulation
     day_running_trade: dict | None = None
+
+    # ── PASS 1: collect signals + bars for all legs (no simulation yet) ──────
+    # This allows cross-leg R:R check (CE reward = PE LTP - PE zone_trigger)
+    leg_coll: dict[tuple, dict] = {}   # (opt_type, strike, depth) → data
 
     for opt_type, strike, key, depth in legs:
         # Bias filter: on gap days, opposing leg scanned for EXIT ONLY (not entry)
@@ -763,34 +768,54 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         entry_signals = _dedup_zones(entry_signals, price_tol=10.0)
 
         # Minimum zone width filter: T1 must be at least sl_buf pts above entry.
-        # Zones narrower than sl_buf have negative R:R — skip them.
-        min_zone_width = sl_buf  # e.g. 10pts: T1 profit must exceed 1 SL unit
+        min_zone_width = sl_buf
         entry_signals = [z for z in entry_signals
                          if (z.get("zone_high", 0) - z.get("zone_low", 0)) >= min_zone_width]
 
-        # 5-min bars for TSL trap events (may already exist from cascade path)
+        if not entry_signals:
+            continue
+
+        # 5-min bars (may already exist from cascade path)
         if "df_5" not in dir():
             df_5 = _resample(df_opt_today, 5)
 
-        # ── 1 ITM mode: detect on scan strike, execute on live-ATM ± 1 step ─
-        # SL/T1/TSL triggers come from scan strike bars (zone levels intact).
-        # Entry and exit PRICES come from exec strike bars (at same timestamps).
-        # exec_strike = live spot ATM at entry time ± 1 step (CE: ATM-step, PE: ATM+step)
+        # Store for pass 2
+        leg_coll[(opt_type, strike, depth)] = {
+            "signals":    entry_signals,
+            "df_today":   df_opt_today,
+            "df_5":       df_5,
+            "exit_only":  exit_only,
+            "mode":       mode,
+        }
+
+    # ── PASS 2: R:R filter + simulate ────────────────────────────────────────
+
+    # Sort signals by trap timestamp for chronological processing
+    def _sig_ts(z):
+        t = pd.to_datetime(z.get("closed_on") or z.get("trapped_on") or "NaT")
+        return t.tz_localize(None) if (t is not pd.NaT and t.tzinfo) else t
+
+    for (opt_type, strike, depth), ld in leg_coll.items():
+        entry_signals = ld["signals"]
+        df_opt_today  = ld["df_today"]
+        df_5          = ld["df_5"]
+        exit_only     = ld["exit_only"]
+        mode          = ld["mode"]
+
+        # Opposing leg data for R:R filter
+        opp_type = "PE" if opt_type == "CE" else "CE"
+        opp_ld   = next((v for (ot, s, d), v in leg_coll.items() if ot == opp_type), None)
+        opp_df   = opp_ld["df_today"] if opp_ld else None
+        opp_sigs = opp_ld["signals"]  if opp_ld else []
+        # Lowest zone_low across all opposing signals = most conservative zone_trigger
+        opp_zone_trigger = (min(float(s.get("zone_low", 9999)) for s in opp_sigs)
+                            if opp_sigs else None)
+
+        # 1 ITM exec bars (per signal, resolved below)
         exec_strike   = strike
         df_exec_today = df_opt_today
         df_exec_5m    = df_5
-        _1itm_exec_bars: dict[int, pd.DataFrame] = {}  # strike → today bars
-
-        if use_1itm:
-            # Pre-fetch exec strike bars; actual exec_strike resolved per zone (live ATM)
-            # We need spot at each zone's entry time → compute per-zone below.
-            # Here just mark that 1ITM is active; resolution happens inside the zone loop.
-            pass
-
-        # Sort signals by trap timestamp for chronological processing
-        def _sig_ts(z):
-            t = pd.to_datetime(z.get("closed_on") or z.get("trapped_on") or "NaT")
-            return t.tz_localize(None) if (t is not pd.NaT and t.tzinfo) else t
+        _1itm_exec_bars: dict[int, pd.DataFrame] = {}
 
         entry_signals.sort(key=_sig_ts)
 
@@ -874,6 +899,29 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             if exit_only:
                 continue
 
+            # ── R:R filter ────────────────────────────────────────────────────
+            # Logic: find the historical timestamp when opposing leg was at its
+            # zone_low (entry point for opp bears). At that same timestamp, get
+            # current leg's price → that is the current leg's TARGET (market
+            # returning to that level = opp OPP_SIGNAL territory again).
+            # Reward = target - entry_est.  Skip if reward < risk (< 1:1).
+            if rr_filter and opp_zone_trigger is not None and opp_df is not None and not opp_df.empty:
+                entry_est = float(z.get("zone_low", 0))
+                my_sl     = float(z.get("_htf_sl", 0)) - sl_buf
+                my_risk   = entry_est - my_sl
+                if my_risk > 0:
+                    # Find bar in opp bars where close was closest to opp zone_low
+                    dists     = (opp_df["close"] - opp_zone_trigger).abs()
+                    hist_ts   = opp_df.loc[dists.idxmin(), "datetime"]
+                    # Get current-leg price at that historical timestamp
+                    mask_hist = df_opt_today["datetime"] <= hist_ts
+                    if mask_hist.any():
+                        ce_at_hist = float(df_opt_today[mask_hist].iloc[-1]["close"])
+                        ce_reward  = ce_at_hist - entry_est
+                        if ce_reward < my_risk:
+                            print(f"  R:R SKIP {opt_type} {strike}: target={ce_at_hist:.1f} entry={entry_est:.1f} reward={ce_reward:.1f} < risk={my_risk:.1f}")
+                            continue
+
             # scan bars drive SL/T1 timing; exec bars (ATM-50) provide entry/exit prices
             scan_bars_arg = (df_opt_today
                              if (use_1itm and exec_strike != strike)
@@ -942,7 +990,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        use_1itm: bool = False,
                        profit_floor_per_lot: float = 0.0,
                        htf_min: int = 0,
-                       no_target_tsl: bool = False) -> dict:
+                       no_target_tsl: bool = False,
+                       rr_filter: bool = False) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -997,7 +1046,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
                               opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm,
-                              profit_floor_per_lot, no_target_tsl)
+                              profit_floor_per_lot, no_target_tsl, rr_filter)
         all_trades.extend(day_trades)
 
     # Summary
