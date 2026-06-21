@@ -295,8 +295,11 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     df1m       = exec strike bars (prices for entry/exit P&L)
     df1m_scan  = scan strike bars (SL/T1/TSL trigger logic); if None, uses df1m (no 1ITM)
     """
-    # 1ITM: scan bars drive triggers, exec bars drive prices
-    scan_bars = df1m_scan if (df1m_scan is not None and not df1m_scan.empty) else df1m
+    # 1ITM: scan bars drive triggers (zone levels), exec bars drive entry/exit prices.
+    # Only valid when scan and exec strikes are close (GAP trades: 150 pts apart).
+    # For PIVOT trades df1m_scan is None → standard mode (scan=exec).
+    use_1itm_mode = df1m_scan is not None and not df1m_scan.empty
+    scan_bars = df1m_scan if use_1itm_mode else df1m
     exec_bars = df1m
 
     total_qty = lot * 2
@@ -305,8 +308,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
 
     zh = float(e["zone_high"])
     zl = float(e["zone_low"])
-    # Scan-zone trigger price (used for SL/T1 thresholds on scan bars)
-    scan_entry  = _zone_trigger(e)
+    scan_entry  = _zone_trigger(e)   # zone trigger level on scan strike
     t1_price    = round(float(e["_htf_t1"]) if "_htf_t1" in e else zh, 2)
     t2_price    = float(e["_t2"]) if e.get("_t2") else None
     init_sl     = zl
@@ -316,17 +318,21 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         return None
     trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
 
-    # Entry price: exec bar close at entry timestamp
-    entry_price = _price_at_ts(exec_bars, trap_ts)
-    if entry_price <= 0:
-        # fallback to scan zone trigger if exec bars have no data at this ts
+    # Entry price:
+    #   1ITM mode → exec strike's actual price at trap_ts
+    #   Standard  → zone_trigger level (original behaviour)
+    if use_1itm_mode:
+        entry_price = _price_at_ts(exec_bars, trap_ts)
+        if entry_price <= 0:
+            entry_price = scan_entry
+    else:
         entry_price = scan_entry
 
     future_scan = scan_bars[scan_bars["datetime"] > trap_ts]
     if future_scan.empty:
         return None
 
-    # Pre-compute 5-min TSL trap events (on scan strike bars — zone-level logic)
+    # Pre-compute 5-min TSL trap events on scan strike bars
     trap_events: list[tuple[pd.Timestamp, float]] = []
     if not df5m.empty:
         df5m_post = df5m[df5m["datetime"] > trap_ts]
@@ -740,9 +746,11 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         df_exec_today = df_exec
                         df_exec_5m    = _resample(df_exec, 5)
 
-            # In 1ITM mode: scan bars (df_opt_today) drive triggers,
-            # exec bars (df_exec_today) drive entry/exit prices
-            scan_bars_arg = df_opt_today if (use_1itm and exec_strike != strike) else None
+            # 1ITM only for GAP trades (scan ATM-200, exec ATM-50 → 150pts apart, correlated).
+            # PIVOT trades: scan=S1/R1 can be 500+ pts from exec ATM-50 → no 1ITM.
+            scan_bars_arg = (df_opt_today
+                             if (use_1itm and gap_fired and exec_strike != strike)
+                             else None)
             result = _simulate_exit(
                 z, df_exec_today, df_exec_5m,
                 lot, sl_buf, opt_type, trade_date,
