@@ -283,6 +283,19 @@
           </template>
         </div>
 
+        <!-- No Target / No TSL toggle -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">No Target / No TSL</p>
+            <p class="text-xs text-t-muted">Exit only: SL · Opp-side signal · Floor · EOD</p>
+          </div>
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" x-model="noTargetTsl" class="accent-[var(--t-yellow)]" />
+            <span class="text-xs" x-text="noTargetTsl ? 'ON' : 'OFF'"
+              :class="noTargetTsl ? 'text-[var(--t-yellow)]' : 'text-t-muted'"></span>
+          </label>
+        </div>
+
         <!-- 1 ITM Execution toggle -->
         <div class="flex items-center justify-between">
           <div>
@@ -431,6 +444,7 @@ function backtestNifty() {
     profitCap:    10000,
     profitFloorOn: false,
     profitFloor:   10000,
+    noTargetTsl:   false,
     use1itm:      false,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
@@ -476,6 +490,7 @@ function backtestNifty() {
         strike_depth:       this.strikeDepth,
         profit_cap_per_lot:   this.profitCapOn   ? this.profitCap   : 0,
         profit_floor_per_lot: this.profitFloorOn ? this.profitFloor : 0,
+        no_target_tsl: this.noTargetTsl,
         use_1itm:             this.use1itm,
       }
       if (this.dateMode === 'weeks') {

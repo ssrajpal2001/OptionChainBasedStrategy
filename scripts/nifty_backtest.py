@@ -291,7 +291,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                    profit_cap_per_lot: float = 0.0,
                    profit_floor_per_lot: float = 0.0,
                    df1m_scan: pd.DataFrame | None = None,
-                   force_exit_ts: pd.Timestamp | None = None) -> Optional[dict]:
+                   force_exit_ts: pd.Timestamp | None = None,
+                   no_target_tsl: bool = False) -> Optional[dict]:
     """
     df1m       = exec strike bars (prices for entry/exit P&L)
     df1m_scan  = scan strike bars (SL/T1/TSL trigger logic); if None, uses df1m (no 1ITM)
@@ -408,58 +409,71 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             exit_ts     = bar_ts
             break
 
-        # 1. T1 trigger from scan bar (high crosses zone_high)
-        # T1 exit price read from exec bar at same timestamp
-        if not t1_hit and bar_high >= t1_price:
-            t1_hit       = True
-            t1_exit_ts   = bar_ts
-            exec_t1_px   = _price_at_ts(exec_bars, bar_ts) or exec_close
-            t1_pnl       = round((exec_t1_px - entry_price) * t1_qty, 2)
-            trail_sl     = init_sl   # TSL resets to zone_low (breakeven anchor on scan)
-
-        # Profit cap: triggered on exec_close P&L
-        if t1_hit and profit_cap_per_lot > 0:
-            running_rem = (exec_close - entry_price) * rem_qty
-            if t1_pnl + running_rem >= profit_cap_per_lot:
-                rem_needed  = profit_cap_per_lot - t1_pnl
-                exit_price  = round(entry_price + rem_needed / rem_qty, 2)
-                exit_reason = "PROFIT_CAP"
-                exit_ts     = bar_ts
-                break
-
-        # Profit floor: lock ₹floor once hit; exit at implied floor price on breach
-        if t1_hit and profit_floor_per_lot > 0:
-            running_rem = (exec_close - entry_price) * rem_qty
-            current_pnl = t1_pnl + running_rem
-            if not floor_locked and current_pnl >= profit_floor_per_lot:
-                floor_locked    = True
-                locked_floor_rs = profit_floor_per_lot
-            if floor_locked and current_pnl < locked_floor_rs:
-                floor_rem_needed = locked_floor_rs - t1_pnl
-                exit_price  = round(entry_price + floor_rem_needed / rem_qty, 2)
-                exit_reason = "FLOOR_SL"
-                exit_ts     = bar_ts
-                break
-
-        # 2. Ratchet TSL: scan-zone 5-min traps raise TSL (zone_low levels)
-        if t1_hit:
-            while trap_idx < len(trap_events):
-                ev_ts, z_low = trap_events[trap_idx]
-                if bar_ts < ev_ts:
+        if no_target_tsl:
+            # ── No-Target-TSL mode: SL / OPP_SIGNAL / Floor / EOD only ──────
+            # Floor locks directly from total P&L (no T1 prerequisite)
+            if profit_floor_per_lot > 0:
+                current_pnl = (exec_close - entry_price) * total_qty
+                if not floor_locked and current_pnl >= profit_floor_per_lot:
+                    floor_locked    = True
+                    locked_floor_rs = profit_floor_per_lot
+                if floor_locked and current_pnl < locked_floor_rs:
+                    exit_price  = round(entry_price + locked_floor_rs / total_qty, 2)
+                    exit_reason = "FLOOR_SL"
+                    exit_ts     = bar_ts
                     break
-                if z_low > trail_sl:
-                    trail_sl = z_low
-                trap_idx += 1
+        else:
+            # 1. T1 trigger from scan bar (high crosses zone_high)
+            if not t1_hit and bar_high >= t1_price:
+                t1_hit       = True
+                t1_exit_ts   = bar_ts
+                exec_t1_px   = _price_at_ts(exec_bars, bar_ts) or exec_close
+                t1_pnl       = round((exec_t1_px - entry_price) * t1_qty, 2)
+                trail_sl     = init_sl   # TSL resets to zone_low (breakeven anchor)
 
-        # 3. T2: scan bar high crosses next zone → exit at exec price
-        if t1_hit and t2_price and bar_high >= t2_price:
-            exit_price  = _price_at_ts(exec_bars, bar_ts) or exec_close
-            exit_reason = "T2"
-            exit_ts     = bar_ts
-            break
+            # Profit cap: triggered on exec_close P&L
+            if t1_hit and profit_cap_per_lot > 0:
+                running_rem = (exec_close - entry_price) * rem_qty
+                if t1_pnl + running_rem >= profit_cap_per_lot:
+                    rem_needed  = profit_cap_per_lot - t1_pnl
+                    exit_price  = round(entry_price + rem_needed / rem_qty, 2)
+                    exit_reason = "PROFIT_CAP"
+                    exit_ts     = bar_ts
+                    break
 
-        # 4. SL trigger on scan bar close; exit price from exec bar
-        active_sl = trail_sl if t1_hit else init_sl
+            # Profit floor: lock ₹floor after T1; exit if P&L drops below
+            if t1_hit and profit_floor_per_lot > 0:
+                running_rem = (exec_close - entry_price) * rem_qty
+                current_pnl = t1_pnl + running_rem
+                if not floor_locked and current_pnl >= profit_floor_per_lot:
+                    floor_locked    = True
+                    locked_floor_rs = profit_floor_per_lot
+                if floor_locked and current_pnl < locked_floor_rs:
+                    floor_rem_needed = locked_floor_rs - t1_pnl
+                    exit_price  = round(entry_price + floor_rem_needed / rem_qty, 2)
+                    exit_reason = "FLOOR_SL"
+                    exit_ts     = bar_ts
+                    break
+
+            # 2. Ratchet TSL: scan-zone 5-min traps raise TSL
+            if t1_hit:
+                while trap_idx < len(trap_events):
+                    ev_ts, z_low = trap_events[trap_idx]
+                    if bar_ts < ev_ts:
+                        break
+                    if z_low > trail_sl:
+                        trail_sl = z_low
+                    trap_idx += 1
+
+            # 3. T2: scan bar high crosses next zone → exit at exec price
+            if t1_hit and t2_price and bar_high >= t2_price:
+                exit_price  = _price_at_ts(exec_bars, bar_ts) or exec_close
+                exit_reason = "T2"
+                exit_ts     = bar_ts
+                break
+
+        # SL trigger on scan bar close (active in both modes)
+        active_sl = trail_sl if (t1_hit and not no_target_tsl) else init_sl
         if bar_close < round(active_sl - sl_buf, 2):
             exit_price  = _price_at_ts(exec_bars, bar_ts) or exec_close
             exit_reason = "TRAIL_SL" if t1_hit else "SL"
@@ -480,9 +494,14 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         exit_reason = "EOD"
         exit_ts     = last_ts
 
-    exit_qty    = rem_qty if t1_hit else total_qty
-    rem_pnl     = round((exit_price - entry_price) * exit_qty, 2)
-    total_pnl   = round(t1_pnl + rem_pnl, 2)
+    if no_target_tsl:
+        exit_qty  = total_qty   # always full position (no half-exit at T1)
+        rem_pnl   = round((exit_price - entry_price) * exit_qty, 2)
+        total_pnl = rem_pnl
+    else:
+        exit_qty  = rem_qty if t1_hit else total_qty
+        rem_pnl   = round((exit_price - entry_price) * exit_qty, 2)
+        total_pnl = round(t1_pnl + rem_pnl, 2)
     capital_rs  = int(round(entry_price * total_qty, 0))   # premium paid to hold position
     roi_pct     = round(total_pnl / capital_rs * 100, 1) if capital_rs > 0 else 0.0
 
@@ -524,7 +543,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              strike_depth: str = "both",
              profit_cap_per_lot: float = 0.0,
              use_1itm: bool = False,
-             profit_floor_per_lot: float = 0.0) -> list[dict]:
+             profit_floor_per_lot: float = 0.0,
+             no_target_tsl: bool = False) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -806,6 +826,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         profit_floor_per_lot=profit_floor_per_lot,
                         df1m_scan=rt["scan_bars_arg"],
                         force_exit_ts=z_ts,
+                        no_target_tsl=no_target_tsl,
                     )
                     if re_result:
                         re_result["index"]       = index
@@ -864,6 +885,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 profit_cap_per_lot=profit_cap_per_lot,
                 profit_floor_per_lot=profit_floor_per_lot,
                 df1m_scan=scan_bars_arg,
+                no_target_tsl=no_target_tsl,
             )
             if result:
                 result["index"]        = index
@@ -919,7 +941,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        profit_cap_per_lot: float = 0.0,
                        use_1itm: bool = False,
                        profit_floor_per_lot: float = 0.0,
-                       htf_min: int = 0) -> dict:
+                       htf_min: int = 0,
+                       no_target_tsl: bool = False) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -974,7 +997,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
                               opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm,
-                              profit_floor_per_lot)
+                              profit_floor_per_lot, no_target_tsl)
         all_trades.extend(day_trades)
 
     # Summary
