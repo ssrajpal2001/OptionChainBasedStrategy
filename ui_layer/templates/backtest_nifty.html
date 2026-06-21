@@ -229,8 +229,7 @@
       </div>
     </template>
 
-    <template x-if="result && !running">
-    <div class="flex flex-col gap-6">
+    <div x-show="result && !running" x-cloak class="flex flex-col gap-6">
 
       <!-- Summary cards -->
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -337,8 +336,7 @@
         </div>
       </div>
 
-    </div><!-- single root wrapper for x-if -->
-    </template>
+    </div><!-- end results: x-show wrapper -->
   </div><!-- right panel -->
 </div>
 
