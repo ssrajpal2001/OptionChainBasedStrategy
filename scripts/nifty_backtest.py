@@ -296,7 +296,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
     zh = float(e["zone_high"])
     zl = float(e["zone_low"])
     entry_price = _zone_trigger(e)
-    t1_price    = round(zh, 2)
+    # T1 = parent HTF zone_high if this was a cascade/LTF entry, else own zone_high
+    t1_price    = round(float(e["_htf_t1"]) if "_htf_t1" in e else zh, 2)
     init_sl     = round(zl - sl_buf, 2)
     trail_sl    = init_sl
 
@@ -567,6 +568,9 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         le["_trap_pos"] = ("FIRST" if idx == 0
                                            else "LAST" if idx == n - 1
                                            else "MIDDLE")
+                        # T1 = parent 15-min zone_high (bears' SL = real target)
+                        # NOT the 5-min zone_high which is tiny
+                        le["_htf_t1"] = float(cz["zone_high"])
                         entry_signals.append(le)
 
             print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} cascade entry(s)")
