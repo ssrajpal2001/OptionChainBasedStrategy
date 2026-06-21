@@ -102,6 +102,32 @@ def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     return htf
 
 
+# ── Zone dedup: merge zones within price_tol of each other ────────────────────
+def _dedup_zones(zones: list, price_tol: float = 10.0) -> list:
+    """
+    If multiple zones have zone_high within price_tol of each other they are
+    the same structure seen at different bar resolutions. Keep only the one
+    whose entry signal (closed_on or trapped_on) came earliest.
+    """
+    if not zones:
+        return zones
+
+    def _entry_ts(z):
+        ts = z.get("closed_on") or z.get("trapped_on") or z.get("ref_ts")
+        return str(ts) if ts else ""
+
+    # Sort by entry time ascending so earliest survives the cluster
+    ordered = sorted(zones, key=_entry_ts)
+    kept = []
+    for z in ordered:
+        zh = float(z.get("zone_high", 0))
+        # Check if any already-kept zone is within price_tol
+        is_dup = any(abs(float(k.get("zone_high", 0)) - zh) <= price_tol for k in kept)
+        if not is_dup:
+            kept.append(z)
+    return kept
+
+
 # ── Pivot / gap ────────────────────────────────────────────────────────────────
 def _pivot(H: float, L: float, C: float) -> dict:
     P = (H + L + C) / 3
@@ -147,7 +173,7 @@ def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str
     return f"{pfx}{index}{exp_str}{strike}{opt_type}"
 
 
-# ── Exit simulation (reuses same logic as test_trap_scanner.py) ────────────────
+# ── Exit simulation ────────────────────────────────────────────────────────────
 def _zone_trigger(e: dict) -> float:
     if "zone_trigger" in e:
         return float(e["zone_trigger"])
@@ -157,13 +183,8 @@ def _zone_trigger(e: dict) -> float:
     return round(zl + (zh - zl) / 3, 2)
 
 
-def _t1_price(e: dict) -> float:
-    if e.get("kind") == "BULL":
-        return round(float(e["zone_low"]), 2)
-    return round(float(e.get("sl", e["zone_high"])), 2)
-
-
 def _init_sl(e: dict, sl_buf: float) -> float:
+    """Initial SL: just beyond the zone boundary."""
     if e.get("kind") == "BULL":
         return round(float(e["zone_high"]) + sl_buf, 2)
     return round(float(e["zone_low"]) - sl_buf, 2)
@@ -171,17 +192,34 @@ def _init_sl(e: dict, sl_buf: float) -> float:
 
 def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
                    opt_type: str, trade_date: str) -> Optional[dict]:
-    """Simulate T1 + 5min ratchet trail exit on 1min option bars."""
-    total_qty = lot * 2   # always 2 lots
+    """
+    Exit rules:
+      Entry : zone_trigger (1/3 into zone from inner boundary)
+      SL    : just beyond outer zone boundary (zone_high+buf for BEAR, zone_low-buf for BULL)
+      T1    : 50% qty booked when price moves 1× the zone width beyond entry
+              BEAR: entry + (zone_high - zone_low)
+              BULL: entry - (zone_high - zone_low)
+      T2    : remaining 50% trailed on 5min bar lows/highs (ratchet) until SL hit or EOD
+    """
+    total_qty = lot * 2   # 2 lots
     t1_qty    = total_qty // 2
     rem_qty   = total_qty - t1_qty
-    is_bull   = e.get("kind") == "BULL"
 
+    # scan_htf detects BEARISH traps on option premium.
+    # We are BUYERS of the option → expect premium to RISE (bullish on premium).
+    # BEAR trap: bears shorted, got trapped above zone_high.
+    #   Entry  = zone_trigger (1/3 from zone_low into zone)
+    #   T1     = zone_high (bears' SL = premium rises here = our 50% target)
+    #   SL     = zone_low - sl_buf (premium drops further = trap failed)
+    #   Trail  = ratchet SL UP as premium rises (lock profit on remainder)
+    zh = float(e["zone_high"])
+    zl = float(e["zone_low"])
     entry_price = _zone_trigger(e)
-    t1_price    = _t1_price(e)
-    trail_sl    = _init_sl(e, sl_buf)
+    t1_price    = round(zh, 2)              # T1 = zone_high (bears' SL)
+    init_sl     = round(zl - sl_buf, 2)    # SL = below zone_low
+    trail_sl    = init_sl
 
-    # closed_on = price returned to zone = actual entry signal; trapped_on = SL sweep
+    # closed_on = price returned to zone = entry signal; trapped_on = trap sweep
     trap_ts = pd.to_datetime(e.get("closed_on") or e.get("trapped_on"))
     if trap_ts is pd.NaT:
         return None
@@ -190,8 +228,9 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
     if future.empty:
         return None
 
-    t1_hit = False
-    t1_pnl = 0.0
+    t1_hit     = False
+    t1_pnl     = 0.0
+    t1_exit_ts = None
     exit_price  = None
     exit_reason = "OPEN"
     exit_ts     = None
@@ -200,36 +239,37 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
     for _, row in future.iterrows():
         bar_ts = row["datetime"]
 
-        # 5min trail after T1
+        # After T1: ratchet trail SL UP on each new 5min bar (premium rises)
         if t1_hit:
             bucket = bar_ts.floor("5min")
             if last_5m_ts is None or bucket > last_5m_ts:
                 last_5m_ts = bucket
-                prev = df1m[(df1m["datetime"] >= bucket - pd.Timedelta(minutes=5)) &
-                            (df1m["datetime"] < bucket)]
-                if not prev.empty:
-                    if is_bull:
-                        cand = round(float(prev["high"].max()) + sl_buf, 2)
-                        if cand < trail_sl:
-                            trail_sl = cand
-                    else:
-                        cand = round(float(prev["low"].min()) - sl_buf, 2)
-                        if cand > trail_sl:
-                            trail_sl = cand
+                prev5 = df1m[(df1m["datetime"] >= bucket - pd.Timedelta(minutes=5)) &
+                             (df1m["datetime"] < bucket)]
+                if not prev5.empty:
+                    # We are long premium: trail SL up using prev 5min LOW
+                    cand = round(float(prev5["low"].min()) - sl_buf, 2)
+                    if cand > trail_sl:
+                        trail_sl = cand
 
-        active_sl = trail_sl if t1_hit else _init_sl(e, sl_buf)
-        hit_sl = row["high"] >= active_sl if is_bull else row["low"] <= active_sl
-        if hit_sl:
+        active_sl = trail_sl if t1_hit else init_sl
+
+        # Check SL hit (premium drops to SL)
+        if row["low"] <= active_sl:
             exit_price  = active_sl
             exit_reason = "TRAIL_SL" if t1_hit else "SL"
             exit_ts     = bar_ts
             break
 
-        if not t1_hit:
-            t1_hit = (row["low"] <= t1_price) if is_bull else (row["high"] >= t1_price)
-            if t1_hit:
-                t1_pnl = round(abs(t1_price - entry_price) * t1_qty, 2)
+        # Check T1 hit (premium rises to zone_high = 50% book)
+        if not t1_hit and row["high"] >= t1_price:
+            t1_hit     = True
+            t1_exit_ts = bar_ts
+            t1_pnl     = round((t1_price - entry_price) * t1_qty, 2)
+            # Move trail SL to entry (break-even lock for remainder)
+            trail_sl   = round(entry_price - sl_buf, 2)
 
+        # EOD square-off
         if bar_ts.time() >= pd.Timestamp("15:25").time():
             exit_price  = round(float(row["close"]), 2)
             exit_reason = "EOD"
@@ -242,8 +282,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
         exit_reason = "EOD"
         exit_ts     = last["datetime"]
 
-    rem_pnl   = round((entry_price - exit_price) * rem_qty if is_bull
-                      else (exit_price - entry_price) * rem_qty, 2)
+    # P&L — always long premium (buy CE/PE, exit when price rises or SL)
+    rem_pnl   = round((exit_price - entry_price) * rem_qty, 2)
     total_pnl = round(t1_pnl + rem_pnl, 2)
 
     return {
@@ -252,8 +292,9 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
         "kind":       e.get("kind", "BEAR"),
         "entry":      round(entry_price, 2),
         "t1":         round(t1_price, 2),
-        "sl":         round(_init_sl(e, sl_buf), 2),
+        "sl":         round(init_sl, 2),
         "entry_ts":   str(trap_ts)[:16],
+        "t1_ts":      str(t1_exit_ts)[:16] if t1_exit_ts else "",
         "exit":       round(exit_price, 2),
         "exit_ts":    str(exit_ts)[:16] if exit_ts is not None else "",
         "reason":     exit_reason,
@@ -264,8 +305,9 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
         "pnl_rs":     int(total_pnl),
         "zone_low":   round(float(e["zone_low"]), 2),
         "zone_high":  round(float(e["zone_high"]), 2),
-        "zone":       f"{e['zone_low']:.0f}→{e['zone_high']:.0f}",
+        "zone":       f"{e['zone_low']:.0f}-{e['zone_high']:.0f}",
         "mode":       e.get("_mode", ""),
+        "trap_pos":   e.get("_trap_pos", ""),   # FIRST / MIDDLE / LAST among 5min traps
     }
 
 
@@ -307,12 +349,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         ce_strike  = atm - cfg["gap_near"]
         pe_strike  = atm + cfg["gap_near"]
         mode       = f"GAP {gap_dir} {gap_pct:.1f}%"
-        cascade_min = 30   # gap day: intraday cascade
     else:
         ce_strike   = _round_strike(piv["S1"], step)
         pe_strike   = _round_strike(piv["R1"], step)
         mode        = f"NOGAP pivot P={piv['P']:.0f} S1={piv['S1']:.0f} R1={piv['R1']:.0f}"
-        cascade_min = None   # no-gap: HTF zones only
 
     ce_key = _option_key(index, ce_strike, "CE", trade_dt_obj)
     pe_key = _option_key(index, pe_strike, "PE", trade_dt_obj)
@@ -348,24 +388,17 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
         df_opt_all   = _mkt_hours(df_opt_raw)
         df_opt_today = df_opt_all[df_opt_all["datetime"].dt.date == td].copy()
-        df_opt_hist  = df_opt_all[df_opt_all["datetime"].dt.date < td].copy()
 
         if df_opt_today.empty:
             print(f"  {trade_date} {opt_type} {strike}: no today option bars")
             continue
 
-        # HTF zone scan on option bars (prev + today)
+        # ── Step 1: 75min HTF scan on full history (prev week + today) ──────
         htf_bars = _resample(df_opt_all, htf_min)
-        if len(htf_bars) < 2:
-            continue
+        _, htf_entries = scanner.scan_htf(htf_bars) if len(htf_bars) >= 2 else (None, [])
 
-        _, htf_entries = scanner.scan_htf(htf_bars)   # bearish traps on option premium
-
-        # CLOSED = price returned to zone (entry signal) today
-        # TRAPPED = price broke SL today but hasn't returned yet
-        # Use closed_on (return = entry) as primary filter; trapped_on as fallback
-        def _entry_fired_today(e):
-            ts = e.get("closed_on") or e.get("trapped_on")
+        def _closed_today(e):
+            ts = e.get("closed_on")   # CLOSED = price returned to zone = entry ready
             if not ts:
                 return False
             try:
@@ -373,35 +406,81 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             except Exception:
                 return False
 
-        zones = [e for e in htf_entries
-                 if e.get("status") in ("TRAPPED", "CLOSED") and _entry_fired_today(e)]
+        htf_zones = [e for e in htf_entries if e.get("status") == "CLOSED" and _closed_today(e)]
 
-        # Cascade fallback: no HTF zone trapped today → intraday cascade
-        if not zones and cascade_min:
-            htf_cas = _resample(df_opt_today, cascade_min)
-            if len(htf_cas) >= 2:
-                _, cas_entries = scanner.scan_htf(htf_cas)
-                zones = [e for e in cas_entries if e.get("status") in ("TRAPPED", "CLOSED")]
-                for z in zones:
-                    z["_mode"] = f"CASCADE-{cascade_min}m"
+        entry_signals = []   # list of (entry_ts, entry_price, sl, t1, zone_low, zone_high, mode_tag)
 
-        for z in zones:
-            if not z.get("_mode"):
+        if htf_zones:
+            # HTF zone fired today — use directly, entry at zone_trigger on 1min bars
+            n = len(htf_zones)
+            for idx, z in enumerate(htf_zones):
                 z["_mode"] = f"HTF-{htf_min}m"
+                z["_trap_pos"] = ("FIRST" if idx == 0
+                                  else "LAST" if idx == n - 1
+                                  else "MIDDLE")
+                entry_signals.append(z)
+            print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(htf_zones)} HTF zone(s)")
+        else:
+            # ── Step 2: No HTF zone (or zone is far) → 15min intraday cascade ──
+            df_15 = _resample(df_opt_today, 15)
+            _, cas15 = scanner.scan_htf(df_15) if len(df_15) >= 2 else (None, [])
 
-        if not zones:
-            print(f"  {trade_date} {opt_type} {strike}: no trapped zones")
+            # TRAPPED or CLOSED on 15min intraday bars
+            cas_zones = [e for e in cas15 if e.get("status") in ("TRAPPED", "CLOSED")]
+
+            if not cas_zones:
+                print(f"  {trade_date} {opt_type} {strike}: no zones (HTF or 15m)")
+                continue
+
+            # ── Step 3: For each 15min zone → scan 5min bars for LTF entry ──
+            df_5 = _resample(df_opt_today, 5)
+
+            for cz in cas_zones:
+                zh = float(cz["zone_high"])
+                zl = float(cz["zone_low"])
+                trap_ts = pd.to_datetime(cz.get("trapped_on") or cz.get("ref_ts"))
+                if trap_ts is not pd.NaT:
+                    trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
+
+                # 5min bars INSIDE the 15min zone, after it was detected
+                df_5_in_zone = df_5[df_5["datetime"] >= trap_ts] if trap_ts is not pd.NaT else df_5
+
+                # Bearish LTF trap inside the 15min zone
+                _, ltf5 = scanner.scan_htf(df_5_in_zone) if len(df_5_in_zone) >= 2 else (None, [])
+                ltf5_in = [e for e in ltf5
+                           if e.get("status") in ("TRAPPED", "CLOSED")
+                           and float(e["zone_high"]) <= zh * 1.02
+                           and float(e["zone_low"])  >= zl * 0.98]
+
+                if not ltf5_in:
+                    # No 5min sub-trap found — use the 15min zone itself as entry
+                    cz["_mode"] = "CASCADE-15m"
+                    cz["_trap_pos"] = "ONLY"
+                    entry_signals.append(cz)
+                else:
+                    n = len(ltf5_in)
+                    for idx, le in enumerate(ltf5_in):
+                        le["_mode"] = "CASCADE-15m->5m"
+                        le["_trap_pos"] = ("FIRST" if idx == 0
+                                           else "LAST" if idx == n - 1
+                                           else "MIDDLE")
+                        entry_signals.append(le)
+
+            print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} cascade entry(s)")
+
+        if not entry_signals:
             continue
 
-        print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(zones)} zone(s) trapped today")
+        # Merge zones that are at the same price level (within 10 pts) — take earliest
+        entry_signals = _dedup_zones(entry_signals, price_tol=10.0)
 
-        # Simulate exit on today's 1min option bars
-        for z in zones:
+        # ── Simulate exit on today's 1min bars for each entry signal ──
+        for z in entry_signals:
             result = _simulate_exit(z, df_opt_today, lot, sl_buf, opt_type, trade_date)
             if result:
-                result["strike"]   = strike
-                result["index"]    = index
-                result["gap_pct"]  = round(gap_pct, 2)
+                result["strike"]    = strike
+                result["index"]     = index
+                result["gap_pct"]   = round(gap_pct, 2)
                 result["gap_fired"] = gap_fired
                 result["mode"]     += f" {mode}"
                 trades.append(result)
@@ -445,14 +524,14 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         s_date = e_date - timedelta(weeks=weeks)
 
     days = _trading_days(s_date, e_date)
-    print(f"\n{index} backtest  {s_date} → {e_date}  ({len(days)} days)  "
+    print(f"\n{index} backtest  {s_date} to {e_date}  ({len(days)} days)  "
           f"bias={'ON' if use_bias else 'OFF'}  sl_buf={sl_buf}")
 
     # Fetch spot bars for entire range (+ 1 extra week for prev-day pivot)
     spot_from = (s_date - timedelta(days=14)).isoformat()
     spot_to   = (e_date + timedelta(days=1)).isoformat()
     spot_key  = cfg["spot_key"]
-    print(f"Fetching spot bars {spot_from} → {spot_to}…")
+    print(f"Fetching spot bars {spot_from} to {spot_to}...")
     df_spot_all = _fetch_1m(spot_key, spot_from, spot_to)
     if df_spot_all.empty:
         return {"ok": False, "error": "No spot data"}
@@ -490,12 +569,12 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         eq_map[t["date"]] = running
 
     print(f"\n{'─'*60}")
-    print(f"{index}  {s_date}→{e_date}  Trades={len(all_trades)}  "
+    print(f"{index}  {s_date} to {e_date}  Trades={len(all_trades)}  "
           f"Win={summary['win_pct']:.1f}%  Rs {total:+,.0f}  PF={pf}")
     print(f"{'─'*60}")
     for t in all_trades:
         print(f"  {t['date']}  {t['opt_type']} {t['strike']}  "
-              f"{t['mode']:<30}  {t['entry_ts'][11:]}→{t['exit_ts'][11:]}  "
+              f"{t['mode']:<30}  {t['entry_ts'][11:]} to {t['exit_ts'][11:]}  "
               f"entry={t['entry']}  exit={t['exit']}  {t['reason']:<10}  "
               f"Rs {t['pnl_rs']:+,.0f}")
 
