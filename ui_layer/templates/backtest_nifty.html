@@ -120,7 +120,7 @@
           <div class="flex justify-between text-xs text-t-muted mb-1">
             <span>Weeks back</span><span x-text="weeks + ' wk'" class="font-mono font-600 text-t-bright"></span>
           </div>
-          <input type="range" x-model.number="weeks" min="1" max="4" step="1" class="w-full accent-[var(--t-cyan)]" />
+          <input type="range" x-model.number="weeks" min="1" max="12" step="1" class="w-full accent-[var(--t-cyan)]" />
           <p class="text-xs text-t-muted mt-1">
             <span x-text="weekStart()"></span> → today
           </p>
@@ -145,6 +145,18 @@
     <div>
       <p class="sec-label mb-2">Strategy</p>
       <div class="flex flex-col gap-3">
+
+        <!-- Monthly expiry -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">Monthly Expiry</p>
+            <p class="text-xs text-t-muted">Last Thu/Fri of month — data from day 1</p>
+          </div>
+          <label class="toggle-track">
+            <input type="checkbox" x-model="monthly" />
+            <span class="toggle-pip"></span>
+          </label>
+        </div>
 
         <!-- Use Bias -->
         <div class="flex items-center justify-between">
@@ -338,6 +350,7 @@ function backtestNifty() {
     startDate: '',
     endDate:   '',
     useBias:   true,
+    monthly:   false,
     gapThresh: 0.5,
     slBuf:     2.0,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -374,6 +387,7 @@ function backtestNifty() {
         token:    this.token,
         index:    this.index,
         use_bias: this.useBias,
+        monthly:  this.monthly,
         sl_buf:   this.slBuf,
       }
       if (this.dateMode === 'weeks') {

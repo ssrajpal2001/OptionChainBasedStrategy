@@ -756,19 +756,20 @@ class DashboardServer:
                 p = await request.json()
             except Exception:
                 return {"ok": False, "error": "Invalid JSON"}
-            token  = p.get("token", "")
-            index  = p.get("index", "NIFTY")
-            weeks  = int(p.get("weeks", 2))
-            start  = p.get("start", "")
-            end    = p.get("end", "")
-            bias   = bool(p.get("use_bias", True))
-            sl_buf = float(p.get("sl_buf", 2.0))
+            token   = p.get("token", "")
+            index   = p.get("index", "NIFTY")
+            weeks   = int(p.get("weeks", 2))
+            start   = p.get("start", "")
+            end     = p.get("end", "")
+            bias    = bool(p.get("use_bias", True))
+            sl_buf  = float(p.get("sl_buf", 2.0))
+            monthly = bool(p.get("monthly", False))
             if not token:
                 return {"ok": False, "error": "token required"}
             try:
                 from scripts.nifty_backtest import run_nifty_backtest
                 result = await asyncio.to_thread(
-                    run_nifty_backtest, token, index, weeks, start, end, bias, sl_buf
+                    run_nifty_backtest, token, index, weeks, start, end, bias, sl_buf, monthly
                 )
                 return result
             except Exception as exc:

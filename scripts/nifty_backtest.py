@@ -69,10 +69,11 @@ _HEADERS: dict = {}   # set by CLI / API caller
 
 
 # ── Data fetch ─────────────────────────────────────────────────────────────────
-def _fetch_1m(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
+def _fetch_1m_chunk(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
+    """Fetch one chunk (≤30 days) of 1min bars from Upstox."""
+    import requests
     enc = quote(key, safe="")
     url = f"https://api.upstox.com/v2/historical-candle/{enc}/1minute/{to_dt}/{from_dt}"
-    import requests
     r = requests.get(url, headers=_HEADERS, timeout=30)
     r.raise_for_status()
     candles = r.json().get("data", {}).get("candles", [])
@@ -86,6 +87,28 @@ def _fetch_1m(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["datetime"] = df["datetime"].dt.tz_localize(None)
     return df
+
+
+def _fetch_1m(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
+    """Fetch 1min bars, splitting into 28-day chunks to stay within Upstox API limits."""
+    f = date.fromisoformat(from_dt)
+    t = date.fromisoformat(to_dt)
+    chunks: list[pd.DataFrame] = []
+    cur = f
+    while cur <= t:
+        nxt = min(cur + timedelta(days=28), t)
+        try:
+            chunk = _fetch_1m_chunk(key, cur.isoformat(), nxt.isoformat())
+            if not chunk.empty:
+                chunks.append(chunk)
+            time.sleep(0.1)
+        except Exception as exc:
+            print(f"    [fetch] {key} {cur}→{nxt} failed: {exc}")
+        cur = nxt + timedelta(days=1)
+    if not chunks:
+        return pd.DataFrame()
+    df = pd.concat(chunks, ignore_index=True).sort_values("datetime").drop_duplicates("datetime")
+    return df.reset_index(drop=True)
 
 
 def _mkt_hours(df: pd.DataFrame) -> pd.DataFrame:
@@ -140,16 +163,67 @@ def _round_strike(v: float, step: int) -> int:
 
 
 # ── Instrument key lookup ──────────────────────────────────────────────────────
-def _get_expiry(index: str, from_date: date) -> tuple[date, str]:
-    """Return (expiry_date, expiry_str) for the nearest weekly expiry >= from_date."""
-    # Try REGISTRY first (most reliable for BSE numeric keys)
+
+# Expiry weekday per index: weekly
+_WEEKLY_DOW  = {"NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
+                "SENSEX": 4, "MIDCPNIFTY": 1}   # 0=Mon … 4=Fri
+# Expiry weekday per index: monthly (last occurrence in month)
+_MONTHLY_DOW = {"NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
+                "SENSEX": 4, "MIDCPNIFTY": 1}
+
+
+def _last_weekday_of_month(year: int, month: int, dow: int) -> date:
+    """Return the last occurrence of weekday `dow` (0=Mon) in the given month."""
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    d = date(year, month, last_day)
+    while d.weekday() != dow:
+        d -= timedelta(days=1)
+    return d
+
+
+def _monthly_expiry(index: str, from_date: date) -> tuple[date, str]:
+    """
+    Return the monthly expiry on or after from_date.
+
+    Strategy: get all expiries from REGISTRY (sorted). A monthly expiry is
+    the LAST expiry of its calendar month — detected by comparing consecutive
+    expiries: if expiry[i].month != expiry[i+1].month, expiry[i] is monthly.
+    If REGISTRY unavailable, fall back to last-weekday-of-month math.
+    """
+    if REGISTRY.is_loaded(index):
+        all_exp = sorted(REGISTRY.all_expiries(index))
+        # Filter to on or after from_date
+        future = [e for e in all_exp if e >= from_date]
+        # Walk pairs — if next expiry is a different month, this one is the monthly
+        for i, exp in enumerate(future):
+            if i + 1 >= len(future) or future[i + 1].month != exp.month:
+                return exp, exp.strftime("%d%b%y").upper()
+
+    # Fallback: last-weekday-of-month math
+    dow = _MONTHLY_DOW.get(index, 3)
+    for delta_m in range(3):
+        month = from_date.month + delta_m
+        year  = from_date.year + (month - 1) // 12
+        month = ((month - 1) % 12) + 1
+        exp = _last_weekday_of_month(year, month, dow)
+        if exp >= from_date:
+            return exp, exp.strftime("%d%b%y").upper()
+    return from_date, from_date.strftime("%d%b%y").upper()
+
+
+def _get_expiry(index: str, from_date: date,
+                monthly: bool = False) -> tuple[date, str]:
+    """Return (expiry_date, expiry_str) for weekly or monthly expiry >= from_date."""
+    if monthly:
+        return _monthly_expiry(index, from_date)
+    # Weekly: try REGISTRY first (most reliable for BSE numeric keys)
     if REGISTRY.is_loaded(index):
         exp = REGISTRY.get_active_expiry(index, from_date=from_date)
         if exp:
             return exp, exp.strftime("%d%b%y").upper()
     # Fallback: weekday math
-    _DOW = {"NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1, "SENSEX": 3, "MIDCPNIFTY": 1}
-    dow = _DOW.get(index, 3)
+    dow = _WEEKLY_DOW.get(index, 3)
     d = from_date
     for _ in range(7):
         if d.weekday() == dow:
@@ -158,9 +232,13 @@ def _get_expiry(index: str, from_date: date) -> tuple[date, str]:
     return from_date, from_date.strftime("%d%b%y").upper()
 
 
+# Module-level flag — set by run_nifty_backtest before _run_day is called
+_USE_MONTHLY: bool = False
+
+
 def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str:
     """Resolve Upstox instrument key for an option strike."""
-    exp_date, exp_str = _get_expiry(index, trade_date)
+    exp_date, exp_str = _get_expiry(index, trade_date, monthly=_USE_MONTHLY)
     # REGISTRY lookup (required for BSE_FO numeric token)
     if REGISTRY.is_loaded(index):
         key = REGISTRY.get_upstox_key(index, exp_date, strike, opt_type)
@@ -505,9 +583,11 @@ def _trading_days(start: date, end: date) -> list[str]:
 # ── Public entry point (called by API + CLI) ───────────────────────────────────
 def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        start: str = "", end: str = "",
-                       use_bias: bool = True, sl_buf: float = 2.0) -> dict:
-    global _HEADERS
-    _HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+                       use_bias: bool = True, sl_buf: float = 2.0,
+                       monthly: bool = False) -> dict:
+    global _HEADERS, _USE_MONTHLY
+    _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    _USE_MONTHLY = monthly
 
     cfg = INDEX_CFG.get(index.upper())
     if not cfg:
@@ -527,9 +607,10 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         e_date = date.today()
         s_date = e_date - timedelta(weeks=weeks)
 
+    expiry_label = "MONTHLY" if monthly else "WEEKLY"
     days = _trading_days(s_date, e_date)
     print(f"\n{index} backtest  {s_date} to {e_date}  ({len(days)} days)  "
-          f"bias={'ON' if use_bias else 'OFF'}  sl_buf={sl_buf}")
+          f"expiry={expiry_label}  bias={'ON' if use_bias else 'OFF'}  sl_buf={sl_buf}")
 
     # Fetch spot bars for entire range (+ 1 extra week for prev-day pivot)
     spot_from = (s_date - timedelta(days=14)).isoformat()
@@ -608,6 +689,8 @@ if __name__ == "__main__":
     ap.add_argument("--end",     default="")
     ap.add_argument("--no-bias", action="store_true", help="Scan both CE+PE on gap days too")
     ap.add_argument("--sl-buf",  type=float, default=2.0)
+    ap.add_argument("--monthly", action="store_true",
+                    help="Use monthly expiry contract (last Thu/Fri of month) instead of weekly")
     args = ap.parse_args()
 
     result = run_nifty_backtest(
@@ -618,6 +701,7 @@ if __name__ == "__main__":
         end      = args.end,
         use_bias = not args.no_bias,
         sl_buf   = args.sl_buf,
+        monthly  = args.monthly,
     )
     if not result["ok"]:
         print(f"ERROR: {result['error']}")
