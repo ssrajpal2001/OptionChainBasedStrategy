@@ -279,7 +279,8 @@ def _spot_at_ts(df_spot: pd.DataFrame, ts: pd.Timestamp) -> float:
 def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                    lot: int, sl_buf: float,
                    opt_type: str, trade_date: str, strike: int,
-                   spot_at_entry: float) -> Optional[dict]:
+                   spot_at_entry: float,
+                   profit_cap_per_lot: float = 0.0) -> Optional[dict]:
     """
     Exit rules:
       T1    : 50% qty @ HTF zone_high (bears' SL). TSL starts at entry (breakeven).
@@ -331,16 +332,14 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 trap_events.append((ev_ts, z5_low))
     trap_events.sort(key=lambda x: x[0])
 
-    t1_hit          = False
-    t1_pnl          = 0.0
-    t1_exit_ts      = None
-    trail_sl        = init_sl      # starts at zone_low (support floor)
-    sl_breach_close = None         # close of 1-min candle that crossed below active_sl
-    sl_breach_low   = None         # low of that same candle (used for step-2 confirm level)
-    exit_price      = None
-    exit_reason     = "OPEN"
-    exit_ts         = None
-    trap_idx        = 0
+    t1_hit      = False
+    t1_pnl      = 0.0
+    t1_exit_ts  = None
+    trail_sl    = init_sl   # tracks zone_low (support floor); SL fires on close < zone_low−sl_buf
+    exit_price  = None
+    exit_reason = "OPEN"
+    exit_ts     = None
+    trap_idx    = 0
 
     for _, row in future.iterrows():
         bar_ts    = row["datetime"]
@@ -352,12 +351,20 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
 
         # 1. T1: 50% exit, TSL locks at entry (breakeven)
         if not t1_hit and bar_high >= t1_price:
-            t1_hit          = True
-            t1_exit_ts      = bar_ts
-            t1_pnl          = round((t1_price - entry_price) * t1_qty, 2)
-            trail_sl        = entry_price   # breakeven: TSL = where we entered
-            sl_breach_close = None
-            sl_breach_low   = None
+            t1_hit     = True
+            t1_exit_ts = bar_ts
+            t1_pnl     = round((t1_price - entry_price) * t1_qty, 2)
+            trail_sl   = entry_price   # breakeven: TSL = where we entered
+
+        # Profit cap: total trade P&L >= cap_per_lot × lots → close all
+        if t1_hit and profit_cap_per_lot > 0:
+            cap_total = profit_cap_per_lot * (total_qty / lot)
+            running_rem = (bar_close - entry_price) * rem_qty
+            if t1_pnl + running_rem >= cap_total:
+                exit_price  = bar_close
+                exit_reason = "PROFIT_CAP"
+                exit_ts     = bar_ts
+                break
 
         # 2. Ratchet TSL up: each newly TRAPPED 5-min zone raises TSL to its zone_low
         if t1_hit:
@@ -367,8 +374,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                     break
                 if z_low > trail_sl:        # only ratchet UP
                     trail_sl        = z_low
-                    sl_breach_close = None
-                    sl_breach_low   = None  # old breach invalidated by higher TSL
+                    pass  # TSL ratcheted up
                 trap_idx += 1
 
         # 3. T2: next 15-min zone_high → close all remaining
@@ -381,23 +387,13 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         # 4. Active SL = zone_low / TSL (support floor, no buffer yet)
         active_sl = trail_sl if t1_hit else init_sl
 
-        # 5. 2-step SL:
-        #    Step 1 — 1-min candle closes below active_sl (zone_low / TSL floor)
-        #    Step 2 — on any subsequent bar, if price ticks to breach_bar_low − sl_buf → exit
-        #    Recovery — if price closes back above active_sl before step 2 fires → reset
-        if sl_breach_close is not None:
-            confirm = round(sl_breach_low - sl_buf, 2)   # breach candle's low − buffer
-            if bar_low <= confirm:
-                exit_price  = confirm
-                exit_reason = "TRAIL_SL" if t1_hit else "SL"
-                exit_ts     = bar_ts
-                break
-            if bar_close > active_sl:       # price recovered → breach cancelled
-                sl_breach_close = None
-                sl_breach_low   = None
-        elif bar_close < active_sl:         # step 1: close below support floor
-            sl_breach_close = bar_close
-            sl_breach_low   = bar_low
+        # 5. SL: 1-min close below zone_low − sl_buf → exit at that close
+        #    zone_low = actual support floor; buffer confirms genuine break (not wick noise)
+        if bar_close < round(active_sl - sl_buf, 2):
+            exit_price  = bar_close
+            exit_reason = "TRAIL_SL" if t1_hit else "SL"
+            exit_ts     = bar_ts
+            break
 
         # 6. EOD
         if bar_ts.time() >= pd.Timestamp("15:25").time():
@@ -449,7 +445,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              df_spot_all: pd.DataFrame,
              use_bias: bool, sl_buf: float,
              opt_bar_cache: dict | None = None,
-             strike_depth: str = "both") -> list[dict]:
+             strike_depth: str = "both",
+             profit_cap_per_lot: float = 0.0) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -664,6 +661,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 z, df_opt_today, df_5,
                 lot, sl_buf, opt_type, trade_date,
                 strike=strike, spot_at_entry=spot_val,
+                profit_cap_per_lot=profit_cap_per_lot,
             )
             if result:
                 result["index"]     = index
@@ -691,7 +689,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        start: str = "", end: str = "",
                        use_bias: bool = True, sl_buf: float = 10.0,
                        monthly: bool = False,
-                       strike_depth: str = "both") -> dict:
+                       strike_depth: str = "both",
+                       profit_cap_per_lot: float = 0.0) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -743,7 +742,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     all_trades: list[dict] = []
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
-                              opt_bar_cache, strike_depth)
+                              opt_bar_cache, strike_depth, profit_cap_per_lot)
         all_trades.extend(day_trades)
 
     # Summary

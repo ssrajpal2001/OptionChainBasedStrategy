@@ -205,6 +205,27 @@
           <input type="range" x-model.number="slBuf" min="1" max="20" step="0.5" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
+        <!-- Profit Cap toggle -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs text-t-muted">Profit Cap / lot</span>
+            <label class="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" x-model="profitCapOn" class="accent-[var(--t-cyan)]" />
+              <span class="text-xs" x-text="profitCapOn ? 'ON' : 'OFF'"
+                :class="profitCapOn ? 'text-[var(--t-cyan)]' : 'text-t-muted'"></span>
+            </label>
+          </div>
+          <template x-if="profitCapOn">
+            <div>
+              <div class="flex justify-between text-xs text-t-muted mb-1">
+                <span>Close all when total P&L ≥ ₹<span x-text="profitCap"></span> × lots</span>
+              </div>
+              <input type="range" x-model.number="profitCap" min="1000" max="15000" step="500"
+                class="w-full accent-[var(--t-cyan)]" />
+            </div>
+          </template>
+        </div>
+
       </div>
     </div>
 
@@ -330,9 +351,11 @@ function backtestNifty() {
     endDate:   '',
     useBias:     true,
     monthly:     false,
-    strikeDepth: 'both',   // 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=200+400
-    gapThresh: 0.5,
-    slBuf:     10.0,
+    strikeDepth:  'both',
+    gapThresh:    0.5,
+    slBuf:        10.0,
+    profitCapOn:  false,
+    profitCap:    5000,
     token:     sessionStorage.getItem('upstox_token') || '',
 
     // State
@@ -368,8 +391,9 @@ function backtestNifty() {
         index:        this.index,
         use_bias:     this.useBias,
         monthly:      this.monthly,
-        sl_buf:       this.slBuf,
-        strike_depth: this.strikeDepth,
+        sl_buf:             this.slBuf,
+        strike_depth:       this.strikeDepth,
+        profit_cap_per_lot: this.profitCapOn ? this.profitCap : 0,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks
@@ -470,7 +494,7 @@ function backtestNifty() {
           <td class="font-mono" style="color:#ef4444">${t.sl}</td>
           <td class="font-mono">${t.exit}</td>
           <td class="font-mono" style="font-size:0.75rem;color:#6b7280">${exitTs}</td>
-          <td style="font-size:0.75rem">${t.reason}</td>
+          <td style="font-size:0.75rem;color:${t.reason==='PROFIT_CAP'?'#f59e0b':t.reason==='T2'?'#a78bfa':t.reason==='SL'?'#ef4444':'#6b7280'}">${t.reason}</td>
           <td>${t1Hit}</td>
           <td class="font-mono ${pnlCls}" style="font-weight:700">${pnlFmt}</td>
         </tr>`
