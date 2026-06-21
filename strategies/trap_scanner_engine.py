@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 _INDEX_CFG: Dict[str, dict] = {
     # htf_source="option": HTF and LTF both scan OPTION premium bars (same units → scan_ltf works)
     # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
-    "NIFTY":      {"step": 100, "lot": 75,  "gap_near": 200, "gap_far": 400,
+    "NIFTY":      {"step": 50,  "lot": 65,  "gap_near": 50,  "gap_far": 100,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
@@ -175,7 +175,7 @@ class TrapScannerEngine:
         self._entry_win  = _adm.get("entry_window",     _def["window"])
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
-        self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 1.0))
+        self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 0.5))
         self._admin_cfg   = ts_admin_cfg
         # CrudeOil HTF = 30-min (frozen per spec); all others = admin-configurable (default 75)
         _htf_override     = _def.get("htf_min_override")
