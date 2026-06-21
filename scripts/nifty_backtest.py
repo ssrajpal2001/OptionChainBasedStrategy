@@ -675,29 +675,26 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             if trap_ts is not pd.NaT:
                 trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
 
-            # Scan 5min inside the lowest 15min zone for sub-trap
+            # Scan ALL of today's 5min bars within the 15min zone for fresh sub-trap
             df_5 = _resample(df_opt_today, 5)
-            df_5_in_zone = df_5[df_5["datetime"] >= trap_ts] if trap_ts is not pd.NaT else df_5
-            _, ltf5 = scanner.scan_htf(df_5_in_zone) if len(df_5_in_zone) >= 2 else (None, [])
-            ltf5_in = [e for e in (ltf5 or [])
+            _, ltf5_all = scanner.scan_htf(df_5) if len(df_5) >= 2 else (None, [])
+            ltf5_in = [e for e in (ltf5_all or [])
                        if e.get("status") in ("TRAPPED", "CLOSED")
                        and float(e.get("zone_high", 0)) <= zh * 1.02
                        and float(e.get("zone_low",  0)) >= zl * 0.98]
 
             if ltf5_in:
-                # Pick lowest 5min sub-trap inside the 15min zone
+                # Pick lowest 5min sub-trap; SL = 15min zone_low (not 5min zone_low)
                 best = min(ltf5_in, key=lambda e: float(e.get("zone_low", 9999)))
                 best["_mode"]     = "CASCADE-15m→5m"
                 best["_trap_pos"] = "LOWEST"
                 best["_htf_t1"]   = zh   # T1 = 15min zone_high
+                best["_htf_sl"]   = zl   # SL = 15min zone_low (parent zone)
                 entry_signals.append(best)
+                print(f"  {trade_date} {opt_type} {strike}: CASCADE 15m {zl:.0f}-{zh:.0f} → 5m sub-trap at {best.get('zone_low'):.0f}-{best.get('zone_high'):.0f}")
             else:
-                # No 5min sub-trap — use 15min zone itself
-                cz["_mode"]     = "CASCADE-15m"
-                cz["_trap_pos"] = "LOWEST"
-                entry_signals.append(cz)
-
-            print(f"  {trade_date} {opt_type} {strike} [{mode}]: cascade 15m zone {zl:.0f}-{zh:.0f}")
+                # No 5min sub-trap inside 15min zone → skip
+                print(f"  {trade_date} {opt_type} {strike}: CASCADE 15m {zl:.0f}-{zh:.0f} → no 5m sub-trap — SKIP")
 
         if not entry_signals:
             continue
