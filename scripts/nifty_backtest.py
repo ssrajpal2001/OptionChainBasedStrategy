@@ -311,7 +311,9 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     scan_entry  = _zone_trigger(e)   # zone trigger level on scan strike
     t1_price    = round(float(e["_htf_t1"]) if "_htf_t1" in e else zh, 2)
     t2_price    = float(e["_t2"]) if e.get("_t2") else None
-    init_sl     = zl
+    # SL: if HTF zone_low override present (5min sub-trap inside HTF zone),
+    # use HTF zone_low as absolute stop — not the tight 5min zone_low.
+    init_sl     = float(e["_htf_sl"]) if "_htf_sl" in e else zl
 
     trap_ts = pd.to_datetime(e.get("closed_on") or e.get("trapped_on"))
     if trap_ts is pd.NaT:
@@ -625,27 +627,28 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 if trap_ts is not None and getattr(trap_ts, 'tzinfo', None):
                     trap_ts = trap_ts.tz_localize(None)
 
-                # Scan 5min sub-zones inside the HTF zone (after zone was trapped)
-                df_5_after = df_5[df_5["datetime"] >= trap_ts] if trap_ts is not None else df_5
-                _, ltf5 = scanner.scan_htf(df_5_after) if len(df_5_after) >= 2 else (None, [])
-                ltf5_in = [e for e in (ltf5 or [])
+                # Scan ALL of today's 5min bars within the HTF zone for a fresh trap.
+                # Search full day (not just after trap_ts) so we catch bears trapped
+                # anywhere inside the zone as price sweeps up → comes back → entry.
+                _, ltf5_all = scanner.scan_htf(df_5) if len(df_5) >= 2 else (None, [])
+                ltf5_in = [e for e in (ltf5_all or [])
                            if e.get("status") in ("TRAPPED", "CLOSED")
                            and float(e.get("zone_high", 0)) <= zh * 1.02
                            and float(e.get("zone_low",  0)) >= zl * 0.98]
 
                 if ltf5_in:
-                    # Pick the 5min zone with LOWEST zone_low (nearest to HTF zone_low = tightest SL)
+                    # Pick lowest zone_low 5min sub-trap (nearest to HTF zone_low)
                     best = min(ltf5_in, key=lambda e: float(e.get("zone_low", 9999)))
                     best["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m→5m"
                     best["_trap_pos"] = "LOWEST-LTF"
-                    best["_htf_t1"]   = zh   # T1 stays at HTF zone_high (all bears' SL)
+                    best["_htf_t1"]   = zh   # T1 = HTF zone_high (all bears' SL)
+                    best["_htf_sl"]   = zl   # SL = HTF zone_low (not 5min zone_low)
                     entry_signals.append(best)
                     print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → 5m sub-trap at {best.get('zone_low'):.0f}-{best.get('zone_high'):.0f}")
                 else:
-                    # No 5min sub-trap found — fall back to HTF zone trigger directly
-                    htf_z["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m"
-                    htf_z["_trap_pos"] = "ONLY"
-                    entry_signals.append(htf_z)
+                    # No fresh 5min trap found inside HTF zone — skip (no trade).
+                    # Do not enter blindly at HTF trigger without LTF confirmation.
+                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → no 5m sub-trap — SKIP")
 
             print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} HTF zone(s)")
         else:
