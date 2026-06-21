@@ -746,10 +746,9 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         df_exec_today = df_exec
                         df_exec_5m    = _resample(df_exec, 5)
 
-            # 1ITM only for GAP trades (scan ATM-200, exec ATM-50 → 150pts apart, correlated).
-            # PIVOT trades: scan=S1/R1 can be 500+ pts from exec ATM-50 → no 1ITM.
+            # scan bars drive SL/T1 timing; exec bars (ATM-50) provide entry/exit prices
             scan_bars_arg = (df_opt_today
-                             if (use_1itm and gap_fired and exec_strike != strike)
+                             if (use_1itm and exec_strike != strike)
                              else None)
             result = _simulate_exit(
                 z, df_exec_today, df_exec_5m,
