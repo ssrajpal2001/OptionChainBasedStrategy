@@ -592,12 +592,15 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     day_running_trade: dict | None = None
 
     for opt_type, strike, key, depth in legs:
-        # Bias filter: on gap days, skip the leg that opposes gap direction
+        # Bias filter: on gap days, opposing leg scanned for EXIT ONLY (not entry)
+        # Gap UP → CE = entry; PE = exit tracker only (close CE if PE trap fires)
+        # Gap DOWN → PE = entry; CE = exit tracker only
+        exit_only = False
         if use_bias and gap_fired:
             if gap_dir == "UP" and opt_type == "PE":
-                continue
+                exit_only = True   # scan PE but only for closing CE
             if gap_dir == "DOWN" and opt_type == "CE":
-                continue
+                exit_only = True   # scan CE but only for closing PE
         mode = f"{base_mode} {depth}"
 
         if not key:
@@ -790,6 +793,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     continue   # SAME side still running → skip
                 else:
                     # OPPOSITE side fired while trade running → force-close running trade
+                    # (applies even if this leg is exit_only — that's exactly what exit_only is for)
                     # Re-simulate the running trade with forced exit at z_ts
                     prev_result = trades[rt["trade_idx"]]
                     prev_z      = rt["z"]
@@ -844,6 +848,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         exec_strike   = z_exec
                         df_exec_today = df_exec
                         df_exec_5m    = _resample(df_exec, 5)
+
+            # exit_only leg: only used to close running opposite trade, never opens new entry
+            if exit_only:
+                continue
 
             # scan bars drive SL/T1 timing; exec bars (ATM-50) provide entry/exit prices
             scan_bars_arg = (df_opt_today
