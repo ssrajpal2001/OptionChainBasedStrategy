@@ -46,7 +46,7 @@ INDEX_CFG = {
     "NIFTY": {
         "spot_key":  "NSE_INDEX|Nifty 50",
         "step":      50,
-        "lot":       75,
+        "lot":       65,
         "gap_near":  50,   # 1 ITM = 1 step
         "gap_thresh": 0.5, # % gap to classify as gap day
         "htf_min":   75,
