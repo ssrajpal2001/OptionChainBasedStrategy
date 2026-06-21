@@ -329,7 +329,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     actual_entry_ts = None
     future_1m_all = exec_bars[exec_bars["datetime"] > trap_ts]
 
-    rejection_bar = None   # (high, ts) of first 1min bar that touched zone_low area
+    rejection_bar = None   # (high, low, ts) of first 1min bar that touched zone_low area
 
     for _, rb in future_1m_all.iterrows():
         rb_ts   = rb["datetime"]
@@ -339,12 +339,14 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         if rejection_bar is None:
             # First 1min bar whose low touches zone_trigger (zone_low area)
             if rb_low <= scan_entry:
-                rejection_bar = (rb_high, rb_ts)
+                rejection_bar = (rb_high, rb_low, rb_ts)
         else:
-            rej_high, _ = rejection_bar
-            # Any subsequent bar that breaks ABOVE rejection candle high → ENTRY
-            if rb_high > rej_high:
-                entry_price     = round(rej_high, 2)   # entry = rejection candle HIGH
+            rej_high, rej_low, _ = rejection_bar
+            # Entry when price reaches 50% from rejection candle low (midpoint going up)
+            # This gives earlier entry than waiting for HIGH break on big candles
+            midpoint = round(rej_low + (rej_high - rej_low) * 0.5, 2)
+            if rb_high >= midpoint:
+                entry_price     = midpoint
                 actual_entry_ts = rb_ts
                 break
 
@@ -652,8 +654,6 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     trap_ts = trap_ts.tz_localize(None)
 
                 # Scan ALL of today's 5min bars within the HTF zone for a fresh trap.
-                # Search full day (not just after trap_ts) so we catch bears trapped
-                # anywhere inside the zone as price sweeps up → comes back → entry.
                 _, ltf5_all = scanner.scan_htf(df_5) if len(df_5) >= 2 else (None, [])
                 ltf5_in = [e for e in (ltf5_all or [])
                            if e.get("status") in ("TRAPPED", "CLOSED")
@@ -666,10 +666,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     for idx, best in enumerate(ltf5_in):
                         best["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m→5m"
                         best["_trap_pos"] = f"LTF-{idx+1}"
-                        best["_htf_t1"]   = zh   # T1 = HTF zone_high (all bears' SL)
-                        best["_htf_sl"]   = zl   # SL = HTF zone_low (not 5min zone_low)
+                        best["_htf_t1"]   = zh   # T1 = zone_high = bears' SL level
+                        best["_htf_sl"]   = zl   # SL = HTF zone_low
                         entry_signals.append(best)
-                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → 5m sub-trap at {best.get('zone_low'):.0f}-{best.get('zone_high'):.0f}")
+                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → {len(ltf5_in)} 5m sub-trap(s)")
                 else:
                     # No fresh 5min trap found inside HTF zone — skip (no trade).
                     # Do not enter blindly at HTF trigger without LTF confirmation.
@@ -753,12 +753,31 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             # Here just mark that 1ITM is active; resolution happens inside the zone loop.
             pass
 
+        # One-trade-at-a-time: sort all signals by their trap timestamp
+        def _sig_ts(z):
+            t = pd.to_datetime(z.get("closed_on") or z.get("trapped_on") or "NaT")
+            return t.tz_localize(None) if (t is not pd.NaT and t.tzinfo) else t
+
+        entry_signals.sort(key=_sig_ts)
+
+        running_trade = None   # {exit_ts, opt_type} of currently open trade
+
         for z in entry_signals:
             trap_ts = pd.to_datetime(z.get("closed_on") or z.get("trapped_on"))
             spot_val = 0.0
             if trap_ts is not pd.NaT:
                 ts_naive = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
                 spot_val = _spot_at_ts(df_today, ts_naive)
+
+            # One-trade-at-a-time rule
+            z_ts = _sig_ts(z)
+            if running_trade is not None:
+                if z_ts is pd.NaT or z_ts < running_trade["exit_ts"]:
+                    # Trade still running — if SAME side, skip; if OPPOSITE side, skip
+                    # (SL will hit naturally from opposite-side move)
+                    continue
+                else:
+                    running_trade = None   # previous trade closed, can take new signal
 
             # 1 ITM: resolve exec strike from LIVE spot at entry time
             # CE → live ATM − step (1 step ITM), PE → live ATM + step
@@ -814,6 +833,14 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 if use_1itm and exec_strike != strike:
                     result["exec_mode"] = "1ITM"
                 trades.append(result)
+                # Track running trade for one-at-a-time rule
+                exit_ts_raw = result.get("exit_ts") or result.get("exit_time")
+                if exit_ts_raw:
+                    exit_ts_pd = pd.to_datetime(exit_ts_raw)
+                    if exit_ts_pd is not pd.NaT:
+                        if exit_ts_pd.tzinfo:
+                            exit_ts_pd = exit_ts_pd.tz_localize(None)
+                        running_trade = {"exit_ts": exit_ts_pd, "opt_type": z.get("_opt_type", opt_type)}
 
     return trades
 
