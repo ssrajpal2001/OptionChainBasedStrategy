@@ -379,7 +379,10 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 floor_locked    = True
                 locked_floor_rs = profit_floor_per_lot   # e.g. ₹10,000 per trade
             if floor_locked and current_pnl < locked_floor_rs:
-                exit_price  = bar_close
+                # exit at implied tick price where P&L = floor (not bar_close)
+                # matches live: tick crosses floor → exit immediately at that price
+                floor_rem_needed = locked_floor_rs - t1_pnl
+                exit_price  = round(entry_price + floor_rem_needed / rem_qty, 2)
                 exit_reason = "FLOOR_SL"
                 exit_ts     = bar_ts
                 break
