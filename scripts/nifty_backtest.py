@@ -653,60 +653,48 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             df_15 = _resample(df_opt_today, 15)
             _, cas15 = scanner.scan_htf(df_15) if len(df_15) >= 2 else (None, [])
 
-            # TRAPPED or CLOSED on 15min intraday bars, sorted low→high for T2 lookup
+            # TRAPPED or CLOSED on 15min intraday bars — pick LOWEST zone_low
+            # (tightest SL, nearest to HTF zone_low, strongest confirmation)
             cas_zones = sorted(
                 [e for e in cas15 if e.get("status") in ("TRAPPED", "CLOSED")],
-                key=lambda z: float(z["zone_high"])
+                key=lambda z: float(z.get("zone_low", 9999))
             )
 
             if not cas_zones:
                 print(f"  {trade_date} {opt_type} {strike}: no zones (HTF or 15m)")
                 continue
 
-            # ── Step 3: For each 15min zone → scan 5min bars for LTF entry ──
+            # Pick the single lowest 15min zone
+            cz   = cas_zones[0]
+            zh   = float(cz["zone_high"])
+            zl   = float(cz["zone_low"])
+            trap_ts = pd.to_datetime(cz.get("trapped_on") or cz.get("ref_ts"))
+            if trap_ts is not pd.NaT:
+                trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
+
+            # Scan 5min inside the lowest 15min zone for sub-trap
             df_5 = _resample(df_opt_today, 5)
+            df_5_in_zone = df_5[df_5["datetime"] >= trap_ts] if trap_ts is not pd.NaT else df_5
+            _, ltf5 = scanner.scan_htf(df_5_in_zone) if len(df_5_in_zone) >= 2 else (None, [])
+            ltf5_in = [e for e in (ltf5 or [])
+                       if e.get("status") in ("TRAPPED", "CLOSED")
+                       and float(e.get("zone_high", 0)) <= zh * 1.02
+                       and float(e.get("zone_low",  0)) >= zl * 0.98]
 
-            for ci, cz in enumerate(cas_zones):
-                zh = float(cz["zone_high"])
-                zl = float(cz["zone_low"])
-                # T2 = the NEXT 15-min zone's zone_high above this one (next bears' SL)
-                t2_val = float(cas_zones[ci + 1]["zone_high"]) if ci + 1 < len(cas_zones) else None
-                trap_ts = pd.to_datetime(cz.get("trapped_on") or cz.get("ref_ts"))
-                if trap_ts is not pd.NaT:
-                    trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
+            if ltf5_in:
+                # Pick lowest 5min sub-trap inside the 15min zone
+                best = min(ltf5_in, key=lambda e: float(e.get("zone_low", 9999)))
+                best["_mode"]     = "CASCADE-15m→5m"
+                best["_trap_pos"] = "LOWEST"
+                best["_htf_t1"]   = zh   # T1 = 15min zone_high
+                entry_signals.append(best)
+            else:
+                # No 5min sub-trap — use 15min zone itself
+                cz["_mode"]     = "CASCADE-15m"
+                cz["_trap_pos"] = "LOWEST"
+                entry_signals.append(cz)
 
-                # 5min bars INSIDE the 15min zone, after it was detected
-                df_5_in_zone = df_5[df_5["datetime"] >= trap_ts] if trap_ts is not pd.NaT else df_5
-
-                # Bearish LTF trap inside the 15min zone
-                _, ltf5 = scanner.scan_htf(df_5_in_zone) if len(df_5_in_zone) >= 2 else (None, [])
-                ltf5_in = [e for e in ltf5
-                           if e.get("status") in ("TRAPPED", "CLOSED")
-                           and float(e["zone_high"]) <= zh * 1.02
-                           and float(e["zone_low"])  >= zl * 0.98]
-
-                if not ltf5_in:
-                    # No 5min sub-trap found — use the 15min zone itself as entry
-                    cz["_mode"]     = "CASCADE-15m"
-                    cz["_trap_pos"] = "ONLY"
-                    if t2_val:
-                        cz["_t2"] = t2_val
-                    entry_signals.append(cz)
-                else:
-                    n = len(ltf5_in)
-                    for idx, le in enumerate(ltf5_in):
-                        le["_mode"]     = "CASCADE-15m->5m"
-                        le["_trap_pos"] = ("FIRST" if idx == 0
-                                           else "LAST" if idx == n - 1
-                                           else "MIDDLE")
-                        # T1 = parent 15-min zone_high (bears' SL = real target)
-                        le["_htf_t1"] = zh
-                        # T2 = next 15-min zone_high above parent
-                        if t2_val:
-                            le["_t2"] = t2_val
-                        entry_signals.append(le)
-
-            print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} cascade entry(s)")
+            print(f"  {trade_date} {opt_type} {strike} [{mode}]: cascade 15m zone {zl:.0f}-{zh:.0f}")
 
         if not entry_signals:
             continue
