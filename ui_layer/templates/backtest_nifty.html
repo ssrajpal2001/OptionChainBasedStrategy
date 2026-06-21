@@ -266,18 +266,20 @@
               <tr>
                 <th>Date</th>
                 <th>Opt</th>
-                <th>Strike</th>
+                <th title="Strike used for zone detection (S1/R1/ATM)">Scan</th>
+                <th title="Actual execution strike (1 ITM from ATM at trap time)">Exec</th>
+                <th title="Spot price at trap time">Spot</th>
+                <th title="Position of this trap among all 5min traps">Pos</th>
                 <th>Mode</th>
-                <th>Kind</th>
-                <th>Entry@</th>
-                <th>Exit@</th>
+                <th>Trap@</th>
+                <th>T1@</th>
+                <th>Entry</th>
                 <th>T1</th>
                 <th>SL</th>
-                <th>In</th>
-                <th>Out</th>
+                <th>Exit</th>
+                <th>Exit@</th>
                 <th>Reason</th>
                 <th>T1?</th>
-                <th>P&amp;L pts</th>
                 <th>P&amp;L ₹</th>
               </tr>
             </thead>
@@ -288,32 +290,36 @@
                   <td>
                     <span :class="t.opt_type==='CE' ? 'tag-ce' : 'tag-pe'" x-text="t.opt_type"></span>
                   </td>
-                  <td x-text="t.strike" class="font-mono"></td>
+                  <td x-text="t.scan_strike" class="font-mono text-t-muted"></td>
+                  <td x-text="t.exec_strike" class="font-mono font-700"></td>
+                  <td x-text="t.spot_at_entry" class="font-mono text-xs text-t-muted"></td>
+                  <td>
+                    <span class="text-xs font-700"
+                      :class="t.trap_pos==='FIRST' ? 'text-t-green' : t.trap_pos==='LAST' ? 'text-t-amber' : 'text-t-cyan'"
+                      x-text="t.trap_pos || '-'"></span>
+                  </td>
                   <td>
                     <span :class="t.gap_fired ? 'tag-gap' : 'tag-nogap'"
                           x-text="t.gap_fired ? 'GAP' : 'PIVOT'"></span>
                     <span class="text-t-muted text-xs ml-1" x-text="(t.mode || '').split(' ')[0]"></span>
                   </td>
-                  <td class="text-xs font-600" x-text="t.kind"></td>
+                  <td x-text="(t.entry_ts || '').slice(11,16)" class="font-mono text-xs text-t-cyan"></td>
+                  <td x-text="t.t1_ts ? (t.t1_ts).slice(11,16) : '-'" class="font-mono text-xs text-t-green"></td>
                   <td x-text="t.entry" class="font-mono"></td>
+                  <td x-text="t.t1" class="font-mono text-t-green"></td>
+                  <td x-text="t.sl" class="font-mono text-t-red"></td>
                   <td x-text="t.exit" class="font-mono"></td>
-                  <td x-text="t.t1" class="font-mono"></td>
-                  <td x-text="t.sl" class="font-mono"></td>
-                  <td x-text="(t.entry_ts || '').slice(11,16)" class="font-mono text-xs text-t-muted"></td>
                   <td x-text="(t.exit_ts || '').slice(11,16)" class="font-mono text-xs text-t-muted"></td>
                   <td x-text="t.reason" class="text-xs"></td>
                   <td x-text="t.t1_hit ? 'Y' : 'N'"
                       :class="t.t1_hit ? 'text-t-green font-700' : 'text-t-muted'"></td>
-                  <td x-text="t.pnl_pts > 0 ? '+' + t.pnl_pts : t.pnl_pts"
-                      :class="t.pnl_pts > 0 ? 'pnl-pos font-700' : t.pnl_pts < 0 ? 'pnl-neg font-700' : 'pnl-zero'"
-                      class="font-mono"></td>
                   <td :class="t.pnl_rs > 0 ? 'pnl-pos font-700' : t.pnl_rs < 0 ? 'pnl-neg font-700' : 'pnl-zero'"
                       x-text="'₹' + t.pnl_rs.toLocaleString('en-IN', {signDisplay:'always'})"
                       class="font-mono"></td>
                 </tr>
               </template>
               <template x-if="result.trades.length === 0">
-                <tr><td colspan="15" class="text-center text-t-muted py-6 text-sm">No trades found in this period</td></tr>
+                <tr><td colspan="17" class="text-center text-t-muted py-6 text-sm">No trades found in this period</td></tr>
               </template>
             </tbody>
           </table>
