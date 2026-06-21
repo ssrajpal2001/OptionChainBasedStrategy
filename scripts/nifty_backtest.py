@@ -361,7 +361,9 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             cap_total = profit_cap_per_lot * (total_qty / lot)
             running_rem = (bar_close - entry_price) * rem_qty
             if t1_pnl + running_rem >= cap_total:
-                exit_price  = bar_close
+                # exit rem at exact price that hits cap, not full bar_close
+                rem_needed  = cap_total - t1_pnl
+                exit_price  = round(entry_price + rem_needed / rem_qty, 2)
                 exit_reason = "PROFIT_CAP"
                 exit_ts     = bar_ts
                 break
