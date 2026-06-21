@@ -391,7 +391,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, lot: int, sl_buf: float,
 def _run_day(index: str, cfg: dict, trade_date: str,
              df_spot_all: pd.DataFrame,
              use_bias: bool, sl_buf: float,
-             opt_bar_cache: dict | None = None) -> list[dict]:
+             opt_bar_cache: dict | None = None,
+             strike_depth: str = "both") -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -428,12 +429,18 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         pe_near    = atm + cfg["gap_near"]         # PE1 = ATM+200
         pe_far     = atm + cfg.get("gap_far", cfg["gap_near"] * 2)  # PE2 = ATM+400
         base_mode  = f"GAP {gap_dir} {gap_pct:.1f}%"
-        legs = [
+        all_legs = [
             ("CE", ce_near, _option_key(index, ce_near, "CE", trade_dt_obj), "NEAR"),
             ("CE", ce_far,  _option_key(index, ce_far,  "CE", trade_dt_obj), "FAR"),
             ("PE", pe_near, _option_key(index, pe_near, "PE", trade_dt_obj), "NEAR"),
             ("PE", pe_far,  _option_key(index, pe_far,  "PE", trade_dt_obj), "FAR"),
         ]
+        if strike_depth == "near":
+            legs = [l for l in all_legs if l[3] == "NEAR"]
+        elif strike_depth == "far":
+            legs = [l for l in all_legs if l[3] == "FAR"]
+        else:
+            legs = all_legs
     else:
         ce_strike  = _round_strike(piv["S1"], step)
         pe_strike  = _round_strike(piv["R1"], step)
@@ -604,7 +611,9 @@ def _trading_days(start: date, end: date) -> list[str]:
 def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        start: str = "", end: str = "",
                        use_bias: bool = True, sl_buf: float = 2.0,
-                       monthly: bool = False) -> dict:
+                       monthly: bool = False,
+                       strike_depth: str = "both") -> dict:
+    # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     _USE_MONTHLY = monthly
@@ -655,7 +664,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     all_trades: list[dict] = []
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
-                              opt_bar_cache)
+                              opt_bar_cache, strike_depth)
         all_trades.extend(day_trades)
 
     # Summary

@@ -158,6 +158,22 @@
           </label>
         </div>
 
+        <!-- Strike Depth -->
+        <div>
+          <p class="text-sm font-600 text-t-bright mb-1">Strike Depth (Gap Days)</p>
+          <p class="text-xs text-t-muted mb-2">Which ITM strike to scan &amp; trade when gap fires</p>
+          <div class="grid grid-cols-3 gap-1">
+            <template x-for="opt in [{v:'near',l:'NEAR',sub:'ATM-200'},{v:'far',l:'FAR',sub:'ATM-400'},{v:'both',l:'BOTH',sub:'200+400'}]" :key="opt.v">
+              <button @click="strikeDepth=opt.v"
+                :class="strikeDepth===opt.v ? 'bg-[var(--t-cyan)] text-[var(--bg-card)] font-700' : 'bg-[var(--bg-row)] text-t-muted hover:text-t-bright'"
+                class="rounded py-1.5 text-xs text-center transition-colors">
+                <div x-text="opt.l"></div>
+                <div class="text-[0.6rem] opacity-70" x-text="opt.sub"></div>
+              </button>
+            </template>
+          </div>
+        </div>
+
         <!-- Use Bias -->
         <div class="flex items-center justify-between">
           <div>
@@ -312,8 +328,9 @@ function backtestNifty() {
     weeks:     2,
     startDate: '',
     endDate:   '',
-    useBias:   true,
-    monthly:   false,
+    useBias:     true,
+    monthly:     false,
+    strikeDepth: 'both',   // 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=200+400
     gapThresh: 0.5,
     slBuf:     2.0,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -347,11 +364,12 @@ function backtestNifty() {
       this.result  = null
 
       const payload = {
-        token:    this.token,
-        index:    this.index,
-        use_bias: this.useBias,
-        monthly:  this.monthly,
-        sl_buf:   this.slBuf,
+        token:        this.token,
+        index:        this.index,
+        use_bias:     this.useBias,
+        monthly:      this.monthly,
+        sl_buf:       this.slBuf,
+        strike_depth: this.strikeDepth,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks
