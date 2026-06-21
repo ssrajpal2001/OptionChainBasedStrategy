@@ -610,7 +610,7 @@ def _trading_days(start: date, end: date) -> list[str]:
 # ── Public entry point (called by API + CLI) ───────────────────────────────────
 def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        start: str = "", end: str = "",
-                       use_bias: bool = True, sl_buf: float = 2.0,
+                       use_bias: bool = True, sl_buf: float = 10.0,
                        monthly: bool = False,
                        strike_depth: str = "both") -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
