@@ -589,8 +589,11 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             print(f"  {trade_date} {opt_type} {strike}: no today option bars")
             continue
 
-        # ── Step 1: 75min HTF scan on full history (prev week + today) ──────
-        htf_bars = _resample(df_opt_all, htf_min)
+        # ── Step 1: HTF scan ────────────────────────────────────────────────
+        # >= 60min: institutional memory → scan full prev-week + today history
+        # <  60min: pure intraday concept → scan TODAY's bars only (no prev day reference)
+        htf_source = df_opt_all if htf_min >= 60 else df_opt_today
+        htf_bars = _resample(htf_source, htf_min)
         _, htf_entries = scanner.scan_htf(htf_bars) if len(htf_bars) >= 2 else (None, [])
 
         def _closed_today(e):
@@ -614,7 +617,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 htf_zones = [min(htf_zones, key=lambda z: float(z.get("zone_low", 9999)))]
             n = len(htf_zones)
             for idx, z in enumerate(htf_zones):
-                z["_mode"] = f"HTF-{htf_min}m"
+                z["_mode"] = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m"
                 z["_trap_pos"] = ("FIRST" if idx == 0
                                   else "LAST" if idx == n - 1
                                   else "MIDDLE")
