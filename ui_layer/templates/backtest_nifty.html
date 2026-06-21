@@ -244,7 +244,8 @@
           <div class="flex items-center justify-between mb-1">
             <span class="text-xs text-t-muted">Profit Cap / lot</span>
             <label class="flex items-center gap-1 cursor-pointer">
-              <input type="checkbox" x-model="profitCapOn" class="accent-[var(--t-cyan)]" />
+              <input type="checkbox" x-model="profitCapOn" class="accent-[var(--t-cyan)]"
+                @change="if(profitCapOn) profitFloorOn=false" />
               <span class="text-xs" x-text="profitCapOn ? 'ON' : 'OFF'"
                 :class="profitCapOn ? 'text-[var(--t-cyan)]' : 'text-t-muted'"></span>
             </label>
@@ -255,6 +256,28 @@
                 <span>Close all when total P&L ≥ ₹<span x-text="profitCap"></span> × lots</span>
               </div>
               <input type="range" x-model.number="profitCap" min="1000" max="15000" step="500"
+                class="w-full accent-[var(--t-cyan)]" />
+            </div>
+          </template>
+        </div>
+
+        <!-- Profit Floor toggle -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs text-t-muted">Profit Floor (total trade)</span>
+            <label class="flex items-center gap-1 cursor-pointer">
+              <input type="checkbox" x-model="profitFloorOn" class="accent-[var(--t-cyan)]"
+                @change="if(profitFloorOn) profitCapOn=false" />
+              <span class="text-xs" x-text="profitFloorOn ? 'ON' : 'OFF'"
+                :class="profitFloorOn ? 'text-[var(--t-cyan)]' : 'text-t-muted'"></span>
+            </label>
+          </div>
+          <template x-if="profitFloorOn">
+            <div>
+              <div class="flex justify-between text-xs text-t-muted mb-1">
+                <span>Lock ₹<span x-text="profitFloor.toLocaleString('en-IN')"></span> total · TSL continues · exit if P&L drops below lock</span>
+              </div>
+              <input type="range" x-model.number="profitFloor" min="2000" max="20000" step="1000"
                 class="w-full accent-[var(--t-cyan)]" />
             </div>
           </template>
@@ -406,6 +429,8 @@ function backtestNifty() {
     slBuf:        10.0,
     profitCapOn:  false,
     profitCap:    5000,
+    profitFloorOn: false,
+    profitFloor:   10000,
     use1itm:      false,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
@@ -449,8 +474,9 @@ function backtestNifty() {
         monthly:      this.monthly,
         sl_buf:             this.slBuf,
         strike_depth:       this.strikeDepth,
-        profit_cap_per_lot: this.profitCapOn ? this.profitCap : 0,
-        use_1itm:           this.use1itm,
+        profit_cap_per_lot:   this.profitCapOn   ? this.profitCap   : 0,
+        profit_floor_per_lot: this.profitFloorOn ? this.profitFloor : 0,
+        use_1itm:             this.use1itm,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks
@@ -557,7 +583,7 @@ function backtestNifty() {
           <td class="font-mono" style="color:#ef4444">${t.sl}</td>
           <td class="font-mono">${t.exit}</td>
           <td class="font-mono" style="font-size:0.75rem;color:#6b7280">${exitTs}</td>
-          <td style="font-size:0.75rem;color:${t.reason==='PROFIT_CAP'?'#f59e0b':t.reason==='T2'?'#a78bfa':t.reason==='SL'?'#ef4444':'#6b7280'}">${t.reason}</td>
+          <td style="font-size:0.75rem;color:${t.reason==='PROFIT_CAP'?'#f59e0b':t.reason==='FLOOR_SL'?'#22d3ee':t.reason==='T2'?'#a78bfa':t.reason==='SL'?'#ef4444':'#6b7280'}">${t.reason}</td>
           <td>${t1Hit}</td>
           <td class="font-mono" style="font-size:0.75rem;color:#6b7280">${capRs}</td>
           <td class="font-mono ${roiCls}" style="font-size:0.75rem;font-weight:600">${roiFmt}</td>

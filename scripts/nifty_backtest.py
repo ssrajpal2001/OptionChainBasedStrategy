@@ -280,7 +280,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                    lot: int, sl_buf: float,
                    opt_type: str, trade_date: str, strike: int,
                    spot_at_entry: float,
-                   profit_cap_per_lot: float = 0.0) -> Optional[dict]:
+                   profit_cap_per_lot: float = 0.0,
+                   profit_floor_per_lot: float = 0.0) -> Optional[dict]:
     """
     Exit rules:
       T1    : 50% qty @ HTF zone_high (bears' SL). TSL starts at entry (breakeven).
@@ -332,14 +333,16 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 trap_events.append((ev_ts, z5_low))
     trap_events.sort(key=lambda x: x[0])
 
-    t1_hit      = False
-    t1_pnl      = 0.0
-    t1_exit_ts  = None
-    trail_sl    = init_sl   # tracks zone_low (support floor); SL fires on close < zone_low−sl_buf
-    exit_price  = None
-    exit_reason = "OPEN"
-    exit_ts     = None
-    trap_idx    = 0
+    t1_hit          = False
+    t1_pnl          = 0.0
+    t1_exit_ts      = None
+    trail_sl        = init_sl
+    exit_price      = None
+    exit_reason     = "OPEN"
+    exit_ts         = None
+    trap_idx        = 0
+    floor_locked    = False   # True once total P&L first hits profit_floor_per_lot×lots
+    locked_floor_rs = 0.0    # the floor amount in ₹ once locked
 
     for _, row in future.iterrows():
         bar_ts    = row["datetime"]
@@ -356,15 +359,29 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             t1_pnl     = round((t1_price - entry_price) * t1_qty, 2)
             trail_sl   = entry_price   # breakeven: TSL = where we entered
 
-        # Profit cap: total trade P&L >= cap_per_lot × lots → close all
+        # Profit cap: total trade P&L >= cap_per_lot × lots → close all immediately
         if t1_hit and profit_cap_per_lot > 0:
             cap_total = profit_cap_per_lot * (total_qty / lot)
             running_rem = (bar_close - entry_price) * rem_qty
             if t1_pnl + running_rem >= cap_total:
-                # exit rem at exact price that hits cap, not full bar_close
                 rem_needed  = cap_total - t1_pnl
                 exit_price  = round(entry_price + rem_needed / rem_qty, 2)
                 exit_reason = "PROFIT_CAP"
+                exit_ts     = bar_ts
+                break
+
+        # Profit floor: once TOTAL trade P&L (t1+running rem) hits the floor,
+        # LOCK that amount. Continue holding. Exit only if P&L drops back below floor.
+        # floor is per-TRADE (t1_pnl already includes T1 fill at T1_price).
+        if t1_hit and profit_floor_per_lot > 0:
+            running_rem = (bar_close - entry_price) * rem_qty
+            current_pnl = t1_pnl + running_rem     # total trade P&L so far
+            if not floor_locked and current_pnl >= profit_floor_per_lot:
+                floor_locked    = True
+                locked_floor_rs = profit_floor_per_lot   # e.g. ₹10,000 per trade
+            if floor_locked and current_pnl < locked_floor_rs:
+                exit_price  = bar_close
+                exit_reason = "FLOOR_SL"
                 exit_ts     = bar_ts
                 break
 
@@ -453,7 +470,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              opt_bar_cache: dict | None = None,
              strike_depth: str = "both",
              profit_cap_per_lot: float = 0.0,
-             use_1itm: bool = False) -> list[dict]:
+             use_1itm: bool = False,
+             profit_floor_per_lot: float = 0.0) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -691,6 +709,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 lot, sl_buf, opt_type, trade_date,
                 strike=exec_strike, spot_at_entry=spot_val,
                 profit_cap_per_lot=profit_cap_per_lot,
+                profit_floor_per_lot=profit_floor_per_lot,
             )
             if result:
                 result["index"]        = index
@@ -723,7 +742,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        monthly: bool = False,
                        strike_depth: str = "both",
                        profit_cap_per_lot: float = 0.0,
-                       use_1itm: bool = False) -> dict:
+                       use_1itm: bool = False,
+                       profit_floor_per_lot: float = 0.0) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -775,7 +795,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     all_trades: list[dict] = []
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
-                              opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm)
+                              opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm,
+                              profit_floor_per_lot)
         all_trades.extend(day_trades)
 
     # Summary
