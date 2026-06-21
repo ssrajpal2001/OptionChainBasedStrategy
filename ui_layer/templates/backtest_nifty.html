@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NIFTY / SENSEX Options Backtest — AlgoTrader</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono:    ['JetBrains Mono', 'monospace'],
+            display: ['Plus Jakarta Sans', 'sans-serif'],
+            ui:      ['Plus Jakarta Sans', 'sans-serif'],
+          },
+          colors: {
+            t: {
+              bg:      'var(--t-bg)',      surface: 'var(--t-surface)',
+              card:    'var(--t-card)',    border:  'var(--t-border)',
+              dim:     'var(--t-dim)',     cyan:    'var(--t-cyan)',
+              green:   'var(--t-green)',   red:     'var(--t-red)',
+              amber:   'var(--t-amber)',   muted:   'var(--t-muted)',
+              text:    'var(--t-text)',    bright:  'var(--t-bright)',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --t-bg:#ffffff; --t-surface:#f9f9f9; --t-card:#ffffff; --t-border:#e9e9ed;
+      --t-dim:#d8d8dd; --t-cyan:#387ED1; --t-green:#4CA64C; --t-red:#FF5722;
+      --t-amber:#F5A623; --t-muted:#9b9b9b; --t-text:#3c3c3c; --t-bright:#1a1a1a;
+      --t-cyan-rgb:56,126,209; --t-green-rgb:76,166,76;
+      --t-red-rgb:255,87,34;   --t-amber-rgb:245,166,35;
+    }
+    [x-cloak]{display:none!important}
+    *{box-sizing:border-box} html,body{height:100%;margin:0}
+    body{background:var(--t-bg);color:var(--t-text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px}
+    .t-card{background:var(--t-card);border:1px solid var(--t-border);border-radius:10px}
+    .sec-label{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t-muted)}
+    .t-input{font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-bright);padding:7px 10px;border-radius:6px;width:100%;outline:none;transition:border-color .15s}
+    .t-input:focus{border-color:rgba(var(--t-cyan-rgb),.5);box-shadow:0 0 0 3px rgba(var(--t-cyan-rgb),.10)}
+    .t-input option{background:var(--t-card);color:var(--t-bright)}
+    .btn-primary{font-size:13px;font-weight:700;letter-spacing:.04em;padding:10px 24px;border-radius:7px;background:var(--t-cyan);border:none;color:#000;cursor:pointer;transition:all .15s;width:100%}
+    .btn-primary:hover{opacity:.85;box-shadow:0 0 18px rgba(var(--t-cyan-rgb),.35)}
+    .btn-primary:disabled{opacity:.45;cursor:not-allowed}
+    .toggle-track{display:inline-flex;align-items:center;cursor:pointer;gap:8px;font-size:13px;font-weight:600}
+    .toggle-track input{display:none}
+    .toggle-pip{width:38px;height:20px;border-radius:99px;background:var(--t-dim);position:relative;transition:background .2s}
+    .toggle-pip::after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .2s}
+    input:checked ~ .toggle-pip{background:var(--t-cyan)}
+    input:checked ~ .toggle-pip::after{left:21px}
+    .bt-table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12px}
+    .bt-table th{padding:8px 10px;text-align:left;color:var(--t-muted);font-weight:600;font-size:11px;border-bottom:1px solid var(--t-border);position:sticky;top:0;background:var(--t-card);z-index:1}
+    .bt-table td{padding:7px 10px;border-bottom:1px solid var(--t-border);white-space:nowrap}
+    .bt-table tr:last-child td{border-bottom:none}
+    .bt-table tr:hover td{background:rgba(var(--t-cyan-rgb),.03)}
+    .stat-card{padding:16px 20px;border-radius:10px;border:1px solid var(--t-border)}
+    .stat-val{font-size:22px;font-weight:800;font-family:'JetBrains Mono',monospace}
+    .pnl-pos{color:var(--t-green)} .pnl-neg{color:var(--t-red)} .pnl-zero{color:var(--t-muted)}
+    .tag-ce{background:rgba(var(--t-cyan-rgb),.12);color:var(--t-cyan);border-radius:4px;padding:1px 5px;font-size:11px;font-weight:700}
+    .tag-pe{background:rgba(var(--t-red-rgb),.10);color:var(--t-red);border-radius:4px;padding:1px 5px;font-size:11px;font-weight:700}
+    .tag-gap{background:rgba(var(--t-amber-rgb),.12);color:var(--t-amber);border-radius:4px;padding:1px 5px;font-size:10px}
+    .tag-nogap{background:rgba(var(--t-green-rgb),.10);color:var(--t-green);border-radius:4px;padding:1px 5px;font-size:10px}
+  </style>
+</head>
+<body x-data="backtestNifty()" x-init="init()">
+
+<!-- NAV -->
+<div class="flex items-center justify-between px-6 py-3 border-b border-t-border bg-t-card">
+  <div class="flex items-center gap-3">
+    <span class="font-display font-800 text-t-bright text-base">AlgoTrader</span>
+    <span class="text-t-dim">|</span>
+    <span class="text-t-cyan font-semibold text-sm">Options Backtest</span>
+  </div>
+  <div class="flex gap-3 text-sm">
+    <a href="/" class="text-t-muted hover:text-t-cyan transition-colors">Dashboard</a>
+    <a href="/backtest" class="text-t-muted hover:text-t-cyan transition-colors">CrudeOil BT</a>
+  </div>
+</div>
+
+<div class="flex h-[calc(100vh-49px)]">
+
+  <!-- LEFT PANEL: Controls -->
+  <div class="w-72 flex-shrink-0 border-r border-t-border overflow-y-auto p-4 flex flex-col gap-4">
+
+    <div>
+      <p class="sec-label mb-2">Index</p>
+      <select x-model="index" class="t-input">
+        <option value="NIFTY">NIFTY (NSE)</option>
+        <option value="SENSEX">SENSEX (BSE)</option>
+      </select>
+    </div>
+
+    <!-- Date mode -->
+    <div>
+      <p class="sec-label mb-2">Date Range</p>
+      <div class="flex gap-2 mb-2">
+        <button @click="dateMode='weeks'"
+          :class="dateMode==='weeks' ? 'border-t-cyan text-t-cyan bg-[rgba(var(--t-cyan-rgb),.07)]' : 'border-t-border text-t-muted'"
+          class="flex-1 border rounded-md text-xs font-700 py-1.5 transition-all">Rolling</button>
+        <button @click="dateMode='range'"
+          :class="dateMode==='range' ? 'border-t-cyan text-t-cyan bg-[rgba(var(--t-cyan-rgb),.07)]' : 'border-t-border text-t-muted'"
+          class="flex-1 border rounded-md text-xs font-700 py-1.5 transition-all">Custom</button>
+      </div>
+
+      <template x-if="dateMode==='weeks'">
+        <div>
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>Weeks back</span><span x-text="weeks + ' wk'" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="weeks" min="1" max="4" step="1" class="w-full accent-[var(--t-cyan)]" />
+          <p class="text-xs text-t-muted mt-1">
+            <span x-text="weekStart()"></span> → today
+          </p>
+        </div>
+      </template>
+
+      <template x-if="dateMode==='range'">
+        <div class="flex flex-col gap-2">
+          <div>
+            <p class="text-xs text-t-muted mb-1">From</p>
+            <input type="date" x-model="startDate" class="t-input" />
+          </div>
+          <div>
+            <p class="text-xs text-t-muted mb-1">To</p>
+            <input type="date" x-model="endDate" class="t-input" />
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Strategy settings -->
+    <div>
+      <p class="sec-label mb-2">Strategy</p>
+      <div class="flex flex-col gap-3">
+
+        <!-- Use Bias -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">Gap Bias Filter</p>
+            <p class="text-xs text-t-muted">UP gap → CE only · DOWN gap → PE only</p>
+          </div>
+          <label class="toggle-track">
+            <input type="checkbox" x-model="useBias" />
+            <span class="toggle-pip"></span>
+          </label>
+        </div>
+
+        <!-- Gap threshold -->
+        <div>
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>Min Gap % to classify</span>
+            <span x-text="gapThresh.toFixed(1) + '%'" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="gapThresh" min="0.1" max="2.0" step="0.1" class="w-full accent-[var(--t-cyan)]" />
+          <p class="text-xs text-t-muted">Gap ≥ <span x-text="gapThresh.toFixed(1)"></span>% → intraday cascade</p>
+        </div>
+
+        <!-- SL Buffer -->
+        <div>
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>SL Buffer (pts)</span>
+            <span x-text="slBuf" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="slBuf" min="1" max="10" step="0.5" class="w-full accent-[var(--t-cyan)]" />
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Token -->
+    <div>
+      <p class="sec-label mb-2">Upstox Token</p>
+      <input type="password" x-model="token" class="t-input font-mono text-xs" placeholder="Bearer token…" />
+    </div>
+
+    <button class="btn-primary mt-auto" @click="runBacktest()"
+      :disabled="running || !token">
+      <span x-show="!running">▶ Run Backtest</span>
+      <span x-show="running" x-cloak>⏳ Running…</span>
+    </button>
+
+    <p x-show="error" x-text="error" class="text-t-red text-xs text-center" x-cloak></p>
+  </div>
+
+  <!-- RIGHT PANEL: Results -->
+  <div class="flex-1 overflow-y-auto p-6 flex flex-col gap-6">
+
+    <!-- Empty state -->
+    <template x-if="!result && !running">
+      <div class="flex-1 flex flex-col items-center justify-center text-t-muted gap-3 mt-20">
+        <div class="text-5xl">📊</div>
+        <p class="font-600 text-t-bright">Configure and run a backtest</p>
+        <p class="text-sm">Detects 75min HTF traps on option premium bars<br>No-gap: S1/R1 pivot strikes · Gap: ATM±1 ITM</p>
+      </div>
+    </template>
+
+    <template x-if="running">
+      <div class="flex-1 flex items-center justify-center mt-20">
+        <div class="text-center text-t-muted">
+          <p class="text-2xl mb-2">⏳</p>
+          <p class="font-600 text-t-bright">Fetching option bars &amp; scanning zones…</p>
+          <p class="text-sm mt-1">May take 30–60s depending on date range</p>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="result && !running">
+
+      <!-- Summary cards -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div class="stat-card">
+          <p class="sec-label mb-1">Trades</p>
+          <p class="stat-val text-t-bright" x-text="result.summary.trades"></p>
+          <p class="text-xs text-t-muted mt-1" x-text="result.summary.days + ' days'"></p>
+        </div>
+        <div class="stat-card">
+          <p class="sec-label mb-1">Win Rate</p>
+          <p class="stat-val" :class="result.summary.win_pct >= 50 ? 'pnl-pos' : 'pnl-neg'"
+             x-text="result.summary.win_pct + '%'"></p>
+          <p class="text-xs text-t-muted mt-1" x-text="result.summary.wins + 'W / ' + result.summary.losses + 'L'"></p>
+        </div>
+        <div class="stat-card">
+          <p class="sec-label mb-1">Total P&amp;L</p>
+          <p class="stat-val" :class="result.summary.total_rs > 0 ? 'pnl-pos' : result.summary.total_rs < 0 ? 'pnl-neg' : 'pnl-zero'"
+             x-text="'₹' + result.summary.total_rs.toLocaleString('en-IN', {signDisplay:'always'})"></p>
+          <p class="text-xs text-t-muted mt-1" x-text="'Avg W: ₹' + Math.abs(result.summary.avg_win).toLocaleString('en-IN')"></p>
+        </div>
+        <div class="stat-card">
+          <p class="sec-label mb-1">Profit Factor</p>
+          <p class="stat-val" :class="result.summary.profit_factor >= 1.5 ? 'pnl-pos' : result.summary.profit_factor < 1 ? 'pnl-neg' : 'text-t-amber'"
+             x-text="result.summary.profit_factor"></p>
+          <p class="text-xs text-t-muted mt-1" x-text="'Avg L: ₹' + Math.abs(result.summary.avg_loss).toLocaleString('en-IN')"></p>
+        </div>
+      </div>
+
+      <!-- Equity curve -->
+      <div class="t-card p-4" x-show="result.equity && result.equity.length > 0">
+        <p class="sec-label mb-3">Equity Curve</p>
+        <div style="height:180px">
+          <canvas x-ref="equityChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Trade log -->
+      <div class="t-card overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 border-b border-t-border">
+          <p class="sec-label">Trade Log</p>
+          <p class="text-xs text-t-muted font-mono" x-text="result.trades.length + ' trades'"></p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="bt-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Opt</th>
+                <th>Strike</th>
+                <th>Mode</th>
+                <th>Kind</th>
+                <th>Entry@</th>
+                <th>Exit@</th>
+                <th>T1</th>
+                <th>SL</th>
+                <th>In</th>
+                <th>Out</th>
+                <th>Reason</th>
+                <th>T1?</th>
+                <th>P&amp;L pts</th>
+                <th>P&amp;L ₹</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="t in result.trades" :key="t.date + t.opt_type + t.entry_ts">
+                <tr>
+                  <td x-text="t.date"></td>
+                  <td>
+                    <span :class="t.opt_type==='CE' ? 'tag-ce' : 'tag-pe'" x-text="t.opt_type"></span>
+                  </td>
+                  <td x-text="t.strike" class="font-mono"></td>
+                  <td>
+                    <span :class="t.gap_fired ? 'tag-gap' : 'tag-nogap'"
+                          x-text="t.gap_fired ? 'GAP' : 'PIVOT'"></span>
+                    <span class="text-t-muted text-xs ml-1" x-text="(t.mode || '').split(' ')[0]"></span>
+                  </td>
+                  <td class="text-xs font-600" x-text="t.kind"></td>
+                  <td x-text="t.entry" class="font-mono"></td>
+                  <td x-text="t.exit" class="font-mono"></td>
+                  <td x-text="t.t1" class="font-mono"></td>
+                  <td x-text="t.sl" class="font-mono"></td>
+                  <td x-text="(t.entry_ts || '').slice(11,16)" class="font-mono text-xs text-t-muted"></td>
+                  <td x-text="(t.exit_ts || '').slice(11,16)" class="font-mono text-xs text-t-muted"></td>
+                  <td x-text="t.reason" class="text-xs"></td>
+                  <td x-text="t.t1_hit ? 'Y' : 'N'"
+                      :class="t.t1_hit ? 'text-t-green font-700' : 'text-t-muted'"></td>
+                  <td x-text="t.pnl_pts > 0 ? '+' + t.pnl_pts : t.pnl_pts"
+                      :class="t.pnl_pts > 0 ? 'pnl-pos font-700' : t.pnl_pts < 0 ? 'pnl-neg font-700' : 'pnl-zero'"
+                      class="font-mono"></td>
+                  <td :class="t.pnl_rs > 0 ? 'pnl-pos font-700' : t.pnl_rs < 0 ? 'pnl-neg font-700' : 'pnl-zero'"
+                      x-text="'₹' + t.pnl_rs.toLocaleString('en-IN', {signDisplay:'always'})"
+                      class="font-mono"></td>
+                </tr>
+              </template>
+              <template x-if="result.trades.length === 0">
+                <tr><td colspan="15" class="text-center text-t-muted py-6 text-sm">No trades found in this period</td></tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </template>
+  </div><!-- right panel -->
+</div>
+
+<script>
+function backtestNifty() {
+  return {
+    // Controls
+    index:     'NIFTY',
+    dateMode:  'weeks',
+    weeks:     2,
+    startDate: '',
+    endDate:   '',
+    useBias:   true,
+    gapThresh: 0.5,
+    slBuf:     2.0,
+    token:     sessionStorage.getItem('upstox_token') || '',
+
+    // State
+    running: false,
+    error:   '',
+    result:  null,
+    _chart:  null,
+
+    init() {
+      // default custom dates
+      const today = new Date()
+      const twoWk = new Date(today)
+      twoWk.setDate(today.getDate() - 14)
+      this.endDate   = today.toISOString().slice(0, 10)
+      this.startDate = twoWk.toISOString().slice(0, 10)
+    },
+
+    weekStart() {
+      const d = new Date()
+      d.setDate(d.getDate() - this.weeks * 7)
+      return d.toISOString().slice(0, 10)
+    },
+
+    async runBacktest() {
+      if (!this.token) { this.error = 'Token required'; return }
+      sessionStorage.setItem('upstox_token', this.token)
+      this.running = true
+      this.error   = ''
+      this.result  = null
+
+      const payload = {
+        token:    this.token,
+        index:    this.index,
+        use_bias: this.useBias,
+        sl_buf:   this.slBuf,
+      }
+      if (this.dateMode === 'weeks') {
+        payload.weeks = this.weeks
+        payload.start = ''
+        payload.end   = ''
+      } else {
+        payload.weeks = 2
+        payload.start = this.startDate
+        payload.end   = this.endDate
+      }
+
+      try {
+        const r = await fetch('/api/backtest/nifty', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        const data = await r.json()
+        if (!data.ok) { this.error = data.error || 'Server error'; return }
+        this.result = data
+        this.$nextTick(() => this._drawChart())
+      } catch(e) {
+        this.error = 'Request failed: ' + e.message
+      } finally {
+        this.running = false
+      }
+    },
+
+    _drawChart() {
+      if (!this.result?.equity?.length) return
+      const ctx = this.$refs.equityChart
+      if (!ctx) return
+      if (this._chart) { this._chart.destroy(); this._chart = null }
+
+      const labels = this.result.equity.map(p => p.date)
+      const vals   = this.result.equity.map(p => p.equity)
+      const pos    = vals[vals.length - 1] >= 0
+
+      this._chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            data: vals,
+            borderColor: pos ? '#4CA64C' : '#FF5722',
+            backgroundColor: pos
+              ? 'rgba(76,166,76,0.08)' : 'rgba(255,87,34,0.08)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 3,
+            borderWidth: 2,
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { font: { family: 'JetBrains Mono', size: 10 }, color: '#9b9b9b' },
+                 grid: { color: '#e9e9ed' } },
+            y: { ticks: { font: { family: 'JetBrains Mono', size: 10 }, color: '#9b9b9b',
+                          callback: v => '₹' + v.toLocaleString('en-IN') },
+                 grid: { color: '#e9e9ed' } }
+          }
+        }
+      })
+    },
+  }
+}
+</script>
+</body>
+</html>

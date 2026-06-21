@@ -407,9 +407,10 @@ try:
 except ImportError:
     _HAS_FASTAPI = False
 
-_TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
-_MONITOR_HTML  = os.path.join(_TEMPLATE_DIR, "monitor.html")
-_BACKTEST_HTML = os.path.join(_TEMPLATE_DIR, "backtest.html")
+_TEMPLATE_DIR      = os.path.join(os.path.dirname(__file__), "templates")
+_MONITOR_HTML       = os.path.join(_TEMPLATE_DIR, "monitor.html")
+_BACKTEST_HTML      = os.path.join(_TEMPLATE_DIR, "backtest.html")
+_BACKTEST_NIFTY_HTML = os.path.join(_TEMPLATE_DIR, "backtest_nifty.html")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Historical replay helpers  (pure functions — no I/O, no imports at module level)
@@ -742,6 +743,37 @@ class DashboardServer:
             if not os.path.exists(_BACKTEST_HTML):
                 return HTMLResponse("<h1>backtest.html not found</h1>", status_code=503)
             return FileResponse(_BACKTEST_HTML, media_type="text/html")
+
+        @app.get("/backtest/nifty", include_in_schema=False)
+        async def backtest_nifty_ui():
+            if not os.path.exists(_BACKTEST_NIFTY_HTML):
+                return HTMLResponse("<h1>backtest_nifty.html not found</h1>", status_code=503)
+            return FileResponse(_BACKTEST_NIFTY_HTML, media_type="text/html")
+
+        @app.post("/api/backtest/nifty", tags=["Admin"])
+        async def run_backtest_nifty(request: Request):
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            token  = p.get("token", "")
+            index  = p.get("index", "NIFTY")
+            weeks  = int(p.get("weeks", 2))
+            start  = p.get("start", "")
+            end    = p.get("end", "")
+            bias   = bool(p.get("use_bias", True))
+            sl_buf = float(p.get("sl_buf", 2.0))
+            if not token:
+                return {"ok": False, "error": "token required"}
+            try:
+                from scripts.nifty_backtest import run_nifty_backtest
+                result = await asyncio.to_thread(
+                    run_nifty_backtest, token, index, weeks, start, end, bias, sl_buf
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
 
         # ── PUBLIC — Authentication ───────────────────────────────────────────
 
