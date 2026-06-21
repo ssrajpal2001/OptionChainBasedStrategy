@@ -325,39 +325,28 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     #   small (< BIG_CANDLE_PTS): enter when next bar breaks above its HIGH
     #   big  (>= BIG_CANDLE_PTS): enter when price reaches 50% from candle LOW
     # If no confirmation within session → no trade.
-    BIG_CANDLE_PTS = 30.0   # NIFTY: 30pts separates small vs big rejection candle
-
     entry_price  = None
     actual_entry_ts = None
     future_1m_all = exec_bars[exec_bars["datetime"] > trap_ts]
 
-    rejection_bar = None   # (high, low) of first 1min bar that touched zone_low area
+    rejection_bar = None   # (high, ts) of first 1min bar that touched zone_low area
 
     for _, rb in future_1m_all.iterrows():
-        rb_ts    = rb["datetime"]
-        rb_high  = float(rb["high"])
-        rb_low   = float(rb["low"])
-        rb_range = rb_high - rb_low
+        rb_ts   = rb["datetime"]
+        rb_high = float(rb["high"])
+        rb_low  = float(rb["low"])
 
         if rejection_bar is None:
-            # Look for first 1min bar that touches zone_trigger (zone_low area)
+            # First 1min bar whose low touches zone_trigger (zone_low area)
             if rb_low <= scan_entry:
-                rejection_bar = (rb_high, rb_low, rb_range, rb_ts)
+                rejection_bar = (rb_high, rb_ts)
         else:
-            ph, pl, pr, _ = rejection_bar
-            if pr < BIG_CANDLE_PTS:
-                # Small candle: enter when this bar breaks ABOVE rejection candle high
-                if rb_high > ph:
-                    entry_price     = round(ph, 2)   # entry at rejection candle high
-                    actual_entry_ts = rb_ts
-                    break
-            else:
-                # Big candle: enter when price reaches 50% from candle low (midpoint)
-                midpoint = round(pl + pr * 0.5, 2)
-                if rb_low <= midpoint:
-                    entry_price     = midpoint
-                    actual_entry_ts = rb_ts
-                    break
+            rej_high, _ = rejection_bar
+            # Any subsequent bar that breaks ABOVE rejection candle high → ENTRY
+            if rb_high > rej_high:
+                entry_price     = round(rej_high, 2)   # entry = rejection candle HIGH
+                actual_entry_ts = rb_ts
+                break
 
     if entry_price is None or entry_price <= 0:
         return None   # no 1min confirmation → skip trade
