@@ -359,12 +359,11 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             t1_pnl     = round((t1_price - entry_price) * t1_qty, 2)
             trail_sl   = entry_price   # breakeven: TSL = where we entered
 
-        # Profit cap: total trade P&L >= cap_per_lot × lots → close all immediately
+        # Profit cap: total trade P&L >= cap (per-trade total) → close all immediately
         if t1_hit and profit_cap_per_lot > 0:
-            cap_total = profit_cap_per_lot * (total_qty / lot)
             running_rem = (bar_close - entry_price) * rem_qty
-            if t1_pnl + running_rem >= cap_total:
-                rem_needed  = cap_total - t1_pnl
+            if t1_pnl + running_rem >= profit_cap_per_lot:
+                rem_needed  = profit_cap_per_lot - t1_pnl
                 exit_price  = round(entry_price + rem_needed / rem_qty, 2)
                 exit_reason = "PROFIT_CAP"
                 exit_ts     = bar_ts

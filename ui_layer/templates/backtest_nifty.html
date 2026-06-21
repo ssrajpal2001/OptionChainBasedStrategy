@@ -242,7 +242,7 @@
         <!-- Profit Cap toggle -->
         <div>
           <div class="flex items-center justify-between mb-1">
-            <span class="text-xs text-t-muted">Profit Cap / lot</span>
+            <span class="text-xs text-t-muted">Profit Cap (total trade)</span>
             <label class="flex items-center gap-1 cursor-pointer">
               <input type="checkbox" x-model="profitCapOn" class="accent-[var(--t-cyan)]"
                 @change="if(profitCapOn) profitFloorOn=false" />
@@ -253,9 +253,9 @@
           <template x-if="profitCapOn">
             <div>
               <div class="flex justify-between text-xs text-t-muted mb-1">
-                <span>Close all when total P&L ≥ ₹<span x-text="profitCap"></span> × lots</span>
+                <span>Exit immediately when total P&L ≥ ₹<span x-text="profitCap.toLocaleString('en-IN')"></span></span>
               </div>
-              <input type="range" x-model.number="profitCap" min="1000" max="15000" step="500"
+              <input type="range" x-model.number="profitCap" min="2000" max="20000" step="1000"
                 class="w-full accent-[var(--t-cyan)]" />
             </div>
           </template>
@@ -428,7 +428,7 @@ function backtestNifty() {
     gapThresh:    0.5,
     slBuf:        10.0,
     profitCapOn:  false,
-    profitCap:    5000,
+    profitCap:    10000,
     profitFloorOn: false,
     profitFloor:   10000,
     use1itm:      false,
