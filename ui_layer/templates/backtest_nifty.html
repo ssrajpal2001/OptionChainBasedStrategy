@@ -45,7 +45,7 @@
       --t-red-rgb:255,87,34;   --t-amber-rgb:245,166,35;
     }
     [x-cloak]{display:none!important}
-    *{box-sizing:border-box} html,body{height:100%;margin:0}
+    *{box-sizing:border-box} html,body{margin:0}
     body{background:var(--t-bg);color:var(--t-text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px}
     .t-card{background:var(--t-card);border:1px solid var(--t-border);border-radius:10px}
     .sec-label{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t-muted)}
@@ -66,34 +66,68 @@
     .bt-table td{padding:7px 10px;border-bottom:1px solid var(--t-border);white-space:nowrap}
     .bt-table tr:last-child td{border-bottom:none}
     .bt-table tr:hover td{background:rgba(var(--t-cyan-rgb),.03)}
-    .stat-card{padding:16px 20px;border-radius:10px;border:1px solid var(--t-border)}
-    .stat-val{font-size:22px;font-weight:800;font-family:'JetBrains Mono',monospace}
+    .stat-card{padding:14px 16px;border-radius:10px;border:1px solid var(--t-border)}
+    .stat-val{font-size:20px;font-weight:800;font-family:'JetBrains Mono',monospace}
     .pnl-pos{color:var(--t-green)} .pnl-neg{color:var(--t-red)} .pnl-zero{color:var(--t-muted)}
     .tag-ce{background:rgba(var(--t-cyan-rgb),.12);color:var(--t-cyan);border-radius:4px;padding:1px 5px;font-size:11px;font-weight:700}
     .tag-pe{background:rgba(var(--t-red-rgb),.10);color:var(--t-red);border-radius:4px;padding:1px 5px;font-size:11px;font-weight:700}
     .tag-gap{background:rgba(var(--t-amber-rgb),.12);color:var(--t-amber);border-radius:4px;padding:1px 5px;font-size:10px}
     .tag-nogap{background:rgba(var(--t-green-rgb),.10);color:var(--t-green);border-radius:4px;padding:1px 5px;font-size:10px}
+
+    /* ── Mobile layout ───────────────────────────────────────────────── */
+    .page-layout{display:flex;flex-direction:column;min-height:calc(100vh - 49px)}
+    .ctrl-panel{width:100%;padding:16px;border-bottom:1px solid var(--t-border);
+                background:var(--t-card);display:flex;flex-direction:column;gap:16px}
+    .results-panel{flex:1;padding:16px;display:flex;flex-direction:column;gap:16px;overflow-x:hidden}
+    /* collapsible controls on mobile */
+    .ctrl-toggle-btn{display:flex;align-items:center;justify-between;width:100%;
+                     background:none;border:none;padding:0;cursor:pointer;
+                     font-size:13px;font-weight:700;color:var(--t-bright)}
+    .ctrl-body{display:flex;flex-direction:column;gap:16px}
+    /* desktop: side-by-side */
+    @media(min-width:768px){
+      .page-layout{flex-direction:row;height:calc(100vh - 49px)}
+      .ctrl-panel{width:288px;flex-shrink:0;border-right:1px solid var(--t-border);
+                  border-bottom:none;overflow-y:auto;height:100%}
+      .ctrl-toggle-btn{display:none}
+      .ctrl-body{display:flex!important}
+      .results-panel{overflow-y:auto;height:100%;padding:24px}
+    }
+    /* table scroll wrapper */
+    .table-scroll{overflow-x:auto;overflow-y:auto;-webkit-overflow-scrolling:touch;max-width:100vw}
+    @media(max-width:767px){
+      .stat-val{font-size:16px}
+      .stat-card{padding:10px 12px}
+    }
   </style>
 </head>
 <body x-data="backtestNifty()" x-init="init()">
 
 <!-- NAV -->
-<div class="flex items-center justify-between px-6 py-3 border-b border-t-border bg-t-card">
-  <div class="flex items-center gap-3">
-    <span class="font-display font-800 text-t-bright text-base">AlgoTrader</span>
+<div class="flex items-center justify-between px-4 py-3 border-b border-t-border bg-t-card" style="min-height:49px">
+  <div class="flex items-center gap-2">
+    <span class="font-display font-800 text-t-bright text-sm md:text-base">AlgoTrader</span>
     <span class="text-t-dim">|</span>
-    <span class="text-t-cyan font-semibold text-sm">Options Backtest</span>
+    <span class="text-t-cyan font-semibold text-xs md:text-sm">Options Backtest</span>
   </div>
-  <div class="flex gap-3 text-sm">
+  <div class="flex gap-3 text-xs md:text-sm">
     <a href="/" class="text-t-muted hover:text-t-cyan transition-colors">Dashboard</a>
     <a href="/backtest" class="text-t-muted hover:text-t-cyan transition-colors">CrudeOil BT</a>
   </div>
 </div>
 
-<div class="flex h-[calc(100vh-49px)]">
+<div class="page-layout">
 
-  <!-- LEFT PANEL: Controls -->
-  <div class="w-72 flex-shrink-0 border-r border-t-border overflow-y-auto p-4 flex flex-col gap-4">
+  <!-- CONTROL PANEL (full-width on mobile, left sidebar on desktop) -->
+  <div class="ctrl-panel">
+
+    <!-- Mobile: collapsible header -->
+    <button class="ctrl-toggle-btn" @click="ctrlOpen=!ctrlOpen">
+      <span>⚙ Settings</span>
+      <span x-text="ctrlOpen ? '▲' : '▼'" class="text-t-muted text-xs"></span>
+    </button>
+
+    <div class="ctrl-body" x-show="ctrlOpen || isMd" x-cloak>
 
     <div>
       <p class="sec-label mb-2">Index</p>
@@ -235,17 +269,19 @@
       <input type="password" x-model="token" class="t-input font-mono text-xs" placeholder="Bearer token…" />
     </div>
 
-    <button class="btn-primary mt-auto" @click="runBacktest()"
+    <button class="btn-primary" @click="runBacktest(); ctrlOpen=false"
       :disabled="running || !token">
       <span x-show="!running">▶ Run Backtest</span>
       <span x-show="running" x-cloak>⏳ Running…</span>
     </button>
 
     <p x-show="error" x-text="error" class="text-t-red text-xs text-center" x-cloak></p>
-  </div>
 
-  <!-- RIGHT PANEL: Results -->
-  <div class="flex-1 overflow-y-auto p-6 flex flex-col gap-6">
+    </div><!-- end ctrl-body -->
+  </div><!-- end ctrl-panel -->
+
+  <!-- RESULTS PANEL -->
+  <div class="results-panel">
 
     <!-- Empty state -->
     <template x-if="!result && !running">
@@ -309,7 +345,7 @@
           <p class="sec-label">Trade Log</p>
           <p class="text-xs text-t-muted font-mono" x-text="(result?.trades?.length ?? 0) + ' trades'"></p>
         </div>
-        <div class="overflow-x-auto">
+        <div class="table-scroll">
           <table class="bt-table">
             <thead>
               <tr>
@@ -356,6 +392,8 @@ function backtestNifty() {
     slBuf:        10.0,
     profitCapOn:  false,
     profitCap:    5000,
+    ctrlOpen:     false,
+    isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
 
     // State
@@ -365,12 +403,15 @@ function backtestNifty() {
     _chart:  null,
 
     init() {
-      // default custom dates
       const today = new Date()
       const twoWk = new Date(today)
       twoWk.setDate(today.getDate() - 14)
       this.endDate   = today.toISOString().slice(0, 10)
       this.startDate = twoWk.toISOString().slice(0, 10)
+      // mobile: track breakpoint
+      const mq = window.matchMedia('(min-width:768px)')
+      this.isMd = mq.matches
+      mq.addEventListener('change', e => { this.isMd = e.matches })
     },
 
     weekStart() {
