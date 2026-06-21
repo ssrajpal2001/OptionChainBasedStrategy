@@ -766,13 +766,14 @@ class DashboardServer:
             monthly            = bool(p.get("monthly", False))
             strike_depth       = str(p.get("strike_depth", "both"))
             profit_cap_per_lot = float(p.get("profit_cap_per_lot", 0.0))
+            use_1itm           = bool(p.get("use_1itm", False))
             if not token:
                 return {"ok": False, "error": "token required"}
             try:
                 from scripts.nifty_backtest import run_nifty_backtest
                 result = await asyncio.to_thread(
                     run_nifty_backtest, token, index, weeks, start, end, bias, sl_buf,
-                    monthly, strike_depth, profit_cap_per_lot
+                    monthly, strike_depth, profit_cap_per_lot, use_1itm
                 )
                 return result
             except Exception as exc:

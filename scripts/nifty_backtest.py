@@ -410,9 +410,11 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         exit_reason = "EOD"
         exit_ts     = last["datetime"]
 
-    exit_qty  = rem_qty if t1_hit else total_qty
-    rem_pnl   = round((exit_price - entry_price) * exit_qty, 2)
-    total_pnl = round(t1_pnl + rem_pnl, 2)
+    exit_qty    = rem_qty if t1_hit else total_qty
+    rem_pnl     = round((exit_price - entry_price) * exit_qty, 2)
+    total_pnl   = round(t1_pnl + rem_pnl, 2)
+    capital_rs  = int(round(entry_price * total_qty, 0))   # premium paid to hold position
+    roi_pct     = round(total_pnl / capital_rs * 100, 1) if capital_rs > 0 else 0.0
 
     return {
         "date":          trade_date,
@@ -435,6 +437,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         "rem_pnl":       rem_pnl,
         "pnl_pts":       round(total_pnl / total_qty, 2) if total_qty else 0,
         "pnl_rs":        int(total_pnl),
+        "capital_rs":    capital_rs,
+        "roi_pct":       roi_pct,
         "zone_low":      round(zl, 2),
         "zone_high":     round(zh, 2),
         "zone":          f"{zl:.0f}-{zh:.0f}",
@@ -448,7 +452,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              use_bias: bool, sl_buf: float,
              opt_bar_cache: dict | None = None,
              strike_depth: str = "both",
-             profit_cap_per_lot: float = 0.0) -> list[dict]:
+             profit_cap_per_lot: float = 0.0,
+             use_1itm: bool = False) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -652,6 +657,28 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         if "df_5" not in dir():
             df_5 = _resample(df_opt_today, 5)
 
+        # ── 1 ITM mode: detect on scan strike, execute on ATM±1step ──────────
+        exec_strike = strike
+        df_exec_today = df_opt_today   # bars used for P&L simulation
+        df_exec_5m    = df_5
+        if use_1itm and gap_fired:
+            atm = _round_strike(today_open, step)
+            exec_strike = atm - step if opt_type == "CE" else atm + step
+            if exec_strike != strike:
+                exec_key = _option_key(index, exec_strike, opt_type, td)
+                if exec_key not in cache:
+                    try:
+                        cache[exec_key] = _fetch_1m(exec_key, fetch_from, fetch_to)
+                        time.sleep(0.2)
+                    except Exception as exc:
+                        print(f"  {trade_date} {opt_type} {exec_strike} (1ITM exec): fetch error {exc}")
+                        cache[exec_key] = pd.DataFrame()
+                df_exec_raw = cache.get(exec_key, pd.DataFrame())
+                if not df_exec_raw.empty:
+                    df_exec_today = _mkt_hours(df_exec_raw)[
+                        _mkt_hours(df_exec_raw)["datetime"].dt.date == td].copy()
+                    df_exec_5m = _resample(df_exec_today, 5) if not df_exec_today.empty else df_5
+
         for z in entry_signals:
             trap_ts = pd.to_datetime(z.get("closed_on") or z.get("trapped_on"))
             spot_val = 0.0
@@ -660,17 +687,20 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 spot_val = _spot_at_ts(df_today, ts_naive)
 
             result = _simulate_exit(
-                z, df_opt_today, df_5,
+                z, df_exec_today, df_exec_5m,
                 lot, sl_buf, opt_type, trade_date,
-                strike=strike, spot_at_entry=spot_val,
+                strike=exec_strike, spot_at_entry=spot_val,
                 profit_cap_per_lot=profit_cap_per_lot,
             )
             if result:
-                result["index"]     = index
-                result["gap_pct"]   = round(gap_pct, 2)
-                result["gap_fired"] = gap_fired
-                result["depth"]     = depth   # NEAR/FAR/S1/R1
-                result["mode"]     += f" {mode}"
+                result["index"]        = index
+                result["gap_pct"]      = round(gap_pct, 2)
+                result["gap_fired"]    = gap_fired
+                result["depth"]        = depth
+                result["mode"]        += f" {mode}"
+                result["scan_strike"]  = strike   # the detection strike
+                if use_1itm and exec_strike != strike:
+                    result["exec_mode"] = "1ITM"
                 trades.append(result)
 
     return trades
@@ -692,7 +722,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        use_bias: bool = True, sl_buf: float = 10.0,
                        monthly: bool = False,
                        strike_depth: str = "both",
-                       profit_cap_per_lot: float = 0.0) -> dict:
+                       profit_cap_per_lot: float = 0.0,
+                       use_1itm: bool = False) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -744,7 +775,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     all_trades: list[dict] = []
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
-                              opt_bar_cache, strike_depth, profit_cap_per_lot)
+                              opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm)
         all_trades.extend(day_trades)
 
     # Summary

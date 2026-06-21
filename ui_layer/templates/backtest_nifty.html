@@ -260,6 +260,18 @@
           </template>
         </div>
 
+        <!-- 1 ITM Execution toggle -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">Execute in 1 ITM</p>
+            <p class="text-xs text-t-muted">Scan ATM-200/400, trade ATM-50 (less capital)</p>
+          </div>
+          <label class="toggle-track">
+            <input type="checkbox" x-model="use1itm" />
+            <span class="toggle-pip"></span>
+          </label>
+        </div>
+
       </div>
     </div>
 
@@ -364,6 +376,8 @@
                 <th>Exit@</th>
                 <th>Reason</th>
                 <th>T1?</th>
+                <th>Capital ₹</th>
+                <th>ROI%</th>
                 <th>P&amp;L ₹</th>
               </tr>
             </thead>
@@ -392,6 +406,7 @@ function backtestNifty() {
     slBuf:        10.0,
     profitCapOn:  false,
     profitCap:    5000,
+    use1itm:      false,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -435,6 +450,7 @@ function backtestNifty() {
         sl_buf:             this.slBuf,
         strike_depth:       this.strikeDepth,
         profit_cap_per_lot: this.profitCapOn ? this.profitCap : 0,
+        use_1itm:           this.use1itm,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks
@@ -505,7 +521,7 @@ function backtestNifty() {
     tradeRowsHtml() {
       const trades = this.result?.trades
       if (!trades || trades.length === 0)
-        return '<tr><td colspan="16" style="text-align:center;padding:1.5rem;color:#6b7280;font-size:0.875rem">No trades found in this period</td></tr>'
+        return '<tr><td colspan="18" style="text-align:center;padding:1.5rem;color:#6b7280;font-size:0.875rem">No trades found in this period</td></tr>'
       return trades.map(t => {
         const optTag  = t.opt_type === 'CE'
           ? `<span class="tag-ce">${t.opt_type}</span>`
@@ -521,10 +537,16 @@ function backtestNifty() {
         const t1Ts     = t.t1_ts ? String(t.t1_ts).slice(11,16) : '-'
         const exitTs   = (t.exit_ts || '').slice(11,16)
         const t1Hit    = t.t1_hit ? '<span style="color:#22c55e;font-weight:700">Y</span>' : '<span style="color:#6b7280">N</span>'
+        const capRs    = t.capital_rs ? '₹' + Number(t.capital_rs).toLocaleString('en-IN') : '-'
+        const roiCls   = t.roi_pct > 0 ? 'pnl-pos' : t.roi_pct < 0 ? 'pnl-neg' : 'pnl-zero'
+        const roiFmt   = t.roi_pct != null ? (t.roi_pct > 0 ? '+' : '') + t.roi_pct + '%' : '-'
+        const strikeDisp = t.exec_mode === '1ITM'
+          ? `${t.strike} <span style="font-size:0.65rem;color:#a78bfa;font-weight:700">1ITM</span> <span style="font-size:0.65rem;color:#6b7280">(scan:${t.scan_strike})</span>`
+          : t.strike
         return `<tr>
           <td>${t.date}</td>
           <td>${optTag}</td>
-          <td class="font-mono" style="font-weight:700">${t.strike}</td>
+          <td class="font-mono" style="font-weight:700">${strikeDisp}</td>
           <td class="font-mono" style="font-size:0.75rem;color:#6b7280">${t.spot_at_entry > 0 ? t.spot_at_entry : '-'}</td>
           <td><span style="font-size:0.75rem;font-weight:700;color:${posColor}">${t.trap_pos || '-'}</span></td>
           <td>${modeTag} <span style="color:#6b7280;font-size:0.75rem">${(t.mode||'').split(' ')[0]}</span></td>
@@ -537,6 +559,8 @@ function backtestNifty() {
           <td class="font-mono" style="font-size:0.75rem;color:#6b7280">${exitTs}</td>
           <td style="font-size:0.75rem;color:${t.reason==='PROFIT_CAP'?'#f59e0b':t.reason==='T2'?'#a78bfa':t.reason==='SL'?'#ef4444':'#6b7280'}">${t.reason}</td>
           <td>${t1Hit}</td>
+          <td class="font-mono" style="font-size:0.75rem;color:#6b7280">${capRs}</td>
+          <td class="font-mono ${roiCls}" style="font-size:0.75rem;font-weight:600">${roiFmt}</td>
           <td class="font-mono ${pnlCls}" style="font-weight:700">${pnlFmt}</td>
         </tr>`
       }).join('')
