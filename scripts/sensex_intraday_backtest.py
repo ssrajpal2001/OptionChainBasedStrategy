@@ -861,28 +861,11 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                     "pnl_rs": round(total_rs, 0), "reason": "T1+SL"}
 
         if not t1_hit and hi >= t1:
-            t1_ts = ts
-            # T1 extension: if opposite side hasn't entered yet, keep running
-            opp_entered = (opp_entry_ts is not None and opp_entry_ts <= ts)
-            if not opp_entered and (ext_75m_zones or tsl_zones):
-                # Find next 75m zone sl_level above current price as new T1
-                next_75_t1 = None
-                if ext_75m_zones:
-                    above = [z["sl_level"] for z in ext_75m_zones
-                             if z["sl_level"] > hi and z["formed_ts"] < ts]
-                    if above:
-                        next_75_t1 = min(above)
-                if next_75_t1 is not None:
-                    t1 = next_75_t1   # extend T1 to next 75m zone sl_level, don't book yet
-                    continue          # keep running without booking 50%
-                else:
-                    # No 75m zone: lock SL at current LTP (protect gains), trail via TSL zones
-                    trailing_sl = max(trailing_sl, float(bar["close"]))
-                    continue          # keep running, TSL will trail up
-            # Normal T1: book 50%, trail rest at breakeven
-            t1_hit = True
+            # Always book 50% at T1 — no extension, no skipping
+            t1_hit      = True
+            t1_ts       = ts
             t1_pnl_rs   = (t1 - entry_price) * qty_half
-            trailing_sl = max(entry_price, trailing_sl)
+            trailing_sl = max(entry_price, trailing_sl)  # runner SL = breakeven minimum
 
     # Last bar — no sq_off hit
     last = df1m.iloc[-1]
@@ -1378,10 +1361,12 @@ def run_backtest_3level_ui(
                     # Example: PE LTP=900, PE zone=800 → 100 pts → CE T1 = CE_entry + 100
                     opp_dist = opp_ltp - opp_zone_high
                     sl_dist  = ep - sl
-                    # R:R gate: opp room must be >= 0.5x our SL distance
+                    # R:R gate (scanner.py pattern): (T1-entry)/(entry-SL) >= 0.5
                     if opp_dist > 10 and sl_dist > 0 and (opp_dist / sl_dist) >= 0.5:
-                        t1 = ep + opp_dist
-                    # else: R:R too poor or no opp data → keep zone T1
+                        qty_total = lots * LOT_SIZE
+                        cap_pts   = 5000.0 / qty_total   # ₹5,000 cap per trade
+                        t1 = min(ep + opp_dist, ep + cap_pts)
+                    # else: R:R too poor → keep zone T1
 
             ext_75m = [z for z in sd.get("z75_pool", []) if z["sl_level"] > t1]
 
