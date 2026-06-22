@@ -561,8 +561,8 @@ function backtestNifty() {
     isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
 
-    // Zone Diagnostic state
-    zoneDate:    new Date().toISOString().slice(0,10),
+    // Zone Diagnostic state — default to last Friday/Thursday (last trading day)
+    zoneDate:    (() => { const d = new Date(); d.setDate(d.getDate()-1); while(d.getDay()===0||d.getDay()===6) d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); })(),
     zoneStrike:  0,
     zoneOpt:     'CE',
     zoneHtf:     75,

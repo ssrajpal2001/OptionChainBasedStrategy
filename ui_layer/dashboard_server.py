@@ -896,6 +896,8 @@ class DashboardServer:
                 result = await asyncio.to_thread(
                     show_zones_json, token, dt, index, side, htf, strike
                 )
+                if "error" in result:
+                    return {"ok": False, "error": result["error"]}
                 return {"ok": True, **result}
             except Exception as exc:
                 import traceback; traceback.print_exc()
