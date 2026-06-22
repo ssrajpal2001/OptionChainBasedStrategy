@@ -778,12 +778,47 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
             "pnl_rs": round(total_rs, 0), "reason": "T1+EOD"}
 
 
-def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
-                             cutoff: str = "15:10") -> list:
+def _spot_bias(spot_df: pd.DataFrame, spot_bear_pool: list, spot_bull_pool: list,
+               today_start: pd.Timestamp) -> tuple:
     """
-    Run 3-level hierarchy on one day's 1m bars.
-    Returns list of entry dicts: {entry_ts, entry_price, sl, t1, zone_label, side}
-    side = 'BUY' (we always BUY the option in a seller trap).
+    Returns (ce_allowed, pe_allowed) based on spot zone bias.
+    75m pool first; cascade to 15m today if no pool zone is active.
+    BEAR spot zone (sellers trapped → spot up) → CE allowed.
+    BULL spot zone (buyers trapped → spot down) → PE allowed.
+    """
+    from scripts.show_75m_zones import resample, detect_zones, detect_bull_zones, first_1m_entry
+    if spot_df.empty:
+        return True, True   # no data → allow both (no filter)
+
+    # 75m pool zones active before today
+    bear_75 = [z for z in spot_bear_pool if z["sl_hit_ts"] < today_start]
+    bull_75 = [z for z in spot_bull_pool if z["sl_hit_ts"] < today_start]
+
+    day_start = spot_df["ts"].iloc[0] - pd.Timedelta(minutes=1)
+
+    # CE allowed: any 75m BEAR zone that today's price enters
+    ce_allowed = any(first_1m_entry(spot_df, z, day_start) is not None for z in bear_75)
+    # PE allowed: any 75m BULL zone that today's price enters
+    pe_allowed = any(first_1m_entry(spot_df, z, day_start) is not None for z in bull_75)
+
+    if not ce_allowed and not pe_allowed:
+        # CASCADE to 15m spot: check today's intraday 15m zones
+        mtf_spot_15 = resample(spot_df, 15)
+        if not ce_allowed:
+            ce_allowed = len([z for z in detect_zones(mtf_spot_15) if z["sl_hit_ts"] is not None]) > 0
+        if not pe_allowed:
+            pe_allowed = len([z for z in detect_bull_zones(mtf_spot_15) if z["sl_hit_ts"] is not None]) > 0
+
+    return ce_allowed, pe_allowed
+
+
+def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
+                             cutoff: str = "15:10",
+                             side_allowed: str = "BOTH") -> list:
+    """
+    Run 3-level hierarchy on one day's option 1m bars.
+    side_allowed: "CE" | "PE" | "BOTH"
+    Returns list of entry dicts: {entry_ts, entry_price, sl, t1, zone_label}
     """
     from scripts.show_75m_zones import (
         resample, detect_zones, first_1m_entry, first_return_to_zone_high,
@@ -796,13 +831,11 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
 
     entries = []
     seen_5m_zones: set = set()
-
-    MIN_ZONE_WIDTH = 5.0   # skip degenerate zones with near-zero range
+    MIN_ZONE_WIDTH = 5.0
 
     def _try_5m(z15, ret15_ts):
-        """Find CLOSED 5m zones inside z15 after ret15_ts → record entries."""
         if (z15["zone_high"] - z15["zone_low"]) < MIN_ZONE_WIDTH:
-            return   # degenerate zero-width zone — skip
+            return
         zones_5 = [z for z in detect_zones(ltf_5)
                    if z["zone_high"] >= z15["zone_low"]
                    and z["zone_high"] <= z15["zone_high"]
@@ -821,15 +854,17 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
             entries.append({
                 "entry_ts":    entry_ts,
                 "entry_price": z5["zone_high"],
-                "sl":          round(z15["zone_low"], 2),       # 15m zone_low (wider SL)
-                "t1":          round(z15["sl_level"], 2),      # c0.high of 15m = sellers' SL = T1
+                "sl":          round(z15["zone_low"], 2),
+                "t1":          round(z15["sl_level"], 2),
                 "zone_label":  f"{mode_label[0]}15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl_level']:.0f}) / 5m {z5['zone_high']:.0f}",
-                "side":        "BUY",
             })
+
+    if side_allowed == "NONE":
+        return []
 
     active_75 = [z for z in z75_pool if z["sl_hit_ts"] < today_start]
     used_75 = False
-    mode_label = [""]   # mutable so _try_5m can read it
+    mode_label = [""]
 
     for z75 in active_75:
         entry_1m_ts = first_1m_entry(df1m, z75, day_start)
@@ -848,7 +883,6 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
             _try_5m(z15, ret15["entry_ts"])
 
     if not used_75:
-        # CASCADE: no 75m zone active today → any CLOSED 15m zone qualifies
         mode_label[0] = "CASCADE → "
         for z15 in detect_zones(mtf_15):
             ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
@@ -856,7 +890,6 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
                 continue
             _try_5m(z15, ret15["entry_ts"])
 
-    # Take only the first entry (earliest) to avoid over-trading
     entries.sort(key=lambda e: e["entry_ts"])
     return entries[:1]
 
@@ -966,14 +999,16 @@ def run_backtest_3level_ui(
     sq_off: str       = "15:20",
     cutoff: str       = "15:10",
     pool_days: int    = 15,
-    ce_key: str       = "",   # kept for compat but auto-resolved if empty
+    ce_key: str       = "",
     pe_key: str       = "",
+    gap_bias: bool    = True,   # GAP UP → CE only, GAP DOWN → PE only
+    spot_bias: bool   = True,   # spot BEAR zone → CE, BULL zone → PE
 ) -> dict:
     """
     3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
     Strikes auto-resolved per day using same pivot logic as TrapScannerEngine.
     """
-    from scripts.show_75m_zones import fetch_1m, resample, detect_zones
+    from scripts.show_75m_zones import fetch_1m, resample, detect_zones, detect_bull_zones
 
     LOT_SIZE = 20
     trading_days = _get_trading_days(days)
@@ -981,7 +1016,6 @@ def run_backtest_3level_ui(
     debug_log: list = []
     all_trades: list = []
 
-    # Cache per-key bars across days to avoid re-fetching
     key_bar_cache: dict = {}
 
     def _get_bars(key: str, dt: date) -> pd.DataFrame:
@@ -989,13 +1023,29 @@ def run_backtest_3level_ui(
             key_bar_cache[(key, dt)] = fetch_1m(key, dt, token)
         return key_bar_cache[(key, dt)]
 
+    # Build SENSEX spot 75m bear/bull zone pools (for spot_bias)
+    SPOT_KEY = "BSE_INDEX|SENSEX"
+    spot_bear_pool: list = []
+    spot_bull_pool: list = []
+    spot_bar_cache: dict = {}
+    if spot_bias:
+        for pdt in all_pool_days:
+            df_s = _get_bars(SPOT_KEY, pdt)
+            spot_bar_cache[pdt] = df_s
+            if not df_s.empty:
+                for z in detect_zones(resample(df_s, 75)):
+                    spot_bear_pool.append(z)
+                for z in detect_bull_zones(resample(df_s, 75)):
+                    spot_bull_pool.append(z)
+
     for dt in trading_days:
-        # Resolve strikes for this day
+        # Resolve strikes + gap direction for this day
         if ce_key or pe_key:
-            # Manual override (legacy / testing)
             day_ce_key = ce_key
             day_pe_key = pe_key
             day_label  = "manual keys"
+            gap_fired  = False
+            gap_dir    = "FLAT"
         else:
             strikes = _resolve_day_strikes(dt, token)
             if not strikes:
@@ -1004,14 +1054,42 @@ def run_backtest_3level_ui(
             day_ce_key = strikes["ce1_key"]
             day_pe_key = strikes["pe1_key"]
             day_label  = strikes["label"]
-        debug_log.append(f"{dt}: {day_label} CE={day_ce_key} PE={day_pe_key}")
+            gap_fired  = strikes["gap_fired"]
+            gap_dir    = "UP" if gap_fired and "UP" in strikes["label"] else ("DOWN" if gap_fired else "FLAT")
 
-        for side, scan_key in [("CE", day_ce_key), ("PE", day_pe_key)]:
+        # ── Bias filter ─────────────────────────────────────────────────────
+        ce_allowed = True
+        pe_allowed = True
+
+        if gap_bias and gap_fired:
+            # Gap day: direction determines which side to trade
+            ce_allowed = (gap_dir == "UP")
+            pe_allowed = (gap_dir == "DOWN")
+            bias_src = f"GAP_BIAS({gap_dir})"
+        elif spot_bias:
+            # No gap (or gap_bias off): use spot zone bias
+            spot_df = spot_bar_cache.get(dt) or _get_bars(SPOT_KEY, dt)
+            ce_allowed, pe_allowed = _spot_bias(
+                spot_df, spot_bear_pool, spot_bull_pool, pd.Timestamp(dt)
+            )
+            bias_src = f"SPOT_BIAS(ce={ce_allowed},pe={pe_allowed})"
+        else:
+            bias_src = "NO_BIAS"
+
+        debug_log.append(f"{dt}: {day_label} | {bias_src} | CE={day_ce_key} PE={day_pe_key}")
+
+        for side, scan_key, allowed in [
+            ("CE", day_ce_key, ce_allowed),
+            ("PE", day_pe_key, pe_allowed),
+        ]:
+            if not allowed:
+                debug_log.append(f"  {side}: blocked by bias")
+                continue
             if not scan_key:
                 debug_log.append(f"  {side}: no key")
                 continue
 
-            # Build 75m zone pool using pool_days of bars for this key
+            # Build 75m option zone pool for this key
             z75_pool: list = []
             for pdt in all_pool_days:
                 df_p = _get_bars(scan_key, pdt)

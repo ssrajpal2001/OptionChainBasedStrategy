@@ -97,6 +97,41 @@ def detect_zones(candles: pd.DataFrame) -> list:
         })
     return zones
 
+def detect_bull_zones(candles: pd.DataFrame) -> list:
+    """
+    Buyer-trap zones (mirror of detect_zones): c1.high > c0.high → zone forms.
+    Valid only if a later candle LOW <= c0.LOW (buyers' SL hit → buyers TRAPPED).
+    zone_low  = c0.high  (where buyers entered)
+    zone_high = c1.high  (how far buyers pushed)
+    sl_level  = c0.low   (buyers' stop loss)
+    TRAPPED → spot goes DOWN → PE option gains.
+    """
+    zones = []
+    for i in range(len(candles) - 1):
+        c0, c1 = candles.iloc[i], candles.iloc[i + 1]
+        if float(c1["high"]) <= float(c0["high"]):
+            continue
+        zone_low  = float(c0["high"])
+        zone_high = float(c1["high"])
+        sl_level  = float(c0["low"])
+        sl_hit_ts = None
+        for j in range(i + 2, len(candles)):
+            if float(candles.iloc[j]["low"]) <= sl_level:
+                sl_hit_ts = candles.iloc[j]["ts"]
+                break
+        if sl_hit_ts is None:
+            continue
+        zones.append({
+            "formed_ts": c0["ts"],
+            "c1_ts":     c1["ts"],
+            "zone_low":  zone_low,
+            "zone_high": zone_high,
+            "sl_level":  sl_level,
+            "sl_hit_ts": sl_hit_ts,
+        })
+    return zones
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def first_1m_entry(df1m: pd.DataFrame, zone: dict,

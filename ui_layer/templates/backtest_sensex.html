@@ -185,6 +185,19 @@
           <input type="range" x-model.number="poolDays" min="5" max="20" step="1" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
+        <!-- Bias toggles -->
+        <div class="mb-3">
+          <p class="sec-label mb-2">Bias Filters</p>
+          <label class="flex items-center gap-2 text-xs text-t-muted mb-2 cursor-pointer">
+            <input type="checkbox" x-model="gapBias" class="accent-[var(--t-cyan)]" />
+            <span>Gap Bias — GAP UP=CE only, GAP DOWN=PE only</span>
+          </label>
+          <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
+            <input type="checkbox" x-model="spotBias" class="accent-[var(--t-cyan)]" />
+            <span>Spot Bias — BEAR spot zone=CE, BULL spot zone=PE</span>
+          </label>
+        </div>
+
       </div>
 
       <!-- Run button -->
@@ -315,13 +328,15 @@
 function sensexBT() {
   return {
     // Settings — 3-level hierarchy
-    token:    sessionStorage.getItem('sx_token') || '',
-    days:     10,
-    lots:     2,
-    slBuf:    5,
-    cutoff:   '15:10',
-    sqOff:    '15:20',
-    poolDays: 15,
+    token:     sessionStorage.getItem('sx_token') || '',
+    days:      10,
+    lots:      2,
+    slBuf:     5,
+    cutoff:    '15:10',
+    sqOff:     '15:20',
+    poolDays:  15,
+    gapBias:   true,
+    spotBias:  true,
 
     // UI state
     ctrlOpen: true,
@@ -357,6 +372,8 @@ function sensexBT() {
             cutoff:    this.cutoff,
             sq_off:    this.sqOff,
             pool_days: this.poolDays,
+            gap_bias:  this.gapBias,
+            spot_bias: this.spotBias,
           }),
         });
         const d = await r.json();
