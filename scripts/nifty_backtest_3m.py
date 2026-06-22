@@ -177,15 +177,19 @@ def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date,
 # ── HTF zone scan ──────────────────────────────────────────────────────────────
 
 def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date,
-                         zone_lookback_days: int = 2) -> list:
+                         zone_lookback_days: int = 0) -> list:
     """
-    Run HTF scan on yesterday+today bars only (2 calendar days).
-    Older bars have different premium levels → produce stale irrelevant zones.
+    Scan TODAY's intraday bars only for HTF zones.
+    Strike changes every day → yesterday's bars are at wrong premium levels.
+    With today-only bars: zone forms in morning HTF candle, trapped in a later candle.
     """
     if df_all.empty:
         return []
-    cutoff = pd.Timestamp(today - timedelta(days=zone_lookback_days))
-    df_recent = df_all[df_all["datetime"] >= cutoff]
+    if zone_lookback_days == 0:
+        df_recent = df_all[df_all["datetime"].dt.date == today]
+    else:
+        cutoff = pd.Timestamp(today - timedelta(days=zone_lookback_days))
+        df_recent = df_all[df_all["datetime"] >= cutoff]
     if df_recent.empty:
         df_recent = df_all  # fallback
     df_htf = _resample(df_recent, htf_min)
