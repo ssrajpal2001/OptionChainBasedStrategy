@@ -429,11 +429,39 @@ def _find_option_key_from_registry(underlying: str, expiry: date,
     return None
 
 
+def _get_nearest_expiry_from_api(token: str, trade_date: date) -> Optional[date]:
+    """
+    Fetch the nearest SENSEX expiry on or after trade_date from Upstox option chain API.
+    Uses /v2/option/chain which returns expiry_list for the underlying.
+    """
+    try:
+        url = "https://api.upstox.com/v2/option/chain"
+        params = {
+            "instrument_key": SENSEX_INDEX_KEY,
+            "expiry_date":    trade_date.strftime("%Y-%m-%d"),
+        }
+        r = requests.get(url, params=params, headers=_headers(token), timeout=10)
+        d = r.json()
+        # expiry_list is a list of "YYYY-MM-DD" strings
+        expiries = d.get("data", {}).get("expiry_list", [])
+        candidates = []
+        for e in expiries:
+            try:
+                edt = date.fromisoformat(str(e)[:10])
+                if edt >= trade_date:
+                    candidates.append(edt)
+            except Exception:
+                pass
+        if candidates:
+            return min(candidates)
+    except Exception as ex:
+        print(f"    [expiry API] {ex}")
+    return None
+
+
 def _find_option_key_upstox_search(token: str, strike: int, side: str,
                                    expiry: date) -> Optional[str]:
     """Search Upstox instruments API for SENSEX option key."""
-    # Upstox instrument search for BSE_FO SENSEX options
-    expiry_str = expiry.strftime("%d%b%y").upper()   # e.g. 23JUN26 → but API uses YYYY-MM-DD
     try:
         url = "https://api.upstox.com/v2/instruments/search"
         params = {
@@ -484,19 +512,19 @@ def run(token: str, days: int = 10, lots: int = 1) -> None:
         pe_strike = _round_pe(spot)
         print(f"  Spot open={spot:.0f}  CE={ce_strike}  PE={pe_strike}")
 
-        # Find expiry (nearest Thursday for SENSEX weekly, or monthly)
-        # SENSEX weekly = every Friday (BSE), or use REGISTRY
-        expiry = None
-        try:
-            from data_layer.instrument_registry import REGISTRY
-            if REGISTRY.is_loaded("SENSEX"):
-                expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt)
-        except Exception:
-            pass
+        # Find expiry — ask Upstox option chain API for real expiry list
+        expiry = _get_nearest_expiry_from_api(token, dt)
         if expiry is None:
-            # Fallback: next Friday
-            days_to_fri = (4 - dt.weekday()) % 7
-            expiry = dt + timedelta(days=days_to_fri if days_to_fri else 7)
+            try:
+                from data_layer.instrument_registry import REGISTRY
+                if REGISTRY.is_loaded("SENSEX"):
+                    expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt)
+            except Exception:
+                pass
+        if expiry is None:
+            # Last resort: next Thursday
+            days_to_thu = (3 - dt.weekday()) % 7
+            expiry = dt + timedelta(days=days_to_thu if days_to_thu else 7)
         print(f"  Expiry: {expiry}")
 
         # Get instrument keys
@@ -605,15 +633,15 @@ def run_backtest_ui(
             continue
         ce_strike = _round_ce(spot)
         pe_strike = _round_pe(spot)
-        expiry = None
-        try:
-            from data_layer.instrument_registry import REGISTRY
-            if REGISTRY.is_loaded("SENSEX"):
-                expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt)
-        except Exception:
-            pass
+        expiry = _get_nearest_expiry_from_api(token, dt)
         if expiry is None:
-            # SENSEX weekly options expire on THURSDAY (not Friday)
+            try:
+                from data_layer.instrument_registry import REGISTRY
+                if REGISTRY.is_loaded("SENSEX"):
+                    expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt)
+            except Exception:
+                pass
+        if expiry is None:
             days_to_thu = (3 - dt.weekday()) % 7
             expiry = dt + timedelta(days=days_to_thu if days_to_thu else 7)
 
