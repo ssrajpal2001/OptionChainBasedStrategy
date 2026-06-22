@@ -922,7 +922,8 @@ def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
         pe1_strike = int(round(r1 / step)) * step
         label = f"No-gap (S1={s1:.0f}→{ce1_strike}, R1={r1:.0f}→{pe1_strike})"
 
-    # 5. Expiry + key lookup via REGISTRY
+    # 5. Expiry + key lookup — REGISTRY only has current/future contracts.
+    #    For past dates use _find_key_and_expiry (Upstox search by strike+date).
     if not REGISTRY.is_loaded(und):
         try:
             REGISTRY.load_sync(und, token)
@@ -930,16 +931,18 @@ def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
             pass
 
     expiry = REGISTRY.get_active_expiry(und, from_date=dt) if REGISTRY.is_loaded(und) else None
-    if expiry is None:
-        return {}
 
-    ce1_key = REGISTRY.get_upstox_key(und, expiry, ce1_strike, "CE") if REGISTRY.is_loaded(und) else ""
-    pe1_key = REGISTRY.get_upstox_key(und, expiry, pe1_strike, "PE") if REGISTRY.is_loaded(und) else ""
+    # Try REGISTRY key first (works for current expiry), fall back to API search for past dates
+    ce1_key = REGISTRY.get_upstox_key(und, expiry, ce1_strike, "CE") if (REGISTRY.is_loaded(und) and expiry) else ""
+    pe1_key = REGISTRY.get_upstox_key(und, expiry, pe1_strike, "PE") if (REGISTRY.is_loaded(und) and expiry) else ""
 
     if not ce1_key:
-        ce1_key, _ = _find_key_and_expiry(token, ce1_strike, "CE", dt)
+        ce1_key, expiry = _find_key_and_expiry(token, ce1_strike, "CE", dt)
     if not pe1_key:
         pe1_key, _ = _find_key_and_expiry(token, pe1_strike, "PE", dt)
+
+    if not ce1_key and not pe1_key:
+        return {}   # genuinely no data for this date
 
     return {
         "ce1_strike": ce1_strike, "pe1_strike": pe1_strike,
