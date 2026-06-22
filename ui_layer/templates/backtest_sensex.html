@@ -192,10 +192,10 @@
           <input type="range" x-model.number="poolDays" min="5" max="20" step="1" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
-        <!-- Fixed Strikes -->
+        <!-- Fixed Strikes + Keys -->
         <div class="mb-3">
-          <p class="sec-label mb-2">Fixed Strikes <span class="text-t-dim font-normal">(overrides per-day pivot)</span></p>
-          <div class="grid grid-cols-2 gap-2">
+          <p class="sec-label mb-2">Fixed Strikes <span class="text-t-dim font-normal">(same contract every day)</span></p>
+          <div class="grid grid-cols-2 gap-2 mb-2">
             <div>
               <label class="text-xs text-t-muted">CE Strike</label>
               <input type="number" x-model.number="fixedCe" step="100" placeholder="e.g. 76000"
@@ -203,11 +203,23 @@
             </div>
             <div>
               <label class="text-xs text-t-muted">PE Strike</label>
-              <input type="number" x-model.number="fixedPe" step="100" placeholder="e.g. 78000"
+              <input type="number" x-model.number="fixedPe" step="100" placeholder="e.g. 77000"
                 class="input-field w-full mt-1 text-sm" />
             </div>
           </div>
-          <p class="text-xs text-t-dim mt-1">Set both to 0 to use auto pivot strikes per day.</p>
+          <div class="space-y-1">
+            <div>
+              <label class="text-xs text-t-muted">CE Instrument Key <span class="text-t-dim">(BSE_FO|... — paste from broker)</span></label>
+              <input type="text" x-model="ceKey" placeholder="BSE_FO|XXXXXX"
+                class="input-field w-full mt-1 text-sm font-mono" />
+            </div>
+            <div>
+              <label class="text-xs text-t-muted">PE Instrument Key</label>
+              <input type="text" x-model="peKey" placeholder="BSE_FO|XXXXXX"
+                class="input-field w-full mt-1 text-sm font-mono" />
+            </div>
+          </div>
+          <p class="text-xs text-t-dim mt-1">If keys are provided, they are used as-is (no auto lookup). Set strikes to 0 for per-day pivot mode.</p>
         </div>
 
         <!-- Bias & Expiry toggles -->
@@ -366,6 +378,8 @@ function sensexBT() {
     monthly:   true,
     fixedCe:   76000,
     fixedPe:   77000,
+    ceKey:     '',
+    peKey:     '',
     fromDate:  '2026-05-12',
 
     // UI state
@@ -406,6 +420,8 @@ function sensexBT() {
             monthly:   this.monthly,
             fixed_ce:  this.fixedCe || 0,
             fixed_pe:  this.fixedPe || 0,
+            ce_key:    this.ceKey || '',
+            pe_key:    this.peKey || '',
             from_date: this.fromDate || '',
           }),
         });

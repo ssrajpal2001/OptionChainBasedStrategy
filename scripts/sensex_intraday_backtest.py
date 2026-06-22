@@ -1154,7 +1154,7 @@ def run_backtest_3level_ui(
         if ce_key or pe_key:
             day_ce_key = ce_key
             day_pe_key = pe_key
-            day_label  = "manual keys"
+            day_label  = f"Manual CE={fixed_ce or '?'} PE={fixed_pe or '?'}"
             gap_fired  = False
             gap_dir    = "FLAT"
         else:
