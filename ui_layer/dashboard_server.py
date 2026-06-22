@@ -845,8 +845,8 @@ class DashboardServer:
             pool_days = int(p.get("pool_days", 15))
             ce_key    = str(p.get("ce_key", ""))
             pe_key    = str(p.get("pe_key", ""))
-            gap_bias  = bool(p.get("gap_bias", True))
             spot_bias = bool(p.get("spot_bias", True))
+            monthly   = bool(p.get("monthly", True))
             if not token:
                 return {"ok": False, "error": "token required"}
             try:
@@ -854,7 +854,7 @@ class DashboardServer:
                 result = await asyncio.to_thread(
                     run_backtest_3level_ui, token, days, lots,
                     sl_buf, sq_off, cutoff, pool_days, ce_key, pe_key,
-                    gap_bias, spot_bias,
+                    False, spot_bias, monthly,
                 )
                 return result
             except Exception as exc:

@@ -429,6 +429,37 @@ def _find_option_key_from_registry(underlying: str, expiry: date,
     return None
 
 
+def _get_monthly_expiry(dt: date, token: str, und: str = "SENSEX") -> Optional[date]:
+    """
+    Return the LAST expiry of the NEXT calendar month after dt.
+    e.g. dt=May-01 → last expiry of June
+         dt=Jun-15 → last expiry of July
+    REGISTRY is always loaded and has current+future expiries — no API search needed.
+    """
+    from data_layer.instrument_registry import REGISTRY
+
+    # Compute next month
+    if dt.month == 12:
+        next_year, next_month = dt.year + 1, 1
+    else:
+        next_year, next_month = dt.year, dt.month + 1
+
+    all_expiries = REGISTRY.all_expiries(und) if REGISTRY.is_loaded(und) else []
+
+    # 1. Last expiry of current month (still in REGISTRY = not yet expired)
+    curr_exp = [e for e in all_expiries if e.year == dt.year and e.month == dt.month]
+    if curr_exp:
+        return max(curr_exp)
+
+    # 2. Current month fully expired (e.g. backtesting May after May expiry is gone)
+    #    → use last expiry of next month (e.g. June)
+    next_exp = [e for e in all_expiries if e.year == next_year and e.month == next_month]
+    if next_exp:
+        return max(next_exp)
+
+    return None
+
+
 def _find_key_and_expiry(token: str, strike: int, side: str,
                          trade_date: date) -> tuple[Optional[str], Optional[date]]:
     """
@@ -896,10 +927,11 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
 
 def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
                           gap_thresh: float = 0.5, gap_near: int = 500,
-                          step: int = 100) -> dict:
+                          step: int = 100, monthly: bool = False) -> dict:
     """
     Replicate TrapScannerEngine morning-init strike selection for a past date.
-    Returns {ce1_strike, pe1_strike, ce1_key, pe1_key, expiry, gap_fired, label}
+    monthly=True: use last expiry of current month instead of nearest weekly.
+    Returns {ce1_strike, pe1_strike, ce1_key, pe1_key, expiry, gap_fired, gap_direction, label}
     or empty dict on failure.
     """
     from data_layer.instrument_registry import REGISTRY
@@ -972,16 +1004,20 @@ def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
         except Exception:
             pass
 
-    expiry = REGISTRY.get_active_expiry(und, from_date=dt) if REGISTRY.is_loaded(und) else None
+    # Expiry selection: monthly = last expiry of the month; else nearest weekly
+    if monthly:
+        expiry = _get_monthly_expiry(dt, token, und)
+    else:
+        expiry = REGISTRY.get_active_expiry(und, from_date=dt) if REGISTRY.is_loaded(und) else None
 
-    # Try REGISTRY key first (works for current expiry), fall back to API search for past dates
+    # Try REGISTRY key first, fall back to Upstox search for past/historical dates
     ce1_key = REGISTRY.get_upstox_key(und, expiry, ce1_strike, "CE") if (REGISTRY.is_loaded(und) and expiry) else ""
     pe1_key = REGISTRY.get_upstox_key(und, expiry, pe1_strike, "PE") if (REGISTRY.is_loaded(und) and expiry) else ""
 
     if not ce1_key:
-        ce1_key, expiry = _find_key_and_expiry(token, ce1_strike, "CE", dt)
+        ce1_key, expiry = _find_key_and_expiry(token, ce1_strike, "CE", expiry or dt)
     if not pe1_key:
-        pe1_key, _ = _find_key_and_expiry(token, pe1_strike, "PE", dt)
+        pe1_key, _ = _find_key_and_expiry(token, pe1_strike, "PE", expiry or dt)
 
     if not ce1_key and not pe1_key:
         return {}   # genuinely no data for this date
@@ -1004,8 +1040,8 @@ def run_backtest_3level_ui(
     pool_days: int    = 15,
     ce_key: str       = "",
     pe_key: str       = "",
-    gap_bias: bool    = True,   # GAP UP → CE only, GAP DOWN → PE only
-    spot_bias: bool   = True,   # spot BEAR zone → CE, BULL zone → PE
+    spot_bias: bool   = True,
+    monthly: bool     = True,   # last expiry of running month (not nearest weekly)
 ) -> dict:
     """
     3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
@@ -1050,7 +1086,7 @@ def run_backtest_3level_ui(
             gap_fired  = False
             gap_dir    = "FLAT"
         else:
-            strikes = _resolve_day_strikes(dt, token)
+            strikes = _resolve_day_strikes(dt, token, monthly=monthly)
             if not strikes:
                 debug_log.append(f"{dt}: strike resolution failed")
                 continue

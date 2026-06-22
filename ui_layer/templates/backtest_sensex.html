@@ -124,7 +124,7 @@
           <span>Days back</span>
           <span x-text="days + ' days'" class="font-mono font-600 text-t-bright"></span>
         </div>
-        <input type="range" x-model.number="days" min="3" max="30" step="1" class="w-full accent-[var(--t-cyan)]" />
+        <input type="range" x-model.number="days" min="3" max="60" step="1" class="w-full accent-[var(--t-cyan)]" />
       </div>
 
       <!-- Lots -->
@@ -185,14 +185,20 @@
           <input type="range" x-model.number="poolDays" min="5" max="20" step="1" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
-        <!-- Bias toggles -->
+        <!-- Bias & Expiry toggles -->
         <div class="mb-3">
-          <p class="sec-label mb-2">Bias Filters</p>
-          <p class="text-xs text-t-muted mb-2">Gap direction affects strike selection only (ATM±offset). Side filter is always spot zone.</p>
-          <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
-            <input type="checkbox" x-model="spotBias" class="accent-[var(--t-cyan)]" />
-            <span>Spot Bias — BEAR spot zone=CE, BULL spot zone=PE</span>
-          </label>
+          <p class="sec-label mb-2">Filters</p>
+          <div class="space-y-2">
+            <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
+              <input type="checkbox" x-model="spotBias" class="accent-[var(--t-cyan)]" />
+              <span>Spot Bias — BEAR spot zone=CE, BULL spot zone=PE</span>
+            </label>
+            <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
+              <input type="checkbox" x-model="monthly" class="accent-[var(--t-cyan)]" />
+              <span>Monthly Expiry — last expiry of running month (not weekly)</span>
+            </label>
+          </div>
+          <p class="text-xs text-t-dim mt-2">Gap direction affects strike selection only (ATM±offset).</p>
         </div>
 
       </div>
@@ -326,14 +332,14 @@ function sensexBT() {
   return {
     // Settings — 3-level hierarchy
     token:     sessionStorage.getItem('sx_token') || '',
-    days:      10,
+    days:      20,
     lots:      2,
     slBuf:     5,
     cutoff:    '15:10',
     sqOff:     '15:20',
     poolDays:  15,
-    gapBias:   true,
     spotBias:  true,
+    monthly:   true,
 
     // UI state
     ctrlOpen: true,
@@ -369,8 +375,8 @@ function sensexBT() {
             cutoff:    this.cutoff,
             sq_off:    this.sqOff,
             pool_days: this.poolDays,
-            gap_bias:  this.gapBias,
             spot_bias: this.spotBias,
+            monthly:   this.monthly,
           }),
         });
         const d = await r.json();
