@@ -1372,16 +1372,16 @@ def run_backtest_3level_ui(
                 opp_df  = opp_sd["df1m"]
                 opp_row = opp_df[opp_df["ts"] <= ets]
                 if not opp_row.empty:
-                    opp_ltp      = float(opp_row.iloc[-1]["close"])
-                    opp_sl_level = opp_e["t1"]   # opp 5m zone sl_level = where opp sellers get trapped
-                    # T1 = distance opp still needs to travel to trap its sellers
-                    opp_dist = opp_sl_level - opp_ltp
+                    opp_ltp       = float(opp_row.iloc[-1]["close"])
+                    opp_zone_high = opp_e["entry_price"]   # PE entry level (5m zone_high)
+                    # T1 = how far PE has already moved above its own entry zone
+                    # Example: PE LTP=900, PE zone=800 → 100 pts → CE T1 = CE_entry + 100
+                    opp_dist = opp_ltp - opp_zone_high
                     sl_dist  = ep - sl
                     # R:R gate: opp room must be >= 0.5x our SL distance
                     if opp_dist > 10 and sl_dist > 0 and (opp_dist / sl_dist) >= 0.5:
                         t1 = ep + opp_dist
-                    elif opp_dist <= 0 or (sl_dist > 0 and (opp_dist / sl_dist) < 0.5):
-                        pass   # R:R too poor → keep zone T1, trade still taken
+                    # else: R:R too poor or no opp data → keep zone T1
 
             ext_75m = [z for z in sd.get("z75_pool", []) if z["sl_level"] > t1]
 
