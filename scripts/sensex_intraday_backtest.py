@@ -86,7 +86,7 @@ def _fetch_1m(key: str, dt: date, token: str) -> pd.DataFrame:
     if not candles:
         return pd.DataFrame()
     df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume", "oi"])
-    df["ts"] = pd.to_datetime(df["ts"])
+    df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
     df = df.sort_values("ts").reset_index(drop=True)
     df = df[(df["ts"].dt.time >= pd.Timestamp("09:15").time()) &
             (df["ts"].dt.time <= pd.Timestamp("15:30").time())]
@@ -238,6 +238,10 @@ def _run_day(dt: date, token: str, lots: int,
             print(f"    [{side} {strike}] insufficient bars ({len(df1m)}), skip")
             continue
 
+        # Strip timezone so all comparisons are tz-naive
+        if df1m["ts"].dt.tz is not None:
+            df1m["ts"] = df1m["ts"].dt.tz_localize(None)
+
         # Build HTF (15m) and MTF (5m) from 1m
         htf = _resample(df1m, HTF_MIN)
         mtf = _resample(df1m, MTF_MIN)
@@ -253,9 +257,7 @@ def _run_day(dt: date, token: str, lots: int,
         zones = _detect_seller_trap_zones(htf)
 
         # State machine
-        position    = None   # dict when in trade
-        htf_idx     = 0      # which HTF candle we're up to
-        active_zone = None   # zone that passed HTF + 5m confirmation
+        position      = None   # dict when in trade
         mtf_confirmed = False
 
         eod = pd.Timestamp(f"{dt} {EOD_TIME}")
