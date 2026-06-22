@@ -505,10 +505,21 @@
         </div>
         <template x-for="(hz, hi) in zoneResult.htf_zones" :key="hi">
           <div class="mb-3 border border-white/10 rounded p-2">
-            <div class="flex items-center gap-2 mb-1">
+            <div class="flex items-start gap-2 mb-1 flex-wrap">
               <span x-text="hz.status==='CLOSED'?'🟢':hz.status==='TRAPPED'?'🟠':'🟡'"></span>
-              <span class="text-xs font-600 text-t-bright" x-text="'HTF #'+(hi+1)+' | zh='+hz.zone_high+' zl='+hz.zone_low+' T1='+hz.sl_level"></span>
-              <span class="text-xs text-t-muted" x-text="hz.status+(hz.closed_at&&hz.closed_at!=='-'?' @'+hz.closed_at:hz.trapped_at&&hz.trapped_at!=='-'?' @'+hz.trapped_at:'')"></span>
+              <div>
+                <span class="text-xs font-600 text-t-bright" x-text="'HTF #'+(hi+1)+' | zh='+hz.zone_high+' zl='+hz.zone_low+' T1='+hz.sl_level"></span>
+                <span class="text-xs ml-2" :class="hz.status==='CLOSED'?'text-green-400':hz.status==='TRAPPED'?'text-orange-400':'text-yellow-400'" x-text="hz.status"></span>
+                <div class="text-xs text-t-muted mt-0.5">
+                  75m: <span x-text="hz.ref_bar"></span> ref
+                  <template x-if="hz.trapped_at && hz.trapped_at!=='-'">
+                    <span> → <span x-text="hz.trapped_at"></span> trapped</span>
+                  </template>
+                  <template x-if="hz.closed_at && hz.closed_at!=='-'">
+                    <span> → <span x-text="hz.closed_at"></span> closed</span>
+                  </template>
+                </div>
+              </div>
             </div>
             <template x-if="hz.entry_signals.length > 0">
               <div class="ml-4">
