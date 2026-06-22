@@ -244,19 +244,75 @@ def show_zones(token: str, dt: str, key: str, side: str, htf_min: int = 75):
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def _test_token(token: str) -> bool:
+    """Quick check if token is valid by hitting Upstox profile endpoint."""
+    try:
+        r = requests.get("https://api.upstox.com/v2/user/profile",
+                         headers={"Authorization": f"Bearer {token}",
+                                  "Accept": "application/json"}, timeout=10)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _build_key(index: str, strike: int, opt: str, trade_date: str) -> str:
+    """Build Upstox instrument key — same logic as nifty_backtest._instrument_key."""
+    from data_layer.contract_registry import ContractRegistry
+    from scripts.nifty_backtest import _get_expiry, _USE_MONTHLY, _USE_NEXT_WEEK
+    index = index.upper()
+    opt   = opt.upper()
+    exp_date, exp_str = _get_expiry(index, date.fromisoformat(trade_date),
+                                    monthly=_USE_MONTHLY, next_week=_USE_NEXT_WEEK)
+    reg = ContractRegistry()
+    key = reg.get_upstox_key(index, exp_date, strike, opt)
+    if key:
+        return key
+    pfx = {"NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
+           "SENSEX": "BSE_FO|", "FINNIFTY": "NSE_FO|"}.get(index, "NSE_FO|")
+    return f"{pfx}{index}{exp_str}{strike}{opt}"
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="TrapScanner zone diagnostic viewer")
-    ap.add_argument("--token", required=True,  help="Upstox access token")
-    ap.add_argument("--date",  required=True,  help="Date YYYY-MM-DD")
-    ap.add_argument("--key",   required=True,  help="Instrument key e.g. NSE_FO|57202")
-    ap.add_argument("--side",  default="CE",   help="CE or PE")
-    ap.add_argument("--htf",   default=75, type=int, help="HTF minutes (default 75)")
+    ap.add_argument("--token",  required=True,  help="Upstox access token")
+    ap.add_argument("--date",   required=True,  help="Date YYYY-MM-DD")
+    ap.add_argument("--htf",    default=75, type=int, help="HTF minutes (default 75)")
+
+    # Option A: pass full key directly
+    ap.add_argument("--key",    default="", help="Full instrument key e.g. NSE_FO|NIFTY2561823400CE")
+    # Option B: let script resolve key from index+strike+opt
+    ap.add_argument("--index",  default="NIFTY", help="NIFTY / BANKNIFTY / SENSEX")
+    ap.add_argument("--strike", default=0, type=int, help="Strike price e.g. 23400")
+    ap.add_argument("--opt",    default="CE",  help="CE or PE")
+
     args = ap.parse_args()
+
+    # Validate token first
+    print(f"\nChecking token... ", end="", flush=True)
+    if not _test_token(args.token):
+        print("EXPIRED or INVALID — get a fresh Upstox token from the dashboard.")
+        sys.exit(1)
+    print("OK")
+
+    # Resolve instrument key
+    if args.key:
+        key = args.key
+    elif args.strike > 0:
+        try:
+            key = _build_key(args.index, args.strike, args.opt, args.date)
+            print(f"Resolved key: {key}")
+        except Exception as ex:
+            print(f"Could not auto-resolve key: {ex}")
+            print("Pass --key directly instead.")
+            sys.exit(1)
+    else:
+        print("Provide either --key OR --index + --strike + --opt")
+        sys.exit(1)
 
     show_zones(
         token   = args.token,
         dt      = args.date,
-        key     = args.key,
-        side    = args.side,
+        key     = key,
+        side    = args.opt if not args.key else "CE",
         htf_min = args.htf,
     )
