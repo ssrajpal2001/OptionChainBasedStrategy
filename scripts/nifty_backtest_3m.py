@@ -457,6 +457,9 @@ def _run_day(index: str, cfg: dict, td: date,
     all_sides = ["CE", "PE"]
     if use_bias and gap_fired:
         all_sides = ["CE"] if gap_dir == "UP" else ["PE"]
+        print(f"  GAP {gap_dir} detected → {all_sides[0]} side only")
+    elif use_bias:
+        print(f"  No qualifying gap (<{gap_thresh}%) → both sides")
 
     # ── Strike map per side ───────────────────────────────────────────────
     strike_map = {"CE": ce_strike, "PE": pe_strike}
