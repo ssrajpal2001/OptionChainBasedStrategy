@@ -33,12 +33,18 @@ from strategies.trap_scanner.scanner import scan_htf, scan_ltf, scan_htf_spot
 
 # ── Upstox fetch ──────────────────────────────────────────────────────────────
 
-def _fetch_1m(key: str, dt: str, token: str) -> pd.DataFrame:
+def _fetch_1m_single(key: str, dt: str, token: str) -> pd.DataFrame:
+    """Fetch 1m bars for a single date. Returns empty df on non-trading days (400)."""
     enc = quote(key, safe="")
     url = f"https://api.upstox.com/v2/historical-candle/{enc}/1minute/{dt}/{dt}"
-    r = requests.get(url, headers={"Authorization": f"Bearer {token}",
-                                    "Accept": "application/json"}, timeout=30)
-    r.raise_for_status()
+    try:
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}",
+                                        "Accept": "application/json"}, timeout=30)
+        if r.status_code == 400:
+            return pd.DataFrame()   # non-trading day
+        r.raise_for_status()
+    except requests.exceptions.HTTPError:
+        return pd.DataFrame()
     candles = r.json().get("data", {}).get("candles", [])
     if not candles:
         return pd.DataFrame()
@@ -50,6 +56,26 @@ def _fetch_1m(key: str, dt: str, token: str) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["datetime"] = df["datetime"].dt.tz_localize(None)
     return df
+
+
+def _fetch_1m(key: str, dt: str, token: str, lookback_days: int = 5) -> pd.DataFrame:
+    """Fetch 1m bars for dt and up to lookback_days prior trading days for HTF pool."""
+    frames = []
+    target = date.fromisoformat(dt)
+    d = target - timedelta(days=lookback_days + 4)  # go back extra to cover weekends
+    collected = 0
+    while d <= target:
+        if d.weekday() < 5:  # Mon-Fri only
+            df = _fetch_1m_single(key, d.isoformat(), token)
+            if not df.empty:
+                frames.append(df)
+                collected += 1
+        d += timedelta(days=1)
+        if d > target and collected >= lookback_days:
+            break
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames).drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
 
 
 def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
@@ -76,26 +102,26 @@ def show_zones(token: str, dt: str, key: str, side: str, htf_min: int = 75):
     print(f"{'='*70}")
 
     # ── Fetch bars ────────────────────────────────────────────────────────────
-    print(f"\n[1] Fetching 1m bars for {dt}...")
+    print(f"\n[1] Fetching 1m bars for {dt} + prior 5 trading days for HTF pool...")
 
-    # For HTF we need prev-day bars too (zones formed on prev-day close often visible intraday)
-    prev_dt = (date.fromisoformat(dt) - timedelta(days=3)).isoformat()
-    df1m_all = _fetch_1m(key, prev_dt, token)
-    df1m_today = _fetch_1m(key, dt, token)
+    # All bars (prev 5 trading days + today) for HTF zone pool
+    df_pool = _fetch_1m(key, dt, token, lookback_days=5)
 
-    if df1m_today.empty:
-        print(f"  ERROR: No 1m data for {dt}. Check token or key.")
+    if df_pool.empty:
+        print(f"  ERROR: No 1m data found. Check token or key.")
         return
 
-    print(f"  1m bars (today) : {len(df1m_today)} bars  "
-          f"[{_hhmm(df1m_today['datetime'].iloc[0])} → {_hhmm(df1m_today['datetime'].iloc[-1])}]")
+    # Today-only bars for LTF scan
+    today_str = pd.Timestamp(dt).date()
+    df1m_today = df_pool[df_pool["datetime"].dt.date == today_str].copy().reset_index(drop=True)
 
-    if not df1m_all.empty:
-        print(f"  1m bars (pool)  : {len(df1m_all)} bars  "
-              f"[{df1m_all['datetime'].iloc[0].date()} → {df1m_all['datetime'].iloc[-1].date()}]")
-
-    # Use combined (prev+today) for HTF zone pool, today-only for LTF
-    df_pool = pd.concat([df1m_all, df1m_today]).drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
+    print(f"  1m bars (pool)  : {len(df_pool)} bars  "
+          f"[{df_pool['datetime'].iloc[0].date()} → {df_pool['datetime'].iloc[-1].date()}]")
+    print(f"  1m bars (today) : {len(df1m_today)} bars  ", end="")
+    if df1m_today.empty:
+        print(f"\n  ERROR: No bars for {dt} specifically. Check token or key.")
+        return
+    print(f"[{_hhmm(df1m_today['datetime'].iloc[0])} → {_hhmm(df1m_today['datetime'].iloc[-1])}]")
 
     # ── HTF zones ─────────────────────────────────────────────────────────────
     df_htf = _resample(df_pool, htf_min)
