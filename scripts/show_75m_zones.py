@@ -32,19 +32,27 @@ def fetch_1m(key: str, dt: date, token: str) -> pd.DataFrame:
     df = pd.DataFrame(candles, columns=["ts","open","high","low","close","vol","oi"])
     df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
     df = df.sort_values("ts").reset_index(drop=True)
-    # Keep only market hours 9:15 - 15:30
-    df = df[(df["ts"].dt.time >= pd.Timestamp("09:15").time()) &
-            (df["ts"].dt.time <= pd.Timestamp("15:30").time())]
-    return df
+    # Strict market hours: 09:15:00 to 15:29:59 only
+    market_open  = pd.Timestamp("09:15:00").time()
+    market_close = pd.Timestamp("15:29:00").time()
+    df = df[(df["ts"].dt.time >= market_open) & (df["ts"].dt.time <= market_close)]
+    return df.reset_index(drop=True)
 
 def resample_75m(df1m: pd.DataFrame) -> pd.DataFrame:
-    df = df1m.set_index("ts")
-    rule = "75min"
-    out = df.resample(rule, origin=pd.Timestamp("2000-01-01 09:15:00")).agg(
-        open=("open","first"), high=("high","max"),
-        low=("low","min"), close=("close","last")
-    ).dropna(subset=["open"])
-    out = out.reset_index()
+    """Resample 1m bars to 75m, anchored at 09:15 each day."""
+    if df1m.empty:
+        return pd.DataFrame()
+    # Compute minutes-since-0915 and bucket into 75m blocks
+    base = df1m["ts"].iloc[0].normalize() + pd.Timedelta("9h15m")
+    df1m = df1m.copy()
+    df1m["bucket"] = ((df1m["ts"] - base).dt.total_seconds() // (75 * 60)).astype(int)
+    out = df1m.groupby("bucket").agg(
+        ts=("ts", "first"),
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+    ).reset_index(drop=True)
     return out
 
 def find_zones(htf: pd.DataFrame) -> list:
@@ -64,11 +72,18 @@ def find_zones(htf: pd.DataFrame) -> list:
             })
     return zones
 
+_KEY_CACHE: dict = {}   # (strike, side, expiry_str) → key
+
 def get_key_for_strike(token: str, strike: int, side: str, trade_date: date) -> tuple:
-    """Find instrument key by trying expiry dates from trade_date to +14 days."""
-    from datetime import timedelta
+    """
+    Find instrument key by trying expiry dates from trade_date to +14 days.
+    Caches results so the same contract key is reused across the week.
+    """
     for delta in range(15):
         candidate = trade_date + timedelta(days=delta)
+        cache_k = (strike, side, candidate.strftime("%d%b%y").upper())
+        if cache_k in _KEY_CACHE:
+            return _KEY_CACHE[cache_k], candidate
         try:
             r = requests.get(
                 "https://api.upstox.com/v2/instruments/search",
@@ -80,6 +95,7 @@ def get_key_for_strike(token: str, strike: int, side: str, trade_date: date) -> 
             if items:
                 key = items[0].get("instrument_key","")
                 if key:
+                    _KEY_CACHE[cache_k] = key
                     return key, candidate
         except Exception:
             pass
