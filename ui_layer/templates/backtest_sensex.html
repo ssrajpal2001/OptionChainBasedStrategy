@@ -236,7 +236,11 @@
             </label>
             <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
               <input type="checkbox" x-model="skip15m" class="accent-[var(--t-cyan)]" />
-              <span>Skip 15m — 75m → 5m only (2-level, no 15m gate)</span>
+              <span>Skip 15m — 75m → 5m only (2-level)</span>
+            </label>
+            <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
+              <input type="checkbox" x-model="skip75m" class="accent-[var(--t-cyan)]" />
+              <span>Skip 75m — 15m → 5m only (no pool, intraday cascade always)</span>
             </label>
           </div>
         </div>
@@ -381,6 +385,7 @@ function sensexBT() {
     spotBias:  true,
     monthly:   true,
     skip15m:   false,
+    skip75m:   false,
     fixedCe:   76000,
     fixedPe:   77000,
     ceKey:     '',
@@ -429,6 +434,7 @@ function sensexBT() {
             pe_key:    this.peKey || '',
             from_date: this.fromDate || '',
             skip_15m:  this.skip15m,
+            skip_75m:  this.skip75m,
           }),
         });
         const d = await r.json();

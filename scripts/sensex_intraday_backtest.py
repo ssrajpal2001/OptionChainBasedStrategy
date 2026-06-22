@@ -1133,6 +1133,7 @@ def run_backtest_3level_ui(
     fixed_pe: int     = 0,
     from_date: Optional[date] = None,
     skip_15m: bool    = False,  # True = 75m→5m only (skip 15m level)
+    skip_75m: bool    = False,  # True = ignore 75m pool, always cascade 15m→5m
 ) -> dict:
     """
     3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
@@ -1240,7 +1241,8 @@ def run_backtest_3level_ui(
                 debug_log.append(f"  {dt} {side}: no 1m data")
                 continue
 
-            entries = _collect_entries_3level(dt, df1m, z75_pool,
+            entries = _collect_entries_3level(dt, df1m,
+                                              [] if skip_75m else z75_pool,
                                               cutoff=cutoff, skip_15m=skip_15m)
             for e in entries:
                 ep   = e["entry_price"]
