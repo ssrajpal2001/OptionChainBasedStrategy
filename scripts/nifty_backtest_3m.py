@@ -390,10 +390,11 @@ def _simulate_trade(entry: dict,
             eod_exit_ts = bar_ts
             break
 
-        # Live engine: 1m CLOSE below SL triggers exit (not intrabar LOW dip)
-        if float(bar["close"]) <= sl_price:
+        # SL: touched intrabar AND bar closes below → real hit, exit at sl_price
+        # Bars that dip below SL but recover (close > sl) are NOT stopped
+        if float(bar["low"]) <= sl_price and float(bar["close"]) <= sl_price:
             sl_hit     = True
-            sl_exit_px = round(float(bar["close"]), 2)
+            sl_exit_px = sl_price   # stop-order fills at SL level, not bar close
             sl_exit_ts = bar_ts
             break
 
@@ -447,9 +448,9 @@ def _simulate_trade(entry: dict,
             trail_sl = round(bar_close - trail_pts, 2)
 
         # TSL hit
-        # Live engine: exit on close below trail_sl (not intrabar low dip)
-        if bar_close <= trail_sl:
-            tsl_exit_px = round(bar_close, 2)
+        # TSL: low touched AND close below trail_sl → exit at trail_sl
+        if bar_low <= trail_sl and bar_close <= trail_sl:
+            tsl_exit_px = trail_sl
             tsl_exit_ts = bar_ts
             tsl_reason  = "TSL"
             break
