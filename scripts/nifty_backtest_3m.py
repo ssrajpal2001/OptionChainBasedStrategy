@@ -176,14 +176,19 @@ def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date,
 
 # ── HTF zone scan ──────────────────────────────────────────────────────────────
 
-def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date) -> list:
+def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date,
+                         zone_lookback_days: int = 5) -> list:
     """
-    Run HTF scan on multi-day bars; return zones confirmed (TRAPPED or CLOSED)
-    on or before today.
+    Run HTF scan on recent bars only (last zone_lookback_days calendar days).
+    Using all history gives 50+ stale zones; recent-only gives 2-3 relevant ones.
     """
     if df_all.empty:
         return []
-    df_htf = _resample(df_all, htf_min)
+    cutoff = pd.Timestamp(today - timedelta(days=zone_lookback_days))
+    df_recent = df_all[df_all["datetime"] >= cutoff]
+    if df_recent.empty:
+        df_recent = df_all  # fallback
+    df_htf = _resample(df_recent, htf_min)
     _, entries = scan_htf(df_htf)
     result = []
     for e in entries:
