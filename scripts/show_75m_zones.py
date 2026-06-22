@@ -32,8 +32,11 @@ ZONE_VALID_DAYS = 10
 # ── Data fetch ────────────────────────────────────────────────────────────────
 
 def fetch_1m(key: str, dt: date, token: str) -> pd.DataFrame:
-    ds  = dt.strftime("%Y-%m-%d")
-    url = f"https://api.upstox.com/v2/historical-candle/{key}/1minute/{ds}/{ds}"
+    ds = dt.strftime("%Y-%m-%d")
+    if dt == date.today():
+        url = f"https://api.upstox.com/v2/historical-candle/intraday/{key}/1minute"
+    else:
+        url = f"https://api.upstox.com/v2/historical-candle/{key}/1minute/{ds}/{ds}"
     r   = requests.get(url, headers=HEADERS(token), timeout=15)
     candles = r.json().get("data", {}).get("candles", [])
     if not candles:
