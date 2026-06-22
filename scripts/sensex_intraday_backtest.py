@@ -759,13 +759,21 @@ def run_backtest_ui(
 
 # ── 3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY) ──
 
+PROFIT_CAP_RS = 5000   # ₹5,000 per trade — lock profits at cap, then TSL trails
+
+
 def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
-                   sl: float, t1: float, sq_off: str, lot_size: int, lots: int) -> dict:
+                   sl: float, t1: float, sq_off: str, lot_size: int, lots: int,
+                   df5m: pd.DataFrame = None) -> dict:
     """
     Walk 1m bars from entry_ts.
-    At T1: book 50% (lot1), trail remaining lot with SL = entry (breakeven), exit at EOD/SL.
+    At T1 (or profit cap ₹5,000): book 50%, trail rest at entry (breakeven).
+    TSL step-up: new post-entry 5m traps → step up SL to zone_low when sl_level hit.
+    Profit cap: once running P&L >= ₹5,000 (full qty), lock by stepping SL up to that level;
+    if price falls back below the cap-SL, exit with capped profit.
     Returns combined PnL across both legs.
     """
+    from scripts.show_75m_zones import detect_zones, resample
     sq_h, sq_m = map(int, sq_off.split(":"))
     qty_total = lots * lot_size
     qty_half  = qty_total // 2      # 50% at T1
@@ -775,7 +783,30 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
     t1_hit = False
     t1_ts  = None
     t1_pnl_rs = 0.0
-    trailing_sl = sl   # before T1 = zone_low SL; after T1 = entry (breakeven)
+    trailing_sl = sl   # before T1 = zone_low SL; after T1 = entry (breakeven), then step-up
+    cap_pts = PROFIT_CAP_RS / qty_total  # pts per unit at which full-position P&L = ₹5,000
+    cap_sl_locked = False  # True once cap has been locked in via SL step-up
+
+    # Pre-compute post-entry 5m zones for TSL step-up
+    tsl_zones = []   # list of (sl_level, new_tsl) sorted by formed_ts
+    if df5m is not None:
+        for z in detect_zones(df5m):
+            if z["formed_ts"] > entry_ts and z["zone_high"] > entry_price:
+                # New zone above entry: sellers trapped when price hits sl_level
+                # We step up our SL to zone_low when that happens
+                tsl_zones.append({
+                    "sl_trigger": z["sl_level"],   # price must reach here to confirm trap
+                    "new_tsl":    z["zone_low"],   # our new SL once confirmed
+                    "activated":  False,
+                })
+
+    def _check_tsl_stepup(hi: float) -> None:
+        for tz in tsl_zones:
+            if not tz["activated"] and hi >= tz["sl_trigger"]:
+                tz["activated"] = True
+                if tz["new_tsl"] > trailing_sl:
+                    nonlocal trailing_sl
+                    trailing_sl = tz["new_tsl"]
 
     for _, bar in future.iterrows():
         ts   = bar["ts"]
@@ -790,7 +821,6 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                 return {"exit_ts": ts, "exit_price": ep,
                         "pnl_pts": round(pnl_pts, 2),
                         "pnl_rs": round(pnl_pts * qty_total, 0), "reason": "EOD"}
-            # T1 already booked: exit rest at EOD open
             rest_pnl_pts = ep - entry_price
             total_rs = t1_pnl_rs + rest_pnl_pts * qty_rest
             avg_pts  = total_rs / qty_total
@@ -798,14 +828,25 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                     "pnl_pts": round(avg_pts, 2),
                     "pnl_rs": round(total_rs, 0), "reason": "T1+EOD"}
 
+        # Profit cap: once full-position gain >= ₹5,000, lock SL at cap level
+        if not t1_hit and not cap_sl_locked:
+            running_gain = (hi - entry_price) * qty_total
+            if running_gain >= PROFIT_CAP_RS:
+                cap_sl_locked = True
+                cap_lock_price = entry_price + cap_pts   # price that locks ₹5,000
+                trailing_sl = max(trailing_sl, cap_lock_price)
+
+        # TSL step-up check: did price touch a post-entry 5m zone's sl_level?
+        if df5m is not None:
+            _check_tsl_stepup(hi)
+
         if lo <= trailing_sl:
             if not t1_hit:
                 pnl_pts = trailing_sl - entry_price
                 return {"exit_ts": ts, "exit_price": trailing_sl,
                         "pnl_pts": round(pnl_pts, 2),
                         "pnl_rs": round(pnl_pts * qty_total, 0), "reason": "SL"}
-            # Rest stopped out at breakeven
-            rest_pnl_pts = trailing_sl - entry_price   # = 0 at breakeven
+            rest_pnl_pts = trailing_sl - entry_price
             total_rs = t1_pnl_rs + rest_pnl_pts * qty_rest
             avg_pts  = total_rs / qty_total
             return {"exit_ts": ts, "exit_price": trailing_sl,
@@ -816,7 +857,7 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
             t1_hit = True
             t1_ts  = ts
             t1_pnl_rs   = (t1 - entry_price) * qty_half
-            trailing_sl = entry_price   # move SL to breakeven for rest
+            trailing_sl = max(entry_price, trailing_sl)   # step-up can't go below entry after T1
 
     # Last bar — no sq_off hit
     last = df1m.iloc[-1]
@@ -1237,6 +1278,8 @@ def run_backtest_3level_ui(
 
         debug_log.append(f"{dt}: {day_label} | {bias_src} | CE={day_ce_key} PE={day_pe_key}")
 
+        # --- Collect entries for both sides first (needed for opposite-side T1) ---
+        side_data: dict = {}  # side → {df1m, df5m, entries}
         for side, scan_key, allowed in [
             ("CE", day_ce_key, ce_allowed),
             ("PE", day_pe_key, pe_allowed),
@@ -1248,7 +1291,6 @@ def run_backtest_3level_ui(
                 debug_log.append(f"  {side}: no key")
                 continue
 
-            # Build 75m option zone pool for this key
             z75_pool: list = []
             for pdt in all_pool_days:
                 df_p = _get_bars(scan_key, pdt)
@@ -1260,20 +1302,41 @@ def run_backtest_3level_ui(
             if df1m.empty:
                 debug_log.append(f"  {dt} {side}: no 1m data")
                 continue
+            df5m_opt = resample(df1m, 5)
 
             entries = _collect_entries_3level(dt, df1m,
                                               [] if skip_75m else z75_pool,
                                               cutoff=cutoff, skip_15m=skip_15m,
                                               t1_from_75m=t1_from_75m,
                                               no_cascade=no_cascade)
+            side_data[side] = {"df1m": df1m, "df5m": df5m_opt, "entries": entries}
+
+        for side, scan_key, allowed in [
+            ("CE", day_ce_key, ce_allowed),
+            ("PE", day_pe_key, pe_allowed),
+        ]:
+            if side not in side_data:
+                continue
+            sd = side_data[side]
+            df1m      = sd["df1m"]
+            df5m_opt  = sd["df5m"]
+            entries   = sd["entries"]
+
+            # Opposite side entry zone_high → use as additional T1 signal if available
+            opp_side  = "PE" if side == "CE" else "CE"
+            opp_entry = None
+            if opp_side in side_data and side_data[opp_side]["entries"]:
+                opp_entry = side_data[opp_side]["entries"][0]["entry_price"]
+
             for e in entries:
                 ep   = e["entry_price"]
-                sl   = round(e["sl"] - sl_buf, 2)  # 15m zone_low - buffer
-                # Enforce minimum 50pt SL distance from entry (₹2000 on 2 lots)
+                sl   = round(e["sl"] - sl_buf, 2)  # zone_low - buffer
                 sl   = min(sl, ep - 50.0)
-                t1   = e["t1"]
+                # T1: use opposite-side entry if available (both sides moving = trend confirmed)
+                # otherwise fall back to zone T1
+                t1   = opp_entry if opp_entry is not None else e["t1"]
                 exit_info = _simulate_exit(df1m, e["entry_ts"], ep, sl, t1,
-                                           sq_off, LOT_SIZE, lots)
+                                           sq_off, LOT_SIZE, lots, df5m=df5m_opt)
                 all_trades.append({
                     "date":       dt.isoformat(),
                     "side":       side,
@@ -1289,6 +1352,7 @@ def run_backtest_3level_ui(
                     "pnl_rs":     exit_info["pnl_rs"],
                     "reason":     exit_info["reason"],
                     "htf_zone":   e["zone_label"],
+                    "opp_t1":     f"{opp_entry:.0f}" if opp_entry else "",
                 })
 
     if not all_trades:
