@@ -39,10 +39,14 @@ STRIKE_STEP      = 500          # round spot to nearest 500
 HTF_MIN          = 15           # HTF timeframe
 MTF_MIN          = 5            # entry confirmation timeframe
 LTF_MIN          = 1            # trigger timeframe
-EOD_TIME         = "15:15"      # square-off time
+EOD_TIME         = "14:00"      # no new entries after this time (square-off at 15:15)
+SQ_OFF_TIME      = "15:15"      # hard square-off
 SL_BUFFER        = 0.0          # pts below zone_low for SL (0 = zone_low itself)
-TARGET_MULT      = 1.5          # target = zone_low + (zone_high-zone_low)*TARGET_MULT
+TARGET_MULT      = 1.5          # target = zone_high + (zone_high-zone_low)*TARGET_MULT
 LOT_SIZE         = 10           # SENSEX lot size
+MIN_ZONE_RANGE   = 30           # skip zones smaller than this (noise filter)
+MAX_TRADES_PER_SIDE = 2         # max entries per direction (CE/PE) per day
+MIN_REWARD       = 20           # skip if target - entry < this (entry already overshot zone)
 
 # BSE options URL uses BSE_FO — SENSEX weekly options
 # Instrument keys are looked up from REGISTRY at runtime; fallback to Upstox search API
@@ -260,16 +264,18 @@ def _run_day(dt: date, token: str, lots: int,
         position      = None   # dict when in trade
         mtf_confirmed = False
 
-        eod = pd.Timestamp(f"{dt} {EOD_TIME}")
+        no_new_entry = pd.Timestamp(f"{dt} {EOD_TIME}")   # 14:00 — no new entries
+        sq_off       = pd.Timestamp(f"{dt} {SQ_OFF_TIME}") # 15:15 — hard exit
+        trades_this_side = 0   # max MAX_TRADES_PER_SIDE per direction
 
         for _, bar1m in df1m.iterrows():
-            ts   = bar1m["ts"]
-            ltp  = float(bar1m["close"])
+            ts     = bar1m["ts"]
+            ltp    = float(bar1m["close"])
             high1m = float(bar1m["high"])
             low1m  = float(bar1m["low"])
 
-            if ts >= eod:
-                # EOD square-off
+            if ts >= sq_off:
+                # Hard square-off
                 if position:
                     pnl = (ltp - position["entry"]) * position["qty"]
                     trades.append({**position,
@@ -287,26 +293,26 @@ def _run_day(dt: date, token: str, lots: int,
                                    "exit_ts": ts, "exit_price": position["sl"],
                                    "pnl_pts": position["sl"] - position["entry"],
                                    "pnl_rs":  pnl, "reason": "SL"})
-                    position      = None
-                    active_zone   = None
-                    mtf_confirmed = False
+                    position = None
                 elif high1m >= position["target"]:
                     pnl = (position["target"] - position["entry"]) * position["qty"]
                     trades.append({**position,
                                    "exit_ts": ts, "exit_price": position["target"],
                                    "pnl_pts": position["target"] - position["entry"],
                                    "pnl_rs":  pnl, "reason": "TARGET"})
-                    position      = None
-                    active_zone   = None
-                    mtf_confirmed = False
+                    position = None
                 continue   # don't look for new entry while in trade
+
+            # No new entries after EOD_TIME or if daily limit reached
+            if ts >= no_new_entry:
+                continue
+            if trades_this_side >= MAX_TRADES_PER_SIDE:
+                continue
 
             # ── Advance ALL zone states on each 1m close ─────────────────────
             zones = [_advance_zone_state(z, ltp) for z in zones]
 
             # ── Step 1: HTF zone ENTRY_READY? ────────────────────────────────
-            # Only look at zones whose zone_ts ≤ current ts (zone must have formed already)
-            ts_col = "ts" if "ts" in htf.columns else None
             zones_ready = [z for z in zones
                            if z["state"] == "ENTRY_READY" and z["zone_ts"] <= ts]
             if not zones_ready:
@@ -315,43 +321,48 @@ def _run_day(dt: date, token: str, lots: int,
             # Use the most recent ENTRY_READY zone
             best_zone = zones_ready[-1]
 
+            # Skip tiny zones (noise)
+            if (best_zone["zone_high"] - best_zone["zone_low"]) < MIN_ZONE_RANGE:
+                continue
+
             # ── Step 2: 5m MTF confirmation ───────────────────────────────────
-            # The last completed 5m candle must be BULLISH (close > open)
-            # AND close above the zone midpoint (price recovering, not fading)
-            mtf_ts = mtf["ts"] if "ts" in mtf.columns else mtf.index
-            mtf_past = mtf[mtf_ts < ts]   # completed 5m candles only
+            mtf_ts   = mtf["ts"] if "ts" in mtf.columns else mtf.index
+            mtf_past = mtf[mtf_ts < ts]
             if mtf_past.empty:
                 continue
-            last_5m = mtf_past.iloc[-1]
+            last_5m       = mtf_past.iloc[-1]
             last_5m_close = float(last_5m["close"])
             last_5m_open  = float(last_5m["open"])
-            # 5m must be bullish AND above zone midpoint trigger
             if last_5m_close <= last_5m_open:
-                continue   # bearish 5m candle — wait
+                continue   # bearish 5m — wait
             if last_5m_close < best_zone["zone_trigger"]:
-                continue   # 5m still below midpoint — not enough recovery
+                continue   # 5m below midpoint — not recovered enough
 
             # ── Step 3: 1m buy signal ─────────────────────────────────────────
-            # 1m close > previous 1m high (momentum breakout on 1m)
             bar_idx = bar1m.name
             if bar_idx < 1:
                 continue
-            prev1m     = df1m.iloc[bar_idx - 1]
-            buy_signal = ltp > float(prev1m["high"])
-            if not buy_signal:
-                continue
+            prev1m = df1m.iloc[bar_idx - 1]
+            if ltp <= float(prev1m["high"]):
+                continue   # no 1m breakout yet
 
-            # ── All 3 conditions met — ENTER at this bar's close (next open) ──
+            # ── All 3 conditions met — ENTER at next 1m open ─────────────────
             next_idx = bar_idx + 1
             if next_idx >= len(df1m):
                 continue
             entry_bar   = df1m.iloc[next_idx]
             entry_price = float(entry_bar["open"])
             entry_ts    = entry_bar["ts"]
-            if entry_ts >= eod:
+            if entry_ts >= no_new_entry:
                 continue
 
-            qty = lots * LOT_SIZE
+            # Guard: entry must be below target with meaningful reward
+            if entry_price >= best_zone["target"]:
+                continue   # price already overshot target before we could enter
+            if best_zone["target"] - entry_price < MIN_REWARD:
+                continue   # too little left to capture
+
+            qty      = lots * LOT_SIZE
             position = {
                 "date":     dt.isoformat(),
                 "side":     side,
@@ -364,7 +375,8 @@ def _run_day(dt: date, token: str, lots: int,
                 "qty":      qty,
                 "htf_zone": f"{best_zone['zone_low']}→{best_zone['zone_high']}",
             }
-            # Mark zone consumed so we don't re-enter on same zone
+            trades_this_side += 1
+            # Mark zone consumed — no double entry on same zone
             for z in zones:
                 if z["zone_ts"] == best_zone["zone_ts"]:
                     z["state"] = "CONSUMED"
@@ -372,7 +384,7 @@ def _run_day(dt: date, token: str, lots: int,
                   f"@ {entry_price:.1f}  zone={best_zone['zone_low']}→{best_zone['zone_high']}"
                   f"  SL={best_zone['sl']:.1f}  T={best_zone['target']:.1f}")
 
-        # EOD close if still open
+        # Hard EOD close if loop ended with open position
         if position and not df1m.empty:
             last = df1m.iloc[-1]
             ltp  = float(last["close"])
