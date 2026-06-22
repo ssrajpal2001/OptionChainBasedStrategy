@@ -152,55 +152,73 @@ def _get_sensex_spot_open(dt: date, token: str) -> float:
 
 def _detect_seller_trap_zones(htf: pd.DataFrame) -> list[dict]:
     """
-    Seller-trap on HTF (15m) bars:
-    For each candle, a BEAR trap forms when:
-      - Price dips into the candle range (low ≤ close ≤ high of reference candle)
-      - Then recovers above candle high → sellers trapped
-    Returns list of zones with zone_low, zone_high, zone_trigger, target.
+    Every completed 15m candle creates a zone (low → high).
+    The zone is "armed" and we then watch 1m ticks to advance state.
     """
     zones = []
-    for i in range(1, len(htf)):
-        ref = htf.iloc[i - 1]   # reference candle (LIFO — previous candle)
-        curr = htf.iloc[i]
-        zone_low  = round(float(ref["low"]),  2)
-        zone_high = round(float(ref["high"]), 2)
-        if zone_high <= zone_low:
+    ts_col = "ts" if "ts" in htf.columns else htf.index.name
+    for i in range(len(htf)):
+        row = htf.iloc[i]
+        zone_low  = round(float(row["low"]),  2)
+        zone_high = round(float(row["high"]), 2)
+        if zone_high <= zone_low or (zone_high - zone_low) < 5:
             continue
         zone_range = zone_high - zone_low
-        # Trigger: 33% into the zone from low (similar to live engine)
-        trigger = round(zone_low + zone_range * 0.33, 2)
+        # Trigger = midpoint of zone (50%) — price recovering through mid = sellers losing
+        trigger = round(zone_low + zone_range * 0.50, 2)
+        # Target = zone_high + range × mult (sellers get squeezed above zone_high)
         target  = round(zone_high + zone_range * TARGET_MULT, 2)
         sl      = round(zone_low - SL_BUFFER, 2)
         zones.append({
-            "ref_ts":      ref["ts"] if "ts" in ref.index else htf.index[i - 1],
-            "zone_ts":     curr["ts"] if "ts" in curr.index else htf.index[i],
-            "zone_low":    zone_low,
-            "zone_high":   zone_high,
-            "zone_trigger":trigger,
-            "target":      target,
-            "sl":          sl,
-            "state":       "WATCH",
+            "zone_ts":      row["ts"] if ts_col == "ts" else htf.index[i],
+            "zone_low":     zone_low,
+            "zone_high":    zone_high,
+            "zone_trigger": trigger,
+            "target":       target,
+            "sl":           sl,
+            "state":        "WATCH",
+            # Track lowest price seen while SELLERS_IN (confirms sellers really entered)
+            "sellers_in_low": None,
         })
     return zones
 
 
 def _advance_zone_state(zone: dict, price: float) -> dict:
     """
-    WATCH → (price dips ≤ zone_low) → SELLERS_IN
-          → (price rises ≥ zone_high) → TRAPPED
-          → (price drops ≤ zone_low) → ENTRY_READY
+    State machine matching what the charts show:
+
+    WATCH
+      → price ≤ zone_low                    → SELLERS_IN   (sellers pushed it down)
+    SELLERS_IN
+      → price ≥ zone_trigger (midpoint)     → TRAPPED      (sellers starting to lose)
+    TRAPPED
+      → price ≥ zone_high                   → ENTRY_READY  (sellers fully trapped above zone)
+
+    Entry is triggered from ENTRY_READY state via 5m + 1m confirmation.
+    SL = zone_low (where sellers entered — if price goes back there, trap failed).
     """
     z = zone.copy()
     st = z["state"]
     if st == "WATCH":
         if price <= z["zone_low"]:
             z["state"] = "SELLERS_IN"
+            z["sellers_in_low"] = price
     elif st == "SELLERS_IN":
-        if price >= z["zone_high"]:
+        # Track how deep sellers pushed
+        if z["sellers_in_low"] is None or price < z["sellers_in_low"]:
+            z["sellers_in_low"] = price
+        # Sellers are trapped when price recovers through the midpoint trigger
+        if price >= z["zone_trigger"]:
             z["state"] = "TRAPPED"
     elif st == "TRAPPED":
-        if price <= z["zone_low"]:
+        # Full trap confirmed when price breaks above zone_high
+        if price >= z["zone_high"]:
             z["state"] = "ENTRY_READY"
+        # If price falls back to zone_low, trap failed — reset to WATCH
+        elif price <= z["zone_low"]:
+            z["state"] = "WATCH"
+            z["sellers_in_low"] = None
+    # ENTRY_READY: stays until consumed by entry logic
     return z
 
 
@@ -281,72 +299,76 @@ def _run_day(dt: date, token: str, lots: int,
                     mtf_confirmed = False
                 continue   # don't look for new entry while in trade
 
-            # ── Advance zone states on each 1m close ─────────────────────────
+            # ── Advance ALL zone states on each 1m close ─────────────────────
             zones = [_advance_zone_state(z, ltp) for z in zones]
 
-            # ── Step 1: HTF gate — find a TRAPPED zone ────────────────────────
-            # Update zones list with newly-completed HTF candles
-            htf_ts_list = list(htf["ts"]) if "ts" in htf.columns else list(htf.index)
-            while htf_idx < len(htf) and htf_ts_list[htf_idx] <= ts:
-                htf_idx += 1
-            zones_ready = [z for z in zones if z["state"] == "ENTRY_READY"]
-
+            # ── Step 1: HTF zone ENTRY_READY? ────────────────────────────────
+            # Only look at zones whose zone_ts ≤ current ts (zone must have formed already)
+            ts_col = "ts" if "ts" in htf.columns else None
+            zones_ready = [z for z in zones
+                           if z["state"] == "ENTRY_READY" and z["zone_ts"] <= ts]
             if not zones_ready:
-                continue   # no HTF zone ready yet
+                continue
 
             # Use the most recent ENTRY_READY zone
             best_zone = zones_ready[-1]
 
             # ── Step 2: 5m MTF confirmation ───────────────────────────────────
-            # 5m candle containing current ts
-            mtf_now = mtf[mtf["ts"] <= ts]
-            if mtf_now.empty:
+            # The last completed 5m candle must be BULLISH (close > open)
+            # AND close above the zone midpoint (price recovering, not fading)
+            mtf_ts = mtf["ts"] if "ts" in mtf.columns else mtf.index
+            mtf_past = mtf[mtf_ts < ts]   # completed 5m candles only
+            if mtf_past.empty:
                 continue
-            last_5m = mtf_now.iloc[-1]
+            last_5m = mtf_past.iloc[-1]
             last_5m_close = float(last_5m["close"])
-
-            # 5m must close INSIDE the zone (zone_low ≤ 5m_close ≤ zone_high)
-            in_zone = best_zone["zone_low"] <= last_5m_close <= best_zone["zone_high"]
-            if not in_zone:
-                continue
+            last_5m_open  = float(last_5m["open"])
+            # 5m must be bullish AND above zone midpoint trigger
+            if last_5m_close <= last_5m_open:
+                continue   # bearish 5m candle — wait
+            if last_5m_close < best_zone["zone_trigger"]:
+                continue   # 5m still below midpoint — not enough recovery
 
             # ── Step 3: 1m buy signal ─────────────────────────────────────────
-            # 1m close > prev 1m high (bullish breakout on 1m)
+            # 1m close > previous 1m high (momentum breakout on 1m)
             bar_idx = bar1m.name
             if bar_idx < 1:
                 continue
-            prev1m = df1m.iloc[bar_idx - 1]
+            prev1m     = df1m.iloc[bar_idx - 1]
             buy_signal = ltp > float(prev1m["high"])
-
             if not buy_signal:
                 continue
 
-            # All 3 conditions met — ENTER at next bar's open
+            # ── All 3 conditions met — ENTER at this bar's close (next open) ──
             next_idx = bar_idx + 1
             if next_idx >= len(df1m):
                 continue
-            entry_bar  = df1m.iloc[next_idx]
+            entry_bar   = df1m.iloc[next_idx]
             entry_price = float(entry_bar["open"])
             entry_ts    = entry_bar["ts"]
-
             if entry_ts >= eod:
                 continue
 
             qty = lots * LOT_SIZE
             position = {
-                "date":        dt.isoformat(),
-                "side":        side,
-                "strike":      strike,
-                "key":         key,
-                "entry_ts":    entry_ts,
-                "entry":       entry_price,
-                "sl":          best_zone["sl"],
-                "target":      best_zone["target"],
-                "qty":         qty,
-                "htf_zone":    f"{best_zone['zone_low']}→{best_zone['zone_high']}",
+                "date":     dt.isoformat(),
+                "side":     side,
+                "strike":   strike,
+                "key":      key,
+                "entry_ts": entry_ts,
+                "entry":    entry_price,
+                "sl":       best_zone["sl"],
+                "target":   best_zone["target"],
+                "qty":      qty,
+                "htf_zone": f"{best_zone['zone_low']}→{best_zone['zone_high']}",
             }
+            # Mark zone consumed so we don't re-enter on same zone
+            for z in zones:
+                if z["zone_ts"] == best_zone["zone_ts"]:
+                    z["state"] = "CONSUMED"
             print(f"      ENTRY {entry_ts.strftime('%H:%M')} {side} {strike} "
-                  f"@ {entry_price:.1f}  SL={best_zone['sl']:.1f}  T={best_zone['target']:.1f}")
+                  f"@ {entry_price:.1f}  zone={best_zone['zone_low']}→{best_zone['zone_high']}"
+                  f"  SL={best_zone['sl']:.1f}  T={best_zone['target']:.1f}")
 
         # EOD close if still open
         if position and not df1m.empty:
