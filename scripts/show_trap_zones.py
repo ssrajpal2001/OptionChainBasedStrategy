@@ -355,7 +355,14 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
                 t1  = round(l["sl"], 2)
                 rr  = round((t1 - ep) / max(ep - sl, 0.01), 2)
                 entry_signal = {"entry": ep, "sl": sl, "t1": t1, "rr": rr,
-                                "htf_t1": round(e["sl"], 2)}
+                                "htf_t1": round(e["sl"], 2),
+                                "ltf_ref":     _hhmm(l.get("ref_ts")),
+                                "ltf_trapped": _hhmm(l.get("trapped_on")),
+                                "ltf_closed":  _hhmm(l.get("closed_on")),
+                                "htf_ref":     _hhmm(e.get("ref_ts")),
+                                "htf_trapped": _hhmm(e.get("trapped_on")),
+                                "htf_closed":  _hhmm(e.get("closed_on")),
+                                }
             ltf_out.append({
                 "status":     l["status"],
                 "zone_high":  round(l["zone_high"],    2),
