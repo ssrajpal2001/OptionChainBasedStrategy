@@ -595,7 +595,7 @@ def run_backtest_ui(
     trading_days = _get_trading_days(days)
 
     for dt in trading_days:
-        spot = _get_sensex_spot_open(token, dt)
+        spot = _get_sensex_spot_open(dt, token)
         if spot is None:
             continue
         ce_strike = _round_ce(spot)
