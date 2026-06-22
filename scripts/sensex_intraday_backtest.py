@@ -972,7 +972,7 @@ def run_backtest_3level_ui(
             entries = _collect_entries_3level(dt, df1m, z75_pool, cutoff=cutoff)
             for e in entries:
                 ep   = e["entry_price"]
-                sl   = round(ep - sl_buf, 2) if sl_buf > 0 else e["sl"]
+                sl   = round(e["sl"] - sl_buf, 2)  # zone_low - buffer (same as TrapScanner)
                 t1   = e["t1"]
                 exit_info = _simulate_exit(df1m, e["entry_ts"], ep, sl, t1,
                                            sq_off, LOT_SIZE, lots)
