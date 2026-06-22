@@ -548,6 +548,7 @@ def _run_day(index: str, cfg: dict, td: date,
         atm       = int(round(float(df_spot_today.iloc[0]["open"]) / step) * step)
         ce_strike = atm - gap_near   # ITM call (below spot)
         pe_strike = atm + gap_near   # ITM put  (above spot)
+        print(f"  ATM={atm}  CE_strike={ce_strike}  PE_strike={pe_strike}")
 
     # ── Determine scan sides ───────────────────────────────────────────────
     all_sides = ["CE", "PE"]
@@ -685,10 +686,12 @@ def _run_day(index: str, cfg: dict, td: date,
             last_exit_ts = pd.Timestamp(result["exit_ts"])
             trades.append(result)
 
-            sl_tag = result.get("sl_type", "ZONE_LOW")
-            rr_tag = f"  RR={result['rr']:.2f}" if result.get("rr") else ""
+            sl_tag  = result.get("sl_type", "ZONE_LOW")
+            rr_tag  = f"  RR={result['rr']:.2f}" if result.get("rr") else ""
+            strike  = result.get("strike", atm - cfg.get("gap_near",200) if opt_type=="CE" else atm + cfg.get("gap_near",200))
+            sk_tag  = f"  K={strike}"
             if result.get("t1_hit"):
-                print(f"  {today_str} {opt_type} [{sl_tag}]{rr_tag}"
+                print(f"  {today_str} {opt_type}{sk_tag} [{sl_tag}]{rr_tag}"
                       f"  entry={result['entry_price']:.1f} ({str(entry_ts)[11:16]})"
                       f"  sl={result['sl_price']:.1f}"
                       f"  T1={result['t1_price']:.1f} ({str(result['t1_ts'])[11:16]})"
@@ -697,7 +700,7 @@ def _run_day(index: str, cfg: dict, td: date,
                       f"  Rs{result['trail_pnl_rs']:+.0f}(50%)"
                       f"  TOTAL=Rs{result['pnl_rs']:+.0f}  [{result['reason']}]")
             else:
-                print(f"  {today_str} {opt_type} [{sl_tag}]{rr_tag}"
+                print(f"  {today_str} {opt_type}{sk_tag} [{sl_tag}]{rr_tag}"
                       f"  entry={result['entry_price']:.1f} ({str(entry_ts)[11:16]})"
                       f"  sl={result['sl_price']:.1f}"
                       f"  exit={result['exit_price']:.1f} ({str(last_exit_ts)[11:16]})"
