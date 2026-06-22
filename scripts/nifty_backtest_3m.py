@@ -177,19 +177,15 @@ def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date,
 # ── HTF zone scan ──────────────────────────────────────────────────────────────
 
 def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date,
-                         zone_lookback_days: int = 0) -> list:
+                         zone_lookback_days: int = 14) -> list:
     """
-    Scan TODAY's intraday bars only for HTF zones.
-    Strike changes every day → yesterday's bars are at wrong premium levels.
-    With today-only bars: zone forms in morning HTF candle, trapped in a later candle.
+    Scan prev-week + current-week bars (14 days) for this strike's 75m zones.
+    Each day uses its own selected strike; that strike's own option chart builds zones.
     """
     if df_all.empty:
         return []
-    if zone_lookback_days == 0:
-        df_recent = df_all[df_all["datetime"].dt.date == today]
-    else:
-        cutoff = pd.Timestamp(today - timedelta(days=zone_lookback_days))
-        df_recent = df_all[df_all["datetime"] >= cutoff]
+    cutoff = pd.Timestamp(today - timedelta(days=zone_lookback_days))
+    df_recent = df_all[df_all["datetime"] >= cutoff]
     if df_recent.empty:
         df_recent = df_all  # fallback
     df_htf = _resample(df_recent, htf_min)
