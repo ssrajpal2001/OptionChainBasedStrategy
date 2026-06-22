@@ -322,15 +322,16 @@ def _run_day(dt: date, token: str, lots: int,
             elif state == "SELLERS_IN":
                 if ltp < trap_low:
                     trap_low = ltp
-                # Sellers recovering through 90% of ref = trapped
-                if ltp >= ref_price * 0.90:
+                # Sellers trapped when price recovers to 50% between trap_low and ref
+                midpoint = (trap_low + ref_price) / 2
+                if ltp >= midpoint:
                     state = "TRAPPED"
 
             elif state == "TRAPPED":
-                # If price falls back below dip threshold — trap failed
-                if ltp <= ref_price - min_dip_pts:
-                    state    = "SELLERS_IN"
-                    trap_low = min(trap_low, ltp) if trap_low else ltp
+                # If price falls back to trap_low — sellers regained control, reset
+                if ltp <= trap_low:
+                    state    = "WATCH"
+                    trap_low = None
                     continue
 
                 # ── 5m confirmation: last completed 5m must close ABOVE ref ──
