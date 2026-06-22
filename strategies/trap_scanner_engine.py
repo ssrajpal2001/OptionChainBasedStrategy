@@ -456,6 +456,13 @@ class TrapScannerEngine:
                 self._ce2_strike = _round_strike(pivots["s2"], self._step)
                 self._pe1_strike = _round_strike(pivots["r1"], self._step)
                 self._pe2_strike = _round_strike(pivots["r2"], self._step)
+                # Deduplicate: if two strikes collide after rounding (e.g. R1=24073
+                # and R2=24133 both round to 24100 with step=100), push CE2 one step
+                # lower and PE2 one step higher so all 4 strikes are distinct.
+                if self._ce2_strike == self._ce1_strike:
+                    self._ce2_strike -= self._step
+                if self._pe2_strike == self._pe1_strike:
+                    self._pe2_strike += self._step
                 self._log.info(
                     "No gap (%.1f%%) → CE1=%d(S1=%.0f) CE2=%d(S2=%.0f) "
                     "PE1=%d(R1=%.0f) PE2=%d(R2=%.0f)",
