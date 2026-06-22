@@ -564,6 +564,113 @@ def run(token: str, days: int = 10, lots: int = 1) -> None:
         print(f"  {t['date']}  {sign}  ₹{cum:>+8,.0f}  {bar}")
 
 
+# ── UI-callable entry point ──────────────────────────────────────────────────
+
+def run_backtest_ui(
+    token: str,
+    days: int             = 10,
+    lots: int             = 1,
+    htf_min: int          = 15,
+    mtf_min: int          = 5,
+    eod_time: str         = "14:00",
+    sq_off_time: str      = "15:15",
+    min_zone_range: float = 30.0,
+    max_trades_side: int  = 2,
+    min_reward: float     = 20.0,
+    target_mult: float    = 1.5,
+) -> dict:
+    """Called by FastAPI /api/backtest/sensex — returns JSON-serialisable dict."""
+    global HTF_MIN, MTF_MIN, EOD_TIME, SQ_OFF_TIME, MIN_ZONE_RANGE, MAX_TRADES_PER_SIDE, MIN_REWARD, TARGET_MULT
+    HTF_MIN          = htf_min
+    MTF_MIN          = mtf_min
+    EOD_TIME         = eod_time
+    SQ_OFF_TIME      = sq_off_time
+    MIN_ZONE_RANGE   = min_zone_range
+    MAX_TRADES_PER_SIDE = max_trades_side
+    MIN_REWARD       = min_reward
+    TARGET_MULT      = target_mult
+
+    all_trades: list = []
+    trading_days = _get_trading_days(days)
+
+    for dt in trading_days:
+        spot = _get_sensex_spot_open(token, dt)
+        if spot is None:
+            continue
+        ce_strike = _round_ce(spot)
+        pe_strike = _round_pe(spot)
+        expiry = _find_nearest_expiry(token, dt)
+        if expiry is None:
+            days_to_fri = (4 - dt.weekday()) % 7
+            expiry = dt + timedelta(days=days_to_fri if days_to_fri else 7)
+
+        ce_key = _find_option_key_from_registry("SENSEX", expiry, ce_strike, "CE")
+        pe_key = _find_option_key_from_registry("SENSEX", expiry, pe_strike, "PE")
+        if not ce_key:
+            ce_key = _find_option_key_upstox_search(token, ce_strike, "CE", expiry)
+        if not pe_key:
+            pe_key = _find_option_key_upstox_search(token, pe_strike, "PE", expiry)
+        if not ce_key and not pe_key:
+            continue
+
+        day_trades = _run_day(
+            dt=dt, token=token, lots=lots,
+            ce_key=ce_key or "", pe_key=pe_key or "",
+            ce_strike=ce_strike, pe_strike=pe_strike,
+        )
+        all_trades.extend(day_trades)
+        time.sleep(0.3)
+
+    if not all_trades:
+        return {"ok": True, "trades": [], "summary": {}, "equity": []}
+
+    df = pd.DataFrame(all_trades)
+    wins   = len(df[df["pnl_rs"] > 0])
+    losses = len(df[df["pnl_rs"] <= 0])
+    total_pnl = float(df["pnl_rs"].sum())
+    avg_win   = float(df[df["pnl_rs"] > 0]["pnl_rs"].mean()) if wins else 0.0
+    avg_loss  = float(df[df["pnl_rs"] <= 0]["pnl_rs"].mean()) if losses else 0.0
+    pf = abs(avg_win * wins / (avg_loss * losses)) if losses and avg_loss else None
+
+    trades_out = []
+    cum = 0.0
+    equity = []
+    for _, t in df.iterrows():
+        cum += float(t["pnl_rs"])
+        equity.append({"date": t["date"], "cum_pnl": round(cum, 0)})
+        ets = t["entry_ts"]
+        xts = t["exit_ts"]
+        trades_out.append({
+            "date":       t["date"],
+            "side":       t["side"],
+            "strike":     int(t["strike"]),
+            "entry_time": ets.strftime("%H:%M") if hasattr(ets, "strftime") else str(ets),
+            "exit_time":  xts.strftime("%H:%M") if hasattr(xts, "strftime") else str(xts),
+            "entry":      round(float(t["entry"]), 1),
+            "exit":       round(float(t["exit_price"]), 1),
+            "pnl_pts":    round(float(t["pnl_pts"]), 1),
+            "pnl_rs":     round(float(t["pnl_rs"]), 0),
+            "reason":     t["reason"],
+            "zone":       t.get("htf_zone", ""),
+        })
+
+    return {
+        "ok": True,
+        "summary": {
+            "total":      len(df),
+            "wins":       wins,
+            "losses":     losses,
+            "win_rate":   round(wins / len(df) * 100, 1),
+            "total_pnl":  round(total_pnl, 0),
+            "avg_win":    round(avg_win, 0),
+            "avg_loss":   round(avg_loss, 0),
+            "profit_factor": round(pf, 2) if pf else None,
+        },
+        "trades": trades_out,
+        "equity": equity,
+    }
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

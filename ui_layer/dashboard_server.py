@@ -790,6 +790,45 @@ class DashboardServer:
                 import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
 
+        _BACKTEST_SENSEX_HTML = os.path.join(_TEMPLATE_DIR, "backtest_sensex.html")
+
+        @app.get("/backtest/sensex", include_in_schema=False)
+        async def backtest_sensex_ui():
+            if not os.path.exists(_BACKTEST_SENSEX_HTML):
+                return HTMLResponse("<h1>backtest_sensex.html not found</h1>", status_code=503)
+            return FileResponse(_BACKTEST_SENSEX_HTML, media_type="text/html")
+
+        @app.post("/api/backtest/sensex", tags=["Admin"])
+        async def run_backtest_sensex(request: Request):
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            token           = p.get("token", "")
+            days            = int(p.get("days", 10))
+            lots            = int(p.get("lots", 1))
+            htf_min         = int(p.get("htf_min", 15))
+            mtf_min         = int(p.get("mtf_min", 5))
+            eod_time        = str(p.get("eod_time", "14:00"))
+            sq_off_time     = str(p.get("sq_off_time", "15:15"))
+            min_zone_range  = float(p.get("min_zone_range", 30))
+            max_trades_side = int(p.get("max_trades_side", 2))
+            min_reward      = float(p.get("min_reward", 20))
+            target_mult     = float(p.get("target_mult", 1.5))
+            if not token:
+                return {"ok": False, "error": "token required"}
+            try:
+                from scripts.sensex_intraday_backtest import run_backtest_ui
+                result = await asyncio.to_thread(
+                    run_backtest_ui, token, days, lots, htf_min, mtf_min,
+                    eod_time, sq_off_time, min_zone_range, max_trades_side,
+                    min_reward, target_mult
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
+
         # ── PUBLIC — Authentication ───────────────────────────────────────────
 
         @app.post("/api/auth/login", tags=["Auth"])

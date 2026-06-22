@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SENSEX Intraday Backtest — AlgoTrader</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['JetBrains Mono','monospace'],
+            ui:   ['Plus Jakarta Sans','sans-serif'],
+          },
+          colors: {
+            t: {
+              bg:'var(--t-bg)', surface:'var(--t-surface)', card:'var(--t-card)',
+              border:'var(--t-border)', dim:'var(--t-dim)', cyan:'var(--t-cyan)',
+              green:'var(--t-green)', red:'var(--t-red)', amber:'var(--t-amber)',
+              muted:'var(--t-muted)', text:'var(--t-text)', bright:'var(--t-bright)',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --t-bg:#ffffff; --t-surface:#f9f9f9; --t-card:#ffffff; --t-border:#e9e9ed;
+      --t-dim:#d8d8dd; --t-cyan:#387ED1; --t-green:#4CA64C; --t-red:#FF5722;
+      --t-amber:#F5A623; --t-muted:#9b9b9b; --t-text:#3c3c3c; --t-bright:#1a1a1a;
+      --t-cyan-rgb:56,126,209; --t-green-rgb:76,166,76;
+      --t-red-rgb:255,87,34;   --t-amber-rgb:245,166,35;
+    }
+    [x-cloak]{display:none!important}
+    *{box-sizing:border-box} html,body{margin:0}
+    body{background:var(--t-bg);color:var(--t-text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px}
+    .t-card{background:var(--t-card);border:1px solid var(--t-border);border-radius:10px}
+    .sec-label{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t-muted)}
+    .t-input{font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;background:var(--t-surface);
+             border:1px solid var(--t-border);color:var(--t-bright);padding:7px 10px;
+             border-radius:6px;width:100%;outline:none;transition:border-color .15s}
+    .t-input:focus{border-color:rgba(var(--t-cyan-rgb),.5);box-shadow:0 0 0 3px rgba(var(--t-cyan-rgb),.10)}
+    .btn-primary{font-size:13px;font-weight:700;letter-spacing:.04em;padding:10px 24px;border-radius:7px;
+                 background:var(--t-cyan);border:none;color:#fff;cursor:pointer;transition:all .15s;width:100%}
+    .btn-primary:hover{opacity:.85;box-shadow:0 0 18px rgba(var(--t-cyan-rgb),.35)}
+    .btn-primary:disabled{opacity:.45;cursor:not-allowed}
+    .bt-table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12px}
+    .bt-table th{padding:8px 10px;text-align:left;color:var(--t-muted);font-weight:600;font-size:11px;
+                 border-bottom:1px solid var(--t-border);position:sticky;top:0;background:var(--t-card);z-index:1}
+    .bt-table td{padding:7px 10px;border-bottom:1px solid var(--t-border);white-space:nowrap}
+    .bt-table tr:last-child td{border-bottom:none}
+    .bt-table tr:hover td{background:rgba(var(--t-cyan-rgb),.03)}
+    .stat-card{padding:14px 16px;border-radius:10px;border:1px solid var(--t-border)}
+    .stat-val{font-size:20px;font-weight:800;font-family:'JetBrains Mono',monospace}
+    .pnl-pos{color:var(--t-green)} .pnl-neg{color:var(--t-red)} .pnl-zero{color:var(--t-muted)}
+    .tag-ce{background:rgba(var(--t-cyan-rgb),.12);color:var(--t-cyan);border-radius:4px;padding:1px 5px;font-size:11px;font-weight:700}
+    .tag-pe{background:rgba(var(--t-red-rgb),.10);color:var(--t-red);border-radius:4px;padding:1px 5px;font-size:11px;font-weight:700}
+    .page-layout{display:flex;flex-direction:column;min-height:calc(100vh - 49px)}
+    .ctrl-panel{width:100%;padding:16px;border-bottom:1px solid var(--t-border);
+                background:var(--t-card);display:flex;flex-direction:column;gap:16px}
+    .results-panel{flex:1;padding:16px;display:flex;flex-direction:column;gap:16px;overflow-x:hidden}
+    .ctrl-toggle-btn{display:flex;align-items:center;justify-content:space-between;width:100%;
+                     background:none;border:none;padding:0;cursor:pointer;
+                     font-size:13px;font-weight:700;color:var(--t-bright)}
+    .ctrl-body{display:flex;flex-direction:column;gap:16px}
+    @media(min-width:768px){
+      .page-layout{flex-direction:row;height:calc(100vh - 49px)}
+      .ctrl-panel{width:288px;flex-shrink:0;border-right:1px solid var(--t-border);
+                  border-bottom:none;overflow-y:auto;height:100%}
+      .ctrl-toggle-btn{display:none}
+      .ctrl-body{display:flex!important}
+      .results-panel{overflow-y:auto;height:100%;padding:24px}
+    }
+    .table-scroll{overflow-x:auto;overflow-y:auto;-webkit-overflow-scrolling:touch;max-width:100vw}
+  </style>
+</head>
+<body x-data="sensexBT()" x-init="init()">
+
+<!-- NAV -->
+<div class="flex items-center justify-between px-4 py-3 border-b border-t-border bg-t-card" style="min-height:49px">
+  <div class="flex items-center gap-2">
+    <span class="font-display font-800 text-t-bright text-sm md:text-base">AlgoTrader</span>
+    <span class="text-t-dim">|</span>
+    <span class="text-t-cyan font-semibold text-xs md:text-sm">SENSEX Intraday BT</span>
+  </div>
+  <div class="flex gap-3 text-xs md:text-sm">
+    <a href="/" class="text-t-muted hover:text-t-cyan transition-colors">Dashboard</a>
+    <a href="/backtest" class="text-t-muted hover:text-t-cyan transition-colors">CrudeOil BT</a>
+    <a href="/backtest/nifty" class="text-t-muted hover:text-t-cyan transition-colors">NIFTY BT</a>
+  </div>
+</div>
+
+<div class="page-layout">
+
+  <!-- CONTROL PANEL -->
+  <div class="ctrl-panel">
+
+    <button class="ctrl-toggle-btn" @click="ctrlOpen=!ctrlOpen">
+      <span>⚙ Settings</span>
+      <span x-text="ctrlOpen ? '▲' : '▼'" class="text-t-muted text-xs"></span>
+    </button>
+
+    <div class="ctrl-body" x-show="ctrlOpen || isMd" x-cloak>
+
+      <!-- Token -->
+      <div>
+        <p class="sec-label mb-2">Upstox Token</p>
+        <input type="password" x-model="token" placeholder="eyJ0eXA..." class="t-input" autocomplete="off" />
+      </div>
+
+      <!-- Days back -->
+      <div>
+        <p class="sec-label mb-2">Trading Days</p>
+        <div class="flex justify-between text-xs text-t-muted mb-1">
+          <span>Days back</span>
+          <span x-text="days + ' days'" class="font-mono font-600 text-t-bright"></span>
+        </div>
+        <input type="range" x-model.number="days" min="3" max="30" step="1" class="w-full accent-[var(--t-cyan)]" />
+      </div>
+
+      <!-- Lots -->
+      <div>
+        <p class="sec-label mb-2">Lots per Trade</p>
+        <div class="grid grid-cols-4 gap-1">
+          <template x-for="n in [1,2,3,4]" :key="n">
+            <button @click="lots=n"
+              :class="lots===n ? 'bg-[var(--t-cyan)] text-white font-700' : 'bg-t-surface text-t-muted hover:text-t-bright'"
+              class="rounded py-1.5 text-xs text-center transition-colors border border-t-border"
+              x-text="n + 'L'"></button>
+          </template>
+        </div>
+      </div>
+
+      <!-- Strategy section -->
+      <div>
+        <p class="sec-label mb-3">Strategy — 15m/5m/1m Seller Trap</p>
+
+        <!-- HTF Minutes -->
+        <div class="mb-3">
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>HTF candle (zone detection)</span>
+            <span x-text="htfMin + 'm'" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <div class="grid grid-cols-3 gap-1">
+            <template x-for="m in [10,15,20]" :key="m">
+              <button @click="htfMin=m"
+                :class="htfMin===m ? 'bg-[var(--t-cyan)] text-white font-700' : 'bg-t-surface text-t-muted'"
+                class="rounded py-1.5 text-xs text-center transition-colors border border-t-border"
+                x-text="m+'m'"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- MTF Minutes -->
+        <div class="mb-3">
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>MTF candle (5m confirm)</span>
+            <span x-text="mtfMin + 'm'" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <div class="grid grid-cols-3 gap-1">
+            <template x-for="m in [3,5,10]" :key="m">
+              <button @click="mtfMin=m"
+                :class="mtfMin===m ? 'bg-[var(--t-cyan)] text-white font-700' : 'bg-t-surface text-t-muted'"
+                class="rounded py-1.5 text-xs text-center transition-colors border border-t-border"
+                x-text="m+'m'"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Target multiplier -->
+        <div class="mb-3">
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>Target = zone_high + range × <span x-text="targetMult.toFixed(1)" class="font-mono font-600 text-t-bright"></span></span>
+          </div>
+          <input type="range" x-model.number="targetMult" min="0.5" max="3.0" step="0.5" class="w-full accent-[var(--t-cyan)]" />
+          <div class="flex justify-between text-xs text-t-muted mt-1">
+            <span>0.5×</span><span>1.5× (default)</span><span>3.0×</span>
+          </div>
+        </div>
+
+        <!-- Min zone range -->
+        <div class="mb-3">
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>Min zone size (noise filter)</span>
+            <span x-text="minZone + ' pts'" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="minZone" min="10" max="100" step="5" class="w-full accent-[var(--t-cyan)]" />
+        </div>
+
+        <!-- Min reward -->
+        <div class="mb-3">
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>Min reward at entry</span>
+            <span x-text="minReward + ' pts'" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="minReward" min="5" max="80" step="5" class="w-full accent-[var(--t-cyan)]" />
+          <p class="text-xs text-t-muted mt-1">Skip if (target − entry) &lt; this</p>
+        </div>
+
+        <!-- Max trades per side -->
+        <div class="mb-3">
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>Max trades per side/day</span>
+            <span x-text="maxTrades" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="maxTrades" min="1" max="5" step="1" class="w-full accent-[var(--t-cyan)]" />
+        </div>
+
+        <!-- EOD cutoff -->
+        <div class="mb-3">
+          <p class="text-xs text-t-muted mb-1">No new entries after</p>
+          <select x-model="eodTime" class="t-input">
+            <option value="13:00">13:00</option>
+            <option value="13:30">13:30</option>
+            <option value="14:00">14:00 (default)</option>
+            <option value="14:30">14:30</option>
+            <option value="15:00">15:00</option>
+          </select>
+        </div>
+
+      </div>
+
+      <!-- Run button -->
+      <button class="btn-primary" @click="runBacktest()" :disabled="running || !token">
+        <span x-show="!running">▶ Run Backtest</span>
+        <span x-show="running" x-cloak>⏳ Running…</span>
+      </button>
+
+      <p x-show="error" x-cloak class="text-xs text-t-red p-2 bg-red-50 rounded" x-text="error"></p>
+
+    </div><!-- ctrl-body -->
+  </div><!-- ctrl-panel -->
+
+  <!-- RESULTS PANEL -->
+  <div class="results-panel">
+
+    <!-- Placeholder -->
+    <template x-if="!result && !running">
+      <div class="flex flex-col items-center justify-center h-64 text-t-muted gap-3">
+        <div class="text-4xl">📊</div>
+        <div class="text-sm font-600">SENSEX Intraday Backtest</div>
+        <div class="text-xs text-center max-w-xs">
+          Strategy: 15m seller trap zone → 5m bullish confirm → 1m breakout<br/>
+          Strike: CE = floor(open/500)×500 · PE = ceil(open/500)×500
+        </div>
+        <div class="text-xs text-t-dim">Enter token and click Run</div>
+      </div>
+    </template>
+
+    <!-- Loading -->
+    <template x-if="running">
+      <div class="flex flex-col items-center justify-center h-64 text-t-muted gap-3">
+        <div class="text-3xl animate-pulse">⏳</div>
+        <div class="text-sm">Fetching bars &amp; running backtest…</div>
+        <div class="text-xs text-t-dim">May take 30–90s depending on days</div>
+      </div>
+    </template>
+
+    <!-- Results -->
+    <template x-if="result && !running">
+
+      <div class="flex flex-col gap-5">
+
+        <!-- Summary cards -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div class="stat-card">
+            <div class="sec-label mb-1">Total Trades</div>
+            <div class="stat-val text-t-bright" x-text="result.summary.total"></div>
+          </div>
+          <div class="stat-card">
+            <div class="sec-label mb-1">Win Rate</div>
+            <div class="stat-val" :class="result.summary.win_rate>=50?'pnl-pos':'pnl-neg'"
+                 x-text="result.summary.win_rate + '%'"></div>
+            <div class="text-xs text-t-muted mt-1"
+                 x-text="result.summary.wins + 'W / ' + result.summary.losses + 'L'"></div>
+          </div>
+          <div class="stat-card">
+            <div class="sec-label mb-1">Total P&amp;L</div>
+            <div class="stat-val" :class="result.summary.total_pnl>=0?'pnl-pos':'pnl-neg'"
+                 x-text="'₹' + result.summary.total_pnl.toLocaleString('en-IN')"></div>
+          </div>
+          <div class="stat-card">
+            <div class="sec-label mb-1">Profit Factor</div>
+            <div class="stat-val" :class="(result.summary.profit_factor||0)>=1?'pnl-pos':'pnl-neg'"
+                 x-text="result.summary.profit_factor ? result.summary.profit_factor.toFixed(2) : '—'"></div>
+            <div class="text-xs text-t-muted mt-1"
+                 x-text="'Avg W: ₹'+result.summary.avg_win + '  L: ₹'+result.summary.avg_loss"></div>
+          </div>
+        </div>
+
+        <!-- Equity chart -->
+        <div class="t-card p-4">
+          <p class="sec-label mb-3">Equity Curve</p>
+          <canvas id="eqChart" height="120"></canvas>
+        </div>
+
+        <!-- Trade table -->
+        <div class="t-card">
+          <div class="p-4 border-b border-t-border flex items-center justify-between">
+            <p class="sec-label">Trade Log</p>
+            <p class="text-xs text-t-muted" x-text="result.trades.length + ' trades'"></p>
+          </div>
+          <div class="table-scroll" style="max-height:400px">
+            <table class="bt-table">
+              <thead>
+                <tr>
+                  <th>Date</th><th>Side</th><th>Strike</th>
+                  <th>Zone</th><th>Entry</th><th>Exit</th>
+                  <th>Entry T</th><th>Exit T</th>
+                  <th>P&amp;L pts</th><th>P&amp;L ₹</th><th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="t in result.trades" :key="t.date+t.side+t.entry_time">
+                  <tr>
+                    <td x-text="t.date.slice(5)"></td>
+                    <td>
+                      <span :class="t.side==='CE'?'tag-ce':'tag-pe'" x-text="t.side"></span>
+                    </td>
+                    <td x-text="t.strike"></td>
+                    <td class="text-t-muted text-xs" x-text="t.zone"></td>
+                    <td x-text="t.entry.toFixed(1)"></td>
+                    <td x-text="t.exit.toFixed(1)"></td>
+                    <td x-text="t.entry_time"></td>
+                    <td x-text="t.exit_time"></td>
+                    <td :class="t.pnl_pts>=0?'pnl-pos':'pnl-neg'" x-text="(t.pnl_pts>=0?'+':'')+t.pnl_pts.toFixed(1)"></td>
+                    <td :class="t.pnl_rs>=0?'pnl-pos':'pnl-neg'" x-text="'₹'+(t.pnl_rs>=0?'+':'')+t.pnl_rs.toLocaleString('en-IN')"></td>
+                    <td class="text-t-muted" x-text="t.reason"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </template>
+
+  </div><!-- results-panel -->
+</div><!-- page-layout -->
+
+<script>
+function sensexBT() {
+  return {
+    // Settings (mirrors Python defaults)
+    token:      sessionStorage.getItem('sx_token') || '',
+    days:       10,
+    lots:       1,
+    htfMin:     15,
+    mtfMin:     5,
+    targetMult: 1.5,
+    minZone:    30,
+    minReward:  20,
+    maxTrades:  2,
+    eodTime:    '14:00',
+
+    // UI state
+    ctrlOpen: true,
+    isMd:     false,
+    running:  false,
+    error:    '',
+    result:   null,
+    _chart:   null,
+
+    init() {
+      this.isMd = window.innerWidth >= 768;
+      window.addEventListener('resize', () => { this.isMd = window.innerWidth >= 768; });
+    },
+
+    async runBacktest() {
+      if (!this.token) { this.error = 'Token required'; return; }
+      sessionStorage.setItem('sx_token', this.token);
+      this.running = true;
+      this.error   = '';
+      this.result  = null;
+      if (this._chart) { this._chart.destroy(); this._chart = null; }
+
+      try {
+        const r = await fetch('/api/backtest/sensex', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token:          this.token,
+            days:           this.days,
+            lots:           this.lots,
+            htf_min:        this.htfMin,
+            mtf_min:        this.mtfMin,
+            target_mult:    this.targetMult,
+            min_zone_range: this.minZone,
+            min_reward:     this.minReward,
+            max_trades_side:this.maxTrades,
+            eod_time:       this.eodTime,
+            sq_off_time:    '15:15',
+          }),
+        });
+        const d = await r.json();
+        if (!d.ok) { this.error = d.error || 'Server error'; return; }
+        this.result = d;
+        this.$nextTick(() => this._renderChart(d.equity));
+      } catch(e) {
+        this.error = 'Network error: ' + e.message;
+      } finally {
+        this.running = false;
+      }
+    },
+
+    _renderChart(equity) {
+      const canvas = document.getElementById('eqChart');
+      if (!canvas || !equity || !equity.length) return;
+      const labels = equity.map(e => e.date.slice(5));
+      const data   = equity.map(e => e.cum_pnl);
+      const color  = data[data.length-1] >= 0 ? '#4CA64C' : '#FF5722';
+      this._chart = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            data,
+            borderColor: color,
+            backgroundColor: color + '18',
+            fill: true,
+            tension: 0.3,
+            pointRadius: data.length > 40 ? 0 : 3,
+            pointHoverRadius: 4,
+          }]
+        },
+        options: {
+          responsive: true,
+          interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => '₹' + ctx.raw.toLocaleString('en-IN')
+              }
+            }
+          },
+          scales: {
+            x: { ticks: { font: { family: 'JetBrains Mono', size: 10 }, maxRotation: 45 },
+                 grid: { color: '#e9e9ed' } },
+            y: { ticks: { font: { family: 'JetBrains Mono', size: 10 },
+                          callback: v => '₹' + v.toLocaleString('en-IN') },
+                 grid: { color: '#e9e9ed' },
+                 border: { dash: [2,2] } },
+          }
+        }
+      });
+    },
+  }
+}
+</script>
+</body>
+</html>
