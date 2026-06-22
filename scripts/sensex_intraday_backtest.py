@@ -238,7 +238,7 @@ def _advance_zone_state(zone: dict, price: float) -> dict:
 #   Entry at next 1m open.  SL = session_low.  Target = ref + (ref-session_low)*TARGET_MULT
 #   Max 1 trade per side per day; no new entries after EOD_TIME.
 
-MIN_DIP_PCT  = 0.03   # sellers must push option at least 3% below opening price
+MIN_DIP_PCT  = 0.015  # sellers must push option at least 1.5% below opening price
 
 def _run_day(dt: date, token: str, lots: int,
              ce_key: str, pe_key: str,
@@ -600,7 +600,7 @@ def run_backtest_ui(
 
     for dt in trading_days:
         spot = _get_sensex_spot_open(dt, token)
-        if spot is None:
+        if not spot or spot <= 0:
             continue
         ce_strike = _round_ce(spot)
         pe_strike = _round_pe(spot)
