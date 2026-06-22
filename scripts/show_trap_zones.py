@@ -255,21 +255,72 @@ def _test_token(token: str) -> bool:
         return False
 
 
-def _build_key(index: str, strike: int, opt: str, trade_date: str) -> str:
-    """Build Upstox instrument key — same logic as nifty_backtest._instrument_key."""
-    from data_layer.instrument_registry import REGISTRY
-    from scripts.nifty_backtest import _get_expiry, _USE_MONTHLY, _USE_NEXT_WEEK
+def _next_thursday(from_date: date) -> date:
+    """Return next Thursday >= from_date (NIFTY weekly expiry)."""
+    d = from_date
+    while d.weekday() != 3:   # 3 = Thursday
+        d += timedelta(days=1)
+    return d
+
+
+def _search_upstox_key(index: str, strike: int, opt: str,
+                        exp_date: date, token: str) -> str:
+    """
+    Search Upstox instrument master for the exact numeric key.
+    Falls back to downloading the NSE FO master JSON.
+    """
+    import io, gzip
+    seg = "NSE_FO" if index in ("NIFTY", "BANKNIFTY", "FINNIFTY") else "BSE_FO"
+    url = f"https://assets.upstox.com/market-quote/instruments/exchange/{seg}.json.gz"
+    print(f"  Downloading instrument master from Upstox ({seg})...", flush=True)
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    with gzip.open(io.BytesIO(r.content)) as f:
+        import json
+        instruments = json.load(f)
+
+    exp_str = exp_date.strftime("%Y-%m-%d")
+    opt_u   = opt.upper()
+    index_u = index.upper()
+
+    for inst in instruments:
+        # instrument can be dict or object
+        ik  = inst.get("instrument_key", "") if isinstance(inst, dict) else getattr(inst, "instrument_key", "")
+        ts  = inst.get("trading_symbol",  "") if isinstance(inst, dict) else getattr(inst, "trading_symbol",  "")
+        sp  = inst.get("strike_price",    0)  if isinstance(inst, dict) else getattr(inst, "strike_price",    0)
+        ex  = inst.get("expiry",          "") if isinstance(inst, dict) else getattr(inst, "expiry",          "")
+        name= inst.get("name",            "") if isinstance(inst, dict) else getattr(inst, "name",            "")
+
+        if (str(name).upper() == index_u
+                and int(sp) == int(strike)
+                and opt_u in str(ts).upper()
+                and str(ex) == exp_str):
+            print(f"  Found: {ik}  ({ts})")
+            return ik
+
+    return ""
+
+
+def _build_key(index: str, strike: int, opt: str, trade_date: str, token: str) -> str:
+    """Resolve Upstox instrument key for a given option."""
     index = index.upper()
     opt   = opt.upper()
-    exp_date, exp_str = _get_expiry(index, date.fromisoformat(trade_date),
-                                    monthly=_USE_MONTHLY, next_week=_USE_NEXT_WEEK)
-    if REGISTRY.is_loaded(index):
-        key = REGISTRY.get_upstox_key(index, exp_date, strike, opt)
-        if key:
-            return key
-    pfx = {"NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
-           "SENSEX": "BSE_FO|", "FINNIFTY": "NSE_FO|"}.get(index, "NSE_FO|")
-    return f"{pfx}{index}{exp_str}{strike}{opt}"
+
+    # Determine expiry: next Thursday from trade_date for NIFTY weekly
+    td = date.fromisoformat(trade_date)
+    if index == "BANKNIFTY":
+        # BANKNIFTY is monthly — last Thursday of month
+        exp = _next_thursday(td)
+    else:
+        exp = _next_thursday(td)   # weekly for NIFTY/FINNIFTY/SENSEX
+
+    print(f"  Using expiry: {exp}  (next Thursday from {trade_date})")
+
+    key = _search_upstox_key(index, strike, opt, exp, token)
+    if key:
+        return key
+
+    raise ValueError(f"Could not find instrument key for {index} {strike}{opt} exp={exp}")
 
 
 if __name__ == "__main__":
@@ -299,7 +350,7 @@ if __name__ == "__main__":
         key = args.key
     elif args.strike > 0:
         try:
-            key = _build_key(args.index, args.strike, args.opt, args.date)
+            key = _build_key(args.index, args.strike, args.opt, args.date, args.token)
             print(f"Resolved key: {key}")
         except Exception as ex:
             print(f"Could not auto-resolve key: {ex}")
