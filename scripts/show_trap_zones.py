@@ -31,6 +31,9 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from strategies.trap_scanner.scanner import scan_htf, scan_ltf, scan_htf_spot
 
+# Reuse nifty_backtest internals (key resolution + fetch)
+import scripts.nifty_backtest as _nb
+
 # ── Upstox fetch ──────────────────────────────────────────────────────────────
 
 def _fetch_1m_single(key: str, dt: str, token: str) -> pd.DataFrame:
@@ -94,37 +97,76 @@ def _hhmm(ts) -> str:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def show_zones(token: str, dt: str, key: str, side: str, htf_min: int = 75):
-    side = side.upper()
+_SPOT_KEY = {
+    "NIFTY":      "NSE_INDEX|Nifty 50",
+    "BANKNIFTY":  "NSE_INDEX|Nifty Bank",
+    "FINNIFTY":   "NSE_INDEX|Nifty Fin Service",
+    "SENSEX":     "BSE_INDEX|SENSEX",
+    "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
+}
+
+
+def show_zones(token: str, dt: str, index: str, side: str, htf_min: int = 75,
+               strike: int = 0):
+    side  = side.upper()
+    index = index.upper()
+    td    = date.fromisoformat(dt)
+
+    # Init nifty_backtest with token so REGISTRY loads + _HEADERS set
+    _nb._HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    from data_layer.instrument_registry import REGISTRY
+    if not REGISTRY.is_loaded(index):
+        print(f"  Loading REGISTRY for {index}...", flush=True)
+        REGISTRY.load_sync(index, token)
+
+    # Resolve strike if not given — use S1 pivot (same as nifty_backtest no-gap path)
+    cfg = _nb._INDEX_CFG.get(index, _nb._INDEX_CFG["NIFTY"])
+    if strike == 0:
+        print("  No strike given — using today's open to compute S1/R1 pivot strikes")
+
+    # Build option key using nifty_backtest's resolver (uses REGISTRY numeric token)
+    opt_key = _nb._option_key(index, strike, side, td) if strike > 0 else ""
+
     print(f"\n{'='*70}")
     print(f"  TrapScanner Zone Diagnostic")
-    print(f"  Date : {dt}  |  Key : {key}  |  Side : {side}  |  HTF : {htf_min}m")
+    print(f"  Date:{dt}  Index:{index}  Side:{side}  HTF:{htf_min}m  Strike:{strike or 'auto'}")
+    print(f"  Option key: {opt_key or '(will resolve per strike)'}")
     print(f"{'='*70}")
 
-    # ── Fetch bars ────────────────────────────────────────────────────────────
-    print(f"\n[1] Fetching 1m bars for {dt} + prior 5 trading days for HTF pool...")
+    # ── Fetch OPTION bars (same as nifty_backtest _run_day) ───────────────────
+    fetch_from = (td - timedelta(days=14)).isoformat()
+    fetch_to   = dt
 
-    # All bars (prev 5 trading days + today) for HTF zone pool
-    df_pool = _fetch_1m(key, dt, token, lookback_days=5)
+    if opt_key:
+        print(f"\n[1] Fetching 1m option bars ({opt_key})...")
+        try:
+            df_opt_raw = _nb._fetch_1m(opt_key, fetch_from, fetch_to)
+        except Exception as ex:
+            print(f"  Fetch failed: {ex}")
+            df_opt_raw = pd.DataFrame()
+    else:
+        df_opt_raw = pd.DataFrame()
 
-    if df_pool.empty:
-        print(f"  ERROR: No 1m data found. Check token or key.")
+    if df_opt_raw.empty:
+        print(f"  No option data for key {opt_key}. "
+              f"Strike may not exist or expiry is past. Try a different strike.")
         return
 
-    # Today-only bars for LTF scan
-    today_str = pd.Timestamp(dt).date()
-    df1m_today = df_pool[df_pool["datetime"].dt.date == today_str].copy().reset_index(drop=True)
+    df_opt_all   = _nb._mkt_hours(df_opt_raw)
+    today_date   = pd.Timestamp(dt).date()
+    df_opt_today = df_opt_all[df_opt_all["datetime"].dt.date == today_date].copy().reset_index(drop=True)
 
-    print(f"  1m bars (pool)  : {len(df_pool)} bars  "
-          f"[{df_pool['datetime'].iloc[0].date()} → {df_pool['datetime'].iloc[-1].date()}]")
-    print(f"  1m bars (today) : {len(df1m_today)} bars  ", end="")
-    if df1m_today.empty:
-        print(f"\n  ERROR: No bars for {dt} specifically. Check token or key.")
+    print(f"  Option bars (pool)  : {len(df_opt_all)} bars  "
+          f"[{df_opt_all['datetime'].iloc[0].date()} -> {df_opt_all['datetime'].iloc[-1].date()}]")
+    if df_opt_today.empty:
+        print(f"  No option bars for {dt} specifically.")
         return
-    print(f"[{_hhmm(df1m_today['datetime'].iloc[0])} → {_hhmm(df1m_today['datetime'].iloc[-1])}]")
+    print(f"  Option bars (today) : {len(df_opt_today)} bars  "
+          f"[{_hhmm(df_opt_today['datetime'].iloc[0])} -> {_hhmm(df_opt_today['datetime'].iloc[-1])}]")
 
-    # ── HTF zones ─────────────────────────────────────────────────────────────
-    df_htf = _resample(df_pool, htf_min)
+    # ── HTF zones (same logic as nifty_backtest: >= 60m uses full pool, else today only) ──
+    htf_source = df_opt_all if htf_min >= 60 else df_opt_today
+    df_htf = _resample(htf_source, htf_min)
     print(f"\n[2] HTF {htf_min}m bars : {len(df_htf)} bars  "
           f"[{_hhmm(df_htf['datetime'].iloc[0])} → {_hhmm(df_htf['datetime'].iloc[-1])}]")
 
@@ -179,8 +221,7 @@ def show_zones(token: str, dt: str, key: str, side: str, htf_min: int = 75):
             print(f"     status     = {status_str}")
 
             # ── LTF 5m scan inside this HTF zone ──────────────────────────────
-            # Use today's bars only for LTF
-            df5m = _resample(df1m_today, 5)
+            df5m = _resample(df_opt_today, 5)
 
             # Filter to bars that started AFTER this HTF zone was formed
             if e.get("trapped_on") is not None:
@@ -345,25 +386,11 @@ if __name__ == "__main__":
         sys.exit(1)
     print("OK")
 
-    # Resolve instrument key
-    if args.key:
-        key = args.key
-    elif args.strike > 0:
-        try:
-            key = _build_key(args.index, args.strike, args.opt, args.date, args.token)
-            print(f"Resolved key: {key}")
-        except Exception as ex:
-            print(f"Could not auto-resolve key: {ex}")
-            print("Pass --key directly instead.")
-            sys.exit(1)
-    else:
-        print("Provide either --key OR --index + --strike + --opt")
-        sys.exit(1)
-
     show_zones(
         token   = args.token,
         dt      = args.date,
-        key     = key,
-        side    = args.opt if not args.key else "CE",
+        index   = args.index,
+        side    = args.opt,
         htf_min = args.htf,
+        strike  = args.strike,
     )
