@@ -325,7 +325,14 @@ def _run_day(dt: date, token: str, lots: int,
             if (best_zone["zone_high"] - best_zone["zone_low"]) < MIN_ZONE_RANGE:
                 continue
 
+            # ── Zone quality check: sellers must have dipped meaningfully ─────
+            # sellers_in_low must be at least 5pts below zone_low to confirm real selling
+            s_low = best_zone.get("sellers_in_low")
+            if s_low is None or s_low > best_zone["zone_low"] - 5:
+                continue   # sellers barely dipped — weak trap, skip
+
             # ── Step 2: 5m MTF confirmation ───────────────────────────────────
+            # 5m must CLOSE above zone_high — proves sellers are truly trapped above zone
             mtf_ts   = mtf["ts"] if "ts" in mtf.columns else mtf.index
             mtf_past = mtf[mtf_ts < ts]
             if mtf_past.empty:
@@ -334,9 +341,9 @@ def _run_day(dt: date, token: str, lots: int,
             last_5m_close = float(last_5m["close"])
             last_5m_open  = float(last_5m["open"])
             if last_5m_close <= last_5m_open:
-                continue   # bearish 5m — wait
-            if last_5m_close < best_zone["zone_trigger"]:
-                continue   # 5m below midpoint — not recovered enough
+                continue   # bearish 5m — sellers still in control
+            if last_5m_close < best_zone["zone_high"]:
+                continue   # 5m close below zone_high — not confirmed yet
 
             # ── Step 3: 1m buy signal ─────────────────────────────────────────
             bar_idx = bar1m.name
@@ -359,8 +366,9 @@ def _run_day(dt: date, token: str, lots: int,
             sl     = best_zone["sl"]
             target = best_zone["target"]
 
-            # Guard 1: entry must be strictly inside zone (no overshoot allowed)
-            if entry_price > best_zone["zone_high"]:
+            # Guard 1: entry must not overshoot zone_high by more than 5% of range
+            zone_range = best_zone["zone_high"] - best_zone["zone_low"]
+            if entry_price > best_zone["zone_high"] + zone_range * 0.05:
                 continue
 
             # Guard 2: entry must not be at or below SL (would be instant loss)
