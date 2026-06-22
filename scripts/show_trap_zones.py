@@ -257,16 +257,16 @@ def _test_token(token: str) -> bool:
 
 def _build_key(index: str, strike: int, opt: str, trade_date: str) -> str:
     """Build Upstox instrument key — same logic as nifty_backtest._instrument_key."""
-    from data_layer.contract_registry import ContractRegistry
+    from data_layer.instrument_registry import REGISTRY
     from scripts.nifty_backtest import _get_expiry, _USE_MONTHLY, _USE_NEXT_WEEK
     index = index.upper()
     opt   = opt.upper()
     exp_date, exp_str = _get_expiry(index, date.fromisoformat(trade_date),
                                     monthly=_USE_MONTHLY, next_week=_USE_NEXT_WEEK)
-    reg = ContractRegistry()
-    key = reg.get_upstox_key(index, exp_date, strike, opt)
-    if key:
-        return key
+    if REGISTRY.is_loaded(index):
+        key = REGISTRY.get_upstox_key(index, exp_date, strike, opt)
+        if key:
+            return key
     pfx = {"NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
            "SENSEX": "BSE_FO|", "FINNIFTY": "NSE_FO|"}.get(index, "NSE_FO|")
     return f"{pfx}{index}{exp_str}{strike}{opt}"
