@@ -1,13 +1,14 @@
+from __future__ import annotations
 """
 show_75m_zones.py — 3-level seller trap zone detection for SENSEX CE/PE.
 
 Hierarchy:
   75m zone valid (c0.high SL hit)
-    → 1m candle enters 75m zone
-      → 15m zones inside (c0.high SL hit)
-        → price returns to 15m zone_high
-          → 5m zones inside (c0.high SL hit)
-            → price returns to 5m zone_high = ENTRY
+    -> 1m candle enters 75m zone
+      -> 15m zones inside (c0.high SL hit)
+        -> price returns to 15m zone_high
+          -> 5m zones inside (c0.high SL hit)
+            -> price returns to 5m zone_high = ENTRY
 
 Usage:
   python scripts/show_75m_zones.py --token <upstox_token>
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import requests
 import pandas as pd
 from datetime import date, timedelta
+from typing import Optional
 
 HEADERS = lambda t: {"Authorization": f"Bearer {t}", "Accept": "application/json"}
 
@@ -54,12 +56,11 @@ def resample(df1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
 
 # ── Core zone detection ───────────────────────────────────────────────────────
 
-def detect_zones(candles: pd.DataFrame) -> list[dict]:
+def detect_zones(candles: pd.DataFrame) -> list:
     """
-    From a candle DataFrame find all valid seller-trap zones.
-    Zone forms when candle[N+1].low < candle[N].low.
-    Zone is VALID only if a subsequent candle's HIGH >= candle[N].HIGH (sellers' SL).
-    Returns list of zone dicts.
+    Find valid seller-trap zones.
+    Zone forms: candle[N+1].low < candle[N].low
+    Valid only if a later candle HIGH >= candle[N].HIGH (sellers SL hit)
     """
     zones = []
     for i in range(len(candles) - 1):
@@ -69,8 +70,7 @@ def detect_zones(candles: pd.DataFrame) -> list[dict]:
             continue
         zone_high = float(c0["low"])
         zone_low  = float(c1["low"])
-        sl_level  = float(c0["high"])   # sellers' SL = HIGH of zone candle
-        # Check if SL was hit by any later candle
+        sl_level  = float(c0["high"])
         sl_hit_ts = None
         for j in range(i + 2, len(candles)):
             if float(candles.iloc[j]["high"]) >= sl_level:
@@ -79,36 +79,27 @@ def detect_zones(candles: pd.DataFrame) -> list[dict]:
         if sl_hit_ts is None:
             continue
         zones.append({
-            "formed_ts":  c0["ts"],
-            "c1_ts":      c1["ts"],
-            "zone_high":  zone_high,
-            "zone_low":   zone_low,
-            "sl_level":   sl_level,
-            "sl_hit_ts":  sl_hit_ts,
+            "formed_ts": c0["ts"],
+            "c1_ts":     c1["ts"],
+            "zone_high": zone_high,
+            "zone_low":  zone_low,
+            "sl_level":  sl_level,
+            "sl_hit_ts": sl_hit_ts,
         })
     return zones
 
-# ── 1m entry into zone ────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def first_1m_entry_into_zone(df1m: pd.DataFrame, zone: dict,
-                              after_ts: pd.Timestamp) -> pd.Timestamp | None:
-    """First 1m bar (after after_ts) whose price enters [zone_low, zone_high]."""
+                              after_ts: pd.Timestamp) -> Optional[pd.Timestamp]:
     window = df1m[df1m["ts"] > after_ts]
     for _, bar in window.iterrows():
-        lo = float(bar["low"])
-        hi = float(bar["high"])
-        if lo <= zone["zone_high"] and hi >= zone["zone_low"]:
+        if float(bar["low"]) <= zone["zone_high"] and float(bar["high"]) >= zone["zone_low"]:
             return bar["ts"]
     return None
 
-# ── Price returns to zone_high ────────────────────────────────────────────────
-
 def first_return_to_zone_high(df1m: pd.DataFrame, zone: dict,
-                               after_ts: pd.Timestamp) -> dict | None:
-    """
-    First 1m bar (after after_ts) whose LOW <= zone_high.
-    That is the bar where price returns to the zone_high = entry signal.
-    """
+                               after_ts: pd.Timestamp) -> Optional[dict]:
     window = df1m[df1m["ts"] > after_ts]
     for _, bar in window.iterrows():
         if float(bar["low"]) <= zone["zone_high"]:
@@ -130,77 +121,67 @@ def analyse_day(df1m: pd.DataFrame, dt: date) -> None:
     ltf_5  = resample(df1m,  5)
 
     zones_75 = detect_zones(htf_75)
-
     if not zones_75:
-        print(f"  No valid 75m zones")
+        print("  No valid 75m zones")
         return
 
     for z75 in zones_75:
         t0   = z75["formed_ts"].strftime("%H:%M")
         t1   = z75["c1_ts"].strftime("%H:%M")
         sl_t = z75["sl_hit_ts"].strftime("%H:%M")
-        print(f"\n  ▶ 75m zone [{t0}→{t1}]  "
-              f"zone_high={z75['zone_high']:.1f}  zone_low={z75['zone_low']:.1f}  "
-              f"sl_level={z75['sl_level']:.1f}  SL_hit@{sl_t}")
+        print(f"\n  >> 75m zone [{t0}->{t1}]  zone_high={z75['zone_high']:.1f}  "
+              f"zone_low={z75['zone_low']:.1f}  sl_level={z75['sl_level']:.1f}  SL_hit@{sl_t}")
 
-        # Step 1: find first 1m bar that enters the 75m zone (after zone formed)
         entry_1m_ts = first_1m_entry_into_zone(df1m, z75, z75["c1_ts"])
         if entry_1m_ts is None:
-            print(f"    ✗ 1m price never entered 75m zone")
+            print("    x 1m never entered 75m zone")
             continue
-        print(f"    ✓ 1m enters 75m zone at {entry_1m_ts.strftime('%H:%M')} → now track 15m zones")
+        print(f"    + 1m enters zone at {entry_1m_ts.strftime('%H:%M')} -> track 15m zones")
 
-        # Step 2: find valid 15m zones inside 75m zone, formed after 1m entry
         zones_15 = [z for z in detect_zones(mtf_15)
-                    if z75["zone_low"] <= z["zone_low"]
+                    if z["zone_low"] >= z75["zone_low"]
                     and z["zone_high"] <= z75["zone_high"]
                     and z["formed_ts"] >= entry_1m_ts]
 
         if not zones_15:
-            print(f"    ✗ No valid 15m zones inside 75m zone")
+            print("    x No valid 15m zones inside 75m zone")
             continue
 
         for z15 in zones_15:
             t15   = z15["formed_ts"].strftime("%H:%M")
             sl15t = z15["sl_hit_ts"].strftime("%H:%M")
-            print(f"\n      ▶ 15m zone [{t15}]  "
-                  f"zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  "
-                  f"sl_level={z15['sl_level']:.1f}  SL_hit@{sl15t}")
+            print(f"\n      >> 15m zone [{t15}]  zone_high={z15['zone_high']:.1f}  "
+                  f"zone_low={z15['zone_low']:.1f}  sl_level={z15['sl_level']:.1f}  SL_hit@{sl15t}")
 
-            # Step 3: price returns to 15m zone_high after SL hit
             ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
             if ret15 is None:
-                print(f"        ✗ Price never returned to 15m zone_high after SL hit")
+                print("        x Price never returned to 15m zone_high")
                 continue
             ret15_t = ret15["entry_ts"].strftime("%H:%M")
-            print(f"        ✓ Price returns to 15m zone_high={z15['zone_high']:.1f} at {ret15_t} → now track 5m zones")
+            print(f"        + Price returns to {z15['zone_high']:.1f} at {ret15_t} -> track 5m zones")
 
-            # Step 4: find valid 5m zones inside 15m zone, after return to zone_high
             zones_5 = [z for z in detect_zones(ltf_5)
-                       if z15["zone_low"] <= z["zone_low"]
+                       if z["zone_low"] >= z15["zone_low"]
                        and z["zone_high"] <= z15["zone_high"]
                        and z["formed_ts"] >= ret15["entry_ts"]]
 
             if not zones_5:
-                print(f"        ✗ No valid 5m zones inside 15m zone")
+                print("        x No valid 5m zones inside 15m zone")
                 continue
 
             for z5 in zones_5:
                 t5   = z5["formed_ts"].strftime("%H:%M")
                 sl5t = z5["sl_hit_ts"].strftime("%H:%M")
-                print(f"\n          ▶ 5m zone [{t5}]  "
-                      f"zone_high={z5['zone_high']:.1f}  zone_low={z5['zone_low']:.1f}  "
-                      f"sl_level={z5['sl_level']:.1f}  SL_hit@{sl5t}")
+                print(f"\n          >> 5m zone [{t5}]  zone_high={z5['zone_high']:.1f}  "
+                      f"zone_low={z5['zone_low']:.1f}  sl_level={z5['sl_level']:.1f}  SL_hit@{sl5t}")
 
-                # Step 5: price returns to 5m zone_high = ENTRY
                 ret5 = first_return_to_zone_high(df1m, z5, z5["sl_hit_ts"])
                 if ret5 is None:
-                    print(f"            ✗ Price never returned to 5m zone_high — no entry")
+                    print("            x Price never returned to 5m zone_high — no entry")
                 else:
                     ret5_t = ret5["entry_ts"].strftime("%H:%M")
-                    print(f"            ★ ENTRY  time={ret5_t}  "
-                          f"price={ret5['entry_price']:.1f}  "
-                          f"(bar_open={ret5['bar_open']:.1f})")
+                    print(f"            * ENTRY  time={ret5_t}  price={ret5['entry_price']:.1f}  "
+                          f"bar_open={ret5['bar_open']:.1f}")
 
 # ── Instrument key lookup ─────────────────────────────────────────────────────
 
@@ -238,7 +219,7 @@ def main():
     parser.add_argument("--side",   default="CE")
     args = parser.parse_args()
 
-    today    = date.today()
+    today     = date.today()
     days_back = today.weekday() + 7
     prev_mon  = today - timedelta(days=days_back)
     dates = [prev_mon + timedelta(days=i)
@@ -251,15 +232,14 @@ def main():
     print(f"{'='*65}")
 
     for dt in dates:
-        key, expiry = get_key_for_strike(args.token, args.strike, args.side, dt)
+        key, _ = get_key_for_strike(args.token, args.strike, args.side, dt)
         if not key:
-            print(f"\n{dt} — instrument key not found, skip")
+            print(f"\n{dt} — key not found, skip")
             continue
         df1m = fetch_1m(key, dt, args.token)
         if df1m.empty:
             print(f"\n{dt} — no 1m data")
             continue
-
         print(f"\n{'─'*65}")
         print(f"Date: {dt}  |  Key: {key}")
         analyse_day(df1m, dt)
