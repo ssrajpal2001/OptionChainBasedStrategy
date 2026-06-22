@@ -759,21 +759,17 @@ def run_backtest_ui(
 
 # ── 3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY) ──
 
-PROFIT_CAP_RS = 5000   # ₹5,000 per trade — lock profits at cap, then TSL trails
-
-
 def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                    sl: float, t1: float, sq_off: str, lot_size: int, lots: int,
                    df5m: pd.DataFrame = None) -> dict:
     """
     Walk 1m bars from entry_ts.
-    At T1 (or profit cap ₹5,000): book 50%, trail rest at entry (breakeven).
-    TSL step-up: new post-entry 5m traps → step up SL to zone_low when sl_level hit.
-    Profit cap: once running P&L >= ₹5,000 (full qty), lock by stepping SL up to that level;
-    if price falls back below the cap-SL, exit with capped profit.
+    At T1: book 50% (lot1), trail remaining lot with SL = entry (breakeven), exit at EOD/SL.
+    TSL step-up: if a new 5m trap forms AFTER entry above our price, and price later
+    touches its sl_level (sellers trapped), step up trailing_sl to that zone's zone_low.
     Returns combined PnL across both legs.
     """
-    from scripts.show_75m_zones import detect_zones, resample
+    from scripts.show_75m_zones import detect_zones
     sq_h, sq_m = map(int, sq_off.split(":"))
     qty_total = lots * lot_size
     qty_half  = qty_total // 2      # 50% at T1
@@ -783,9 +779,7 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
     t1_hit = False
     t1_ts  = None
     t1_pnl_rs = 0.0
-    trailing_sl = sl   # before T1 = zone_low SL; after T1 = entry (breakeven), then step-up
-    cap_pts = PROFIT_CAP_RS / qty_total  # pts per unit at which full-position P&L = ₹5,000
-    cap_sl_locked = False  # True once cap has been locked in via SL step-up
+    trailing_sl = sl
 
     # Pre-compute post-entry 5m zones for TSL step-up
     tsl_zones = []   # list of (sl_level, new_tsl) sorted by formed_ts
@@ -829,14 +823,6 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
             return {"exit_ts": ts, "exit_price": ep,
                     "pnl_pts": round(avg_pts, 2),
                     "pnl_rs": round(total_rs, 0), "reason": "T1+EOD"}
-
-        # Profit cap: once full-position gain >= ₹5,000, lock SL at cap level
-        if not t1_hit and not cap_sl_locked:
-            running_gain = (hi - entry_price) * qty_total
-            if running_gain >= PROFIT_CAP_RS:
-                cap_sl_locked = True
-                cap_lock_price = entry_price + cap_pts   # price that locks ₹5,000
-                trailing_sl = max(trailing_sl, cap_lock_price)
 
         # TSL step-up check: did price touch a post-entry 5m zone's sl_level?
         if df5m is not None:
@@ -1324,19 +1310,11 @@ def run_backtest_3level_ui(
             df5m_opt  = sd["df5m"]
             entries   = sd["entries"]
 
-            # Opposite side entry zone_high → use as additional T1 signal if available
-            opp_side  = "PE" if side == "CE" else "CE"
-            opp_entry = None
-            if opp_side in side_data and side_data[opp_side]["entries"]:
-                opp_entry = side_data[opp_side]["entries"][0]["entry_price"]
-
             for e in entries:
                 ep   = e["entry_price"]
-                sl   = round(e["sl"] - sl_buf, 2)  # zone_low - buffer
+                sl   = round(e["sl"] - sl_buf, 2)
                 sl   = min(sl, ep - 50.0)
-                # T1: use opposite-side entry if available (both sides moving = trend confirmed)
-                # otherwise fall back to zone T1
-                t1   = opp_entry if opp_entry is not None else e["t1"]
+                t1   = e["t1"]
                 exit_info = _simulate_exit(df1m, e["entry_ts"], ep, sl, t1,
                                            sq_off, LOT_SIZE, lots, df5m=df5m_opt)
                 all_trades.append({
@@ -1354,7 +1332,6 @@ def run_backtest_3level_ui(
                     "pnl_rs":     exit_info["pnl_rs"],
                     "reason":     exit_info["reason"],
                     "htf_zone":   e["zone_label"],
-                    "opp_t1":     f"{opp_entry:.0f}" if opp_entry else "",
                 })
 
     if not all_trades:
