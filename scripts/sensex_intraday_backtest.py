@@ -1310,11 +1310,31 @@ def run_backtest_3level_ui(
             df5m_opt  = sd["df5m"]
             entries   = sd["entries"]
 
+            # Opposite-side R:R T1: distance from opp current LTP to opp entry zone
+            opp_side = "PE" if side == "CE" else "CE"
+            opp_sd   = side_data.get(opp_side)
+
             for e in entries:
                 ep   = e["entry_price"]
                 sl   = round(e["sl"] - sl_buf, 2)
                 sl   = min(sl, ep - 50.0)
-                t1   = e["t1"]
+                t1   = e["t1"]   # default: zone T1
+
+                # Override T1 using opposite side's room (same market move, different leg)
+                if opp_sd and opp_sd["entries"]:
+                    opp_entry_zone = opp_sd["entries"][0]["entry_price"]
+                    # Get opp side LTP at this entry timestamp
+                    opp_df = opp_sd["df1m"]
+                    opp_row = opp_df[opp_df["ts"] <= e["entry_ts"]]
+                    if not opp_row.empty:
+                        opp_ltp = float(opp_row.iloc[-1]["close"])
+                        # Distance opp has to travel to reach its entry zone
+                        # PE: premium falls to entry → distance = opp_ltp - opp_entry_zone
+                        # CE: premium falls to entry → distance = opp_ltp - opp_entry_zone
+                        opp_dist = opp_ltp - opp_entry_zone
+                        if opp_dist > 10:   # only if meaningful room (>10 pts)
+                            t1 = ep + opp_dist   # our T1 = entry + same distance
+
                 exit_info = _simulate_exit(df1m, e["entry_ts"], ep, sl, t1,
                                            sq_off, LOT_SIZE, lots, df5m=df5m_opt)
                 all_trades.append({
