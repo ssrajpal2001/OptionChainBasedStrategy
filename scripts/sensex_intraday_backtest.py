@@ -429,54 +429,34 @@ def _find_option_key_from_registry(underlying: str, expiry: date,
     return None
 
 
-def _get_nearest_expiry_from_api(token: str, trade_date: date) -> Optional[date]:
+def _find_key_and_expiry(token: str, strike: int, side: str,
+                         trade_date: date) -> tuple[Optional[str], Optional[date]]:
     """
-    Fetch the nearest SENSEX expiry on or after trade_date from Upstox option chain API.
-    Uses /v2/option/chain which returns expiry_list for the underlying.
+    Find SENSEX option instrument key by trying candidate expiry dates
+    (every day from trade_date to +14 days) via Upstox search API.
+    Returns (instrument_key, expiry_date) of the first match found.
     """
-    try:
-        url = "https://api.upstox.com/v2/option/chain"
-        params = {
-            "instrument_key": SENSEX_INDEX_KEY,
-            "expiry_date":    trade_date.strftime("%Y-%m-%d"),
-        }
-        r = requests.get(url, params=params, headers=_headers(token), timeout=10)
-        d = r.json()
-        # expiry_list is a list of "YYYY-MM-DD" strings
-        expiries = d.get("data", {}).get("expiry_list", [])
-        candidates = []
-        for e in expiries:
-            try:
-                edt = date.fromisoformat(str(e)[:10])
-                if edt >= trade_date:
-                    candidates.append(edt)
-            except Exception:
-                pass
-        if candidates:
-            return min(candidates)
-    except Exception as ex:
-        print(f"    [expiry API] {ex}")
-    return None
-
-
-def _find_option_key_upstox_search(token: str, strike: int, side: str,
-                                   expiry: date) -> Optional[str]:
-    """Search Upstox instruments API for SENSEX option key."""
-    try:
-        url = "https://api.upstox.com/v2/instruments/search"
-        params = {
-            "exchange": "BSE_FO",
-            "segment":  "BSE_FO",
-            "query":    f"SENSEX {strike} {side} {expiry.strftime('%d%b%y').upper()}"
-        }
-        r = requests.get(url, params=params, headers=_headers(token), timeout=10)
-        d = r.json()
-        items = d.get("data", [])
-        if items:
-            return items[0].get("instrument_key", None)
-    except Exception:
-        pass
-    return None
+    from datetime import timedelta
+    for delta in range(15):
+        candidate = trade_date + timedelta(days=delta)
+        try:
+            url = "https://api.upstox.com/v2/instruments/search"
+            params = {
+                "exchange": "BSE_FO",
+                "segment":  "BSE_FO",
+                "query":    f"SENSEX {strike} {side} {candidate.strftime('%d%b%y').upper()}"
+            }
+            r = requests.get(url, params=params, headers=_headers(token), timeout=10)
+            d = r.json()
+            items = d.get("data", [])
+            if items:
+                key = items[0].get("instrument_key")
+                if key:
+                    print(f"    [{side} {strike}] found expiry {candidate} key={key}")
+                    return key, candidate
+        except Exception:
+            pass
+    return None, None
 
 
 def run(token: str, days: int = 10, lots: int = 1) -> None:
@@ -512,33 +492,14 @@ def run(token: str, days: int = 10, lots: int = 1) -> None:
         pe_strike = _round_pe(spot)
         print(f"  Spot open={spot:.0f}  CE={ce_strike}  PE={pe_strike}")
 
-        # Find expiry — ask Upstox option chain API for real expiry list
-        expiry = _get_nearest_expiry_from_api(token, dt)
-        if expiry is None:
-            try:
-                from data_layer.instrument_registry import REGISTRY
-                if REGISTRY.is_loaded("SENSEX"):
-                    expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt)
-            except Exception:
-                pass
-        if expiry is None:
-            # Last resort: next Thursday
-            days_to_thu = (3 - dt.weekday()) % 7
-            expiry = dt + timedelta(days=days_to_thu if days_to_thu else 7)
-        print(f"  Expiry: {expiry}")
-
-        # Get instrument keys
-        ce_key = _find_option_key_from_registry("SENSEX", expiry, ce_strike, "CE")
-        pe_key = _find_option_key_from_registry("SENSEX", expiry, pe_strike, "PE")
-
-        if not ce_key:
-            ce_key = _find_option_key_upstox_search(token, ce_strike, "CE", expiry)
-        if not pe_key:
-            pe_key = _find_option_key_upstox_search(token, pe_strike, "PE", expiry)
+        # Find instrument keys — tries every day from dt to dt+14 until API returns a result
+        ce_key, ce_expiry = _find_key_and_expiry(token, ce_strike, "CE", dt)
+        pe_key, pe_expiry = _find_key_and_expiry(token, pe_strike, "PE", dt)
+        expiry = ce_expiry or pe_expiry
+        print(f"  Expiry: {expiry}  CE={ce_key or 'NOT FOUND'}  PE={pe_key or 'NOT FOUND'}")
 
         if not ce_key and not pe_key:
             print(f"  Could not resolve instrument keys for {dt}, skip")
-            print(f"  Hint: add BSE_FO keys manually below for testing")
             continue
 
         print(f"  CE key: {ce_key or 'NOT FOUND'}")
@@ -633,24 +594,8 @@ def run_backtest_ui(
             continue
         ce_strike = _round_ce(spot)
         pe_strike = _round_pe(spot)
-        expiry = _get_nearest_expiry_from_api(token, dt)
-        if expiry is None:
-            try:
-                from data_layer.instrument_registry import REGISTRY
-                if REGISTRY.is_loaded("SENSEX"):
-                    expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt)
-            except Exception:
-                pass
-        if expiry is None:
-            days_to_thu = (3 - dt.weekday()) % 7
-            expiry = dt + timedelta(days=days_to_thu if days_to_thu else 7)
-
-        ce_key = _find_option_key_from_registry("SENSEX", expiry, ce_strike, "CE")
-        pe_key = _find_option_key_from_registry("SENSEX", expiry, pe_strike, "PE")
-        if not ce_key:
-            ce_key = _find_option_key_upstox_search(token, ce_strike, "CE", expiry)
-        if not pe_key:
-            pe_key = _find_option_key_upstox_search(token, pe_strike, "PE", expiry)
+        ce_key, _ = _find_key_and_expiry(token, ce_strike, "CE", dt)
+        pe_key, _ = _find_key_and_expiry(token, pe_strike, "PE", dt)
         if not ce_key and not pe_key:
             continue
 
