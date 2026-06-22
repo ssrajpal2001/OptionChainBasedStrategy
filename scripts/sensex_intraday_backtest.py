@@ -468,21 +468,20 @@ def run(token: str, days: int = 10, lots: int = 1) -> None:
     trading_days = _get_trading_days(days)
     all_trades: list[dict] = []
 
-    # Try to load REGISTRY for instrument key lookup
+    # Load REGISTRY — contains ALL BSE_FO contracts with correct expiry dates
+    from data_layer.instrument_registry import REGISTRY
+    from config.global_config import GlobalConfig
+    import asyncio
     try:
-        from data_layer.instrument_registry import REGISTRY
-        from config.global_config import GlobalConfig
         cfg = GlobalConfig()
-        import asyncio
         asyncio.run(REGISTRY.load_all(cfg))
-        print("REGISTRY loaded.\n")
+        print(f"REGISTRY loaded — SENSEX loaded: {REGISTRY.is_loaded('SENSEX')}\n")
     except Exception as exc:
-        print(f"REGISTRY not available ({exc}) — will use Upstox search.\n")
+        print(f"REGISTRY load failed: {exc}\n")
 
     for dt in trading_days:
         print(f"\n── {dt} ──────────────────────────────────────────────────")
 
-        # Get SENSEX spot open
         spot = _get_sensex_spot_open(dt, token)
         if spot <= 0:
             print(f"  Could not fetch SENSEX spot for {dt}, skip")
@@ -492,18 +491,27 @@ def run(token: str, days: int = 10, lots: int = 1) -> None:
         pe_strike = _round_pe(spot)
         print(f"  Spot open={spot:.0f}  CE={ce_strike}  PE={pe_strike}")
 
-        # Find instrument keys — tries every day from dt to dt+14 until API returns a result
-        ce_key, ce_expiry = _find_key_and_expiry(token, ce_strike, "CE", dt)
-        pe_key, pe_expiry = _find_key_and_expiry(token, pe_strike, "PE", dt)
-        expiry = ce_expiry or pe_expiry
-        print(f"  Expiry: {expiry}  CE={ce_key or 'NOT FOUND'}  PE={pe_key or 'NOT FOUND'}")
-
-        if not ce_key and not pe_key:
-            print(f"  Could not resolve instrument keys for {dt}, skip")
+        # Get expiry from REGISTRY (correct, no calendar math)
+        expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt) if REGISTRY.is_loaded("SENSEX") else None
+        if expiry is None:
+            # Fallback: brute-force search via API
+            _, expiry = _find_key_and_expiry(token, ce_strike, "CE", dt)
+        if expiry is None:
+            print(f"  Could not determine expiry for {dt}, skip")
             continue
+        print(f"  Expiry: {expiry}")
 
-        print(f"  CE key: {ce_key or 'NOT FOUND'}")
-        print(f"  PE key: {pe_key or 'NOT FOUND'}")
+        ce_key = REGISTRY.get_instrument_key("SENSEX", expiry, ce_strike, "CE") if REGISTRY.is_loaded("SENSEX") else None
+        pe_key = REGISTRY.get_instrument_key("SENSEX", expiry, pe_strike, "PE") if REGISTRY.is_loaded("SENSEX") else None
+        if not ce_key:
+            ce_key, _ = _find_key_and_expiry(token, ce_strike, "CE", dt)
+        if not pe_key:
+            pe_key, _ = _find_key_and_expiry(token, pe_strike, "PE", dt)
+
+        print(f"  CE={ce_key or 'NOT FOUND'}  PE={pe_key or 'NOT FOUND'}")
+        if not ce_key and not pe_key:
+            print(f"  No keys found, skip")
+            continue
 
         day_trades = _run_day(
             dt=dt, token=token, lots=lots,
@@ -585,6 +593,16 @@ def run_backtest_ui(
     MIN_REWARD       = min_reward
     TARGET_MULT      = target_mult
 
+    # Load REGISTRY once — has all BSE_FO contracts with real expiry dates
+    from data_layer.instrument_registry import REGISTRY
+    from config.global_config import GlobalConfig
+    import asyncio
+    try:
+        cfg = GlobalConfig()
+        asyncio.run(REGISTRY.load_all(cfg))
+    except Exception:
+        pass
+
     all_trades: list = []
     trading_days = _get_trading_days(days)
 
@@ -594,8 +612,19 @@ def run_backtest_ui(
             continue
         ce_strike = _round_ce(spot)
         pe_strike = _round_pe(spot)
-        ce_key, _ = _find_key_and_expiry(token, ce_strike, "CE", dt)
-        pe_key, _ = _find_key_and_expiry(token, pe_strike, "PE", dt)
+
+        expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt) if REGISTRY.is_loaded("SENSEX") else None
+        if expiry is None:
+            _, expiry = _find_key_and_expiry(token, ce_strike, "CE", dt)
+        if expiry is None:
+            continue
+
+        ce_key = REGISTRY.get_instrument_key("SENSEX", expiry, ce_strike, "CE") if REGISTRY.is_loaded("SENSEX") else None
+        pe_key = REGISTRY.get_instrument_key("SENSEX", expiry, pe_strike, "PE") if REGISTRY.is_loaded("SENSEX") else None
+        if not ce_key:
+            ce_key, _ = _find_key_and_expiry(token, ce_strike, "CE", dt)
+        if not pe_key:
+            pe_key, _ = _find_key_and_expiry(token, pe_strike, "PE", dt)
         if not ce_key and not pe_key:
             continue
 
