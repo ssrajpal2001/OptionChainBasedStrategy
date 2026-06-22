@@ -111,7 +111,7 @@ def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date) -> lis
 
 # ── 3m entry detection ─────────────────────────────────────────────────────────
 
-def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list) -> list:
+def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list, sl_buf: float = 3.0) -> list:
     """
     Return list of entry dicts for TRAPPED/CLOSED zones.
     Entry condition:
@@ -153,23 +153,39 @@ def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list) -> list:
             if _is_eod(bar_ts) or not _before_cutoff(bar_ts):
                 continue
 
-            # Prev candle must be in lower 1/3 (close ≤ zone_trigger)
-            if float(prev["close"]) > zone_trigger:
+            # Prev candle close must be in or just below lower 1/3 (zone_trigger area)
+            prev_close = float(prev["close"])
+            prev_low   = float(prev["low"])
+            if prev_close > zone_trigger:
                 continue
-            # Not too far below zone (avoid deep underwater entries)
-            if float(prev["close"]) < zone_low * 0.85:
+            # Not a runaway breakdown — close must be at most sl_buf below zone_low
+            if prev_close < zone_low - sl_buf:
                 continue
 
             # Confirmation: curr 3m high breaks prev 3m high
             if float(curr["high"]) > float(prev["high"]):
                 entry_price = round(float(prev["high"]), 2)
+
+                # SL logic:
+                # - Price stayed within zone → SL = zone_low (structural)
+                # - Price dipped below zone_low (bear trap) → SL = candle low − sl_buf
+                if prev_close >= zone_low:
+                    sl = zone_low
+                else:
+                    sl = round(prev_low - sl_buf, 2)
+
+                # Skip if SL is above entry (degenerate candle)
+                if sl >= entry_price:
+                    continue
+
                 entries.append({
                     "entry_price":  entry_price,
                     "entry_ts":     bar_ts,
                     "zone_low":     zone_low,
                     "zone_high":    zone_high,
                     "zone_trigger": zone_trigger,
-                    "sl_price":     zone_low,
+                    "sl_price":     sl,
+                    "sl_type":      "ZONE_LOW" if prev_close >= zone_low else "DIP_LOW",
                     "htf_zone":     zone,
                 })
                 break  # first signal per zone
@@ -218,19 +234,28 @@ def _simulate_trade(entry: dict,
                     df_opp_1m: pd.DataFrame,
                     opp_zone_trigger: Optional[float],
                     lot: int,
-                    lot_size: int) -> Optional[dict]:
+                    lot_size: int,
+                    trail_pts: float = 5.0) -> Optional[dict]:
     """
-    Simulate one trade bar-by-bar on 1m bars.
+    Two-stage exit simulation:
 
-    Exit priority (checked every 1m bar):
-      1. EOD (≥ 15:20) → exit at bar open
-      2. SL  (bar low ≤ zone_low) → exit at zone_low
-      3. T1  (OPP bar close ≤ opp_zone_trigger) → exit CE at CE bar close (immediate)
+    Stage 1 — until T1 (OPP_ZONE_TRIGGER):
+      SL   : bar low ≤ sl_price → full exit at sl_price
+      T1   : OPP close ≤ opp_zone_trigger → book 50% at CE bar close
+      EOD  : ≥ 15:20 → full exit at bar open
+
+    Stage 2 — trailing remaining 50% after T1:
+      TSL  : trail_sl starts at entry_price (breakeven), ratchets up when
+             bar close > (trail_sl + trail_pts).  trail_sl = bar_close - trail_pts.
+      SL   : bar low ≤ trail_sl → exit remaining at trail_sl
+      EOD  : ≥ 15:20 → exit remaining at bar open
     """
     entry_ts    = pd.Timestamp(entry["entry_ts"])
     entry_price = entry["entry_price"]
     sl_price    = entry["sl_price"]
     total_qty   = lot * lot_size
+    half_qty    = total_qty // 2
+    rem_qty     = total_qty - half_qty   # handles odd lots
 
     df_after = df_exec_1m[df_exec_1m["datetime"] > entry_ts].copy().reset_index(drop=True)
     df_opp_after = (
@@ -242,65 +267,140 @@ def _simulate_trade(entry: dict,
     if df_after.empty:
         return None
 
-    exit_price  = None
-    exit_ts     = None
-    exit_reason = None
+    # Safety: SL must be below entry for a long position
+    if sl_price >= entry_price:
+        return None
+
+    # ── Stage 1: full position, watch for SL / T1 / EOD ──────────────────
+    t1_hit      = False
+    t1_price    = None
+    t1_ts       = None
+    t1_pnl_rs   = 0.0
+    sl_hit      = False
+    sl_exit_px  = None
+    sl_exit_ts  = None
+    eod_exit_px = None
+    eod_exit_ts = None
 
     for i in range(len(df_after)):
         bar    = df_after.iloc[i]
         bar_ts = pd.Timestamp(bar["datetime"])
 
-        # 1. EOD
         if _is_eod(bar_ts):
-            exit_price  = float(bar["open"])
-            exit_ts     = bar_ts
-            exit_reason = "EOD"
+            eod_exit_px = float(bar["open"])
+            eod_exit_ts = bar_ts
             break
 
-        # 2. SL: bar low touches zone_low
         if float(bar["low"]) <= sl_price:
-            exit_price  = sl_price
-            exit_ts     = bar_ts
-            exit_reason = "SL"
+            sl_hit     = True
+            sl_exit_px = sl_price
+            sl_exit_ts = bar_ts
             break
 
-        # 3. T1: check OPP bar at same timestamp
         if opp_zone_trigger is not None and not df_opp_after.empty:
             opp_bars = df_opp_after[df_opp_after["datetime"] <= bar["datetime"]]
-            if not opp_bars.empty:
-                opp_close = float(opp_bars.iloc[-1]["close"])
-                if opp_close <= opp_zone_trigger:
-                    exit_price  = float(bar["close"])
-                    exit_ts     = bar_ts
-                    exit_reason = "OPP_ZONE_TRIGGER"
-                    break
+            if not opp_bars.empty and float(opp_bars.iloc[-1]["close"]) <= opp_zone_trigger:
+                t1_hit    = True
+                t1_price  = round(float(bar["close"]), 2)
+                t1_ts     = bar_ts
+                t1_pnl_rs = round((t1_price - entry_price) * half_qty, 2)
+                stage2_start_idx = i + 1
+                break
 
-    # Never exited → EOD at last bar
-    if exit_price is None:
-        last        = df_after.iloc[-1]
-        exit_price  = float(last["close"])
-        exit_ts     = pd.Timestamp(last["datetime"])
-        exit_reason = "EOD"
+    # Full exit (SL or EOD without T1) — single-stage result
+    if sl_hit:
+        pnl_rs = round((sl_exit_px - entry_price) * total_qty, 2)
+        return _trade_result(entry, entry_ts, sl_exit_ts, sl_exit_px, sl_price,
+                             total_qty, pnl_rs, "SL",
+                             t1_hit=False, t1_price=None, t1_ts=None, t1_pnl_rs=0)
 
-    pnl_pts = round(exit_price - entry_price, 2)
-    pnl_rs  = round(pnl_pts * total_qty, 2)
+    if not t1_hit:
+        px = eod_exit_px or float(df_after.iloc[-1]["close"])
+        ts = eod_exit_ts or pd.Timestamp(df_after.iloc[-1]["datetime"])
+        pnl_rs = round((px - entry_price) * total_qty, 2)
+        return _trade_result(entry, entry_ts, ts, px, sl_price,
+                             total_qty, pnl_rs, "EOD",
+                             t1_hit=False, t1_price=None, t1_ts=None, t1_pnl_rs=0)
 
+    # ── Stage 2: trail remaining 50% after T1 ────────────────────────────
+    trail_sl      = entry_price          # start TSL at breakeven
+    tsl_exit_px   = None
+    tsl_exit_ts   = None
+    tsl_reason    = "EOD"
+
+    df_stage2 = df_after.iloc[stage2_start_idx:].reset_index(drop=True)
+
+    for i in range(len(df_stage2)):
+        bar    = df_stage2.iloc[i]
+        bar_ts = pd.Timestamp(bar["datetime"])
+        bar_close = float(bar["close"])
+        bar_low   = float(bar["low"])
+
+        if _is_eod(bar_ts):
+            tsl_exit_px = float(bar["open"])
+            tsl_exit_ts = bar_ts
+            tsl_reason  = "EOD"
+            break
+
+        # Ratchet TSL up when price makes new highs
+        if bar_close > trail_sl + trail_pts:
+            trail_sl = round(bar_close - trail_pts, 2)
+
+        # TSL hit
+        if bar_low <= trail_sl:
+            tsl_exit_px = trail_sl
+            tsl_exit_ts = bar_ts
+            tsl_reason  = "TSL"
+            break
+
+    if tsl_exit_px is None:
+        last = df_stage2.iloc[-1] if not df_stage2.empty else df_after.iloc[-1]
+        tsl_exit_px = float(last["close"])
+        tsl_exit_ts = pd.Timestamp(last["datetime"])
+        tsl_reason  = "EOD"
+
+    trail_pnl_rs = round((tsl_exit_px - entry_price) * rem_qty, 2)
+    total_pnl_rs = round(t1_pnl_rs + trail_pnl_rs, 2)
+
+    return _trade_result(entry, entry_ts, tsl_exit_ts, tsl_exit_px, sl_price,
+                         total_qty, total_pnl_rs, tsl_reason,
+                         t1_hit=True, t1_price=t1_price, t1_ts=t1_ts,
+                         t1_pnl_rs=t1_pnl_rs,
+                         trail_exit_px=tsl_exit_px, trail_exit_ts=tsl_exit_ts,
+                         trail_pnl_rs=trail_pnl_rs, trail_sl=trail_sl)
+
+
+def _trade_result(entry, entry_ts, exit_ts, exit_price, sl_price,
+                  total_qty, pnl_rs, reason,
+                  t1_hit=False, t1_price=None, t1_ts=None, t1_pnl_rs=0,
+                  trail_exit_px=None, trail_exit_ts=None,
+                  trail_pnl_rs=0, trail_sl=None) -> dict:
     return {
-        "date":         str(entry_ts.date()),
-        "opt_type":     entry.get("opt_type", "?"),
-        "entry_ts":     str(entry_ts),
-        "exit_ts":      str(exit_ts),
-        "entry_price":  round(entry_price, 2),
-        "exit_price":   round(exit_price, 2),
-        "sl_price":     round(sl_price, 2),
-        "zone_low":     round(entry["zone_low"], 2),
-        "zone_high":    round(entry["zone_high"], 2),
-        "zone_trigger": round(entry["zone_trigger"], 2),
-        "pnl_pts":      pnl_pts,
-        "pnl_rs":       pnl_rs,
-        "qty":          total_qty,
-        "reason":       exit_reason,
-        "win":          pnl_rs > 0,
+        "date":           str(entry_ts.date()),
+        "opt_type":       entry.get("opt_type", "?"),
+        "sl_type":        entry.get("sl_type", "ZONE_LOW"),
+        "entry_ts":       str(entry_ts),
+        "exit_ts":        str(exit_ts),
+        "entry_price":    round(entry["entry_price"], 2),
+        "exit_price":     round(exit_price, 2),
+        "sl_price":       round(sl_price, 2),
+        "zone_low":       round(entry["zone_low"], 2),
+        "zone_high":      round(entry["zone_high"], 2),
+        "zone_trigger":   round(entry["zone_trigger"], 2),
+        "qty":            total_qty,
+        "pnl_rs":         pnl_rs,
+        "reason":         reason,
+        "win":            pnl_rs > 0,
+        # T1 detail
+        "t1_hit":         t1_hit,
+        "t1_price":       t1_price,
+        "t1_ts":          str(t1_ts) if t1_ts else None,
+        "t1_pnl_rs":      t1_pnl_rs,
+        # Trail detail
+        "trail_exit_px":  trail_exit_px,
+        "trail_exit_ts":  str(trail_exit_ts) if trail_exit_ts else None,
+        "trail_pnl_rs":   trail_pnl_rs,
+        "trail_sl":       trail_sl,
     }
 
 
@@ -312,6 +412,7 @@ def _run_day(index: str, cfg: dict, td: date,
              lots: int,
              htf_min: int,
              rr_min: float,
+             sl_buf: float,
              cache: dict,
              fetch_from: str) -> list:
     """Process one trading day; return list of trade result dicts."""
@@ -419,7 +520,7 @@ def _run_day(index: str, cfg: dict, td: date,
             opp_zone_trigger = min(float(z["zone_trigger"]) for z in opp_zones)
 
         # ── 3m entry signals ───────────────────────────────────────────────
-        signals = _find_3m_entries(df_today, zones)
+        signals = _find_3m_entries(df_today, zones, sl_buf=sl_buf)
         if not signals:
             continue
 
@@ -464,14 +565,25 @@ def _run_day(index: str, cfg: dict, td: date,
             last_exit_ts = pd.Timestamp(result["exit_ts"])
             trades.append(result)
 
-            print(f"  {today_str} {opt_type}  "
-                  f"entry={result['entry_price']:.1f} ({str(entry_ts)[11:16]})  "
-                  f"sl={result['sl_price']:.1f}  "
-                  f"exit={result['exit_price']:.1f} ({str(last_exit_ts)[11:16]})  "
-                  f"pnl=₹{result['pnl_rs']:+.0f}  {result['reason']}")
+            sl_tag = result.get("sl_type", "ZONE_LOW")
+            if result.get("t1_hit"):
+                print(f"  {today_str} {opt_type} [{sl_tag}]"
+                      f"  entry={result['entry_price']:.1f} ({str(entry_ts)[11:16]})"
+                      f"  sl={result['sl_price']:.1f}"
+                      f"  T1={result['t1_price']:.1f} ({str(result['t1_ts'])[11:16]})"
+                      f"  +Rs{result['t1_pnl_rs']:.0f}(50%)"
+                      f"  trail_exit={result['trail_exit_px']:.1f} ({str(result['trail_exit_ts'])[11:16]})"
+                      f"  Rs{result['trail_pnl_rs']:+.0f}(50%)"
+                      f"  TOTAL=Rs{result['pnl_rs']:+.0f}  [{result['reason']}]")
+            else:
+                print(f"  {today_str} {opt_type} [{sl_tag}]"
+                      f"  entry={result['entry_price']:.1f} ({str(entry_ts)[11:16]})"
+                      f"  sl={result['sl_price']:.1f}"
+                      f"  exit={result['exit_price']:.1f} ({str(last_exit_ts)[11:16]})"
+                      f"  Rs{result['pnl_rs']:+.0f}  [{result['reason']}]")
 
             # ── Rotation: if T1 hit, check OPP side ───────────────────────
-            if result["reason"] == "OPP_ZONE_TRIGGER" and opp_type in side_data:
+            if result.get("t1_hit") and opp_type in side_data:
                 _try_opp_entry(
                     opp_type, opp_zones,
                     side_data[opp_type]["df_today"],
@@ -557,6 +669,7 @@ def run_backtest_3m(token: str,
                     lots: int = 2,
                     htf_min: int = 75,
                     rr_min: float = 1.5,
+                    sl_buf: float = 3.0,
                     use_bias: bool = True) -> dict:
     """
     Run 3m-confirmation backtest and return:
@@ -598,10 +711,10 @@ def run_backtest_3m(token: str,
     all_trades: list[dict] = []
 
     for td in trading_days:
-        print(f"\n── {td} {'(GAP bias)' if use_bias else ''} ──")
+        print(f"\n--- {td} {'(GAP bias)' if use_bias else ''} ---")
         day_trades = _run_day(
             index, cfg, td, df_spot_all,
-            use_bias, lots, htf_min, rr_min,
+            use_bias, lots, htf_min, rr_min, sl_buf,
             cache, fetch_from
         )
         all_trades.extend(day_trades)
@@ -648,7 +761,7 @@ def _summarise(trades: list[dict], lots: int, lot_size: int) -> dict:
         "by_reason":  by_reason,
     }
 
-    print(f"\n{'='*55}")
+    print(f"\n{'='*55}", flush=True)
     print(f"  Trades    : {len(trades)}   Wins: {len(wins)}   Losses: {len(losses)}")
     print(f"  Win Rate  : {win_rate}%")
     print(f"  Total P&L : ₹{total_pnl:+,.0f}")
@@ -673,6 +786,7 @@ if __name__ == "__main__":
     ap.add_argument("--lots",     type=int,   default=2)
     ap.add_argument("--htf",      type=int,   default=75, help="HTF timeframe minutes")
     ap.add_argument("--rr-min",   type=float, default=1.5, help="Min R:R ratio (0=skip check)")
+    ap.add_argument("--sl-buf",   type=float, default=3.0, help="Buffer below dip-low for SL (pts)")
     ap.add_argument("--no-bias",  action="store_true", help="Disable gap-direction bias")
     args = ap.parse_args()
 
@@ -683,5 +797,6 @@ if __name__ == "__main__":
         lots     = args.lots,
         htf_min  = args.htf,
         rr_min   = args.rr_min,
+        sl_buf   = args.sl_buf,
         use_bias = not args.no_bias,
     )
