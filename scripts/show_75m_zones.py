@@ -42,7 +42,10 @@ def fetch_1m(key: str, dt: date, token: str) -> pd.DataFrame:
     if not candles:
         return pd.DataFrame()
     df = pd.DataFrame(candles, columns=["ts","open","high","low","close","vol","oi"])
-    df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
+    ts = pd.to_datetime(df["ts"])
+    if ts.dt.tz is not None:
+        ts = ts.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+    df["ts"] = ts
     df = df.sort_values("ts").reset_index(drop=True)
     t_open  = pd.Timestamp("09:15:00").time()
     t_close = pd.Timestamp("15:29:00").time()
