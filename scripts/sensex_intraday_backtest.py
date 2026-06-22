@@ -135,7 +135,7 @@ def _find_sensex_option_key(spot: float, expiry_date: date, side: str,
     try:
         from data_layer.instrument_registry import REGISTRY
         if REGISTRY.is_loaded("SENSEX"):
-            key = REGISTRY.get_instrument_key("SENSEX", expiry_date, strike, side)
+            key = REGISTRY.get_upstox_key("SENSEX", expiry_date, strike, side)
             if key:
                 return key
     except Exception:
@@ -422,7 +422,7 @@ def _find_option_key_from_registry(underlying: str, expiry: date,
     try:
         from data_layer.instrument_registry import REGISTRY
         if REGISTRY.is_loaded(underlying):
-            key = REGISTRY.get_instrument_key(underlying, expiry, strike, side)
+            key = REGISTRY.get_upstox_key(underlying, expiry, strike, side)
             return key
     except Exception:
         pass
@@ -501,8 +501,8 @@ def run(token: str, days: int = 10, lots: int = 1) -> None:
             continue
         print(f"  Expiry: {expiry}")
 
-        ce_key = REGISTRY.get_instrument_key("SENSEX", expiry, ce_strike, "CE") if REGISTRY.is_loaded("SENSEX") else None
-        pe_key = REGISTRY.get_instrument_key("SENSEX", expiry, pe_strike, "PE") if REGISTRY.is_loaded("SENSEX") else None
+        ce_key = REGISTRY.get_upstox_key("SENSEX", expiry, ce_strike, "CE") if REGISTRY.is_loaded("SENSEX") else None
+        pe_key = REGISTRY.get_upstox_key("SENSEX", expiry, pe_strike, "PE") if REGISTRY.is_loaded("SENSEX") else None
         if not ce_key:
             ce_key, _ = _find_key_and_expiry(token, ce_strike, "CE", dt)
         if not pe_key:
@@ -619,8 +619,8 @@ def run_backtest_ui(
         if expiry is None:
             continue
 
-        ce_key = REGISTRY.get_instrument_key("SENSEX", expiry, ce_strike, "CE") if REGISTRY.is_loaded("SENSEX") else None
-        pe_key = REGISTRY.get_instrument_key("SENSEX", expiry, pe_strike, "PE") if REGISTRY.is_loaded("SENSEX") else None
+        ce_key = REGISTRY.get_upstox_key("SENSEX", expiry, ce_strike, "CE") if REGISTRY.is_loaded("SENSEX") else None
+        pe_key = REGISTRY.get_upstox_key("SENSEX", expiry, pe_strike, "PE") if REGISTRY.is_loaded("SENSEX") else None
         if not ce_key:
             ce_key, _ = _find_key_and_expiry(token, ce_strike, "CE", dt)
         if not pe_key:
