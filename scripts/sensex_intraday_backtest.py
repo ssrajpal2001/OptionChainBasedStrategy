@@ -613,8 +613,9 @@ def run_backtest_ui(
         except Exception:
             pass
         if expiry is None:
-            days_to_fri = (4 - dt.weekday()) % 7
-            expiry = dt + timedelta(days=days_to_fri if days_to_fri else 7)
+            # SENSEX weekly options expire on THURSDAY (not Friday)
+            days_to_thu = (3 - dt.weekday()) % 7
+            expiry = dt + timedelta(days=days_to_thu if days_to_thu else 7)
 
         ce_key = _find_option_key_from_registry("SENSEX", expiry, ce_strike, "CE")
         pe_key = _find_option_key_from_registry("SENSEX", expiry, pe_strike, "PE")
