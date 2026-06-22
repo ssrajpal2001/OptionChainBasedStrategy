@@ -8186,25 +8186,24 @@ function histReplay() {
                           expirySaving: false,
                           async loadExpiries() {
                             if (this.expiryLoaded) return;
-                            const r = await this._fetch('/api/client/deployment/'+dep.deploy_id+'/available_expiries');
-                            if (r && r.ok !== false) {
-                              this.availExpiries = r.expiries || [];
-                              this.expiryMode = r.current_mode || 'current';
-                            }
+                            try {
+                              const r = await fetch('/api/client/deployment/'+dep.deploy_id+'/available_expiries', {credentials:'include'});
+                              const d = await r.json();
+                              if (d && d.ok !== false) { this.availExpiries = d.expiries || []; this.expiryMode = d.current_mode || 'current'; }
+                            } catch(e) {}
                             this.expiryLoaded = true;
                           },
                           async saveExpiry() {
                             this.expirySaving = true;
-                            await this._fetch('/api/client/deployment/'+dep.deploy_id+'/expiry_mode',
-                              {method:'POST', json:{expiry_mode: this.expiryMode}});
+                            try {
+                              await fetch('/api/client/deployment/'+dep.deploy_id+'/expiry_mode', {
+                                method:'POST', credentials:'include',
+                                headers:{'Content-Type':'application/json'},
+                                body: JSON.stringify({expiry_mode: this.expiryMode})
+                              });
+                            } catch(e) {}
                             this.expirySaving = false;
-                          },
-                          _fetch(url, opts) { return fetch(url, {
-                            method: opts?.method||'GET',
-                            headers: opts?.json ? {'Content-Type':'application/json'} : {},
-                            body: opts?.json ? JSON.stringify(opts.json) : undefined,
-                            credentials: 'include'
-                          }).then(r=>r.json()).catch(()=>null); }
+                          }
                         }"
                          x-effect="bk = trapBookFor(b.binding_id, dep.underlying)"
                          x-init="loadExpiries()">

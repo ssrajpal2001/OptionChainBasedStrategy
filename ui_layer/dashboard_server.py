@@ -264,6 +264,9 @@ try:
     class _KillAllConfirmSchema(_PydanticBase):
         confirm: bool = False   # must be True to proceed
 
+    class _ExpiryModeSchema(_PydanticBase):
+        expiry_mode: str  # current|next_week|monthly|YYYY-MM-DD
+
     class _SaveUpstoxCredsSchema(_PydanticBase):
         client_id: str = ""
         api_key:   str = ""
@@ -1846,9 +1849,6 @@ class DashboardServer:
             return {"ok": True, "deploy_id": deploy_id, "running": running, "squared_off": squared}
 
         # ── CLIENT — set expiry mode for a deployment ────────────────────────
-        class _ExpiryModeSchema(BaseModel):
-            expiry_mode: str  # current|next_week|monthly|YYYY-MM-DD
-
         @app.post("/api/client/deployment/{deploy_id}/expiry_mode", tags=["Client"])
         async def api_set_deployment_expiry_mode(
             deploy_id: str, body: _ExpiryModeSchema, user: dict = Depends(_require_client),
