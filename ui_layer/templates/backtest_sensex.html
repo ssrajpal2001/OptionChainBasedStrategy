@@ -303,6 +303,11 @@
           <canvas id="eqChart" height="120"></canvas>
         </div>
 
+        <!-- Debug log -->
+        <template x-if="result.debug && result.debug.length">
+          <div class="t-card mb-4 p-3 text-xs font-mono text-t-muted" style="white-space:pre-wrap" x-text="result.debug.join('\n')"></div>
+        </template>
+
         <!-- Trade table -->
         <div class="t-card">
           <div class="p-4 border-b border-t-border flex items-center justify-between">

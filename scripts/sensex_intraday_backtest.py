@@ -593,10 +593,16 @@ def run_backtest_ui(
 
     # Load REGISTRY with SENSEX BSE_FO contracts (real expiry dates)
     from data_layer.instrument_registry import REGISTRY
+    reg_err = ""
     try:
         REGISTRY.load_sync("SENSEX", token)
-    except Exception:
-        pass
+    except Exception as e:
+        reg_err = str(e)
+
+    debug_log = [
+        f"REGISTRY loaded={REGISTRY.is_loaded('SENSEX')} err={reg_err}",
+        f"expiries={REGISTRY._expiries.get('SENSEX', [])[:6]}",
+    ]
 
     all_trades: list = []
     trading_days = _get_trading_days(days)
@@ -604,6 +610,7 @@ def run_backtest_ui(
     for dt in trading_days:
         spot = _get_sensex_spot_open(dt, token)
         if not spot or spot <= 0:
+            debug_log.append(f"{dt}: spot fetch failed")
             continue
         ce_strike = _round_ce(spot)
         pe_strike = _round_pe(spot)
@@ -612,6 +619,7 @@ def run_backtest_ui(
         if expiry is None:
             _, expiry = _find_key_and_expiry(token, ce_strike, "CE", dt)
         if expiry is None:
+            debug_log.append(f"{dt}: no expiry found")
             continue
 
         ce_key = REGISTRY.get_upstox_key("SENSEX", expiry, ce_strike, "CE") if REGISTRY.is_loaded("SENSEX") else None
@@ -620,6 +628,9 @@ def run_backtest_ui(
             ce_key, _ = _find_key_and_expiry(token, ce_strike, "CE", dt)
         if not pe_key:
             pe_key, _ = _find_key_and_expiry(token, pe_strike, "PE", dt)
+
+        debug_log.append(f"{dt}: spot={spot:.0f} expiry={expiry} CE={ce_strike}/{bool(ce_key)} PE={pe_strike}/{bool(pe_key)}")
+
         if not ce_key and not pe_key:
             continue
 
@@ -686,6 +697,7 @@ def run_backtest_ui(
         },
         "trades": trades_out,
         "equity": equity,
+        "debug": debug_log,
     }
 
 
