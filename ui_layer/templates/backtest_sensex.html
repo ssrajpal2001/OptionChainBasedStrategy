@@ -212,7 +212,7 @@
             <span>Max trades per side/day</span>
             <span x-text="maxTrades" class="font-mono font-600 text-t-bright"></span>
           </div>
-          <input type="range" x-model.number="maxTrades" min="1" max="5" step="1" class="w-full accent-[var(--t-cyan)]" />
+          <input type="range" x-model.number="maxTrades" min="1" max="3" step="1" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
         <!-- EOD cutoff -->
@@ -360,7 +360,7 @@ function sensexBT() {
     targetMult: 1.5,
     minZone:    30,
     minReward:  20,
-    maxTrades:  2,
+    maxTrades:  1,
     eodTime:    '14:00',
 
     // UI state

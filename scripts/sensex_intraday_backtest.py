@@ -356,11 +356,14 @@ def _run_day(dt: date, token: str, lots: int,
             if entry_ts >= no_new_entry:
                 continue
 
-            # Guard: entry must be below target with meaningful reward
-            if entry_price >= best_zone["target"]:
-                continue   # price already overshot target before we could enter
+            # Guard 1: entry must still be inside or just above zone (not overshot)
+            zone_range = best_zone["zone_high"] - best_zone["zone_low"]
+            max_entry  = best_zone["zone_high"] + zone_range * 0.1   # allow 10% overshoot
+            if entry_price > max_entry:
+                continue   # entered too late, price already far above zone
+            # Guard 2: meaningful reward remaining to target
             if best_zone["target"] - entry_price < MIN_REWARD:
-                continue   # too little left to capture
+                continue
 
             qty      = lots * LOT_SIZE
             position = {
