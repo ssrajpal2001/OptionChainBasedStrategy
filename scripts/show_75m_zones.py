@@ -119,6 +119,61 @@ def first_return_to_zone_high(df1m: pd.DataFrame, zone: dict,
             }
     return None
 
+# ── Cascade (no 75m gate): 15m CLOSED → 5m CLOSED → ENTRY ───────────────────
+
+def _show_cascade(dt: date, df1m: pd.DataFrame) -> None:
+    """Show 15m→5m cascade entries when no 75m zone is active."""
+    mtf_15 = resample(df1m, 15)
+    ltf_5  = resample(df1m,  5)
+
+    zones_15 = [z for z in detect_zones(mtf_15) if z["sl_hit_ts"] is not None]
+    if not zones_15:
+        print("     x No valid 15m zones today")
+        return
+
+    found_any = False
+    for z15 in zones_15:
+        ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
+        if ret15 is None:
+            continue
+        # CLOSED 15m zone found
+        found_any = True
+        t15   = z15["formed_ts"].strftime("%H:%M")
+        sl15t = z15["sl_hit_ts"].strftime("%H:%M")
+        ret15_t = ret15["entry_ts"].strftime("%H:%M")
+        print(f"\n       >> 15m zone [{t15}]  "
+              f"zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  "
+              f"sl_level={z15['sl_level']:.1f}  SL_hit@{sl15t}")
+        print(f"         + Returns to {z15['zone_high']:.1f} at {ret15_t} -> tracking 5m zones")
+
+        zones_5 = [z for z in detect_zones(ltf_5)
+                   if z["zone_high"] >= z15["zone_low"]
+                   and z["zone_high"] <= z15["zone_high"]
+                   and z["formed_ts"] >= ret15["entry_ts"]]
+
+        if not zones_5:
+            print("         x No valid 5m zones inside 15m zone")
+            continue
+
+        for z5 in zones_5:
+            t5   = z5["formed_ts"].strftime("%H:%M")
+            sl5t = z5["sl_hit_ts"].strftime("%H:%M")
+            print(f"\n           >> 5m zone [{t5}]  "
+                  f"zone_high={z5['zone_high']:.1f}  zone_low={z5['zone_low']:.1f}  "
+                  f"sl_level={z5['sl_level']:.1f}  SL_hit@{sl5t}")
+            ret5 = first_return_to_zone_high(df1m, z5, z5["sl_hit_ts"])
+            if ret5 is None:
+                print("             x Price never returned to 5m zone_high — no entry")
+            else:
+                ret5_t = ret5["entry_ts"].strftime("%H:%M")
+                print(f"             * ENTRY  time={ret5_t}  "
+                      f"price={ret5['entry_price']:.1f}  "
+                      f"bar_open={ret5['bar_open']:.1f}")
+
+    if not found_any:
+        print("     x No CLOSED 15m zones today (SL hit but price never returned)")
+
+
 # ── Per-day analysis ──────────────────────────────────────────────────────────
 
 def analyse_day(dt: date, df1m: pd.DataFrame, z75_pool: list) -> None:
@@ -144,6 +199,8 @@ def analyse_day(dt: date, df1m: pd.DataFrame, z75_pool: list) -> None:
 
     if not active_75:
         print("  No active 75m zones from pool for this day")
+        print("  [CASCADE] Scanning 15m zones directly (no 75m gate)")
+        _show_cascade(dt, df1m)
         return
 
     hit_any = False
@@ -208,6 +265,8 @@ def analyse_day(dt: date, df1m: pd.DataFrame, z75_pool: list) -> None:
 
     if not hit_any:
         print("  Price never entered any active 75m zone today")
+        print("  [CASCADE] Scanning 15m zones directly (no 75m gate)")
+        _show_cascade(dt, df1m)
 
 # ── Instrument key lookup ─────────────────────────────────────────────────────
 
