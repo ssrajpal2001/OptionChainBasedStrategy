@@ -127,6 +127,13 @@
         <input type="range" x-model.number="days" min="3" max="60" step="1" class="w-full accent-[var(--t-cyan)]" />
       </div>
 
+      <!-- From Date -->
+      <div>
+        <p class="sec-label mb-2">Start Date <span class="text-t-dim font-normal">(overrides days slider)</span></p>
+        <input type="date" x-model="fromDate" class="input-field w-full text-sm" />
+        <p class="text-xs text-t-dim mt-1">Leave blank to use days slider instead.</p>
+      </div>
+
       <!-- Lots -->
       <div>
         <p class="sec-label mb-2">Lots per Trade</p>
@@ -185,6 +192,24 @@
           <input type="range" x-model.number="poolDays" min="5" max="20" step="1" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
+        <!-- Fixed Strikes -->
+        <div class="mb-3">
+          <p class="sec-label mb-2">Fixed Strikes <span class="text-t-dim font-normal">(overrides per-day pivot)</span></p>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-xs text-t-muted">CE Strike</label>
+              <input type="number" x-model.number="fixedCe" step="100" placeholder="e.g. 76000"
+                class="input-field w-full mt-1 text-sm" />
+            </div>
+            <div>
+              <label class="text-xs text-t-muted">PE Strike</label>
+              <input type="number" x-model.number="fixedPe" step="100" placeholder="e.g. 78000"
+                class="input-field w-full mt-1 text-sm" />
+            </div>
+          </div>
+          <p class="text-xs text-t-dim mt-1">Set both to 0 to use auto pivot strikes per day.</p>
+        </div>
+
         <!-- Bias & Expiry toggles -->
         <div class="mb-3">
           <p class="sec-label mb-2">Filters</p>
@@ -198,7 +223,6 @@
               <span>Monthly Expiry — last expiry of running month (not weekly)</span>
             </label>
           </div>
-          <p class="text-xs text-t-dim mt-2">Gap direction affects strike selection only (ATM±offset).</p>
         </div>
 
       </div>
@@ -340,6 +364,9 @@ function sensexBT() {
     poolDays:  15,
     spotBias:  true,
     monthly:   true,
+    fixedCe:   76000,
+    fixedPe:   77000,
+    fromDate:  '2026-05-12',
 
     // UI state
     ctrlOpen: true,
@@ -377,6 +404,9 @@ function sensexBT() {
             pool_days: this.poolDays,
             spot_bias: this.spotBias,
             monthly:   this.monthly,
+            fixed_ce:  this.fixedCe || 0,
+            fixed_pe:  this.fixedPe || 0,
+            from_date: this.fromDate || '',
           }),
         });
         const d = await r.json();

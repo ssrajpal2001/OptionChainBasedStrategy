@@ -405,12 +405,18 @@ def _run_day(dt: date, token: str, lots: int,
 
 # ── Multi-day runner ──────────────────────────────────────────────────────────
 
-def _get_trading_days(n: int) -> list[date]:
-    """Return last N weekdays up to (and including) today."""
+def _get_trading_days(n: int, from_date: Optional[date] = None) -> list[date]:
+    """Return weekdays: last N days ending today, OR from from_date to today."""
     days = []
     d = date.today()
+    if from_date:
+        while d >= from_date:
+            if d.weekday() < 5:
+                days.append(d)
+            d -= timedelta(days=1)
+        return list(reversed(days))
     while len(days) < n:
-        if d.weekday() < 5:   # Mon-Fri
+        if d.weekday() < 5:
             days.append(d)
         d -= timedelta(days=1)
     return list(reversed(days))
@@ -457,6 +463,25 @@ def _get_monthly_expiry(dt: date, token: str, und: str = "SENSEX") -> Optional[d
     if next_exp:
         return max(next_exp)
 
+    return None
+
+
+def _find_key_exact_expiry(token: str, strike: int, side: str,
+                            expiry: date) -> Optional[str]:
+    """Search Upstox for a specific strike+side+expiry. Returns instrument key or None."""
+    try:
+        url = "https://api.upstox.com/v2/instruments/search"
+        params = {
+            "exchange": "BSE_FO",
+            "segment":  "BSE_FO",
+            "query":    f"SENSEX {strike} {side} {expiry.strftime('%d%b%y').upper()}"
+        }
+        r = requests.get(url, params=params, headers=_headers(token), timeout=10)
+        items = r.json().get("data", [])
+        if items:
+            return items[0].get("instrument_key")
+    except Exception:
+        pass
     return None
 
 
@@ -927,15 +952,41 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
 
 def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
                           gap_thresh: float = 0.5, gap_near: int = 500,
-                          step: int = 100, monthly: bool = False) -> dict:
+                          step: int = 100, monthly: bool = False,
+                          fixed_ce: int = 0, fixed_pe: int = 0) -> dict:
     """
-    Replicate TrapScannerEngine morning-init strike selection for a past date.
+    Strike resolution for a past date.
+    fixed_ce/fixed_pe: skip all pivot/gap math and use these strikes directly.
     monthly=True: use last expiry of current month instead of nearest weekly.
     Returns {ce1_strike, pe1_strike, ce1_key, pe1_key, expiry, gap_fired, gap_direction, label}
     or empty dict on failure.
     """
     from data_layer.instrument_registry import REGISTRY
     import requests as _req
+
+    # Fast path: fixed strikes — skip all prev-day OHLC + pivot math
+    if fixed_ce > 0 and fixed_pe > 0:
+        if not REGISTRY.is_loaded(und):
+            try:
+                REGISTRY.load_sync(und, token)
+            except Exception:
+                pass
+        expiry = _get_monthly_expiry(dt, token, und) if monthly else (
+            REGISTRY.get_active_expiry(und, from_date=dt) if REGISTRY.is_loaded(und) else None)
+        ce1_key = REGISTRY.get_upstox_key(und, expiry, fixed_ce, "CE") if (REGISTRY.is_loaded(und) and expiry) else ""
+        pe1_key = REGISTRY.get_upstox_key(und, expiry, fixed_pe, "PE") if (REGISTRY.is_loaded(und) and expiry) else ""
+        if not ce1_key and expiry:
+            ce1_key = _find_key_exact_expiry(token, fixed_ce, "CE", expiry)
+        if not pe1_key and expiry:
+            pe1_key = _find_key_exact_expiry(token, fixed_pe, "PE", expiry)
+        if not ce1_key and not pe1_key:
+            return {}
+        return {
+            "ce1_strike": fixed_ce, "pe1_strike": fixed_pe,
+            "ce1_key": ce1_key or "", "pe1_key": pe1_key or "",
+            "expiry": expiry, "gap_fired": False,
+            "gap_direction": "FLAT", "label": f"Fixed CE={fixed_ce} PE={fixed_pe}",
+        }
 
     # 1. Prev-day OHLC: fetch 1-min bars for the calendar day before dt
     prev_dt = dt - timedelta(days=1)
@@ -1015,9 +1066,16 @@ def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
     pe1_key = REGISTRY.get_upstox_key(und, expiry, pe1_strike, "PE") if (REGISTRY.is_loaded(und) and expiry) else ""
 
     if not ce1_key:
-        ce1_key, expiry = _find_key_and_expiry(token, ce1_strike, "CE", expiry or dt)
+        if expiry:
+            # Known target expiry — search for that exact date, not forward scan
+            ce1_key = _find_key_exact_expiry(token, ce1_strike, "CE", expiry)
+        if not ce1_key:
+            ce1_key, expiry = _find_key_and_expiry(token, ce1_strike, "CE", dt)
     if not pe1_key:
-        pe1_key, _ = _find_key_and_expiry(token, pe1_strike, "PE", expiry or dt)
+        if expiry:
+            pe1_key = _find_key_exact_expiry(token, pe1_strike, "PE", expiry)
+        if not pe1_key:
+            pe1_key, _ = _find_key_and_expiry(token, pe1_strike, "PE", dt)
 
     if not ce1_key and not pe1_key:
         return {}   # genuinely no data for this date
@@ -1041,7 +1099,10 @@ def run_backtest_3level_ui(
     ce_key: str       = "",
     pe_key: str       = "",
     spot_bias: bool   = True,
-    monthly: bool     = True,   # last expiry of running month (not nearest weekly)
+    monthly: bool     = True,
+    fixed_ce: int     = 0,
+    fixed_pe: int     = 0,
+    from_date: Optional[date] = None,  # if set, override days and backtest from this date
 ) -> dict:
     """
     3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
@@ -1050,8 +1111,19 @@ def run_backtest_3level_ui(
     from scripts.show_75m_zones import fetch_1m, resample, detect_zones, detect_bull_zones
 
     LOT_SIZE = 20
-    trading_days = _get_trading_days(days)
-    all_pool_days = _get_trading_days(days + pool_days)
+    trading_days = _get_trading_days(days, from_date=from_date)
+    # pool_days: N extra weekdays before the first trading day for zone history
+    if trading_days:
+        pool_start = trading_days[0]
+        extra: list = []
+        d = pool_start - timedelta(days=1)
+        while len(extra) < pool_days:
+            if d.weekday() < 5:
+                extra.append(d)
+            d -= timedelta(days=1)
+        all_pool_days = list(reversed(extra)) + trading_days
+    else:
+        all_pool_days = _get_trading_days(days + pool_days)
     debug_log: list = []
     all_trades: list = []
 
@@ -1086,7 +1158,8 @@ def run_backtest_3level_ui(
             gap_fired  = False
             gap_dir    = "FLAT"
         else:
-            strikes = _resolve_day_strikes(dt, token, monthly=monthly)
+            strikes = _resolve_day_strikes(dt, token, monthly=monthly,
+                                           fixed_ce=fixed_ce, fixed_pe=fixed_pe)
             if not strikes:
                 debug_log.append(f"{dt}: strike resolution failed")
                 continue
