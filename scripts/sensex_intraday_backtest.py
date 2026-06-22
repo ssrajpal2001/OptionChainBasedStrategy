@@ -625,6 +625,16 @@ def run_backtest_ui(
         return {"ok": True, "trades": [], "summary": {}, "equity": []}
 
     df = pd.DataFrame(all_trades)
+    # Normalise timestamps to HH:MM strings now — avoids mixed-type issues in iterrows
+    def _hhmm(v) -> str:
+        if hasattr(v, "strftime"):
+            return v.strftime("%H:%M")
+        s = str(v)
+        return s[11:16] if len(s) > 15 else s
+
+    df["entry_hm"] = df["entry_ts"].apply(_hhmm)
+    df["exit_hm"]  = df["exit_ts"].apply(_hhmm)
+
     wins   = len(df[df["pnl_rs"] > 0])
     losses = len(df[df["pnl_rs"] <= 0])
     total_pnl = float(df["pnl_rs"].sum())
@@ -637,20 +647,13 @@ def run_backtest_ui(
     equity = []
     for _, t in df.iterrows():
         cum += float(t["pnl_rs"])
-        equity.append({"date": t["date"], "cum_pnl": round(cum, 0)})
-        ets = t["entry_ts"]
-        xts = t["exit_ts"]
-        def _fmt(ts):
-            if hasattr(ts, "strftime"):
-                return ts.strftime("%H:%M")
-            s = str(ts)
-            return s[11:16] if len(s) > 15 else s
+        equity.append({"date": str(t["date"]), "cum_pnl": round(cum, 0)})
         trades_out.append({
             "date":       t["date"],
             "side":       t["side"],
             "strike":     int(t["strike"]),
-            "entry_time": _fmt(ets),
-            "exit_time":  _fmt(xts),
+            "entry_time": str(t["entry_hm"]),
+            "exit_time":  str(t["exit_hm"]),
             "entry":      round(float(t["entry"]), 1),
             "exit":       round(float(t["exit_price"]), 1),
             "pnl_pts":    round(float(t["pnl_pts"]), 1),
