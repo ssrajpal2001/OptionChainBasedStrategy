@@ -869,11 +869,13 @@ def _spot_bias(spot_df: pd.DataFrame, spot_bear_pool: list, spot_bull_pool: list
 
 
 def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
-                             cutoff: str = "15:10",
-                             side_allowed: str = "BOTH") -> list:
+                             cutoff: str = "14:30",
+                             side_allowed: str = "BOTH",
+                             skip_15m: bool = False) -> list:
     """
-    Run 3-level hierarchy on one day's option 1m bars.
-    side_allowed: "CE" | "PE" | "BOTH"
+    Run zone hierarchy on one day's option 1m bars.
+    skip_15m=False (default): 75m → 15m → 5m (3-level)
+    skip_15m=True:            75m → 5m only (2-level); cascade = 5m only
     Returns list of entry dicts: {entry_ts, entry_price, sl, t1, zone_label}
     """
     from scripts.show_75m_zones import (
@@ -881,46 +883,59 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
     )
     cut_h, cut_m = map(int, cutoff.split(":"))
     today_start  = pd.Timestamp(dt)
-    mtf_15  = resample(df1m, 15)
-    ltf_5   = resample(df1m,  5)
+    ltf_5   = resample(df1m, 5)
+    mtf_15  = resample(df1m, 15) if not skip_15m else None
     day_start = df1m["ts"].iloc[0] - pd.Timedelta(minutes=1)
 
     entries = []
     seen_5m_zones: set = set()
     MIN_ZONE_WIDTH = 5.0
+    mode_label = [""]
 
-    def _try_5m(z15, ret15_ts):
+    def _add_5m_entry(z5, sl_price, t1_price, label_prefix):
+        uid = f"{z5['formed_ts']}_{z5['zone_high']:.1f}"
+        if uid in seen_5m_zones:
+            return
+        ret5 = first_return_to_zone_high(df1m, z5, z5["sl_hit_ts"])
+        if ret5 is None:
+            return
+        entry_ts = ret5["entry_ts"]
+        if (entry_ts.hour, entry_ts.minute) >= (cut_h, cut_m):
+            return
+        seen_5m_zones.add(uid)
+        entries.append({
+            "entry_ts":    entry_ts,
+            "entry_price": z5["zone_high"],
+            "sl":          round(sl_price, 2),
+            "t1":          round(t1_price, 2),
+            "zone_label":  label_prefix + f"5m {z5['zone_high']:.0f}",
+        })
+
+    def _scan_5m_in_range(low_bound, high_bound, from_ts, label_prefix):
+        zones_5 = [z for z in detect_zones(ltf_5)
+                   if z["zone_high"] >= low_bound
+                   and z["zone_high"] <= high_bound
+                   and z["formed_ts"] >= from_ts]
+        for z5 in zones_5:
+            _add_5m_entry(z5, z5["zone_low"], z5["sl_level"], label_prefix)
+
+    def _try_5m_via_15m(z15, ret15_ts):
+        """3-level: SL=15m zone_low, T1=15m sl_level, entry gated by 15m CLOSED."""
         if (z15["zone_high"] - z15["zone_low"]) < MIN_ZONE_WIDTH:
             return
         zones_5 = [z for z in detect_zones(ltf_5)
                    if z["zone_high"] >= z15["zone_low"]
                    and z["zone_high"] <= z15["zone_high"]
                    and z["formed_ts"] >= ret15_ts]
+        lbl = f"{mode_label[0]}15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl_level']:.0f}) / "
         for z5 in zones_5:
-            uid = f"{z5['formed_ts']}_{z5['zone_high']:.1f}"
-            if uid in seen_5m_zones:
-                continue
-            ret5 = first_return_to_zone_high(df1m, z5, z5["sl_hit_ts"])
-            if ret5 is None:
-                continue
-            entry_ts = ret5["entry_ts"]
-            if (entry_ts.hour, entry_ts.minute) >= (cut_h, cut_m):
-                continue
-            seen_5m_zones.add(uid)
-            entries.append({
-                "entry_ts":    entry_ts,
-                "entry_price": z5["zone_high"],
-                "sl":          round(z15["zone_low"], 2),
-                "t1":          round(z15["sl_level"], 2),
-                "zone_label":  f"{mode_label[0]}15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl_level']:.0f}) / 5m {z5['zone_high']:.0f}",
-            })
+            _add_5m_entry(z5, z15["zone_low"], z15["sl_level"], lbl)
 
     if side_allowed == "NONE":
         return []
 
     active_75 = [z for z in z75_pool if z["sl_hit_ts"] < today_start]
     used_75 = False
-    mode_label = [""]
 
     for z75 in active_75:
         entry_1m_ts = first_1m_entry(df1m, z75, day_start)
@@ -928,23 +943,34 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
             continue
         used_75 = True
         mode_label[0] = f"75m {z75['zone_high']:.0f}→{z75['zone_low']:.0f} → "
-        zones_15 = [z for z in detect_zones(mtf_15)
-                    if z["zone_high"] >= z75["zone_low"]
-                    and z["zone_high"] <= z75["zone_high"]
-                    and z["formed_ts"] >= entry_1m_ts]
-        for z15 in zones_15:
-            ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
-            if ret15 is None:
-                continue
-            _try_5m(z15, ret15["entry_ts"])
+
+        if skip_15m:
+            # 2-level: scan 5m zones inside the 75m zone, SL/T1 from 5m zone itself
+            _scan_5m_in_range(z75["zone_low"], z75["zone_high"], entry_1m_ts,
+                              mode_label[0])
+        else:
+            # 3-level: need 15m CLOSED first
+            zones_15 = [z for z in detect_zones(mtf_15)
+                        if z["zone_high"] >= z75["zone_low"]
+                        and z["zone_high"] <= z75["zone_high"]
+                        and z["formed_ts"] >= entry_1m_ts]
+            for z15 in zones_15:
+                ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
+                if ret15 is None:
+                    continue
+                _try_5m_via_15m(z15, ret15["entry_ts"])
 
     if not used_75:
         mode_label[0] = "CASCADE → "
-        for z15 in detect_zones(mtf_15):
-            ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
-            if ret15 is None:
-                continue
-            _try_5m(z15, ret15["entry_ts"])
+        if skip_15m:
+            # 2-level cascade: all intraday 5m zones
+            _scan_5m_in_range(0, float("inf"), day_start, mode_label[0])
+        else:
+            for z15 in detect_zones(mtf_15):
+                ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
+                if ret15 is None:
+                    continue
+                _try_5m_via_15m(z15, ret15["entry_ts"])
 
     entries.sort(key=lambda e: e["entry_ts"])
     return entries[:1]
@@ -1102,7 +1128,8 @@ def run_backtest_3level_ui(
     monthly: bool     = True,
     fixed_ce: int     = 0,
     fixed_pe: int     = 0,
-    from_date: Optional[date] = None,  # if set, override days and backtest from this date
+    from_date: Optional[date] = None,
+    skip_15m: bool    = False,  # True = 75m→5m only (skip 15m level)
 ) -> dict:
     """
     3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
@@ -1210,7 +1237,8 @@ def run_backtest_3level_ui(
                 debug_log.append(f"  {dt} {side}: no 1m data")
                 continue
 
-            entries = _collect_entries_3level(dt, df1m, z75_pool, cutoff=cutoff)
+            entries = _collect_entries_3level(dt, df1m, z75_pool,
+                                              cutoff=cutoff, skip_15m=skip_15m)
             for e in entries:
                 ep   = e["entry_price"]
                 sl   = round(e["sl"] - sl_buf, 2)  # 15m zone_low - buffer

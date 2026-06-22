@@ -234,6 +234,10 @@
               <input type="checkbox" x-model="monthly" class="accent-[var(--t-cyan)]" />
               <span>Monthly Expiry — last expiry of running month (not weekly)</span>
             </label>
+            <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
+              <input type="checkbox" x-model="skip15m" class="accent-[var(--t-cyan)]" />
+              <span>Skip 15m — 75m → 5m only (2-level, no 15m gate)</span>
+            </label>
           </div>
         </div>
 
@@ -376,6 +380,7 @@ function sensexBT() {
     poolDays:  15,
     spotBias:  true,
     monthly:   true,
+    skip15m:   false,
     fixedCe:   76000,
     fixedPe:   77000,
     ceKey:     '',
@@ -423,6 +428,7 @@ function sensexBT() {
             ce_key:    this.ceKey || '',
             pe_key:    this.peKey || '',
             from_date: this.fromDate || '',
+            skip_15m:  this.skip15m,
           }),
         });
         const d = await r.json();

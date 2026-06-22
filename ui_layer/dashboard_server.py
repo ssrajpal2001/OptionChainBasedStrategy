@@ -849,6 +849,7 @@ class DashboardServer:
             monthly    = bool(p.get("monthly", True))
             fixed_ce   = int(p.get("fixed_ce", 0))
             fixed_pe   = int(p.get("fixed_pe", 0))
+            skip_15m   = bool(p.get("skip_15m", False))
             from_date_s = str(p.get("from_date", ""))
             from_date_obj = None
             if from_date_s:
@@ -864,7 +865,7 @@ class DashboardServer:
                 result = await asyncio.to_thread(
                     run_backtest_3level_ui, token, days, lots,
                     sl_buf, sq_off, cutoff, pool_days, ce_key, pe_key,
-                    spot_bias, monthly, fixed_ce, fixed_pe, from_date_obj,
+                    spot_bias, monthly, fixed_ce, fixed_pe, from_date_obj, skip_15m,
                 )
                 return result
             except Exception as exc:
