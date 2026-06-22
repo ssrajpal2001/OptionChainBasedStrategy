@@ -142,89 +142,59 @@
 
       <!-- Strategy section -->
       <div>
-        <p class="sec-label mb-3">Strategy — 15m/5m/1m Seller Trap</p>
+        <p class="sec-label mb-3">Strategy — 75m Pool → 15m → 5m</p>
 
-        <!-- HTF Minutes -->
+        <!-- CE Key -->
         <div class="mb-3">
-          <div class="flex justify-between text-xs text-t-muted mb-1">
-            <span>HTF candle (zone detection)</span>
-            <span x-text="htfMin + 'm'" class="font-mono font-600 text-t-bright"></span>
-          </div>
-          <div class="grid grid-cols-3 gap-1">
-            <template x-for="m in [10,15,20]" :key="m">
-              <button @click="htfMin=m"
-                :class="htfMin===m ? 'bg-[var(--t-cyan)] text-white font-700' : 'bg-t-surface text-t-muted'"
-                class="rounded py-1.5 text-xs text-center transition-colors border border-t-border"
-                x-text="m+'m'"></button>
-            </template>
-          </div>
+          <p class="text-xs text-t-muted mb-1">CE Instrument Key</p>
+          <input type="text" x-model="ceKey" placeholder="BSE_FO|887815" class="t-input font-mono text-xs" />
+          <p class="text-xs text-t-muted mt-1">From TrapScanner heartbeat: ce1=…</p>
         </div>
 
-        <!-- MTF Minutes -->
+        <!-- PE Key -->
         <div class="mb-3">
-          <div class="flex justify-between text-xs text-t-muted mb-1">
-            <span>MTF candle (5m confirm)</span>
-            <span x-text="mtfMin + 'm'" class="font-mono font-600 text-t-bright"></span>
-          </div>
-          <div class="grid grid-cols-3 gap-1">
-            <template x-for="m in [3,5,10]" :key="m">
-              <button @click="mtfMin=m"
-                :class="mtfMin===m ? 'bg-[var(--t-cyan)] text-white font-700' : 'bg-t-surface text-t-muted'"
-                class="rounded py-1.5 text-xs text-center transition-colors border border-t-border"
-                x-text="m+'m'"></button>
-            </template>
-          </div>
+          <p class="text-xs text-t-muted mb-1">PE Instrument Key</p>
+          <input type="text" x-model="peKey" placeholder="BSE_FO|887720" class="t-input font-mono text-xs" />
+          <p class="text-xs text-t-muted mt-1">From TrapScanner heartbeat: pe1=…</p>
         </div>
 
-        <!-- Target multiplier -->
+        <!-- SL Buffer -->
         <div class="mb-3">
           <div class="flex justify-between text-xs text-t-muted mb-1">
-            <span>Target = zone_high + range × <span x-text="targetMult.toFixed(1)" class="font-mono font-600 text-t-bright"></span></span>
+            <span>SL buffer below zone_low</span>
+            <span x-text="slBuf + ' pts'" class="font-mono font-600 text-t-bright"></span>
           </div>
-          <input type="range" x-model.number="targetMult" min="0.5" max="3.0" step="0.5" class="w-full accent-[var(--t-cyan)]" />
-          <div class="flex justify-between text-xs text-t-muted mt-1">
-            <span>0.5×</span><span>1.5× (default)</span><span>3.0×</span>
-          </div>
+          <input type="range" x-model.number="slBuf" min="0" max="30" step="1" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
-        <!-- Min zone range -->
-        <div class="mb-3">
-          <div class="flex justify-between text-xs text-t-muted mb-1">
-            <span>Min zone size (noise filter)</span>
-            <span x-text="minZone + ' pts'" class="font-mono font-600 text-t-bright"></span>
-          </div>
-          <input type="range" x-model.number="minZone" min="10" max="100" step="5" class="w-full accent-[var(--t-cyan)]" />
-        </div>
-
-        <!-- Min reward -->
-        <div class="mb-3">
-          <div class="flex justify-between text-xs text-t-muted mb-1">
-            <span>Min reward at entry</span>
-            <span x-text="minReward + ' pts'" class="font-mono font-600 text-t-bright"></span>
-          </div>
-          <input type="range" x-model.number="minReward" min="5" max="80" step="5" class="w-full accent-[var(--t-cyan)]" />
-          <p class="text-xs text-t-muted mt-1">Skip if (target − entry) &lt; this</p>
-        </div>
-
-        <!-- Max trades per side -->
-        <div class="mb-3">
-          <div class="flex justify-between text-xs text-t-muted mb-1">
-            <span>Max trades per side/day</span>
-            <span x-text="maxTrades" class="font-mono font-600 text-t-bright"></span>
-          </div>
-          <input type="range" x-model.number="maxTrades" min="1" max="3" step="1" class="w-full accent-[var(--t-cyan)]" />
-        </div>
-
-        <!-- EOD cutoff -->
+        <!-- Entry cutoff -->
         <div class="mb-3">
           <p class="text-xs text-t-muted mb-1">No new entries after</p>
-          <select x-model="eodTime" class="t-input">
-            <option value="13:00">13:00</option>
-            <option value="13:30">13:30</option>
-            <option value="14:00">14:00 (default)</option>
+          <select x-model="cutoff" class="t-input">
+            <option value="14:00">14:00</option>
             <option value="14:30">14:30</option>
             <option value="15:00">15:00</option>
+            <option value="15:10">15:10 (default)</option>
           </select>
+        </div>
+
+        <!-- Square-off -->
+        <div class="mb-3">
+          <p class="text-xs text-t-muted mb-1">Hard square-off time</p>
+          <select x-model="sqOff" class="t-input">
+            <option value="15:15">15:15</option>
+            <option value="15:20">15:20 (default)</option>
+            <option value="15:25">15:25</option>
+          </select>
+        </div>
+
+        <!-- Pool days -->
+        <div class="mb-3">
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>75m zone pool lookback</span>
+            <span x-text="poolDays + ' days'" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="poolDays" min="5" max="20" step="1" class="w-full accent-[var(--t-cyan)]" />
         </div>
 
       </div>
@@ -356,17 +326,16 @@
 <script>
 function sensexBT() {
   return {
-    // Settings (mirrors Python defaults)
-    token:      sessionStorage.getItem('sx_token') || '',
-    days:       10,
-    lots:       1,
-    htfMin:     15,
-    mtfMin:     5,
-    targetMult: 1.5,
-    minZone:    30,
-    minReward:  20,
-    maxTrades:  1,
-    eodTime:    '14:00',
+    // Settings — 3-level hierarchy
+    token:    sessionStorage.getItem('sx_token') || '',
+    days:     10,
+    lots:     1,
+    ceKey:    sessionStorage.getItem('sx_ce_key') || '',
+    peKey:    sessionStorage.getItem('sx_pe_key') || '',
+    slBuf:    5,
+    cutoff:   '15:10',
+    sqOff:    '15:20',
+    poolDays: 15,
 
     // UI state
     ctrlOpen: true,
@@ -383,29 +352,30 @@ function sensexBT() {
 
     async runBacktest() {
       if (!this.token) { this.error = 'Token required'; return; }
+      if (!this.ceKey && !this.peKey) { this.error = 'At least one instrument key (CE or PE) required'; return; }
       sessionStorage.setItem('sx_token', this.token);
+      sessionStorage.setItem('sx_ce_key', this.ceKey);
+      sessionStorage.setItem('sx_pe_key', this.peKey);
       this.running = true;
       this.error   = '';
       this.result  = null;
       if (this._chart) { this._chart.destroy(); this._chart = null; }
 
       try {
-        const r = await fetch('/api/backtest/sensex', {
+        const r = await fetch('/api/backtest/sensex3', {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            token:          this.token,
-            days:           this.days,
-            lots:           this.lots,
-            htf_min:        this.htfMin,
-            mtf_min:        this.mtfMin,
-            target_mult:    this.targetMult,
-            min_zone_range: this.minZone,
-            min_reward:     this.minReward,
-            max_trades_side:this.maxTrades,
-            eod_time:       this.eodTime,
-            sq_off_time:    '15:15',
+            token:     this.token,
+            days:      this.days,
+            lots:      this.lots,
+            ce_key:    this.ceKey,
+            pe_key:    this.peKey,
+            sl_buf:    this.slBuf,
+            cutoff:    this.cutoff,
+            sq_off:    this.sqOff,
+            pool_days: this.poolDays,
           }),
         });
         const d = await r.json();
