@@ -380,7 +380,8 @@ def _run_day(dt: date, token: str, lots: int,
             for z in zones:
                 if z["zone_ts"] == best_zone["zone_ts"]:
                     z["state"] = "CONSUMED"
-            print(f"      ENTRY {entry_ts.strftime('%H:%M')} {side} {strike} "
+            _ets = entry_ts.strftime('%H:%M') if hasattr(entry_ts, 'strftime') else str(entry_ts)[11:16]
+            print(f"      ENTRY {_ets} {side} {strike} "
                   f"@ {entry_price:.1f}  zone={best_zone['zone_low']}→{best_zone['zone_high']}"
                   f"  SL={best_zone['sl']:.1f}  T={best_zone['target']:.1f}")
 
