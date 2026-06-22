@@ -120,7 +120,7 @@ def show_zones(token: str, dt: str, index: str, side: str, htf_min: int = 75,
         REGISTRY.load_sync(index, token)
 
     # Resolve strike if not given — use S1 pivot (same as nifty_backtest no-gap path)
-    cfg = _nb._INDEX_CFG.get(index, _nb._INDEX_CFG["NIFTY"])
+    cfg = _nb.INDEX_CFG.get(index, _nb.INDEX_CFG["NIFTY"])
     if strike == 0:
         print("  No strike given — using today's open to compute S1/R1 pivot strikes")
 
