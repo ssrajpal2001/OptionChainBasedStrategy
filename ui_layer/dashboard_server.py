@@ -854,7 +854,7 @@ class DashboardServer:
                 result = await asyncio.to_thread(
                     run_backtest_3level_ui, token, days, lots,
                     sl_buf, sq_off, cutoff, pool_days, ce_key, pe_key,
-                    False, spot_bias, monthly,
+                    spot_bias, monthly,
                 )
                 return result
             except Exception as exc:
