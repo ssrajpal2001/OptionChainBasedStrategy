@@ -255,6 +255,9 @@ def main():
     parser.add_argument("--side",   default="CE")
     parser.add_argument("--days",   type=int, default=10,
                         help="Number of trading days to analyse")
+    parser.add_argument("--key",    default="",
+                        help="Direct Upstox instrument key (e.g. BSE_FO|843961). "
+                             "Overrides --strike/--side lookup. Use to match TrapScanner's exact key.")
     args = parser.parse_args()
 
     # Fetch data for pool window (extra 5 days buffer for zone building)
@@ -272,7 +275,10 @@ def main():
     day_data: dict = {}
 
     for dt in pool_days:
-        key, _ = get_key(args.token, args.strike, args.side, dt)
+        if args.key:
+            key = args.key
+        else:
+            key, _ = get_key(args.token, args.strike, args.side, dt)
         if not key:
             continue
         df1m = fetch_1m(key, dt, args.token)
@@ -295,7 +301,7 @@ def main():
     for dt in trade_days:
         df1m = day_data.get(dt)
         if df1m is None or df1m.empty:
-            key, _ = get_key(args.token, args.strike, args.side, dt)
+            key = args.key if args.key else get_key(args.token, args.strike, args.side, dt)[0]
             if key:
                 df1m = fetch_1m(key, dt, args.token)
             if df1m is None or df1m.empty:
