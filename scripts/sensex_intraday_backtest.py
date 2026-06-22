@@ -797,8 +797,12 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
     entries = []
     seen_5m_zones: set = set()
 
+    MIN_ZONE_WIDTH = 5.0   # skip degenerate zones with near-zero range
+
     def _try_5m(z15, ret15_ts):
         """Find CLOSED 5m zones inside z15 after ret15_ts → record entries."""
+        if (z15["zone_high"] - z15["zone_low"]) < MIN_ZONE_WIDTH:
+            return   # degenerate zero-width zone — skip
         zones_5 = [z for z in detect_zones(ltf_5)
                    if z["zone_high"] >= z15["zone_low"]
                    and z["zone_high"] <= z15["zone_high"]
