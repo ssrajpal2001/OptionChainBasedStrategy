@@ -167,9 +167,9 @@
           <p class="text-xs text-t-muted mb-1">No new entries after</p>
           <select x-model="cutoff" class="t-input">
             <option value="14:00">14:00</option>
-            <option value="14:30">14:30</option>
+            <option value="14:30">14:30 (default)</option>
             <option value="15:00">15:00</option>
-            <option value="15:10">15:10 (default)</option>
+            <option value="15:10">15:10</option>
           </select>
         </div>
 
@@ -371,7 +371,7 @@ function sensexBT() {
     days:      20,
     lots:      2,
     slBuf:     5,
-    cutoff:    '15:10',
+    cutoff:    '14:30',
     sqOff:     '15:20',
     poolDays:  15,
     spotBias:  true,

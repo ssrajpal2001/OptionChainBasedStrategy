@@ -1094,7 +1094,7 @@ def run_backtest_3level_ui(
     lots: int         = 1,
     sl_buf: float     = 5.0,
     sq_off: str       = "15:20",
-    cutoff: str       = "15:10",
+    cutoff: str       = "14:30",
     pool_days: int    = 15,
     ce_key: str       = "",
     pe_key: str       = "",
