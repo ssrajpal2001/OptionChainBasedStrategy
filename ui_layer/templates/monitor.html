@@ -5216,24 +5216,7 @@ function histReplay() {
                 <span style="color:var(--t-dim);font-size:10px">Skip T1 half-exit + TSL · Exit only: SL · Opp-side signal · Floor · EOD</span>
               </div>
             </label>
-            <label class="flex flex-col gap-1 col-span-2">
-              <span style="color:var(--t-cyan);font-weight:700">Next Week Expiry</span>
-              <div class="flex items-center gap-2 mt-1">
-                <input type="checkbox" class="accent-[var(--t-cyan)]"
-                       :checked="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].next_week_expiry??false)"
-                       @change="if(!trapScannerCfg.per_index) trapScannerCfg.per_index={}; if(!trapScannerCfg.per_index[adminSelectedIndex]) trapScannerCfg.per_index[adminSelectedIndex]={}; trapScannerCfg.per_index[adminSelectedIndex].next_week_expiry=$event.target.checked">
-                <span style="color:var(--t-dim);font-size:10px">Always trade NEXT week's expiry (skip current week) · Better premiums · Tighter bid-ask vs monthly</span>
-              </div>
-            </label>
-            <label class="flex flex-col gap-1 col-span-2">
-              <span style="color:var(--t-cyan);font-weight:700">Monthly Expiry</span>
-              <div class="flex items-center gap-2 mt-1">
-                <input type="checkbox" class="accent-[var(--t-cyan)]"
-                       :checked="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].monthly_expiry??false)"
-                       @change="if(!trapScannerCfg.per_index) trapScannerCfg.per_index={}; if(!trapScannerCfg.per_index[adminSelectedIndex]) trapScannerCfg.per_index[adminSelectedIndex]={}; trapScannerCfg.per_index[adminSelectedIndex].monthly_expiry=$event.target.checked">
-                <span style="color:var(--t-dim);font-size:10px">Always trade MONTHLY expiry (last expiry of the month from REGISTRY) · Takes priority over Next Week toggle</span>
-              </div>
-            </label>
+            <!-- Expiry selection moved to client deployment card -->
           </div>
         </div>
 
@@ -8195,7 +8178,56 @@ function histReplay() {
                   </template>
                   <!-- Trap Scanner live zone panel (replaces generic idle message for trap_scanner) -->
                   <template x-if="dep.strategy_name==='trap_scanner'">
-                    <div x-data="{ bk: null }" x-effect="bk = trapBookFor(b.binding_id, dep.underlying)">
+                    <div x-data="{
+                          bk: null,
+                          availExpiries: [],
+                          expiryMode: dep.expiry_mode || 'current',
+                          expiryLoaded: false,
+                          expirySaving: false,
+                          async loadExpiries() {
+                            if (this.expiryLoaded) return;
+                            const r = await this._fetch('/api/client/deployment/'+dep.deploy_id+'/available_expiries');
+                            if (r && r.ok !== false) {
+                              this.availExpiries = r.expiries || [];
+                              this.expiryMode = r.current_mode || 'current';
+                            }
+                            this.expiryLoaded = true;
+                          },
+                          async saveExpiry() {
+                            this.expirySaving = true;
+                            await this._fetch('/api/client/deployment/'+dep.deploy_id+'/expiry_mode',
+                              {method:'POST', json:{expiry_mode: this.expiryMode}});
+                            this.expirySaving = false;
+                          },
+                          _fetch(url, opts) { return fetch(url, {
+                            method: opts?.method||'GET',
+                            headers: opts?.json ? {'Content-Type':'application/json'} : {},
+                            body: opts?.json ? JSON.stringify(opts.json) : undefined,
+                            credentials: 'include'
+                          }).then(r=>r.json()).catch(()=>null); }
+                        }"
+                         x-effect="bk = trapBookFor(b.binding_id, dep.underlying)"
+                         x-init="loadExpiries()">
+                      <!-- Expiry selector row -->
+                      <div class="flex flex-wrap gap-2 items-center mb-2 p-2 rounded"
+                           style="background:rgba(0,200,255,0.04);border:1px solid rgba(0,200,255,0.15)">
+                        <span class="text-xs font-mono font-bold" style="color:var(--t-cyan)">EXPIRY</span>
+                        <select class="text-xs font-mono rounded px-2 py-0.5"
+                                style="background:var(--t-surface);color:var(--t-bright);border:1px solid var(--t-border)"
+                                x-model="expiryMode"
+                                @change="saveExpiry()">
+                          <option value="current">Current Week</option>
+                          <option value="next_week">Next Week</option>
+                          <option value="monthly">Monthly (last of month)</option>
+                          <template x-for="e in availExpiries" :key="e.date">
+                            <option :value="e.date" x-text="e.label + (e.date===bk?.expiry_date?'  ← active':'')"></option>
+                          </template>
+                        </select>
+                        <span x-show="bk&&bk.expiry" class="text-xs font-mono px-2 py-0.5 rounded"
+                              style="color:var(--t-green);background:rgba(0,255,100,0.08);border:1px solid rgba(0,255,100,0.2)"
+                              x-text="'Active: '+bk?.expiry"></span>
+                        <span x-show="expirySaving" class="text-xs font-mono" style="color:var(--t-amber)">saving…</span>
+                      </div>
                       <!-- Status header -->
                       <div class="flex flex-wrap gap-2 text-xs font-mono mb-2">
                         <span :style="(bk&&bk.initialized)?'color:var(--t-green)':'color:var(--t-yellow)'"

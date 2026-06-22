@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS strategy_deployments (
     squareoff_time     TEXT NOT NULL DEFAULT '15:15',
     is_active          INTEGER DEFAULT 1,
     is_running         INTEGER DEFAULT 0,   -- per-strategy Start/Stop toggle (0 = deployed but stopped)
+    expiry_mode        TEXT NOT NULL DEFAULT 'current',  -- current|next_week|monthly|<date YYYY-MM-DD>
     created_at         TEXT NOT NULL,
     updated_at         TEXT NOT NULL
 );
@@ -607,6 +608,14 @@ class ClientDB:
             self._exec,
             "UPDATE strategy_deployments SET is_active=0 WHERE deploy_id=? AND client_id=?",
             (deploy_id, client_id),
+        )
+
+    async def set_deployment_expiry_mode(self, deploy_id: str, client_id: str, expiry_mode: str) -> None:
+        """Set the expiry mode for a deployment: 'current'|'next_week'|'monthly'|'YYYY-MM-DD'."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET expiry_mode=?, updated_at=? WHERE deploy_id=? AND client_id=?",
+            (expiry_mode, datetime.now(IST).isoformat(), deploy_id, client_id),
         )
 
     async def set_deployment_running(self, deploy_id: str, client_id: str, running: bool) -> None:
@@ -1217,6 +1226,7 @@ class ClientDB:
             "ALTER TABLE strategy_deployments ADD COLUMN is_running INTEGER DEFAULT 0",
             "ALTER TABLE broker_bindings ADD COLUMN password_enc TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN totp_secret_enc TEXT DEFAULT ''",
+            "ALTER TABLE strategy_deployments ADD COLUMN expiry_mode TEXT DEFAULT 'current'",
         ):
             try:
                 con.execute(migration)

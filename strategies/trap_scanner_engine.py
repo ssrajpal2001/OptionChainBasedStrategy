@@ -154,6 +154,7 @@ class TrapScannerEngine:
         binding_id: str,
         ts_admin_cfg: dict,
         client_db,
+        expiry_mode: str = "current",  # current|next_week|monthly|YYYY-MM-DD (per-client DB value)
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -162,6 +163,8 @@ class TrapScannerEngine:
         self._cid = client_id
         self._bid = binding_id
         self._db = client_db
+        # Per-client expiry preference: overrides admin next_week/monthly toggles
+        self._expiry_mode = str(expiry_mode or "current").strip()
 
         _def = _INDEX_CFG.get(self._und, _INDEX_CFG["NIFTY"])
         _adm = ts_admin_cfg.get("per_index", {}).get(self._und, {})
@@ -176,6 +179,7 @@ class TrapScannerEngine:
         # Profit floor: lock ₹N once total P&L (T1+remainder) hits it.
         # If P&L drops back below floor → exit immediately at that tick. 0 = disabled.
         self._profit_floor  = float(_adm.get("profit_floor", 0.0))
+        # Legacy admin toggles — kept for backward-compat but _expiry_mode takes priority
         self._next_week_exp  = bool(_adm.get("next_week_expiry", False))
         self._monthly_exp    = bool(_adm.get("monthly_expiry", False))
         # No-Target-TSL mode: skip T1 half-exit and TSL; floor locks from total P&L directly.
@@ -2664,11 +2668,13 @@ class TrapScannerEngine:
         try:
             from data_layer.instrument_registry import REGISTRY
             if REGISTRY.is_loaded(self._und):
-                if self._monthly_exp:
-                    # Monthly expiry = last expiry of its calendar month in REGISTRY
-                    all_exp = sorted(REGISTRY.all_expiries(self._und))
-                    today = date.today()
-                    future = [e for e in all_exp if e >= today]
+                all_exp   = sorted(REGISTRY.all_expiries(self._und))
+                today     = date.today()
+                future    = [e for e in all_exp if e >= today]
+                mode      = self._expiry_mode
+
+                if mode == "monthly" or self._monthly_exp:
+                    # Last expiry of the current calendar month from REGISTRY
                     exp_date = None
                     for i, exp in enumerate(future):
                         if i + 1 >= len(future) or future[i + 1].month != exp.month:
@@ -2678,17 +2684,35 @@ class TrapScannerEngine:
                         exp_str = exp_date.strftime("%d%b%y").upper()
                         self._log.info("_get_expiry %s → MONTHLY: %s (%s)", self._und, exp_str, exp_date)
                         return exp_str, exp_date
-                    self._log.warning("_get_expiry %s → MONTHLY requested but no monthly expiry found in REGISTRY", self._und)
+                    self._log.warning("_get_expiry %s → MONTHLY but no monthly expiry in REGISTRY", self._und)
+
+                elif mode == "next_week" or self._next_week_exp:
+                    # Skip the nearest expiry — get the one after it
+                    if len(future) >= 2:
+                        exp_date = future[1]
+                        exp_str  = exp_date.strftime("%d%b%y").upper()
+                        self._log.info("_get_expiry %s → NEXT WEEK: %s (%s)", self._und, exp_str, exp_date)
+                        return exp_str, exp_date
+
+                elif len(mode) == 10 and mode[4] == "-":
+                    # Specific date: YYYY-MM-DD
+                    import re as _re
+                    if _re.match(r"^\d{4}-\d{2}-\d{2}$", mode):
+                        from datetime import date as _date
+                        picked = _date.fromisoformat(mode)
+                        # Snap to nearest REGISTRY expiry on or after picked date
+                        snapped = next((e for e in future if e >= picked), None)
+                        if snapped is not None:
+                            exp_str = snapped.strftime("%d%b%y").upper()
+                            self._log.info("_get_expiry %s → FIXED %s → snapped: %s (%s)",
+                                           self._und, mode, exp_str, snapped)
+                            return exp_str, snapped
+
+                # Default: nearest (current week) expiry
                 exp_date = REGISTRY.get_active_expiry(self._und)
                 if exp_date is not None:
-                    if self._next_week_exp:
-                        # Skip current week — get the expiry after this one
-                        exp_date2 = REGISTRY.get_active_expiry(self._und, from_date=exp_date + timedelta(days=1))
-                        if exp_date2 is not None:
-                            exp_date = exp_date2
-                            self._log.info("_get_expiry %s → NEXT WEEK: %s", self._und, exp_date)
                     exp_str = exp_date.strftime("%d%b%y").upper()
-                    self._log.info("_get_expiry %s → REGISTRY: %s (%s)", self._und, exp_str, exp_date)
+                    self._log.info("_get_expiry %s → CURRENT: %s (%s)", self._und, exp_str, exp_date)
                     return exp_str, exp_date
                 self._log.warning("_get_expiry %s → REGISTRY loaded but no active expiry found", self._und)
         except Exception as exc:
@@ -3038,6 +3062,8 @@ class TrapScannerEngine:
             "pe1_strike":       self._pe1_strike,
             "pe2_strike":       self._pe2_strike,
             "expiry":           self._expiry_str,
+            "expiry_date":      str(self._expiry_date) if self._expiry_date else None,
+            "expiry_mode":      self._expiry_mode,
             "bear_zones":       bear_trapped,
             "bull_zones":       bull_trapped,
             "fut_zones":        fut_trapped,

@@ -88,7 +88,8 @@ class TrapBookManager:
                     lots = max(2, lots + 1)   # enforce multiple of 2
             except Exception:
                 lots = 2
-            wanted[(cid, bid, und)] = lots
+            expiry_mode = str(d.get("expiry_mode", "current") or "current").strip()
+            wanted[(cid, bid, und)] = (lots, expiry_mode)
         return wanted
 
     def _ts_admin_cfg(self) -> dict:
@@ -109,16 +110,18 @@ class TrapBookManager:
         # Spawn new books
         for key in set(wanted) - set(self._books):
             cid, bid, und = key
+            lots, expiry_mode = wanted[key]
             try:
                 eng = TrapScannerEngine(
                     bus=self._bus,
                     cfg=self._cfg,
                     underlying=und,
-                    lot_multiplier=wanted[key],
+                    lot_multiplier=lots,
                     client_id=cid,
                     binding_id=bid,
                     ts_admin_cfg=ts_cfg,
                     client_db=self._db,
+                    expiry_mode=expiry_mode,
                 )
                 if self._rebalancer is not None:
                     eng.set_rebalancer(self._rebalancer)
@@ -126,8 +129,8 @@ class TrapBookManager:
                     eng.set_mcx_feeder(self._mcx_feeder)
                 eng.start()
                 self._books[key] = eng
-                logger.info("TrapBookManager: spawned %s/%s/%s (lots=%d)",
-                            cid, bid, und, wanted[key])
+                logger.info("TrapBookManager: spawned %s/%s/%s (lots=%d expiry=%s)",
+                            cid, bid, und, lots, expiry_mode)
             except Exception as exc:
                 logger.warning("TrapBookManager: spawn %s failed: %s", key, exc, exc_info=True)
 
@@ -138,22 +141,38 @@ class TrapBookManager:
             loop.create_task(eng.stop_async())
             logger.info("TrapBookManager: stopped %s/%s/%s", *key)
 
-        # Re-spawn on lot_multiplier change (only when flat)
-        for key, lots in wanted.items():
+        # Re-spawn on lot_multiplier or expiry_mode change (only when flat)
+        for key, (lots, expiry_mode) in wanted.items():
             eng = self._books.get(key)
-            if eng and getattr(eng, "_lot_mul", 2) != lots and eng._position is None:
+            if eng is None:
+                continue
+            lots_changed   = getattr(eng, "_lot_mul", 2) != lots
+            expiry_changed = getattr(eng, "_expiry_mode", "current") != expiry_mode
+            if (lots_changed or expiry_changed) and eng._position is None:
                 try:
                     asyncio.get_event_loop().create_task(eng.stop_async())
                     nb = TrapScannerEngine(
                         bus=self._bus, cfg=self._cfg, underlying=key[2],
                         lot_multiplier=lots, client_id=key[0], binding_id=key[1],
                         ts_admin_cfg=ts_cfg, client_db=self._db,
+                        expiry_mode=expiry_mode,
                     )
                     nb.start()
                     self._books[key] = nb
-                    logger.info("TrapBookManager: re-spawned %s/%s/%s lots→%d", *key, lots)
+                    logger.info("TrapBookManager: re-spawned %s/%s/%s lots→%d expiry→%s",
+                                *key, lots, expiry_mode)
                 except Exception as exc:
                     logger.warning("TrapBookManager: re-spawn %s failed: %s", key, exc)
+
+    async def set_expiry_mode(self, client_id: str, binding_id: str, underlying: str,
+                               expiry_mode: str) -> None:
+        """Hot-swap expiry mode — triggers re-spawn on next reconcile (DB update done by caller)."""
+        key = (client_id, binding_id, underlying.upper())
+        eng = self._books.get(key)
+        if eng is not None:
+            eng._expiry_mode = expiry_mode
+            logger.info("TrapBookManager: expiry_mode hot-swapped for %s/%s/%s → %s",
+                        client_id, binding_id, underlying, expiry_mode)
 
     async def stop_async(self) -> None:
         self._running = False

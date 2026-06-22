@@ -1845,6 +1845,57 @@ class DashboardServer:
                         deploy_id, "ON" if running else "OFF", squared)
             return {"ok": True, "deploy_id": deploy_id, "running": running, "squared_off": squared}
 
+        # ── CLIENT — set expiry mode for a deployment ────────────────────────
+        class _ExpiryModeSchema(BaseModel):
+            expiry_mode: str  # current|next_week|monthly|YYYY-MM-DD
+
+        @app.post("/api/client/deployment/{deploy_id}/expiry_mode", tags=["Client"])
+        async def api_set_deployment_expiry_mode(
+            deploy_id: str, body: _ExpiryModeSchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            deps = _srv._client_db.get_deployments_sync(cid)
+            if not any(d.get("deploy_id") == deploy_id for d in deps):
+                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
+            valid = {"current", "next_week", "monthly"}
+            mode = body.expiry_mode.strip()
+            import re as _re
+            if mode not in valid and not _re.match(r"^\d{4}-\d{2}-\d{2}$", mode):
+                raise HTTPException(400, f"Invalid expiry_mode '{mode}'. Use: current|next_week|monthly|YYYY-MM-DD")
+            await _srv._client_db.set_deployment_expiry_mode(deploy_id, cid, mode)
+            # Notify the trap scanner manager to re-init with new expiry
+            if _srv._trap_scanner_manager is not None:
+                try:
+                    dep = next(d for d in deps if d["deploy_id"] == deploy_id)
+                    await _srv._trap_scanner_manager.set_expiry_mode(
+                        dep["client_id"], dep["binding_id"], dep["underlying"], mode
+                    )
+                except Exception as exc:
+                    logger.warning("expiry_mode hot-swap failed: %s", exc)
+            return {"ok": True, "deploy_id": deploy_id, "expiry_mode": mode}
+
+        @app.get("/api/client/deployment/{deploy_id}/available_expiries", tags=["Client"])
+        async def api_get_available_expiries(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            deps = _srv._client_db.get_deployments_sync(cid)
+            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
+            if dep is None:
+                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
+            underlying = dep.get("underlying", "NIFTY")
+            try:
+                from data_layer.instrument_registry import REGISTRY
+                from datetime import date
+                today = date.today()
+                all_exp = sorted(REGISTRY.all_expiries(underlying)) if REGISTRY.is_loaded(underlying) else []
+                future = [e for e in all_exp if e >= today]
+                expiries = [{"date": str(e), "label": e.strftime("%d %b %Y")} for e in future[:8]]
+            except Exception:
+                expiries = []
+            return {"ok": True, "underlying": underlying, "expiries": expiries,
+                    "current_mode": dep.get("expiry_mode", "current")}
+
         # ── CLIENT — global STOP & SQUARE-OFF (flatten the whole client) ──────
         @app.post("/api/client/stop_squareoff", tags=["Client"])
         async def api_client_stop_squareoff(user: dict = Depends(_require_client)):
