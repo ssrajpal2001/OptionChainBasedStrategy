@@ -809,6 +809,100 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
     return entries[:1]
 
 
+def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
+                          gap_thresh: float = 0.5, gap_near: int = 500,
+                          step: int = 100) -> dict:
+    """
+    Replicate TrapScannerEngine morning-init strike selection for a past date.
+    Returns {ce1_strike, pe1_strike, ce1_key, pe1_key, expiry, gap_fired, label}
+    or empty dict on failure.
+    """
+    from data_layer.instrument_registry import REGISTRY
+    import requests as _req
+
+    # 1. Prev-day OHLC: fetch 1-min bars for the calendar day before dt
+    prev_dt = dt - timedelta(days=1)
+    while prev_dt.weekday() >= 5:
+        prev_dt -= timedelta(days=1)
+
+    idx_key = "BSE_INDEX|SENSEX"
+    ds = prev_dt.strftime("%Y-%m-%d")
+    try:
+        url = f"https://api.upstox.com/v2/historical-candle/{idx_key}/1minute/{ds}/{ds}"
+        r = _req.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=15)
+        candles = r.json().get("data", {}).get("candles", [])
+    except Exception:
+        candles = []
+    if not candles:
+        return {}
+
+    prev_df = pd.DataFrame(candles, columns=["ts","open","high","low","close","vol","oi"])
+    prev_H = float(prev_df["high"].max())
+    prev_L = float(prev_df["low"].min())
+    prev_C = float(prev_df["close"].iloc[-1])
+
+    # 2. Today open: first bar of dt
+    ds_today = dt.strftime("%Y-%m-%d")
+    today_open = 0.0
+    try:
+        if dt == date.today():
+            url2 = f"https://api.upstox.com/v2/historical-candle/intraday/{idx_key}/1minute"
+        else:
+            url2 = f"https://api.upstox.com/v2/historical-candle/{idx_key}/1minute/{ds_today}/{ds_today}"
+        r2 = _req.get(url2, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=15)
+        c2 = r2.json().get("data", {}).get("candles", [])
+        if c2:
+            today_open = float(sorted(c2, key=lambda x: x[0])[0][1])  # first bar open
+    except Exception:
+        pass
+    if today_open <= 0:
+        today_open = prev_C
+
+    # 3. Gap check
+    gap_pct = abs(today_open - prev_C) / prev_C * 100 if prev_C > 0 else 0.0
+    gap_fired = gap_pct >= gap_thresh
+
+    # 4. Strike selection (mirror TrapScannerEngine)
+    P = (prev_H + prev_L + prev_C) / 3
+    r1 = 2 * P - prev_L
+    s1 = 2 * P - prev_H
+    atm = int(round(today_open / step)) * step
+
+    if gap_fired:
+        ce1_strike = atm - gap_near
+        pe1_strike = atm + gap_near
+        label = f"GAP {gap_pct:.1f}% → CE={ce1_strike} PE={pe1_strike}"
+    else:
+        ce1_strike = int(round(s1 / step)) * step
+        pe1_strike = int(round(r1 / step)) * step
+        label = f"No-gap (S1={s1:.0f}→{ce1_strike}, R1={r1:.0f}→{pe1_strike})"
+
+    # 5. Expiry + key lookup via REGISTRY
+    if not REGISTRY.is_loaded(und):
+        try:
+            REGISTRY.load_sync(und, token)
+        except Exception:
+            pass
+
+    expiry = REGISTRY.get_active_expiry(und, from_date=dt) if REGISTRY.is_loaded(und) else None
+    if expiry is None:
+        return {}
+
+    ce1_key = REGISTRY.get_upstox_key(und, expiry, ce1_strike, "CE") if REGISTRY.is_loaded(und) else ""
+    pe1_key = REGISTRY.get_upstox_key(und, expiry, pe1_strike, "PE") if REGISTRY.is_loaded(und) else ""
+
+    if not ce1_key:
+        ce1_key, _ = _find_key_and_expiry(token, ce1_strike, "CE", dt)
+    if not pe1_key:
+        pe1_key, _ = _find_key_and_expiry(token, pe1_strike, "PE", dt)
+
+    return {
+        "ce1_strike": ce1_strike, "pe1_strike": pe1_strike,
+        "ce1_key": ce1_key or "", "pe1_key": pe1_key or "",
+        "expiry": expiry, "gap_fired": gap_fired, "label": label,
+    }
+
+
 def run_backtest_3level_ui(
     token: str,
     days: int         = 10,
@@ -817,13 +911,12 @@ def run_backtest_3level_ui(
     sq_off: str       = "15:20",
     cutoff: str       = "15:10",
     pool_days: int    = 15,
-    ce_key: str       = "",
+    ce_key: str       = "",   # kept for compat but auto-resolved if empty
     pe_key: str       = "",
 ) -> dict:
     """
     3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
-    Called by FastAPI /api/backtest/sensex3 — returns JSON-serialisable dict.
-    ce_key / pe_key: direct Upstox instrument keys (bypass strike lookup).
+    Strikes auto-resolved per day using same pivot logic as TrapScannerEngine.
     """
     from scripts.show_75m_zones import fetch_1m, resample, detect_zones
 
@@ -833,29 +926,47 @@ def run_backtest_3level_ui(
     debug_log: list = []
     all_trades: list = []
 
-    for side, scan_key in [("CE", ce_key), ("PE", pe_key)]:
-        if not scan_key:
-            debug_log.append(f"{side}: no key provided — skipped")
-            continue
+    # Cache per-key bars across days to avoid re-fetching
+    key_bar_cache: dict = {}
 
-        # Build 75m zone pool from all_pool_days bars
-        z75_pool: list = []
-        day_data: dict = {}
-        for dt in all_pool_days:
-            df1m = fetch_1m(scan_key, dt, token)
-            if df1m.empty:
+    def _get_bars(key: str, dt: date) -> pd.DataFrame:
+        if (key, dt) not in key_bar_cache:
+            key_bar_cache[(key, dt)] = fetch_1m(key, dt, token)
+        return key_bar_cache[(key, dt)]
+
+    for dt in trading_days:
+        # Resolve strikes for this day
+        if ce_key or pe_key:
+            # Manual override (legacy / testing)
+            day_ce_key = ce_key
+            day_pe_key = pe_key
+            day_label  = "manual keys"
+        else:
+            strikes = _resolve_day_strikes(dt, token)
+            if not strikes:
+                debug_log.append(f"{dt}: strike resolution failed")
                 continue
-            day_data[dt] = df1m
-            for z in detect_zones(resample(df1m, 75)):
-                z75_pool.append(z)
-        debug_log.append(f"{side} key={scan_key} pool_zones={len(z75_pool)}")
+            day_ce_key = strikes["ce1_key"]
+            day_pe_key = strikes["pe1_key"]
+            day_label  = strikes["label"]
+        debug_log.append(f"{dt}: {day_label} CE={day_ce_key} PE={day_pe_key}")
 
-        for dt in trading_days:
-            df1m = day_data.get(dt)
-            if df1m is None or df1m.empty:
-                df1m = fetch_1m(scan_key, dt, token)
-            if df1m is None or df1m.empty:
-                debug_log.append(f"{dt} {side}: no 1m data")
+        for side, scan_key in [("CE", day_ce_key), ("PE", day_pe_key)]:
+            if not scan_key:
+                debug_log.append(f"  {side}: no key")
+                continue
+
+            # Build 75m zone pool using pool_days of bars for this key
+            z75_pool: list = []
+            for pdt in all_pool_days:
+                df_p = _get_bars(scan_key, pdt)
+                if not df_p.empty:
+                    for z in detect_zones(resample(df_p, 75)):
+                        z75_pool.append(z)
+
+            df1m = _get_bars(scan_key, dt)
+            if df1m.empty:
+                debug_log.append(f"  {dt} {side}: no 1m data")
                 continue
 
             entries = _collect_entries_3level(dt, df1m, z75_pool, cutoff=cutoff)

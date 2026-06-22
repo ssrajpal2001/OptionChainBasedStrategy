@@ -144,19 +144,7 @@
       <div>
         <p class="sec-label mb-3">Strategy — 75m Pool → 15m → 5m</p>
 
-        <!-- CE Key -->
-        <div class="mb-3">
-          <p class="text-xs text-t-muted mb-1">CE Instrument Key</p>
-          <input type="text" x-model="ceKey" placeholder="BSE_FO|887815" class="t-input font-mono text-xs" />
-          <p class="text-xs text-t-muted mt-1">From TrapScanner heartbeat: ce1=…</p>
-        </div>
-
-        <!-- PE Key -->
-        <div class="mb-3">
-          <p class="text-xs text-t-muted mb-1">PE Instrument Key</p>
-          <input type="text" x-model="peKey" placeholder="BSE_FO|887720" class="t-input font-mono text-xs" />
-          <p class="text-xs text-t-muted mt-1">From TrapScanner heartbeat: pe1=…</p>
-        </div>
+        <p class="text-xs text-t-muted mb-3">Strikes auto-resolved per day using same pivot/gap logic as TrapScanner (S1/R1 no-gap, ATM±offset on gap).</p>
 
         <!-- SL Buffer -->
         <div class="mb-3">
@@ -330,8 +318,6 @@ function sensexBT() {
     token:    sessionStorage.getItem('sx_token') || '',
     days:     10,
     lots:     1,
-    ceKey:    sessionStorage.getItem('sx_ce_key') || '',
-    peKey:    sessionStorage.getItem('sx_pe_key') || '',
     slBuf:    5,
     cutoff:   '15:10',
     sqOff:    '15:20',
@@ -352,10 +338,7 @@ function sensexBT() {
 
     async runBacktest() {
       if (!this.token) { this.error = 'Token required'; return; }
-      if (!this.ceKey && !this.peKey) { this.error = 'At least one instrument key (CE or PE) required'; return; }
       sessionStorage.setItem('sx_token', this.token);
-      sessionStorage.setItem('sx_ce_key', this.ceKey);
-      sessionStorage.setItem('sx_pe_key', this.peKey);
       this.running = true;
       this.error   = '';
       this.result  = null;
@@ -370,8 +353,6 @@ function sensexBT() {
             token:     this.token,
             days:      this.days,
             lots:      this.lots,
-            ce_key:    this.ceKey,
-            pe_key:    this.peKey,
             sl_buf:    this.slBuf,
             cutoff:    this.cutoff,
             sq_off:    this.sqOff,
