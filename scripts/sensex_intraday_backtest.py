@@ -817,9 +817,9 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
             entries.append({
                 "entry_ts":    entry_ts,
                 "entry_price": z5["zone_high"],
-                "sl":          round(z5["zone_low"], 2),
-                "t1":          round(z15["sl_level"], 2),
-                "zone_label":  f"15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f} / 5m {z5['zone_high']:.0f}",
+                "sl":          round(z15["zone_low"], 2),  # 15m zone_low (wider SL)
+                "t1":          round(z15["sl"], 2),        # c0.high of 15m = sellers' SL = T1
+                "zone_label":  f"15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl']:.0f}) / 5m {z5['zone_high']:.0f}",
                 "side":        "BUY",
             })
 
