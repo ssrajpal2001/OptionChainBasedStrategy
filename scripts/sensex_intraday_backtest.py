@@ -701,6 +701,246 @@ def run_backtest_ui(
     }
 
 
+# ── 3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY) ──
+
+def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
+                   sl: float, t1: float, sq_off: str, lot_size: int, lots: int) -> dict:
+    """Walk 1m bars from entry_ts forward; return exit details."""
+    sq_h, sq_m = map(int, sq_off.split(":"))
+    qty = lots * lot_size
+    future = df1m[df1m["ts"] > entry_ts]
+    for _, bar in future.iterrows():
+        ts = bar["ts"]
+        if (ts.hour, ts.minute) >= (sq_h, sq_m):
+            ep = float(bar["open"])
+            pnl_pts = ep - entry_price
+            return {"exit_ts": ts, "exit_price": ep, "pnl_pts": round(pnl_pts, 2),
+                    "pnl_rs": round(pnl_pts * qty, 0), "reason": "EOD"}
+        lo, hi = float(bar["low"]), float(bar["high"])
+        if lo <= sl:
+            pnl_pts = sl - entry_price
+            return {"exit_ts": ts, "exit_price": sl, "pnl_pts": round(pnl_pts, 2),
+                    "pnl_rs": round(pnl_pts * qty, 0), "reason": "SL"}
+        if hi >= t1:
+            pnl_pts = t1 - entry_price
+            return {"exit_ts": ts, "exit_price": t1, "pnl_pts": round(pnl_pts, 2),
+                    "pnl_rs": round(pnl_pts * qty, 0), "reason": "T1"}
+    # Last bar EOD
+    last = df1m.iloc[-1]
+    ep = float(last["close"])
+    return {"exit_ts": last["ts"], "exit_price": ep,
+            "pnl_pts": round(ep - entry_price, 2),
+            "pnl_rs": round((ep - entry_price) * qty, 0), "reason": "EOD"}
+
+
+def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
+                             cutoff: str = "15:10") -> list:
+    """
+    Run 3-level hierarchy on one day's 1m bars.
+    Returns list of entry dicts: {entry_ts, entry_price, sl, t1, zone_label, side}
+    side = 'BUY' (we always BUY the option in a seller trap).
+    """
+    from scripts.show_75m_zones import (
+        resample, detect_zones, first_1m_entry, first_return_to_zone_high,
+    )
+    cut_h, cut_m = map(int, cutoff.split(":"))
+    today_start  = pd.Timestamp(dt)
+    mtf_15  = resample(df1m, 15)
+    ltf_5   = resample(df1m,  5)
+    day_start = df1m["ts"].iloc[0] - pd.Timedelta(minutes=1)
+
+    entries = []
+    seen_5m_zones: set = set()
+
+    def _try_5m(z15, ret15_ts):
+        """Find CLOSED 5m zones inside z15 after ret15_ts → record entries."""
+        zones_5 = [z for z in detect_zones(ltf_5)
+                   if z["zone_high"] >= z15["zone_low"]
+                   and z["zone_high"] <= z15["zone_high"]
+                   and z["formed_ts"] >= ret15_ts]
+        for z5 in zones_5:
+            uid = f"{z5['formed_ts']}_{z5['zone_high']:.1f}"
+            if uid in seen_5m_zones:
+                continue
+            ret5 = first_return_to_zone_high(df1m, z5, z5["sl_hit_ts"])
+            if ret5 is None:
+                continue
+            entry_ts = ret5["entry_ts"]
+            if (entry_ts.hour, entry_ts.minute) >= (cut_h, cut_m):
+                continue
+            seen_5m_zones.add(uid)
+            entries.append({
+                "entry_ts":    entry_ts,
+                "entry_price": z5["zone_high"],
+                "sl":          round(z5["zone_low"], 2),
+                "t1":          round(z15["sl_level"], 2),
+                "zone_label":  f"15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f} / 5m {z5['zone_high']:.0f}",
+                "side":        "BUY",
+            })
+
+    active_75 = [z for z in z75_pool if z["sl_hit_ts"] < today_start]
+    used_75 = False
+
+    for z75 in active_75:
+        entry_1m_ts = first_1m_entry(df1m, z75, day_start)
+        if entry_1m_ts is None:
+            continue
+        used_75 = True
+        zones_15 = [z for z in detect_zones(mtf_15)
+                    if z["zone_high"] >= z75["zone_low"]
+                    and z["zone_high"] <= z75["zone_high"]
+                    and z["formed_ts"] >= entry_1m_ts]
+        for z15 in zones_15:
+            ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
+            if ret15 is None:
+                continue
+            _try_5m(z15, ret15["entry_ts"])
+
+    if not used_75:
+        # CASCADE: any CLOSED 15m zone today
+        for z15 in detect_zones(mtf_15):
+            ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
+            if ret15 is None:
+                continue
+            _try_5m(z15, ret15["entry_ts"])
+
+    # Take only the first entry (earliest) to avoid over-trading
+    entries.sort(key=lambda e: e["entry_ts"])
+    return entries[:1]
+
+
+def run_backtest_3level_ui(
+    token: str,
+    days: int         = 10,
+    lots: int         = 1,
+    sl_buf: float     = 5.0,
+    sq_off: str       = "15:20",
+    cutoff: str       = "15:10",
+    pool_days: int    = 15,
+    ce_key: str       = "",
+    pe_key: str       = "",
+) -> dict:
+    """
+    3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
+    Called by FastAPI /api/backtest/sensex3 — returns JSON-serialisable dict.
+    ce_key / pe_key: direct Upstox instrument keys (bypass strike lookup).
+    """
+    from scripts.show_75m_zones import fetch_1m, resample, detect_zones
+
+    LOT_SIZE = 10
+    trading_days = _get_trading_days(days)
+    all_pool_days = _get_trading_days(days + pool_days)
+    debug_log: list = []
+    all_trades: list = []
+
+    for side, scan_key in [("CE", ce_key), ("PE", pe_key)]:
+        if not scan_key:
+            debug_log.append(f"{side}: no key provided — skipped")
+            continue
+
+        # Build 75m zone pool from all_pool_days bars
+        z75_pool: list = []
+        day_data: dict = {}
+        for dt in all_pool_days:
+            df1m = fetch_1m(scan_key, dt, token)
+            if df1m.empty:
+                continue
+            day_data[dt] = df1m
+            for z in detect_zones(resample(df1m, 75)):
+                z75_pool.append(z)
+        debug_log.append(f"{side} key={scan_key} pool_zones={len(z75_pool)}")
+
+        for dt in trading_days:
+            df1m = day_data.get(dt)
+            if df1m is None or df1m.empty:
+                df1m = fetch_1m(scan_key, dt, token)
+            if df1m is None or df1m.empty:
+                debug_log.append(f"{dt} {side}: no 1m data")
+                continue
+
+            entries = _collect_entries_3level(dt, df1m, z75_pool, cutoff=cutoff)
+            for e in entries:
+                ep   = e["entry_price"]
+                sl   = round(ep - sl_buf, 2) if sl_buf > 0 else e["sl"]
+                t1   = e["t1"]
+                exit_info = _simulate_exit(df1m, e["entry_ts"], ep, sl, t1,
+                                           sq_off, LOT_SIZE, lots)
+                all_trades.append({
+                    "date":       dt.isoformat(),
+                    "side":       side,
+                    "strike":     scan_key.split("|")[-1],
+                    "key":        scan_key,
+                    "entry_ts":   e["entry_ts"],
+                    "entry":      round(ep, 2),
+                    "sl":         sl,
+                    "t1":         t1,
+                    "exit_price": exit_info["exit_price"],
+                    "exit_ts":    exit_info["exit_ts"],
+                    "pnl_pts":    exit_info["pnl_pts"],
+                    "pnl_rs":     exit_info["pnl_rs"],
+                    "reason":     exit_info["reason"],
+                    "htf_zone":   e["zone_label"],
+                })
+
+    if not all_trades:
+        return {"ok": True, "trades": [], "summary": {}, "equity": [], "debug": debug_log}
+
+    all_trades.sort(key=lambda t: (t["date"], str(t["entry_ts"])))
+    df = pd.DataFrame(all_trades)
+
+    def _hhmm(v) -> str:
+        if hasattr(v, "strftime"):
+            return v.strftime("%H:%M")
+        s = str(v); return s[11:16] if len(s) > 15 else s
+
+    df["entry_hm"] = df["entry_ts"].apply(_hhmm)
+    df["exit_hm"]  = df["exit_ts"].apply(_hhmm)
+
+    wins      = len(df[df["pnl_rs"] > 0])
+    losses    = len(df[df["pnl_rs"] <= 0])
+    total_pnl = float(df["pnl_rs"].sum())
+    avg_win   = float(df[df["pnl_rs"] > 0]["pnl_rs"].mean()) if wins else 0.0
+    avg_loss  = float(df[df["pnl_rs"] <= 0]["pnl_rs"].mean()) if losses else 0.0
+    pf        = abs(avg_win * wins / (avg_loss * losses)) if losses and avg_loss else None
+
+    trades_out, equity, cum = [], [], 0.0
+    for _, t in df.iterrows():
+        cum += float(t["pnl_rs"])
+        equity.append({"date": str(t["date"]), "cum_pnl": round(cum, 0)})
+        trades_out.append({
+            "date":       t["date"],
+            "side":       t["side"],
+            "strike":     str(t["strike"]),
+            "entry_time": str(t["entry_hm"]),
+            "exit_time":  str(t["exit_hm"]),
+            "entry":      round(float(t["entry"]), 1),
+            "exit":       round(float(t["exit_price"]), 1),
+            "sl":         round(float(t["sl"]), 1),
+            "t1":         round(float(t["t1"]), 1),
+            "pnl_pts":    round(float(t["pnl_pts"]), 1),
+            "pnl_rs":     round(float(t["pnl_rs"]), 0),
+            "reason":     t["reason"],
+            "zone":       t.get("htf_zone", ""),
+        })
+
+    return {
+        "ok": True,
+        "summary": {
+            "total":         len(df),
+            "wins":          wins,
+            "losses":        losses,
+            "win_rate":      round(wins / len(df) * 100, 1),
+            "total_pnl":     round(total_pnl, 0),
+            "avg_win":       round(avg_win, 0),
+            "avg_loss":      round(avg_loss, 0),
+            "profit_factor": round(pf, 2) if pf else None,
+        },
+        "trades":  trades_out,
+        "equity":  equity,
+        "debug":   debug_log,
+    }
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

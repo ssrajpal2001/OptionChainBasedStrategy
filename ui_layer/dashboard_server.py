@@ -829,6 +829,35 @@ class DashboardServer:
                 import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
 
+        @app.post("/api/backtest/sensex3", tags=["Admin"])
+        async def run_backtest_sensex3(request: Request):
+            """3-level hierarchy backtest: 75m pool → 15m CLOSED → 5m CLOSED → ENTRY."""
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            token    = p.get("token", "")
+            days     = int(p.get("days", 10))
+            lots     = int(p.get("lots", 1))
+            sl_buf   = float(p.get("sl_buf", 5.0))
+            sq_off   = str(p.get("sq_off", "15:20"))
+            cutoff   = str(p.get("cutoff", "15:10"))
+            pool_days = int(p.get("pool_days", 15))
+            ce_key   = str(p.get("ce_key", ""))
+            pe_key   = str(p.get("pe_key", ""))
+            if not token:
+                return {"ok": False, "error": "token required"}
+            try:
+                from scripts.sensex_intraday_backtest import run_backtest_3level_ui
+                result = await asyncio.to_thread(
+                    run_backtest_3level_ui, token, days, lots,
+                    sl_buf, sq_off, cutoff, pool_days, ce_key, pe_key,
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
+
         # ── PUBLIC — Authentication ───────────────────────────────────────────
 
         @app.post("/api/auth/login", tags=["Auth"])
