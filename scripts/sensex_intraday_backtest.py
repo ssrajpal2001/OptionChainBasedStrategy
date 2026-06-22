@@ -911,16 +911,17 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
             "zone_label":  label_prefix + f"5m {z5['zone_high']:.0f}",
         })
 
-    def _scan_5m_in_range(low_bound, high_bound, from_ts, label_prefix):
+    def _scan_5m_in_range(low_bound, high_bound, from_ts, label_prefix, sl_override=None):
         zones_5 = [z for z in detect_zones(ltf_5)
                    if z["zone_high"] >= low_bound
                    and z["zone_high"] <= high_bound
                    and z["formed_ts"] >= from_ts]
         for z5 in zones_5:
-            _add_5m_entry(z5, z5["zone_low"], z5["sl_level"], label_prefix)
+            sl = sl_override if sl_override is not None else z5["zone_low"]
+            _add_5m_entry(z5, sl, z5["sl_level"], label_prefix)
 
-    def _try_5m_via_15m(z15, ret15_ts):
-        """3-level: SL=15m zone_low, T1=15m sl_level, entry gated by 15m CLOSED."""
+    def _try_5m_via_15m(z15, ret15_ts, sl_override=None):
+        """3-level: SL=75m zone_low (or 15m if no 75m), T1=15m sl_level."""
         if (z15["zone_high"] - z15["zone_low"]) < MIN_ZONE_WIDTH:
             return
         zones_5 = [z for z in detect_zones(ltf_5)
@@ -928,8 +929,9 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
                    and z["zone_high"] <= z15["zone_high"]
                    and z["formed_ts"] >= ret15_ts]
         lbl = f"{mode_label[0]}15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl_level']:.0f}) / "
+        sl = sl_override if sl_override is not None else z15["zone_low"]
         for z5 in zones_5:
-            _add_5m_entry(z5, z15["zone_low"], z15["sl_level"], lbl)
+            _add_5m_entry(z5, sl, z15["sl_level"], lbl)
 
     if side_allowed == "NONE":
         return []
@@ -944,12 +946,13 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
         used_75 = True
         mode_label[0] = f"75m {z75['zone_high']:.0f}→{z75['zone_low']:.0f} → "
 
+        z75_sl = z75["zone_low"]   # SL anchor = 75m zone_low for ALL entries via this zone
         if skip_15m:
-            # 2-level: scan 5m zones inside the 75m zone, SL/T1 from 5m zone itself
+            # 2-level: scan 5m zones inside the 75m zone, SL = 75m zone_low
             _scan_5m_in_range(z75["zone_low"], z75["zone_high"], entry_1m_ts,
-                              mode_label[0])
+                              mode_label[0], sl_override=z75_sl)
         else:
-            # 3-level: need 15m CLOSED first
+            # 3-level: need 15m CLOSED first, SL still = 75m zone_low
             zones_15 = [z for z in detect_zones(mtf_15)
                         if z["zone_high"] >= z75["zone_low"]
                         and z["zone_high"] <= z75["zone_high"]
@@ -958,7 +961,7 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
                 ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
                 if ret15 is None:
                     continue
-                _try_5m_via_15m(z15, ret15["entry_ts"])
+                _try_5m_via_15m(z15, ret15["entry_ts"], sl_override=z75_sl)
 
     if not used_75:
         mode_label[0] = "CASCADE → "
@@ -1118,7 +1121,7 @@ def run_backtest_3level_ui(
     token: str,
     days: int         = 10,
     lots: int         = 1,
-    sl_buf: float     = 5.0,
+    sl_buf: float     = 10.0,
     sq_off: str       = "15:20",
     cutoff: str       = "14:30",
     pool_days: int    = 15,
