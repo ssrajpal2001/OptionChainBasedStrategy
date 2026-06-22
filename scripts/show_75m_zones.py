@@ -56,18 +56,35 @@ def resample_75m(df1m: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def find_zones(htf: pd.DataFrame) -> list:
+    """
+    Find zones where:
+    1. candle[N+1].low < candle[N].low  (breach = zone formed)
+    2. A subsequent candle's HIGH >= zone_high (sellers' SL triggered = valid zone)
+    """
     zones = []
     for i in range(len(htf) - 1):
         c0 = htf.iloc[i]
         c1 = htf.iloc[i+1]
-        if float(c1["low"]) < float(c0["low"]):
-            zones.append({
-                "candle_0_ts":  c0["ts"],
-                "candle_1_ts":  c1["ts"],
-                "zone_high":    float(c0["low"]),
-                "zone_low":     float(c1["low"]),
-                "range":        round(float(c0["low"]) - float(c1["low"]), 1),
-            })
+        if float(c1["low"]) >= float(c0["low"]):
+            continue
+        zone_high = float(c0["low"])
+        zone_low  = float(c1["low"])
+        # Check subsequent candles for SL hit (high >= zone_high)
+        sl_hit_ts = None
+        for j in range(i + 2, len(htf)):
+            if float(htf.iloc[j]["high"]) >= zone_high:
+                sl_hit_ts = htf.iloc[j]["ts"]
+                break
+        if sl_hit_ts is None:
+            continue   # SL never hit — zone not valid
+        zones.append({
+            "candle_0_ts":  c0["ts"],
+            "candle_1_ts":  c1["ts"],
+            "zone_high":    zone_high,
+            "zone_low":     zone_low,
+            "range":        round(zone_high - zone_low, 1),
+            "sl_hit_ts":    sl_hit_ts,
+        })
     return zones
 
 
@@ -105,17 +122,28 @@ def find_15m_zones_inside(df1m: pd.DataFrame, z75: dict) -> list:
     for i in range(len(mtf) - 1):
         c0 = mtf.iloc[i]
         c1 = mtf.iloc[i+1]
-        if float(c1["low"]) < float(c0["low"]):
-            zh = float(c0["low"])
-            zl = float(c1["low"])
-            # Must be inside the 75m zone price range
-            if zl >= z75["zone_low"] and zh <= z75["zone_high"]:
-                zones_15m.append({
-                    "ts":         c0["ts"],
-                    "zone_high":  zh,
-                    "zone_low":   zl,
-                    "range":      round(zh - zl, 1),
-                })
+        if float(c1["low"]) >= float(c0["low"]):
+            continue
+        zh = float(c0["low"])
+        zl = float(c1["low"])
+        # Must be inside the 75m zone price range
+        if zl < z75["zone_low"] or zh > z75["zone_high"]:
+            continue
+        # SL must be hit: subsequent 15m candle high >= zone_high
+        sl_hit_ts = None
+        for j in range(i + 2, len(mtf)):
+            if float(mtf.iloc[j]["high"]) >= zh:
+                sl_hit_ts = mtf.iloc[j]["ts"]
+                break
+        if sl_hit_ts is None:
+            continue
+        zones_15m.append({
+            "ts":         c0["ts"],
+            "zone_high":  zh,
+            "zone_low":   zl,
+            "range":      round(zh - zl, 1),
+            "sl_hit_ts":  sl_hit_ts,
+        })
     return zones_15m
 
 _KEY_CACHE: dict = {}   # (strike, side, expiry_str) → key
@@ -201,14 +229,16 @@ def main():
             for z in zones:
                 t0 = z["candle_0_ts"].strftime("%H:%M")
                 t1 = z["candle_1_ts"].strftime("%H:%M")
-                print(f"\n  75m [{t0}→{t1}]  zone_high={z['zone_high']:.1f}  zone_low={z['zone_low']:.1f}  range={z['range']:.1f}pts")
+                sl_t = z["sl_hit_ts"].strftime("%H:%M")
+                print(f"\n  75m [{t0}→{t1}]  zone_high={z['zone_high']:.1f}  zone_low={z['zone_low']:.1f}  range={z['range']:.1f}pts  SL_hit={sl_t}")
                 zones_15 = find_15m_zones_inside(df1m, z)
                 if zones_15:
                     for z15 in zones_15:
-                        t15 = z15["ts"].strftime("%H:%M")
-                        print(f"    └─ 15m [{t15}]  zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  range={z15['range']:.1f}pts")
+                        t15    = z15["ts"].strftime("%H:%M")
+                        sl15_t = z15["sl_hit_ts"].strftime("%H:%M")
+                        print(f"    └─ 15m [{t15}]  zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  range={z15['range']:.1f}pts  SL_hit={sl15_t}")
                 else:
-                    print(f"    └─ No 15m zone inside this 75m zone")
+                    print(f"    └─ No valid 15m zone (SL not hit) inside this 75m zone")
         else:
             print(f"\n  No 75m zones detected")
 
