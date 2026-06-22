@@ -279,6 +279,17 @@ class TrapScannerEngine:
     def set_rebalancer(self, rebalancer) -> None:
         self._rebalancer = rebalancer
 
+    def set_expiry_mode(self, mode: str) -> None:
+        """Change expiry mode at runtime and force re-initialization on next loop tick."""
+        old = self._expiry_mode
+        self._expiry_mode = mode.strip()
+        if old != self._expiry_mode:
+            # Reset expiry so morning_init re-runs _get_expiry with the new mode
+            self._expiry_str  = None
+            self._expiry_date = None
+            self._initialized = False
+            self._log.info("Expiry mode changed %s → %s; forcing re-init", old, self._expiry_mode)
+
     def set_mcx_feeder(self, feeder) -> None:
         """Dedicated Upstox2 feeder for MCX option subscriptions (CrudeOil/Gold)."""
         self._mcx_feeder = feeder

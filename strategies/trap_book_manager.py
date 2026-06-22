@@ -166,12 +166,12 @@ class TrapBookManager:
 
     async def set_expiry_mode(self, client_id: str, binding_id: str, underlying: str,
                                expiry_mode: str) -> None:
-        """Signal that expiry_mode changed — reconcile will detect mismatch and re-spawn.
-        Do NOT set eng._expiry_mode here; that would hide the change from the reconcile loop."""
+        """Hot-apply expiry mode — calls engine.set_expiry_mode() which resets init state."""
         key = (client_id, binding_id, underlying.upper())
         eng = self._books.get(key)
-        if eng is not None:
-            logger.info("TrapBookManager: expiry_mode change queued for %s/%s/%s → %s (re-spawn on next reconcile)",
+        if eng is not None and hasattr(eng, "set_expiry_mode"):
+            eng.set_expiry_mode(expiry_mode)
+            logger.info("TrapBookManager: expiry_mode applied for %s/%s/%s → %s",
                         client_id, binding_id, underlying, expiry_mode)
 
     async def stop_async(self) -> None:
