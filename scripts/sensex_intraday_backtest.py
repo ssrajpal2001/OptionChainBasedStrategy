@@ -1064,12 +1064,7 @@ def run_backtest_3level_ui(
         ce_allowed = True
         pe_allowed = True
 
-        if gap_bias and gap_fired:
-            # Gap day: direction determines which side to trade
-            ce_allowed = (gap_dir == "UP")
-            pe_allowed = (gap_dir == "DOWN")
-            bias_src = f"GAP_BIAS({gap_dir})"
-        elif spot_bias:
+        if spot_bias:
             # No gap (or gap_bias off): use spot zone bias
             _cached = spot_bar_cache.get(dt)
             spot_df = _cached if _cached is not None else _get_bars(SPOT_KEY, dt)
@@ -1078,7 +1073,7 @@ def run_backtest_3level_ui(
             )
             bias_src = f"SPOT_BIAS(ce={ce_allowed},pe={pe_allowed})"
         else:
-            bias_src = "NO_BIAS"
+            bias_src = "NO_BIAS(both allowed)"
 
         debug_log.append(f"{dt}: {day_label} | {bias_src} | CE={day_ce_key} PE={day_pe_key}")
 

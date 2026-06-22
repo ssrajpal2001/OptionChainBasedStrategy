@@ -188,10 +188,7 @@
         <!-- Bias toggles -->
         <div class="mb-3">
           <p class="sec-label mb-2">Bias Filters</p>
-          <label class="flex items-center gap-2 text-xs text-t-muted mb-2 cursor-pointer">
-            <input type="checkbox" x-model="gapBias" class="accent-[var(--t-cyan)]" />
-            <span>Gap Bias — GAP UP=CE only, GAP DOWN=PE only</span>
-          </label>
+          <p class="text-xs text-t-muted mb-2">Gap direction affects strike selection only (ATM±offset). Side filter is always spot zone.</p>
           <label class="flex items-center gap-2 text-xs text-t-muted cursor-pointer">
             <input type="checkbox" x-model="spotBias" class="accent-[var(--t-cyan)]" />
             <span>Spot Bias — BEAR spot zone=CE, BULL spot zone=PE</span>
