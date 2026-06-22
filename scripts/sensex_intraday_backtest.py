@@ -784,6 +784,9 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
     t1_ts  = None
     t1_pnl_rs = 0.0
     trailing_sl = sl
+    lock_5k_pts   = 5000.0 / qty_total   # pts gain per unit that = ₹5,000 on full position
+    lock_5k_price = entry_price + lock_5k_pts   # SL steps here once gain crosses ₹5,000
+    lock_5k_done  = False
 
     # Pre-compute post-entry 5m zones for TSL step-up
     tsl_zones = []   # list of (sl_level, new_tsl) sorted by formed_ts
@@ -842,6 +845,11 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
             return {"exit_ts": ts, "exit_price": ep,
                     "pnl_pts": round(avg_pts, 2),
                     "pnl_rs": round(total_rs, 0), "reason": "T1+ROTATED"}
+
+        # ₹5,000 minimum lock: once gain crosses ₹5,000, floor SL at that level
+        if not lock_5k_done and hi >= lock_5k_price:
+            lock_5k_done = True
+            trailing_sl  = max(trailing_sl, lock_5k_price)
 
         # TSL step-up check: did price touch a post-entry 5m zone's sl_level?
         if df5m is not None:
@@ -1363,9 +1371,7 @@ def run_backtest_3level_ui(
                     sl_dist  = ep - sl
                     # R:R gate (scanner.py pattern): (T1-entry)/(entry-SL) >= 0.5
                     if opp_dist > 10 and sl_dist > 0 and (opp_dist / sl_dist) >= 0.5:
-                        qty_total = lots * LOT_SIZE
-                        cap_pts   = 5000.0 / qty_total   # ₹5,000 cap per trade
-                        t1 = min(ep + opp_dist, ep + cap_pts)
+                        t1 = ep + opp_dist   # no cap — T1 is the full distance
                     # else: R:R too poor → keep zone T1
 
             ext_75m = [z for z in sd.get("z75_pool", []) if z["sl_level"] > t1]
