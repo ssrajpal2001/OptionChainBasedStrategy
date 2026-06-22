@@ -390,9 +390,10 @@ def _simulate_trade(entry: dict,
             eod_exit_ts = bar_ts
             break
 
-        if float(bar["low"]) <= sl_price:
+        # Live engine: 1m CLOSE below SL triggers exit (not intrabar LOW dip)
+        if float(bar["close"]) <= sl_price:
             sl_hit     = True
-            sl_exit_px = sl_price
+            sl_exit_px = round(float(bar["close"]), 2)
             sl_exit_ts = bar_ts
             break
 
@@ -446,8 +447,9 @@ def _simulate_trade(entry: dict,
             trail_sl = round(bar_close - trail_pts, 2)
 
         # TSL hit
-        if bar_low <= trail_sl:
-            tsl_exit_px = trail_sl
+        # Live engine: exit on close below trail_sl (not intrabar low dip)
+        if bar_close <= trail_sl:
+            tsl_exit_px = round(bar_close, 2)
             tsl_exit_ts = bar_ts
             tsl_reason  = "TSL"
             break
