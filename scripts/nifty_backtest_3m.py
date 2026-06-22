@@ -124,11 +124,12 @@ def _scan_htf_bull(df: pd.DataFrame) -> list:
     return zones
 
 
-def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date) -> list:
+def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date,
+                     lookback_days: int = 3) -> list:
     """
-    For no-gap days: scan SPOT HTF zones to determine allowed sides.
-    BEAR zone TRAPPED/CLOSED → sellers trapped → CE (spot going UP)
-    BULL zone TRAPPED/CLOSED → buyers trapped → PE (spot going DOWN)
+    For no-gap days: scan SPOT HTF zones confirmed within last `lookback_days` days.
+    BEAR zone TRAPPED/CLOSED recently → sellers trapped → CE (spot going UP)
+    BULL zone TRAPPED/CLOSED recently → buyers trapped → PE (spot going DOWN)
     Returns list of allowed sides e.g. ["CE"], ["PE"], ["CE","PE"]
     """
     df_prior = df_spot_all[df_spot_all["datetime"].dt.date <= td]
@@ -138,35 +139,37 @@ def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date) -> list:
     if len(df_htf) < 2:
         return ["CE", "PE"]
 
+    cutoff = td - timedelta(days=lookback_days)
     allowed = []
 
-    # BEAR zone TRAPPED/CLOSED → sellers trapped → CE
-    _, bear_zones = scan_htf(df_htf)
-    for z in bear_zones:
-        if z.get("status") in ("TRAPPED", "CLOSED"):
-            ct = z.get("closed_on") or z.get("trapped_on")
-            if ct is not None:
-                try:
-                    ct_date = pd.Timestamp(str(ct)).date()
-                except Exception:
-                    ct_date = None
-                if ct_date and ct_date <= td:
-                    allowed.append("CE")
-                    break
+    def _recent(z) -> bool:
+        ct = z.get("closed_on") or z.get("trapped_on")
+        if ct is None:
+            return False
+        try:
+            ct_date = pd.Timestamp(str(ct)).date()
+        except Exception:
+            return False
+        return cutoff <= ct_date <= td
 
-    # BULL zone TRAPPED/CLOSED → buyers trapped → PE
+    # BEAR zone TRAPPED/CLOSED recently → sellers trapped → CE
+    _, bear_zones = scan_htf(df_htf)
+    # sort newest first (most recent confirmation wins)
+    bear_recent = sorted(
+        [z for z in bear_zones if z.get("status") in ("TRAPPED", "CLOSED") and _recent(z)],
+        key=lambda z: z.get("closed_on") or z.get("trapped_on") or "", reverse=True
+    )
+    if bear_recent:
+        allowed.append("CE")
+
+    # BULL zone TRAPPED/CLOSED recently → buyers trapped → PE
     bull_zones = _scan_htf_bull(df_htf)
-    for z in bull_zones:
-        if z.get("status") in ("TRAPPED", "CLOSED"):
-            ct = z.get("closed_on") or z.get("trapped_on")
-            if ct is not None:
-                try:
-                    ct_date = pd.Timestamp(str(ct)).date()
-                except Exception:
-                    ct_date = None
-                if ct_date and ct_date <= td:
-                    allowed.append("PE")
-                    break
+    bull_recent = sorted(
+        [z for z in bull_zones if z.get("status") in ("TRAPPED", "CLOSED") and _recent(z)],
+        key=lambda z: z.get("closed_on") or z.get("trapped_on") or "", reverse=True
+    )
+    if bull_recent:
+        allowed.append("PE")
 
     return allowed if allowed else ["CE", "PE"]
 
