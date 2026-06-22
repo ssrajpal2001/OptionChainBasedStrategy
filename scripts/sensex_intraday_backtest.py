@@ -356,13 +356,21 @@ def _run_day(dt: date, token: str, lots: int,
             if entry_ts >= no_new_entry:
                 continue
 
-            # Guard 1: entry must still be inside or just above zone (not overshot)
-            zone_range = best_zone["zone_high"] - best_zone["zone_low"]
-            max_entry  = best_zone["zone_high"] + zone_range * 0.1   # allow 10% overshoot
-            if entry_price > max_entry:
-                continue   # entered too late, price already far above zone
-            # Guard 2: meaningful reward remaining to target
-            if best_zone["target"] - entry_price < MIN_REWARD:
+            sl     = best_zone["sl"]
+            target = best_zone["target"]
+
+            # Guard 1: entry must be strictly inside zone (no overshoot allowed)
+            if entry_price > best_zone["zone_high"]:
+                continue
+
+            # Guard 2: entry must not be at or below SL (would be instant loss)
+            if entry_price <= sl + 5:
+                continue
+
+            # Guard 3: minimum R:R ratio of 1.5 — don't take poor-odds trades
+            risk   = entry_price - sl
+            reward = target - entry_price
+            if risk <= 0 or reward / risk < 1.5:
                 continue
 
             qty      = lots * LOT_SIZE
@@ -373,8 +381,8 @@ def _run_day(dt: date, token: str, lots: int,
                 "key":      key,
                 "entry_ts": entry_ts,
                 "entry":    entry_price,
-                "sl":       best_zone["sl"],
-                "target":   best_zone["target"],
+                "sl":       sl,
+                "target":   target,
                 "qty":      qty,
                 "htf_zone": f"{best_zone['zone_low']}→{best_zone['zone_high']}",
             }
