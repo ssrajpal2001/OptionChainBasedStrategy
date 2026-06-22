@@ -176,7 +176,8 @@ class TrapScannerEngine:
         # Profit floor: lock ₹N once total P&L (T1+remainder) hits it.
         # If P&L drops back below floor → exit immediately at that tick. 0 = disabled.
         self._profit_floor  = float(_adm.get("profit_floor", 0.0))
-        self._next_week_exp = bool(_adm.get("next_week_expiry", False))
+        self._next_week_exp  = bool(_adm.get("next_week_expiry", False))
+        self._monthly_exp    = bool(_adm.get("monthly_expiry", False))
         # No-Target-TSL mode: skip T1 half-exit and TSL; floor locks from total P&L directly.
         # Exit only on: SL, OPP_SIGNAL (opposite side), Floor breach, EOD.
         self._no_target_tsl = bool(_adm.get("no_target_tsl", False))
@@ -2663,6 +2664,21 @@ class TrapScannerEngine:
         try:
             from data_layer.instrument_registry import REGISTRY
             if REGISTRY.is_loaded(self._und):
+                if self._monthly_exp:
+                    # Monthly expiry = last expiry of its calendar month in REGISTRY
+                    all_exp = sorted(REGISTRY.all_expiries(self._und))
+                    today = date.today()
+                    future = [e for e in all_exp if e >= today]
+                    exp_date = None
+                    for i, exp in enumerate(future):
+                        if i + 1 >= len(future) or future[i + 1].month != exp.month:
+                            exp_date = exp
+                            break
+                    if exp_date is not None:
+                        exp_str = exp_date.strftime("%d%b%y").upper()
+                        self._log.info("_get_expiry %s → MONTHLY: %s (%s)", self._und, exp_str, exp_date)
+                        return exp_str, exp_date
+                    self._log.warning("_get_expiry %s → MONTHLY requested but no monthly expiry found in REGISTRY", self._und)
                 exp_date = REGISTRY.get_active_expiry(self._und)
                 if exp_date is not None:
                     if self._next_week_exp:
