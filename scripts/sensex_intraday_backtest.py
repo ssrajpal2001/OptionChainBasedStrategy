@@ -640,12 +640,17 @@ def run_backtest_ui(
         equity.append({"date": t["date"], "cum_pnl": round(cum, 0)})
         ets = t["entry_ts"]
         xts = t["exit_ts"]
+        def _fmt(ts):
+            if hasattr(ts, "strftime"):
+                return ts.strftime("%H:%M")
+            s = str(ts)
+            return s[11:16] if len(s) > 15 else s
         trades_out.append({
             "date":       t["date"],
             "side":       t["side"],
             "strike":     int(t["strike"]),
-            "entry_time": ets.strftime("%H:%M") if hasattr(ets, "strftime") else str(ets),
-            "exit_time":  xts.strftime("%H:%M") if hasattr(xts, "strftime") else str(xts),
+            "entry_time": _fmt(ets),
+            "exit_time":  _fmt(xts),
             "entry":      round(float(t["entry"]), 1),
             "exit":       round(float(t["exit_price"]), 1),
             "pnl_pts":    round(float(t["pnl_pts"]), 1),
