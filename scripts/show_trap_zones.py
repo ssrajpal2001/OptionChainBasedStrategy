@@ -327,16 +327,63 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
     df_htf = _resample(htf_source, htf_min)
     _, htf_entries = scan_htf(df_htf)
 
+    def _bar_ohlcv(df: pd.DataFrame, ts) -> dict:
+        """Return OHLCV dict for the bar whose datetime matches ts."""
+        if ts is None:
+            return {}
+        try:
+            row = df[df["datetime"] == pd.Timestamp(str(ts))]
+            if row.empty:
+                return {}
+            r = row.iloc[0]
+            return {"o": round(float(r["open"]),2), "h": round(float(r["high"]),2),
+                    "l": round(float(r["low"]),2),  "c": round(float(r["close"]),2)}
+        except Exception:
+            return {}
+
+    def _first_enter_bar(df: pd.DataFrame, zone_high: float, zone_low: float) -> str:
+        """Find first bar where price enters the zone band (high >= zone_low and low <= zone_high)."""
+        try:
+            mask = (df["high"] >= zone_low) & (df["low"] <= zone_high)
+            rows = df[mask]
+            if not rows.empty:
+                return _hhmm(rows.iloc[0]["datetime"])
+        except Exception:
+            pass
+        return "-"
+
+    df5m_all = _resample(df_opt_today, 5)
+
     out_zones = []
     for e in htf_entries:
         if e["status"] not in ("TRAPPED", "CLOSED", "ACTIVE"):
             continue
-        df5m = _resample(df_opt_today, 5)
+
+        # HTF ref candle and next candle OHLCV
+        ref_ts  = e.get("ref_ts")
+        htf_ref_ohlcv  = _bar_ohlcv(df_htf, ref_ts)
+        # next bar after ref = the bar that made the zone_low
+        try:
+            ref_idx = df_htf[df_htf["datetime"] == pd.Timestamp(str(ref_ts))].index[0]
+            next_bar = df_htf.iloc[ref_idx + 1] if ref_idx + 1 < len(df_htf) else None
+            htf_curr_ohlcv = {"o": round(float(next_bar["open"]),2),
+                               "h": round(float(next_bar["high"]),2),
+                               "l": round(float(next_bar["low"]),2),
+                               "c": round(float(next_bar["close"]),2)} if next_bar is not None else {}
+            htf_curr_ts = _hhmm(next_bar["datetime"]) if next_bar is not None else "-"
+        except Exception:
+            htf_curr_ohlcv = {}
+            htf_curr_ts = "-"
+
+        htf_trapped_ohlcv = _bar_ohlcv(df_htf, e.get("trapped_on"))
+        htf_closed_ohlcv  = _bar_ohlcv(df_htf, e.get("closed_on"))
+        htf_zone_enter    = _first_enter_bar(df5m_all, e["zone_high"], e["zone_low"])
+
         if e.get("trapped_on") is not None:
             trap_ts    = pd.Timestamp(str(e["trapped_on"]))
-            df5m_after = df5m[df5m["datetime"] >= trap_ts].copy().reset_index(drop=True)
+            df5m_after = df5m_all[df5m_all["datetime"] >= trap_ts].copy().reset_index(drop=True)
         else:
-            df5m_after = df5m.copy()
+            df5m_after = df5m_all.copy()
 
         _, ltf_entries = scan_ltf(
             df5m_after,
@@ -348,21 +395,38 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
 
         ltf_out = []
         for l in ltf_entries:
+            l_ref_ohlcv     = _bar_ohlcv(df5m_all, l.get("ref_ts"))
+            l_trapped_ohlcv = _bar_ohlcv(df5m_all, l.get("trapped_on"))
+            l_closed_ohlcv  = _bar_ohlcv(df5m_all, l.get("closed_on"))
+            # next bar after ltf ref
+            try:
+                lr_idx = df5m_all[df5m_all["datetime"] == pd.Timestamp(str(l.get("ref_ts")))].index[0]
+                l_next = df5m_all.iloc[lr_idx + 1] if lr_idx + 1 < len(df5m_all) else None
+                l_curr_ohlcv = {"o": round(float(l_next["open"]),2),
+                                "h": round(float(l_next["high"]),2),
+                                "l": round(float(l_next["low"]),2),
+                                "c": round(float(l_next["close"]),2)} if l_next is not None else {}
+                l_curr_ts = _hhmm(l_next["datetime"]) if l_next is not None else "-"
+            except Exception:
+                l_curr_ohlcv = {}
+                l_curr_ts = "-"
+
             entry_signal = None
             if l["status"] == "CLOSED":
                 ep  = round(l["zone_trigger"], 2)
                 sl  = round(l["zone_low"] - 2.0, 2)
                 t1  = round(l["sl"], 2)
                 rr  = round((t1 - ep) / max(ep - sl, 0.01), 2)
-                entry_signal = {"entry": ep, "sl": sl, "t1": t1, "rr": rr,
-                                "htf_t1": round(e["sl"], 2),
-                                "ltf_ref":     _hhmm(l.get("ref_ts")),
-                                "ltf_trapped": _hhmm(l.get("trapped_on")),
-                                "ltf_closed":  _hhmm(l.get("closed_on")),
-                                "htf_ref":     _hhmm(e.get("ref_ts")),
-                                "htf_trapped": _hhmm(e.get("trapped_on")),
-                                "htf_closed":  _hhmm(e.get("closed_on")),
-                                }
+                entry_signal = {
+                    "entry": ep, "sl": sl, "t1": t1, "rr": rr,
+                    "htf_t1":      round(e["sl"], 2),
+                    "ltf_ref":     _hhmm(l.get("ref_ts")),
+                    "ltf_trapped": _hhmm(l.get("trapped_on")),
+                    "ltf_closed":  _hhmm(l.get("closed_on")),
+                    "htf_ref":     _hhmm(e.get("ref_ts")),
+                    "htf_trapped": _hhmm(e.get("trapped_on")),
+                    "htf_closed":  _hhmm(e.get("closed_on")),
+                }
             ltf_out.append({
                 "status":     l["status"],
                 "zone_high":  round(l["zone_high"],    2),
@@ -370,8 +434,14 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
                 "zone_trig":  round(l["zone_trigger"], 2),
                 "sl_level":   round(l["sl"],           2),
                 "ref_bar":    _hhmm(l.get("ref_ts")),
+                "curr_bar":   l_curr_ts,
                 "trapped_at": _hhmm(l.get("trapped_on")),
                 "closed_at":  _hhmm(l.get("closed_on")),
+                # raw OHLCV
+                "ref_ohlcv":     l_ref_ohlcv,
+                "curr_ohlcv":    l_curr_ohlcv,
+                "trapped_ohlcv": l_trapped_ohlcv,
+                "closed_ohlcv":  l_closed_ohlcv,
                 "entry_signal": entry_signal,
             })
 
@@ -382,8 +452,15 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
             "zone_trig":  round(e["zone_trigger"], 2),
             "sl_level":   round(e["sl"],           2),
             "ref_bar":    _hhmm(e.get("ref_ts")),
+            "curr_bar":   htf_curr_ts,
             "trapped_at": _hhmm(e.get("trapped_on")),
             "closed_at":  _hhmm(e.get("closed_on")),
+            "zone_entered_5m": htf_zone_enter,   # first 5m bar price entered HTF zone band
+            # raw OHLCV for each lifecycle stage
+            "ref_ohlcv":     htf_ref_ohlcv,
+            "curr_ohlcv":    htf_curr_ohlcv,
+            "trapped_ohlcv": htf_trapped_ohlcv,
+            "closed_ohlcv":  htf_closed_ohlcv,
             "ltf_zones":  ltf_out,
             "entry_signals": [l["entry_signal"] for l in ltf_out if l["entry_signal"]],
         })
