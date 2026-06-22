@@ -177,10 +177,10 @@ def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date,
 # ── HTF zone scan ──────────────────────────────────────────────────────────────
 
 def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date,
-                         zone_lookback_days: int = 5) -> list:
+                         zone_lookback_days: int = 2) -> list:
     """
-    Run HTF scan on recent bars only (last zone_lookback_days calendar days).
-    Using all history gives 50+ stale zones; recent-only gives 2-3 relevant ones.
+    Run HTF scan on yesterday+today bars only (2 calendar days).
+    Older bars have different premium levels → produce stale irrelevant zones.
     """
     if df_all.empty:
         return []
