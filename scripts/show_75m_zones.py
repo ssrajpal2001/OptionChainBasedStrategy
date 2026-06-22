@@ -67,12 +67,13 @@ def find_zones(htf: pd.DataFrame) -> list:
         c1 = htf.iloc[i+1]
         if float(c1["low"]) >= float(c0["low"]):
             continue
-        zone_high = float(c0["low"])
-        zone_low  = float(c1["low"])
-        # Check subsequent candles for SL hit (high >= zone_high)
+        zone_high = float(c0["low"])    # where sellers entered
+        zone_low  = float(c1["low"])    # bottom of breach
+        sl_level  = float(c0["high"])   # sellers' actual SL = HIGH of c0
+        # SL hit = subsequent candle HIGH >= c0.HIGH (not just c0.LOW)
         sl_hit_ts = None
         for j in range(i + 2, len(htf)):
-            if float(htf.iloc[j]["high"]) >= zone_high:
+            if float(htf.iloc[j]["high"]) >= sl_level:
                 sl_hit_ts = htf.iloc[j]["ts"]
                 break
         if sl_hit_ts is None:
@@ -82,6 +83,7 @@ def find_zones(htf: pd.DataFrame) -> list:
             "candle_1_ts":  c1["ts"],
             "zone_high":    zone_high,
             "zone_low":     zone_low,
+            "sl_level":     sl_level,
             "range":        round(zone_high - zone_low, 1),
             "sl_hit_ts":    sl_hit_ts,
         })
@@ -124,15 +126,16 @@ def find_15m_zones_inside(df1m: pd.DataFrame, z75: dict) -> list:
         c1 = mtf.iloc[i+1]
         if float(c1["low"]) >= float(c0["low"]):
             continue
-        zh = float(c0["low"])
-        zl = float(c1["low"])
+        zh       = float(c0["low"])    # where sellers entered
+        zl       = float(c1["low"])    # bottom of breach
+        sl_level = float(c0["high"])   # sellers' actual SL = HIGH of c0
         # Must be inside the 75m zone price range
         if zl < z75["zone_low"] or zh > z75["zone_high"]:
             continue
-        # SL must be hit: subsequent 15m candle high >= zone_high
+        # SL hit = subsequent 15m candle HIGH >= c0.HIGH
         sl_hit_ts = None
         for j in range(i + 2, len(mtf)):
-            if float(mtf.iloc[j]["high"]) >= zh:
+            if float(mtf.iloc[j]["high"]) >= sl_level:
                 sl_hit_ts = mtf.iloc[j]["ts"]
                 break
         if sl_hit_ts is None:
@@ -141,6 +144,7 @@ def find_15m_zones_inside(df1m: pd.DataFrame, z75: dict) -> list:
             "ts":         c0["ts"],
             "zone_high":  zh,
             "zone_low":   zl,
+            "sl_level":   sl_level,
             "range":      round(zh - zl, 1),
             "sl_hit_ts":  sl_hit_ts,
         })
@@ -230,13 +234,13 @@ def main():
                 t0 = z["candle_0_ts"].strftime("%H:%M")
                 t1 = z["candle_1_ts"].strftime("%H:%M")
                 sl_t = z["sl_hit_ts"].strftime("%H:%M")
-                print(f"\n  75m [{t0}→{t1}]  zone_high={z['zone_high']:.1f}  zone_low={z['zone_low']:.1f}  range={z['range']:.1f}pts  SL_hit={sl_t}")
+                print(f"\n  75m [{t0}→{t1}]  zone_high={z['zone_high']:.1f}  zone_low={z['zone_low']:.1f}  sl_level={z['sl_level']:.1f}  SL_hit@{sl_t}")
                 zones_15 = find_15m_zones_inside(df1m, z)
                 if zones_15:
                     for z15 in zones_15:
                         t15    = z15["ts"].strftime("%H:%M")
                         sl15_t = z15["sl_hit_ts"].strftime("%H:%M")
-                        print(f"    └─ 15m [{t15}]  zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  range={z15['range']:.1f}pts  SL_hit={sl15_t}")
+                        print(f"    └─ 15m [{t15}]  zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  sl_level={z15['sl_level']:.1f}  SL_hit@{sl15_t}")
                 else:
                     print(f"    └─ No valid 15m zone (SL not hit) inside this 75m zone")
         else:
