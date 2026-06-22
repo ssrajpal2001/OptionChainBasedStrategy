@@ -828,6 +828,21 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                     "pnl_pts": round(avg_pts, 2),
                     "pnl_rs": round(total_rs, 0), "reason": "T1+EOD"}
 
+        # Rotation: opposite side entry fired → exit this trade now
+        if opp_entry_ts is not None and ts >= opp_entry_ts:
+            ep = float(bar["open"])
+            if not t1_hit:
+                pnl_pts = ep - entry_price
+                return {"exit_ts": ts, "exit_price": ep,
+                        "pnl_pts": round(pnl_pts, 2),
+                        "pnl_rs": round(pnl_pts * qty_total, 0), "reason": "ROTATED"}
+            rest_pnl_pts = ep - entry_price
+            total_rs = t1_pnl_rs + rest_pnl_pts * qty_rest
+            avg_pts  = total_rs / qty_total
+            return {"exit_ts": ts, "exit_price": ep,
+                    "pnl_pts": round(avg_pts, 2),
+                    "pnl_rs": round(total_rs, 0), "reason": "T1+ROTATED"}
+
         # TSL step-up check: did price touch a post-entry 5m zone's sl_level?
         if df5m is not None:
             trailing_sl = _check_tsl_stepup(hi, trailing_sl)
@@ -1319,65 +1334,103 @@ def run_backtest_3level_ui(
                                               cutoff=cutoff, skip_15m=skip_15m,
                                               t1_from_75m=t1_from_75m,
                                               no_cascade=no_cascade)
-            side_data[side] = {"df1m": df1m, "df5m": df5m_opt, "entries": entries}
+            side_data[side] = {"df1m": df1m, "df5m": df5m_opt, "entries": entries, "z75_pool": z75_pool}
 
-        for side, scan_key, allowed in [
-            ("CE", day_ce_key, ce_allowed),
-            ("PE", day_pe_key, pe_allowed),
-        ]:
-            if side not in side_data:
+        # ── Rotation-aware execution: one active trade at a time ─────────────────
+        # Gather first entry from each side, pick earliest, rotate on opp signal
+        pending: list = []
+        key_map = {"CE": day_ce_key, "PE": day_pe_key}
+        for side, sd in side_data.items():
+            if sd["entries"]:
+                e = sd["entries"][0]
+                pending.append((e["entry_ts"], side, e, sd))
+        pending.sort(key=lambda x: x[0])
+
+        active_until = None   # after a trade exits, next trade cannot start before this ts
+
+        for i, (ets, side, e, sd) in enumerate(pending):
+            # Skip if this entry is before previous trade finished
+            if active_until is not None and ets < active_until:
                 continue
-            sd = side_data[side]
+
+            scan_key  = key_map[side]
             df1m      = sd["df1m"]
             df5m_opt  = sd["df5m"]
-            entries   = sd["entries"]
+            opp_side  = "PE" if side == "CE" else "CE"
+            opp_sd    = side_data.get(opp_side)
 
-            # Opposite-side R:R T1: distance from opp current LTP to opp entry zone
-            opp_side = "PE" if side == "CE" else "CE"
-            opp_sd   = side_data.get(opp_side)
+            ep = e["entry_price"]
+            sl = round(e["sl"] - sl_buf, 2)
+            sl = min(sl, ep - 50.0)
+            t1 = e["t1"]
 
-            for e in entries:
-                ep   = e["entry_price"]
-                sl   = round(e["sl"] - sl_buf, 2)
-                sl   = min(sl, ep - 50.0)
-                t1   = e["t1"]   # default: zone T1
+            # Opposite-side T1 distance
+            opp_entry_ts_val = None
+            if opp_sd and opp_sd["entries"]:
+                opp_e = opp_sd["entries"][0]
+                opp_entry_ts_val = opp_e["entry_ts"]
+                opp_df  = opp_sd["df1m"]
+                opp_row = opp_df[opp_df["ts"] <= ets]
+                if not opp_row.empty:
+                    opp_ltp  = float(opp_row.iloc[-1]["close"])
+                    opp_dist = opp_ltp - opp_e["entry_price"]
+                    if opp_dist > 10:
+                        t1 = ep + opp_dist
 
-                # Opposite-side T1: distance = opp_ltp - opp_entry_zone at our entry time
-                opp_entry_ts_val = None
-                if opp_sd and opp_sd["entries"]:
-                    opp_entry_zone = opp_sd["entries"][0]["entry_price"]
-                    opp_entry_ts_val = opp_sd["entries"][0]["entry_ts"]
-                    opp_df = opp_sd["df1m"]
-                    opp_row = opp_df[opp_df["ts"] <= e["entry_ts"]]
-                    if not opp_row.empty:
-                        opp_ltp = float(opp_row.iloc[-1]["close"])
-                        opp_dist = opp_ltp - opp_entry_zone
-                        if opp_dist > 10:
-                            t1 = ep + opp_dist
+            ext_75m = [z for z in sd.get("z75_pool", []) if z["sl_level"] > t1]
 
-                # 75m zones above T1 for T1 extension when opp side hasn't entered
-                ext_75m = [z for z in z75_pool if z["sl_level"] > t1]
+            exit_info = _simulate_exit(df1m, ets, ep, sl, t1,
+                                       sq_off, LOT_SIZE, lots, df5m=df5m_opt,
+                                       opp_entry_ts=opp_entry_ts_val,
+                                       ext_75m_zones=ext_75m)
+            active_until = exit_info["exit_ts"]
 
-                exit_info = _simulate_exit(df1m, e["entry_ts"], ep, sl, t1,
-                                           sq_off, LOT_SIZE, lots, df5m=df5m_opt,
-                                           opp_entry_ts=opp_entry_ts_val,
-                                           ext_75m_zones=ext_75m)
+            all_trades.append({
+                "date":       dt.isoformat(),
+                "side":       side,
+                "strike":     scan_key.split("|")[-1],
+                "key":        scan_key,
+                "entry_ts":   ets,
+                "entry":      round(ep, 2),
+                "sl":         sl,
+                "t1":         t1,
+                "exit_price": exit_info["exit_price"],
+                "exit_ts":    exit_info["exit_ts"],
+                "pnl_pts":    exit_info["pnl_pts"],
+                "pnl_rs":     exit_info["pnl_rs"],
+                "reason":     exit_info["reason"],
+                "htf_zone":   e["zone_label"],
+            })
+
+            # If rotation: opposite side may now start after this exit
+            if exit_info["reason"] == "ROTATED" and opp_sd and opp_sd["entries"]:
+                opp_e2   = opp_sd["entries"][0]
+                opp_key2 = key_map[opp_side]
+                opp_ep   = opp_e2["entry_price"]
+                opp_sl   = round(opp_e2["sl"] - sl_buf, 2)
+                opp_sl   = min(opp_sl, opp_ep - 50.0)
+                opp_t1   = opp_e2["t1"]
+                opp_exit = _simulate_exit(opp_sd["df1m"], opp_e2["entry_ts"],
+                                          opp_ep, opp_sl, opp_t1,
+                                          sq_off, LOT_SIZE, lots,
+                                          df5m=opp_sd["df5m"])
                 all_trades.append({
                     "date":       dt.isoformat(),
-                    "side":       side,
-                    "strike":     scan_key.split("|")[-1],
-                    "key":        scan_key,
-                    "entry_ts":   e["entry_ts"],
-                    "entry":      round(ep, 2),
-                    "sl":         sl,
-                    "t1":         t1,
-                    "exit_price": exit_info["exit_price"],
-                    "exit_ts":    exit_info["exit_ts"],
-                    "pnl_pts":    exit_info["pnl_pts"],
-                    "pnl_rs":     exit_info["pnl_rs"],
-                    "reason":     exit_info["reason"],
-                    "htf_zone":   e["zone_label"],
+                    "side":       opp_side,
+                    "strike":     opp_key2.split("|")[-1],
+                    "key":        opp_key2,
+                    "entry_ts":   opp_e2["entry_ts"],
+                    "entry":      round(opp_ep, 2),
+                    "sl":         opp_sl,
+                    "t1":         opp_t1,
+                    "exit_price": opp_exit["exit_price"],
+                    "exit_ts":    opp_exit["exit_ts"],
+                    "pnl_pts":    opp_exit["pnl_pts"],
+                    "pnl_rs":     opp_exit["pnl_rs"],
+                    "reason":     opp_exit["reason"],
+                    "htf_zone":   opp_e2["zone_label"],
                 })
+                break   # only one rotation per day
 
     if not all_trades:
         return {"ok": True, "trades": [], "summary": {}, "equity": [], "debug": debug_log}
