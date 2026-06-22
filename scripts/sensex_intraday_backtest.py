@@ -1068,7 +1068,8 @@ def run_backtest_3level_ui(
             bias_src = f"GAP_BIAS({gap_dir})"
         elif spot_bias:
             # No gap (or gap_bias off): use spot zone bias
-            spot_df = spot_bar_cache.get(dt) or _get_bars(SPOT_KEY, dt)
+            _cached = spot_bar_cache.get(dt)
+            spot_df = _cached if _cached is not None else _get_bars(SPOT_KEY, dt)
             ce_allowed, pe_allowed = _spot_bias(
                 spot_df, spot_bear_pool, spot_bull_pool, pd.Timestamp(dt)
             )
