@@ -800,13 +800,15 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                     "activated":  False,
                 })
 
-    def _check_tsl_stepup(hi: float) -> None:
+    def _check_tsl_stepup(hi: float, current_sl: float) -> float:
+        """Returns updated trailing_sl after checking all post-entry zone triggers."""
+        new_sl = current_sl
         for tz in tsl_zones:
             if not tz["activated"] and hi >= tz["sl_trigger"]:
                 tz["activated"] = True
-                if tz["new_tsl"] > trailing_sl:
-                    nonlocal trailing_sl
-                    trailing_sl = tz["new_tsl"]
+                if tz["new_tsl"] > new_sl:
+                    new_sl = tz["new_tsl"]
+        return new_sl
 
     for _, bar in future.iterrows():
         ts   = bar["ts"]
@@ -838,7 +840,7 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
 
         # TSL step-up check: did price touch a post-entry 5m zone's sl_level?
         if df5m is not None:
-            _check_tsl_stepup(hi)
+            trailing_sl = _check_tsl_stepup(hi, trailing_sl)
 
         if lo <= trailing_sl:
             if not t1_hit:
