@@ -374,6 +374,10 @@ def _run_day(index: str, cfg: dict, td: date,
                 print(f"  {today_str} {opt_type} fetch error: {exc}")
                 continue
 
+        if df_raw.empty or "datetime" not in df_raw.columns:
+            print(f"  {today_str} {opt_type}: no bars for key={key}")
+            continue
+
         df_all   = _mkt_hours(df_raw)
         df_today = df_all[df_all["datetime"].dt.date == td].copy().reset_index(drop=True)
         if df_today.empty:
