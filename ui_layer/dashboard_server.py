@@ -851,6 +851,8 @@ class DashboardServer:
             fixed_pe   = int(p.get("fixed_pe", 0))
             skip_15m   = bool(p.get("skip_15m", False))
             skip_75m   = bool(p.get("skip_75m", False))
+            no_cascade = bool(p.get("no_cascade", False))
+            t1_from_75m = bool(p.get("t1_from_75m", False))
             from_date_s = str(p.get("from_date", ""))
             from_date_obj = None
             if from_date_s:
@@ -867,6 +869,7 @@ class DashboardServer:
                     run_backtest_3level_ui, token, days, lots,
                     sl_buf, sq_off, cutoff, pool_days, ce_key, pe_key,
                     spot_bias, monthly, fixed_ce, fixed_pe, from_date_obj, skip_15m, skip_75m,
+                    no_cascade, t1_from_75m,
                 )
                 return result
             except Exception as exc:

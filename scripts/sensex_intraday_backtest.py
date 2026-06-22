@@ -871,7 +871,9 @@ def _spot_bias(spot_df: pd.DataFrame, spot_bear_pool: list, spot_bull_pool: list
 def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
                              cutoff: str = "14:30",
                              side_allowed: str = "BOTH",
-                             skip_15m: bool = False) -> list:
+                             skip_15m: bool = False,
+                             t1_from_75m: bool = False,
+                             no_cascade: bool = False) -> list:
     """
     Run zone hierarchy on one day's option 1m bars.
     skip_15m=False (default): 75m → 15m → 5m (3-level)
@@ -946,13 +948,23 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
         used_75 = True
         mode_label[0] = f"75m {z75['zone_high']:.0f}→{z75['zone_low']:.0f} → "
 
-        z75_sl = z75["zone_low"]   # SL anchor = 75m zone_low for ALL entries via this zone
+        z75_sl = z75["zone_low"]        # SL = 75m zone_low always
+        z75_t1 = z75["sl_level"] if t1_from_75m else None  # T1 = 75m sl_level when toggled
+
+        def _scan_with_t1(low_bound, high_bound, from_ts, label_prefix, sl_ov=None):
+            zones_5 = [z for z in detect_zones(ltf_5)
+                       if z["zone_high"] >= low_bound
+                       and z["zone_high"] <= high_bound
+                       and z["formed_ts"] >= from_ts]
+            for z5 in zones_5:
+                sl = sl_ov if sl_ov is not None else z5["zone_low"]
+                t1 = z75_t1 if z75_t1 is not None else z5["sl_level"]
+                _add_5m_entry(z5, sl, t1, label_prefix)
+
         if skip_15m:
-            # 2-level: scan 5m zones inside the 75m zone, SL = 75m zone_low
-            _scan_5m_in_range(z75["zone_low"], z75["zone_high"], entry_1m_ts,
-                              mode_label[0], sl_override=z75_sl)
+            _scan_with_t1(z75["zone_low"], z75["zone_high"], entry_1m_ts,
+                          mode_label[0], sl_ov=z75_sl)
         else:
-            # 3-level: need 15m CLOSED first, SL still = 75m zone_low
             zones_15 = [z for z in detect_zones(mtf_15)
                         if z["zone_high"] >= z75["zone_low"]
                         and z["zone_high"] <= z75["zone_high"]
@@ -961,12 +973,18 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
                 ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
                 if ret15 is None:
                     continue
-                _try_5m_via_15m(z15, ret15["entry_ts"], sl_override=z75_sl)
+                lbl = f"{mode_label[0]}15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl_level']:.0f}) / "
+                sl = z75_sl
+                t1 = z75_t1 if z75_t1 is not None else z15["sl_level"]
+                for z5 in [z for z in detect_zones(ltf_5)
+                           if z["zone_high"] >= z15["zone_low"]
+                           and z["zone_high"] <= z15["zone_high"]
+                           and z["formed_ts"] >= ret15["entry_ts"]]:
+                    _add_5m_entry(z5, sl, t1, lbl)
 
-    if not used_75:
+    if not used_75 and not no_cascade:
         mode_label[0] = "CASCADE → "
         if skip_15m:
-            # 2-level cascade: all intraday 5m zones
             _scan_5m_in_range(0, float("inf"), day_start, mode_label[0])
         else:
             for z15 in detect_zones(mtf_15):
@@ -1134,6 +1152,8 @@ def run_backtest_3level_ui(
     from_date: Optional[date] = None,
     skip_15m: bool    = False,  # True = 75m→5m only (skip 15m level)
     skip_75m: bool    = False,  # True = ignore 75m pool, always cascade 15m→5m
+    no_cascade: bool  = False,  # True = only trade when 75m zone active (no cascade fallback)
+    t1_from_75m: bool = False,  # True = T1 = 75m sl_level (wider target)
 ) -> dict:
     """
     3-level hierarchy backtest (75m pool → 15m CLOSED → 5m CLOSED → ENTRY).
@@ -1243,7 +1263,9 @@ def run_backtest_3level_ui(
 
             entries = _collect_entries_3level(dt, df1m,
                                               [] if skip_75m else z75_pool,
-                                              cutoff=cutoff, skip_15m=skip_15m)
+                                              cutoff=cutoff, skip_15m=skip_15m,
+                                              t1_from_75m=t1_from_75m,
+                                              no_cascade=no_cascade)
             for e in entries:
                 ep   = e["entry_price"]
                 sl   = round(e["sl"] - sl_buf, 2)  # 15m zone_low - buffer
