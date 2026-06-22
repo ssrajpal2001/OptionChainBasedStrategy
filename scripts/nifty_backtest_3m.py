@@ -111,7 +111,8 @@ def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date) -> lis
 
 # ── 3m entry detection ─────────────────────────────────────────────────────────
 
-def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list, sl_buf: float = 3.0) -> list:
+def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list,
+                     sl_buf: float = 3.0, min_risk: float = 10.0) -> list:
     """
     Return list of entry dicts for TRAPPED/CLOSED zones.
     Entry condition:
@@ -153,29 +154,34 @@ def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list, sl_buf: float =
             if _is_eod(bar_ts) or not _before_cutoff(bar_ts):
                 continue
 
-            # Prev candle close must be in or just below lower 1/3 (zone_trigger area)
+            # Prev candle close must be at or below zone_trigger (in lower 1/3)
+            # Price can dip below zone_low (liquidity sweep) — allowed up to sl_buf below
             prev_close = float(prev["close"])
-            prev_low   = float(prev["low"])
             if prev_close > zone_trigger:
                 continue
-            # Not a runaway breakdown — close must be at most sl_buf below zone_low
-            if prev_close < zone_low - sl_buf:
+            if prev_close < zone_low - sl_buf:   # runaway breakdown, skip
                 continue
 
             # Confirmation: curr 3m high breaks prev 3m high
             if float(curr["high"]) > float(prev["high"]):
                 entry_price = round(float(prev["high"]), 2)
 
-                # SL logic:
-                # - Price stayed within zone → SL = zone_low (structural)
-                # - Price dipped below zone_low (bear trap) → SL = candle low − sl_buf
+                # SL rule:
+                # Normal (close ≥ zone_low): SL = zone_low − sl_buf
+                # Liquidity sweep (close < zone_low): SL = 3m candle low − sl_buf
+                prev_low = float(prev["low"])
                 if prev_close >= zone_low:
-                    sl = zone_low
+                    sl      = round(zone_low - sl_buf, 2)
+                    sl_type = "ZONE_LOW"
                 else:
-                    sl = round(prev_low - sl_buf, 2)
+                    sl      = round(prev_low - sl_buf, 2)
+                    sl_type = "DIP_LOW"
 
                 # Skip if SL is above entry (degenerate candle)
                 if sl >= entry_price:
+                    continue
+                # Skip if risk < min_risk pts (spread noise would eat it)
+                if (entry_price - sl) < min_risk:
                     continue
 
                 entries.append({
@@ -185,7 +191,7 @@ def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list, sl_buf: float =
                     "zone_high":    zone_high,
                     "zone_trigger": zone_trigger,
                     "sl_price":     sl,
-                    "sl_type":      "ZONE_LOW" if prev_close >= zone_low else "DIP_LOW",
+                    "sl_type":      sl_type,
                     "htf_zone":     zone,
                 })
                 break  # first signal per zone
@@ -413,6 +419,7 @@ def _run_day(index: str, cfg: dict, td: date,
              htf_min: int,
              rr_min: float,
              sl_buf: float,
+             min_risk: float,
              cache: dict,
              fetch_from: str) -> list:
     """Process one trading day; return list of trade result dicts."""
@@ -506,6 +513,7 @@ def _run_day(index: str, cfg: dict, td: date,
         # ── HTF zones for today ────────────────────────────────────────────
         zones = _htf_zones_for_today(df_all, htf_min, td)
         if not zones:
+            print(f"  {opt_type}: no TRAPPED/CLOSED HTF zones for {td}")
             continue
 
         # ── OPP zone trigger (for R:R and exit) ───────────────────────────
@@ -520,8 +528,9 @@ def _run_day(index: str, cfg: dict, td: date,
             opp_zone_trigger = min(float(z["zone_trigger"]) for z in opp_zones)
 
         # ── 3m entry signals ───────────────────────────────────────────────
-        signals = _find_3m_entries(df_today, zones, sl_buf=sl_buf)
+        signals = _find_3m_entries(df_today, zones, sl_buf=sl_buf, min_risk=min_risk)
         if not signals:
+            print(f"  {opt_type}: {len(zones)} zone(s) found but no 3m entry signal (price never in lower 1/3 or risk < {min_risk}pts)")
             continue
 
         last_exit_ts: Optional[pd.Timestamp] = None
@@ -669,7 +678,8 @@ def run_backtest_3m(token: str,
                     lots: int = 2,
                     htf_min: int = 75,
                     rr_min: float = 1.5,
-                    sl_buf: float = 3.0,
+                    sl_buf: float = 10.0,
+                    min_risk: float = 10.0,
                     use_bias: bool = True) -> dict:
     """
     Run 3m-confirmation backtest and return:
@@ -714,7 +724,7 @@ def run_backtest_3m(token: str,
         print(f"\n--- {td} {'(GAP bias)' if use_bias else ''} ---")
         day_trades = _run_day(
             index, cfg, td, df_spot_all,
-            use_bias, lots, htf_min, rr_min, sl_buf,
+            use_bias, lots, htf_min, rr_min, sl_buf, min_risk,
             cache, fetch_from
         )
         all_trades.extend(day_trades)
@@ -786,7 +796,8 @@ if __name__ == "__main__":
     ap.add_argument("--lots",     type=int,   default=2)
     ap.add_argument("--htf",      type=int,   default=75, help="HTF timeframe minutes")
     ap.add_argument("--rr-min",   type=float, default=1.5, help="Min R:R ratio (0=skip check)")
-    ap.add_argument("--sl-buf",   type=float, default=3.0, help="Buffer below dip-low for SL (pts)")
+    ap.add_argument("--sl-buf",   type=float, default=10.0, help="Buffer below zone_low/dip-low for SL (pts)")
+    ap.add_argument("--min-risk", type=float, default=10.0, help="Min entry-to-SL distance (pts), skip if smaller")
     ap.add_argument("--no-bias",  action="store_true", help="Disable gap-direction bias")
     args = ap.parse_args()
 
@@ -798,5 +809,6 @@ if __name__ == "__main__":
         htf_min  = args.htf,
         rr_min   = args.rr_min,
         sl_buf   = args.sl_buf,
+        min_risk = args.min_risk,
         use_bias = not args.no_bias,
     )
