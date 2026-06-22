@@ -156,7 +156,7 @@ def analyse_day(dt: date, df1m: pd.DataFrame, z75_pool: list) -> None:
         print(f"     1m enters zone at {entry_1m_ts.strftime('%H:%M')} -> tracking 15m zones")
 
         zones_15 = [z for z in detect_zones(mtf_15)
-                    if z["zone_low"] >= z75["zone_low"]
+                    if z["zone_high"] >= z75["zone_low"]
                     and z["zone_high"] <= z75["zone_high"]
                     and z["formed_ts"] >= entry_1m_ts]
 
@@ -179,7 +179,7 @@ def analyse_day(dt: date, df1m: pd.DataFrame, z75_pool: list) -> None:
             print(f"         + Returns to {z15['zone_high']:.1f} at {ret15_t} -> tracking 5m zones")
 
             zones_5 = [z for z in detect_zones(ltf_5)
-                       if z["zone_low"] >= z15["zone_low"]
+                       if z["zone_high"] >= z15["zone_low"]
                        and z["zone_high"] <= z15["zone_high"]
                        and z["formed_ts"] >= ret15["entry_ts"]]
 
