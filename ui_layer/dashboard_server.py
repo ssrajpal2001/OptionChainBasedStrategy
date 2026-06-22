@@ -876,6 +876,31 @@ class DashboardServer:
                 import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
 
+        @app.post("/api/diagnostic/trap_zones", tags=["Admin"])
+        async def diagnostic_trap_zones(request: Request):
+            """Run TrapScanner zone diagnostic for a given date/index/strike."""
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            token  = p.get("token", "")
+            dt     = str(p.get("date", ""))
+            index  = str(p.get("index", "NIFTY")).upper()
+            side   = str(p.get("opt", "CE")).upper()
+            htf    = int(p.get("htf", 75))
+            strike = int(p.get("strike", 0))
+            if not token or not dt:
+                return {"ok": False, "error": "token and date required"}
+            try:
+                from scripts.show_trap_zones import show_zones_json
+                result = await asyncio.to_thread(
+                    show_zones_json, token, dt, index, side, htf, strike
+                )
+                return {"ok": True, **result}
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
+
         # ── PUBLIC — Authentication ───────────────────────────────────────────
 
         @app.post("/api/auth/login", tags=["Auth"])

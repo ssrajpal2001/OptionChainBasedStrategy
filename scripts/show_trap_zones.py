@@ -285,6 +285,112 @@ def show_zones(token: str, dt: str, index: str, side: str, htf_min: int = 75,
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def show_zones_json(token: str, dt: str, index: str, side: str,
+                    htf_min: int = 75, strike: int = 0) -> dict:
+    """
+    Same as show_zones() but returns structured JSON for the UI endpoint.
+    Returns: {htf_zones: [...], meta: {...}}
+    """
+    import io, contextlib
+    side  = side.upper()
+    index = index.upper()
+    td    = date.fromisoformat(dt)
+
+    _nb._HEADERS = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    from data_layer.instrument_registry import REGISTRY
+    if not REGISTRY.is_loaded(index):
+        REGISTRY.load_sync(index, token)
+
+    opt_key = _nb._option_key(index, strike, side, td) if strike > 0 else ""
+    if not opt_key:
+        return {"error": f"Could not resolve key for {index} {strike}{side}"}
+
+    fetch_from = (td - timedelta(days=14)).isoformat()
+    fetch_to   = dt
+    try:
+        df_opt_raw = _nb._fetch_1m(opt_key, fetch_from, fetch_to)
+    except Exception as ex:
+        return {"error": str(ex)}
+
+    if df_opt_raw.empty:
+        return {"error": f"No option data for {opt_key}"}
+
+    cfg = _nb.INDEX_CFG.get(index, _nb.INDEX_CFG["NIFTY"])
+    df_opt_all   = _nb._mkt_hours(df_opt_raw)
+    today_date   = pd.Timestamp(dt).date()
+    df_opt_today = df_opt_all[df_opt_all["datetime"].dt.date == today_date].copy().reset_index(drop=True)
+
+    if df_opt_today.empty:
+        return {"error": f"No option bars for {dt}"}
+
+    htf_source = df_opt_all if htf_min >= 60 else df_opt_today
+    df_htf = _resample(htf_source, htf_min)
+    _, htf_entries = scan_htf(df_htf)
+
+    out_zones = []
+    for e in htf_entries:
+        if e["status"] not in ("TRAPPED", "CLOSED", "ACTIVE"):
+            continue
+        df5m = _resample(df_opt_today, 5)
+        if e.get("trapped_on") is not None:
+            trap_ts    = pd.Timestamp(str(e["trapped_on"]))
+            df5m_after = df5m[df5m["datetime"] >= trap_ts].copy().reset_index(drop=True)
+        else:
+            df5m_after = df5m.copy()
+
+        _, ltf_entries = scan_ltf(
+            df5m_after,
+            htf_zone_high=e["zone_high"], htf_zone_low=e["zone_low"],
+            htf_ref_bar=str(e.get("ref_ts", "")),
+            htf_trap_bar=str(e.get("trapped_on", "")),
+            htf_target=e["sl"],
+        )
+
+        ltf_out = []
+        for l in ltf_entries:
+            entry_signal = None
+            if l["status"] == "CLOSED":
+                ep  = round(l["zone_trigger"], 2)
+                sl  = round(l["zone_low"] - 2.0, 2)
+                t1  = round(l["sl"], 2)
+                rr  = round((t1 - ep) / max(ep - sl, 0.01), 2)
+                entry_signal = {"entry": ep, "sl": sl, "t1": t1, "rr": rr,
+                                "htf_t1": round(e["sl"], 2)}
+            ltf_out.append({
+                "status":     l["status"],
+                "zone_high":  round(l["zone_high"],    2),
+                "zone_low":   round(l["zone_low"],     2),
+                "zone_trig":  round(l["zone_trigger"], 2),
+                "sl_level":   round(l["sl"],           2),
+                "ref_bar":    _hhmm(l.get("ref_ts")),
+                "trapped_at": _hhmm(l.get("trapped_on")),
+                "closed_at":  _hhmm(l.get("closed_on")),
+                "entry_signal": entry_signal,
+            })
+
+        out_zones.append({
+            "status":     e["status"],
+            "zone_high":  round(e["zone_high"],    2),
+            "zone_low":   round(e["zone_low"],     2),
+            "zone_trig":  round(e["zone_trigger"], 2),
+            "sl_level":   round(e["sl"],           2),
+            "ref_bar":    _hhmm(e.get("ref_ts")),
+            "trapped_at": _hhmm(e.get("trapped_on")),
+            "closed_at":  _hhmm(e.get("closed_on")),
+            "ltf_zones":  ltf_out,
+            "entry_signals": [l["entry_signal"] for l in ltf_out if l["entry_signal"]],
+        })
+
+    return {
+        "meta": {"date": dt, "index": index, "side": side, "htf_min": htf_min,
+                 "strike": strike, "opt_key": opt_key,
+                 "pool_bars": len(df_opt_all), "today_bars": len(df_opt_today)},
+        "htf_zones": out_zones,
+        "total_htf": len(out_zones),
+        "total_entry_signals": sum(len(z["entry_signals"]) for z in out_zones),
+    }
+
+
 def _test_token(token: str) -> bool:
     """Quick check if token is valid by hitting Upstox profile endpoint."""
     try:
@@ -386,11 +492,23 @@ if __name__ == "__main__":
         sys.exit(1)
     print("OK")
 
-    show_zones(
-        token   = args.token,
-        dt      = args.date,
-        index   = args.index,
-        side    = args.opt,
-        htf_min = args.htf,
-        strike  = args.strike,
-    )
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        show_zones(
+            token   = args.token,
+            dt      = args.date,
+            index   = args.index,
+            side    = args.opt,
+            htf_min = args.htf,
+            strike  = args.strike,
+        )
+    output = buf.getvalue()
+    print(output)
+
+    # Always save full output to file
+    log_path = f"logs/zones_{args.index}_{args.opt}_{args.date}.txt"
+    os.makedirs("logs", exist_ok=True)
+    with open(log_path, "w") as f:
+        f.write(output)
+    print(f"\n[Full output saved to: {log_path}]")
