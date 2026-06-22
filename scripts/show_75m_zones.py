@@ -1,18 +1,18 @@
 """
-show_75m_zones.py — Print 75-minute candles and zones for SENSEX CE 77000.
+show_75m_zones.py — 3-level seller trap zone detection for SENSEX CE/PE.
 
-Zone rule (user-defined):
-  For each pair of consecutive 75m candles:
-  IF candle[N+1].low < candle[N].low  →  ZONE detected
-  Zone HIGH = candle[N].low
-  Zone LOW  = candle[N+1].low
+Hierarchy:
+  75m zone valid (c0.high SL hit)
+    → 1m candle enters 75m zone
+      → 15m zones inside (c0.high SL hit)
+        → price returns to 15m zone_high
+          → 5m zones inside (c0.high SL hit)
+            → price returns to 5m zone_high = ENTRY
 
 Usage:
   python scripts/show_75m_zones.py --token <upstox_token>
 """
-import argparse
-import sys
-import os
+import argparse, sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
@@ -21,169 +21,197 @@ from datetime import date, timedelta
 
 HEADERS = lambda t: {"Authorization": f"Bearer {t}", "Accept": "application/json"}
 
+# ── Data fetch ────────────────────────────────────────────────────────────────
+
 def fetch_1m(key: str, dt: date, token: str) -> pd.DataFrame:
-    ds = dt.strftime("%Y-%m-%d")
+    ds  = dt.strftime("%Y-%m-%d")
     url = f"https://api.upstox.com/v2/historical-candle/{key}/1minute/{ds}/{ds}"
-    r = requests.get(url, headers=HEADERS(token), timeout=15)
-    d = r.json()
-    candles = d.get("data", {}).get("candles", [])
+    r   = requests.get(url, headers=HEADERS(token), timeout=15)
+    candles = r.json().get("data", {}).get("candles", [])
     if not candles:
         return pd.DataFrame()
     df = pd.DataFrame(candles, columns=["ts","open","high","low","close","vol","oi"])
     df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
     df = df.sort_values("ts").reset_index(drop=True)
-    # Strict market hours: 09:15:00 to 15:29:59 only
     market_open  = pd.Timestamp("09:15:00").time()
     market_close = pd.Timestamp("15:29:00").time()
     df = df[(df["ts"].dt.time >= market_open) & (df["ts"].dt.time <= market_close)]
     return df.reset_index(drop=True)
 
-def resample_75m(df1m: pd.DataFrame) -> pd.DataFrame:
-    """Resample 1m bars to 75m, anchored at 09:15 each day."""
+# ── Resampling anchored at 09:15 ──────────────────────────────────────────────
+
+def resample(df1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
     if df1m.empty:
         return pd.DataFrame()
-    # Compute minutes-since-0915 and bucket into 75m blocks
     base = df1m["ts"].iloc[0].normalize() + pd.Timedelta("9h15m")
-    df1m = df1m.copy()
-    df1m["bucket"] = ((df1m["ts"] - base).dt.total_seconds() // (75 * 60)).astype(int)
-    out = df1m.groupby("bucket").agg(
-        ts=("ts", "first"),
-        open=("open", "first"),
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last"),
+    df   = df1m.copy()
+    df["bucket"] = ((df["ts"] - base).dt.total_seconds() // (minutes * 60)).astype(int)
+    out = df.groupby("bucket").agg(
+        ts=("ts","first"), open=("open","first"),
+        high=("high","max"), low=("low","min"), close=("close","last"),
     ).reset_index(drop=True)
     return out
 
-def find_zones(htf: pd.DataFrame) -> list:
+# ── Core zone detection ───────────────────────────────────────────────────────
+
+def detect_zones(candles: pd.DataFrame) -> list[dict]:
     """
-    Find zones where:
-    1. candle[N+1].low < candle[N].low  (breach = zone formed)
-    2. A subsequent candle's HIGH >= zone_high (sellers' SL triggered = valid zone)
+    From a candle DataFrame find all valid seller-trap zones.
+    Zone forms when candle[N+1].low < candle[N].low.
+    Zone is VALID only if a subsequent candle's HIGH >= candle[N].HIGH (sellers' SL).
+    Returns list of zone dicts.
     """
     zones = []
-    for i in range(len(htf) - 1):
-        c0 = htf.iloc[i]
-        c1 = htf.iloc[i+1]
+    for i in range(len(candles) - 1):
+        c0 = candles.iloc[i]
+        c1 = candles.iloc[i + 1]
         if float(c1["low"]) >= float(c0["low"]):
             continue
-        zone_high = float(c0["low"])    # where sellers entered
-        zone_low  = float(c1["low"])    # bottom of breach
-        sl_level  = float(c0["high"])   # sellers' actual SL = HIGH of c0
-        # SL hit = subsequent candle HIGH >= c0.HIGH (not just c0.LOW)
+        zone_high = float(c0["low"])
+        zone_low  = float(c1["low"])
+        sl_level  = float(c0["high"])   # sellers' SL = HIGH of zone candle
+        # Check if SL was hit by any later candle
         sl_hit_ts = None
-        for j in range(i + 2, len(htf)):
-            if float(htf.iloc[j]["high"]) >= sl_level:
-                sl_hit_ts = htf.iloc[j]["ts"]
+        for j in range(i + 2, len(candles)):
+            if float(candles.iloc[j]["high"]) >= sl_level:
+                sl_hit_ts = candles.iloc[j]["ts"]
                 break
         if sl_hit_ts is None:
-            continue   # SL never hit — zone not valid
+            continue
         zones.append({
-            "candle_0_ts":  c0["ts"],
-            "candle_1_ts":  c1["ts"],
-            "zone_high":    zone_high,
-            "zone_low":     zone_low,
-            "sl_level":     sl_level,
-            "range":        round(zone_high - zone_low, 1),
-            "sl_hit_ts":    sl_hit_ts,
+            "formed_ts":  c0["ts"],
+            "c1_ts":      c1["ts"],
+            "zone_high":  zone_high,
+            "zone_low":   zone_low,
+            "sl_level":   sl_level,
+            "sl_hit_ts":  sl_hit_ts,
         })
     return zones
 
+# ── 1m entry into zone ────────────────────────────────────────────────────────
 
-def resample_15m(df1m: pd.DataFrame) -> pd.DataFrame:
-    """Resample 1m bars to 15m, anchored at 09:15."""
-    if df1m.empty:
-        return pd.DataFrame()
-    base = df1m["ts"].iloc[0].normalize() + pd.Timedelta("9h15m")
-    df1m = df1m.copy()
-    df1m["bucket"] = ((df1m["ts"] - base).dt.total_seconds() // (15 * 60)).astype(int)
-    out = df1m.groupby("bucket").agg(
-        ts=("ts", "first"),
-        open=("open", "first"),
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last"),
-    ).reset_index(drop=True)
-    return out
+def first_1m_entry_into_zone(df1m: pd.DataFrame, zone: dict,
+                              after_ts: pd.Timestamp) -> pd.Timestamp | None:
+    """First 1m bar (after after_ts) whose price enters [zone_low, zone_high]."""
+    window = df1m[df1m["ts"] > after_ts]
+    for _, bar in window.iterrows():
+        lo = float(bar["low"])
+        hi = float(bar["high"])
+        if lo <= zone["zone_high"] and hi >= zone["zone_low"]:
+            return bar["ts"]
+    return None
 
+# ── Price returns to zone_high ────────────────────────────────────────────────
 
-def find_entry_after_sl(df1m: pd.DataFrame, z15: dict) -> dict | None:
+def first_return_to_zone_high(df1m: pd.DataFrame, zone: dict,
+                               after_ts: pd.Timestamp) -> dict | None:
     """
-    After 15m SL is hit (price >= sl_level), watch 1m bars for price
-    to return to zone_high (c0.low). That touch = ENTRY.
-    Returns the first 1m bar where low <= zone_high after SL was hit.
+    First 1m bar (after after_ts) whose LOW <= zone_high.
+    That is the bar where price returns to the zone_high = entry signal.
     """
-    sl_hit_ts  = z15["sl_hit_ts"]
-    zone_high  = z15["zone_high"]
-    # Only look at 1m bars AFTER the SL hit candle
-    after_sl = df1m[df1m["ts"] > sl_hit_ts].copy()
-    for _, bar in after_sl.iterrows():
-        # Price returns to zone_high = low touches or goes below zone_high
-        if float(bar["low"]) <= zone_high:
+    window = df1m[df1m["ts"] > after_ts]
+    for _, bar in window.iterrows():
+        if float(bar["low"]) <= zone["zone_high"]:
             return {
                 "entry_ts":    bar["ts"],
-                "entry_price": zone_high,
+                "entry_price": zone["zone_high"],
                 "bar_open":    float(bar["open"]),
-                "bar_low":     float(bar["low"]),
             }
     return None
 
+# ── Main per-day logic ────────────────────────────────────────────────────────
 
-def find_15m_zones_inside(df1m: pd.DataFrame, z75: dict) -> list:
-    """
-    Find 15m zones inside a given 75m zone.
-    Time window: candle_0_ts to candle_1_ts + 75min
-    Price window: zone_low to zone_high
-    """
-    t_start = z75["candle_0_ts"]
-    t_end   = z75["candle_1_ts"] + pd.Timedelta("75min")
-    window  = df1m[(df1m["ts"] >= t_start) & (df1m["ts"] < t_end)].copy()
-    if window.empty:
-        return []
+def analyse_day(df1m: pd.DataFrame, dt: date) -> None:
+    if df1m.empty:
+        return
 
-    mtf = resample_15m(window)
-    zones_15m = []
-    for i in range(len(mtf) - 1):
-        c0 = mtf.iloc[i]
-        c1 = mtf.iloc[i+1]
-        if float(c1["low"]) >= float(c0["low"]):
-            continue
-        zh       = float(c0["low"])    # where sellers entered
-        zl       = float(c1["low"])    # bottom of breach
-        sl_level = float(c0["high"])   # sellers' actual SL = HIGH of c0
-        # Must be inside the 75m zone price range
-        if zl < z75["zone_low"] or zh > z75["zone_high"]:
-            continue
-        # SL hit = subsequent 15m candle HIGH >= c0.HIGH
-        sl_hit_ts = None
-        for j in range(i + 2, len(mtf)):
-            if float(mtf.iloc[j]["high"]) >= sl_level:
-                sl_hit_ts = mtf.iloc[j]["ts"]
-                break
-        if sl_hit_ts is None:
-            continue
-        zones_15m.append({
-            "ts":         c0["ts"],
-            "zone_high":  zh,
-            "zone_low":   zl,
-            "sl_level":   sl_level,
-            "range":      round(zh - zl, 1),
-            "sl_hit_ts":  sl_hit_ts,
-        })
-    return zones_15m
+    htf_75 = resample(df1m, 75)
+    mtf_15 = resample(df1m, 15)
+    ltf_5  = resample(df1m,  5)
 
-_KEY_CACHE: dict = {}   # (strike, side, expiry_str) → key
+    zones_75 = detect_zones(htf_75)
+
+    if not zones_75:
+        print(f"  No valid 75m zones")
+        return
+
+    for z75 in zones_75:
+        t0   = z75["formed_ts"].strftime("%H:%M")
+        t1   = z75["c1_ts"].strftime("%H:%M")
+        sl_t = z75["sl_hit_ts"].strftime("%H:%M")
+        print(f"\n  ▶ 75m zone [{t0}→{t1}]  "
+              f"zone_high={z75['zone_high']:.1f}  zone_low={z75['zone_low']:.1f}  "
+              f"sl_level={z75['sl_level']:.1f}  SL_hit@{sl_t}")
+
+        # Step 1: find first 1m bar that enters the 75m zone (after zone formed)
+        entry_1m_ts = first_1m_entry_into_zone(df1m, z75, z75["c1_ts"])
+        if entry_1m_ts is None:
+            print(f"    ✗ 1m price never entered 75m zone")
+            continue
+        print(f"    ✓ 1m enters 75m zone at {entry_1m_ts.strftime('%H:%M')} → now track 15m zones")
+
+        # Step 2: find valid 15m zones inside 75m zone, formed after 1m entry
+        zones_15 = [z for z in detect_zones(mtf_15)
+                    if z75["zone_low"] <= z["zone_low"]
+                    and z["zone_high"] <= z75["zone_high"]
+                    and z["formed_ts"] >= entry_1m_ts]
+
+        if not zones_15:
+            print(f"    ✗ No valid 15m zones inside 75m zone")
+            continue
+
+        for z15 in zones_15:
+            t15   = z15["formed_ts"].strftime("%H:%M")
+            sl15t = z15["sl_hit_ts"].strftime("%H:%M")
+            print(f"\n      ▶ 15m zone [{t15}]  "
+                  f"zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  "
+                  f"sl_level={z15['sl_level']:.1f}  SL_hit@{sl15t}")
+
+            # Step 3: price returns to 15m zone_high after SL hit
+            ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
+            if ret15 is None:
+                print(f"        ✗ Price never returned to 15m zone_high after SL hit")
+                continue
+            ret15_t = ret15["entry_ts"].strftime("%H:%M")
+            print(f"        ✓ Price returns to 15m zone_high={z15['zone_high']:.1f} at {ret15_t} → now track 5m zones")
+
+            # Step 4: find valid 5m zones inside 15m zone, after return to zone_high
+            zones_5 = [z for z in detect_zones(ltf_5)
+                       if z15["zone_low"] <= z["zone_low"]
+                       and z["zone_high"] <= z15["zone_high"]
+                       and z["formed_ts"] >= ret15["entry_ts"]]
+
+            if not zones_5:
+                print(f"        ✗ No valid 5m zones inside 15m zone")
+                continue
+
+            for z5 in zones_5:
+                t5   = z5["formed_ts"].strftime("%H:%M")
+                sl5t = z5["sl_hit_ts"].strftime("%H:%M")
+                print(f"\n          ▶ 5m zone [{t5}]  "
+                      f"zone_high={z5['zone_high']:.1f}  zone_low={z5['zone_low']:.1f}  "
+                      f"sl_level={z5['sl_level']:.1f}  SL_hit@{sl5t}")
+
+                # Step 5: price returns to 5m zone_high = ENTRY
+                ret5 = first_return_to_zone_high(df1m, z5, z5["sl_hit_ts"])
+                if ret5 is None:
+                    print(f"            ✗ Price never returned to 5m zone_high — no entry")
+                else:
+                    ret5_t = ret5["entry_ts"].strftime("%H:%M")
+                    print(f"            ★ ENTRY  time={ret5_t}  "
+                          f"price={ret5['entry_price']:.1f}  "
+                          f"(bar_open={ret5['bar_open']:.1f})")
+
+# ── Instrument key lookup ─────────────────────────────────────────────────────
+
+_KEY_CACHE: dict = {}
 
 def get_key_for_strike(token: str, strike: int, side: str, trade_date: date) -> tuple:
-    """
-    Find instrument key by trying expiry dates from trade_date to +14 days.
-    Caches results so the same contract key is reused across the week.
-    """
     for delta in range(15):
         candidate = trade_date + timedelta(days=delta)
-        cache_k = (strike, side, candidate.strftime("%d%b%y").upper())
-        if cache_k in _KEY_CACHE:
-            return _KEY_CACHE[cache_k], candidate
+        ck = (strike, side, candidate.strftime("%d%b%y").upper())
+        if ck in _KEY_CACHE:
+            return _KEY_CACHE[ck], candidate
         try:
             r = requests.get(
                 "https://api.upstox.com/v2/instruments/search",
@@ -195,87 +223,48 @@ def get_key_for_strike(token: str, strike: int, side: str, trade_date: date) -> 
             if items:
                 key = items[0].get("instrument_key","")
                 if key:
-                    _KEY_CACHE[cache_k] = key
+                    _KEY_CACHE[ck] = key
                     return key, candidate
         except Exception:
             pass
     return "", None
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--token", required=True)
+    parser.add_argument("--token",  required=True)
     parser.add_argument("--strike", type=int, default=77000)
-    parser.add_argument("--side", default="CE")
+    parser.add_argument("--side",   default="CE")
     args = parser.parse_args()
 
-    token = args.token
-    strike = args.strike
-    side = args.side
+    today    = date.today()
+    days_back = today.weekday() + 7
+    prev_mon  = today - timedelta(days=days_back)
+    dates = [prev_mon + timedelta(days=i)
+             for i in range(14)
+             if (prev_mon + timedelta(days=i)).weekday() < 5
+             and (prev_mon + timedelta(days=i)) <= today]
 
-    # Dates: previous week Mon-Fri + current week so far
-    today = date.today()
-    # Go back to find last Monday
-    days_back = today.weekday() + 7   # previous week's Monday
-    prev_mon = today - timedelta(days=days_back)
-    dates = []
-    for i in range(14):
-        d = prev_mon + timedelta(days=i)
-        if d.weekday() < 5 and d <= today:   # Mon-Fri only
-            dates.append(d)
-
-    print(f"\n{'='*60}")
-    print(f"SENSEX {strike} {side} — 75m Zone Detection")
-    print(f"{'='*60}")
+    print(f"\n{'='*65}")
+    print(f"SENSEX {args.strike} {args.side} — 75m/15m/5m Seller Trap Zones")
+    print(f"{'='*65}")
 
     for dt in dates:
-        # Find key (use the first date's search result, reuse across week)
-        key, expiry = get_key_for_strike(token, strike, side, dt)
+        key, expiry = get_key_for_strike(args.token, args.strike, args.side, dt)
         if not key:
-            print(f"\n{dt} — could not find instrument key, skip")
+            print(f"\n{dt} — instrument key not found, skip")
             continue
-
-        df1m = fetch_1m(key, dt, token)
+        df1m = fetch_1m(key, dt, args.token)
         if df1m.empty:
-            print(f"\n{dt} — no 1m data (holiday or no trades)")
+            print(f"\n{dt} — no 1m data")
             continue
 
-        htf = resample_75m(df1m)
-        zones = find_zones(htf)
+        print(f"\n{'─'*65}")
+        print(f"Date: {dt}  |  Key: {key}")
+        analyse_day(df1m, dt)
 
-        print(f"\n{'─'*60}")
-        print(f"Date: {dt}  |  Key: {key}  |  Expiry: {expiry}")
-        print(f"75m Candles ({len(htf)} total):")
-        for _, row in htf.iterrows():
-            ts = row["ts"].strftime("%H:%M")
-            print(f"  {ts}  O={row['open']:.1f}  H={row['high']:.1f}  L={row['low']:.1f}  C={row['close']:.1f}")
-
-        if zones:
-            print(f"\n75m ZONES ({len(zones)}):")
-            for z in zones:
-                t0 = z["candle_0_ts"].strftime("%H:%M")
-                t1 = z["candle_1_ts"].strftime("%H:%M")
-                sl_t = z["sl_hit_ts"].strftime("%H:%M")
-                print(f"\n  75m [{t0}→{t1}]  zone_high={z['zone_high']:.1f}  zone_low={z['zone_low']:.1f}  sl_level={z['sl_level']:.1f}  SL_hit@{sl_t}")
-                zones_15 = find_15m_zones_inside(df1m, z)
-                if zones_15:
-                    for z15 in zones_15:
-                        t15    = z15["ts"].strftime("%H:%M")
-                        sl15_t = z15["sl_hit_ts"].strftime("%H:%M")
-                        print(f"    └─ 15m [{t15}]  zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  sl_level={z15['sl_level']:.1f}  SL_hit@{sl15_t}")
-                        entry = find_entry_after_sl(df1m, z15)
-                        if entry:
-                            et = entry["entry_ts"].strftime("%H:%M")
-                            print(f"         ★ ENTRY  time={et}  price={entry['entry_price']:.1f}  (1m bar open={entry['bar_open']:.1f}  low={entry['bar_low']:.1f})")
-                        else:
-                            print(f"         ✗ No return to zone_high after SL hit — no entry")
-                else:
-                    print(f"    └─ No valid 15m zone (SL not hit) inside this 75m zone")
-        else:
-            print(f"\n  No 75m zones detected")
-
-    print(f"\n{'='*60}\n")
-
+    print(f"\n{'='*65}\n")
 
 if __name__ == "__main__":
     main()
