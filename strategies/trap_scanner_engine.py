@@ -975,9 +975,14 @@ class TrapScannerEngine:
                     if keys:
                         feeder = (self._mcx_feeder if self._mcx_feeder is not None
                                   else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
-                        if feeder and hasattr(feeder, "subscribe_tokens"):
+                        if feeder:
                             try:
-                                await feeder.subscribe_tokens(keys)
+                                # resubscribe_tokens always sends the WS subscribe command
+                                # even for already-subscribed keys — recovers from silent drops
+                                if hasattr(feeder, "resubscribe_tokens"):
+                                    await feeder.resubscribe_tokens(keys)
+                                elif hasattr(feeder, "subscribe_tokens"):
+                                    await feeder.subscribe_tokens(keys)
                             except Exception:
                                 pass
                 # SPOT bars: legacy htf_source="spot" path

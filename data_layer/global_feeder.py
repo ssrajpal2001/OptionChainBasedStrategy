@@ -389,6 +389,27 @@ class UpstoxFeeder(BaseFeeder):
             except Exception as exc:
                 logger.warning("UpstoxFeeder: subscribe error: %s", exc)
 
+    async def resubscribe_tokens(self, tokens: List[str]) -> None:
+        """Force-resubscribe tokens even if already in _subscribed_keys.
+        Use in engine heartbeats to recover from silent WS subscription drops
+        (Upstox SDK can silently stop delivering ticks for subscribed keys without
+        triggering a reconnect — explicit re-subscribe recovers them)."""
+        mine = [t for t in tokens if self._is_upstox_key(t)]
+        if not mine:
+            return
+        for k in mine:
+            if k not in self._subscribed_keys:
+                self._subscribed_keys.append(k)
+        if self._streamer:
+            try:
+                try:
+                    self._streamer.subscribe(mine, "full")
+                except TypeError:
+                    self._streamer.subscribe(mine)
+                logger.info("UpstoxFeeder: force-resubscribed %d keys.", len(mine))
+            except Exception as exc:
+                logger.warning("UpstoxFeeder: resubscribe error: %s", exc)
+
     async def unsubscribe_tokens(self, tokens: List[str]) -> None:
         mine = [t for t in tokens if self._is_upstox_key(t)]
         for t in mine:
@@ -548,6 +569,12 @@ class UpstoxFeeder(BaseFeeder):
 
             # ── Option tick — look up via cached reverse map ──────────────
             meta = self._get_option_meta(inst_key)
+            if not meta:
+                # Log unrecognised option keys (throttled) so silent drops are visible
+                _dk = f"_unrecog_{inst_key}"
+                if time.monotonic() - getattr(self, _dk, 0.0) > 60.0:
+                    setattr(self, _dk, time.monotonic())
+                    logger.warning("UpstoxFeeder: option tick key=%s not in REGISTRY — tick dropped", inst_key)
             if meta:
                 underlying, strike, opt_type, expiry = meta
                 extras = self._extract_extras(feed_data)
@@ -1160,6 +1187,23 @@ class GlobalFeeder:
                 await feeder.subscribe_tokens(tokens)
         elif self._feeder is not None:
             await self._feeder.subscribe_tokens(tokens)
+
+    async def resubscribe_tokens(self, tokens: list) -> None:
+        """Force-resubscribe tokens even if already subscribed (heartbeat recovery)."""
+        for t in tokens:
+            if t not in self._cached_tokens:
+                self._cached_tokens.append(t)
+        if self._dual_feeder is not None:
+            for feeder in self._dual_feeder._feeders.values():
+                if hasattr(feeder, "resubscribe_tokens"):
+                    await feeder.resubscribe_tokens(tokens)
+                else:
+                    await feeder.subscribe_tokens(tokens)
+        elif self._feeder is not None:
+            if hasattr(self._feeder, "resubscribe_tokens"):
+                await self._feeder.resubscribe_tokens(tokens)
+            else:
+                await self._feeder.subscribe_tokens(tokens)
 
     async def unsubscribe_tokens(self, tokens: list) -> None:
         """Proxy to active feeder — DualFeeder takes priority over initial feeder."""
