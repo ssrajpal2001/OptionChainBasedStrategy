@@ -468,14 +468,12 @@ def run(token: str, days: int = 10, lots: int = 1) -> None:
     trading_days = _get_trading_days(days)
     all_trades: list[dict] = []
 
-    # Load REGISTRY — contains ALL BSE_FO contracts with correct expiry dates
+    # Load REGISTRY with SENSEX BSE_FO contracts (real expiry dates, no calendar math)
     from data_layer.instrument_registry import REGISTRY
-    from config.global_config import GlobalConfig
-    import asyncio
     try:
-        cfg = GlobalConfig()
-        asyncio.run(REGISTRY.load_all(cfg))
-        print(f"REGISTRY loaded — SENSEX loaded: {REGISTRY.is_loaded('SENSEX')}\n")
+        REGISTRY.load_sync("SENSEX", token)
+        print(f"REGISTRY loaded — SENSEX loaded: {REGISTRY.is_loaded('SENSEX')}, "
+              f"expiries: {REGISTRY._expiries.get('SENSEX', [])[:5]}\n")
     except Exception as exc:
         print(f"REGISTRY load failed: {exc}\n")
 
@@ -593,13 +591,10 @@ def run_backtest_ui(
     MIN_REWARD       = min_reward
     TARGET_MULT      = target_mult
 
-    # Load REGISTRY once — has all BSE_FO contracts with real expiry dates
+    # Load REGISTRY with SENSEX BSE_FO contracts (real expiry dates)
     from data_layer.instrument_registry import REGISTRY
-    from config.global_config import GlobalConfig
-    import asyncio
     try:
-        cfg = GlobalConfig()
-        asyncio.run(REGISTRY.load_all(cfg))
+        REGISTRY.load_sync("SENSEX", token)
     except Exception:
         pass
 
