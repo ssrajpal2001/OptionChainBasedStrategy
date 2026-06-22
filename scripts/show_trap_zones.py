@@ -90,9 +90,21 @@ def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
 
 
 def _hhmm(ts) -> str:
-    if pd.isnull(ts):
+    if ts is None:
         return "-"
-    return pd.Timestamp(ts).strftime("%H:%M")
+    try:
+        return pd.Timestamp(ts).strftime("%H:%M")
+    except Exception:
+        return "-"
+
+def _dtstr(ts) -> str:
+    """Full date+time string for lifecycle table — shows which day each stage is on."""
+    if ts is None:
+        return "-"
+    try:
+        return pd.Timestamp(ts).strftime("%d-%b %H:%M")
+    except Exception:
+        return "-"
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -347,7 +359,7 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
             mask = (df["high"] >= zone_low) & (df["low"] <= zone_high)
             rows = df[mask]
             if not rows.empty:
-                return _hhmm(rows.iloc[0]["datetime"])
+                return _dtstr(rows.iloc[0]["datetime"])
         except Exception:
             pass
         return "-"
@@ -370,7 +382,7 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
                                "h": round(float(next_bar["high"]),2),
                                "l": round(float(next_bar["low"]),2),
                                "c": round(float(next_bar["close"]),2)} if next_bar is not None else {}
-            htf_curr_ts = _hhmm(next_bar["datetime"]) if next_bar is not None else "-"
+            htf_curr_ts = _dtstr(next_bar["datetime"]) if next_bar is not None else "-"
         except Exception:
             htf_curr_ohlcv = {}
             htf_curr_ts = "-"
@@ -406,7 +418,7 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
                                 "h": round(float(l_next["high"]),2),
                                 "l": round(float(l_next["low"]),2),
                                 "c": round(float(l_next["close"]),2)} if l_next is not None else {}
-                l_curr_ts = _hhmm(l_next["datetime"]) if l_next is not None else "-"
+                l_curr_ts = _dtstr(l_next["datetime"]) if l_next is not None else "-"
             except Exception:
                 l_curr_ohlcv = {}
                 l_curr_ts = "-"
@@ -420,12 +432,12 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
                 entry_signal = {
                     "entry": ep, "sl": sl, "t1": t1, "rr": rr,
                     "htf_t1":      round(e["sl"], 2),
-                    "ltf_ref":     _hhmm(l.get("ref_ts")),
-                    "ltf_trapped": _hhmm(l.get("trapped_on")),
-                    "ltf_closed":  _hhmm(l.get("closed_on")),
-                    "htf_ref":     _hhmm(e.get("ref_ts")),
-                    "htf_trapped": _hhmm(e.get("trapped_on")),
-                    "htf_closed":  _hhmm(e.get("closed_on")),
+                    "ltf_ref":     _dtstr(l.get("ref_ts")),
+                    "ltf_trapped": _dtstr(l.get("trapped_on")),
+                    "ltf_closed":  _dtstr(l.get("closed_on")),
+                    "htf_ref":     _dtstr(e.get("ref_ts")),
+                    "htf_trapped": _dtstr(e.get("trapped_on")),
+                    "htf_closed":  _dtstr(e.get("closed_on")),
                 }
             ltf_out.append({
                 "status":     l["status"],
@@ -433,10 +445,10 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
                 "zone_low":   round(l["zone_low"],     2),
                 "zone_trig":  round(l["zone_trigger"], 2),
                 "sl_level":   round(l["sl"],           2),
-                "ref_bar":    _hhmm(l.get("ref_ts")),
+                "ref_bar":    _dtstr(l.get("ref_ts")),
                 "curr_bar":   l_curr_ts,
-                "trapped_at": _hhmm(l.get("trapped_on")),
-                "closed_at":  _hhmm(l.get("closed_on")),
+                "trapped_at": _dtstr(l.get("trapped_on")),
+                "closed_at":  _dtstr(l.get("closed_on")),
                 # raw OHLCV
                 "ref_ohlcv":     l_ref_ohlcv,
                 "curr_ohlcv":    l_curr_ohlcv,
@@ -451,10 +463,10 @@ def show_zones_json(token: str, dt: str, index: str, side: str,
             "zone_low":   round(e["zone_low"],     2),
             "zone_trig":  round(e["zone_trigger"], 2),
             "sl_level":   round(e["sl"],           2),
-            "ref_bar":    _hhmm(e.get("ref_ts")),
+            "ref_bar":    _dtstr(e.get("ref_ts")),
             "curr_bar":   htf_curr_ts,
-            "trapped_at": _hhmm(e.get("trapped_on")),
-            "closed_at":  _hhmm(e.get("closed_on")),
+            "trapped_at": _dtstr(e.get("trapped_on")),
+            "closed_at":  _dtstr(e.get("closed_on")),
             "zone_entered_5m": htf_zone_enter,   # first 5m bar price entered HTF zone band
             # raw OHLCV for each lifecycle stage
             "ref_ohlcv":     htf_ref_ohlcv,
