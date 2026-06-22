@@ -575,8 +575,9 @@ def _run_day(index: str, cfg: dict, td: date,
             trades.append(result)
 
             sl_tag = result.get("sl_type", "ZONE_LOW")
+            rr_tag = f"  RR={result['rr']:.2f}" if result.get("rr") else ""
             if result.get("t1_hit"):
-                print(f"  {today_str} {opt_type} [{sl_tag}]"
+                print(f"  {today_str} {opt_type} [{sl_tag}]{rr_tag}"
                       f"  entry={result['entry_price']:.1f} ({str(entry_ts)[11:16]})"
                       f"  sl={result['sl_price']:.1f}"
                       f"  T1={result['t1_price']:.1f} ({str(result['t1_ts'])[11:16]})"
@@ -585,7 +586,7 @@ def _run_day(index: str, cfg: dict, td: date,
                       f"  Rs{result['trail_pnl_rs']:+.0f}(50%)"
                       f"  TOTAL=Rs{result['pnl_rs']:+.0f}  [{result['reason']}]")
             else:
-                print(f"  {today_str} {opt_type} [{sl_tag}]"
+                print(f"  {today_str} {opt_type} [{sl_tag}]{rr_tag}"
                       f"  entry={result['entry_price']:.1f} ({str(entry_ts)[11:16]})"
                       f"  sl={result['sl_price']:.1f}"
                       f"  exit={result['exit_price']:.1f} ({str(last_exit_ts)[11:16]})"
