@@ -45,7 +45,7 @@ from data_layer.instrument_registry import REGISTRY
 INDEX_CFG = {
     "NIFTY": {
         "spot_key":  "NSE_INDEX|Nifty 50",
-        "step":      50,
+        "step":      100,
         "lot":       65,
         "gap_near":  200,  # CE1=ATM-200, PE1=ATM+200  ← matches live scanner
         "gap_far":   400,  # CE2=ATM-400, PE2=ATM+400  ← matches live scanner
