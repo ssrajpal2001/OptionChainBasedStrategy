@@ -351,7 +351,7 @@
                 </tr>
               </thead>
               <tbody>
-                <template x-for="t in result.trades" :key="t.date+t.side+t.entry_time">
+                <template x-for="(t, idx) in result.trades" :key="idx">
                   <tr>
                     <td x-text="t.date.slice(5)"></td>
                     <td>
