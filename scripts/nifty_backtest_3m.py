@@ -2,7 +2,8 @@
 scripts/nifty_backtest_3m.py — NIFTY 3m-confirmation trap backtest.
 
 Entry logic (per leg):
-  1. GAP bias:  UP → CE side only; DOWN → PE side only; no-gap → both.
+  1. GAP bias:  UP → CE only (sellers trapped by gap); DOWN → PE only (buyers trapped).
+               NO GAP → scan SPOT HTF 75m zones: BEAR trapped→CE, BULL trapped→PE.
   2. HTF 75m zone must be TRAPPED or CLOSED (confirmed bearish trap).
   3. Option price in lower 1/3 of HTF zone (ltp ≤ zone_trigger).
   4. 3m candle: curr HIGH > prev HIGH while prev close ≤ zone_trigger → ENTRY.
@@ -79,6 +80,95 @@ def _before_cutoff(ts) -> bool:
 def _is_eod(ts) -> bool:
     h, m = _ts_hm(ts)
     return (h, m) >= EOD_HM
+
+
+# ── Spot HTF trap direction (for no-gap days) ─────────────────────────────────
+
+def _scan_htf_bull(df: pd.DataFrame) -> list:
+    """
+    Bull zone: curr_high > prev_high (buyers entered at prev_high).
+    TRAPPED when a later bar's low < prev_low (buyers' SL hit = bearish).
+    Returns list of zone dicts with status ACTIVE/TRAPPED/CLOSED.
+    """
+    zones = []
+    for i in range(1, len(df)):
+        prev = df.iloc[i - 1]
+        curr = df.iloc[i]
+        if float(curr["high"]) <= float(prev["high"]):
+            continue
+        zone_low  = float(prev["high"])   # buyers entered here
+        zone_high = float(curr["high"])
+        sl        = float(prev["low"])    # buyers' stop loss
+        e = {
+            "kind":       "BULL",
+            "zone_low":   zone_low,
+            "zone_high":  zone_high,
+            "sl":         sl,
+            "zone_trigger": round(zone_high - (zone_high - zone_low) / 3, 2),
+            "status":     "ACTIVE",
+            "trapped_on": None,
+            "closed_on":  None,
+        }
+        for j in range(i + 1, len(df)):
+            fut = df.iloc[j]
+            if e["status"] == "ACTIVE":
+                if float(fut["low"]) < sl:
+                    e["status"] = "TRAPPED"
+                    e["trapped_on"] = fut["datetime"]
+            elif e["status"] == "TRAPPED":
+                if float(fut["high"]) >= zone_low:
+                    e["status"] = "CLOSED"
+                    e["closed_on"] = fut["datetime"]
+                    break
+        zones.append(e)
+    return zones
+
+
+def _spot_trap_sides(df_spot_all: pd.DataFrame, htf_min: int, td: date) -> list:
+    """
+    For no-gap days: scan SPOT HTF zones to determine allowed sides.
+    BEAR zone TRAPPED/CLOSED → sellers trapped → CE (spot going UP)
+    BULL zone TRAPPED/CLOSED → buyers trapped → PE (spot going DOWN)
+    Returns list of allowed sides e.g. ["CE"], ["PE"], ["CE","PE"]
+    """
+    df_prior = df_spot_all[df_spot_all["datetime"].dt.date <= td]
+    if df_prior.empty or len(df_prior) < 2:
+        return ["CE", "PE"]
+    df_htf = _resample(df_prior, htf_min)
+    if len(df_htf) < 2:
+        return ["CE", "PE"]
+
+    allowed = []
+
+    # BEAR zone TRAPPED/CLOSED → sellers trapped → CE
+    _, bear_zones = scan_htf(df_htf)
+    for z in bear_zones:
+        if z.get("status") in ("TRAPPED", "CLOSED"):
+            ct = z.get("closed_on") or z.get("trapped_on")
+            if ct is not None:
+                try:
+                    ct_date = pd.Timestamp(str(ct)).date()
+                except Exception:
+                    ct_date = None
+                if ct_date and ct_date <= td:
+                    allowed.append("CE")
+                    break
+
+    # BULL zone TRAPPED/CLOSED → buyers trapped → PE
+    bull_zones = _scan_htf_bull(df_htf)
+    for z in bull_zones:
+        if z.get("status") in ("TRAPPED", "CLOSED"):
+            ct = z.get("closed_on") or z.get("trapped_on")
+            if ct is not None:
+                try:
+                    ct_date = pd.Timestamp(str(ct)).date()
+                except Exception:
+                    ct_date = None
+                if ct_date and ct_date <= td:
+                    allowed.append("PE")
+                    break
+
+    return allowed if allowed else ["CE", "PE"]
 
 
 # ── HTF zone scan ──────────────────────────────────────────────────────────────
@@ -456,10 +546,22 @@ def _run_day(index: str, cfg: dict, td: date,
     # ── Determine scan sides ───────────────────────────────────────────────
     all_sides = ["CE", "PE"]
     if use_bias and gap_fired:
+        # GAP itself is the trap: UP=bearish sellers trapped→CE, DOWN=bullish buyers trapped→PE
         all_sides = ["CE"] if gap_dir == "UP" else ["PE"]
         print(f"  GAP {gap_dir} detected → {all_sides[0]} side only")
     elif use_bias:
-        print(f"  No qualifying gap (<{gap_thresh}%) → both sides")
+        # No gap: use SPOT HTF zone direction to determine side
+        all_sides = _spot_trap_sides(df_spot_all, htf_min, td)
+        bear_active = "CE" in all_sides
+        bull_active = "PE" in all_sides
+        if bear_active and bull_active:
+            print(f"  No gap, spot: BEAR+BULL zones active → both sides")
+        elif bear_active:
+            print(f"  No gap, spot: BEAR zone trapped → CE only")
+        elif bull_active:
+            print(f"  No gap, spot: BULL zone trapped → PE only")
+        else:
+            print(f"  No gap, no spot zones → both sides")
 
     # ── Strike map per side ───────────────────────────────────────────────
     strike_map = {"CE": ce_strike, "PE": pe_strike}
