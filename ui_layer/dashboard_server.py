@@ -790,6 +790,32 @@ class DashboardServer:
                 import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
 
+        @app.post("/api/backtest/nifty3m", tags=["Admin"])
+        async def run_backtest_nifty_3m(request: Request):
+            """3m-confirmation trap backtest (opposite-zone exit)."""
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            token    = p.get("token", "")
+            index    = str(p.get("index", "NIFTY")).upper()
+            days     = int(p.get("days", 20))
+            lots     = int(p.get("lots", 2))
+            htf_min  = int(p.get("htf_min", 75))
+            rr_min   = float(p.get("rr_min", 1.5))
+            use_bias = bool(p.get("use_bias", True))
+            if not token:
+                return {"ok": False, "error": "token required"}
+            try:
+                from scripts.nifty_backtest_3m import run_backtest_3m
+                result = await asyncio.to_thread(
+                    run_backtest_3m, token, index, days, lots, htf_min, rr_min, use_bias
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
+
         _BACKTEST_SENSEX_HTML = os.path.join(_TEMPLATE_DIR, "backtest_sensex.html")
 
         @app.get("/backtest/sensex", include_in_schema=False)
