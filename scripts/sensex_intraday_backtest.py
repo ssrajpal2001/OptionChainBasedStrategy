@@ -953,10 +953,12 @@ def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
     s1 = 2 * P - prev_H
     atm = int(round(today_open / step)) * step
 
+    gap_direction = ("UP" if today_open > prev_C else "DOWN") if gap_fired else "FLAT"
+
     if gap_fired:
         ce1_strike = atm - gap_near
         pe1_strike = atm + gap_near
-        label = f"GAP {gap_pct:.1f}% → CE={ce1_strike} PE={pe1_strike}"
+        label = f"GAP {gap_pct:.1f}% {gap_direction} → CE={ce1_strike} PE={pe1_strike}"
     else:
         ce1_strike = int(round(s1 / step)) * step
         pe1_strike = int(round(r1 / step)) * step
@@ -987,7 +989,8 @@ def _resolve_day_strikes(dt: date, token: str, und: str = "SENSEX",
     return {
         "ce1_strike": ce1_strike, "pe1_strike": pe1_strike,
         "ce1_key": ce1_key or "", "pe1_key": pe1_key or "",
-        "expiry": expiry, "gap_fired": gap_fired, "label": label,
+        "expiry": expiry, "gap_fired": gap_fired,
+        "gap_direction": gap_direction, "label": label,
     }
 
 
@@ -1055,7 +1058,7 @@ def run_backtest_3level_ui(
             day_pe_key = strikes["pe1_key"]
             day_label  = strikes["label"]
             gap_fired  = strikes["gap_fired"]
-            gap_dir    = "UP" if gap_fired and "UP" in strikes["label"] else ("DOWN" if gap_fired else "FLAT")
+            gap_dir    = strikes.get("gap_direction", "FLAT")
 
         # ── Bias filter ─────────────────────────────────────────────────────
         ce_allowed = True
