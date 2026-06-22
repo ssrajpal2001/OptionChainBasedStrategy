@@ -107,6 +107,28 @@ def resample_15m(df1m: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def find_entry_after_sl(df1m: pd.DataFrame, z15: dict) -> dict | None:
+    """
+    After 15m SL is hit (price >= sl_level), watch 1m bars for price
+    to return to zone_high (c0.low). That touch = ENTRY.
+    Returns the first 1m bar where low <= zone_high after SL was hit.
+    """
+    sl_hit_ts  = z15["sl_hit_ts"]
+    zone_high  = z15["zone_high"]
+    # Only look at 1m bars AFTER the SL hit candle
+    after_sl = df1m[df1m["ts"] > sl_hit_ts].copy()
+    for _, bar in after_sl.iterrows():
+        # Price returns to zone_high = low touches or goes below zone_high
+        if float(bar["low"]) <= zone_high:
+            return {
+                "entry_ts":    bar["ts"],
+                "entry_price": zone_high,
+                "bar_open":    float(bar["open"]),
+                "bar_low":     float(bar["low"]),
+            }
+    return None
+
+
 def find_15m_zones_inside(df1m: pd.DataFrame, z75: dict) -> list:
     """
     Find 15m zones inside a given 75m zone.
@@ -241,6 +263,12 @@ def main():
                         t15    = z15["ts"].strftime("%H:%M")
                         sl15_t = z15["sl_hit_ts"].strftime("%H:%M")
                         print(f"    └─ 15m [{t15}]  zone_high={z15['zone_high']:.1f}  zone_low={z15['zone_low']:.1f}  sl_level={z15['sl_level']:.1f}  SL_hit@{sl15_t}")
+                        entry = find_entry_after_sl(df1m, z15)
+                        if entry:
+                            et = entry["entry_ts"].strftime("%H:%M")
+                            print(f"         ★ ENTRY  time={et}  price={entry['entry_price']:.1f}  (1m bar open={entry['bar_open']:.1f}  low={entry['bar_low']:.1f})")
+                        else:
+                            print(f"         ✗ No return to zone_high after SL hit — no entry")
                 else:
                     print(f"    └─ No valid 15m zone (SL not hit) inside this 75m zone")
         else:
