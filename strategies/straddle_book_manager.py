@@ -32,7 +32,11 @@ class StraddleBookManager:
         self._indices = {str(i).upper() for i in (monitored_indices or [])}
         self._reconcile_sec = reconcile_sec
         self._books: Dict[Key, SellStraddleStrategy] = {}
+        self._rebalancer = None
         self._running = False
+
+    def set_rebalancer(self, rebalancer) -> None:
+        self._rebalancer = rebalancer
 
     # ── Accessors (used by dashboard + bridge) ────────────────────────────────
     @property
@@ -93,6 +97,10 @@ class StraddleBookManager:
                 book.set_client_db(self._db)
                 book.start()
                 self._books[key] = book
+                # Activate full ATM chain for this underlying so the rebalancer
+                # subscribes the option chain (needed for pool indicator engine)
+                if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
+                    self._rebalancer.enable_chain(und)
                 logger.info("StraddleBookManager: spawned book %s/%s/%s (lots=%d)",
                             cid, bid, und, wanted[key])
             except Exception as exc:

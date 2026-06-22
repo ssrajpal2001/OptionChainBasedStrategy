@@ -65,6 +65,7 @@ class _UnderlyingState:
     pinned_strikes: Set[float] = field(default_factory=set)
     rebalance_count: int = 0
     eod_unsubscribed: bool = False           # True once NSE EOD cleanup has run
+    chain_enabled: bool = False              # True once a strategy calls enable_chain()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,6 +99,14 @@ class StrikeRebalancer:
         }
 
     # ── Public API ─────────────────────────────────────────────────────────────
+
+    def enable_chain(self, underlying: str) -> None:
+        """Allow the full ATM±chain_depth subscription for this underlying.
+        Called by sell_straddle / iron_condor books when they are active.
+        Without this call the rebalancer only subscribes pinned strikes (trap scanner legs)
+        and NOT the full ATM window — saves WS slots for inactive indices."""
+        if underlying in self._state:
+            self._state[underlying].chain_enabled = True
 
     def pin_strike(self, underlying: str, strike: float) -> None:
         """
@@ -292,7 +301,17 @@ class StrikeRebalancer:
         state: _UnderlyingState,
     ) -> None:
         depth = self._cfg.chain_depth
-        window = set(_strike_window(atm, step, depth))
+        if state.chain_enabled:
+            window = set(_strike_window(atm, step, depth))
+        else:
+            # No sell_straddle/IC active for this index — skip full ATM chain to save
+            # WS slots. Only pinned strikes (trap scanner legs) will be subscribed.
+            window = set()
+            logger.info(
+                "StrikeRebalancer: [%s] chain_enabled=False — skipping ATM±%d chain; "
+                "only %d pinned trap strikes subscribed. Call enable_chain() to activate.",
+                underlying, depth, len(state.pinned_strikes),
+            )
         # Union with any pre-existing pins (e.g. restored from SQLite on reboot)
         state.active_strikes = window | state.pinned_strikes
         tokens = self._strikes_to_tokens(underlying, list(state.active_strikes))

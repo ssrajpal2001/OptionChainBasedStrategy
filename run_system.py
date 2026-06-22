@@ -496,6 +496,12 @@ async def _run_live(
     trap_engine.set_rebalancer(rebalancer)
     # Give the trap scanner book manager the rebalancer so new engines can pin their strikes.
     trap_scanner_manager.set_rebalancer(rebalancer)
+    # Give the straddle manager the rebalancer so it can call enable_chain() when a book spawns
+    straddle_manager.set_rebalancer(rebalancer)
+    # Iron condor needs the full ATM chain — enable for all IC indices
+    for _ic in _iron_condors:
+        if hasattr(rebalancer, "enable_chain"):
+            rebalancer.enable_chain(_ic._underlying)
     # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
     # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
     _mcx_feeder = None  # Upstox1 handles MCX options (Upstox2 lacks MCX options data plan)
