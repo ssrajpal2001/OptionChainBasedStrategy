@@ -761,12 +761,16 @@ def run_backtest_ui(
 
 def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                    sl: float, t1: float, sq_off: str, lot_size: int, lots: int,
-                   df5m: pd.DataFrame = None) -> dict:
+                   df5m: pd.DataFrame = None,
+                   opp_entry_ts=None,
+                   ext_75m_zones: list = None) -> dict:
     """
     Walk 1m bars from entry_ts.
     At T1: book 50% (lot1), trail remaining lot with SL = entry (breakeven), exit at EOD/SL.
-    TSL step-up: if a new 5m trap forms AFTER entry above our price, and price later
-    touches its sl_level (sellers trapped), step up trailing_sl to that zone's zone_low.
+    TSL step-up: new post-entry 5m traps → step SL to zone_low when sl_level hit.
+    T1 extension: if opposite side has NOT entered yet when T1 is hit:
+      - New T1 = next 75m zone sl_level above current price (ext_75m_zones)
+      - If no 75m zone: lock SL at current LTP, trail until next 5m zone sl_level hit
     Returns combined PnL across both legs.
     """
     from scripts.show_75m_zones import detect_zones
@@ -842,10 +846,28 @@ def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                     "pnl_rs": round(total_rs, 0), "reason": "T1+SL"}
 
         if not t1_hit and hi >= t1:
+            t1_ts = ts
+            # T1 extension: if opposite side hasn't entered yet, keep running
+            opp_entered = (opp_entry_ts is not None and opp_entry_ts <= ts)
+            if not opp_entered and (ext_75m_zones or tsl_zones):
+                # Find next 75m zone sl_level above current price as new T1
+                next_75_t1 = None
+                if ext_75m_zones:
+                    above = [z["sl_level"] for z in ext_75m_zones
+                             if z["sl_level"] > hi and z["formed_ts"] < ts]
+                    if above:
+                        next_75_t1 = min(above)
+                if next_75_t1 is not None:
+                    t1 = next_75_t1   # extend T1 to next 75m zone sl_level, don't book yet
+                    continue          # keep running without booking 50%
+                else:
+                    # No 75m zone: lock SL at current LTP (protect gains), trail via TSL zones
+                    trailing_sl = max(trailing_sl, float(bar["close"]))
+                    continue          # keep running, TSL will trail up
+            # Normal T1: book 50%, trail rest at breakeven
             t1_hit = True
-            t1_ts  = ts
             t1_pnl_rs   = (t1 - entry_price) * qty_half
-            trailing_sl = max(entry_price, trailing_sl)   # step-up can't go below entry after T1
+            trailing_sl = max(entry_price, trailing_sl)
 
     # Last bar — no sq_off hit
     last = df1m.iloc[-1]
@@ -1320,23 +1342,26 @@ def run_backtest_3level_ui(
                 sl   = min(sl, ep - 50.0)
                 t1   = e["t1"]   # default: zone T1
 
-                # Override T1 using opposite side's room (same market move, different leg)
+                # Opposite-side T1: distance = opp_ltp - opp_entry_zone at our entry time
+                opp_entry_ts_val = None
                 if opp_sd and opp_sd["entries"]:
                     opp_entry_zone = opp_sd["entries"][0]["entry_price"]
-                    # Get opp side LTP at this entry timestamp
+                    opp_entry_ts_val = opp_sd["entries"][0]["entry_ts"]
                     opp_df = opp_sd["df1m"]
                     opp_row = opp_df[opp_df["ts"] <= e["entry_ts"]]
                     if not opp_row.empty:
                         opp_ltp = float(opp_row.iloc[-1]["close"])
-                        # Distance opp has to travel to reach its entry zone
-                        # PE: premium falls to entry → distance = opp_ltp - opp_entry_zone
-                        # CE: premium falls to entry → distance = opp_ltp - opp_entry_zone
                         opp_dist = opp_ltp - opp_entry_zone
-                        if opp_dist > 10:   # only if meaningful room (>10 pts)
-                            t1 = ep + opp_dist   # our T1 = entry + same distance
+                        if opp_dist > 10:
+                            t1 = ep + opp_dist
+
+                # 75m zones above T1 for T1 extension when opp side hasn't entered
+                ext_75m = [z for z in z75_pool if z["sl_level"] > t1]
 
                 exit_info = _simulate_exit(df1m, e["entry_ts"], ep, sl, t1,
-                                           sq_off, LOT_SIZE, lots, df5m=df5m_opt)
+                                           sq_off, LOT_SIZE, lots, df5m=df5m_opt,
+                                           opp_entry_ts=opp_entry_ts_val,
+                                           ext_75m_zones=ext_75m)
                 all_trades.append({
                     "date":       dt.isoformat(),
                     "side":       side,
