@@ -43,7 +43,7 @@ EOD_TIME         = "14:00"      # no new entries after this time (square-off at 
 SQ_OFF_TIME      = "15:15"      # hard square-off
 SL_BUFFER        = 0.0          # pts below zone_low for SL (0 = zone_low itself)
 TARGET_MULT      = 1.5          # target = zone_high + (zone_high-zone_low)*TARGET_MULT
-LOT_SIZE         = 10           # SENSEX lot size
+LOT_SIZE         = 20           # SENSEX lot size
 MIN_ZONE_RANGE   = 30           # skip zones smaller than this (noise filter)
 MAX_TRADES_PER_SIDE = 2         # max entries per direction (CE/PE) per day
 MIN_REWARD       = 20           # skip if target - entry < this (entry already overshot zone)
@@ -705,32 +705,77 @@ def run_backtest_ui(
 
 def _simulate_exit(df1m: pd.DataFrame, entry_ts, entry_price: float,
                    sl: float, t1: float, sq_off: str, lot_size: int, lots: int) -> dict:
-    """Walk 1m bars from entry_ts forward; return exit details."""
+    """
+    Walk 1m bars from entry_ts.
+    At T1: book 50% (lot1), trail remaining lot with SL = entry (breakeven), exit at EOD/SL.
+    Returns combined PnL across both legs.
+    """
     sq_h, sq_m = map(int, sq_off.split(":"))
-    qty = lots * lot_size
+    qty_total = lots * lot_size
+    qty_half  = qty_total // 2      # 50% at T1
+    qty_rest  = qty_total - qty_half
+
     future = df1m[df1m["ts"] > entry_ts]
+    t1_hit = False
+    t1_ts  = None
+    t1_pnl_rs = 0.0
+    trailing_sl = sl   # before T1 = zone_low SL; after T1 = entry (breakeven)
+
     for _, bar in future.iterrows():
-        ts = bar["ts"]
-        if (ts.hour, ts.minute) >= (sq_h, sq_m):
+        ts   = bar["ts"]
+        lo   = float(bar["low"])
+        hi   = float(bar["high"])
+        eod  = (ts.hour, ts.minute) >= (sq_h, sq_m)
+
+        if eod:
             ep = float(bar["open"])
-            pnl_pts = ep - entry_price
-            return {"exit_ts": ts, "exit_price": ep, "pnl_pts": round(pnl_pts, 2),
-                    "pnl_rs": round(pnl_pts * qty, 0), "reason": "EOD"}
-        lo, hi = float(bar["low"]), float(bar["high"])
-        if lo <= sl:
-            pnl_pts = sl - entry_price
-            return {"exit_ts": ts, "exit_price": sl, "pnl_pts": round(pnl_pts, 2),
-                    "pnl_rs": round(pnl_pts * qty, 0), "reason": "SL"}
-        if hi >= t1:
-            pnl_pts = t1 - entry_price
-            return {"exit_ts": ts, "exit_price": t1, "pnl_pts": round(pnl_pts, 2),
-                    "pnl_rs": round(pnl_pts * qty, 0), "reason": "T1"}
-    # Last bar EOD
+            if not t1_hit:
+                pnl_pts = ep - entry_price
+                return {"exit_ts": ts, "exit_price": ep,
+                        "pnl_pts": round(pnl_pts, 2),
+                        "pnl_rs": round(pnl_pts * qty_total, 0), "reason": "EOD"}
+            # T1 already booked: exit rest at EOD open
+            rest_pnl_pts = ep - entry_price
+            total_rs = t1_pnl_rs + rest_pnl_pts * qty_rest
+            avg_pts  = total_rs / qty_total
+            return {"exit_ts": ts, "exit_price": ep,
+                    "pnl_pts": round(avg_pts, 2),
+                    "pnl_rs": round(total_rs, 0), "reason": "T1+EOD"}
+
+        if lo <= trailing_sl:
+            if not t1_hit:
+                pnl_pts = trailing_sl - entry_price
+                return {"exit_ts": ts, "exit_price": trailing_sl,
+                        "pnl_pts": round(pnl_pts, 2),
+                        "pnl_rs": round(pnl_pts * qty_total, 0), "reason": "SL"}
+            # Rest stopped out at breakeven
+            rest_pnl_pts = trailing_sl - entry_price   # = 0 at breakeven
+            total_rs = t1_pnl_rs + rest_pnl_pts * qty_rest
+            avg_pts  = total_rs / qty_total
+            return {"exit_ts": ts, "exit_price": trailing_sl,
+                    "pnl_pts": round(avg_pts, 2),
+                    "pnl_rs": round(total_rs, 0), "reason": "T1+SL"}
+
+        if not t1_hit and hi >= t1:
+            t1_hit = True
+            t1_ts  = ts
+            t1_pnl_rs   = (t1 - entry_price) * qty_half
+            trailing_sl = entry_price   # move SL to breakeven for rest
+
+    # Last bar — no sq_off hit
     last = df1m.iloc[-1]
-    ep = float(last["close"])
+    ep   = float(last["close"])
+    if not t1_hit:
+        pnl_pts = ep - entry_price
+        return {"exit_ts": last["ts"], "exit_price": ep,
+                "pnl_pts": round(pnl_pts, 2),
+                "pnl_rs": round(pnl_pts * qty_total, 0), "reason": "EOD"}
+    rest_pnl_pts = ep - entry_price
+    total_rs = t1_pnl_rs + rest_pnl_pts * qty_rest
+    avg_pts  = total_rs / qty_total
     return {"exit_ts": last["ts"], "exit_price": ep,
-            "pnl_pts": round(ep - entry_price, 2),
-            "pnl_rs": round((ep - entry_price) * qty, 0), "reason": "EOD"}
+            "pnl_pts": round(avg_pts, 2),
+            "pnl_rs": round(total_rs, 0), "reason": "T1+EOD"}
 
 
 def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
@@ -920,7 +965,7 @@ def run_backtest_3level_ui(
     """
     from scripts.show_75m_zones import fetch_1m, resample, detect_zones
 
-    LOT_SIZE = 10
+    LOT_SIZE = 20
     trading_days = _get_trading_days(days)
     all_pool_days = _get_trading_days(days + pool_days)
     debug_log: list = []
