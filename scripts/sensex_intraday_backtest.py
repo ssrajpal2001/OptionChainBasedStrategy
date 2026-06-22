@@ -600,7 +600,13 @@ def run_backtest_ui(
             continue
         ce_strike = _round_ce(spot)
         pe_strike = _round_pe(spot)
-        expiry = _find_nearest_expiry(token, dt)
+        expiry = None
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            if REGISTRY.is_loaded("SENSEX"):
+                expiry = REGISTRY.get_active_expiry("SENSEX", from_date=dt)
+        except Exception:
+            pass
         if expiry is None:
             days_to_fri = (4 - dt.weekday()) % 7
             expiry = dt + timedelta(days=days_to_fri if days_to_fri else 7)
