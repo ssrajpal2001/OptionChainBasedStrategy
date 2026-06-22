@@ -227,13 +227,22 @@ def _advance_zone_state(zone: dict, price: float) -> dict:
 
 
 # ── Main per-day simulation ───────────────────────────────────────────────────
+#
+# STRATEGY (matches user's June-22 SENSEX CE-77000 example):
+#   Reference  = option's OPENING PRICE (first 1m open) = zone_high
+#   Session low = lowest price seen from open onward      = zone_low
+#   State machine (per 1m bar):
+#     WATCH    → price drops MIN_DIP pts below ref       → SELLERS_IN
+#     SELLERS_IN → price recovers to REF_PCT (90%) of ref → TRAPPED
+#     TRAPPED  → 5m close above ref AND 1m breakout      → ENTRY
+#   Entry at next 1m open.  SL = session_low.  Target = ref + (ref-session_low)*TARGET_MULT
+#   Max 1 trade per side per day; no new entries after EOD_TIME.
+
+MIN_DIP_PCT  = 0.03   # sellers must push option at least 3% below opening price
 
 def _run_day(dt: date, token: str, lots: int,
              ce_key: str, pe_key: str,
              ce_strike: int, pe_strike: int) -> list[dict]:
-    """
-    Run one trading day. Returns list of trade dicts (one per trade).
-    """
     trades = []
 
     for side, key, strike in [("CE", ce_key, ce_strike), ("PE", pe_key, pe_strike)]:
@@ -242,31 +251,25 @@ def _run_day(dt: date, token: str, lots: int,
             print(f"    [{side} {strike}] insufficient bars ({len(df1m)}), skip")
             continue
 
-        # Strip timezone so all comparisons are tz-naive
         if df1m["ts"].dt.tz is not None:
             df1m["ts"] = df1m["ts"].dt.tz_localize(None)
 
-        # Build HTF (15m) and MTF (5m) from 1m
-        htf = _resample(df1m, HTF_MIN)
-        mtf = _resample(df1m, MTF_MIN)
+        mtf = _resample(df1m, MTF_MIN)   # 5m candles for confirmation
 
-        if htf.empty or len(htf) < 2:
-            print(f"    [{side} {strike}] not enough HTF candles, skip")
-            continue
+        ref_price    = float(df1m.iloc[0]["open"])   # opening price = our reference
+        session_low  = ref_price                      # track lowest price seen
+        min_dip_pts  = ref_price * MIN_DIP_PCT        # 3% of opening = meaningful dip
 
-        opening_price = float(df1m.iloc[0]["open"])
-        print(f"    [{side} {strike}] bars={len(df1m)} open={opening_price:.1f}")
+        print(f"    [{side} {strike}] bars={len(df1m)} open={ref_price:.1f}  need_dip_below={ref_price - min_dip_pts:.1f}")
 
-        # Detect initial zones from HTF
-        zones = _detect_seller_trap_zones(htf)
+        # State: WATCH → SELLERS_IN → TRAPPED → (entry fired)
+        state        = "WATCH"
+        trap_low     = None    # lowest price seen while SELLERS_IN
+        entered      = False   # only 1 trade per side per day
+        position     = None
 
-        # State machine
-        position      = None   # dict when in trade
-        mtf_confirmed = False
-
-        no_new_entry = pd.Timestamp(f"{dt} {EOD_TIME}")   # 14:00 — no new entries
-        sq_off       = pd.Timestamp(f"{dt} {SQ_OFF_TIME}") # 15:15 — hard exit
-        trades_this_side = 0   # max MAX_TRADES_PER_SIDE per direction
+        no_new_entry = pd.Timestamp(f"{dt} {EOD_TIME}")
+        sq_off       = pd.Timestamp(f"{dt} {SQ_OFF_TIME}")
 
         for _, bar1m in df1m.iterrows():
             ts     = bar1m["ts"]
@@ -274,8 +277,11 @@ def _run_day(dt: date, token: str, lots: int,
             high1m = float(bar1m["high"])
             low1m  = float(bar1m["low"])
 
+            # Track session low (even while in position)
+            if low1m < session_low:
+                session_low = low1m
+
             if ts >= sq_off:
-                # Hard square-off
                 if position:
                     pnl = (ltp - position["entry"]) * position["qty"]
                     trades.append({**position,
@@ -285,7 +291,7 @@ def _run_day(dt: date, token: str, lots: int,
                     position = None
                 break
 
-            # ── If in position: check SL / target ────────────────────────────
+            # ── Manage open position ──────────────────────────────────────────
             if position:
                 if low1m <= position["sl"]:
                     pnl = (position["sl"] - position["entry"]) * position["qty"]
@@ -301,108 +307,87 @@ def _run_day(dt: date, token: str, lots: int,
                                    "pnl_pts": position["target"] - position["entry"],
                                    "pnl_rs":  pnl, "reason": "TARGET"})
                     position = None
-                continue   # don't look for new entry while in trade
-
-            # No new entries after EOD_TIME or if daily limit reached
-            if ts >= no_new_entry:
-                continue
-            if trades_this_side >= MAX_TRADES_PER_SIDE:
                 continue
 
-            # ── Advance ALL zone states on each 1m close ─────────────────────
-            zones = [_advance_zone_state(z, ltp) for z in zones]
-
-            # ── Step 1: HTF zone ENTRY_READY? ────────────────────────────────
-            zones_ready = [z for z in zones
-                           if z["state"] == "ENTRY_READY" and z["zone_ts"] <= ts]
-            if not zones_ready:
+            if entered or ts >= no_new_entry:
                 continue
 
-            # Use the most recent ENTRY_READY zone
-            best_zone = zones_ready[-1]
+            # ── State machine ─────────────────────────────────────────────────
+            if state == "WATCH":
+                # Sellers must push option at least MIN_DIP_PCT below opening price
+                if ltp <= ref_price - min_dip_pts:
+                    state    = "SELLERS_IN"
+                    trap_low = ltp
 
-            # Skip tiny zones (noise)
-            if (best_zone["zone_high"] - best_zone["zone_low"]) < MIN_ZONE_RANGE:
-                continue
+            elif state == "SELLERS_IN":
+                if ltp < trap_low:
+                    trap_low = ltp
+                # Sellers recovering through 90% of ref = trapped
+                if ltp >= ref_price * 0.90:
+                    state = "TRAPPED"
 
-            # ── Zone quality check: sellers must have dipped meaningfully ─────
-            # sellers_in_low must be at least 5pts below zone_low to confirm real selling
-            s_low = best_zone.get("sellers_in_low")
-            if s_low is None or s_low > best_zone["zone_low"] - 5:
-                continue   # sellers barely dipped — weak trap, skip
+            elif state == "TRAPPED":
+                # If price falls back below dip threshold — trap failed
+                if ltp <= ref_price - min_dip_pts:
+                    state    = "SELLERS_IN"
+                    trap_low = min(trap_low, ltp) if trap_low else ltp
+                    continue
 
-            # ── Step 2: 5m MTF confirmation ───────────────────────────────────
-            # 5m must CLOSE above zone_high — proves sellers are truly trapped above zone
-            mtf_ts   = mtf["ts"] if "ts" in mtf.columns else mtf.index
-            mtf_past = mtf[mtf_ts < ts]
-            if mtf_past.empty:
-                continue
-            last_5m       = mtf_past.iloc[-1]
-            last_5m_close = float(last_5m["close"])
-            last_5m_open  = float(last_5m["open"])
-            if last_5m_close <= last_5m_open:
-                continue   # bearish 5m — sellers still in control
-            if last_5m_close < best_zone["zone_high"]:
-                continue   # 5m close below zone_high — not confirmed yet
+                # ── 5m confirmation: last completed 5m must close ABOVE ref ──
+                mtf_ts   = mtf["ts"] if "ts" in mtf.columns else mtf.index
+                mtf_past = mtf[mtf_ts < ts]
+                if mtf_past.empty:
+                    continue
+                last_5m = mtf_past.iloc[-1]
+                if float(last_5m["close"]) < ref_price:
+                    continue   # 5m not yet above opening ref
 
-            # ── Step 3: 1m buy signal ─────────────────────────────────────────
-            bar_idx = bar1m.name
-            if bar_idx < 1:
-                continue
-            prev1m = df1m.iloc[bar_idx - 1]
-            if ltp <= float(prev1m["high"]):
-                continue   # no 1m breakout yet
+                # ── 1m breakout: close > prev 1m high ─────────────────────────
+                bar_idx = bar1m.name
+                if bar_idx < 1:
+                    continue
+                prev1m = df1m.iloc[bar_idx - 1]
+                if ltp <= float(prev1m["high"]):
+                    continue
 
-            # ── All 3 conditions met — ENTER at next 1m open ─────────────────
-            next_idx = bar_idx + 1
-            if next_idx >= len(df1m):
-                continue
-            entry_bar   = df1m.iloc[next_idx]
-            entry_price = float(entry_bar["open"])
-            entry_ts    = entry_bar["ts"]
-            if entry_ts >= no_new_entry:
-                continue
+                # ── ENTRY ─────────────────────────────────────────────────────
+                next_idx = bar_idx + 1
+                if next_idx >= len(df1m):
+                    continue
+                entry_bar   = df1m.iloc[next_idx]
+                entry_price = float(entry_bar["open"])
+                entry_ts    = entry_bar["ts"]
+                if entry_ts >= no_new_entry:
+                    continue
 
-            sl     = best_zone["sl"]
-            target = best_zone["target"]
+                dip_range = ref_price - trap_low    # how far sellers pushed it
+                sl        = round(trap_low - SL_BUFFER, 1)
+                target    = round(ref_price + dip_range * TARGET_MULT, 1)
 
-            # Guard 1: entry must not overshoot zone_high by more than 5% of range
-            zone_range = best_zone["zone_high"] - best_zone["zone_low"]
-            if entry_price > best_zone["zone_high"] + zone_range * 0.05:
-                continue
+                # R:R check: must be at least 1.5:1
+                risk   = entry_price - sl
+                reward = target - entry_price
+                if risk <= 0 or reward / risk < 1.5:
+                    continue
 
-            # Guard 2: entry must not be at or below SL (would be instant loss)
-            if entry_price <= sl + 5:
-                continue
-
-            # Guard 3: minimum R:R ratio of 1.5 — don't take poor-odds trades
-            risk   = entry_price - sl
-            reward = target - entry_price
-            if risk <= 0 or reward / risk < 1.5:
-                continue
-
-            qty      = lots * LOT_SIZE
-            position = {
-                "date":     dt.isoformat(),
-                "side":     side,
-                "strike":   strike,
-                "key":      key,
-                "entry_ts": entry_ts,
-                "entry":    entry_price,
-                "sl":       sl,
-                "target":   target,
-                "qty":      qty,
-                "htf_zone": f"{best_zone['zone_low']}→{best_zone['zone_high']}",
-            }
-            trades_this_side += 1
-            # Mark zone consumed — no double entry on same zone
-            for z in zones:
-                if z["zone_ts"] == best_zone["zone_ts"]:
-                    z["state"] = "CONSUMED"
-            _ets = entry_ts.strftime('%H:%M') if hasattr(entry_ts, 'strftime') else str(entry_ts)[11:16]
-            print(f"      ENTRY {_ets} {side} {strike} "
-                  f"@ {entry_price:.1f}  zone={best_zone['zone_low']}→{best_zone['zone_high']}"
-                  f"  SL={best_zone['sl']:.1f}  T={best_zone['target']:.1f}")
+                qty      = lots * LOT_SIZE
+                position = {
+                    "date":     dt.isoformat(),
+                    "side":     side,
+                    "strike":   strike,
+                    "key":      key,
+                    "entry_ts": entry_ts,
+                    "entry":    entry_price,
+                    "sl":       sl,
+                    "target":   target,
+                    "qty":      qty,
+                    "htf_zone": f"{round(trap_low,1)}→{ref_price}",
+                }
+                entered = True
+                _ets = entry_ts.strftime('%H:%M') if hasattr(entry_ts, 'strftime') else str(entry_ts)[11:16]
+                print(f"      ENTRY {_ets} {side} {strike} @ {entry_price:.1f}"
+                      f"  ref={ref_price:.1f}  trap_low={trap_low:.1f}"
+                      f"  SL={sl:.1f}  T={target:.1f}  R:R={reward/risk:.1f}")
 
         # Hard EOD close if loop ended with open position
         if position and not df1m.empty:
