@@ -823,18 +823,20 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
                 "entry_price": z5["zone_high"],
                 "sl":          round(z15["zone_low"], 2),       # 15m zone_low (wider SL)
                 "t1":          round(z15["sl_level"], 2),      # c0.high of 15m = sellers' SL = T1
-                "zone_label":  f"15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl_level']:.0f}) / 5m {z5['zone_high']:.0f}",
+                "zone_label":  f"{mode_label[0]}15m {z15['zone_high']:.0f}→{z15['zone_low']:.0f}(sl={z15['sl_level']:.0f}) / 5m {z5['zone_high']:.0f}",
                 "side":        "BUY",
             })
 
     active_75 = [z for z in z75_pool if z["sl_hit_ts"] < today_start]
     used_75 = False
+    mode_label = [""]   # mutable so _try_5m can read it
 
     for z75 in active_75:
         entry_1m_ts = first_1m_entry(df1m, z75, day_start)
         if entry_1m_ts is None:
             continue
         used_75 = True
+        mode_label[0] = f"75m {z75['zone_high']:.0f}→{z75['zone_low']:.0f} → "
         zones_15 = [z for z in detect_zones(mtf_15)
                     if z["zone_high"] >= z75["zone_low"]
                     and z["zone_high"] <= z75["zone_high"]
@@ -846,7 +848,8 @@ def _collect_entries_3level(dt, df1m: pd.DataFrame, z75_pool: list,
             _try_5m(z15, ret15["entry_ts"])
 
     if not used_75:
-        # CASCADE: any CLOSED 15m zone today
+        # CASCADE: no 75m zone active today → any CLOSED 15m zone qualifies
+        mode_label[0] = "CASCADE → "
         for z15 in detect_zones(mtf_15):
             ret15 = first_return_to_zone_high(df1m, z15, z15["sl_hit_ts"])
             if ret15 is None:
