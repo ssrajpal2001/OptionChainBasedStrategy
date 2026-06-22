@@ -647,7 +647,15 @@ def _run_day(index: str, cfg: dict, td: date,
         # ── 3m entry signals ───────────────────────────────────────────────
         signals = _find_3m_entries(df_today, zones, sl_buf=sl_buf, min_risk=min_risk)
         if not signals:
-            print(f"  {opt_type}: {len(zones)} zone(s) found but no 3m entry signal (price never in lower 1/3 or risk < {min_risk}pts)")
+            # Debug: show zone boundaries and min 3m close vs zone_trigger
+            zinfo = []
+            for z in zones[:3]:
+                zt = float(z["zone_trigger"])
+                zl = float(z["zone_low"])
+                zh = float(z["zone_high"])
+                zinfo.append(f"zone=[{zl:.0f}-{zh:.0f}] trig={zt:.0f}")
+            min_close = round(float(df_today["close"].min()), 1) if not df_today.empty else "?"
+            print(f"  {opt_type}: {len(zones)} zone(s) | min_3m_close={min_close} | {'; '.join(zinfo)}")
             continue
 
         last_exit_ts: Optional[pd.Timestamp] = None
