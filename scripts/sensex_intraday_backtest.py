@@ -1399,8 +1399,9 @@ def run_backtest_3level_ui(
                 "htf_zone":   e["zone_label"],
             })
 
-            # If rotation: opposite side may now start after this exit
-            if exit_info["reason"] == "ROTATED" and opp_sd and opp_sd["entries"]:
+            # If rotation: opposite side may now start — but only if spot bias allows it
+            opp_bias_ok = (pe_allowed if opp_side == "PE" else ce_allowed)
+            if exit_info["reason"] == "ROTATED" and opp_sd and opp_sd["entries"] and opp_bias_ok:
                 opp_e2   = opp_sd["entries"][0]
                 opp_key2 = key_map[opp_side]
                 opp_ep   = opp_e2["entry_price"]
