@@ -342,17 +342,17 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
 
-    # SL buffer = user's SL_BUF input, capped at zone_height (never wider than the zone itself).
-    # Floor = 1 pt to avoid touching zone_low exactly (avoids tick-precision fill issues).
-    # Previous logic `max(2, zht)` (full zone height) was too wide for small-premium stock options
-    # → forced risk = ~1.67×zht making R:R impossible for stocks.
-    sl_buf_eff = max(1.0, min(SL_BUF, zht))
+    # SL buffer: fixed 2 pts for stock options (premiums are tiny, 2pt sweep is enough).
+    # For index options use the user's SL_BUF input (default 10 pts).
+    # Proportional (= zone_height) was tried but made R:R structurally ≤ 0.8 for all zones.
+    sl_buf_eff = 2.0 if IS_STOCK else max(1.0, SL_BUF)
     sl_px      = round(zl - sl_buf_eff, 2)        # hard SL for both lots
 
     # R:R filter: reward (target - lot1 trigger) vs risk (trigger - sl).
     # Entry approximated at scale_in_lvl (zone_high - 1/3 zone_height).
-    # For stocks (IS_STOCK) use a relaxed threshold since option premiums are small.
-    _rr_min    = MIN_RR * 0.67 if IS_STOCK else MIN_RR   # 1.0 for stocks, 1.5 for indices
+    # For stocks: threshold = 1.0 (realistic given tiny premiums).
+    # For indices: threshold = 1.5 (NIFTY/BN zones have larger swings).
+    _rr_min    = 1.0 if IS_STOCK else MIN_RR
     _approx_entry = scale_in_lvl
     _reward       = zt - _approx_entry
     _risk         = _approx_entry - sl_px
