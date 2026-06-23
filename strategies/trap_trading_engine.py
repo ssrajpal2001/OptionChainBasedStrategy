@@ -467,12 +467,23 @@ class TrapTradingEngine:
         for sym in symbols:
             self._restore_trade(sym)
 
-        # v2: lock each symbol's day strikes (prev open-day high/low → ATM+DTE) and seed
-        # the per-leg HTF detectors from each option's own history — all inside
-        # _lock_day_strikes → _seed_leg_detection. No underlying-bar replay needed.
-        # Scheduled in the BACKGROUND so startup never blocks on the historical API.
+        # v2: lock each symbol's day strikes only when at least one client has terminal ON.
+        # If no terminal is connected at startup (e.g. pm2 restart before user logs in),
+        # skip subscription — the 60s heartbeat re-check in _on_index_tick will subscribe
+        # as soon as the first terminal connects.
         for sym in symbols:
-            asyncio.create_task(self._lock_day_strikes(sym))
+            terminal_on = False
+            if self._client_db is not None:
+                try:
+                    terminal_on = await asyncio.to_thread(
+                        self._client_db.any_trap_terminal_on_sync, sym
+                    )
+                except Exception:
+                    terminal_on = False
+            if terminal_on:
+                asyncio.create_task(self._lock_day_strikes(sym))
+            else:
+                logger.info("TrapEngine[%s]: warm_start skipped — no terminal connected", sym)
 
     def _market_close_for(self, symbol: str):
         """EOD force-exit time for the symbol's exchange (MCX trades the evening
@@ -856,8 +867,15 @@ class TrapTradingEngine:
                     self._lock_try = {}
                 if _t.monotonic() - self._lock_try.get(event.symbol, 0.0) > 60.0:
                     self._lock_try[event.symbol] = _t.monotonic()
-                    # Background: never block tick draining on the HTTP/DB lookup.
-                    asyncio.create_task(self._lock_day_strikes(event.symbol))
+                    # Only lock + subscribe if at least one terminal is ON for this instrument.
+                    terminal_on = True
+                    if self._client_db is not None:
+                        try:
+                            terminal_on = self._client_db.any_trap_terminal_on_sync(event.symbol)
+                        except Exception:
+                            terminal_on = True  # fail-open: subscribe if DB unreadable
+                    if terminal_on:
+                        asyncio.create_task(self._lock_day_strikes(event.symbol))
             else:
                 # Periodically RE-ASSERT the tracked-leg subscription. If the mock→live feeder
                 # swap or a WS reconnect dropped these far-OTM keys, this re-adds them (the
@@ -989,6 +1007,25 @@ class TrapTradingEngine:
             # No running loop (e.g. unit context) — caller may invoke _fire_entry_v2 directly.
             pass
 
+    def _get_monthly_expiry(self, underlying: str, today) -> Optional[object]:
+        """Return the last expiry of the current month from REGISTRY (= monthly contract).
+        If current month's last expiry is already past today, return last expiry of next month.
+        Falls back to None if REGISTRY has no data for this underlying."""
+        from data_layer.instrument_registry import REGISTRY as _REG
+        all_exp = [e for e in _REG.all_expiries(underlying) if e >= today]
+        if not all_exp:
+            return None
+        # Group by (year, month), take the last expiry in that month = monthly.
+        from collections import defaultdict
+        by_month: dict = defaultdict(list)
+        for e in all_exp:
+            by_month[(e.year, e.month)].append(e)
+        # Pick the earliest month that has a last-Thursday-of-month expiry.
+        for _ym in sorted(by_month):
+            monthly = by_month[_ym][-1]  # last expiry in the month
+            return monthly
+        return None
+
     def _build_entry_payload(self, underlying: str, opt_type: str) -> Optional[dict]:
         """Resolve the fresh ATM±buy_depth execution strike from the live spot/future.
         Returns the order payload, or None if spot is unknown."""
@@ -1019,15 +1056,32 @@ class TrapTradingEngine:
                 pos["opt_type"], pos["strike"], exit_prem, opt_type)
             self._v2_position = None   # clear runner + its SL state
             await self._v2_publish_exit(pos, exit_prem, "rotation")
+        # Gate: only fire if at least one client has terminal ON + trade ON for this instrument.
+        if self._client_db is not None:
+            try:
+                active_bindings = await asyncio.to_thread(
+                    self._client_db.get_active_trap_bindings_sync, underlying
+                )
+            except Exception:
+                active_bindings = []
+            if not active_bindings:
+                self._tlog(underlying).info(
+                    "V2 ENTRY blocked [%s %s]: no client with terminal+trade ON", underlying, opt_type
+                )
+                return
+
         payload = self._build_entry_payload(underlying, opt_type)
         if payload is None:
             self._tlog(underlying).info("V2 ENTRY aborted: no live spot for %s", underlying)
             return
         from data_layer.instrument_registry import REGISTRY as _REG
         today = datetime.now(IST).date()
-        expiry = _REG.get_active_expiry(underlying, today)
+        # Execution uses MONTHLY expiry (last expiry of current/next month loaded in REGISTRY).
+        # Detection legs use weekly expiry (set at day-lock time) — intentionally different.
+        expiry = self._get_monthly_expiry(underlying, today)
         if expiry is None:
-            expiry = next((e for e in _REG.all_expiries(underlying) if e >= today), None)
+            # Fallback to nearest available expiry if no monthly found in registry.
+            expiry = _REG.get_active_expiry(underlying, today)
         # Subscribe + pin the execution strike so its premium streams for management.
         try:
             if self._feeder is not None and expiry is not None:
