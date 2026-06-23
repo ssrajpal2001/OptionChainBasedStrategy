@@ -600,41 +600,35 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
             print(f"  {trade_date} {ot}{strike}: no today bars")
             continue
 
-        # HTF 75-min scan on full history (institutional memory)
-        htf = _rs(df_all, HTF_MIN)
+        # HTF 75-min scan on PREVIOUS days only — today's bars must NOT be included.
+        # Using today's spike to form a zone and then "entering" that same spike is circular.
+        df_prev_opt = df_all[df_all["datetime"].dt.date < td].copy()
+        htf = _rs(df_prev_opt, HTF_MIN)
         if len(htf) < 2:
             print(f"  {trade_date} {ot}{strike}: not enough HTF bars")
             continue
 
         _, htf_zones = scanner.scan_htf(htf)
 
-        # Only use TRAPPED zones (CLOSED = price already re-entered zone - too late for Lot1)
-        def _trapped_today(z):
+        # Only use zones trapped strictly BEFORE today (HTF scanned on prev-day bars only)
+        def _trapped_before_today(z):
             ts = z.get("trapped_on")
             if not ts:
                 return False
             try:
-                return pd.to_datetime(ts).date() <= td
+                return pd.to_datetime(ts).date() < td
             except Exception:
                 return False
 
         valid = [z for z in htf_zones
-                 if z.get("status") in ("TRAPPED", "CLOSED") and _trapped_today(z)]
+                 if z.get("status") in ("TRAPPED", "CLOSED") and _trapped_before_today(z)]
 
         if not valid:
-            # Fallback: intraday 15-min cascade
-            df_15 = _rs(df_today_opt, 15)
-            if len(df_15) >= 2:
-                _, cas = scanner.scan_htf(df_15)
-                valid = [z for z in cas if z.get("status") in ("TRAPPED", "CLOSED")]
-                if valid:
-                    print(f"  {trade_date} {ot}{strike}: no HTF zone -> cascade 15m ({len(valid)} zones)")
-                else:
-                    print(f"  {trade_date} {ot}{strike}: no zones (HTF or 15m) - skip")
-                    continue
-            else:
-                print(f"  {trade_date} {ot}{strike}: no zones - skip")
-                continue
+            # No pre-existing HTF zone from previous days → skip this day.
+            # Intraday cascade removed: scanning today's own bars would detect
+            # a zone from the morning spike and enter during the same spike (circular).
+            print(f"  {trade_date} {ot}{strike}: no pre-existing HTF zone - skip")
+            continue
         else:
             print(f"  {trade_date} {ot}{strike} [{mode} {bias_label}]: {len(valid)} HTF zone(s)")
 
