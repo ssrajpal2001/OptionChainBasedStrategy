@@ -269,7 +269,9 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
 
             if bar_close <= position["sl"]:
                 reason = f"SL(stage{stage})" if stage > 0 else "SL"
-                trades.append(_close(position, bar_close, ts, reason))
+                # Exit at SL price, not bar close — SL order fills at the level,
+                # not wherever the bar happens to close (100 not 80).
+                trades.append(_close(position, position["sl"], ts, reason))
                 consec_sl = consec_sl + 1 if stage == 0 else 0
                 position  = None
             elif stage < len(targets) and bar_close >= targets[stage]:
