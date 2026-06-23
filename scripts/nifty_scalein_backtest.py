@@ -314,7 +314,11 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         return None
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
-    sl_px        = round(zl - SL_BUF, 2)          # hard SL for both lots
+    # SL buffer = max(user SL_BUF, zone_height).
+    # A 5-pt zone with SL_BUF=20 gives SL 25 pts below entry — disproportionate.
+    # Using zone_height as the floor keeps risk proportional to the zone size.
+    sl_buf_eff   = max(SL_BUF, zht)
+    sl_px        = round(zl - sl_buf_eff, 2)      # hard SL for both lots
 
     # -- Lot 1 entry ----------------------------------------------------------
     # First 1-min close INSIDE the zone AND after the zone became valid (trapped_on).
