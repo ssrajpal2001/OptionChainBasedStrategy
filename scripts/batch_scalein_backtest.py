@@ -51,7 +51,7 @@ def _run_one(sym: str, token: str, days: int, sl_buf: float) -> dict:
     from scripts.nifty_scalein_backtest import run_scalein_backtest
     try:
         result = run_scalein_backtest(
-            access_token=token,
+            token=token,
             days=days,
             start="",
             end="",
