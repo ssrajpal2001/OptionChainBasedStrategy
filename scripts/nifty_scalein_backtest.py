@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time as _time
@@ -40,6 +41,26 @@ sys.path.insert(0, ".")
 
 from strategies.trap_scanner import scanner
 from data_layer.instrument_registry import REGISTRY
+
+# -- Module logger (file + console, configured per-run) -----------------------
+_log: logging.Logger = logging.getLogger("scalein_backtest")
+_log.setLevel(logging.DEBUG)
+if not _log.handlers:
+    _log.addHandler(logging.NullHandler())   # silent until _setup_log() wires the file
+
+
+def _setup_log(log_path: str) -> None:
+    """Wire a FileHandler + StreamHandler to _log for this backtest run."""
+    for h in list(_log.handlers):
+        _log.removeHandler(h)
+    fmt = logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    _log.addHandler(fh)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(fmt)
+    _log.addHandler(ch)
+
 
 # -- Shared config -------------------------------------------------------------
 HTF_MIN  = 75
@@ -198,7 +219,7 @@ def _fetch_1m(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
                 chunks.append(chunk)
             _time.sleep(0.15)
         except Exception as exc:
-            print(f"  [fetch] {key} {cur}->{nxt}: {exc}")
+            _log.info(f"  [fetch] {key} {cur}->{nxt}: {exc}")
         cur = nxt + timedelta(days=1)
     if not chunks:
         return pd.DataFrame()
@@ -314,7 +335,9 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     zl  = float(zone["zone_low"])
     zt  = float(zone.get("sl", zh + (zh - zl)))   # T1 target = bears' stop above zone_high
     zht = zh - zl                                  # zone height
+    _log.info(f"    ZONE  zh={zh}  zl={zl}  target={zt}  height={zht:.1f}  mode={mode}")
     if zht < 3.0:                                  # reject narrow/noise zones (< 3 pts)
+        _log.info(f"    SKIP  zone too narrow ({zht:.1f} < 3.0 pts)")
         return None
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
@@ -330,7 +353,11 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     _approx_entry = scale_in_lvl
     _reward       = zt - _approx_entry
     _risk         = _approx_entry - sl_px
+    _log.info(f"    R:R   entry~={_approx_entry}  SL={sl_px}  target={zt}  "
+              f"risk={_risk:.1f}  reward={_reward:.1f}  rr={_reward/_risk:.2f}" if _risk > 0
+              else f"    R:R   risk<=0 — skip")
     if _risk <= 0 or (_reward / _risk) < MIN_RR:
+        _log.info(f"    SKIP  R:R {_reward/_risk:.2f} < {MIN_RR}" if _risk > 0 else "    SKIP  risk<=0")
         return None   # poor R:R — zone target not far enough above SL
 
     # -- Zone valid-from gate (common to both modes) ---------------------------
@@ -378,7 +405,10 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 break
 
     if lot1_px is None:
+        _log.info(f"    NO ENTRY  entry condition never triggered")
         return None   # entry condition never triggered today
+
+    _log.info(f"    LOT1 ENTRY  px={lot1_px}  ts={lot1_ts}  sl={sl_px}  target={zt}")
 
     # TrapScanner = 2 lots entered at same ENTRY_READY price, T1 exits Lot 1 (50%)
     if mode == "trapscanner":
@@ -505,6 +535,8 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         else:
             return None
 
+    _log.info(f"    EXIT  px={exit_px}  reason={reason}  ts={exit_ts}  t1_hit={t1_hit}")
+
     # -- P&L ------------------------------------------------------------------
     if two_lots:
         if t1_hit:
@@ -521,6 +553,8 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         total_pnl = round((exit_px - lot1_px) * LOT, 2)
         rem_pnl   = total_pnl
 
+    _log.info(f"    TRADE  pnl=Rs {int(total_pnl):+,}  lots={total_qty//LOT}  "
+              f"entry={lot1_px}  exit={exit_px}  reason={reason}")
     return {
         "date":           trade_date,
         "opt_type":       ot,
@@ -560,7 +594,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     df_prev  = df_spot_all[df_spot_all["datetime"].dt.date < td].copy()
     df_today = _mkt(df_spot_all[df_spot_all["datetime"].dt.date == td].copy())
     if df_prev.empty or df_today.empty:
-        print(f"  {trade_date}: no spot data - skip")
+        _log.info(f"  {trade_date}: no spot data - skip")
         return []
 
     prev_H = float(df_prev["high"].max())
@@ -610,14 +644,14 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         else:
             day_expiry = next((e for e in all_csv_exp if e > td), None)
         if day_expiry is None:
-            print(f"  {trade_date}: no next-week expiry in CSV - skip")
+            _log.info(f"  {trade_date}: no next-week expiry in CSV - skip")
             return []
     elif IS_STOCK:
         day_expiry = _current_expiry(td)   # stocks = monthly, current month's last Thu
-        print(f"  {trade_date}: monthly expiry = {day_expiry}")
+        _log.info(f"  {trade_date}: monthly expiry = {day_expiry}")
     else:
         day_expiry = _next_week_expiry(td)
-        print(f"  {trade_date}: next-week expiry = {day_expiry}")
+        _log.info(f"  {trade_date}: next-week expiry = {day_expiry}")
 
     # Apply spot bias: bullish day -> CE only; bearish day -> PE only; skip ambiguous days
     legs = []
@@ -626,7 +660,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     elif bias_bear:
         legs.append(("PE", pe_s))
     else:
-        print(f"  {trade_date}: gap {bias_diff_pct:+.2f}% < {BIAS_GAP_PCT}% threshold - skip (ambiguous)")
+        _log.info(f"  {trade_date}: gap {bias_diff_pct:+.2f}% < {BIAS_GAP_PCT}% threshold - skip (ambiguous)")
         return []
     bias_label = f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull else f"BEAR-bias(PE) {bias_diff_pct:.2f}%"
     trades = []
@@ -635,7 +669,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         # Use a simple string key for CSV mode (no Upstox instrument lookup needed)
         key = f"{day_expiry}|{strike}|{ot}" if csv_df is not None else _opt_key(day_expiry, strike, ot)
         if not key:
-            print(f"  {trade_date} {ot}{strike}: no key")
+            _log.info(f"  {trade_date} {ot}{strike}: no key")
             continue
 
         if key not in cache:
@@ -656,18 +690,18 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
                 try:
                     cache[key] = _fetch_1m(key, fetch_from, fetch_to)
                 except Exception as exc:
-                    print(f"  {trade_date} {ot}{strike}: fetch error {exc}")
+                    _log.info(f"  {trade_date} {ot}{strike}: fetch error {exc}")
                     cache[key] = pd.DataFrame()
 
         df_raw = cache[key]
         if df_raw.empty:
-            print(f"  {trade_date} {ot}{strike}: no option data")
+            _log.info(f"  {trade_date} {ot}{strike}: no option data")
             continue
 
         df_all   = _mkt(df_raw)
         df_today_opt = df_all[df_all["datetime"].dt.date == td].copy()
         if df_today_opt.empty:
-            print(f"  {trade_date} {ot}{strike}: no today bars")
+            _log.info(f"  {trade_date} {ot}{strike}: no today bars")
             continue
 
         # HTF 75-min scan on PREVIOUS days only — today's bars must NOT be included.
@@ -675,7 +709,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         df_prev_opt = df_all[df_all["datetime"].dt.date < td].copy()
         htf = _rs(df_prev_opt, HTF_MIN)
         if len(htf) < 2:
-            print(f"  {trade_date} {ot}{strike}: not enough HTF bars")
+            _log.info(f"  {trade_date} {ot}{strike}: not enough HTF bars")
             continue
 
         _, htf_zones = scanner.scan_htf(htf)
@@ -704,15 +738,15 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
                 valid = [z for z in cas if z.get("status") in ("TRAPPED", "CLOSED")
                          and z.get("trapped_on")]
                 if valid:
-                    print(f"  {trade_date} {ot}{strike}: no HTF zone -> cascade 15m ({len(valid)} zones)")
+                    _log.info(f"  {trade_date} {ot}{strike}: no HTF zone -> cascade 15m ({len(valid)} zones)")
                 else:
-                    print(f"  {trade_date} {ot}{strike}: no zones (HTF or 15m) - skip")
+                    _log.info(f"  {trade_date} {ot}{strike}: no zones (HTF or 15m) - skip")
                     continue
             else:
-                print(f"  {trade_date} {ot}{strike}: no zones - skip")
+                _log.info(f"  {trade_date} {ot}{strike}: no zones - skip")
                 continue
         else:
-            print(f"  {trade_date} {ot}{strike} [{strike_mode} {bias_label}]: {len(valid)} HTF zone(s)")
+            _log.info(f"  {trade_date} {ot}{strike} [{strike_mode} {bias_label}]: {len(valid)} HTF zone(s)")
 
         df5m = _rs(df_today_opt, 5)
         spot_val = float(df_today.iloc[0]["open"]) if not df_today.empty else 0.0
@@ -779,6 +813,15 @@ def run_scalein_backtest(token: str, days: int = 10,
                          entry_mode: str = "scalein") -> dict:
     global _HEADERS, IDX, SPOT_KEY, STEP, LOT, SL_BUF, IS_STOCK
 
+    # Set up per-run log file
+    import datetime as _dt
+    _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    _log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_path = os.path.join(_log_dir, f"backtest_{index.upper()}_{entry_mode}_{_ts}.log")
+    _setup_log(_log_path)
+    _log.info(f"=== Backtest log: {_log_path}  mode={entry_mode} ===")
+
     # Override index-specific constants
     IDX = index.upper()
     _index_cfg = {
@@ -818,29 +861,29 @@ def run_scalein_backtest(token: str, days: int = 10,
             # Use futures contract key as spot proxy for NSE stocks
             SPOT_KEY = REGISTRY.historical_instrument_key(IDX) or ""
             if SPOT_KEY:
-                print(f"[REGISTRY] {IDX} spot key (futures proxy): {SPOT_KEY}")
+                _log.info(f"[REGISTRY] {IDX} spot key (futures proxy): {SPOT_KEY}")
             else:
-                print(f"[REGISTRY] {IDX}: no futures key found — spot bars may fail")
+                _log.info(f"[REGISTRY] {IDX}: no futures key found — spot bars may fail")
     except Exception as exc:
-        print(f"[REGISTRY] {exc} - using symbol fallback")
+        _log.info(f"[REGISTRY] {exc} - using symbol fallback")
 
     if expiry_str:
-        print(f"[INFO] --expiry {expiry_str} ignored; using per-day next-week expiry from REGISTRY")
+        _log.info(f"[INFO] --expiry {expiry_str} ignored; using per-day next-week expiry from REGISTRY")
 
     # Load CSV option data if provided
     csv_df: Optional[pd.DataFrame] = None
     if csv_path and os.path.exists(csv_path):
-        print(f"[CSV] Loading option data from {csv_path} ...")
+        _log.info(f"[CSV] Loading option data from {csv_path} ...")
         csv_df = _load_csv_options(csv_path, IDX)
         if csv_df is not None and not csv_df.empty:
             csv_dates = sorted(csv_df["datetime"].dt.date.unique())
-            print(f"[CSV] {len(csv_df)} rows | {len(csv_dates)} dates | {IDX}")
+            _log.info(f"[CSV] {len(csv_df)} rows | {len(csv_dates)} dates | {IDX}")
             # Use CSV date range if no explicit range
             if not (start and end):
                 start = csv_dates[0].isoformat()
                 end   = csv_dates[-1].isoformat()
         else:
-            print(f"[CSV] No {IDX} data found in CSV")
+            _log.info(f"[CSV] No {IDX} data found in CSV")
             csv_df = None
 
     # Date range
@@ -861,18 +904,18 @@ def run_scalein_backtest(token: str, days: int = 10,
     if not (start and end):
         trading_days = trading_days[-days:]
 
-    print(f"\n{IDX} Scale-In Backtest  {trading_days[0]} to {trading_days[-1]}"
+    _log.info(f"\n{IDX} Scale-In Backtest  {trading_days[0]} to {trading_days[-1]}"
           f"  ({len(trading_days)} days)  Expiry=NEXT-WEEK(REGISTRY)  SL_BUF={SL_BUF}")
 
     # Fetch spot bars
     spot_from = (date.fromisoformat(trading_days[0]) - timedelta(days=7)).isoformat()
     spot_to   = (date.fromisoformat(trading_days[-1]) + timedelta(days=1)).isoformat()
-    print(f"Fetching {IDX} spot {spot_from} to {spot_to}...")
+    _log.info(f"Fetching {IDX} spot {spot_from} to {spot_to}...")
     df_spot = _fetch_1m(SPOT_KEY, spot_from, spot_to)
     if df_spot.empty:
         return {"ok": False, "error": "No spot data"}
     df_spot = _mkt(df_spot)
-    print(f"  {len(df_spot)} spot bars\n")
+    _log.info(f"  {len(df_spot)} spot bars\n")
 
     cache: dict = {}
     all_trades: list[dict] = []
@@ -891,22 +934,22 @@ def run_scalein_backtest(token: str, days: int = 10,
     two_lot_trades = [t for t in all_trades if t["two_lots"]]
     one_lot_trades = [t for t in all_trades if not t["two_lots"]]
 
-    print(f"\n{'='*110}")
-    print(f"{IDX} Scale-In  {trading_days[0]} to {trading_days[-1]}  "
+    _log.info(f"\n{'='*110}")
+    _log.info(f"{IDX} Scale-In  {trading_days[0]} to {trading_days[-1]}  "
           f"Trades={len(all_trades)}  Win={round(100*len(wins)/len(all_trades),1) if all_trades else 0}%  "
           f"Rs {total:+,.0f}  PF={pf}  "
           f"[1-lot={len(one_lot_trades)}  2-lot={len(two_lot_trades)}]")
-    print(f"  {'DATE':<10}  {'OT':<3}  {'STK':>6}  {'SPOT':>6}  "
+    _log.info(f"  {'DATE':<10}  {'OT':<3}  {'STK':>6}  {'SPOT':>6}  "
           f"{'ZONE':^12}  {'L1@':>6}  {'L2@':>6}  {'SL':>6}  {'T1':>6}  "
           f"{'EXIT':>6}  {'TIME':5}  {'REASON':<10}  {'T1?':<3}  {'LOTS':<4}  {'P&L Rs':>9}")
-    print(f"  {'-'*108}")
+    _log.info(f"  {'-'*108}")
     running = 0
     for t in all_trades:
         running += t["pnl_rs"]
         l2s  = f"{t['lot2_entry']:.1f}" if t["lot2_entry"] else "  -  "
         t1f  = "Y" if t["t1_hit"] else "N"
         lots = "2" if t["two_lots"] else "1"
-        print(f"  {t['date']}  {t['opt_type']:<3}  {t['strike']:>6}  "
+        _log.info(f"  {t['date']}  {t['opt_type']:<3}  {t['strike']:>6}  "
               f"{t['spot']:>6.0f}  {t['zone']:^12}  "
               f"{t['lot1_entry']:>6.1f}  {l2s:>6}  "
               f"{t['sl']:>6.1f}  {t['t1_target']:>6.1f}  "
@@ -914,7 +957,7 @@ def run_scalein_backtest(token: str, days: int = 10,
               f"{t['reason']:<10}  {t1f:<3}  {lots:<4}  Rs {t['pnl_rs']:>+8,.0f}  "
               f"(cum Rs {running:+,.0f})")
 
-    print(f"\n  Total: Rs {total:+,.0f}  Wins={len(wins)}  Losses={len(losses)}  PF={pf}"
+    _log.info(f"\n  Total: Rs {total:+,.0f}  Wins={len(wins)}  Losses={len(losses)}  PF={pf}"
           f"  AvgWin=Rs {round(gw/len(wins),0) if wins else 0:,.0f}"
           f"  AvgLoss=Rs {round(-gl/len(losses),0) if losses else 0:,.0f}")
 
@@ -928,7 +971,9 @@ def run_scalein_backtest(token: str, days: int = 10,
         "one_lot_trades": len(one_lot_trades),
         "two_lot_trades": len(two_lot_trades),
     }
-    return {"ok": True, "summary": summary, "trades": all_trades}
+    _log.info(f"\n=== Done. Log saved: {_log_path} ===")
+    return {"ok": True, "summary": summary, "trades": all_trades,
+            "log_path": _log_path, "lot_size": LOT, "days_run": len(trading_days)}
 
 
 # -- CLI -----------------------------------------------------------------------
@@ -954,5 +999,5 @@ if __name__ == "__main__":
         expiry_str = args.expiry,
     )
     if not result["ok"]:
-        print(f"ERROR: {result['error']}")
+        _log.info(f"ERROR: {result['error']}")
         sys.exit(1)

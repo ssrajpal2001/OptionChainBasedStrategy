@@ -4958,6 +4958,18 @@ class DashboardServer:
                 import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
 
+        @app.get("/api/backtest/log", tags=["Backtest"])
+        async def download_backtest_log(path: str):
+            """Download a backtest log file by its absolute path (returned in backtest result)."""
+            from fastapi.responses import FileResponse as _FR
+            import os as _os
+            if not _os.path.isfile(path):
+                return {"ok": False, "error": "Log file not found"}
+            data_dir = _os.path.abspath("data")
+            if not _os.path.abspath(path).startswith(data_dir):
+                return {"ok": False, "error": "Access denied"}
+            return _FR(path, media_type="text/plain", filename=_os.path.basename(path))
+
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
