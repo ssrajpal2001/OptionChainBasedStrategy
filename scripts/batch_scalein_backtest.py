@@ -15,10 +15,27 @@ import csv
 import sys
 import os
 import time
+import logging
 from datetime import date
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _setup_logger(log_path: str) -> logging.Logger:
+    """Log to both terminal and file simultaneously."""
+    log = logging.getLogger("batch_backtest")
+    log.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(message)s")
+    # File handler — captures everything
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
+    # Console handler
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(fmt)
+    log.addHandler(ch)
+    return log
 
 
 # ── All symbols to run ──────────────────────────────────────────────────────
@@ -95,23 +112,27 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     json_path = os.path.join(out_dir, f"batch_backtest_{today_str}.json")
     csv_path  = os.path.join(out_dir, f"batch_backtest_{today_str}.csv")
+    log_path  = os.path.join(out_dir, f"batch_backtest_{today_str}.log")
+
+    log = _setup_logger(log_path)
 
     all_results = []
     errors = []
     total = len(symbols)
 
-    print(f"\nBatch Scale-In Backtest  |  {total} symbols  |  days={args.days}  |  sl_buf={args.sl_buf}")
-    print("=" * 70)
+    log.info(f"\nBatch Scale-In Backtest  |  {total} symbols  |  days={args.days}  |  sl_buf={args.sl_buf}")
+    log.info(f"Log file: {log_path}")
+    log.info("=" * 70)
 
     for i, sym in enumerate(symbols, 1):
-        print(f"\n[{i}/{total}] {sym} ...", flush=True)
+        log.info(f"\n[{i}/{total}] {sym} ...")
         t0 = time.time()
         res = _run_one(sym, args.token, args.days, args.sl_buf)
         elapsed = time.time() - t0
 
         if not res.get("ok"):
             err = res.get("error", "unknown error")
-            print(f"  ERROR: {err}")
+            log.info(f"  ERROR: {err}")
             errors.append({"symbol": sym, "error": err})
             all_results.append({
                 "symbol": sym, "type": "INDEX" if sym in _INDICES else "STOCK",
@@ -127,7 +148,7 @@ def main():
         pf      = summary.get("profit_factor", 0)
         wr      = round(wins / n * 100, 1) if n > 0 else 0
 
-        print(f"  trades={n}  wins={wins}  P&L=Rs {pnl:+,.0f}  WR={wr}%  PF={pf}  ({elapsed:.1f}s)")
+        log.info(f"  trades={n}  wins={wins}  P&L=Rs {pnl:+,.0f}  WR={wr}%  PF={pf}  ({elapsed:.1f}s)")
 
         all_results.append({
             "symbol":       sym,
@@ -152,7 +173,7 @@ def main():
     with open(json_path, "w") as f:
         json.dump({"date": today_str, "days": args.days, "sl_buf": args.sl_buf,
                    "results": all_results, "errors": errors}, f, indent=2)
-    print(f"\nDetailed results saved: {json_path}")
+    log.info(f"\nDetailed results saved: {json_path}")
 
     # ── Save CSV ──────────────────────────────────────────────────────────
     ok_results = [r for r in all_results if r["ok"]]
@@ -163,12 +184,12 @@ def main():
             w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             w.writeheader()
             w.writerows(sorted(ok_results, key=lambda x: x["total_pnl_rs"], reverse=True))
-        print(f"Summary CSV saved:      {csv_path}")
+        log.info(f"Summary CSV saved:      {csv_path}")
 
     # ── Print summary table ────────────────────────────────────────────────
-    print("\n\n" + "=" * 90)
-    print(f"{'Symbol':<15} {'Type':<7} {'Trades':>6} {'WR%':>6} {'P&L (Rs)':>12} {'PF':>6} {'Lot':>6}")
-    print("-" * 90)
+    log.info("\n\n" + "=" * 90)
+    log.info(f"{'Symbol':<15} {'Type':<7} {'Trades':>6} {'WR%':>6} {'P&L (Rs)':>12} {'PF':>6} {'Lot':>6}")
+    log.info("-" * 90)
 
     sorted_res = sorted(ok_results, key=lambda x: x["total_pnl_rs"], reverse=True)
     for r in sorted_res:
@@ -180,22 +201,22 @@ def main():
         pf    = r["profit_factor"]
         lot   = r["lot_size"]
         marker = " <<" if pnl > 5000 else (" >>" if pnl < -2000 else "")
-        print(f"{sym:<15} {stype:<7} {n:>6} {wr:>5.1f}% {pnl:>+12,.0f} {pf:>6.2f} {str(lot):>6}{marker}")
+        log.info(f"{sym:<15} {stype:<7} {n:>6} {wr:>5.1f}% {pnl:>+12,.0f} {pf:>6.2f} {str(lot):>6}{marker}")
 
-    print("-" * 90)
+    log.info("-" * 90)
     total_pnl = sum(r["total_pnl_rs"] for r in ok_results)
     total_trades = sum(r["trades"] for r in ok_results)
     total_wins   = sum(r["wins"] for r in ok_results)
     overall_wr   = round(total_wins / total_trades * 100, 1) if total_trades > 0 else 0
-    print(f"{'TOTAL':<15} {'':7} {total_trades:>6} {overall_wr:>5.1f}% {total_pnl:>+12,.0f}")
-    print("=" * 90)
+    log.info(f"{'TOTAL':<15} {'':7} {total_trades:>6} {overall_wr:>5.1f}% {total_pnl:>+12,.0f}")
+    log.info("=" * 90)
 
     if errors:
-        print(f"\nErrors ({len(errors)}):")
+        log.info(f"\nErrors ({len(errors)}):")
         for e in errors:
-            print(f"  {e['symbol']}: {e['error']}")
+            log.info(f"  {e['symbol']}: {e['error']}")
 
-    print(f"\nDone. Results: {csv_path}")
+    log.info(f"\nDone. Log: {log_path}  CSV: {csv_path}")
 
 
 if __name__ == "__main__":
