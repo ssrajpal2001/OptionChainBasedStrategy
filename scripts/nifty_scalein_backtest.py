@@ -275,12 +275,39 @@ def _opt_key(expiry: date, strike: int, ot: str) -> str:
 
 
 def _current_expiry(trade_date: date) -> date:
-    """Return the current active expiry >= trade_date (for monthly stock F&O)."""
+    """Return the current active expiry >= trade_date (for monthly stock F&O).
+    Stocks have only one expiry per month in the registry → get_active_expiry is correct.
+    For index weekly-expiry products use _month_expiry() instead.
+    """
     if REGISTRY.is_loaded(IDX):
         exp = REGISTRY.get_active_expiry(IDX, from_date=trade_date)
         if exp:
             return exp
     # Fallback: last Thursday of the month
+    import calendar
+    year, month = trade_date.year, trade_date.month
+    last_day = calendar.monthrange(year, month)[1]
+    d = date(year, month, last_day)
+    while d.weekday() != 3:  # Thursday
+        d -= timedelta(days=1)
+    return d
+
+
+def _month_expiry(trade_date: date) -> date:
+    """Return the LAST expiry in trade_date's calendar month (monthly F&O contract).
+
+    For NIFTY/SENSEX which have weekly expiries, get_active_expiry returns the
+    nearest weekly (e.g. Jun 5), not the monthly (e.g. Jun 30).
+    all_expiries() has the full sorted list; the last entry in the month is correct.
+    Falls back to last-Thursday heuristic if registry not loaded.
+    """
+    if REGISTRY.is_loaded(IDX):
+        all_exp = REGISTRY.all_expiries(IDX)
+        month_exp = [e for e in all_exp
+                     if e.year == trade_date.year and e.month == trade_date.month]
+        if month_exp:
+            return max(month_exp)
+    # Fallback: last Thursday of the month (calendar math only)
     import calendar
     year, month = trade_date.year, trade_date.month
     last_day = calendar.monthrange(year, month)[1]
@@ -656,9 +683,15 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         if day_expiry is None:
             _log.info(f"  {trade_date}: no next-week expiry in CSV - skip")
             return []
-    elif IS_STOCK or use_monthly_expiry:
+    elif IS_STOCK:
+        # Stocks: one expiry per month → get_active_expiry returns it correctly
         day_expiry = _current_expiry(td)
-        _log.info(f"  {trade_date}: monthly expiry = {day_expiry}")
+        _log.info(f"  {trade_date}: monthly expiry (stock) = {day_expiry}")
+    elif use_monthly_expiry:
+        # Indices with weekly expiries: must use all_expiries() to find the
+        # LAST expiry in this calendar month (e.g. NIFTY Jun 30, not Jun 26).
+        day_expiry = _month_expiry(td)
+        _log.info(f"  {trade_date}: monthly expiry (index) = {day_expiry}")
     else:
         day_expiry = _next_week_expiry(td)
         _log.info(f"  {trade_date}: next-week expiry = {day_expiry}")
