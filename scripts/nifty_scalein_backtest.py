@@ -310,7 +310,7 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     zl  = float(zone["zone_low"])
     zt  = float(zone.get("sl", zh + (zh - zl)))   # T1 target = bears' stop above zone_high
     zht = zh - zl                                  # zone height
-    if zht < 1.0:                                  # reject degenerate / zero-width zones
+    if zht < 3.0:                                  # reject narrow/noise zones (< 3 pts)
         return None
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
@@ -537,11 +537,14 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     bias_bull = bias_diff_pct >= BIAS_GAP_PCT    # open meaningfully above prev_close → CE
     bias_bear = bias_diff_pct <= -BIAS_GAP_PCT   # open meaningfully below prev_close → PE
 
-    # Strike selection (mirrors live scanner)
+    # Strike selection — gap offset proportional to step size (4 steps)
+    # Hardcoded 200 only works for NIFTY (step=50). For WIPRO (step=5),
+    # atm-200 = negative strike. Use 4*STEP for all instruments.
+    GAP_STEPS = 4
     if gap_fired:
         atm  = _round(today_open, STEP)
-        ce_s = atm - 200   # CE1 = ATM-200 (matches gap_near=200)
-        pe_s = atm + 200   # PE1 = ATM+200
+        ce_s = max(STEP, atm - GAP_STEPS * STEP)   # never negative
+        pe_s = atm + GAP_STEPS * STEP
         mode = f"GAP {gap_dir} {gap_pct:.1f}%"
     else:
         ce_s = _round(piv["S1"], STEP)
