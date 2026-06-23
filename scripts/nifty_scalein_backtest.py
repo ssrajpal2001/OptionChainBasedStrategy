@@ -336,16 +336,19 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     zt  = float(zone.get("sl", zh + (zh - zl)))   # T1 target = bears' stop above zone_high
     zht = zh - zl                                  # zone height
     _log.info(f"    ZONE  zh={zh}  zl={zl}  target={zt}  height={zht:.1f}  mode={mode}")
-    if zht < 3.0:                                  # reject narrow/noise zones (< 3 pts)
-        _log.info(f"    SKIP  zone too narrow ({zht:.1f} < 3.0 pts)")
+    # Min zone height: 1.0 for stocks (premiums are ₹5-80, 3pt kills everything),
+    # 3.0 for indices (NIFTY/BN premiums ₹100-800, 3pt is a reasonable noise filter).
+    _min_ht = 1.0 if IS_STOCK else 3.0
+    if zht < _min_ht:
+        _log.info(f"    SKIP  zone too narrow ({zht:.1f} < {_min_ht} pts)")
         return None
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
 
-    # SL buffer: fixed 2 pts for stock options (premiums are tiny, 2pt sweep is enough).
+    # SL buffer: 8% of zone_low (≈ option premium level) for stocks — scales with premium.
+    # A flat 2 pts was 20% of a ₹10 PE option, making R:R structurally bad.
     # For index options use the user's SL_BUF input (default 10 pts).
-    # Proportional (= zone_height) was tried but made R:R structurally ≤ 0.8 for all zones.
-    sl_buf_eff = 2.0 if IS_STOCK else max(1.0, SL_BUF)
+    sl_buf_eff = max(0.3, round(0.08 * zl, 2)) if IS_STOCK else max(1.0, SL_BUF)
     sl_px      = round(zl - sl_buf_eff, 2)        # hard SL for both lots
 
     # R:R filter: reward (target - lot1 trigger) vs risk (trigger - sl).
@@ -713,7 +716,8 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         df_all   = _mkt(df_raw)
         df_today_opt = df_all[df_all["datetime"].dt.date == td].copy()
         if df_today_opt.empty:
-            _log.info(f"  {trade_date} {ot}{strike}: no today bars")
+            available = sorted(df_all["datetime"].dt.date.unique()) if not df_all.empty else []
+            _log.info(f"  {trade_date} {ot}{strike}: no today bars (key={key}, have {len(available)} days: {[str(d) for d in available[:5]]}{'...' if len(available)>5 else ''})")
             continue
 
         # HTF 75-min scan on PREVIOUS days only — today's bars must NOT be included.
