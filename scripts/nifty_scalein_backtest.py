@@ -686,12 +686,13 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         _log.info(f"  {trade_date}: next-week expiry = {day_expiry}")
 
     # Leg selection:
-    # STOCKS or monthly-expiry indices: check both CE and PE every day.
-    #   Monthly contract has enough time value; trapscanner zone filter handles direction.
-    # INDICES (weekly): bias filter (bullish → CE only, bearish → PE only, ambiguous → skip)
-    if IS_STOCK or use_monthly_expiry:
+    # STOCKS: both CE and PE every day — ATM is liquid both ways, no directional edge.
+    # INDICES (weekly or monthly): gap-bias filter — gap up → CE only, gap down → PE only.
+    #   Monthly expiry changes the contract used, not the direction logic.
+    #   Without bias, same-day CE+PE entries would be contradictory (straddle-like).
+    if IS_STOCK:
         legs = [("CE", ce_s), ("PE", pe_s)]
-        bias_label = f"both-sides {bias_diff_pct:+.2f}%"
+        bias_label = f"ATM {ce_s} both-sides"
     else:
         legs = []
         if bias_bull:

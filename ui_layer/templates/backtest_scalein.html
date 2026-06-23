@@ -307,7 +307,7 @@
       <label class="flex items-center gap-2 cursor-pointer">
         <input type="checkbox" x-model="useMonthlyExpiry" class="rounded" />
         <span class="text-xs">Monthly expiry (current-month contract)<br>
-          <span class="text-t-muted">Uses last expiry of the calendar month from registry (e.g. NIFTY Jun 30). Checks both CE &amp; PE every day (no gap-bias filter).</span>
+          <span class="text-t-muted">Uses last expiry of the calendar month from registry (e.g. NIFTY Jun 30). Gap-bias direction filter still applies (gap up → CE, gap down → PE).</span>
         </span>
       </label>
     </div>
