@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Scale-In Backtest — AlgoTrader</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: { extend: {
+        fontFamily: { mono: ['JetBrains Mono','monospace'], ui: ['Plus Jakarta Sans','sans-serif'] },
+        colors: { t: {
+          bg:'var(--t-bg)', surface:'var(--t-surface)', card:'var(--t-card)', border:'var(--t-border)',
+          dim:'var(--t-dim)', cyan:'var(--t-cyan)', green:'var(--t-green)', red:'var(--t-red)',
+          amber:'var(--t-amber)', muted:'var(--t-muted)', text:'var(--t-text)', bright:'var(--t-bright)',
+        }}
+      }}
+    }
+  </script>
+
+  <style>
+    :root {
+      --t-bg:#ffffff; --t-surface:#f9f9f9; --t-card:#ffffff; --t-border:#e9e9ed;
+      --t-dim:#d8d8dd; --t-cyan:#387ED1; --t-green:#4CA64C; --t-red:#FF5722;
+      --t-amber:#F5A623; --t-muted:#9b9b9b; --t-text:#3c3c3c; --t-bright:#1a1a1a;
+      --t-cyan-rgb:56,126,209; --t-green-rgb:76,166,76; --t-red-rgb:255,87,34; --t-amber-rgb:245,166,35;
+    }
+    [x-cloak]{display:none!important}
+    *{box-sizing:border-box} html,body{margin:0}
+    body{background:var(--t-bg);color:var(--t-text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px}
+    .t-card{background:var(--t-card);border:1px solid var(--t-border);border-radius:10px}
+    .sec-label{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t-muted)}
+    .t-input{font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;background:var(--t-surface);border:1px solid var(--t-border);color:var(--t-bright);padding:7px 10px;border-radius:6px;width:100%;outline:none;transition:border-color .15s}
+    .t-input:focus{border-color:rgba(var(--t-cyan-rgb),.5);box-shadow:0 0 0 3px rgba(var(--t-cyan-rgb),.10)}
+    .btn-primary{font-size:13px;font-weight:700;letter-spacing:.04em;padding:10px 24px;border-radius:7px;background:var(--t-cyan);border:none;color:#fff;cursor:pointer;transition:all .15s;width:100%}
+    .btn-primary:hover{opacity:.85}
+    .btn-primary:disabled{opacity:.45;cursor:not-allowed}
+    .stat-card{padding:14px 16px;border-radius:10px;border:1px solid var(--t-border)}
+    .stat-val{font-size:22px;font-weight:800;font-family:'JetBrains Mono',monospace}
+    .pnl-pos{color:var(--t-green)} .pnl-neg{color:var(--t-red)} .pnl-zero{color:var(--t-muted)}
+    .bt-table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12px}
+    .bt-table th{padding:8px 10px;text-align:left;color:var(--t-muted);font-weight:600;font-size:11px;border-bottom:1px solid var(--t-border);position:sticky;top:0;background:var(--t-card);z-index:1}
+    .bt-table td{padding:7px 10px;border-bottom:1px solid var(--t-border);white-space:nowrap}
+    .bt-table tr:last-child td{border-bottom:none}
+    .bt-table tr:hover td{background:rgba(var(--t-cyan-rgb),.03)}
+    .tag-ce{background:rgba(var(--t-cyan-rgb),.12);color:var(--t-cyan);border-radius:4px;padding:1px 6px;font-size:11px;font-weight:700}
+    .tag-pe{background:rgba(var(--t-red-rgb),.10);color:var(--t-red);border-radius:4px;padding:1px 6px;font-size:11px;font-weight:700}
+    .page-layout{display:flex;flex-direction:column;min-height:calc(100vh - 49px)}
+    .ctrl-panel{width:100%;padding:16px;border-bottom:1px solid var(--t-border);background:var(--t-card);display:flex;flex-direction:column;gap:14px;overflow-y:auto}
+    .results-panel{flex:1;padding:16px;display:flex;flex-direction:column;gap:16px;overflow-x:hidden;overflow-y:auto}
+    @media(min-width:900px){
+      .page-layout{flex-direction:row;height:calc(100vh - 49px)}
+      .ctrl-panel{width:300px;flex-shrink:0;border-right:1px solid var(--t-border);border-bottom:none;height:100%}
+      .results-panel{height:100%;padding:24px}
+    }
+    .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+    .spin{animation:spin .8s linear infinite;display:inline-block}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .chip{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:99px;font-size:11px;font-weight:700}
+  </style>
+</head>
+
+<body x-data="scaleinApp()" x-init="init()">
+
+<!-- NAV -->
+<div class="flex items-center justify-between px-4 py-3 border-b border-t-border bg-t-card" style="min-height:49px">
+  <div class="flex items-center gap-2">
+    <span class="font-ui font-800 text-t-bright text-sm">AlgoTrader</span>
+    <span class="text-t-dim">|</span>
+    <span class="text-t-cyan font-semibold text-xs">Scale-In Backtest</span>
+  </div>
+  <div class="flex gap-3 text-xs">
+    <a href="/" class="text-t-muted hover:text-t-cyan transition-colors">Dashboard</a>
+    <a href="/backtest/nifty" class="text-t-muted hover:text-t-cyan transition-colors">NIFTY BT</a>
+    <a href="/backtest" class="text-t-muted hover:text-t-cyan transition-colors">CrudeOil BT</a>
+  </div>
+</div>
+
+<div class="page-layout">
+
+  <!-- CONTROL PANEL -->
+  <div class="ctrl-panel">
+
+    <!-- Instrument -->
+    <div>
+      <p class="sec-label mb-2">Instrument</p>
+      <select x-model="index" class="t-input">
+        <optgroup label="Index (Weekly)">
+          <option value="NIFTY">NIFTY</option>
+          <option value="BANKNIFTY">BANKNIFTY</option>
+          <option value="SENSEX">SENSEX</option>
+          <option value="FINNIFTY">FINNIFTY</option>
+        </optgroup>
+        <optgroup label="Large-Cap F&O Stocks (Monthly)">
+          <option value="RELIANCE">RELIANCE</option>
+          <option value="TCS">TCS</option>
+          <option value="INFY">INFY</option>
+          <option value="HDFCBANK">HDFCBANK</option>
+          <option value="ICICIBANK">ICICIBANK</option>
+          <option value="AXISBANK">AXISBANK</option>
+          <option value="KOTAKBANK">KOTAKBANK</option>
+          <option value="SBIN">SBIN</option>
+          <option value="INDUSINDBANK">INDUSINDBANK</option>
+          <option value="IDFCFIRSTB">IDFCFIRSTB</option>
+          <option value="TATAMOTORS">TATAMOTORS</option>
+          <option value="TATASTEEL">TATASTEEL</option>
+          <option value="TATACONSUM">TATACONSUM</option>
+          <option value="WIPRO">WIPRO</option>
+          <option value="HCLTECH">HCLTECH</option>
+          <option value="TECHM">TECHM</option>
+          <option value="LTIM">LTIM</option>
+          <option value="MPHASIS">MPHASIS</option>
+          <option value="COFORGE">COFORGE</option>
+          <option value="PERSISTENT">PERSISTENT</option>
+          <option value="KPITTECH">KPITTECH</option>
+          <option value="BAJFINANCE">BAJFINANCE</option>
+          <option value="LT">LT</option>
+          <option value="ADANIENT">ADANIENT</option>
+          <option value="ADANIPORTS">ADANIPORTS</option>
+          <option value="MARUTI">MARUTI</option>
+          <option value="M&M">M&M</option>
+          <option value="BAJAJ-AUTO">BAJAJ-AUTO</option>
+          <option value="HEROMOTOCO">HEROMOTOCO</option>
+          <option value="EICHERMOT">EICHERMOT</option>
+          <option value="TITAN">TITAN</option>
+          <option value="TRENT">TRENT</option>
+          <option value="DMART">DMART</option>
+        </optgroup>
+        <optgroup label="FMCG / Consumer">
+          <option value="ITC">ITC</option>
+          <option value="HINDUNILVR">HINDUNILVR</option>
+          <option value="NESTLEIND">NESTLEIND</option>
+          <option value="BRITANNIA">BRITANNIA</option>
+          <option value="MARICO">MARICO</option>
+          <option value="GODREJCP">GODREJCP</option>
+          <option value="COLPAL">COLPAL</option>
+          <option value="PIDILITIND">PIDILITIND</option>
+          <option value="BERGEPAINT">BERGEPAINT</option>
+          <option value="ASIANPAINT">ASIANPAINT</option>
+          <option value="MCDOWELL-N">MCDOWELL-N</option>
+        </optgroup>
+        <optgroup label="Pharma / Healthcare">
+          <option value="SUNPHARMA">SUNPHARMA</option>
+          <option value="CIPLA">CIPLA</option>
+          <option value="DRREDDY">DRREDDY</option>
+          <option value="DIVISLAB">DIVISLAB</option>
+          <option value="APOLLOHOSP">APOLLOHOSP</option>
+          <option value="LUPIN">LUPIN</option>
+          <option value="AUROPHARMA">AUROPHARMA</option>
+          <option value="GLENMARK">GLENMARK</option>
+          <option value="BIOCON">BIOCON</option>
+          <option value="TORNTPHARM">TORNTPHARM</option>
+          <option value="ALKEM">ALKEM</option>
+          <option value="ABBOTINDIA">ABBOTINDIA</option>
+        </optgroup>
+        <optgroup label="Metal / Cement / Infra">
+          <option value="JSWSTEEL">JSWSTEEL</option>
+          <option value="TATASTEEL">TATASTEEL</option>
+          <option value="SAIL">SAIL</option>
+          <option value="VEDL">VEDL</option>
+          <option value="NMDC">NMDC</option>
+          <option value="HINDALCO">HINDALCO</option>
+          <option value="GRASIM">GRASIM</option>
+          <option value="ULTRACEMCO">ULTRACEMCO</option>
+          <option value="DLF">DLF</option>
+          <option value="GODREJPROP">GODREJPROP</option>
+          <option value="OBEROIRLTY">OBEROIRLTY</option>
+          <option value="PRESTIGE">PRESTIGE</option>
+        </optgroup>
+        <optgroup label="Energy / Oil">
+          <option value="NTPC">NTPC</option>
+          <option value="POWERGRID">POWERGRID</option>
+          <option value="COALINDIA">COALINDIA</option>
+          <option value="ONGC">ONGC</option>
+          <option value="BPCL">BPCL</option>
+          <option value="IOC">IOC</option>
+          <option value="HINDPETRO">HINDPETRO</option>
+          <option value="GAIL">GAIL</option>
+          <option value="PETRONET">PETRONET</option>
+          <option value="IGL">IGL</option>
+          <option value="MGL">MGL</option>
+        </optgroup>
+        <optgroup label="NBFC / Finance">
+          <option value="LICHSGFIN">LICHSGFIN</option>
+          <option value="RECLTD">RECLTD</option>
+          <option value="PFC">PFC</option>
+          <option value="PNB">PNB</option>
+          <option value="BANKBARODA">BANKBARODA</option>
+          <option value="CANBK">CANBK</option>
+          <option value="YESBANK">YESBANK</option>
+          <option value="IRFC">IRFC</option>
+        </optgroup>
+        <optgroup label="New-Age / Others">
+          <option value="ZOMATO">ZOMATO</option>
+          <option value="PAYTM">PAYTM</option>
+          <option value="NYKAA">NYKAA</option>
+          <option value="POLICYBZR">POLICYBZR</option>
+          <option value="DELHIVERY">DELHIVERY</option>
+          <option value="IRCTC">IRCTC</option>
+          <option value="HAL">HAL</option>
+          <option value="BEL">BEL</option>
+          <option value="BHEL">BHEL</option>
+          <option value="CONCOR">CONCOR</option>
+          <option value="MRF">MRF</option>
+          <option value="BALKRISIND">BALKRISIND</option>
+          <option value="APOLLOTYRE">APOLLOTYRE</option>
+          <option value="EXIDEIND">EXIDEIND</option>
+          <option value="OFSS">OFSS</option>
+          <option value="LTTS">LTTS</option>
+        </optgroup>
+      </select>
+    </div>
+
+    <!-- Date source -->
+    <div>
+      <p class="sec-label mb-2">Data Source</p>
+      <div class="flex gap-2 mb-2">
+        <button @click="dataSource='api'"
+          :class="dataSource==='api'?'border-t-cyan text-t-cyan bg-[rgba(var(--t-cyan-rgb),.07)]':'border-t-border text-t-muted'"
+          class="flex-1 border rounded-md text-xs font-700 py-1.5 transition-all">API (Live)</button>
+        <button @click="dataSource='csv'"
+          :class="dataSource==='csv'?'border-t-cyan text-t-cyan bg-[rgba(var(--t-cyan-rgb),.07)]':'border-t-border text-t-muted'"
+          class="flex-1 border rounded-md text-xs font-700 py-1.5 transition-all">CSV File</button>
+      </div>
+
+      <template x-if="dataSource==='csv'">
+        <div>
+          <p class="text-xs text-t-muted mb-1">Full path to GFD CSV file</p>
+          <input type="text" x-model="csvPath" class="t-input font-mono text-xs"
+            placeholder="E:\AlgoSoft\...\GFDLNFO_OPTIONS_01072025.csv" />
+          <p class="text-xs text-t-muted mt-1">Format: Ticker,Date,Time,Open,High,Low,Close,Volume</p>
+          <p class="text-xs text-amber-600 mt-1">Note: Date range is auto-read from CSV</p>
+        </div>
+      </template>
+    </div>
+
+    <!-- Date range (API mode only) -->
+    <div x-show="dataSource==='api'">
+      <p class="sec-label mb-2">Date Range</p>
+      <div class="flex gap-2 mb-2">
+        <button @click="dateMode='days'"
+          :class="dateMode==='days'?'border-t-cyan text-t-cyan bg-[rgba(var(--t-cyan-rgb),.07)]':'border-t-border text-t-muted'"
+          class="flex-1 border rounded-md text-xs font-700 py-1.5 transition-all">Last N days</button>
+        <button @click="dateMode='range'"
+          :class="dateMode==='range'?'border-t-cyan text-t-cyan bg-[rgba(var(--t-cyan-rgb),.07)]':'border-t-border text-t-muted'"
+          class="flex-1 border rounded-md text-xs font-700 py-1.5 transition-all">Custom</button>
+      </div>
+      <template x-if="dateMode==='days'">
+        <div>
+          <div class="flex justify-between text-xs text-t-muted mb-1">
+            <span>Trading days</span><span x-text="days" class="font-mono font-600 text-t-bright"></span>
+          </div>
+          <input type="range" x-model.number="days" min="3" max="30" step="1" class="w-full accent-[var(--t-cyan)]" />
+        </div>
+      </template>
+      <template x-if="dateMode==='range'">
+        <div class="flex flex-col gap-2">
+          <input type="date" x-model="startDate" class="t-input" />
+          <input type="date" x-model="endDate"   class="t-input" />
+        </div>
+      </template>
+    </div>
+
+    <!-- SL Buffer -->
+    <div>
+      <p class="sec-label mb-2">SL Buffer (pts below zone_low)</p>
+      <input type="number" x-model.number="slBuf" min="5" max="100" step="5" class="t-input" />
+    </div>
+
+    <!-- Token -->
+    <div x-show="dataSource==='api'">
+      <p class="sec-label mb-2">Upstox Token</p>
+      <input type="password" x-model="token" class="t-input font-mono text-xs" placeholder="eyJ..." />
+      <button @click="fetchToken()" class="mt-1 text-xs text-t-cyan hover:underline">
+        Auto-fill from feeder
+      </button>
+    </div>
+
+    <div class="border-t border-t-border pt-3">
+      <p class="text-xs text-t-muted mb-2">Strategy: Lot1 on HTF zone entry → Lot2 when CE/PE drops to 1/3 zone depth + 5m bearish trap</p>
+      <button @click="runBacktest()" :disabled="loading"
+        class="btn-primary flex items-center justify-center gap-2">
+        <span x-show="loading" class="spin">&#9696;</span>
+        <span x-text="loading ? 'Running...' : 'Run Scale-In Backtest'"></span>
+      </button>
+    </div>
+
+    <div x-show="error" class="text-xs text-t-red bg-red-50 rounded-lg px-3 py-2 border border-red-200" x-text="error"></div>
+  </div>
+
+  <!-- RESULTS PANEL -->
+  <div class="results-panel">
+
+    <!-- Placeholder -->
+    <div x-show="!result && !loading" class="flex flex-col items-center justify-center h-full gap-3 text-t-muted">
+      <div class="text-4xl">&#128200;</div>
+      <p class="text-sm font-600">Configure parameters and run backtest</p>
+      <p class="text-xs text-center max-w-xs">Scale-in: Lot 1 on HTF zone entry, Lot 2 at 1/3 zone depth when 5-min bearish trap forms</p>
+    </div>
+
+    <!-- Loading -->
+    <div x-show="loading" class="flex flex-col items-center justify-center h-full gap-3 text-t-muted">
+      <div class="spin text-3xl text-t-cyan">&#9696;</div>
+      <p class="text-sm font-600">Fetching data and running backtest...</p>
+      <p class="text-xs">This may take 30-120 seconds</p>
+    </div>
+
+    <!-- Results -->
+    <template x-if="result">
+      <div class="flex flex-col gap-5">
+
+        <!-- Summary cards -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div class="stat-card">
+            <p class="sec-label mb-1">Total P&L</p>
+            <p class="stat-val" :class="result.summary.total_rs>=0?'pnl-pos':'pnl-neg'"
+               x-text="'Rs ' + result.summary.total_rs.toLocaleString('en-IN',{signDisplay:'always'})"></p>
+          </div>
+          <div class="stat-card">
+            <p class="sec-label mb-1">Win Rate</p>
+            <p class="stat-val" x-text="result.summary.win_pct + '%'"></p>
+            <p class="text-xs text-t-muted" x-text="result.summary.wins+'W / '+result.summary.losses+'L'"></p>
+          </div>
+          <div class="stat-card">
+            <p class="sec-label mb-1">Profit Factor</p>
+            <p class="stat-val" x-text="result.summary.profit_factor"></p>
+          </div>
+          <div class="stat-card">
+            <p class="sec-label mb-1">Trades</p>
+            <p class="stat-val" x-text="result.summary.trades"></p>
+            <p class="text-xs text-t-muted" x-text="result.summary.one_lot_trades+'×1lot  '+result.summary.two_lot_trades+'×2lot'"></p>
+          </div>
+          <div class="stat-card">
+            <p class="sec-label mb-1">Avg Win</p>
+            <p class="stat-val pnl-pos" x-text="'Rs ' + (result.summary.avg_win||0).toLocaleString('en-IN')"></p>
+          </div>
+          <div class="stat-card">
+            <p class="sec-label mb-1">Avg Loss</p>
+            <p class="stat-val pnl-neg" x-text="'Rs -' + (result.summary.avg_loss||0).toLocaleString('en-IN')"></p>
+          </div>
+          <div class="stat-card">
+            <p class="sec-label mb-1">R:R</p>
+            <p class="stat-val" x-text="result.summary.avg_loss>0 ? (result.summary.avg_win/result.summary.avg_loss).toFixed(2) : '-'"></p>
+          </div>
+          <div class="stat-card">
+            <p class="sec-label mb-1">Days</p>
+            <p class="stat-val" x-text="result.summary.days"></p>
+          </div>
+        </div>
+
+        <!-- Equity curve -->
+        <div class="t-card p-4">
+          <p class="sec-label mb-3">Equity Curve</p>
+          <canvas id="equityChart" style="max-height:180px"></canvas>
+        </div>
+
+        <!-- Trade table -->
+        <div class="t-card">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-t-border">
+            <p class="font-600 text-sm text-t-bright">Trade Log</p>
+            <div class="flex gap-2 text-xs">
+              <span class="chip bg-[rgba(var(--t-green-rgb),.10)] text-t-green" x-text="result.summary.wins + ' wins'"></span>
+              <span class="chip bg-[rgba(var(--t-red-rgb),.08)] text-t-red" x-text="result.summary.losses + ' losses'"></span>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="bt-table">
+              <thead>
+                <tr>
+                  <th>Date</th><th>OT</th><th>Strike</th><th>Spot</th>
+                  <th>Zone</th><th>L1@</th><th>L2@</th><th>SL</th><th>T1</th>
+                  <th>Exit</th><th>Time</th><th>Reason</th><th>T1?</th><th>Lots</th>
+                  <th style="text-align:right">P&L</th><th style="text-align:right">Cum</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="(t,i) in result.trades" :key="i">
+                  <tr>
+                    <td x-text="t.date"></td>
+                    <td><span :class="t.opt_type==='CE'?'tag-ce':'tag-pe'" x-text="t.opt_type"></span></td>
+                    <td x-text="t.strike"></td>
+                    <td x-text="Math.round(t.spot)"></td>
+                    <td class="text-t-muted" x-text="t.zone"></td>
+                    <td x-text="t.lot1_entry?.toFixed(1)"></td>
+                    <td x-text="t.lot2_entry ? t.lot2_entry.toFixed(1) : '-'"></td>
+                    <td x-text="t.sl?.toFixed(1)"></td>
+                    <td x-text="t.t1_target?.toFixed(1)"></td>
+                    <td x-text="t.exit?.toFixed(1)"></td>
+                    <td class="text-t-muted" x-text="(t.exit_ts||'').slice(11,16)"></td>
+                    <td x-text="t.reason"></td>
+                    <td x-text="t.t1_hit ? 'Y' : 'N'" :class="t.t1_hit ? 'text-t-green font-700' : 'text-t-muted'"></td>
+                    <td x-text="t.two_lots ? '2' : '1'"></td>
+                    <td style="text-align:right" :class="t.pnl_rs>=0?'pnl-pos font-700':'pnl-neg'"
+                        x-text="(t.pnl_rs>=0?'+':'')+t.pnl_rs.toLocaleString('en-IN')"></td>
+                    <td style="text-align:right" class="text-t-muted font-mono"
+                        x-text="cumAt(i)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </template>
+
+  </div>
+</div>
+
+<script>
+function scaleinApp() {
+  return {
+    // params
+    index: 'NIFTY',
+    dataSource: 'api',
+    dateMode: 'days',
+    days: 10,
+    startDate: '',
+    endDate: '',
+    slBuf: 20,
+    token: '',
+    csvPath: '',
+    // state
+    loading: false,
+    error: '',
+    result: null,
+    _chart: null,
+
+    init() {
+      this.fetchToken();
+    },
+
+    async fetchToken() {
+      try {
+        const r = await fetch('/api/backtest/token');
+        const d = await r.json();
+        if (d.ok && d.token) this.token = d.token;
+      } catch(_) {}
+    },
+
+    cumAt(i) {
+      if (!this.result) return '';
+      let s = 0;
+      for (let j = 0; j <= i; j++) s += this.result.trades[j].pnl_rs;
+      return (s >= 0 ? '+' : '') + s.toLocaleString('en-IN');
+    },
+
+    async runBacktest() {
+      this.error = '';
+      this.result = null;
+      if (this.dataSource === 'api' && !this.token) {
+        this.error = 'Upstox token required for API mode'; return;
+      }
+      this.loading = true;
+      try {
+        const body = {
+          token:    this.token,
+          index:    this.index,
+          sl_buf:   this.slBuf,
+          csv_path: this.dataSource === 'csv' ? this.csvPath : '',
+        };
+        if (this.dataSource === 'api') {
+          if (this.dateMode === 'range' && this.startDate && this.endDate) {
+            body.start = this.startDate;
+            body.end   = this.endDate;
+          } else {
+            body.days = this.days;
+          }
+        }
+        const r = await fetch('/api/backtest/scalein', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!d.ok) { this.error = d.error || 'Backtest failed'; return; }
+        this.result = d;
+        this.$nextTick(() => this._renderChart());
+      } catch(e) {
+        this.error = e.message || 'Network error';
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    _renderChart() {
+      const trades = this.result?.trades || [];
+      const labels = [], data = [];
+      let cum = 0;
+      trades.forEach((t, i) => {
+        cum += t.pnl_rs;
+        labels.push(t.date + (trades.filter(x=>x.date===t.date).length>1 ? ' #'+(i+1) : ''));
+        data.push(cum);
+      });
+
+      const ctx = document.getElementById('equityChart');
+      if (!ctx) return;
+      if (this._chart) { this._chart.destroy(); this._chart = null; }
+
+      const isPos = cum >= 0;
+      this._chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            data,
+            borderColor: isPos ? '#4CA64C' : '#FF5722',
+            backgroundColor: isPos ? 'rgba(76,166,76,.08)' : 'rgba(255,87,34,.08)',
+            borderWidth: 2,
+            pointRadius: 4,
+            pointBackgroundColor: data.map(v => v >= 0 ? '#4CA64C' : '#FF5722'),
+            fill: true,
+            tension: 0.3,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => 'Rs ' + ctx.parsed.y.toLocaleString('en-IN', {signDisplay:'always'})
+              }
+            }
+          },
+          scales: {
+            x: { ticks: { font: { family: 'JetBrains Mono', size: 10 }, maxRotation: 45, color: '#9b9b9b' }, grid: { color: '#e9e9ed' } },
+            y: {
+              ticks: {
+                font: { family: 'JetBrains Mono', size: 10 }, color: '#9b9b9b',
+                callback: v => 'Rs ' + v.toLocaleString('en-IN')
+              },
+              grid: { color: '#e9e9ed' }
+            }
+          }
+        }
+      });
+    },
+  }
+}
+</script>
+</body>
+</html>

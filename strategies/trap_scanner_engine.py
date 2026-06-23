@@ -1287,6 +1287,12 @@ class TrapScannerEngine:
                 asyncio.get_event_loop().create_task(
                     self._on_entry_signal(leg_key, opt_type, best, htf_zones[0])
                 )
+            elif trapped_now:
+                self._log.info(
+                    "_run_ltf_on [%s] waiting: %d option traps still active "
+                    "(entry fires when ALL close); closed=%d",
+                    leg_key, len(trapped_now), len(closed_today),
+                )
             return
 
         for zone in htf_zones:

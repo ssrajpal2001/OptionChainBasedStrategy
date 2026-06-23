@@ -122,7 +122,9 @@ class InstrumentRegistry:
 
         underlying_key = _UPSTOX_UNDERLYING_KEY.get(underlying)
         if not underlying_key:
-            diag.append(f"ERROR: no Upstox underlying key mapping for '{underlying}'")
+            # NSE stock F&O (e.g. RELIANCE, TCS) — no API key needed; load from master JSON
+            diag.append(f"No Upstox underlying key for '{underlying}' — loading NSE stock F&O from master JSON")
+            self._load_from_master_json(underlying, today, diag)
             return
 
         diag.append(f"underlying_key = {underlying_key}")
@@ -400,6 +402,13 @@ class InstrumentRegistry:
                 if str(_uns).upper() != underlying.upper():
                     continue
             elif not ts.startswith(underlying):
+                continue
+
+            # Capture near-month futures key so historical_instrument_key() works for stocks
+            _itype = ((inst.get("instrument_type", "")) if isinstance(inst, dict)
+                      else getattr(inst, "instrument_type", ""))
+            if str(_itype).upper() in ("FUTSTK", "FUTIDX") and underlying.upper() not in self._futures_upstox:
+                self._futures_upstox[underlying.upper()] = ikey
                 continue
 
             try:

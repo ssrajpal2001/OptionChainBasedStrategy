@@ -4885,10 +4885,54 @@ class DashboardServer:
                 from backtest_engine import run_batch_backtest as _run_batch
                 result = await asyncio.wait_for(
                     asyncio.to_thread(_run_batch, params.dict(exclude={"token"}), token),
-                    timeout=900.0,   # 15 min — one fetch, 5 width passes
+                    timeout=900.0,
                 )
                 return result
             except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        # ── Scale-In Backtest (NIFTY / F&O stocks) ───────────────────────────
+
+        _SCALEIN_HTML = os.path.join(_TEMPLATE_DIR, "backtest_scalein.html")
+
+        @app.get("/backtest/scalein", include_in_schema=False)
+        async def backtest_scalein_ui():
+            if not os.path.exists(_SCALEIN_HTML):
+                return HTMLResponse("<h1>backtest_scalein.html not found</h1>", status_code=503)
+            return FileResponse(_SCALEIN_HTML, media_type="text/html")
+
+        @app.post("/api/backtest/scalein", tags=["Backtest"])
+        async def run_scalein_backtest_api(request: Request):
+            """Scale-in backtest: Lot1 on HTF zone entry, Lot2 on 5m trap at 1/3 depth."""
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            token    = p.get("token", "")
+            if not token:
+                creds = await asyncio.to_thread(
+                    _srv._client_db.get_feeder_creds_sync, "upstox"
+                )
+                token = (creds or {}).get("access_token", "")
+            if not token:
+                return {"ok": False, "error": "token required"}
+            days     = int(p.get("days", 10))
+            start    = p.get("start", "")
+            end      = p.get("end", "")
+            index    = str(p.get("index", "NIFTY")).upper()
+            sl_buf   = float(p.get("sl_buf", 20.0))
+            csv_path = p.get("csv_path", "")
+            try:
+                from scripts.nifty_scalein_backtest import run_scalein_backtest
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path
+                    ),
+                    timeout=600.0,
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
 
         return app
