@@ -698,9 +698,13 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         elif bias_bear:
             legs.append(("PE", pe_s))
         else:
-            # Flat open — pivot S1 (CE) + R1 (PE) both sides
+            # Flat open (<0.3%) — ATM±(4×step) both sides: CE=ATM-200, PE=ATM+200 for NIFTY
+            atm         = _round(today_open, STEP)
+            offset      = GAP_STEPS * STEP
+            ce_s        = max(STEP, atm - offset)
+            pe_s        = atm + offset
             legs        = [("CE", ce_s), ("PE", pe_s)]
-            strike_mode = f"FLAT S1={ce_s} R1={pe_s}"
+            strike_mode = f"FLAT ATM±{offset} CE={ce_s} PE={pe_s}"
         bias_label = (f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull
                       else f"BEAR-bias(PE) {bias_diff_pct:.2f}%" if bias_bear
                       else f"FLAT BOTH-SIDES gap={bias_diff_pct:+.2f}%")
