@@ -7,6 +7,7 @@ and the feeder adapters call these translation methods.
 
 Format references (verified as of 2025):
   Fyers    : NSE:NIFTY2652822000CE     (exchange:underlying + YY + expiry_code + strike + CE/PE)
+             MCX:CRUDEOIL26JUL6800CE   (MCX commodities use monthly format MCX:UNDERLYING+YYMON+strike+CE/PE)
   AngelOne : NIFTY28MAY2422000CE       (underlying + DDMON + YY + strike + CE/PE)
   Zerodha  : NIFTY2562822000CE         (underlying + YY + single-char-month + DD + strike + CE/PE)
   Dhan     : uses numeric security_id from instrument master (token-based)
@@ -82,7 +83,8 @@ class SymbolTranslator:
         last-Thursday/Tuesday of the month (i.e. it IS the monthly contract).
         """
         yy       = sym.expiry.strftime("%y")
-        exchange = "BSE" if sym.underlying == "SENSEX" else "NSE"
+        _MCX = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
+        exchange = "BSE" if sym.underlying == "SENSEX" else ("MCX" if sym.underlying in _MCX else "NSE")
         if is_monthly:
             mon = _MONTH_3[sym.expiry.month - 1]
             return f"{exchange}:{sym.underlying}{yy}{mon}{sym.strike_int}{sym.option_type}"
@@ -98,7 +100,7 @@ class SymbolTranslator:
         """
         # Monthly format: 3-char month name, no day field (e.g. BSE:SENSEX26JUN77100CE)
         m_monthly = re.match(
-            r"^(?:NSE|BSE):([A-Z]+)(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d+)(CE|PE)$",
+            r"^(?:NSE|BSE|MCX):([A-Z]+)(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d+)(CE|PE)$",
             raw,
         )
         if m_monthly:
@@ -127,7 +129,7 @@ class SymbolTranslator:
                 expiry=expiry,
             )
         # Weekly format: single-char month code + 2-digit day
-        pattern = r"^(?:NSE|BSE):([A-Z]+)(\d{2})([0-9OND])(\d{2})(\d+)(CE|PE)$"
+        pattern = r"^(?:NSE|BSE|MCX):([A-Z]+)(\d{2})([0-9OND])(\d{2})(\d+)(CE|PE)$"
         m = re.match(pattern, raw)
         if not m:
             return None
