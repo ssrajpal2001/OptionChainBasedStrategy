@@ -511,11 +511,13 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     gap_fired  = gap_pct >= 0.5
     gap_dir    = "UP" if today_open >= prev_C else "DOWN"
 
-    # Spot bias: today_open vs prev_close
-    # Bullish bias -> only CE trades (spot above prev close)
-    # Bearish bias -> only PE trades (spot below prev close)
-    bias_bull = today_open >= prev_C   # True = bullish day bias
-    bias_bear = today_open < prev_C
+    # Spot bias: today_open vs prev_close with min gap threshold (0.3%)
+    # A 0.1% open difference is noise — require meaningful gap before picking a side.
+    # If gap < threshold in either direction, skip the day entirely.
+    BIAS_GAP_PCT = 0.3
+    bias_diff_pct = (today_open - prev_C) / prev_C * 100
+    bias_bull = bias_diff_pct >= BIAS_GAP_PCT    # open meaningfully above prev_close → CE
+    bias_bear = bias_diff_pct <= -BIAS_GAP_PCT   # open meaningfully below prev_close → PE
 
     # Strike selection (mirrors live scanner)
     if gap_fired:
@@ -552,13 +554,16 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         day_expiry = _next_week_expiry(td)
         print(f"  {trade_date}: next-week expiry = {day_expiry}")
 
-    # Apply spot bias: bullish day -> CE only; bearish day -> PE only
+    # Apply spot bias: bullish day -> CE only; bearish day -> PE only; skip ambiguous days
     legs = []
     if bias_bull:
         legs.append(("CE", ce_s))
-    if bias_bear:
+    elif bias_bear:
         legs.append(("PE", pe_s))
-    bias_label = "BULL-bias(CE)" if bias_bull else "BEAR-bias(PE)"
+    else:
+        print(f"  {trade_date}: gap {bias_diff_pct:+.2f}% < {BIAS_GAP_PCT}% threshold - skip (ambiguous)")
+        return []
+    bias_label = f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull else f"BEAR-bias(PE) {bias_diff_pct:.2f}%"
     trades = []
 
     for ot, strike in legs:
