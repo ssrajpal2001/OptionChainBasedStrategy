@@ -395,12 +395,14 @@ class StrikeRebalancer:
         providers = []
         if hasattr(self._feeder, "active_provider"):
             ap = self._feeder.active_provider
-            if ap == "dual":
+            if ap in ("dual", "upstox", "fyers"):
+                # Always generate both formats when any live feeder is active.
+                # Each sub-feeder filters to its own format, so this is safe
+                # even when only one provider is connected (the other silently
+                # drops tokens it can't use). Fixes matched_fyers=0 when the
+                # token-refresh path sets active_provider="upstox" but Fyers
+                # is still running inside the same DualFeeder instance.
                 providers = ["upstox", "fyers"]
-            elif ap == "fyers":
-                providers = ["fyers"]
-            elif ap == "upstox":
-                providers = ["upstox"]
         else:
             feeder_type = type(self._feeder).__name__
             if "Fyers" in feeder_type:

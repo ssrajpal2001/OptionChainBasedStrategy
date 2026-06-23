@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -687,7 +687,6 @@ document.addEventListener('alpine:init', () => {
     availableStrategies: [
       { id: 'sell_straddle', name: 'Sell Straddle',  desc: 'ATM straddle — premium decay (theta)' },
       { id: 'iron_condor',   name: 'Iron Condor',    desc: 'OTM 4-leg credit spread (range-bound)' },
-      { id: 'trap_trading',  name: 'Liquidity Trap Trading', desc: 'MTF institutional liquidity sweep — 5-stage directional entry' },
     ],
     availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','BTC','ETH'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
@@ -741,9 +740,9 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Per-index strategy config (rule builder) ────────────────────── */
     adminSelectedIndex: 'NIFTY',
-    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor' | 'trap_trading'
+    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor' | 'trap_scanner'
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
-    indexConfig: { _trap: { htf_minutes:75, ltf_minutes:5, retest_zone_pct:0.5, slippage_buffer:0.5, sl_mode:'dynamic', sl_pct:2.0, sl_buffer_pct:0.3, entry_cutoff_time:'14:45' } },
+    indexConfig: {},
     trapSaveMsg: '', trapSaveOk: null,
     trapScannerCfg: { htf_minutes: 75, ltf_minutes: 5, gap_threshold_pct: 1.0, per_index: {} },
     trapScannerSaveMsg: '', trapScannerSaveOk: null,
@@ -1011,18 +1010,10 @@ document.addEventListener('alpine:init', () => {
       this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
-      this.loadTrapConfig();
       this.loadTrapScannerCfg();
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); }, 800);
       setTimeout(() => { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); }, 1200);
       setTimeout(() => { this.loadIndexConfig(this.adminSelectedIndex); }, 1500);
-    },
-
-    async loadTrapConfig() {
-      const r = await this._fetch('/api/admin/strategy/trap-config');
-      if (!r) return;
-      const d = await r.json();
-      if (d.ok && d.config) this.indexConfig._trap = { ...this.indexConfig._trap, ...d.config };
     },
 
     _startClock() {
@@ -1625,17 +1616,6 @@ document.addEventListener('alpine:init', () => {
       }
       if (!this.indexConfig[idx].sell_straddle) this.indexConfig[idx].sell_straddle = this._ssDefaults();
       if (!this.indexConfig[idx].iron_condor)   this.indexConfig[idx].iron_condor   = this._icDefaults(idx);
-      if (!this.indexConfig[idx].trap_trading)  this.indexConfig[idx].trap_trading  = {};
-      { const tt = this.indexConfig[idx].trap_trading;
-        if (tt.buy_depth === undefined)     tt.buy_depth = 0;
-        if (tt.lookback_days === undefined) tt.lookback_days = 2;
-        if (tt.htf_minutes === undefined)   tt.htf_minutes = 75;
-        if (tt.mtf_minutes === undefined)   tt.mtf_minutes = 5;
-        if (tt.sl_min_minutes === undefined) tt.sl_min_minutes = 1;
-        if (tt.roundoff_step === undefined) tt.roundoff_step = 0;
-        if (!tt.dte_offset_ladder) tt.dte_offset_ladder = {"5":5,"4":4,"3":3,"2":2,"1":1};
-        if (tt.dte_ladder_text === undefined) tt.dte_ladder_text = JSON.stringify(tt.dte_offset_ladder);
-      }
       // Ensure rule arrays exist
       const ss = this.indexConfig[idx].sell_straddle;
       if (!Array.isArray(ss.entry_rules_beginning)) ss.entry_rules_beginning = [];
@@ -1684,7 +1664,7 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch(`/api/admin/strategy/config/${idx}`);
         if (r && r.ok) {
           const d = await r.json();
-          this.indexConfig[idx] = { sell_straddle: d.sell_straddle || {}, iron_condor: d.iron_condor || {}, trap_trading: d.trap_trading || {} };
+          this.indexConfig[idx] = { sell_straddle: d.sell_straddle || {}, iron_condor: d.iron_condor || {} };
         }
       } catch {}
       this._ensureIndexConfig(idx);
@@ -1697,12 +1677,6 @@ document.addEventListener('alpine:init', () => {
       const idx = this.adminSelectedIndex;
       try {
         const payload = JSON.parse(JSON.stringify(this.indexConfig[idx] || {}));
-        // Parse the editable DTE-ladder text back into the JSON object before saving.
-        if (payload.trap_trading) {
-          try { payload.trap_trading.dte_offset_ladder = JSON.parse(payload.trap_trading.dte_ladder_text || '{}'); }
-          catch (e) { this.indexConfigOk = false; this.indexConfigMsg = 'DTE ladder is not valid JSON.'; this.indexConfigSaving = false; return; }
-          delete payload.trap_trading.dte_ladder_text;
-        }
         const r = await this._fetch(`/api/admin/strategy/config/${idx}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1717,21 +1691,6 @@ document.addEventListener('alpine:init', () => {
         this.indexConfigMsg = 'Network error: ' + (e.message || String(e));
       }
       this.indexConfigSaving = false;
-    },
-    async saveTrapConfig() {
-      this.trapSaveMsg = 'Saving…'; this.trapSaveOk = null;
-      try {
-        const r = await this._fetch('/api/admin/strategy/trap-config', {
-          json: this.indexConfig._trap
-        });
-        if (!r) throw new Error('No response');
-        const d = await r.json();
-        this.trapSaveOk  = d.ok !== false;
-        this.trapSaveMsg = d.message || (d.ok ? 'Liquidity Trap config saved.' : (d.error || 'Save failed.'));
-      } catch (e) {
-        this.trapSaveOk = false;
-        this.trapSaveMsg = 'Network error: ' + (e.message || String(e));
-      }
     },
 
     async loadTrapScannerCfg() {
@@ -2763,91 +2722,7 @@ function trapConfig() {
   }
 }
 
-function clientTrapInstruments() {
-  return {
-    clients: [],
-    _authHeaders() {
-      const token = localStorage.getItem('terminus_token');
-      return token ? { 'Authorization': 'Bearer ' + token } : {};
-    },
-    async init() {
-      try {
-        const [clientsRes, instrumentsRes] = await Promise.all([
-          fetch('/api/admin/clients', { headers: this._authHeaders() }),
-          fetch('/api/admin/trap/clients/instruments', { headers: this._authHeaders() }),
-        ]);
-        const clientsData  = await clientsRes.json();
-        const instrData    = await instrumentsRes.json();
-        const instrMap     = instrData.ok ? instrData.instruments : {};
-        const list = Array.isArray(clientsData.clients) ? clientsData.clients
-                   : (Array.isArray(clientsData) ? clientsData : []);   // 403/non-array safe
-        this.clients = list.map(c => ({
-          ...c,
-          trap_instruments: instrMap[c.client_id] || [],
-          _saving: false,
-          _saved:  false,
-          _error:  false,
-        }));
-      } catch(e) { console.warn('clientTrapInstruments init failed', e); }
-    },
-    async toggle(client, instrument) {
-      // Save pre-mutation state for rollback
-      const previous = [...(client.trap_instruments || [])];
-      const idx = (client.trap_instruments || []).indexOf(instrument);
-      if (idx === -1) client.trap_instruments.push(instrument);
-      else client.trap_instruments.splice(idx, 1);
 
-      client._saving = true; client._saved = false; client._error = false;
-      try {
-        const r = await fetch(`/api/admin/trap/client/${client.client_id}/instruments`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...this._authHeaders() },
-          body: JSON.stringify({ instruments: client.trap_instruments }),
-        });
-        const d = await r.json();
-        if (!d.ok) throw new Error(d.error || 'Server error');
-        client._saved = true;
-        setTimeout(() => client._saved = false, 2000);
-      } catch(e) {
-        client.trap_instruments = previous;   // rollback
-        client._error = true;
-        setTimeout(() => client._error = false, 3000);
-        console.warn('toggle failed, rolled back', e);
-      } finally {
-        client._saving = false;
-      }
-    },
-  }
-}
-
-function trapReplay() {
-  return {
-    symbol: 'NIFTY',
-    startDate: new Date(Date.now() - 7*86400000).toISOString().slice(0,10),
-    endDate:   new Date().toISOString().slice(0,10),
-    running: false,
-    result:  null,
-    error:   '',
-    _authHeaders() {
-      const t = localStorage.getItem('terminus_token');
-      return t ? { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-    },
-    async run() {
-      this.running = true; this.result = null; this.error = '';
-      try {
-        const r = await fetch('/api/strategies/trap_trading/replay', {
-          method: 'POST',
-          headers: this._authHeaders(),
-          body: JSON.stringify({ symbol: this.symbol, start_date: this.startDate, end_date: this.endDate }),
-        });
-        const d = await r.json();
-        if (!d.ok) throw new Error(d.error || 'Server error');
-        this.result = d;
-      } catch(e) { this.error = e.message || String(e); }
-      finally { this.running = false; }
-    },
-  };
-}
 
 function amoTest() {
   return {
@@ -2905,53 +2780,6 @@ function amoTest() {
   };
 }
 
-function histReplay() {
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0,10);
-  return {
-    script:        'NIFTY',
-    provider:      'upstox',
-    backtestDate:  yesterday,
-    capital:       500000,
-    lookbackDays:  2,
-    running:       false,
-    result:        null,
-    rawResult:     null,
-    error:         '',
-    _auth() {
-      const t = localStorage.getItem('terminus_token');
-      return t ? { 'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' };
-    },
-    async run() {
-      this.running = true; this.result = null; this.rawResult = null; this.error = '';
-      try {
-        const r = await fetch('/api/strategies/trap_trading/historical_replay', {
-          method:  'POST',
-          headers: this._auth(),
-          body:    JSON.stringify({
-            script:        this.script,
-            provider:      this.provider,
-            backtest_date: this.backtestDate,
-            capital:       Number(this.capital),
-            lookback_days: Number(this.lookbackDays),
-          }),
-        });
-        const d = await r.json();
-        this.rawResult = d;
-        if (!d.ok) { this.error = d.error || 'Server error'; return; }
-        this.result = d;
-      } catch(e) { this.error = e.message || String(e); }
-      finally { this.running = false; }
-    },
-    phaseColor(phase) {
-      const m = {
-        IDLE:'text-gray-500', HTF_BEARISH:'text-amber-400', TRAP_LOCKED:'text-orange-400',
-        RETEST_ALERT:'text-yellow-300', MTF_BEARISH:'text-blue-400', MTF_LOCKED:'text-indigo-400',
-        ARMED:'text-purple-400', LIVE:'text-green-400',
-      };
-      return m[phase] || 'text-gray-300';
-    },
-  };
-}
 </script>
 
 <!-- ════════════════════════════════════════════════════════════════════════════
@@ -3529,127 +3357,6 @@ function histReplay() {
       </div>
     </div>
 
-    <!-- Trap Trading — compact status (full detail in STRATEGY ADMIN tab) -->
-    <div class="t-card rounded p-4 fade-up-3 relative overflow-hidden">
-      <div class="absolute top-0 left-0 right-0 h-0.5"
-           style="background:linear-gradient(90deg,transparent,rgba(var(--t-amber-rgb),0.5),transparent)"></div>
-
-      <div class="flex items-center justify-between mb-3">
-        <div>
-          <div class="sec-label">TRAP TRADING ENGINE</div>
-          <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)"><span x-text="strategyConfig.tt_htf_minutes||75"></span>m HTF · <span x-text="strategyConfig.tt_ltf_minutes||5"></span>m LTF · <span x-text="activeIndex"></span></div>
-        </div>
-        <span class="font-mono text-xs px-2 py-0.5 rounded font-bold"
-              :style="trapState.phase === 'VOID'      ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.35)'
-                    : trapState.phase === 'ARMED'     ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.1);border:1px solid rgba(var(--t-green-rgb),0.3)'
-                    : trapState.phase === 'ZONE_WATCH' ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border:1px solid rgba(var(--t-cyan-rgb),0.25)'
-                    : 'color:var(--t-muted);border:1px solid var(--t-border)'"
-              x-text="trapState.phase || 'IDLE'"></span>
-      </div>
-
-      <!-- Compact zone proximity alerts -->
-      <div x-show="_zoneProximity(spot.ltp, trapState.htf_supply_zone_high, trapState.htf_supply_zone_low)"
-           class="flex items-center gap-2 px-2 py-1 rounded mb-2 zone-approach-blink"
-           style="background:rgba(var(--t-amber-rgb),0.1);border:1px solid rgba(var(--t-amber-rgb),0.3)">
-        <span style="color:var(--t-amber)">&#9888;</span>
-        <span class="font-mono text-xs font-bold" style="color:var(--t-amber)">NEAR SUPPLY ZONE — <span x-text="trapState.htf_supply_zone_low?fmt(trapState.htf_supply_zone_low):'—'"></span> / <span x-text="trapState.htf_supply_zone_high?fmt(trapState.htf_supply_zone_high):'—'"></span></span>
-      </div>
-      <div x-show="_zoneProximity(spot.ltp, trapState.htf_demand_zone_high, trapState.htf_demand_zone_low)"
-           class="flex items-center gap-2 px-2 py-1 rounded mb-2 zone-approach-blink"
-           style="background:rgba(var(--t-green-rgb),0.1);border:1px solid rgba(var(--t-green-rgb),0.3)">
-        <span style="color:var(--t-green)">&#9650;</span>
-        <span class="font-mono text-xs font-bold" style="color:var(--t-green)">NEAR DEMAND ZONE — <span x-text="trapState.htf_demand_zone_low?fmt(trapState.htf_demand_zone_low):'—'"></span> / <span x-text="trapState.htf_demand_zone_high?fmt(trapState.htf_demand_zone_high):'—'"></span></span>
-      </div>
-      <!-- Rolling Base + State row -->
-      <div class="grid grid-cols-2 gap-2 mb-3">
-        <div class="rounded px-2 py-1.5" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">ROLLING BASE</div>
-          <div class="font-mono text-sm font-bold" style="color:var(--t-bright)"
-               x-text="trapState.rolling_base ? fmt(trapState.rolling_base) : '—'"></div>
-        </div>
-        <div class="rounded px-2 py-1.5"
-             :style="trapState.is_void_state?'background:rgba(var(--t-amber-rgb),0.1);border:1px solid rgba(var(--t-amber-rgb),0.35)':'background:var(--t-surface);border:1px solid var(--t-border)'">
-          <div class="sec-label mb-0.5">STATE</div>
-          <div class="font-mono text-xs font-bold"
-               :style="trapState.is_void_state ? 'color:var(--t-amber)' : 'color:var(--t-green)'"
-               x-text="trapState.is_void_state ? 'VOIDED' : (trapState.phase || 'IDLE')"></div>
-        </div>
-      </div>
-      <div class="h-px mb-3" style="background:var(--t-border)"></div>
-
-      <!-- ── Indicator Scale Panel ────────────────────────────────────── -->
-      <div class="space-y-2.5">
-        <!-- RSI-14 -->
-        <div>
-          <div class="flex justify-between items-baseline mb-1">
-            <span class="sec-label">RSI (14)</span>
-            <span class="font-mono text-sm font-bold"
-                  :style="(trapState.current_rsi_14||0) >= 70 ? 'color:var(--t-red)'
-                        : (trapState.current_rsi_14||0) <= 30 ? 'color:var(--t-green)'
-                        : 'color:var(--t-cyan)'"
-                  x-text="trapState.current_rsi_14 != null ? trapState.current_rsi_14.toFixed(1) : '—'"></span>
-          </div>
-          <div class="gauge-track h-1.5">
-            <div class="gauge-fill h-full"
-                 :style="`width:${trapState.current_rsi_14||0}%;
-                   background:${(trapState.current_rsi_14||0)>=70?'var(--t-red)'
-                              :(trapState.current_rsi_14||0)<=30?'var(--t-green)':'var(--t-cyan)'}`"></div>
-          </div>
-          <div class="flex justify-between mt-0.5">
-            <span class="font-mono text-xs" style="color:var(--t-muted)">OS 30</span>
-            <span class="font-mono text-xs" style="color:var(--t-muted)">OB 70</span>
-          </div>
-        </div>
-        <!-- VWAP-500 -->
-        <div>
-          <div class="flex justify-between items-baseline mb-0.5">
-            <span class="sec-label">VWAP (500)</span>
-            <span class="font-mono text-sm" style="color:var(--t-cyan)"
-                  x-text="trapState.current_vwap_500 != null ? fmt(trapState.current_vwap_500) : '—'"></span>
-          </div>
-          <div x-show="trapState.current_vwap_500 && spot.ltp" class="flex items-center justify-between">
-            <span class="font-mono text-xs" style="color:var(--t-muted)">Distance</span>
-            <span class="font-mono text-xs font-bold"
-                  :style="`color:${spot.ltp > (trapState.current_vwap_500||0) ? 'var(--t-green)' : 'var(--t-red)'}`"
-                  x-text="trapState.current_vwap_500 && spot.ltp
-                    ? ((spot.ltp-(trapState.current_vwap_500||0))/(trapState.current_vwap_500||1)*100).toFixed(2)+'%'
-                    : ''"></span>
-          </div>
-        </div>
-        <!-- ADX-20 -->
-        <div>
-          <div class="flex justify-between items-baseline mb-1">
-            <span class="sec-label">ADX (20)</span>
-            <span class="font-mono text-sm font-bold"
-                  :style="(trapState.current_adx_20||0) >= 20
-                    ? ((trapState.current_adx_20||0)>=30 ? 'color:var(--t-amber)' : 'color:var(--t-text)')
-                    : 'color:var(--t-muted)'"
-                  x-text="trapState.current_adx_20 != null ? trapState.current_adx_20.toFixed(1) : '—'"></span>
-          </div>
-          <div class="gauge-track h-1.5">
-            <div class="gauge-fill h-full"
-                 :style="`width:${Math.min(100,(trapState.current_adx_20||0)*2)}%;
-                   background:var(--t-amber);
-                   opacity:${(trapState.current_adx_20||0)>=20?0.75:0.2}`"></div>
-          </div>
-          <div class="flex justify-between mt-0.5">
-            <span class="font-mono text-xs" style="color:var(--t-muted)">WEAK &lt;20</span>
-            <span class="font-mono text-xs"
-                  :style="`color:${(trapState.current_adx_20||0)>=20?'var(--t-amber)':'var(--t-muted)'}`"
-                  x-text="(trapState.current_adx_20||0)>=20?'TRENDING':'CHOPPY'"></span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Footer: update timestamp + bar counts -->
-      <div class="flex justify-between items-center mt-3 pt-2" style="border-top:1px solid var(--t-border)">
-        <span class="font-mono text-xs" style="color:var(--t-muted)"
-              x-text="'LTF ' + (trapState.ltf_bar_count||0) + ' bars · HTF ' + (trapState.htf_bar_count||0) + ' bars'"></span>
-        <span class="font-mono text-xs" style="color:var(--t-muted)"
-              x-text="strategyTelemetry.ts ? (strategyTelemetry.ts||'').substring(11,19)+' IST' : '—'"></span>
-      </div>
-    </div>
-
     <!-- Worker Stats -->
     <div class="t-card rounded p-4 fade-up-3">
       <div class="sec-label mb-3">Execution Workers</div>
@@ -4069,107 +3776,6 @@ function histReplay() {
       </template>
     </div>
 
-    <!-- Trap Trading Engine Live State -->
-    <div class="t-card rounded p-4">
-      <div class="flex items-center justify-between mb-3">
-        <div>
-          <div class="sec-label">TRAP TRADING — STRUCTURAL COORDINATES</div>
-          <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">
-            <span x-text="strategyConfig.tt_htf_minutes||75"></span>m HTF · <span x-text="strategyConfig.tt_ltf_minutes||5"></span>m LTF · <span x-text="activeIndex"></span>
-          </div>
-        </div>
-        <span class="font-mono text-xs px-2 py-0.5 rounded font-bold"
-              :style="trapState.phase === 'VOID'      ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.35)'
-                    : trapState.phase === 'ARMED'     ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.1);border:1px solid rgba(var(--t-green-rgb),0.3)'
-                    : trapState.phase === 'ZONE_WATCH' ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border:1px solid rgba(var(--t-cyan-rgb),0.25)'
-                    : 'color:var(--t-muted);border:1px solid var(--t-border)'"
-              x-text="trapState.phase || 'IDLE'"></span>
-      </div>
-
-      <!-- Supply / Demand zones -->
-      <div class="grid grid-cols-2 gap-2 mb-3">
-        <div class="rounded p-2" style="background:rgba(var(--t-amber-rgb),0.06);border:1px solid rgba(var(--t-amber-rgb),0.2)">
-          <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-amber)">SUPPLY ZONE</div>
-          <div class="flex justify-between font-mono text-xs">
-            <span style="color:var(--t-muted)">H</span>
-            <span x-text="trapState.htf_supply_zone_high ? fmt(trapState.htf_supply_zone_high) : '—'"></span>
-          </div>
-          <div class="flex justify-between font-mono text-xs">
-            <span style="color:var(--t-muted)">L</span>
-            <span x-text="trapState.htf_supply_zone_low ? fmt(trapState.htf_supply_zone_low) : '—'"></span>
-          </div>
-          <div x-show="_zoneProximity(spot.ltp, trapState.htf_supply_zone_high, trapState.htf_supply_zone_low)"
-               class="font-mono text-xs mt-1 zone-approach-blink" style="color:var(--t-amber)">⚠ APPROACHING</div>
-        </div>
-        <div class="rounded p-2" style="background:rgba(var(--t-green-rgb),0.05);border:1px solid rgba(var(--t-green-rgb),0.18)">
-          <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-green)">DEMAND ZONE</div>
-          <div class="flex justify-between font-mono text-xs">
-            <span style="color:var(--t-muted)">H</span>
-            <span x-text="trapState.htf_demand_zone_high ? fmt(trapState.htf_demand_zone_high) : '—'"></span>
-          </div>
-          <div class="flex justify-between font-mono text-xs">
-            <span style="color:var(--t-muted)">L</span>
-            <span x-text="trapState.htf_demand_zone_low ? fmt(trapState.htf_demand_zone_low) : '—'"></span>
-          </div>
-          <div x-show="_zoneProximity(spot.ltp, trapState.htf_demand_zone_high, trapState.htf_demand_zone_low)"
-               class="font-mono text-xs mt-1 zone-approach-blink" style="color:var(--t-green)">▲ APPROACHING</div>
-        </div>
-      </div>
-
-      <!-- Rolling Base + Void -->
-      <div class="grid grid-cols-3 gap-2 mb-3">
-        <div class="rounded p-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">ROLLING BASE</div>
-          <div class="font-mono text-sm font-bold" style="color:var(--t-bright)"
-               x-text="trapState.rolling_base ? fmt(trapState.rolling_base) : '—'"></div>
-          <div class="font-mono text-xs" :style="`color:${spot.ltp>(trapState.rolling_base||0)?'var(--t-green)':'var(--t-red)'}`"
-               x-text="trapState.rolling_base ? (spot.ltp>(trapState.rolling_base||0)?'ABOVE':'BELOW') : ''"></div>
-        </div>
-        <div class="rounded p-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">TRAP HIGH</div>
-          <div class="font-mono text-sm font-bold" style="color:var(--t-cyan)"
-               x-text="trapState.trap_high ? fmt(trapState.trap_high) : '—'"></div>
-        </div>
-        <div class="rounded p-2"
-             :style="trapState.is_void_state?'background:rgba(var(--t-amber-rgb),0.1);border:1px solid rgba(var(--t-amber-rgb),0.35)':'background:var(--t-surface);border:1px solid var(--t-border)'">
-          <div class="sec-label mb-0.5">STATE</div>
-          <div class="font-mono text-xs font-bold"
-               :style="trapState.is_void_state ? 'color:var(--t-amber)' : 'color:var(--t-green)'"
-               x-text="trapState.is_void_state ? 'VOIDED' : (trapState.phase||'IDLE')"></div>
-          <div class="font-mono text-xs" style="color:var(--t-muted)"
-               x-text="'L:' + (trapState.ltf_bar_count||0) + ' H:' + (trapState.htf_bar_count||0)"></div>
-        </div>
-      </div>
-
-      <!-- Live indicators -->
-      <div class="grid grid-cols-4 gap-2">
-        <div class="rounded p-2 text-center" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">RSI-14</div>
-          <div class="font-mono text-sm font-bold"
-               :style="(trapState.current_rsi_14||0)>=70?'color:var(--t-red)':(trapState.current_rsi_14||0)<=30?'color:var(--t-green)':'color:var(--t-cyan)'"
-               x-text="trapState.current_rsi_14!=null?trapState.current_rsi_14.toFixed(1):'—'"></div>
-        </div>
-        <div class="rounded p-2 text-center" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">VWAP-500</div>
-          <div class="font-mono text-sm" style="color:var(--t-cyan)"
-               x-text="trapState.current_vwap_500!=null?fmt(trapState.current_vwap_500):'—'"></div>
-        </div>
-        <div class="rounded p-2 text-center" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">ADX-20</div>
-          <div class="font-mono text-sm font-bold"
-               :style="(trapState.current_adx_20||0)>=20?'color:var(--t-amber)':'color:var(--t-muted)'"
-               x-text="trapState.current_adx_20!=null?trapState.current_adx_20.toFixed(1):'—'"></div>
-        </div>
-        <div class="rounded p-2 text-center" style="background:var(--t-surface);border:1px solid var(--t-border)">
-          <div class="sec-label mb-0.5">+DI/−DI</div>
-          <div class="font-mono text-xs">
-            <span style="color:var(--t-green)" x-text="trapState.current_pdi?trapState.current_pdi.toFixed(1):'—'"></span>
-            / <span style="color:var(--t-red)" x-text="trapState.current_mdi?trapState.current_mdi.toFixed(1):'—'"></span>
-          </div>
-        </div>
-      </div>
-    </div>
-
   </div><!-- end left col -->
 
   <!-- ══ RIGHT COLUMN — Rule Builder & Config ══════════════════════════════ -->
@@ -4196,13 +3802,6 @@ function histReplay() {
                   ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           IRON CONDOR
-        </button>
-        <button @click="adminStrategyTab='trap_trading'"
-                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
-                :style="adminStrategyTab==='trap_trading'
-                  ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border-bottom:2px solid var(--t-green)'
-                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
-          TRAP TRADING
         </button>
         <button @click="adminStrategyTab='trap_scanner'"
                 class="font-display font-bold text-xs px-4 py-2.5 transition-all"
@@ -5016,128 +4615,6 @@ function histReplay() {
         </div>
       </div><!-- end iron_condor config -->
 
-      <!-- ══ LIQUIDITY TRAP TRADING config ══════════════════════════════════ -->
-      <div x-show="adminStrategyTab==='trap_trading'" class="p-4 flex flex-col gap-3">
-        <!-- TT v2 per-instrument settings (seller-trap nested HTF→MTF) -->
-        <div class="rounded border p-3" style="border-color:var(--t-border)">
-          <div class="font-display text-sm font-black tracking-widest mb-2" style="color:var(--t-cyan)">
-            TRAP v2 — <span x-text="adminSelectedIndex"></span> (seller-trap, per instrument)
-          </div>
-          <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].trap_trading">
-            <div class="grid grid-cols-2 gap-3 text-xs font-mono">
-              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">Buy depth (ATM±N steps)</span>
-                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.buy_depth"></label>
-              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">Lookback days (≥2)</span>
-                <input type="number" min="2" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.lookback_days"></label>
-              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">HTF minutes</span>
-                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.htf_minutes"></label>
-              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">MTF minutes</span>
-                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.mtf_minutes"></label>
-              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">SL min minutes</span>
-                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.sl_min_minutes"></label>
-              <label class="flex flex-col gap-1"><span style="color:var(--t-muted)">Round-off step (0=auto)</span>
-                <input type="number" class="t-input" x-model.number="indexConfig[adminSelectedIndex].trap_trading.roundoff_step"></label>
-              <label class="flex flex-col gap-1 col-span-2"><span style="color:var(--t-muted)">DTE offset ladder (JSON: DTE&gt;k → steps ITM)</span>
-                <input type="text" class="t-input" x-model="indexConfig[adminSelectedIndex].trap_trading.dte_ladder_text" placeholder='{"5":5,"4":4,"3":3,"2":2,"1":1}'></label>
-              <div class="col-span-2 flex items-center gap-3 mt-1">
-                <button class="t-btn" @click="saveIndexConfig()" :disabled="indexConfigSaving" x-text="indexConfigSaving?'Saving…':'Save TRAP v2'"></button>
-                <span class="text-xs" :style="`color:${indexConfigOk?'var(--t-green)':'var(--t-red)'}`" x-text="indexConfigMsg"></span>
-              </div>
-            </div>
-          </template>
-        </div>
-        <div class="text-xs font-mono mb-1" style="color:var(--t-muted)">
-          <span class="font-semibold" style="color:var(--t-text)">Liquidity Trap Trading</span> —
-          5-stage MTF institutional liquidity sweep engine. All parameters apply globally.
-          Detailed timeframe tuning (HTF/MTF/LTF minutes, retest zone, slippage) is in the
-          <span class="text-yellow-400 font-semibold">TRAP ENGINE</span> tab.
-        </div>
-
-        <!-- Entry parameters -->
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="sec-label">HTF MINUTES (Stage 1–2)</label>
-            <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.htf_minutes"
-                   placeholder="75" min="15" max="240" step="5"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Slow timeframe for bearish trap setup (default: 75)</div>
-          </div>
-          <div>
-            <label class="sec-label">MTF MINUTES (Stage 4)</label>
-            <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.ltf_minutes"
-                   placeholder="5" min="1" max="30" step="1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Nested trap timeframe for entry timing (default: 5)</div>
-          </div>
-          <div>
-            <label class="sec-label">RETEST ZONE (%)</label>
-            <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.retest_zone_pct"
-                   placeholder="0.5" min="0.1" max="5.0" step="0.1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Stage 3 retest band around entry origin ± % (default: 0.5)</div>
-          </div>
-          <div>
-            <label class="sec-label">SLIPPAGE BUFFER (pts)</label>
-            <input type="number" class="t-input"
-                   x-model.number="indexConfig._trap.slippage_buffer"
-                   placeholder="0.5" min="0" max="20" step="0.25"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Stage 5 touch trigger buffer above entry line (default: 0.5)</div>
-          </div>
-        </div>
-
-        <!-- Entry cutoff + SL buffer -->
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="sec-label">ENTRY CUTOFF TIME (IST)</label>
-            <input type="text" class="t-input" placeholder="14:45"
-                   x-model="indexConfig._trap.entry_cutoff_time"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">No new entries after this time. HH:MM format. Default: 14:45</div>
-          </div>
-          <div>
-            <label class="sec-label">SL BUFFER (%)</label>
-            <input type="number" class="t-input" placeholder="0.3" min="0" max="5" step="0.1"
-                   x-model.number="indexConfig._trap.sl_buffer_pct"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% below structural candle low to place SL (prevents wick exits). Default: 0.3</div>
-          </div>
-        </div>
-
-        <!-- SL Mode -->
-        <div class="p-3 rounded" style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08)">
-          <label class="sec-label mb-2 block">STOP LOSS MODE</label>
-          <div class="flex gap-4 flex-wrap">
-            <label class="flex items-start gap-2 cursor-pointer">
-              <input type="radio" class="mt-0.5" x-model="indexConfig._trap.sl_mode" value="dynamic"/>
-              <div>
-                <div class="text-xs font-semibold" style="color:var(--t-text)">Dynamic (% below fill)</div>
-                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = entry price − SL%. Always below entry. Recommended.</div>
-              </div>
-            </label>
-            <label class="flex items-start gap-2 cursor-pointer">
-              <input type="radio" class="mt-0.5" x-model="indexConfig._trap.sl_mode" value="structural"/>
-              <div>
-                <div class="text-xs font-semibold" style="color:var(--t-text)">Structural (sweep candle low)</div>
-                <div class="text-xs mt-0.5" style="color:var(--t-muted)">SL = dynamic % below entry price (set at fill time).</div>
-              </div>
-            </label>
-          </div>
-          <div x-show="indexConfig._trap.sl_mode !== 'structural'" class="mt-3">
-            <label class="sec-label">SL PERCENT (%)</label>
-            <input type="number" class="t-input w-32"
-                   x-model.number="indexConfig._trap.sl_pct"
-                   placeholder="2.0" min="0.1" max="20" step="0.1"/>
-            <div class="text-xs mt-0.5" style="color:var(--t-muted)">% below entry fill for stop loss (default: 2.0%)</div>
-          </div>
-        </div>
-
-        <button @click="saveTrapConfig()"
-                class="btn-save-cfg self-start mt-1">
-          <span>&#x1F4BE; Save Liquidity Trap Config</span>
-        </button>
-        <div x-show="trapSaveMsg" class="font-mono text-xs px-2 py-1 rounded"
-             :style="trapSaveOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08)' : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08)'"
-             x-text="trapSaveMsg"></div>
-      </div><!-- end liquidity trap trading config -->
-
       <!-- ══ TRAP SCANNER config ════════════════════════════════════════════ -->
       <div x-show="adminStrategyTab==='trap_scanner'" class="p-4 flex flex-col gap-3">
 
@@ -5948,562 +5425,7 @@ function histReplay() {
     </div>
   </div>
 
-  <!-- ── Client TrapTrading Instrument Selector ────────────────────── -->
-  <div x-data="clientTrapInstruments()" x-init="init()" class="mt-4 bg-gray-900 rounded-lg p-4 border border-gray-700">
-    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Client TrapTrading Scripts</h4>
 
-    <div class="text-xs text-gray-400 mb-2">Select instruments per client for TrapTrading strategy:</div>
-    <template x-for="c in clients" :key="c.client_id">
-      <div class="flex items-center gap-3 py-1.5 border-b border-gray-800">
-        <span class="w-28 font-mono text-gray-200 truncate" x-text="c.client_id"></span>
-        <template x-for="inst in ['NIFTY','BANKNIFTY','FINNIFTY']" :key="inst">
-          <label class="flex items-center gap-1 cursor-pointer">
-            <input type="checkbox"
-                   :checked="(c.trap_instruments || []).includes(inst)"
-                   @change="toggle(c, inst)"
-                   class="w-3 h-3 accent-blue-500" />
-            <span class="text-gray-300" x-text="inst"></span>
-          </label>
-        </template>
-        <span x-show="c._saving" class="text-yellow-400 text-[10px] ml-auto">saving...</span>
-        <span x-show="c._saved"  class="text-green-400 text-[10px] ml-auto">saved</span>
-        <span x-show="c._error"  class="text-red-400 text-[10px] ml-auto">failed ✕</span>
-      </div>
-    </template>
-    <div x-show="clients.length === 0" class="text-gray-500 text-xs py-2">No clients found.</div>
-  </div>
-
-  <!-- ── Paper Backtest Replay ─────────────────────────────────────── -->
-  <div x-data="trapReplay()" class="mt-4 bg-gray-900 rounded-lg p-4 border border-gray-700">
-    <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Paper Backtest Replay</h4>
-    <div class="text-xs text-gray-400 mb-3">Replay saved 1-min bars through the 5-stage engine (sandbox — no orders fired).</div>
-    <div class="flex flex-wrap gap-3 items-end mb-3">
-      <div class="flex flex-col gap-1">
-        <label class="text-[10px] text-gray-500 uppercase tracking-wide">Symbol</label>
-        <select x-model="symbol" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200">
-          <option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option><option>BTC</option><option>ETH</option>
-        </select>
-      </div>
-      <div class="flex flex-col gap-1">
-        <label class="text-[10px] text-gray-500 uppercase tracking-wide">Start Date</label>
-        <input type="date" x-model="startDate" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" />
-      </div>
-      <div class="flex flex-col gap-1">
-        <label class="text-[10px] text-gray-500 uppercase tracking-wide">End Date</label>
-        <input type="date" x-model="endDate" class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-xs text-gray-200" />
-      </div>
-      <button @click="run()"
-              :disabled="running"
-              class="px-4 py-1.5 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 rounded text-xs text-white font-semibold">
-        <span x-text="running ? 'Running…' : 'Run Replay'"></span>
-      </button>
-    </div>
-    <!-- Error -->
-    <div x-show="error" class="text-red-400 text-xs mb-2" x-text="error"></div>
-    <!-- Summary -->
-    <div x-show="result" class="text-xs text-gray-300 mb-2">
-      Bars: <span class="font-mono text-white" x-text="result && result.bars_total"></span> raw ·
-      HTF: <span class="font-mono text-white" x-text="result && result.htf_bars"></span> ·
-      MTF: <span class="font-mono text-white" x-text="result && result.mtf_bars"></span> ·
-      Trades: <span class="font-mono text-green-400 font-bold" x-text="result && result.trade_count"></span> ·
-      Final phase: <span class="font-mono text-yellow-300" x-text="result && JSON.stringify(result.final_phase)"></span>
-    </div>
-    <!-- Trade log table -->
-    <div x-show="result && result.trades && result.trades.length > 0" class="overflow-x-auto">
-      <table class="w-full text-[10px] font-mono border-collapse">
-        <thead>
-          <tr class="text-gray-500 border-b border-gray-700">
-            <th class="text-left py-1 pr-3">Trade ID</th>
-            <th class="text-left py-1 pr-3">Symbol</th>
-            <th class="text-right py-1 pr-3">Entry Price</th>
-            <th class="text-right py-1 pr-3">Qty</th>
-            <th class="text-right py-1 pr-3">Entry Origin</th>
-            <th class="text-right py-1 pr-3">Target High</th>
-            <th class="text-right py-1 pr-3">LTF Entry</th>
-            <th class="text-right py-1 pr-3">LTF SL</th>
-            <th class="text-left py-1">Timestamp</th>
-          </tr>
-        </thead>
-        <tbody>
-          <template x-for="t in (result && result.trades || [])" :key="t.trade_id">
-            <tr class="border-b border-gray-800 hover:bg-gray-800">
-              <td class="py-1 pr-3 text-gray-400" x-text="t.trade_id"></td>
-              <td class="py-1 pr-3 text-blue-300" x-text="t.underlying"></td>
-              <td class="py-1 pr-3 text-right text-white" x-text="t.entry_price"></td>
-              <td class="py-1 pr-3 text-right" x-text="t.quantity"></td>
-              <td class="py-1 pr-3 text-right text-amber-300" x-text="t.entry_origin"></td>
-              <td class="py-1 pr-3 text-right text-green-400" x-text="t.target_high"></td>
-              <td class="py-1 pr-3 text-right text-indigo-300" x-text="t.ltf_entry"></td>
-              <td class="py-1 pr-3 text-right text-red-400" x-text="t.ltf_sl"></td>
-              <td class="py-1 text-gray-500" x-text="(t.timestamp||'').substring(0,19)"></td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
-    </div>
-    <div x-show="result && result.trade_count === 0" class="text-gray-500 text-xs py-1">
-      No trades triggered in this date range — try a wider window or check that 1-min bars are recorded.
-    </div>
-  </div>
-
-  <!-- ── Historical API Replay (Upstox, no local DB needed) ──────────── -->
-  <div x-data="histReplay()" class="mt-4 bg-gray-900 rounded-lg border border-indigo-800 overflow-hidden">
-
-    <!-- Card header -->
-    <div class="flex items-center justify-between px-4 py-2.5 border-b border-indigo-800 bg-indigo-950/40">
-      <div>
-        <div class="text-[10px] font-semibold text-indigo-400 uppercase tracking-widest">Historical API Replay</div>
-        <div class="text-xs text-gray-300 mt-0.5">Pull real Upstox bars on demand — no local DB required. Ideal for weekend backtesting.</div>
-      </div>
-      <span class="text-[10px] font-mono px-2 py-0.5 rounded border border-indigo-700 text-indigo-300">DTE ITM Matrix</span>
-    </div>
-
-    <div class="p-4">
-      <!-- Controls row -->
-      <div class="flex flex-wrap gap-3 items-end mb-4">
-        <div class="flex flex-col gap-1">
-          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Script</label>
-          <select x-model="script" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[110px]">
-            <option>NIFTY</option>
-            <option>BANKNIFTY</option>
-            <option>FINNIFTY</option>
-          </select>
-        </div>
-        <div class="flex flex-col gap-1">
-          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Provider</label>
-          <select x-model="provider" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 min-w-[100px]">
-            <option value="upstox">Upstox</option>
-          </select>
-        </div>
-        <div class="flex flex-col gap-1">
-          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Backtest Date</label>
-          <input type="date" x-model="backtestDate" class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200" />
-        </div>
-        <div class="flex flex-col gap-1">
-          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Capital (₹)</label>
-          <input type="number" x-model.number="capital" min="50000" step="50000"
-                 class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 w-32" />
-        </div>
-        <div class="flex flex-col gap-1">
-          <label class="text-[10px] text-gray-500 uppercase tracking-wide">Lookback Days</label>
-          <input type="number" x-model.number="lookbackDays" min="1" max="10"
-                 class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs text-gray-200 w-20" />
-        </div>
-        <button @click="run()" :disabled="running"
-                class="px-5 py-1.5 rounded text-xs font-semibold text-white transition-colors"
-                :class="running ? 'bg-indigo-900 opacity-50 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500'">
-          <span x-show="!running">Run Historical Replay</span>
-          <span x-show="running" class="flex items-center gap-1.5">
-            <svg class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-            </svg>
-            Fetching...
-          </span>
-        </button>
-      </div>
-
-      <!-- DTE matrix legend -->
-      <div class="mb-4 text-[10px] text-gray-500 font-mono bg-gray-800/50 rounded px-3 py-2 flex flex-wrap gap-x-6 gap-y-1">
-        <span class="text-gray-400 font-semibold">ITM Matrix:</span>
-        <span>0 DTE (Tue) → 100 pts</span>
-        <span>1 DTE (Mon) → 200 pts</span>
-        <span>2 DTE (Sun) → 300 pts</span>
-        <span>3 DTE (Fri) → 400 pts</span>
-        <span>4+ DTE → 500 pts</span>
-        <span class="text-gray-400 ml-2">Base = round((PriorHigh + PriorLow) / 2 / step) × step</span>
-      </div>
-
-      <!-- Error -->
-      <div x-show="error" class="mb-3 text-red-400 text-xs bg-red-900/20 border border-red-800 rounded px-3 py-2">
-        <div class="font-semibold mb-1" x-text="error"></div>
-        <div x-show="rawResult && rawResult.debug_hint" class="text-amber-300 mb-1" x-text="rawResult && rawResult.debug_hint"></div>
-        <template x-if="rawResult && rawResult.registry_diagnostics && rawResult.registry_diagnostics.length">
-          <div class="mt-1 font-mono text-[10px] text-gray-300 space-y-0.5">
-            <div class="text-gray-500 mb-1">Registry load log:</div>
-            <template x-for="(line, i) in (rawResult.registry_diagnostics || [])" :key="i">
-              <div x-text="line"></div>
-            </template>
-          </div>
-        </template>
-      </div>
-
-      <!-- Results -->
-      <template x-if="result">
-        <div class="space-y-4">
-
-          <!-- Contract Parameters grid -->
-          <div class="bg-gray-800/60 rounded-lg border border-gray-700 overflow-hidden">
-            <div class="px-3 py-2 border-b border-gray-700 text-[10px] font-semibold text-indigo-300 uppercase tracking-widest">Contract Parameters</div>
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-0 divide-x divide-y divide-gray-700/50 text-[10px] font-mono">
-              <template x-for="[k,v] in Object.entries({
-                'Prior Day':          result.contract_info.prior_day,
-                'Prior High':         result.contract_info.prior_day_high,
-                'Prior Low':          result.contract_info.prior_day_low,
-                'Base Strike':        result.contract_info.calculated_base_strike,
-                'Expiry':             result.contract_info.target_expiry,
-                'DTE':                result.contract_info.days_to_expiry,
-                'ITM Offset':         result.contract_info.itm_offset_pts + ' pts',
-                'Lot Size':           result.contract_info.lot_size,
-              })" :key="k">
-                <div class="px-3 py-2">
-                  <div class="text-gray-500 mb-0.5" x-text="k"></div>
-                  <div class="text-white" x-text="v"></div>
-                </div>
-              </template>
-            </div>
-            <!-- CE/PE symbols -->
-            <div class="border-t border-gray-700 px-3 py-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] font-mono">
-              <div>
-                <span class="text-gray-500">CE Symbol: </span>
-                <span class="text-green-400" x-text="result.contract_info.selected_ce_symbol"></span>
-                <span class="text-gray-400 ml-2">Strike <span x-text="result.contract_info.ce_strike"></span></span>
-              </div>
-              <div>
-                <span class="text-gray-500">PE Symbol: </span>
-                <span class="text-red-400" x-text="result.contract_info.selected_pe_symbol"></span>
-                <span class="text-gray-400 ml-2">Strike <span x-text="result.contract_info.pe_strike"></span></span>
-              </div>
-            </div>
-            <!-- Premium snapshot -->
-            <div class="border-t border-gray-700 px-3 py-2 grid grid-cols-2 gap-4 text-[10px] font-mono">
-              <div>
-                <div class="text-gray-500 mb-1">CE Premium (backtest day)</div>
-                <template x-if="result.data_summary.ce_premium.bars > 0">
-                  <span class="text-gray-300">
-                    Open <span class="text-white" x-text="result.data_summary.ce_premium.open"></span> &nbsp;
-                    High <span class="text-green-400" x-text="result.data_summary.ce_premium.day_high"></span> &nbsp;
-                    Low <span class="text-red-400" x-text="result.data_summary.ce_premium.day_low"></span> &nbsp;
-                    Close <span class="text-white" x-text="result.data_summary.ce_premium.close"></span> &nbsp;
-                    (<span x-text="result.data_summary.ce_premium.bars"></span> bars)
-                  </span>
-                </template>
-                <template x-if="result.data_summary.ce_premium.bars === 0">
-                  <span class="text-red-400 text-[10px]">No CE data
-                    <span x-show="result.data_summary.ce_fetch_error" x-text="' — ' + result.data_summary.ce_fetch_error"></span>
-                  </span>
-                </template>
-              </div>
-              <div>
-                <div class="text-gray-500 mb-1">PE Premium (backtest day)</div>
-                <template x-if="result.data_summary.pe_premium.bars > 0">
-                  <span class="text-gray-300">
-                    Open <span class="text-white" x-text="result.data_summary.pe_premium.open"></span> &nbsp;
-                    High <span class="text-green-400" x-text="result.data_summary.pe_premium.day_high"></span> &nbsp;
-                    Low <span class="text-red-400" x-text="result.data_summary.pe_premium.day_low"></span> &nbsp;
-                    Close <span class="text-white" x-text="result.data_summary.pe_premium.close"></span> &nbsp;
-                    (<span x-text="result.data_summary.pe_premium.bars"></span> bars)
-                  </span>
-                </template>
-                <template x-if="result.data_summary.pe_premium.bars === 0">
-                  <span class="text-red-400 text-[10px]">No PE data
-                    <span x-show="result.data_summary.pe_fetch_error" x-text="' — ' + result.data_summary.pe_fetch_error"></span>
-                  </span>
-                </template>
-              </div>
-            </div>
-          </div>
-
-          <!-- Engine note -->
-          <div x-show="result.contract_info && result.contract_info.engine_note"
-               class="text-[10px] text-indigo-300 bg-indigo-900/20 border border-indigo-800 rounded px-3 py-2"
-               x-text="result.contract_info && result.contract_info.engine_note"></div>
-
-          <!-- CE Engine Phase Log -->
-          <template x-if="result.ce_engine">
-            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:rgba(var(--t-green-rgb),0.4)">
-              <div class="px-3 py-2 border-b flex items-center justify-between" style="border-color:rgba(var(--t-green-rgb),0.3)">
-                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-green)">CE Option — 5-Stage Phase Log</span>
-                <span class="text-[10px] font-mono" style="color:var(--t-muted)">
-                  Final: <span :class="phaseColor(result.ce_engine.final_phase)" x-text="result.ce_engine.final_phase"></span>
-                  &nbsp;HTF:<span style="color:var(--t-text)" x-text="result.ce_engine.htf_bars"></span>
-                  MTF:<span style="color:var(--t-text)" x-text="result.ce_engine.mtf_bars"></span>
-                </span>
-              </div>
-              <div x-show="!result.ce_engine.phase_transitions.length" class="px-3 py-3 text-[10px]" style="color:var(--t-muted)">No CE phase transitions detected.</div>
-              <div>
-                <template x-for="(t,i) in result.ce_engine.phase_transitions" :key="i">
-                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono" style="border-bottom:1px solid var(--t-border)">
-                    <span class="w-32 shrink-0" style="color:var(--t-muted)" x-text="t.ts"></span>
-                    <span class="w-8 shrink-0" style="color:var(--t-muted)" x-text="t.timeframe"></span>
-                    <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
-                    <span style="color:var(--t-dim)">-&gt;</span>
-                    <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
-                    <span class="ml-auto" style="color:var(--t-muted)">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </template>
-
-          <!-- CE HTF Candle Analysis Table -->
-          <template x-if="result.ce_engine && result.ce_engine.htf_table && result.ce_engine.htf_table.length">
-            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
-              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
-                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-cyan)">CE — 75m HTF Candle Analysis</span>
-              </div>
-              <!-- Key levels summary -->
-              <template x-if="result.ce_engine.entry_origin > 0">
-                <div class="px-3 py-2 border-b grid grid-cols-2 sm:grid-cols-5 gap-2 text-[10px] font-mono" style="border-color:var(--t-border)">
-                  <div><div style="color:var(--t-muted)">HTF Entry Origin</div><div class="text-amber-400 font-bold" x-text="result.ce_engine.entry_origin"></div></div>
-                  <div><div style="color:var(--t-muted)">HTF Target High</div><div class="font-bold" style="color:var(--t-green)" x-text="result.ce_engine.target_high"></div></div>
-                  <div><div style="color:var(--t-muted)">MTF Entry Line</div><div class="text-indigo-400 font-bold" x-text="result.ce_engine.ltf_entry_line || '—'"></div></div>
-                  <div><div style="color:var(--t-muted)">MTF Stop Loss</div><div class="font-bold" style="color:var(--t-red)" x-text="result.ce_engine.ltf_sl_line || '—'"></div></div>
-                  <div><div style="color:var(--t-muted)">Rolling Base</div><div style="color:var(--t-text)" x-text="result.ce_engine.rolling_base || '—'"></div></div>
-                </div>
-              </template>
-              <div class="overflow-x-auto">
-                <table class="w-full text-[10px] font-mono">
-                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
-                    <th class="text-left px-2 py-1.5">Timestamp</th>
-                    <th class="text-right px-2 py-1.5">Open</th>
-                    <th class="text-right px-2 py-1.5">High</th>
-                    <th class="text-right px-2 py-1.5">Low</th>
-                    <th class="text-right px-2 py-1.5">Close</th>
-                    <th class="text-left px-2 py-1.5">Phase</th>
-                    <th class="text-left px-2 py-1.5">Remark</th>
-                  </tr></thead>
-                  <tbody>
-                    <template x-for="(r,i) in result.ce_engine.htf_table" :key="i">
-                      <tr :style="r.remark.includes('STAGE 2') || r.remark.includes('SINGLE-CANDLE') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 1') ? 'background:rgba(var(--t-amber-rgb),0.10)' : r.remark.includes('STAGE 5') ? 'background:rgba(var(--t-cyan-rgb),0.12)' : ''"
-                          style="border-bottom:1px solid var(--t-border)">
-                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
-                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
-                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='HTF_BEARISH','text-orange-400':r.phase==='TRAP_LOCKED','text-green-400':r.phase==='LIVE','text-purple-400':r.phase==='ARMED'}" x-text="r.phase"></td>
-                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-
-          <!-- CE MTF (5m) Candle Analysis Table -->
-          <template x-if="result.ce_engine && result.ce_engine.mtf_table && result.ce_engine.mtf_table.length">
-            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
-              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
-                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-cyan)">CE — 5m MTF Candle Analysis</span>
-              </div>
-              <div class="overflow-x-auto">
-                <table class="w-full text-[10px] font-mono">
-                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
-                    <th class="text-left px-2 py-1.5">Timestamp</th>
-                    <th class="text-right px-2 py-1.5">Open</th>
-                    <th class="text-right px-2 py-1.5">High</th>
-                    <th class="text-right px-2 py-1.5">Low</th>
-                    <th class="text-right px-2 py-1.5">Close</th>
-                    <th class="text-left px-2 py-1.5">Phase</th>
-                    <th class="text-left px-2 py-1.5">Remark</th>
-                  </tr></thead>
-                  <tbody>
-                    <template x-for="(r,i) in result.ce_engine.mtf_table" :key="i">
-                      <tr :style="r.remark.includes('STAGE 4 — ARMED') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
-                          style="border-bottom:1px solid var(--t-border)">
-                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
-                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
-                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='MTF_BEARISH','text-purple-400':r.phase==='ARMED','text-green-400':r.phase==='LIVE'}" x-text="r.phase"></td>
-                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-
-          <!-- PE Engine Phase Log -->
-          <template x-if="result.pe_engine">
-            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:rgba(var(--t-red-rgb),0.4)">
-              <div class="px-3 py-2 border-b flex items-center justify-between" style="border-color:rgba(var(--t-red-rgb),0.3)">
-                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-red)">PE Option — 5-Stage Phase Log</span>
-                <span class="text-[10px] font-mono" style="color:var(--t-muted)">
-                  Final: <span :class="phaseColor(result.pe_engine.final_phase)" x-text="result.pe_engine.final_phase"></span>
-                  &nbsp;HTF:<span style="color:var(--t-text)" x-text="result.pe_engine.htf_bars"></span>
-                  MTF:<span style="color:var(--t-text)" x-text="result.pe_engine.mtf_bars"></span>
-                </span>
-              </div>
-              <div x-show="!result.pe_engine.phase_transitions.length" class="px-3 py-3 text-[10px]" style="color:var(--t-muted)">No PE phase transitions detected.</div>
-              <div>
-                <template x-for="(t,i) in result.pe_engine.phase_transitions" :key="i">
-                  <div class="px-3 py-2 flex items-start gap-3 text-[10px] font-mono" style="border-bottom:1px solid var(--t-border)">
-                    <span class="w-32 shrink-0" style="color:var(--t-muted)" x-text="t.ts"></span>
-                    <span class="w-8 shrink-0" style="color:var(--t-muted)" x-text="t.timeframe"></span>
-                    <span :class="phaseColor(t.from_phase)" x-text="t.from_phase"></span>
-                    <span style="color:var(--t-dim)">-&gt;</span>
-                    <span :class="phaseColor(t.to_phase)" class="font-bold" x-text="t.to_phase"></span>
-                    <span class="ml-auto" style="color:var(--t-muted)">O:<span x-text="t.bar.open"></span> H:<span x-text="t.bar.high"></span> L:<span x-text="t.bar.low"></span> C:<span x-text="t.bar.close"></span></span>
-                  </div>
-                </template>
-              </div>
-            </div>
-          </template>
-
-          <!-- PE HTF Candle Analysis Table -->
-          <template x-if="result.pe_engine && result.pe_engine.htf_table && result.pe_engine.htf_table.length">
-            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
-              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
-                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-red)">PE — 75m HTF Candle Analysis</span>
-              </div>
-              <div class="overflow-x-auto">
-                <table class="w-full text-[10px] font-mono">
-                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
-                    <th class="text-left px-2 py-1.5">Timestamp</th>
-                    <th class="text-right px-2 py-1.5">Open</th>
-                    <th class="text-right px-2 py-1.5">High</th>
-                    <th class="text-right px-2 py-1.5">Low</th>
-                    <th class="text-right px-2 py-1.5">Close</th>
-                    <th class="text-left px-2 py-1.5">Phase</th>
-                    <th class="text-left px-2 py-1.5">Remark</th>
-                  </tr></thead>
-                  <tbody>
-                    <template x-for="(r,i) in result.pe_engine.htf_table" :key="i">
-                      <tr :style="r.remark.includes('STAGE 2') || r.remark.includes('SINGLE-CANDLE') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 1') ? 'background:rgba(var(--t-amber-rgb),0.10)' : r.remark.includes('STAGE 5') ? 'background:rgba(var(--t-cyan-rgb),0.12)' : ''"
-                          style="border-bottom:1px solid var(--t-border)">
-                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
-                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
-                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='HTF_BEARISH','text-orange-400':r.phase==='TRAP_LOCKED','text-green-400':r.phase==='LIVE','text-purple-400':r.phase==='ARMED','text-gray-400':true}" x-text="r.phase"></td>
-                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-
-          <!-- PE MTF (5m) Candle Analysis Table -->
-          <template x-if="result.pe_engine && result.pe_engine.mtf_table && result.pe_engine.mtf_table.length">
-            <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
-              <div class="px-3 py-2 border-b" style="border-color:var(--t-border)">
-                <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--t-red)">PE — 5m MTF Candle Analysis</span>
-              </div>
-              <div class="overflow-x-auto">
-                <table class="w-full text-[10px] font-mono">
-                  <thead><tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
-                    <th class="text-left px-2 py-1.5">Timestamp</th>
-                    <th class="text-right px-2 py-1.5">Open</th>
-                    <th class="text-right px-2 py-1.5">High</th>
-                    <th class="text-right px-2 py-1.5">Low</th>
-                    <th class="text-right px-2 py-1.5">Close</th>
-                    <th class="text-left px-2 py-1.5">Phase</th>
-                    <th class="text-left px-2 py-1.5">Remark</th>
-                  </tr></thead>
-                  <tbody>
-                    <template x-for="(r,i) in result.pe_engine.mtf_table" :key="i">
-                      <tr :style="r.remark.includes('STAGE 4 — ARMED') ? 'background:rgba(var(--t-green-rgb),0.12)' : r.remark.includes('STAGE 4') ? 'background:rgba(var(--t-amber-rgb),0.10)' : ''"
-                          style="border-bottom:1px solid var(--t-border)">
-                        <td class="px-2 py-1" style="color:var(--t-muted)" x-text="r.ts"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-text)" x-text="r.open"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-green)" x-text="r.high"></td>
-                        <td class="px-2 py-1 text-right" style="color:var(--t-red)" x-text="r.low"></td>
-                        <td class="px-2 py-1 text-right font-bold" style="color:var(--t-bright)" x-text="r.close"></td>
-                        <td class="px-2 py-1" :class="{'text-amber-400':r.phase==='MTF_BEARISH','text-purple-400':r.phase==='ARMED','text-green-400':r.phase==='LIVE'}" x-text="r.phase"></td>
-                        <td class="px-2 py-1 max-w-xs truncate" style="color:var(--t-text)" :title="r.remark" x-text="r.remark"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-
-          <!-- Trade Summary Table -->
-          <div class="rounded-lg border overflow-hidden" style="background:var(--t-card);border-color:var(--t-border)">
-            <div class="px-3 py-2 border-b flex items-center justify-between" style="border-color:var(--t-border)">
-              <span class="text-[10px] font-semibold text-indigo-400 uppercase tracking-widest">Trade Summary</span>
-              <span class="text-[10px] font-mono" style="color:var(--t-muted)" x-text="result.trade_count + ' trade(s) triggered'"></span>
-            </div>
-            <div x-show="result.trade_count === 0" class="px-3 py-4 text-[10px]" style="color:var(--t-muted)">
-              No trades triggered — engine did not reach ARMED state. The 5-stage filter requires all stages to complete sequentially.
-            </div>
-            <div x-show="result.trade_count > 0" class="overflow-x-auto">
-              <table class="w-full text-[10px] font-mono">
-                <thead>
-                  <tr class="border-b" style="border-color:var(--t-border);color:var(--t-muted)">
-                    <th class="text-left px-2 py-2">Entry Time</th>
-                    <th class="text-left px-2 py-2">Type</th>
-                    <th class="text-right px-2 py-2">Entry Px</th>
-                    <th class="text-right px-2 py-2">SL</th>
-                    <th class="text-right px-2 py-2">Target</th>
-                    <th class="text-left px-2 py-2">Exit Time</th>
-                    <th class="text-right px-2 py-2">Exit Px</th>
-                    <th class="text-left px-2 py-2">Reason</th>
-                    <th class="text-right px-2 py-2">P&L (pts)</th>
-                    <th class="text-right px-2 py-2">P&L (₹/lot)</th>
-                    <th class="text-right px-2 py-2">Lots</th>
-                    <th class="text-right px-2 py-2">Total P&L ₹</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template x-for="(t,i) in result.trade_logs" :key="i">
-                    <tr :style="t.pnl_rs > 0 ? 'background:rgba(var(--t-green-rgb),0.07)' : t.pnl_rs < 0 ? 'background:rgba(var(--t-red-rgb),0.07)' : ''"
-                        style="border-bottom:1px solid var(--t-border)">
-                      <td class="px-2 py-1.5" style="color:var(--t-muted)" x-text="t.timestamp"></td>
-                      <td class="px-2 py-1.5 font-bold">
-                        <span :style="t.type==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'" x-text="t.type"></span>
-                      </td>
-                      <td class="px-2 py-1.5 text-right font-bold" style="color:var(--t-bright)" x-text="t.entry_price"></td>
-                      <td class="px-2 py-1.5 text-right" style="color:var(--t-red)" x-text="t.ltf_sl_line || '—'"></td>
-                      <td class="px-2 py-1.5 text-right" style="color:var(--t-green)" x-text="t.macro_high_target || '—'"></td>
-                      <td class="px-2 py-1.5" style="color:var(--t-muted)" x-text="t.exit_time || '—'"></td>
-                      <td class="px-2 py-1.5 text-right font-bold" style="color:var(--t-bright)" x-text="t.exit_price ?? '—'"></td>
-                      <td class="px-2 py-1.5">
-                        <span :style="t.exit_reason==='TARGET_HIT' ? 'color:var(--t-green)' : t.exit_reason==='SL_HIT' ? 'color:var(--t-red)' : t.exit_reason==='EOD_1530' ? 'color:var(--t-amber)' : 'color:var(--t-muted)'"
-                              x-text="t.exit_reason || 'OPEN'"></span>
-                      </td>
-                      <td class="px-2 py-1.5 text-right font-bold"
-                          :style="t.pnl_pts > 0 ? 'color:var(--t-green)' : t.pnl_pts < 0 ? 'color:var(--t-red)' : 'color:var(--t-muted)'"
-                          x-text="t.pnl_pts != null ? (t.pnl_pts > 0 ? '+' : '') + t.pnl_pts : '—'"></td>
-                      <td class="px-2 py-1.5 text-right"
-                          :style="t.pnl_pts > 0 ? 'color:var(--t-green)' : t.pnl_pts < 0 ? 'color:var(--t-red)' : 'color:var(--t-muted)'"
-                          x-text="t.pnl_pts != null ? (t.pnl_pts > 0 ? '+' : '') + (t.pnl_pts * 65).toFixed(0) : '—'"></td>
-                      <td class="px-2 py-1.5 text-right" style="color:var(--t-text)" x-text="t.lots"></td>
-                      <td class="px-2 py-1.5 text-right font-bold"
-                          :style="t.pnl_rs > 0 ? 'color:var(--t-green)' : t.pnl_rs < 0 ? 'color:var(--t-red)' : 'color:var(--t-muted)'"
-                          x-text="t.pnl_rs != null ? (t.pnl_rs > 0 ? '+₹' : '-₹') + Math.abs(t.pnl_rs).toLocaleString() : '—'"></td>
-                    </tr>
-                  </template>
-                </tbody>
-                <!-- Totals row -->
-                <tfoot>
-                  <tr class="border-t" style="border-color:var(--t-border)">
-                    <td colspan="11" class="px-2 py-1.5 text-right text-[10px]" style="color:var(--t-muted)">Total P&L</td>
-                    <td class="px-2 py-1.5 text-right font-bold text-[10px]"
-                        :style="result.trade_logs.reduce((s,t)=>s+(t.pnl_rs||0),0) > 0 ? 'color:var(--t-green)' : 'color:var(--t-red)'"
-                        x-text="(() => { const tot = result.trade_logs.reduce((s,t)=>s+(t.pnl_rs||0),0); return (tot>=0?'+₹':'-₹')+Math.abs(tot).toLocaleString(); })()"></td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </div>
-
-          <!-- Option data note (shown when option bars unavailable) -->
-          <div x-show="result.option_data_note"
-               class="text-[10px] text-amber-400 bg-amber-900/20 border border-amber-800 rounded px-3 py-2"
-               x-text="result.option_data_note"></div>
-
-          <!-- Data summary footer -->
-          <div class="text-[10px] font-mono text-gray-600 flex flex-wrap gap-x-4">
-            <span>Spot bars: <span class="text-gray-500" x-text="result.data_summary.spot_bars"></span></span>
-            <span>HTF (75m): <span class="text-gray-500" x-text="result.data_summary.htf_bars"></span></span>
-            <span>MTF (5m): <span class="text-gray-500" x-text="result.data_summary.mtf_bars"></span></span>
-            <span>Signals: <span class="text-gray-500" x-text="result.signal_count"></span></span>
-          </div>
-
-        </div>
-      </template>
-    </div>
-  </div>
 
   <!-- ── AMO Broker Connectivity Test ────────────────────────────────── -->
   <div x-data="amoTest()" x-init="init()" class="mt-4 bg-gray-900 rounded-lg border border-yellow-800 overflow-hidden">
@@ -6971,7 +5893,7 @@ function histReplay() {
           </div>
         </div>
         <div class="px-3 py-2.5 rounded text-xs" style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.18);color:var(--t-muted)">
-          Strategy selection is done by the client after login. Available strategies: <span style="color:var(--t-text);font-weight:600">Sell Straddle · Iron Condor · Liquidity Trap Trading</span>
+          Strategy selection is done by the client after login. Available strategies: <span style="color:var(--t-text);font-weight:600">Sell Straddle · Iron Condor · Trap Scanner</span>
         </div>
         <div class="flex items-center gap-3 pt-1">
           <button class="btn-add" style="min-width:220px" @click="registerClient()" :disabled="clientRegLoading || !newClient.client_id">
@@ -7763,7 +6685,7 @@ function histReplay() {
                         x-text="dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Liquidity Trap Trading')+' · '+dep.underlying"></div>
+                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':dep.strategy_name)+' · '+dep.underlying"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
                   </div>
@@ -7790,7 +6712,6 @@ function histReplay() {
               <select x-model="deployForm.strategy_name" class="t-input">
                 <option value="sell_straddle">Sell Straddle (SS)</option>
                 <option value="iron_condor">Iron Condor (IC)</option>
-                <option value="trap_trading">Liquidity Trap Trading (LTT)</option>
                 <option value="trap_scanner">Trap Scanner (TS) — lot must be even</option>
               </select>
             </div>
@@ -8070,7 +6991,7 @@ function histReplay() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':'Liquidity Trap Trading'"></div>
+                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':dep.strategy_name"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
