@@ -310,7 +310,7 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     zl  = float(zone["zone_low"])
     zt  = float(zone.get("sl", zh + (zh - zl)))   # T1 target = bears' stop above zone_high
     zht = zh - zl                                  # zone height
-    if zht <= 0:
+    if zht < 1.0:                                  # reject degenerate / zero-width zones
         return None
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
@@ -417,8 +417,9 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             trail_sl  = sl_px   # reset TSL anchor after T1
 
         # Ratchet TSL: advance trail_sl using 5-min trap lows
-        # Active always in 1-lot mode; active after T1 in 2-lot mode
-        tsl_active = (not two_lots) or t1_hit
+        # Only active after T1 (per spec: "if both lots purchased + T1 hit → trail")
+        # 1-lot trades use hard SL only throughout
+        tsl_active = t1_hit
         if tsl_active:
             while tsl_idx < len(tsl_events):
                 ev_ts, z_low = tsl_events[tsl_idx]
