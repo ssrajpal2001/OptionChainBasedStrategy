@@ -4903,7 +4903,12 @@ class DashboardServer:
 
         @app.post("/api/backtest/scalein", tags=["Backtest"])
         async def run_scalein_backtest_api(request: Request):
-            """Scale-in backtest: Lot1 on HTF zone entry, Lot2 on 5m trap at 1/3 depth."""
+            """Scale-in backtest.
+            entry_mode: 'scalein' | 'trapscanner' | 'compare'
+              scalein     — Lot1 inside zone, Lot2 on 5m sub-trap
+              trapscanner — single entry after SELLERS_IN→ENTRY_READY cycle
+              compare     — runs both and returns side-by-side summary
+            """
             try:
                 p = await request.json()
             except Exception:
@@ -4916,17 +4921,33 @@ class DashboardServer:
                 token = (creds or {}).get("access_token", "")
             if not token:
                 return {"ok": False, "error": "token required"}
-            days     = int(p.get("days", 10))
-            start    = p.get("start", "")
-            end      = p.get("end", "")
-            index    = str(p.get("index", "NIFTY")).upper()
-            sl_buf   = float(p.get("sl_buf", 20.0))
-            csv_path = p.get("csv_path", "")
+            days       = int(p.get("days", 10))
+            start      = p.get("start", "")
+            end        = p.get("end", "")
+            index      = str(p.get("index", "NIFTY")).upper()
+            sl_buf     = float(p.get("sl_buf", 20.0))
+            csv_path   = p.get("csv_path", "")
+            entry_mode = str(p.get("entry_mode", "scalein")).lower()
             try:
                 from scripts.nifty_scalein_backtest import run_scalein_backtest
+                if entry_mode == "compare":
+                    # Run both modes and merge into a comparison response
+                    r_si, r_ts = await asyncio.wait_for(
+                        asyncio.gather(
+                            asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "scalein"),
+                            asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "trapscanner"),
+                        ),
+                        timeout=600.0,
+                    )
+                    return {
+                        "ok": True,
+                        "mode": "compare",
+                        "scalein":     r_si,
+                        "trapscanner": r_ts,
+                    }
                 result = await asyncio.wait_for(
                     asyncio.to_thread(
-                        run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path
+                        run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, entry_mode
                     ),
                     timeout=600.0,
                 )

@@ -282,12 +282,30 @@
       </button>
     </div>
 
+    <!-- Backtest Mode -->
+    <div>
+      <p class="sec-label mb-2">Backtest Mode</p>
+      <div class="flex flex-col gap-2">
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="emode" value="scalein" x-model="entryMode" class="mt-0.5" />
+          <span class="text-xs"><strong>Scale-In</strong> — Lot 1 inside zone, Lot 2 at 5-min sub-trap (earlier entry, 2 lots)</span>
+        </label>
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="emode" value="trapscanner" x-model="entryMode" class="mt-0.5" />
+          <span class="text-xs"><strong>TrapScanner</strong> — single entry after SELLERS_IN → ENTRY_READY (full confirmation, 1 lot)</span>
+        </label>
+        <label class="flex items-start gap-2 cursor-pointer">
+          <input type="radio" name="emode" value="compare" x-model="entryMode" class="mt-0.5" />
+          <span class="text-xs"><strong>Compare Both</strong> — run both modes, side-by-side summary</span>
+        </label>
+      </div>
+    </div>
+
     <div class="border-t border-t-border pt-3">
-      <p class="text-xs text-t-muted mb-2">Strategy: Lot1 on HTF zone entry → Lot2 when CE/PE drops to 1/3 zone depth + 5m bearish trap</p>
       <button @click="runBacktest()" :disabled="loading"
         class="btn-primary flex items-center justify-center gap-2">
         <span x-show="loading" class="spin">&#9696;</span>
-        <span x-text="loading ? 'Running...' : 'Run Scale-In Backtest'"></span>
+        <span x-text="loading ? 'Running...' : 'Run Backtest'"></span>
       </button>
     </div>
 
@@ -310,6 +328,46 @@
       <p class="text-sm font-600">Fetching data and running backtest...</p>
       <p class="text-xs">This may take 30-120 seconds</p>
     </div>
+
+    <!-- Compare Results -->
+    <template x-if="compareResult">
+      <div class="flex flex-col gap-4">
+        <h3 class="font-700 text-sm text-t-bright">Strategy Comparison — <span x-text="compareResult.scalein?.index || index"></span></h3>
+        <div class="overflow-x-auto">
+          <table class="bt-table">
+            <thead>
+              <tr>
+                <th>Mode</th><th>Trades</th><th>Win %</th><th>Total P&L</th>
+                <th>Profit Factor</th><th>Avg Win</th><th>Avg Loss</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="font-600 text-t-cyan">Scale-In (2L)</td>
+                <td x-text="cmpStat('scalein','trades')"></td>
+                <td x-text="cmpStat('scalein','wr')"></td>
+                <td :class="(compareResult.scalein?.summary?.total_pnl_rs||0)>=0?'pnl-pos':'pnl-neg'"
+                    x-text="'Rs '+cmpStat('scalein','pnl')"></td>
+                <td x-text="cmpStat('scalein','pf')"></td>
+                <td class="pnl-pos" x-text="'Rs '+cmpStat('scalein','avg_w')"></td>
+                <td class="pnl-neg" x-text="'Rs '+cmpStat('scalein','avg_l')"></td>
+              </tr>
+              <tr>
+                <td class="font-600 text-t-amber">TrapScanner (1L)</td>
+                <td x-text="cmpStat('trapscanner','trades')"></td>
+                <td x-text="cmpStat('trapscanner','wr')"></td>
+                <td :class="(compareResult.trapscanner?.summary?.total_pnl_rs||0)>=0?'pnl-pos':'pnl-neg'"
+                    x-text="'Rs '+cmpStat('trapscanner','pnl')"></td>
+                <td x-text="cmpStat('trapscanner','pf')"></td>
+                <td class="pnl-pos" x-text="'Rs '+cmpStat('trapscanner','avg_w')"></td>
+                <td class="pnl-neg" x-text="'Rs '+cmpStat('trapscanner','avg_l')"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-xs text-t-muted">Scale-In enters Lot 1 inside the zone (earlier, 2 lots). TrapScanner waits for full SELLERS_IN→ENTRY_READY confirmation (1 lot, stricter). Same SL / T1 logic.</p>
+      </div>
+    </template>
 
     <!-- Results -->
     <template x-if="result">
@@ -426,10 +484,12 @@ function scaleinApp() {
     slBuf: 20,
     token: '',
     csvPath: '',
+    entryMode: 'scalein',
     // state
     loading: false,
     error: '',
     result: null,
+    compareResult: null,
     _chart: null,
 
     init() {
@@ -454,16 +514,18 @@ function scaleinApp() {
     async runBacktest() {
       this.error = '';
       this.result = null;
+      this.compareResult = null;
       if (this.dataSource === 'api' && !this.token) {
         this.error = 'Upstox token required for API mode'; return;
       }
       this.loading = true;
       try {
         const body = {
-          token:    this.token,
-          index:    this.index,
-          sl_buf:   this.slBuf,
-          csv_path: this.dataSource === 'csv' ? this.csvPath : '',
+          token:      this.token,
+          index:      this.index,
+          sl_buf:     this.slBuf,
+          csv_path:   this.dataSource === 'csv' ? this.csvPath : '',
+          entry_mode: this.entryMode,
         };
         if (this.dataSource === 'api') {
           if (this.dateMode === 'range' && this.startDate && this.endDate) {
@@ -480,13 +542,30 @@ function scaleinApp() {
         });
         const d = await r.json();
         if (!d.ok) { this.error = d.error || 'Backtest failed'; return; }
-        this.result = d;
-        this.$nextTick(() => this._renderChart());
+        if (d.mode === 'compare') {
+          this.compareResult = d;
+        } else {
+          this.result = d;
+          this.$nextTick(() => this._renderChart());
+        }
       } catch(e) {
         this.error = e.message || 'Network error';
       } finally {
         this.loading = false;
       }
+    },
+
+    cmpStat(which, key) {
+      const r = this.compareResult?.[which];
+      if (!r) return '-';
+      const s = r.summary || {};
+      if (key === 'trades') return s.total_trades ?? 0;
+      if (key === 'wr')     return s.total_trades ? (s.wins/s.total_trades*100).toFixed(1)+'%' : '-';
+      if (key === 'pnl')    { const v=s.total_pnl_rs||0; return (v>=0?'+':'')+v.toLocaleString('en-IN'); }
+      if (key === 'pf')     return (s.profit_factor||0).toFixed(2);
+      if (key === 'avg_w')  return s.avg_win ? '+'+Math.round(s.avg_win).toLocaleString('en-IN') : '-';
+      if (key === 'avg_l')  return s.avg_loss ? Math.round(s.avg_loss).toLocaleString('en-IN') : '-';
+      return '-';
     },
 
     _renderChart() {

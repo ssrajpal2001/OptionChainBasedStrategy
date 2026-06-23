@@ -297,15 +297,18 @@ def _next_week_expiry(trade_date: date) -> date:
 # -- Scale-in simulation -------------------------------------------------------
 def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
               trade_date: str, strike: int, ot: str,
-              spot_val: float) -> Optional[dict]:
+              spot_val: float, mode: str = "scalein") -> Optional[dict]:
     """
-    Run scale-in simulation for one HTF TRAPPED zone.
+    Simulate one HTF TRAPPED zone.
+
+    mode="scalein"    : Lot 1 on first bar inside zone; Lot 2 on 5-min sub-trap at 1/3 depth.
+    mode="trapscanner": Single entry only AFTER full SELLERS_IN→ENTRY_READY cycle
+                        (price sweeps below zone_low, then closes above zone_high).
 
     zone fields used:
-      zone_high  = bears' entry (our Lot 1 entry level)
-      zone_low   = support (SL reference)
+      zone_high  = bears' entry (Lot 1 entry level / ENTRY_READY trigger)
+      zone_low   = support (SL reference; SELLERS_IN trigger)
       sl         = bears' stop = our T1 target (above zone_high)
-      kind       = "BEAR" (only BEAR traps -> buy CE)
     """
     zh  = float(zone["zone_high"])
     zl  = float(zone["zone_low"])
@@ -330,10 +333,7 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     if _risk <= 0 or (_reward / _risk) < MIN_RR:
         return None   # poor R:R — zone target not far enough above SL
 
-    # -- Lot 1 entry ----------------------------------------------------------
-    # First 1-min close INSIDE the zone AND after the zone became valid (trapped_on).
-    # Intraday zones: entry must be strictly after the trap confirmation bar closed —
-    # not during the same spike that created the zone.
+    # -- Zone valid-from gate (common to both modes) ---------------------------
     raw_trapped_on = zone.get("trapped_on") or zone.get("closed_on")
     zone_valid_from: Optional[pd.Timestamp] = None
     if raw_trapped_on:
@@ -345,55 +345,87 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
 
     lot1_px: Optional[float] = None
     lot1_ts: Optional[pd.Timestamp] = None
-    for _, r in df1m.iterrows():
-        if r["datetime"].time() >= SQ_TIME:
-            break
-        # Skip bars that occurred before or during the trap confirmation
-        if zone_valid_from is not None and r["datetime"] <= zone_valid_from:
-            continue
-        if zl <= r["close"] <= zh:
-            lot1_px = float(r["close"])
-            lot1_ts = r["datetime"]
-            break
-    if lot1_px is None:
-        return None   # zone never reached today (or only touched before trap confirmed)
 
-    # -- Lot 2 scale-in detection ----------------------------------------------
-    # Conditions (both required):
-    #   1. A 1-min bar closes ? scale_in_lvl (price dipped to 1/3 zone depth)
-    #   2. A 5-min bearish trap forms at or near scale_in_lvl
-    #      (zone_high of 5-min trap within ?10 pts of scale_in_lvl)
+    if mode == "trapscanner":
+        # -- TrapScanner entry: wait for full SELLERS_IN → ENTRY_READY cycle --
+        # Phase 1 (SELLERS_IN): any 1-min bar's LOW drops below zone_low
+        # Phase 2 (ENTRY_READY): after phase 1, first 1-min close above zone_high
+        # This mirrors the live TrapScanner which only fires after bears are fully trapped.
+        sellers_in = False
+        for _, r in df1m.iterrows():
+            if r["datetime"].time() >= SQ_TIME:
+                break
+            if zone_valid_from is not None and r["datetime"] <= zone_valid_from:
+                continue
+            if not sellers_in:
+                if float(r["low"]) < zl:          # bears entered below zone_low
+                    sellers_in = True
+            else:
+                if float(r["close"]) > zh:         # bears' SL hit: close above zone_high
+                    lot1_px = float(r["close"])
+                    lot1_ts = r["datetime"]
+                    break
+    else:
+        # -- Scale-in Lot 1: first 1-min close INSIDE zone --------------------
+        for _, r in df1m.iterrows():
+            if r["datetime"].time() >= SQ_TIME:
+                break
+            if zone_valid_from is not None and r["datetime"] <= zone_valid_from:
+                continue
+            if zl <= r["close"] <= zh:
+                lot1_px = float(r["close"])
+                lot1_ts = r["datetime"]
+                break
+
+    if lot1_px is None:
+        return None   # entry condition never triggered today
+
+    # TrapScanner = single lot, no Lot 2 scale-in
+    if mode == "trapscanner":
+        two_lots  = False
+        lot2_px   = None
+        lot2_ts   = None
+        total_qty = LOT
+        t1_qty    = 0
+        rem_qty   = LOT
+    else:
+        pass   # scale-in Lot 2 detection follows below
+
+    # -- Lot 2 scale-in detection (scale-in mode only) -------------------------
+    # Lot 2 scale-in (scale-in mode only)
     lot2_px: Optional[float] = None
     lot2_ts: Optional[pd.Timestamp] = None
 
     post1m = df1m[df1m["datetime"] > lot1_ts].copy()
     post5m = df5m[df5m["datetime"] > lot1_ts].copy()
 
-    reached_scalein = not post1m[post1m["close"] <= scale_in_lvl].empty
-    if reached_scalein and len(post5m) >= 2:
-        _, traps = scanner.scan_htf(post5m)
-        for tz in traps:
-            if tz.get("status") not in ("TRAPPED", "CLOSED"):
-                continue
-            tz_zh = float(tz.get("zone_high", 0))
-            tz_zl = float(tz.get("zone_low",  0))
-            # 5-min trap must straddle the scale-in level (within 10 pts)
-            if abs(tz_zh - scale_in_lvl) > 10 or tz_zl < zl * 0.98:
-                continue
-            ev_ts = pd.to_datetime(tz.get("trapped_on") or tz.get("closed_on"))
-            if ev_ts is pd.NaT:
-                continue
-            ev_ts = ev_ts.tz_localize(None) if ev_ts.tzinfo else ev_ts
-            if ev_ts <= lot1_ts:
-                continue
-            entry_row = post1m[post1m["datetime"] >= ev_ts]
-            if not entry_row.empty:
-                lot2_px = float(entry_row.iloc[0]["close"])
-                lot2_ts = entry_row.iloc[0]["datetime"]
-                break
-
-    two_lots  = lot2_px is not None
-    total_qty = LOT * 2 if two_lots else LOT
+    if mode != "trapscanner":
+        # Conditions (both required):
+        #   1. A 1-min bar closes at scale_in_lvl (price dipped to 1/3 zone depth)
+        #   2. A 5-min bearish trap forms at or near scale_in_lvl
+        reached_scalein = not post1m[post1m["close"] <= scale_in_lvl].empty
+        if reached_scalein and len(post5m) >= 2:
+            _, traps = scanner.scan_htf(post5m)
+            for tz in traps:
+                if tz.get("status") not in ("TRAPPED", "CLOSED"):
+                    continue
+                tz_zh = float(tz.get("zone_high", 0))
+                tz_zl = float(tz.get("zone_low",  0))
+                if abs(tz_zh - scale_in_lvl) > 10 or tz_zl < zl * 0.98:
+                    continue
+                ev_ts = pd.to_datetime(tz.get("trapped_on") or tz.get("closed_on"))
+                if ev_ts is pd.NaT:
+                    continue
+                ev_ts = ev_ts.tz_localize(None) if ev_ts.tzinfo else ev_ts
+                if ev_ts <= lot1_ts:
+                    continue
+                entry_row = post1m[post1m["datetime"] >= ev_ts]
+                if not entry_row.empty:
+                    lot2_px = float(entry_row.iloc[0]["close"])
+                    lot2_ts = entry_row.iloc[0]["datetime"]
+                    break
+        two_lots  = lot2_px is not None
+        total_qty = LOT * 2 if two_lots else LOT
     t1_qty    = LOT       if two_lots else 0
     rem_qty   = LOT       # always 1 lot remaining after T1 (or full 1 lot in 1-lot mode)
 
@@ -514,13 +546,15 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         "pnl_rs":         int(total_pnl),
         "pnl_pts":        round(total_pnl / total_qty, 2) if total_qty else 0,
         "kind":           zone.get("kind", "BEAR"),
+        "mode":           mode,
     }
 
 
 # -- Per-day backtest ----------------------------------------------------------
 def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
              _expiry_unused, cache: dict,
-             csv_df: Optional[pd.DataFrame] = None) -> list[dict]:
+             csv_df: Optional[pd.DataFrame] = None,
+             entry_mode: str = "scalein") -> list[dict]:
     td = pd.to_datetime(trade_date).date()
 
     df_prev  = df_spot_all[df_spot_all["datetime"].dt.date < td].copy()
@@ -555,11 +589,11 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         atm  = _round(today_open, STEP)
         ce_s = max(STEP, atm - GAP_STEPS * STEP)   # never negative
         pe_s = atm + GAP_STEPS * STEP
-        mode = f"GAP {gap_dir} {gap_pct:.1f}%"
+        strike_mode = f"GAP {gap_dir} {gap_pct:.1f}%"
     else:
         ce_s = _round(piv["S1"], STEP)
         pe_s = _round(piv["R1"], STEP)
-        mode = f"PIVOT S1={ce_s} R1={pe_s}"
+        strike_mode = f"PIVOT S1={ce_s} R1={pe_s}"
 
     fetch_from = (td - timedelta(days=14)).isoformat()
     fetch_to   = (td + timedelta(days=1)).isoformat()
@@ -678,16 +712,17 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
                 print(f"  {trade_date} {ot}{strike}: no zones - skip")
                 continue
         else:
-            print(f"  {trade_date} {ot}{strike} [{mode} {bias_label}]: {len(valid)} HTF zone(s)")
+            print(f"  {trade_date} {ot}{strike} [{strike_mode} {bias_label}]: {len(valid)} HTF zone(s)")
 
         df5m = _rs(df_today_opt, 5)
         spot_val = float(df_today.iloc[0]["open"]) if not df_today.empty else 0.0
 
         for zone in valid:
             result = _simulate(zone, df_today_opt, df5m,
-                               trade_date, strike, ot, spot_val)
+                               trade_date, strike, ot, spot_val,
+                               mode=entry_mode)
             if result:
-                result["mode"] = mode
+                result["strike_mode"] = strike_mode
                 trades.append(result)
                 # One-trade-at-a-time: stop after first successful sim per leg
                 break
@@ -740,7 +775,8 @@ def run_scalein_backtest(token: str, days: int = 10,
                          expiry_str: str = "",
                          index: str = "NIFTY",
                          sl_buf_override: float = 0.0,
-                         csv_path: str = "") -> dict:
+                         csv_path: str = "",
+                         entry_mode: str = "scalein") -> dict:
     global _HEADERS, IDX, SPOT_KEY, STEP, LOT, SL_BUF, IS_STOCK
 
     # Override index-specific constants
@@ -841,7 +877,7 @@ def run_scalein_backtest(token: str, days: int = 10,
     cache: dict = {}
     all_trades: list[dict] = []
     for td in trading_days:
-        day_trades = _run_day(td, df_spot, None, cache, csv_df=csv_df)
+        day_trades = _run_day(td, df_spot, None, cache, csv_df=csv_df, entry_mode=entry_mode)
         all_trades.extend(day_trades)
 
     # -- Summary ---------------------------------------------------------------
