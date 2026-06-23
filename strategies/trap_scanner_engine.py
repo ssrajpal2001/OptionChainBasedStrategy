@@ -1683,7 +1683,13 @@ class TrapScannerEngine:
     def _try_momentum_entry(self, zones: list, leg: str, opt_type: str) -> None:
         """Breakout-momentum entry: fire immediately when a NEW cascade zone is TRAPPED
         and price is within momentum_chase_pts of zone_high (no retest needed).
-        Disabled by default (momentum_chase_pts=0). Set in trap_engine config per-index."""
+
+        SL = zone_high - sl_buf (NOT zone_low): going back below zone_high means sellers
+        reclaimed the level → trap invalidated. Using zone_low as SL would create a
+        huge SL (entry 15 pts above zone_high + full zone range below).
+
+        Disabled by default (momentum_chase_pts=0). Set in trap_engine config per-index.
+        Recommended: 5–8 pts for NIFTY options."""
         chase_pts = float(self._admin_cfg.get("momentum_chase_pts", 0))
         if chase_pts <= 0 or self._position:
             return
@@ -1701,12 +1707,17 @@ class TrapScannerEngine:
             overshoot = ltp - z_high
             if 0 <= overshoot <= chase_pts:
                 self._log.info(
-                    "MOMENTUM [%s] zone=%.1f→%.1f ltp=%.1f overshoot=%.1f/%.1f pts — firing entry",
+                    "MOMENTUM [%s] zone=%.1f→%.1f ltp=%.1f overshoot=%.1f/%.1f pts "
+                    "SL=%.1f (zone_high-buf) — firing entry",
                     leg, z.get("zone_low", 0), z_high, ltp, overshoot, chase_pts,
+                    z_high - self._sl_buf,
                 )
                 self._cascade_momentum_fired.add(uid)
+                # Override zone_low → z_high so _on_entry_signal computes SL as
+                # zone_high - sl_buf instead of zone_low - sl_buf.
+                momentum_entry = {**z, "zone_low": z_high}
                 asyncio.get_event_loop().create_task(
-                    self._on_entry_signal(leg, opt_type, z, z)
+                    self._on_entry_signal(leg, opt_type, momentum_entry, z)
                 )
                 break  # one entry at a time
 
