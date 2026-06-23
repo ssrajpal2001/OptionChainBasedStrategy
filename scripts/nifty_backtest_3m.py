@@ -192,9 +192,24 @@ def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date,
     _, entries = scan_htf(df_htf)
     result = []
     for e in entries:
-        if e.get("status") != "TRAPPED":
+        status = e.get("status")
+        if status == "TRAPPED":
+            confirm_ts = e.get("trapped_on")
+        elif status == "CLOSED":
+            # Only trade if zone CLOSED today (first return = entry opportunity)
+            # Zones closed on prior days already played out → skip
+            closed_on = e.get("closed_on")
+            if closed_on is None:
+                continue
+            try:
+                closed_date = pd.Timestamp(str(closed_on)).date()
+            except Exception:
+                continue
+            if closed_date != today:
+                continue  # played out before today
+            confirm_ts = closed_on
+        else:
             continue
-        confirm_ts = e.get("trapped_on")
         if confirm_ts is not None:
             try:
                 c_date = pd.Timestamp(str(confirm_ts)).date()
@@ -226,10 +241,9 @@ def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list,
     entries = []
 
     for zone in htf_zones:
-        if zone.get("status") != "TRAPPED":
-            # CLOSED = sellers already exited zone, opportunity gone; skip
-            continue
-
+        # TRAPPED: price not yet returned → scan after trap
+        # CLOSED today: first return today → scan after close
+        # CLOSED prior day: already played out → skip (filtered in _htf_zones_for_today)
         zone_trigger = float(zone["zone_trigger"])
         zone_low     = float(zone["zone_low"])
         zone_high    = float(zone["zone_high"])
