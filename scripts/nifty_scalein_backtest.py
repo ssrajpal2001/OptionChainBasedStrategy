@@ -618,13 +618,19 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     bias_bull = bias_diff_pct >= BIAS_GAP_PCT    # open meaningfully above prev_close → CE
     bias_bear = bias_diff_pct <= -BIAS_GAP_PCT   # open meaningfully below prev_close → PE
 
-    # Strike selection — gap offset proportional to step size (4 steps)
-    # Hardcoded 200 only works for NIFTY (step=50). For WIPRO (step=5),
-    # atm-200 = negative strike. Use 4*STEP for all instruments.
+    # Strike selection
+    # STOCKS: ATM rounded to nearest STEP, check BOTH CE and PE every day.
+    #   Pivot/gap picks deep-OTM strikes for stocks → zero volume. ATM is always liquid.
+    # INDICES: pivot-based (S1=CE, R1=PE) with gap override (4 steps from ATM).
     GAP_STEPS = 4
-    if gap_fired:
+    if IS_STOCK:
+        atm        = _round(today_open, STEP)
+        ce_s       = atm
+        pe_s       = atm
+        strike_mode = f"ATM {atm} (stock, both sides)"
+    elif gap_fired:
         atm  = _round(today_open, STEP)
-        ce_s = max(STEP, atm - GAP_STEPS * STEP)   # never negative
+        ce_s = max(STEP, atm - GAP_STEPS * STEP)
         pe_s = atm + GAP_STEPS * STEP
         strike_mode = f"GAP {gap_dir} {gap_pct:.1f}%"
     else:
@@ -637,11 +643,8 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
 
     # Resolve next-week expiry: CSV takes priority (historical data), else REGISTRY
     if csv_df is not None:
-        # Get all expiries present in CSV for this trade date's underlying
         all_csv_exp = sorted(csv_df["csv_expiry"].dropna().unique())
-        # Current week = first expiry >= trade date (within 8 days)
         this_week = next((e for e in all_csv_exp if e >= td and (e - td).days <= 8), None)
-        # Next week = first expiry after this_week
         if this_week:
             day_expiry = next((e for e in all_csv_exp if e > this_week), None)
         else:
@@ -650,22 +653,28 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
             _log.info(f"  {trade_date}: no next-week expiry in CSV - skip")
             return []
     elif IS_STOCK:
-        day_expiry = _current_expiry(td)   # stocks = monthly, current month's last Thu
+        day_expiry = _current_expiry(td)
         _log.info(f"  {trade_date}: monthly expiry = {day_expiry}")
     else:
         day_expiry = _next_week_expiry(td)
         _log.info(f"  {trade_date}: next-week expiry = {day_expiry}")
 
-    # Apply spot bias: bullish day -> CE only; bearish day -> PE only; skip ambiguous days
-    legs = []
-    if bias_bull:
-        legs.append(("CE", ce_s))
-    elif bias_bear:
-        legs.append(("PE", pe_s))
+    # Leg selection:
+    # STOCKS: always check both CE and PE at ATM (no bias filter — ATM is liquid both ways)
+    # INDICES: bias filter (bullish day → CE only, bearish → PE only, ambiguous → skip)
+    if IS_STOCK:
+        legs = [("CE", ce_s), ("PE", pe_s)]
+        bias_label = f"ATM {ce_s} both-sides"
     else:
-        _log.info(f"  {trade_date}: gap {bias_diff_pct:+.2f}% < {BIAS_GAP_PCT}% threshold - skip (ambiguous)")
-        return []
-    bias_label = f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull else f"BEAR-bias(PE) {bias_diff_pct:.2f}%"
+        legs = []
+        if bias_bull:
+            legs.append(("CE", ce_s))
+        elif bias_bear:
+            legs.append(("PE", pe_s))
+        else:
+            _log.info(f"  {trade_date}: gap {bias_diff_pct:+.2f}% < {BIAS_GAP_PCT}% threshold - skip (ambiguous)")
+            return []
+        bias_label = f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull else f"BEAR-bias(PE) {bias_diff_pct:.2f}%"
     trades = []
 
     for ot, strike in legs:
