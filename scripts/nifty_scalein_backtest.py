@@ -700,9 +700,16 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         elif bias_bear:
             legs.append(("PE", pe_s))
         else:
-            _log.info(f"  {trade_date}: gap {bias_diff_pct:+.2f}% < {BIAS_GAP_PCT}% threshold - skip (ambiguous)")
-            return []
-        bias_label = f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull else f"BEAR-bias(PE) {bias_diff_pct:.2f}%"
+            # Flat open — trade both sides at ATM ± (GAP_STEPS × STEP)
+            atm         = _round(today_open, STEP)
+            offset      = GAP_STEPS * STEP          # 200 for NIFTY, 400 for BANKNIFTY
+            ce_s        = max(STEP, atm - offset)
+            pe_s        = atm + offset
+            legs        = [("CE", ce_s), ("PE", pe_s)]
+            strike_mode = f"FLAT ATM±{offset} CE={ce_s} PE={pe_s}"
+        bias_label = (f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull
+                      else f"BEAR-bias(PE) {bias_diff_pct:.2f}%" if bias_bear
+                      else f"FLAT BOTH-SIDES CE={ce_s} PE={pe_s} gap={bias_diff_pct:+.2f}%")
     trades = []
 
     for ot, strike in legs:
