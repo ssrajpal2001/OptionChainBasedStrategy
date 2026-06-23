@@ -555,6 +555,18 @@ class TrapScannerEngine:
                     self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
                 if not self._bars_pe2:
                     self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                # Merge today's intraday bars — historical API ends at prev-day close
+                for attr, key in [
+                    ("_bars_spot", spot_key),
+                    ("_bars_ce1", self._ce1_key), ("_bars_ce2", self._ce2_key),
+                    ("_bars_pe1", self._pe1_key), ("_bars_pe2", self._pe2_key),
+                ]:
+                    intra = await self._fetch_intraday_bars(key)
+                    if intra:
+                        existing = {b["datetime"] for b in getattr(self, attr)}
+                        merged = getattr(self, attr) + [b for b in intra if b["datetime"] not in existing]
+                        merged.sort(key=lambda b: b["datetime"])
+                        setattr(self, attr, merged)
             else:
                 # htf_source="option" (NSE/BSE): option bars for BOTH HTF and LTF
                 # CE1=S1 bars detect bear seller traps; PE1=R1 bars detect bull seller traps
@@ -571,6 +583,18 @@ class TrapScannerEngine:
                     self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
                 if not self._bars_pe2:
                     self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                # Merge today's intraday bars — historical API ends at prev-day close;
+                # on re-init mid-day this restores cascade bars lost to the wipe.
+                for attr, key in [
+                    ("_bars_ce1", self._ce1_key), ("_bars_ce2", self._ce2_key),
+                    ("_bars_pe1", self._pe1_key), ("_bars_pe2", self._pe2_key),
+                ]:
+                    intra = await self._fetch_intraday_bars(key)
+                    if intra:
+                        existing = {b["datetime"] for b in getattr(self, attr)}
+                        merged = getattr(self, attr) + [b for b in intra if b["datetime"] not in existing]
+                        merged.sort(key=lambda b: b["datetime"])
+                        setattr(self, attr, merged)
                 self._log.info(
                     "Bars seeded — CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
                     self._ce1_key, len(self._bars_ce1),
