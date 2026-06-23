@@ -32,7 +32,7 @@ from strategies.trap_scanner import scanner
 # ── Config ────────────────────────────────────────────────────────────────────
 STEP     = 100      # SENSEX strike step
 LOT      = 20       # SENSEX lot size (BSE weekly)
-SL_BUF   = 2.0      # pts below zone_low for SL
+SL_BUF   = 2.0      # pts below zone_low for zone-based SL (also TSL trail buffer)
 HTF_MIN  = 15       # build 15-min bars, detect trap
 MKT_OPEN = "09:15"
 SQ_OFF   = "15:25"
@@ -182,7 +182,7 @@ def round_strike(price: float) -> int:
 def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
                 max_trades: int = 999, cutoff: str = "15:25",
                 min_rr: float = 0.0, ltf_min: int = 1,
-                max_consec_sl: int = 999) -> list[dict]:
+                max_consec_sl: int = 999, sl_pts: float = 0.0) -> list[dict]:
     """
     Simulate intraday 15-min trap entries on 1-min bars.
 
@@ -193,6 +193,9 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
       ltf_min       – LTF timeframe for entry confirmation + SL fires
                       (1 = every 1-min close, 3 = only on 3-min bar close)
       max_consec_sl – stop new entries after N consecutive pre-T1 SLs
+      sl_pts        – flat SL distance from entry in pts (e.g. 50 = entry-50).
+                      0 = zone-based SL (zone_low − SL_BUF). TSL trail buffer
+                      always uses SL_BUF regardless.
 
     TSL target ladder (post-T1):
       T1 = zone sl field (1R), T2 = T1+1R, T3 = T1+2R
@@ -300,8 +303,12 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
             if not (zl <= bar_close <= zh and bar_close >= zt):
                 continue
 
-            sl     = zl - SL_BUF
-            risk   = bar_close - sl
+            if sl_pts > 0:
+                sl   = round(bar_close - sl_pts, 2)  # flat distance from entry
+                risk = sl_pts
+            else:
+                sl   = zl - SL_BUF                   # zone-based
+                risk = bar_close - sl
             reward = t1 - bar_close
             if risk <= 0:
                 continue
@@ -348,6 +355,9 @@ def main():
                     help="LTF minutes for entry confirmation + SL (1=every tick, 3=3-min close)")
     ap.add_argument("--max-consec-sl",   type=int,   default=999,
                     help="Stop new entries after N consecutive pre-T1 SLs same leg (default: off)")
+    ap.add_argument("--sl-pts",          type=float, default=0.0,
+                    help="Flat SL distance from entry in pts (e.g. 50 → SL=entry-50). "
+                         "0 = zone-based SL (default)")
     ap.add_argument("--ce-only",    action="store_true")
     ap.add_argument("--pe-only",    action="store_true")
     args = ap.parse_args()
@@ -368,6 +378,7 @@ def main():
     if args.min_rr > 0:          filters.append(f"min_R:R=1:{args.min_rr:.0f}")
     if args.ltf > 1:             filters.append(f"ltf={args.ltf}m (entry+SL on bar close)")
     if args.max_consec_sl < 999: filters.append(f"max_consec_sl={args.max_consec_sl}")
+    if args.sl_pts > 0:          filters.append(f"sl_pts={args.sl_pts:.0f} (₹{args.sl_pts*LOT:.0f}/lot)")
     if filters: print(f"Filters: {', '.join(filters)}")
 
     all_trades: list[dict] = []
@@ -407,7 +418,8 @@ def main():
                                      cutoff=args.cutoff,
                                      min_rr=args.min_rr,
                                      ltf_min=args.ltf,
-                                     max_consec_sl=args.max_consec_sl)
+                                     max_consec_sl=args.max_consec_sl,
+                                     sl_pts=args.sl_pts)
             if not day_trades:
                 print(f"  [{leg}] No trades today")
             else:
