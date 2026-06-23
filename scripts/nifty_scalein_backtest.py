@@ -633,19 +633,26 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     bias_bull = bias_diff_pct >= BIAS_GAP_PCT    # open meaningfully above prev_close → CE
     bias_bear = bias_diff_pct <= -BIAS_GAP_PCT   # open meaningfully below prev_close → PE
 
-    # Strike selection — always ATM-based (pivot not used).
-    # STOCKS: ATM both sides. INDICES: ATM±(GAP_STEPS×STEP); direction by bias.
+    # Strike selection:
+    #   Gap ≥ 0.5% (gap_fired)  → ATM ± (GAP_STEPS × STEP)  e.g. NIFTY ±200
+    #   Gap < 0.5%  (no gap)    → Pivot S1 (CE) / R1 (PE)
+    #   Stocks                  → ATM both sides
+    #   Direction in all cases from spot bias (bias_bull/bias_bear).
     GAP_STEPS = 4
     atm = _round(today_open, STEP)
     if IS_STOCK:
         ce_s        = atm
         pe_s        = atm
-        strike_mode = f"ATM {atm} (stock, both sides)"
-    else:
-        offset      = GAP_STEPS * STEP          # 200 for NIFTY, 400 for BANKNIFTY
+        strike_mode = f"ATM {atm} (stock)"
+    elif gap_fired:
+        offset      = GAP_STEPS * STEP
         ce_s        = max(STEP, atm - offset)
         pe_s        = atm + offset
-        strike_mode = f"ATM±{offset} CE={ce_s} PE={pe_s}"
+        strike_mode = f"GAP ATM±{offset} CE={ce_s} PE={pe_s}"
+    else:
+        ce_s        = _round(piv["S1"], STEP)
+        pe_s        = _round(piv["R1"], STEP)
+        strike_mode = f"PIVOT S1={ce_s} R1={pe_s}"
 
     fetch_from = (td - timedelta(days=14)).isoformat()
     fetch_to   = (td + timedelta(days=1)).isoformat()
@@ -694,9 +701,8 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         elif bias_bear:
             legs.append(("PE", pe_s))
         else:
-            # Flat open (<0.3%) — both sides at ATM±offset (already set above)
-            legs        = [("CE", ce_s), ("PE", pe_s)]
-            strike_mode = f"FLAT CE={ce_s} PE={pe_s}"
+            # Flat open (<0.3%) — both sides; strikes already set (ATM±offset or Pivot)
+            legs = [("CE", ce_s), ("PE", pe_s)]
         bias_label = (f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull
                       else f"BEAR-bias(PE) {bias_diff_pct:.2f}%" if bias_bear
                       else f"FLAT BOTH-SIDES gap={bias_diff_pct:+.2f}%")
