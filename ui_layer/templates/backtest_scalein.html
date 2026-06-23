@@ -357,7 +357,7 @@
                 <td class="font-600 text-t-cyan">Scale-In (2L)</td>
                 <td x-text="cmpStat('scalein','trades')"></td>
                 <td x-text="cmpStat('scalein','wr')"></td>
-                <td :class="(compareResult.scalein?.summary?.total_pnl_rs||0)>=0?'pnl-pos':'pnl-neg'"
+                <td :class="(compareResult.scalein?.summary?.total_rs||0)>=0?'pnl-pos':'pnl-neg'"
                     x-text="'Rs '+cmpStat('scalein','pnl')"></td>
                 <td x-text="cmpStat('scalein','pf')"></td>
                 <td class="pnl-pos" x-text="'Rs '+cmpStat('scalein','avg_w')"></td>
@@ -367,7 +367,7 @@
                 <td class="font-600 text-t-amber">TrapScanner (1L)</td>
                 <td x-text="cmpStat('trapscanner','trades')"></td>
                 <td x-text="cmpStat('trapscanner','wr')"></td>
-                <td :class="(compareResult.trapscanner?.summary?.total_pnl_rs||0)>=0?'pnl-pos':'pnl-neg'"
+                <td :class="(compareResult.trapscanner?.summary?.total_rs||0)>=0?'pnl-pos':'pnl-neg'"
                     x-text="'Rs '+cmpStat('trapscanner','pnl')"></td>
                 <td x-text="cmpStat('trapscanner','pf')"></td>
                 <td class="pnl-pos" x-text="'Rs '+cmpStat('trapscanner','avg_w')"></td>
@@ -377,6 +377,96 @@
           </table>
         </div>
         <p class="text-xs text-t-muted">Scale-In enters Lot 1 inside the zone (earlier, 2 lots). TrapScanner waits for full SELLERS_IN→ENTRY_READY confirmation (1 lot, stricter). Same SL / T1 logic.</p>
+
+        <!-- Scale-In trade log -->
+        <div class="t-card">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-t-border">
+            <p class="font-600 text-sm text-t-cyan">Scale-In Trade Log</p>
+            <div class="flex gap-2 text-xs">
+              <span class="chip bg-[rgba(var(--t-green-rgb),.10)] text-t-green" x-text="(compareResult.scalein?.summary?.wins||0) + ' wins'"></span>
+              <span class="chip bg-[rgba(var(--t-red-rgb),.08)] text-t-red" x-text="(compareResult.scalein?.summary?.losses||0) + ' losses'"></span>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="bt-table">
+              <thead><tr>
+                <th>Date</th><th>OT</th><th>Strike</th><th>Spot</th><th>Zone</th>
+                <th>L1@</th><th>L2@</th><th>SL</th><th>T1</th><th>Exit</th>
+                <th>Time</th><th>Reason</th><th>T1?</th><th>Lots</th>
+                <th style="text-align:right">P&L</th><th style="text-align:right">Cum</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="(t,i) in (compareResult.scalein?.trades||[])" :key="'si'+i">
+                  <tr>
+                    <td x-text="t.date"></td>
+                    <td><span :class="t.opt_type==='CE'?'tag-ce':'tag-pe'" x-text="t.opt_type"></span></td>
+                    <td x-text="t.strike"></td>
+                    <td x-text="Math.round(t.spot)"></td>
+                    <td class="text-t-muted" x-text="t.zone"></td>
+                    <td x-text="t.lot1_entry?.toFixed(1)"></td>
+                    <td x-text="t.lot2_entry ? t.lot2_entry.toFixed(1) : '-'"></td>
+                    <td x-text="t.sl?.toFixed(1)"></td>
+                    <td x-text="t.t1_target?.toFixed(1)"></td>
+                    <td x-text="t.exit?.toFixed(1)"></td>
+                    <td class="text-t-muted" x-text="(t.exit_ts||'').slice(11,16)"></td>
+                    <td x-text="t.reason"></td>
+                    <td x-text="t.t1_hit ? 'Y' : 'N'" :class="t.t1_hit ? 'text-t-green font-700' : 'text-t-muted'"></td>
+                    <td x-text="t.two_lots ? '2' : '1'"></td>
+                    <td style="text-align:right" :class="t.pnl_rs>=0?'pnl-pos font-700':'pnl-neg'"
+                        x-text="(t.pnl_rs>=0?'+':'')+t.pnl_rs.toLocaleString('en-IN')"></td>
+                    <td style="text-align:right" class="text-t-muted font-mono"
+                        x-text="cmpCumAt('scalein',i)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- TrapScanner trade log -->
+        <div class="t-card">
+          <div class="flex items-center justify-between px-4 py-3 border-b border-t-border">
+            <p class="font-600 text-sm text-t-amber">TrapScanner Trade Log</p>
+            <div class="flex gap-2 text-xs">
+              <span class="chip bg-[rgba(var(--t-green-rgb),.10)] text-t-green" x-text="(compareResult.trapscanner?.summary?.wins||0) + ' wins'"></span>
+              <span class="chip bg-[rgba(var(--t-red-rgb),.08)] text-t-red" x-text="(compareResult.trapscanner?.summary?.losses||0) + ' losses'"></span>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="bt-table">
+              <thead><tr>
+                <th>Date</th><th>OT</th><th>Strike</th><th>Spot</th><th>Zone</th>
+                <th>L1@</th><th>L2@</th><th>SL</th><th>T1</th><th>Exit</th>
+                <th>Time</th><th>Reason</th><th>T1?</th><th>Lots</th>
+                <th style="text-align:right">P&L</th><th style="text-align:right">Cum</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="(t,i) in (compareResult.trapscanner?.trades||[])" :key="'ts'+i">
+                  <tr>
+                    <td x-text="t.date"></td>
+                    <td><span :class="t.opt_type==='CE'?'tag-ce':'tag-pe'" x-text="t.opt_type"></span></td>
+                    <td x-text="t.strike"></td>
+                    <td x-text="Math.round(t.spot)"></td>
+                    <td class="text-t-muted" x-text="t.zone"></td>
+                    <td x-text="t.lot1_entry?.toFixed(1)"></td>
+                    <td x-text="t.lot2_entry ? t.lot2_entry.toFixed(1) : '-'"></td>
+                    <td x-text="t.sl?.toFixed(1)"></td>
+                    <td x-text="t.t1_target?.toFixed(1)"></td>
+                    <td x-text="t.exit?.toFixed(1)"></td>
+                    <td class="text-t-muted" x-text="(t.exit_ts||'').slice(11,16)"></td>
+                    <td x-text="t.reason"></td>
+                    <td x-text="t.t1_hit ? 'Y' : 'N'" :class="t.t1_hit ? 'text-t-green font-700' : 'text-t-muted'"></td>
+                    <td x-text="t.two_lots ? '2' : '1'"></td>
+                    <td style="text-align:right" :class="t.pnl_rs>=0?'pnl-pos font-700':'pnl-neg'"
+                        x-text="(t.pnl_rs>=0?'+':'')+t.pnl_rs.toLocaleString('en-IN')"></td>
+                    <td style="text-align:right" class="text-t-muted font-mono"
+                        x-text="cmpCumAt('trapscanner',i)"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </template>
 
@@ -534,6 +624,13 @@ function scaleinApp() {
       return (s >= 0 ? '+' : '') + s.toLocaleString('en-IN');
     },
 
+    cmpCumAt(which, i) {
+      const trades = this.compareResult?.[which]?.trades || [];
+      let s = 0;
+      for (let j = 0; j <= i; j++) s += trades[j]?.pnl_rs || 0;
+      return (s >= 0 ? '+' : '') + s.toLocaleString('en-IN');
+    },
+
     async runBacktest() {
       this.error = '';
       this.result = null;
@@ -583,9 +680,9 @@ function scaleinApp() {
       const r = this.compareResult?.[which];
       if (!r) return '-';
       const s = r.summary || {};
-      if (key === 'trades') return s.total_trades ?? 0;
-      if (key === 'wr')     return s.total_trades ? (s.wins/s.total_trades*100).toFixed(1)+'%' : '-';
-      if (key === 'pnl')    { const v=s.total_pnl_rs||0; return (v>=0?'+':'')+v.toLocaleString('en-IN'); }
+      if (key === 'trades') return s.trades ?? 0;
+      if (key === 'wr')     return s.trades ? (s.wins/s.trades*100).toFixed(1)+'%' : '-';
+      if (key === 'pnl')    { const v=s.total_rs||0; return (v>=0?'+':'')+v.toLocaleString('en-IN'); }
       if (key === 'pf')     { const v=s.profit_factor||0; return v>=99?'∞':v.toFixed(2); }
       if (key === 'avg_w')  return s.avg_win ? '+'+Math.round(s.avg_win).toLocaleString('en-IN') : '-';
       if (key === 'avg_l')  return s.avg_loss ? Math.round(s.avg_loss).toLocaleString('en-IN') : '-';
