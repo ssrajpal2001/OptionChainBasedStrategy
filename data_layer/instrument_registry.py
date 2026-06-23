@@ -91,9 +91,11 @@ class InstrumentRegistry:
         # {underlying: list of diagnostic strings from last load attempt}
         self._diag: Dict[str, List[str]] = {}
         # MCX commodities: near-month FUTURES symbols (the ATM source)
-        self._futures_upstox: Dict[str, str] = {}   # underlying -> "MCX_FO|499095"
+        self._futures_upstox: Dict[str, str] = {}   # underlying -> "MCX_FO|499095" or "NSE_FO|xxx"
         self._futures_fyers: Dict[str, str] = {}     # underlying -> "MCX:CRUDEOIL26JUNFUT"
         self._futures_expiry: Dict[str, date] = {}
+        # NSE stock equity keys (NSE_EQ|token) — captured from master JSON for spot data
+        self._equity_upstox: Dict[str, str] = {}    # "RELIANCE" -> "NSE_EQ|2885"
 
     # ── Loading ───────────────────────────────────────────────────────────────
 
@@ -389,6 +391,13 @@ class InstrumentRegistry:
         for inst in raw_instruments:
             ikey, ts, strike_raw, exp_raw = self._parse_instrument(inst)
 
+            # Capture NSE_EQ equity key as spot-data fallback for stock underlyings
+            if ikey and ikey.startswith("NSE_EQ|") and underlying.upper() not in self._equity_upstox:
+                eq_sym = (ts.replace("-EQ", "").replace("-BE", "").upper()
+                          if ts else "")
+                if eq_sym == underlying.upper():
+                    self._equity_upstox[underlying.upper()] = ikey
+
             # Filter by instrument_key prefix (reliable, works regardless of field naming)
             if not ikey or not ikey.startswith(seg_prefix):
                 continue
@@ -546,10 +555,13 @@ class InstrumentRegistry:
     def historical_instrument_key(self, underlying: str) -> str:
         """Upstox instrument_key to use for the underlying's HISTORICAL candles.
         MCX commodities → the loaded near-month FUTURES key (the ATM source);
+        NSE stocks → futures key first, equity (NSE_EQ) key as fallback;
         index underlyings → the static index key. Empty if not resolvable."""
         u = underlying.upper()
         if u in self._futures_upstox:
             return self._futures_upstox[u]
+        if u in self._equity_upstox:
+            return self._equity_upstox[u]
         return _UPSTOX_UNDERLYING_KEY.get(u, "")
 
     # ── Multi-broker symbol resolution ────────────────────────────────────────
