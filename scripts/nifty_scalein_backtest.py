@@ -380,26 +380,25 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     if lot1_px is None:
         return None   # entry condition never triggered today
 
-    # TrapScanner = single lot, no Lot 2 scale-in
+    # TrapScanner = 2 lots entered at same ENTRY_READY price, T1 exits Lot 1 (50%)
     if mode == "trapscanner":
-        two_lots  = False
-        lot2_px   = None
-        lot2_ts   = None
-        total_qty = LOT
-        t1_qty    = 0
+        two_lots  = True
+        lot2_px   = lot1_px   # both lots enter at ENTRY_READY close
+        lot2_ts   = lot1_ts
+        total_qty = LOT * 2
+        t1_qty    = LOT
         rem_qty   = LOT
     else:
         pass   # scale-in Lot 2 detection follows below
 
     # -- Lot 2 scale-in detection (scale-in mode only) -------------------------
-    # Lot 2 scale-in (scale-in mode only)
-    lot2_px: Optional[float] = None
-    lot2_ts: Optional[pd.Timestamp] = None
-
     post1m = df1m[df1m["datetime"] > lot1_ts].copy()
     post5m = df5m[df5m["datetime"] > lot1_ts].copy()
 
     if mode != "trapscanner":
+        # lot2_px/ts declared here only — trapscanner already set them above
+        lot2_px: Optional[float] = None
+        lot2_ts: Optional[pd.Timestamp] = None
         # Conditions (both required):
         #   1. A 1-min bar closes at scale_in_lvl (price dipped to 1/3 zone depth)
         #   2. A 5-min bearish trap forms at or near scale_in_lvl
@@ -426,8 +425,9 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                     break
         two_lots  = lot2_px is not None
         total_qty = LOT * 2 if two_lots else LOT
-    t1_qty    = LOT       if two_lots else 0
-    rem_qty   = LOT       # always 1 lot remaining after T1 (or full 1 lot in 1-lot mode)
+    # t1_qty / rem_qty: both modes — two_lots already set correctly above
+    t1_qty  = LOT   if two_lots else 0
+    rem_qty = LOT
 
     # -- Build 5-min TSL events (ratchet: trap lows raise trail SL) ------------
     future5m = df5m[df5m["datetime"] > lot1_ts].copy()
