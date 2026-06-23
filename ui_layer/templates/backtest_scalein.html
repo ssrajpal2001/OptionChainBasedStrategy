@@ -292,13 +292,24 @@
         </label>
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="radio" name="emode" value="trapscanner" x-model="entryMode" class="mt-0.5" />
-          <span class="text-xs"><strong>TrapScanner</strong> — single entry after SELLERS_IN → ENTRY_READY (full confirmation, 1 lot)</span>
+          <span class="text-xs"><strong>TrapScanner</strong> — single entry after SELLERS_IN → ENTRY_READY (full confirmation, 2 lots, 50% T1)</span>
         </label>
         <label class="flex items-start gap-2 cursor-pointer">
           <input type="radio" name="emode" value="compare" x-model="entryMode" class="mt-0.5" />
           <span class="text-xs"><strong>Compare Both</strong> — run both modes, side-by-side summary</span>
         </label>
       </div>
+    </div>
+
+    <!-- Expiry Type -->
+    <div>
+      <p class="sec-label mb-2">Expiry Type</p>
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" x-model="useMonthlyExpiry" class="rounded" />
+        <span class="text-xs">Monthly expiry (current-month contract)<br>
+          <span class="text-t-muted">Indices: NIFTY Jun 26 / SENSEX Jun 27. Checks both CE &amp; PE every day (no gap-bias filter).</span>
+        </span>
+      </label>
     </div>
 
     <div class="border-t border-t-border pt-3">
@@ -496,6 +507,7 @@ function scaleinApp() {
     token: '',
     csvPath: '',
     entryMode: 'scalein',
+    useMonthlyExpiry: false,
     // state
     loading: false,
     error: '',
@@ -532,11 +544,12 @@ function scaleinApp() {
       this.loading = true;
       try {
         const body = {
-          token:      this.token,
-          index:      this.index,
-          sl_buf:     this.slBuf,
-          csv_path:   this.dataSource === 'csv' ? this.csvPath : '',
-          entry_mode: this.entryMode,
+          token:               this.token,
+          index:               this.index,
+          sl_buf:              this.slBuf,
+          csv_path:            this.dataSource === 'csv' ? this.csvPath : '',
+          entry_mode:          this.entryMode,
+          use_monthly_expiry:  this.useMonthlyExpiry,
         };
         if (this.dataSource === 'api') {
           if (this.dateMode === 'range' && this.startDate && this.endDate) {

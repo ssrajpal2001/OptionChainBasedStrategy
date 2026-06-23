@@ -4923,22 +4923,23 @@ class DashboardServer:
                 return {"ok": False, "error": "token required"}
             days       = int(p.get("days", 10))
             start      = p.get("start", "")
-            end        = p.get("end", "")
-            index      = str(p.get("index", "NIFTY")).upper()
-            sl_buf     = float(p.get("sl_buf", 20.0))
-            csv_path   = p.get("csv_path", "")
-            entry_mode = str(p.get("entry_mode", "scalein")).lower()
+            end                = p.get("end", "")
+            index              = str(p.get("index", "NIFTY")).upper()
+            sl_buf             = float(p.get("sl_buf", 20.0))
+            csv_path           = p.get("csv_path", "")
+            entry_mode         = str(p.get("entry_mode", "scalein")).lower()
+            use_monthly_expiry = bool(p.get("use_monthly_expiry", False))
             try:
                 from scripts.nifty_scalein_backtest import run_scalein_backtest
                 if entry_mode == "compare":
                     # Run sequentially — run_scalein_backtest mutates module globals
                     # (IDX, STEP, LOT) so parallel threads would race on the same namespace.
                     r_si = await asyncio.wait_for(
-                        asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "scalein"),
+                        asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "scalein", use_monthly_expiry),
                         timeout=600.0,
                     )
                     r_ts = await asyncio.wait_for(
-                        asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "trapscanner"),
+                        asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "trapscanner", use_monthly_expiry),
                         timeout=600.0,
                     )
                     return {
@@ -4949,7 +4950,7 @@ class DashboardServer:
                     }
                 result = await asyncio.wait_for(
                     asyncio.to_thread(
-                        run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, entry_mode
+                        run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, entry_mode, use_monthly_expiry
                     ),
                     timeout=600.0,
                 )

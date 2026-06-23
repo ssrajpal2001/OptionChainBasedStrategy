@@ -594,7 +594,8 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
 def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
              _expiry_unused, cache: dict,
              csv_df: Optional[pd.DataFrame] = None,
-             entry_mode: str = "scalein") -> list[dict]:
+             entry_mode: str = "scalein",
+             use_monthly_expiry: bool = False) -> list[dict]:
     td = pd.to_datetime(trade_date).date()
 
     df_prev  = df_spot_all[df_spot_all["datetime"].dt.date < td].copy()
@@ -644,7 +645,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     fetch_from = (td - timedelta(days=14)).isoformat()
     fetch_to   = (td + timedelta(days=1)).isoformat()
 
-    # Resolve next-week expiry: CSV takes priority (historical data), else REGISTRY
+    # Resolve expiry: CSV > monthly override > stock-default-monthly > next-week
     if csv_df is not None:
         all_csv_exp = sorted(csv_df["csv_expiry"].dropna().unique())
         this_week = next((e for e in all_csv_exp if e >= td and (e - td).days <= 8), None)
@@ -655,7 +656,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         if day_expiry is None:
             _log.info(f"  {trade_date}: no next-week expiry in CSV - skip")
             return []
-    elif IS_STOCK:
+    elif IS_STOCK or use_monthly_expiry:
         day_expiry = _current_expiry(td)
         _log.info(f"  {trade_date}: monthly expiry = {day_expiry}")
     else:
@@ -663,11 +664,12 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         _log.info(f"  {trade_date}: next-week expiry = {day_expiry}")
 
     # Leg selection:
-    # STOCKS: always check both CE and PE at ATM (no bias filter — ATM is liquid both ways)
-    # INDICES: bias filter (bullish day → CE only, bearish → PE only, ambiguous → skip)
-    if IS_STOCK:
+    # STOCKS or monthly-expiry indices: check both CE and PE every day.
+    #   Monthly contract has enough time value; trapscanner zone filter handles direction.
+    # INDICES (weekly): bias filter (bullish → CE only, bearish → PE only, ambiguous → skip)
+    if IS_STOCK or use_monthly_expiry:
         legs = [("CE", ce_s), ("PE", pe_s)]
-        bias_label = f"ATM {ce_s} both-sides"
+        bias_label = f"both-sides {bias_diff_pct:+.2f}%"
     else:
         legs = []
         if bias_bull:
@@ -826,7 +828,8 @@ def run_scalein_backtest(token: str, days: int = 10,
                          index: str = "NIFTY",
                          sl_buf_override: float = 0.0,
                          csv_path: str = "",
-                         entry_mode: str = "scalein") -> dict:
+                         entry_mode: str = "scalein",
+                         use_monthly_expiry: bool = False) -> dict:
     global _HEADERS, IDX, SPOT_KEY, STEP, LOT, SL_BUF, IS_STOCK
 
     # Set up per-run log file
@@ -936,7 +939,8 @@ def run_scalein_backtest(token: str, days: int = 10,
     cache: dict = {}
     all_trades: list[dict] = []
     for td in trading_days:
-        day_trades = _run_day(td, df_spot, None, cache, csv_df=csv_df, entry_mode=entry_mode)
+        day_trades = _run_day(td, df_spot, None, cache, csv_df=csv_df, entry_mode=entry_mode,
+                              use_monthly_expiry=use_monthly_expiry)
         all_trades.extend(day_trades)
 
     # -- Summary ---------------------------------------------------------------
