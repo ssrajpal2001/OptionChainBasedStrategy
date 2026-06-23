@@ -756,6 +756,15 @@ class TrapScannerEngine:
             df = _bars_to_df(bars)
             if df.empty or len(df) < 2:
                 return
+            # Standard 75-min scan: exclude today's bars so intraday price action never
+            # closes a TRAPPED zone (scan_htf marks CLOSED when curr.low <= zone_high,
+            # which fires the moment price enters the zone — killing the trade opportunity).
+            # Cascade passes bars_override with today's bars only, so this filter is skipped.
+            if bars_override is None:
+                today_d = datetime.now(IST).date()
+                df = df[df["datetime"].dt.date < today_d].copy()
+                if df.empty or len(df) < 2:
+                    return
             htf = _resample_htf(df, minutes)
             if len(htf) < 2:
                 return
@@ -1552,8 +1561,15 @@ class TrapScannerEngine:
             today_bars = _complete_today(self._bars_fut)
             if len(today_bars) < 4:
                 return
-            self._run_htf_scan(bars_override=today_bars, minutes_override=self._cascade_min)
-            zones_15m = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
+            # Scan today's bars inline — do NOT call _run_htf_scan which would overwrite
+            # self._htf_fut_zones (the 75-min prev-day zones we want to preserve).
+            df_today = _bars_to_df(today_bars)
+            htf_today = _resample_htf(df_today, self._cascade_min)
+            if len(htf_today) >= 2:
+                _, cas_entries = scanner.scan_htf(htf_today)
+                zones_15m = [e for e in cas_entries if e["status"] == "TRAPPED"]
+            else:
+                zones_15m = []
             self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE", require_closed=False)
         elif self._htf_source == "option":
             # Per-leg: only scan the leg(s) that are in cascade mode
