@@ -192,9 +192,9 @@ def _htf_zones_for_today(df_all: pd.DataFrame, htf_min: int, today: date,
     _, entries = scan_htf(df_htf)
     result = []
     for e in entries:
-        if e.get("status") not in ("TRAPPED", "CLOSED"):
+        if e.get("status") != "TRAPPED":
             continue
-        confirm_ts = e.get("closed_on") or e.get("trapped_on")
+        confirm_ts = e.get("trapped_on")
         if confirm_ts is not None:
             try:
                 c_date = pd.Timestamp(str(confirm_ts)).date()
@@ -226,7 +226,8 @@ def _find_3m_entries(df_1m_today: pd.DataFrame, htf_zones: list,
     entries = []
 
     for zone in htf_zones:
-        if zone.get("status") not in ("TRAPPED", "CLOSED"):
+        if zone.get("status") != "TRAPPED":
+            # CLOSED = sellers already exited zone, opportunity gone; skip
             continue
 
         zone_trigger = float(zone["zone_trigger"])
