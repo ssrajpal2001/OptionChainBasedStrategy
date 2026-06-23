@@ -181,20 +181,23 @@ def round_strike(price: float) -> int:
 # ── Core backtest per day per leg ─────────────────────────────────────────────
 def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
                 max_trades: int = 999, cutoff: str = "15:25",
-                min_rr: float = 0.0) -> list[dict]:
+                min_rr: float = 0.0, ltf_min: int = 1,
+                max_consec_sl: int = 999) -> list[dict]:
     """
     Simulate intraday 15-min trap entries on 1-min bars.
 
     Filters:
-      max_trades – max entries per day per leg
-      cutoff     – no new entries at or after HH:MM
-      min_rr     – minimum reward:risk (e.g. 2.0 = must offer 1:2)
+      max_trades    – max entries per day per leg
+      cutoff        – no new entries at or after HH:MM
+      min_rr        – minimum reward:risk (e.g. 2.0 = must offer 1:2)
+      ltf_min       – LTF timeframe for entry confirmation + SL fires
+                      (1 = every 1-min close, 3 = only on 3-min bar close)
+      max_consec_sl – stop new entries after N consecutive pre-T1 SLs
 
-    TSL (trailing stop-loss) ladder — post-T1 runner management:
-      T1 = zone's sl field (bears' SL = 1R from entry)
-      T2 = T1 + 1R, T3 = T2 + 1R
-      At each target hit: SL jumps to previous target (T1→BE, T2→T1, T3→T2)
-      Between targets: 3-min candle trailing SL (can only move up)
+    TSL target ladder (post-T1):
+      T1 = zone sl field (1R), T2 = T1+1R, T3 = T1+2R
+      T1 hit → SL to entry(BE), T2 hit → SL to T1, T3 hit → SL to T2
+      TSL: trail to (prev LTF bar low − SL_BUF), only moves up
     """
     trades = []
     if df_1m.empty or len(df_1m) < HTF_MIN:
@@ -204,22 +207,23 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
     notified_uids: set = set()
     position: Optional[dict] = None
     trades_taken = 0
-    last_htf_ts = None
-    last_3m_ts  = None
+    consec_sl    = 0
+    last_htf_ts  = None
+    last_ltf_ts  = None
 
     for idx, row in df_1m.iterrows():
         ts     = row["datetime"]
         ltp    = row["close"]
         ts_str = ts.strftime("%H:%M")
 
-        # ── EOD ───────────────────────────────────────────────────────────────
+        # ── EOD (every 1-min tick) ─────────────────────────────────────────────
         if ts_str >= SQ_OFF:
             if position:
                 trades.append(_close(position, ltp, ts, "EOD"))
                 position = None
             break
 
-        # ── Build 15-min HTF and scan for new zones ───────────────────────────
+        # ── 15-min HTF zone scan ───────────────────────────────────────────────
         df_so_far = df_1m.iloc[: idx + 1]
         htf = resample_to_htf(df_so_far, HTF_MIN)
         if htf.empty or len(htf) < 2:
@@ -235,44 +239,53 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
                 if uid not in notified_uids:
                     known_zones.append({**z, "_uid": uid})
 
-        # ── 3-min trailing SL (active only after T1 hit) ──────────────────────
-        if position and position.get("stage", 0) >= 1:
-            htf3 = resample_to_htf(df_so_far, 3)
-            if len(htf3) >= 2:
-                cur_3m_ts = htf3.iloc[-1]["datetime"]
-                if cur_3m_ts != last_3m_ts:
-                    last_3m_ts = cur_3m_ts
-                    # Trail to previous closed 3-min bar low (minus a tiny buffer)
-                    prev_3m_low = htf3.iloc[-2]["low"]
-                    new_trail = round(prev_3m_low - SL_BUF, 2)
-                    if new_trail > position["sl"]:
-                        position["sl"] = new_trail
+        # ── Determine bar_close / bar_low for SL+entry checks ─────────────────
+        # ltf_min=1: use every 1-min close; ltf_min>1: only on new LTF bar close
+        if ltf_min > 1:
+            htf_ltf = resample_to_htf(df_so_far, ltf_min)
+            if len(htf_ltf) < 2:
+                continue
+            cur_ltf_ts = htf_ltf.iloc[-1]["datetime"]
+            if cur_ltf_ts == last_ltf_ts:
+                continue   # same LTF bar still forming — skip SL/entry this tick
+            last_ltf_ts = cur_ltf_ts
+            prev_bar  = htf_ltf.iloc[-2]
+            bar_close = prev_bar["close"]
+            bar_low   = prev_bar["low"]
+        else:
+            bar_close = ltp
+            bar_low   = row["low"]
 
-        # ── Exit + target-ladder ──────────────────────────────────────────────
+        # ── TSL update: trail to prev LTF bar low (post-T1 only) ──────────────
+        if position and position.get("stage", 0) >= 1:
+            new_trail = round(bar_low - SL_BUF, 2)
+            if new_trail > position["sl"]:
+                position["sl"] = new_trail
+
+        # ── Exit + target-ladder on LTF bar close ─────────────────────────────
         if position:
             stage   = position.get("stage", 0)
             targets = position["targets"]
 
-            if ltp <= position["sl"]:
+            if bar_close <= position["sl"]:
                 reason = f"SL(stage{stage})" if stage > 0 else "SL"
-                trades.append(_close(position, ltp, ts, reason))
-                position = None
-                last_3m_ts = None
-            elif stage < len(targets) and ltp >= targets[stage]:
-                # Advance to next stage — move SL to prior target (or entry for T1)
+                trades.append(_close(position, bar_close, ts, reason))
+                consec_sl = consec_sl + 1 if stage == 0 else 0
+                position  = None
+            elif stage < len(targets) and bar_close >= targets[stage]:
                 if stage == 0:
-                    position["sl"] = round(position["entry"], 2)   # T1 → breakeven
+                    position["sl"] = round(position["entry"], 2)    # T1 → BE
                 else:
-                    position["sl"] = round(targets[stage - 1], 2)  # T2 → T1, T3 → T2
+                    position["sl"] = round(targets[stage - 1], 2)   # Tn → T(n-1)
                 position["stage"] = stage + 1
-                last_3m_ts = None   # reset trail anchor at each new stage
+                consec_sl = 0   # runner advanced = reset streak
+            continue   # in trade or just closed, skip entry
+
+        # ── Entry filters ──────────────────────────────────────────────────────
+        if ts_str >= cutoff or trades_taken >= max_trades or consec_sl >= max_consec_sl:
             continue
 
-        # ── Entry filters ─────────────────────────────────────────────────────
-        if ts_str >= cutoff or trades_taken >= max_trades:
-            continue
-
-        # ── Look for entry ────────────────────────────────────────────────────
+        # ── Entry check on LTF bar close ───────────────────────────────────────
         for z in known_zones:
             uid = z["_uid"]
             if uid in notified_uids:
@@ -282,23 +295,22 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
             zt = z.get("zone_trigger", zl + (zh - zl) * 0.33)
             t1 = z.get("sl", zh + (zh - zl) * 1.5)
 
-            if not (zl <= ltp <= zh and ltp >= zt):
+            if not (zl <= bar_close <= zh and bar_close >= zt):
                 continue
 
-            sl   = zl - SL_BUF
-            risk   = ltp - sl
-            reward = t1 - ltp
+            sl     = zl - SL_BUF
+            risk   = bar_close - sl
+            reward = t1 - bar_close
             if risk <= 0:
                 continue
             if min_rr > 0 and reward / risk < min_rr:
                 notified_uids.add(uid)
                 continue
 
-            # Multi-target ladder: T1 (zone sl), T2 = T1+1R, T3 = T1+2R
             targets = [round(t1, 2), round(t1 + reward, 2), round(t1 + 2 * reward, 2)]
             position = {
                 "leg": leg, "date": trade_date,
-                "entry_ts": ts_str, "entry": ltp,
+                "entry_ts": ts_str, "entry": bar_close,
                 "zone": f"{zl:.1f}→{zh:.1f}", "trigger": round(zt, 2),
                 "t1": targets[0], "sl": round(sl, 2),
                 "targets": targets, "stage": 0,
@@ -306,7 +318,7 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
             }
             notified_uids.add(uid)
             trades_taken += 1
-            last_3m_ts = None
+            consec_sl = 0
             break
 
     return trades
@@ -328,8 +340,12 @@ def main():
                     help="Max entries per day per leg (default: unlimited)")
     ap.add_argument("--cutoff",     default="15:25",
                     help="No new entries at or after HH:MM (default: 15:25)")
-    ap.add_argument("--min-rr",     type=float, default=0.0,
+    ap.add_argument("--min-rr",          type=float, default=0.0,
                     help="Minimum reward:risk ratio (e.g. 2.0 = 1:2 R:R, default: off)")
+    ap.add_argument("--ltf",             type=int,   default=1,
+                    help="LTF minutes for entry confirmation + SL (1=every tick, 3=3-min close)")
+    ap.add_argument("--max-consec-sl",   type=int,   default=999,
+                    help="Stop new entries after N consecutive pre-T1 SLs same leg (default: off)")
     ap.add_argument("--ce-only",    action="store_true")
     ap.add_argument("--pe-only",    action="store_true")
     args = ap.parse_args()
@@ -345,9 +361,11 @@ def main():
     print(f"\nSENSEX 15-min Intraday Backtest — {args.days} days: {trade_days[0]} → {trade_days[-1]}")
     print(f"Legs: {legs}  Lot: {LOT}  Step: {STEP}  SL_BUF: {SL_BUF}")
     filters = []
-    if args.max_trades < 999: filters.append(f"max_trades={args.max_trades}/leg/day")
-    if args.cutoff != "15:25": filters.append(f"cutoff={args.cutoff}")
-    if args.min_rr > 0:        filters.append(f"min_R:R=1:{args.min_rr:.0f}")
+    if args.max_trades < 999:    filters.append(f"max_trades={args.max_trades}/leg/day")
+    if args.cutoff != "15:25":   filters.append(f"cutoff={args.cutoff}")
+    if args.min_rr > 0:          filters.append(f"min_R:R=1:{args.min_rr:.0f}")
+    if args.ltf > 1:             filters.append(f"ltf={args.ltf}m (entry+SL on bar close)")
+    if args.max_consec_sl < 999: filters.append(f"max_consec_sl={args.max_consec_sl}")
     if filters: print(f"Filters: {', '.join(filters)}")
 
     all_trades: list[dict] = []
@@ -385,7 +403,9 @@ def main():
             day_trades = run_day_leg(df, leg, td,
                                      max_trades=args.max_trades,
                                      cutoff=args.cutoff,
-                                     min_rr=args.min_rr)
+                                     min_rr=args.min_rr,
+                                     ltf_min=args.ltf,
+                                     max_consec_sl=args.max_consec_sl)
             if not day_trades:
                 print(f"  [{leg}] No trades today")
             else:
