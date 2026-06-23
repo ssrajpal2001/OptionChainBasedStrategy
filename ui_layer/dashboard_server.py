@@ -4931,12 +4931,14 @@ class DashboardServer:
             try:
                 from scripts.nifty_scalein_backtest import run_scalein_backtest
                 if entry_mode == "compare":
-                    # Run both modes and merge into a comparison response
-                    r_si, r_ts = await asyncio.wait_for(
-                        asyncio.gather(
-                            asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "scalein"),
-                            asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "trapscanner"),
-                        ),
+                    # Run sequentially — run_scalein_backtest mutates module globals
+                    # (IDX, STEP, LOT) so parallel threads would race on the same namespace.
+                    r_si = await asyncio.wait_for(
+                        asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "scalein"),
+                        timeout=600.0,
+                    )
+                    r_ts = await asyncio.wait_for(
+                        asyncio.to_thread(run_scalein_backtest, token, days, start, end, "", index, sl_buf, csv_path, "trapscanner"),
                         timeout=600.0,
                     )
                     return {
