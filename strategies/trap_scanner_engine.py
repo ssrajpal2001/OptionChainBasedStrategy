@@ -1619,12 +1619,52 @@ class TrapScannerEngine:
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
+    def _can_trade(self) -> bool:
+        """Gate new entries on THIS binding's Terminal (broker connected) AND Trade
+        toggle (is_trade_enabled). Mirrors SellStraddle._any_active_terminal but for
+        the single (client, binding) this book belongs to. Throttled to one DB read
+        per 5s. Fail-OPEN when no DB is wired (unit tests / headless) so tests are
+        unaffected; production always injects the DB via TrapBookManager.
+
+        NOTE: this gates FIRING only — the book stays alive so an already-open
+        position keeps its SL/T1 management even if Terminal/Trade is toggled off."""
+        db = self._db
+        if db is None:
+            return True
+        import time as _t
+        _now = _t.monotonic()
+        if _now - getattr(self, "_term_check_t", 0.0) < 5.0:
+            return getattr(self, "_term_active_cached", False)
+        self._term_check_t = _now
+        active = False
+        try:
+            if self._cid and self._bid:
+                _binds = {b.get("binding_id"): b
+                          for b in db.get_bindings_safe_sync(self._cid)}
+                _b = _binds.get(self._bid)
+                active = bool(
+                    _b
+                    and _b.get("terminal_connected")
+                    and _b.get("is_trade_enabled")
+                )
+        except Exception as _exc:
+            logger.debug("TrapScanner[%s]: _can_trade check error: %s", self._und, _exc)
+            active = False
+        self._term_active_cached = active
+        return active
+
     async def _on_entry_signal(self, leg: str, opt_type: str,
                                 entry: dict, htf_zone: dict) -> None:
         if self._no_margin_today:
             self._log.debug("Entry blocked — no margin today (add funds)")
             return
         if self._position:
+            return
+        # Terminal + Trade gate: never fire if THIS binding's broker terminal is
+        # disconnected or the Trade toggle is OFF (fixes trade firing with terminal/trade OFF).
+        if not self._can_trade():
+            self._log.info("Entry blocked — terminal/trade OFF for %s/%s (%s %s)",
+                           self._cid, self._bid, leg, opt_type)
             return
         now = datetime.now(IST)
 

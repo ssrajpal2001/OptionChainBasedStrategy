@@ -697,51 +697,6 @@ class ClientDB:
         logger.error("ClientDB.get_bindings_safe_sync(%s): %s", client_id, last_exc)
         return []
 
-    def get_active_trap_bindings_sync(self, instrument: str) -> List[dict]:
-        """Return bindings with terminal_connected=1, is_trade_enabled=1, assigned_strategy='trap_trading',
-        assigned_instrument matches (case-insensitive). Used to gate trade entry and subscription."""
-        try:
-            con = sqlite3.connect(self._db_path, timeout=5.0)
-            con.row_factory = sqlite3.Row
-            rows = [dict(r) for r in con.execute(
-                """SELECT b.client_id, b.binding_id, b.provider, b.lot_multiplier,
-                          b.trading_mode, b.product_type, b.access_token
-                   FROM broker_bindings b
-                   JOIN clients c ON c.client_id = b.client_id
-                   WHERE b.assigned_strategy = 'trap_trading'
-                     AND UPPER(b.assigned_instrument) = UPPER(?)
-                     AND b.terminal_connected = 1
-                     AND b.is_trade_enabled = 1
-                     AND b.enabled = 1
-                     AND c.is_admin_approved = 1""",
-                (instrument,),
-            ).fetchall()]
-            con.close()
-            return rows
-        except Exception as exc:
-            logger.error("ClientDB.get_active_trap_bindings_sync: %s", exc)
-            return []
-
-    def any_trap_terminal_on_sync(self, instrument: str) -> bool:
-        """Return True if any binding with assigned_strategy='trap_trading' and assigned_instrument
-        has terminal_connected=1. Used to decide whether to subscribe."""
-        try:
-            con = sqlite3.connect(self._db_path, timeout=5.0)
-            row = con.execute(
-                """SELECT 1 FROM broker_bindings
-                   WHERE assigned_strategy = 'trap_trading'
-                     AND UPPER(assigned_instrument) = UPPER(?)
-                     AND terminal_connected = 1
-                     AND enabled = 1
-                   LIMIT 1""",
-                (instrument,),
-            ).fetchone()
-            con.close()
-            return row is not None
-        except Exception as exc:
-            logger.error("ClientDB.any_trap_terminal_on_sync: %s", exc)
-            return False
-
     # ── System feeder credentials ─────────────────────────────────────────────
 
     async def upsert_feeder_creds(
