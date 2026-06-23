@@ -562,7 +562,7 @@ function scaleinApp() {
       if (key === 'trades') return s.total_trades ?? 0;
       if (key === 'wr')     return s.total_trades ? (s.wins/s.total_trades*100).toFixed(1)+'%' : '-';
       if (key === 'pnl')    { const v=s.total_pnl_rs||0; return (v>=0?'+':'')+v.toLocaleString('en-IN'); }
-      if (key === 'pf')     return (s.profit_factor||0).toFixed(2);
+      if (key === 'pf')     { const v=s.profit_factor||0; return v>=99?'∞':v.toFixed(2); }
       if (key === 'avg_w')  return s.avg_win ? '+'+Math.round(s.avg_win).toLocaleString('en-IN') : '-';
       if (key === 'avg_l')  return s.avg_loss ? Math.round(s.avg_loss).toLocaleString('en-IN') : '-';
       return '-';
