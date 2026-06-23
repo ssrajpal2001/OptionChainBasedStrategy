@@ -342,22 +342,25 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
 
-    # SL buffer = zone_height (proportional), floor 2 pts.
-    # Keeps room for liquidity sweeps below zone_low (institutions sweep stops then reverse).
-    # Fixed buffer=20 was too large for small-premium stock options (e.g. SBIN ₹43 zone 3pts → SL=22).
-    sl_buf_eff = max(2.0, zht)
+    # SL buffer = user's SL_BUF input, capped at zone_height (never wider than the zone itself).
+    # Floor = 1 pt to avoid touching zone_low exactly (avoids tick-precision fill issues).
+    # Previous logic `max(2, zht)` (full zone height) was too wide for small-premium stock options
+    # → forced risk = ~1.67×zht making R:R impossible for stocks.
+    sl_buf_eff = max(1.0, min(SL_BUF, zht))
     sl_px      = round(zl - sl_buf_eff, 2)        # hard SL for both lots
 
     # R:R filter: reward (target - lot1 trigger) vs risk (trigger - sl).
     # Entry approximated at scale_in_lvl (zone_high - 1/3 zone_height).
+    # For stocks (IS_STOCK) use a relaxed threshold since option premiums are small.
+    _rr_min    = MIN_RR * 0.67 if IS_STOCK else MIN_RR   # 1.0 for stocks, 1.5 for indices
     _approx_entry = scale_in_lvl
     _reward       = zt - _approx_entry
     _risk         = _approx_entry - sl_px
     _log.info(f"    R:R   entry~={_approx_entry}  SL={sl_px}  target={zt}  "
-              f"risk={_risk:.1f}  reward={_reward:.1f}  rr={_reward/_risk:.2f}" if _risk > 0
+              f"risk={_risk:.1f}  reward={_reward:.1f}  rr={_reward/_risk:.2f}  min={_rr_min}" if _risk > 0
               else f"    R:R   risk<=0 — skip")
-    if _risk <= 0 or (_reward / _risk) < MIN_RR:
-        _log.info(f"    SKIP  R:R {_reward/_risk:.2f} < {MIN_RR}" if _risk > 0 else "    SKIP  risk<=0")
+    if _risk <= 0 or (_reward / _risk) < _rr_min:
+        _log.info(f"    SKIP  R:R {_reward/_risk:.2f} < {_rr_min}" if _risk > 0 else "    SKIP  risk<=0")
         return None   # poor R:R — zone target not far enough above SL
 
     # -- Zone valid-from gate (common to both modes) ---------------------------
