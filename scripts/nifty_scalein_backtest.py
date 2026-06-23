@@ -634,9 +634,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
     bias_bear = bias_diff_pct <= -BIAS_GAP_PCT   # open meaningfully below prev_close → PE
 
     # Strike selection
-    # STOCKS: ATM rounded to nearest STEP, check BOTH CE and PE every day.
-    #   Pivot/gap picks deep-OTM strikes for stocks → zero volume. ATM is always liquid.
-    # INDICES: pivot-based (S1=CE, R1=PE) with gap override (4 steps from ATM).
+    # STOCKS: ATM (always liquid). INDICES: pivot S1/R1 unless big gap (≥0.5%) → ATM±4steps.
     GAP_STEPS = 4
     if IS_STOCK:
         atm        = _round(today_open, STEP)
@@ -700,16 +698,12 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         elif bias_bear:
             legs.append(("PE", pe_s))
         else:
-            # Flat open — trade both sides at ATM ± (GAP_STEPS × STEP)
-            atm         = _round(today_open, STEP)
-            offset      = GAP_STEPS * STEP          # 200 for NIFTY, 400 for BANKNIFTY
-            ce_s        = max(STEP, atm - offset)
-            pe_s        = atm + offset
+            # Flat open — pivot S1 (CE) + R1 (PE) both sides
             legs        = [("CE", ce_s), ("PE", pe_s)]
-            strike_mode = f"FLAT ATM±{offset} CE={ce_s} PE={pe_s}"
+            strike_mode = f"FLAT S1={ce_s} R1={pe_s}"
         bias_label = (f"BULL-bias(CE) +{bias_diff_pct:.2f}%" if bias_bull
                       else f"BEAR-bias(PE) {bias_diff_pct:.2f}%" if bias_bear
-                      else f"FLAT BOTH-SIDES CE={ce_s} PE={pe_s} gap={bias_diff_pct:+.2f}%")
+                      else f"FLAT BOTH-SIDES gap={bias_diff_pct:+.2f}%")
     trades = []
 
     for ot, strike in legs:
