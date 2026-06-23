@@ -4796,8 +4796,7 @@ function amoTest() {
                   </template>
                 </div>
                 <!-- Expanded table — hidden by default -->
-                <template x-if="bk.contracts">
-                  <div x-show="contractsOpen">
+                <div x-show="bk.contracts && contractsOpen">
                   <!-- Header -->
                   <div class="grid mt-1 mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;color:var(--t-muted)">
                     <span>LEG</span><span>STRIKE</span><span>LTP</span>
@@ -4872,13 +4871,20 @@ function amoTest() {
                       </div>
                     </template>
                   </template>
-                  </div><!-- /x-show contractsOpen -->
-                  </template><!-- /x-if bk.contracts (expanded) -->
+                </div><!-- /x-show contractsOpen -->
               </div><!-- /x-data contractsOpen -->
-              <!-- Option zones (CE/PE) — TRAPPED/NEAR always visible; FAR collapsed -->
+              <!-- Option zones (CE/PE) — whole table collapsible (default hidden) -->
+              <div x-data="{ zonesOpen: false, farOpen: false }">
               <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
-                <div class="mt-2" x-data="{ farOpen: false }">
-                  <div class="grid text-center mb-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
+                <div class="mt-2">
+                  <div class="flex items-center gap-2 cursor-pointer select-none" @click="zonesOpen=!zonesOpen"
+                       style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
+                    <span x-text="zonesOpen?'▾':'▸'" style="font-size:10px"></span>
+                    <span style="font-weight:600">ALL ZONES</span>
+                    <span x-text="'('+bk.zones.filter(z=>z.opt_type!=='FUT').length+' · '+bk.zones.filter(z=>z.opt_type!==\'FUT\'&&z.status===\'TRAPPED\').length+' trapped)'"></span>
+                  </div>
+                  <div x-show="zonesOpen">
+                  <div class="grid text-center mb-1 mt-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
                     <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                   </div>
                   <!-- TRAPPED / NEAR / IN TRADE zones always shown -->
@@ -4919,8 +4925,10 @@ function amoTest() {
                       </template>
                     </div>
                   </template>
+                  </div><!-- /x-show zonesOpen -->
                 </div>
               </template>
+              </div><!-- /x-data zonesOpen farOpen -->
               <!-- FUT zones (futures bias — collapsible, hidden by default) -->
               <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type==='FUT').length>0">
                 <div class="mt-1">

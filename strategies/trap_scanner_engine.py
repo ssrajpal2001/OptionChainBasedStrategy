@@ -251,6 +251,7 @@ class TrapScannerEngine:
 
         # Dedup: zones that already fired an entry today
         self._notified_uids: Set[str] = set()
+        self._cascade_momentum_fired: Set[str] = set()  # zones entered via momentum (breakout)
         self._no_margin_today: bool     = False  # set True after all 3 strikes rejected
 
         # Per-zone LTF status for telemetry: uid → "watching"|"ltf_signal"|"entered"
@@ -1576,10 +1577,12 @@ class TrapScannerEngine:
                                        len(bull_15), len(bu), len(htf_pe))
             if bear_15:
                 bear_15 = sorted(bear_15, key=lambda z: z.get("zone_high", 0), reverse=True)
+                self._try_momentum_entry(bear_15, "CE1", "CE")
                 self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE", require_closed=False)
                 self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE", require_closed=False)
             if bull_15:
                 bull_15 = sorted(bull_15, key=lambda z: z.get("zone_high", 0), reverse=True)
+                self._try_momentum_entry(bull_15, "PE1", "PE")
                 self._run_ltf_on("PE1", self._bars_pe1, bull_15, "PE", require_closed=False)
                 self._run_ltf_on("PE2", self._bars_pe2, bull_15, "PE", require_closed=False)
         else:  # "spot" cascade: spot 15-min for direction, option 15-min for entry zones
@@ -1676,6 +1679,36 @@ class TrapScannerEngine:
             active = False
         self._term_active_cached = active
         return active
+
+    def _try_momentum_entry(self, zones: list, leg: str, opt_type: str) -> None:
+        """Breakout-momentum entry: fire immediately when a NEW cascade zone is TRAPPED
+        and price is within momentum_chase_pts of zone_high (no retest needed).
+        Disabled by default (momentum_chase_pts=0). Set in trap_engine config per-index."""
+        chase_pts = float(self._admin_cfg.get("momentum_chase_pts", 0))
+        if chase_pts <= 0 or self._position:
+            return
+        ltp_key = self._pe1_key if opt_type == "PE" else self._ce1_key
+        ltp = self._ltp_cache.get(ltp_key, 0)
+        if ltp <= 0:
+            return
+        for z in zones:
+            uid = f"mom_{z.get('zone_low',0):.2f}_{z.get('zone_high',0):.2f}_{z.get('ref_ts','')}"
+            if uid in self._cascade_momentum_fired or uid in self._notified_uids:
+                continue
+            z_high = z.get("sl", 0)  # bears' SL = trapped level = our zone ceiling
+            if z_high <= 0:
+                continue
+            overshoot = ltp - z_high
+            if 0 <= overshoot <= chase_pts:
+                self._log.info(
+                    "MOMENTUM [%s] zone=%.1f→%.1f ltp=%.1f overshoot=%.1f/%.1f pts — firing entry",
+                    leg, z.get("zone_low", 0), z_high, ltp, overshoot, chase_pts,
+                )
+                self._cascade_momentum_fired.add(uid)
+                asyncio.get_event_loop().create_task(
+                    self._on_entry_signal(leg, opt_type, z, z)
+                )
+                break  # one entry at a time
 
     async def _on_entry_signal(self, leg: str, opt_type: str,
                                 entry: dict, htf_zone: dict) -> None:
@@ -2295,6 +2328,7 @@ class TrapScannerEngine:
         self._htf_fut_zones  = []
         self._buckets        = {}
         self._notified_uids  = set()
+        self._cascade_momentum_fired = set()
         self._zone_ltf_status = {}
         self._htf_atr_val = 0.0
         self._ltp_cache   = {}
