@@ -772,29 +772,44 @@ class TrapScannerEngine:
             _, entries = scanner.scan_htf_spot(htf)
             self._htf_fut_zones = entries
         elif self._htf_source == "option":
+            # Same prev-day-only filter as the futures path: scan_htf marks a zone CLOSED
+            # when curr.low <= zone_high, which fires the instant price enters the zone.
+            # Including today's bars causes the zone to vanish the moment it's touched.
+            # The intraday cascade below adds today's 15-min zones independently.
+            if bars_override is None:
+                today_d = datetime.now(IST).date()
+                def _prev_only(bars):
+                    df = _bars_to_df(bars)
+                    return df[df["datetime"].dt.date < today_d].copy() if not df.empty else df
+                df_ce  = _prev_only(self._bars_ce1)
+                df_ce2 = _prev_only(self._bars_ce2)
+                df_pe  = _prev_only(self._bars_pe1)
+                df_pe2 = _prev_only(self._bars_pe2)
+            else:
+                df_ce  = _bars_to_df(bars_override)
+                df_ce2 = _bars_to_df(bars_override)
+                df_pe  = _bars_to_df(bars_override)
+                df_pe2 = _bars_to_df(bars_override)
+
             # Bear zones from CE1 bars: seller traps on CE premium → buy CE
-            df_ce = _bars_to_df(bars_override or self._bars_ce1)
             if not df_ce.empty and len(df_ce) >= 2:
                 htf_ce = _resample_htf(df_ce, minutes)
                 if len(htf_ce) >= 2:
                     _, bear_entries = scanner.scan_htf(htf_ce)
                     self._htf_bear_zones = bear_entries
             # Seller traps in CE2 bars → buy CE2
-            df_ce2 = _bars_to_df(self._bars_ce2)
             if not df_ce2.empty and len(df_ce2) >= 2:
                 htf_ce2 = _resample_htf(df_ce2, minutes)
                 if len(htf_ce2) >= 2:
                     _, bear_entries_2 = scanner.scan_htf(htf_ce2)
                     self._htf_bear_zones_2 = bear_entries_2
             # Seller traps in PE1 bars → buy PE1
-            df_pe = _bars_to_df(self._bars_pe1)
             if not df_pe.empty and len(df_pe) >= 2:
                 htf_pe = _resample_htf(df_pe, minutes)
                 if len(htf_pe) >= 2:
                     _, bull_entries = scanner.scan_htf(htf_pe)
                     self._htf_bull_zones = bull_entries
             # Seller traps in PE2 bars → buy PE2
-            df_pe2 = _bars_to_df(self._bars_pe2)
             if not df_pe2.empty and len(df_pe2) >= 2:
                 htf_pe2 = _resample_htf(df_pe2, minutes)
                 if len(htf_pe2) >= 2:
