@@ -45,7 +45,8 @@ from data_layer.instrument_registry import REGISTRY
 HTF_MIN  = 75
 LOT      = 65           # NIFTY lot size
 STEP     = 50           # strike step
-SL_BUF   = 20.0         # pts below zone_low for hard SL
+SL_BUF   = 20.0         # fallback only — actual buffer = max(2, zone_height)
+MIN_RR   = 1.5          # minimum reward:risk ratio (skip zone if below)
 SQ_TIME  = pd.Timestamp("15:20").time()
 IDX      = "NIFTY"
 SPOT_KEY = "NSE_INDEX|Nifty 50"
@@ -314,11 +315,20 @@ def _simulate(zone: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         return None
 
     scale_in_lvl = round(zh - zht / 3.0, 2)       # 1/3 down from zone_high
-    # SL buffer = max(user SL_BUF, zone_height).
-    # A 5-pt zone with SL_BUF=20 gives SL 25 pts below entry — disproportionate.
-    # Using zone_height as the floor keeps risk proportional to the zone size.
-    sl_buf_eff   = max(SL_BUF, zht)
-    sl_px        = round(zl - sl_buf_eff, 2)      # hard SL for both lots
+
+    # SL buffer = zone_height (proportional), floor 2 pts.
+    # Keeps room for liquidity sweeps below zone_low (institutions sweep stops then reverse).
+    # Fixed buffer=20 was too large for small-premium stock options (e.g. SBIN ₹43 zone 3pts → SL=22).
+    sl_buf_eff = max(2.0, zht)
+    sl_px      = round(zl - sl_buf_eff, 2)        # hard SL for both lots
+
+    # R:R filter: reward (target - lot1 trigger) vs risk (trigger - sl).
+    # Entry approximated at scale_in_lvl (zone_high - 1/3 zone_height).
+    _approx_entry = scale_in_lvl
+    _reward       = zt - _approx_entry
+    _risk         = _approx_entry - sl_px
+    if _risk <= 0 or (_reward / _risk) < MIN_RR:
+        return None   # poor R:R — zone target not far enough above SL
 
     # -- Lot 1 entry ----------------------------------------------------------
     # First 1-min close INSIDE the zone AND after the zone became valid (trapped_on).
