@@ -678,7 +678,7 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
         # Indices: weekly + monthly contracts in registry; take last expiry of this month
         day_expiry = _month_expiry(td)
         if not day_expiry:
-            _log.info(f"  {trade_date}: registry not loaded, cannot resolve monthly expiry - skip")
+            _log.info(f"  {trade_date}: no {td.strftime('%b')} expiry in registry (contract likely expired) - skip")
             return []
         _log.info(f"  {trade_date}: monthly expiry (index) = {day_expiry}")
     else:
@@ -946,8 +946,9 @@ def run_scalein_backtest(token: str, days: int = 10,
     if not (start and end):
         trading_days = trading_days[-days:]
 
+    expiry_mode_label = "MONTHLY(REGISTRY)" if use_monthly_expiry else ("STOCK(REGISTRY)" if IS_STOCK else "NEXT-WEEK(REGISTRY)")
     _log.info(f"\n{IDX} Scale-In Backtest  {trading_days[0]} to {trading_days[-1]}"
-          f"  ({len(trading_days)} days)  Expiry=NEXT-WEEK(REGISTRY)  SL_BUF={SL_BUF}")
+          f"  ({len(trading_days)} days)  Expiry={expiry_mode_label}  SL_BUF={SL_BUF}")
 
     # Fetch spot bars
     spot_from = (date.fromisoformat(trading_days[0]) - timedelta(days=7)).isoformat()
