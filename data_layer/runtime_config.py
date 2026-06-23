@@ -139,36 +139,12 @@ def _ic_index_default(index: str) -> Dict[str, Any]:
                      "strike_step": 100, "lot_size": 100})
     return base
 
-# roundoff_step overrides per instrument (others fall back to ExchangeConfig.strike_steps)
-_TT_ROUNDOFF_OVERRIDE: Dict[str, int] = {
-    "NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100, "CRUDEOIL": 100,
-}
-
-
-def _tt_index_default(index: str) -> Dict[str, Any]:
-    idx = index.upper()
-    if idx in _TT_ROUNDOFF_OVERRIDE:
-        roundoff = _TT_ROUNDOFF_OVERRIDE[idx]
-    else:
-        from config.global_config import ExchangeConfig
-        roundoff = int(ExchangeConfig().strike_steps.get(idx, 50))
-    return {
-        "roundoff_step":     roundoff,
-        "dte_offset_ladder": {"5": 5, "4": 4, "3": 3, "2": 2, "1": 1},
-        "lookback_days":     2,
-        "buy_depth":         0,
-        "htf_minutes":       75,
-        "mtf_minutes":       5,
-        "sl_min_minutes":    1,
-    }
-
 
 def _build_index_defaults() -> Dict[str, Any]:
     return {
         idx: {
             "sell_straddle": _ss_index_default(idx),
             "iron_condor":   _ic_index_default(idx),
-            "trap_trading":  _tt_index_default(idx),
         }
         for idx in _ALL_INDICES
     }
@@ -235,15 +211,6 @@ _DEFAULTS: Dict[str, Any] = {
             "thursday":  {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
             "friday":    {"enabled": False, "profit_target_pct": 0.0, "loss_sl_pct": 0.0},
         },
-    },
-    "trap_trading": {
-        "htf_minutes":            75,
-        "ltf_minutes":            5,
-        "adx_threshold":          20.0,
-        "volume_spike_multiplier": 1.5,
-        "swing_lookback":         5,
-        "zone_tolerance_pct":     0.5,
-        "void_atr_mult":          2.0,
     },
     # New per-index config section
     "indices": _build_index_defaults(),

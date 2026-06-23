@@ -7,7 +7,7 @@ to the exact broker-specific symbol or key required by:
   • Fyers  WebSocket subscription & order placement  (trading_symbol)
   • Shoonya / AngelOne / Dhan                        (derived from SymbolTranslator)
   • StrikeRebalancer (subscription tokens)
-  • TrapTradingEngine (LTP tracking)
+  • TrapScannerEngine (LTP tracking)
   • HistoricalReplay (Upstox historical API)
 
 Data source: Upstox get_option_contracts REST API.

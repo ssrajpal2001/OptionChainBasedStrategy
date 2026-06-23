@@ -1,7 +1,6 @@
 """
 run_system.py — Unified single-command launcher for the OptionChain AlgoTrader.
 
-Replaces direct invocations of main.py by adding:
   • Automatic dependency verification on startup
   • Directory and database bootstrap
   • Optional web dashboard (--ui flag)
@@ -10,14 +9,8 @@ Usage:
   # Live trading with web dashboard
   python run_system.py --mode live  --ui --port 5000 --index NIFTY
 
-  # Paper trading with local web UI
+  # Paper trading (real order routed + local sim fill) with local web UI
   python run_system.py --mode paper --ui --port 5000
-
-  # Demo mode (synthetic data, no broker needed)
-  python run_system.py --mode demo
-
-  # Historical backtest
-  python run_system.py --mode backtest --start 2024-01-15 --end 2024-02-14
 
   # Full flag list
   python run_system.py --help
@@ -106,9 +99,9 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--mode",
-        choices=["paper", "live", "backtest", "demo"],
-        default="demo",
-        help="Execution mode (default: demo)",
+        choices=["paper", "live"],
+        default="live",
+        help="Execution mode (default: live). 'paper' = real order routed + local sim fill.",
     )
     p.add_argument(
         "--index",
@@ -117,8 +110,6 @@ def _parse_args() -> argparse.Namespace:
              "at once (e.g. NIFTY,SENSEX). This drives which strategies SPAWN (monitored_indices).",
     )
     p.add_argument("--capital",   type=float, default=500_000.0, help="Client capital in INR")
-    p.add_argument("--start",     default=None, help="Backtest start date YYYY-MM-DD")
-    p.add_argument("--end",       default=None, help="Backtest end date YYYY-MM-DD")
     p.add_argument(
         "--log-level",
         default="INFO",
@@ -309,42 +300,7 @@ def _load_registry_from_db(registry) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Backtest runner
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _run_backtest(cfg, underlying: str, start: date, end: date, capital: float) -> None:
-    logger = logging.getLogger(__name__)
-    logger.info("BACKTEST: %s  %s → %s  capital=%.0f", underlying, start, end, capital)
-
-    from data_layer.base_feeder import EventBus
-    from strategies.base_strategy import ConfluenceEngine
-    from strategies.strategy_a_oi import StrategyA_OIZone
-    from strategies.strategy_b_trap import StrategyB_Trap
-    from strategies.strategy_c_panic import StrategyC_Panic
-    from backtester.historical_core import HistoricalBacktester
-
-    cfg.active_index = underlying
-    bus = EventBus()
-    strategies = [StrategyA_OIZone(cfg), StrategyB_Trap(cfg), StrategyC_Panic(cfg)]
-    confluence = ConfluenceEngine(bus, cfg, strategies)
-
-    bt = HistoricalBacktester(cfg, confluence)
-    report = bt.run(underlying=underlying, start=start, end=end, capital=capital)
-    report.print()
-
-    import json
-    out_path = os.path.join(
-        cfg.storage.backtest_dir,
-        f"backtest_{underlying}_{start}_{end}.json",
-    )
-    os.makedirs(cfg.storage.backtest_dir, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(report.to_dict(), f, indent=2)
-    logger.info("Backtest results saved: %s", out_path)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Live / Paper / Demo async runner
+# Live / Paper async runner
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _run_live(
@@ -381,11 +337,6 @@ async def _run_live(
     from matrix_engine.candle_cache import CandleCache
     from matrix_engine.gap_handler import GapHandler
     from matrix_engine.option_matrix import OptionMatrixEngine
-    from strategies.base_strategy import ConfluenceEngine
-    from strategies.strategy_a_oi import StrategyA_OIZone
-    from strategies.strategy_b_trap import StrategyB_Trap
-    from strategies.strategy_c_panic import StrategyC_Panic
-    from strategies.trap_trading_engine import TrapTradingEngine
     from strategies.iron_condor import IronCondorStrategy
     from strategies.sell_straddle import SellStraddleStrategy
     from execution_bridge import ExecutionRouter
@@ -399,9 +350,6 @@ async def _run_live(
     logger.info("run_system: enabled strategies = %s", sorted(_enabled_strats) or "ALL")
 
     bus = EventBus()
-    strategies = [StrategyA_OIZone(cfg), StrategyB_Trap(cfg), StrategyC_Panic(cfg)]
-    confluence    = ConfluenceEngine(bus, cfg, strategies)
-    trap_engine   = TrapTradingEngine(bus, cfg)
 
     # Premium-selling strategies — one instance per monitored index
     _iron_condors: List[IronCondorStrategy] = [
@@ -419,8 +367,6 @@ async def _run_live(
     # for the min-LTP expiry shift (no-op if the feature is unused).
     for _ic in _iron_condors:
         _ic.set_feeder(feeder)
-    # Trap engine subscribes its own deep-ITM tracked CE/PE strikes via the feeder.
-    trap_engine.set_feeder(feeder)
     router        = ExecutionRouter(bus, registry, cfg)
     from data_layer.client_db import ClientDB as _ClientDB
     _shared_client_db = _ClientDB()
@@ -442,9 +388,6 @@ async def _run_live(
         from data_layer.delta_chain_manager import DeltaChainManager
         delta_chain = DeltaChainManager(bus, cfg, _crypto_idx)
         logger.info("Delta crypto feed enabled for %s.", _crypto_idx)
-    # Trap engine needs the DB to warm-start historical HTF/MTF traps from 1m bars.
-    # The live construction path (above) built it without a DB — attach it here.
-    trap_engine._client_db = _shared_client_db
     straddle_bridge = StraddleExecutionBridge(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
@@ -492,8 +435,6 @@ async def _run_live(
 
     # ── Data-layer operational modules ────────────────────────────────────────
     rebalancer     = StrikeRebalancer(bus, cfg, feeder)
-    # Let the trap pin its deep-ITM tracked strikes so cleanup keeps them live.
-    trap_engine.set_rebalancer(rebalancer)
     # Give the trap scanner book manager the rebalancer so new engines can pin their strikes.
     trap_scanner_manager.set_rebalancer(rebalancer)
     # Give the straddle manager the rebalancer so it can call enable_chain() when a book spawns
@@ -526,7 +467,6 @@ async def _run_live(
                 router=router,
                 rebalancer=rebalancer,
                 feeder=feeder,
-                trap_engine=trap_engine,
                 risk_manager=risk_mgr,
                 iron_condors=_iron_condors,
                 straddle_manager=straddle_manager,
@@ -570,15 +510,7 @@ async def _run_live(
             _ic.start()
     # SellStraddle: the book manager spawns/starts one independent book per (client,binding,index)
     # deployment and keeps reconciling (auto-start on deploy). Started as a task below.
-
-    # Warm-start the trap engine: replay historical 1m bars from the DB to rebuild
-    # prior HTF/MTF trap levels so it isn't IDLE/cold at boot. Without this the
-    # engine only builds state from live candles going forward (hours to warm up).
-    if "trap" in _enabled_strats:
-        try:
-            await trap_engine.warm_start(list(cfg.monitored_indices))
-        except Exception as _exc:
-            logger.warning("trap_engine.warm_start failed: %s", _exc)
+    # TrapScanner: same per-binding pattern via trap_scanner_manager (task below).
 
     # Admin console runs as a detached background task — its completion or any
     # internal stream error must NOT trigger the engine shutdown.  Only the
@@ -589,9 +521,6 @@ async def _run_live(
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
         asyncio.create_task(option_matrix.run(),        name="option_matrix"),
     ]
-    if "trap" in _enabled_strats:
-        tasks.append(asyncio.create_task(confluence.run(),    name="confluence"))
-        tasks.append(asyncio.create_task(trap_engine.run(),   name="trap_engine"))
     if "sell_straddle" in _enabled_strats and straddle_manager is not None:
         tasks.append(asyncio.create_task(straddle_manager.run(), name="straddle_books"))
     if "trap_scanner" in _enabled_strats:
@@ -642,14 +571,13 @@ async def _run_live(
                 logger.warning("Task '%s' completed normally — triggered shutdown.", name)
 
     logger.info("Shutting down…")
-    if "trap" in _enabled_strats:
-        confluence.stop()
-        trap_engine.stop()
     if "iron_condor" in _enabled_strats:
         for _ic in _iron_condors:
             _ic.stop()
     if straddle_manager is not None:
         await straddle_manager.stop_async()   # awaits task cancellation → frees EventBus queues
+    if trap_scanner_manager is not None:
+        await trap_scanner_manager.stop_async()
     risk_mgr.stop()
     rebalancer.stop()
     strike_cleanup.stop()
@@ -723,23 +651,11 @@ def main() -> None:
     )
 
     # ── Mode dispatch ─────────────────────────────────────────────────────────
-    if args.mode == "backtest":
-        if not args.start or not args.end:
-            logger.error("--start and --end are required for backtest mode.")
-            sys.exit(1)
-        _run_backtest(
-            cfg,
-            underlying=args.index,
-            start=date.fromisoformat(args.start),
-            end=date.fromisoformat(args.end),
-            capital=args.capital,
-        )
-
-    elif args.mode in ("paper", "demo", "live"):
+    if args.mode in ("paper", "live"):
         from config.client_profiles import REGISTRY
         registry = REGISTRY
 
-        if args.mode in ("paper", "demo"):
+        if args.mode == "paper":
             _setup_default_client(registry, args.capital)
         else:
             _setup_live_clients(registry)
@@ -755,7 +671,7 @@ def main() -> None:
         )
 
     else:
-        logger.error("Unknown mode: %s", args.mode)
+        logger.error("Unknown mode: %s (valid: paper, live)", args.mode)
         sys.exit(1)
 
 

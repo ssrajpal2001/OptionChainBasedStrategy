@@ -1,0 +1,20 @@
+Loading REGISTRY for NIFTY...
+Fetching spot (NSE_INDEX|Nifty 50) from 2026-04-25...
+
+--- 2026-05-25  ---
+  2026-05-25 PE: no bars for key=NSE_FO|56381
+
+--- 2026-05-26  ---
+Traceback (most recent call last):
+  File "E:\AlgoSoft\OptionChainBasedStrategy\scripts\nifty_backtest_3m.py", line 679, in <module>
+    result = run_backtest_3m(
+             ^^^^^^^^^^^^^^^^
+  File "E:\AlgoSoft\OptionChainBasedStrategy\scripts\nifty_backtest_3m.py", line 602, in run_backtest_3m
+    day_trades = _run_day(
+                 ^^^^^^^^^
+  File "E:\AlgoSoft\OptionChainBasedStrategy\scripts\nifty_backtest_3m.py", line 467, in _run_day
+    print(f"  {today_str} {opt_type}  "
+  File "D:\Python\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u20b9' in position 72: character maps to <undefined>

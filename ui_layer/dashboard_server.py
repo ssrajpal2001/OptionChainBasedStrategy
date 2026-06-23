@@ -243,11 +243,6 @@ try:
         ss_entry_end:      str   = "12:00"
         ss_squareoff_time: str   = "15:15"
         ss_max_trades:     int   = 1
-        # Liquidity Trap Trading (new 5-stage MTF engine)
-        tt_htf_minutes:   int   = 75
-        tt_ltf_minutes:   int   = 5
-        tt_sl_mode:       str   = "dynamic"
-        tt_sl_pct:        float = 2.0
 
     class _ChangeAdminPasswordSchema(_PydanticBase):
         current_password: str
@@ -337,7 +332,7 @@ try:
         index: str  # NIFTY / BANKNIFTY / FINNIFTY
 
     class _StrategySelectionItem(_PydanticBase):
-        strategy: str   # sell_straddle | iron_condor | trap_trading
+        strategy: str   # sell_straddle | iron_condor | trap_scanner
         instrument: str # NIFTY | BANKNIFTY | FINNIFTY | SENSEX | MIDCPNIFTY
 
     class _StrategySelectionsSchema(_PydanticBase):
@@ -352,25 +347,6 @@ try:
         max_sl_rs:      float = 0.0
         squareoff_time: str   = "15:15"
 
-    class _TrapConfigUpdateSchema(_PydanticBase):
-        HTF_MINUTES:         Optional[int]   = None
-        MTF_MINUTES:         Optional[int]   = None
-        LTF_MINUTES:         Optional[int]   = None
-        RETEST_ZONE_PERCENT: Optional[float] = None
-        SLIPPAGE_BUFFER:     Optional[float] = None
-        bars_lookback_days:  Optional[int]   = None
-        SL_MODE:             Optional[str]   = None  # "dynamic" | "structural"
-        SL_PCT:              Optional[float] = None  # % below entry (dynamic mode)
-        SL_BUFFER_PCT:       Optional[float] = None  # % buffer below structural SL level
-        ENTRY_CUTOFF_TIME:   Optional[str]   = None  # HH:MM — no new entries after this time
-
-    class _TrapInstrumentsSchema(_PydanticBase):
-        instruments: List[str]
-
-    class _TrapReplaySchema(_PydanticBase):
-        symbol:     str
-        start_date: str   # ISO date string: "2026-05-01"
-        end_date:   str   # ISO date string: "2026-05-31"
 
     class _TrapHistoricalReplaySchema(_PydanticBase):
         script:        str            # "NIFTY" | "BANKNIFTY"
@@ -626,7 +602,6 @@ class DashboardServer:
         router=None,      # ExecutionRouter
         rebalancer=None,  # StrikeRebalancer
         feeder=None,      # GlobalFeeder — optional, for admin feeder management
-        trap_engine=None, # TrapTradingEngine — optional, for strategy telemetry
         risk_manager=None, # RiskManager — optional, for firm risk summary + kill-all
         iron_condors=None,  # List[IronCondorStrategy]
         sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
@@ -640,7 +615,6 @@ class DashboardServer:
         self._router = router
         self._rebalancer = rebalancer
         self._feeder = feeder
-        self._trap_engine = trap_engine
         self._risk_manager = risk_manager
         self._iron_condors: list = iron_condors or []
         self._straddle_manager = straddle_manager
@@ -2160,7 +2134,7 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "iron_condor", "trap_trading"}
+            allowed_strategies = {"sell_straddle", "iron_condor", "trap_scanner"}
             allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"}
             import json as _json
             validated = []
@@ -2178,7 +2152,7 @@ class DashboardServer:
         async def api_client_positions(user: dict = Depends(_require_client)):
             """
             Live open legs per (binding, strategy), read from the GLOBAL strategy
-            instances (_iron_condors / _sell_straddles / _trap_engine). Positions
+            instances (_iron_condors / _sell_straddles / trap_scanner books). Positions
             are engine-level (per underlying); we surface them under each of the
             client's deployments so the portal shows the strikes being traded.
             """
@@ -2427,54 +2401,6 @@ class DashboardServer:
                                     straddle_info["tsl"] = {"enabled": False}
                                 # Exit eval cache — built every 3s by _check_exits
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
-                    elif sname == "trap_trading":
-                        eng = getattr(_srv, "_trap_engine", None)
-                        op = getattr(eng, "_open_positions", {}) if eng else {}
-                        prem = getattr(eng, "_prem_cache", {}) if eng else {}
-                        # Day-locked tracked strikes (prev-day ATM + DTE), shown even
-                        # when there is no open position so the UI reflects scanning.
-                        _legp = getattr(eng, "_leg_prem", {}) if eng else {}
-                        _htf_det = getattr(eng, "_htf_det", {}) if eng else {}
-                        _mtf_det = getattr(eng, "_mtf_det", {}) if eng else {}
-                        _ds = getattr(eng, "_day_strikes", {}).get(underlying) if eng else None
-                        if _ds is not None:
-                            def _legview(strike, opt):
-                                lk = f"{underlying}:{int(strike)}:{opt}"
-                                h = _htf_det.get(lk)
-                                m = _mtf_det.get(lk)
-                                hlv = getattr(h, "active_level", None)
-                                return {
-                                    "strike": int(strike),
-                                    "ltp": round(float(_legp.get((underlying, int(strike), opt), 0.0) or 0.0), 2),
-                                    "htf_state": getattr(getattr(h, "state", None), "name", "WATCH") if h else "—",
-                                    "mtf_state": getattr(getattr(m, "state", None), "name", "WATCH") if m else "—",
-                                    "level_l": round(float(getattr(hlv, "entry_l", 0.0) or 0.0), 2) if hlv else 0.0,
-                                    "level_h": round(float(getattr(hlv, "sl_h", 0.0) or 0.0), 2) if hlv else 0.0,
-                                    "traps": len(getattr(h, "_levels", []) or []) if h else 0,
-                                }
-                            _ce = _legview(_ds.ce_strike, "CE")
-                            _pe = _legview(_ds.pe_strike, "PE")
-                            tracking = {
-                                "atm": _ds.atm, "dte": _ds.dte, "offset": _ds.offset_pts,
-                                "ce_strike": _ds.ce_strike, "pe_strike": _ds.pe_strike,
-                                "ce_ltp": _ce["ltp"], "pe_ltp": _pe["ltp"],
-                                "ce": _ce, "pe": _pe,
-                                # back-compat single fields (CE leg)
-                                "phase": _ce["htf_state"], "entry_line": 0.0,
-                            }
-                        for _tid, tup in op.items():
-                            try:
-                                _t, opt_sym, entry_px, qty = tup
-                            except Exception:
-                                continue
-                            ltp = float(prem.get(opt_sym, entry_px) or entry_px)
-                            _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
-                            _lots = (abs(int(qty)) // _ls) if _ls else 0
-                            legs.append({"symbol": opt_sym, "qty": int(qty),
-                                         "lot_size": _ls, "lots": _lots,
-                                         "entry_price": round(float(entry_px), 2),
-                                         "ltp": round(ltp, 2),
-                                         "pnl": round((float(entry_px) - ltp) * abs(int(qty)), 2)})
                 except Exception as exc:
                     logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
                 by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
@@ -2985,7 +2911,7 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle", "iron_condor", "trap_trading", "trap_scanner"}
+            allowed_strategies = {"sell_straddle", "iron_condor", "trap_scanner"}
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 
@@ -3345,21 +3271,6 @@ class DashboardServer:
                 "ts":     datetime.now(IST).isoformat(),
             }
 
-        # ── ADMIN — strategy telemetry (TrapTradingEngine live state) ────────
-
-        @app.get("/api/admin/strategy/telemetry", tags=["Admin"])
-        async def api_strategy_telemetry(_: dict = Depends(_require_admin)):
-            now_ist = datetime.now(IST).isoformat()
-            eng = _srv._trap_engine
-            if eng is None:
-                return {"ts": now_ist, "trap_engine": {}, "active": False}
-            try:
-                snapshot = eng.telemetry_snapshot()
-                return {"ts": now_ist, "trap_engine": snapshot, "active": True}
-            except Exception as exc:
-                logger.warning("Dashboard: strategy telemetry read failed: %s", exc)
-                return {"ts": now_ist, "trap_engine": {}, "active": False, "error": str(exc)}
-
         # ── ADMIN — premium-selling strategy registry ────────────────────
 
         @app.get("/api/admin/strategies", tags=["Admin"])
@@ -3431,7 +3342,6 @@ class DashboardServer:
             cfg = RuntimeConfig.get()
             ic  = cfg.get("iron_condor", {})
             ss  = cfg.get("sell_straddle", {})
-            tt  = cfg.get("trap_trading", {})
             ic_idx = ic.get("per_index", {})
             return {
                 "ic_squareoff_time":  ic.get("squareoff_time", "15:15"),
@@ -3454,10 +3364,6 @@ class DashboardServer:
                 "ss_entry_end":       ss.get("entry_end",      "12:00"),
                 "ss_squareoff_time":  ss.get("squareoff_time", "15:15"),
                 "ss_max_trades":      ss.get("max_trades",      1),
-                "tt_htf_minutes":     tt.get("htf_minutes",      75),
-                "tt_ltf_minutes":     tt.get("ltf_minutes",       5),
-                "tt_sl_mode":         tt.get("sl_mode",           "dynamic"),
-                "tt_sl_pct":          tt.get("sl_pct",            2.0),
             }
 
         @app.post("/api/admin/strategy/config/update", tags=["Admin"])
@@ -3488,12 +3394,6 @@ class DashboardServer:
                     "squareoff_time": body.ss_squareoff_time,
                     "max_trades":     body.ss_max_trades,
                 },
-                "trap_trading": {
-                    "htf_minutes": body.tt_htf_minutes,
-                    "ltf_minutes": body.tt_ltf_minutes,
-                    "sl_mode":     body.tt_sl_mode,
-                    "sl_pct":      body.tt_sl_pct,
-                },
             }
             RuntimeConfig.update(patch)
 
@@ -3509,14 +3409,6 @@ class DashboardServer:
                     ss.reconfigure()
                 except Exception as e:
                     reconfigure_errors.append(f"sell_straddle[{ss._underlying}]: {e}")
-            if _srv._trap_engine is not None:
-                try:
-                    _srv._cfg.trap_engine.reconfigure(
-                        SL_MODE=body.tt_sl_mode,
-                        SL_PCT=body.tt_sl_pct,
-                    )
-                except Exception as e:
-                    reconfigure_errors.append(f"trap_engine: {e}")
 
             if reconfigure_errors:
                 logger.warning("strategy/config/update: partial reconfigure errors: %s", reconfigure_errors)
@@ -3538,7 +3430,6 @@ class DashboardServer:
                 "index": idx,
                 "sell_straddle": RuntimeConfig.index_section(idx, "sell_straddle"),
                 "iron_condor":   RuntimeConfig.index_section(idx, "iron_condor"),
-                "trap_trading":  RuntimeConfig.index_section(idx, "trap_trading"),
             }
 
         @app.post("/api/admin/strategy/config/{index}", tags=["Admin"])
@@ -3574,11 +3465,6 @@ class DashboardServer:
                         except Exception as exc:
                             logger.warning("reconfigure IC[%s]: %s", idx, exc)
 
-            if "trap_trading" in body:
-                # Trap engine reads settings live via RuntimeConfig.index_section, so
-                # persisting is sufficient; it applies on the next day-strike lock.
-                RuntimeConfig.set_index_section(idx, "trap_trading", body["trap_trading"])
-
             logger.info("Dashboard: per-index config saved for %s.", idx)
             return {"ok": True, "message": f"Config for {idx} saved and injected into running strategies."}
 
@@ -3586,725 +3472,6 @@ class DashboardServer:
         async def api_all_indices_config(_: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             return RuntimeConfig.get_all_indices()
-
-        @app.get("/api/admin/strategy/trap-config", tags=["Admin"])
-        async def api_trap_config_get(_: dict = Depends(_require_admin)):
-            from data_layer.runtime_config import RuntimeConfig
-            cfg = RuntimeConfig.get().get("trap_trading") or {}
-            return {"ok": True, "config": cfg}
-
-        @app.post("/api/admin/strategy/trap-config", tags=["Admin"])
-        async def api_trap_config_save(
-            request: Request, _: dict = Depends(_require_admin),
-        ):
-            # Note: TrapEngineConfig (HTF_MINUTES, MTF_MINUTES, LTF_MINUTES,
-            # RETEST_ZONE_PERCENT, SLIPPAGE_BUFFER, bars_lookback_days) is now
-            # managed at POST /api/admin/trap/config. This endpoint manages
-            # RuntimeConfig overrides only (adx_threshold, volume_spike_multiplier,
-            # swing_lookback, zone_tolerance_pct, void_atr_mult). Callers should
-            # migrate timeframe parameters to /api/admin/trap/config.
-            from data_layer.runtime_config import RuntimeConfig
-            try:
-                body = await request.json()
-            except Exception:
-                return {"ok": False, "error": "Invalid JSON body."}
-            allowed = {"htf_minutes", "ltf_minutes", "retest_zone_pct",
-                       "slippage_buffer", "sl_mode", "sl_pct",
-                       "sl_buffer_pct", "entry_cutoff_time"}
-            patch = {k: v for k, v in body.items() if k in allowed}
-            if not patch:
-                return {"ok": False, "error": "No valid fields provided."}
-            RuntimeConfig.update({"trap_trading": patch})
-            # Live-inject into TrapEngineConfig
-            engine_cfg = getattr(getattr(_srv, "_cfg", None), "trap_engine", None)
-            if engine_cfg is not None:
-                try:
-                    live_updates = {}
-                    if "sl_mode" in patch:
-                        live_updates["SL_MODE"] = patch["sl_mode"]
-                    if "sl_pct" in patch:
-                        live_updates["SL_PCT"] = patch["sl_pct"]
-                    if "retest_zone_pct" in patch:
-                        live_updates["RETEST_ZONE_PERCENT"] = patch["retest_zone_pct"]
-                    if "slippage_buffer" in patch:
-                        live_updates["SLIPPAGE_BUFFER"] = patch["slippage_buffer"]
-                    if "sl_buffer_pct" in patch:
-                        live_updates["SL_BUFFER_PCT"] = patch["sl_buffer_pct"]
-                    if "entry_cutoff_time" in patch:
-                        live_updates["ENTRY_CUTOFF_TIME"] = patch["entry_cutoff_time"]
-                    if live_updates:
-                        engine_cfg.reconfigure(**live_updates)
-                except Exception as exc:
-                    logger.warning("Trap config live-inject failed: %s", exc)
-            logger.info("Trap Trading config saved: %s", patch)
-            return {"ok": True, "message": "Trap Trading config saved."}
-
-        # ── ADMIN — TrapEngineConfig REST endpoints ───────────────────────────
-
-        @app.get("/api/admin/trap/config", tags=["Admin"])
-        async def api_trap_engine_config_get(_: dict = Depends(_require_admin)):
-            """Return current TrapEngineConfig values."""
-            engine_cfg = getattr(_srv._cfg, "trap_engine", None)
-            if engine_cfg is None:
-                return {"ok": False, "error": "TrapEngineConfig not available"}
-            return {"ok": True, "config": engine_cfg.snapshot()}
-
-        @app.post("/api/admin/trap/config", tags=["Admin"])
-        async def api_trap_engine_config_set(
-            payload: _TrapConfigUpdateSchema,
-            _: dict = Depends(_require_admin),
-        ):
-            """Update one or more TrapEngineConfig fields atomically."""
-            engine_cfg = getattr(_srv._cfg, "trap_engine", None)
-            if engine_cfg is None:
-                return {"ok": False, "error": "TrapEngineConfig not available"}
-            try:
-                updates = {k: v for k, v in payload.model_dump().items() if v is not None}
-                if not updates:
-                    return {"ok": False, "error": "No fields provided."}
-                updated = engine_cfg.reconfigure(**updates)
-                return {"ok": True, "updated": updated, "config": engine_cfg.snapshot()}
-            except (ValueError, AttributeError) as exc:
-                return {"ok": False, "error": str(exc)}
-
-        @app.get("/api/admin/trap/client/{client_id}/instruments", tags=["Admin"])
-        async def api_trap_client_instruments_get(
-            client_id: str, _: dict = Depends(_require_admin),
-        ):
-            """Get the TrapTrading instrument list for a client."""
-            try:
-                instruments = await _srv._client_db.get_trap_instruments(client_id)
-                return {"ok": True, "client_id": client_id, "instruments": instruments}
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
-        @app.post("/api/admin/trap/client/{client_id}/instruments", tags=["Admin"])
-        async def api_trap_client_instruments_set(
-            client_id: str,
-            payload: _TrapInstrumentsSchema,
-            _: dict = Depends(_require_admin),
-        ):
-            """Set the TrapTrading instrument list for a client."""
-            try:
-                await _srv._client_db.set_trap_instruments(client_id, payload.instruments)
-                return {"ok": True, "client_id": client_id, "instruments": payload.instruments}
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
-        @app.get("/api/admin/trap/clients/instruments", tags=["Admin"])
-        async def api_trap_all_clients_instruments(_: dict = Depends(_require_admin)):
-            """Return trap_instruments for all clients in one call (avoids N+1 per-client fetches)."""
-            try:
-                clients = await asyncio.to_thread(_srv._client_db.get_all_clients_sync)
-                result = {}
-                for c in clients:
-                    cid = c.get("client_id") or c.get("id")
-                    if not cid:
-                        continue
-                    result[cid] = await _srv._client_db.get_trap_instruments(cid)
-                return {"ok": True, "instruments": result}
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
-        # ── ADMIN — TrapTrading paper backtest replay ─────────────────────────
-
-        @app.post("/api/strategies/trap_trading/replay", tags=["Admin"])
-        async def api_trap_replay(
-            payload: _TrapReplaySchema,
-            _: dict = Depends(_require_admin),
-        ):
-            """
-            Replay saved 1-min bars through the TrapTradingEngine in backtest mode.
-
-            Creates an isolated engine instance (is_backtest=True, no broker orders),
-            resamples bars to HTF/MTF, replays each bar through the state machine,
-            and returns the full trade log plus final phase per symbol.
-            """
-            import pandas as pd
-            from datetime import timedelta
-            from strategies.trap_trading_engine import TrapTradingEngine, _Phase
-            from data_layer.base_feeder import CandleEvent, EventBus as _EB
-
-            if _srv._client_db is None:
-                return {"ok": False, "error": "ClientDB not available."}
-
-            symbol = payload.symbol.upper()
-            try:
-                since = datetime.fromisoformat(payload.start_date).replace(
-                    hour=0, minute=0, second=0, microsecond=0, tzinfo=IST
-                )
-                until = datetime.fromisoformat(payload.end_date).replace(
-                    hour=23, minute=59, second=59, microsecond=0, tzinfo=IST
-                )
-            except ValueError as exc:
-                return {"ok": False, "error": f"Invalid date format: {exc}"}
-
-            rows = await asyncio.to_thread(
-                _srv._client_db.get_1m_bars_sync, symbol, since, until
-            )
-            if not rows:
-                return {
-                    "ok": False,
-                    "error": f"No 1-min bars found for {symbol} in [{payload.start_date}, {payload.end_date}].",
-                }
-
-            # Build isolated engine — no bus publishing, no DB client → pure sandbox
-            sandbox_bus = _EB()
-            sandbox_eng = TrapTradingEngine(sandbox_bus, _srv._cfg, client_db=None)
-
-            # Force every state to backtest mode as states are created
-            _original_get_state = sandbox_eng._get_state
-
-            def _bt_get_state(sym):
-                st = _original_get_state(sym)
-                st.is_backtest = True
-                return st
-
-            sandbox_eng._get_state = _bt_get_state  # monkey-patch for isolation
-
-            # Resample bars
-            tc = _srv._cfg.trap_engine
-            df = pd.DataFrame(rows)
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-            df = df.set_index("timestamp").sort_index()
-            agg = {"open": "first", "high": "max", "low": "min",
-                   "close": "last", "volume": "sum"}
-
-            _htf_origin = df.index[0].normalize().replace(hour=9, minute=15, second=0)
-            htf_df = df.resample(
-                f"{tc.HTF_MINUTES}min", closed="left", label="right", origin=_htf_origin
-            ).agg(agg).dropna()
-
-            mtf_df = df.resample(
-                f"{tc.MTF_MINUTES}min", closed="left", label="right"
-            ).agg(agg).dropna()
-
-            def _make_candle(sym, tf, ts, row):
-                return CandleEvent(
-                    symbol=sym, timeframe=tf,
-                    timestamp=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
-                    open=float(row["open"]), high=float(row["high"]),
-                    low=float(row["low"]),   close=float(row["close"]),
-                    volume=int(row["volume"]),
-                )
-
-            # Interleave HTF and MTF replay in chronological order
-            htf_events = [
-                (ts, "htf", row) for ts, row in htf_df.iterrows()
-            ]
-            mtf_events = [
-                (ts, "mtf", row) for ts, row in mtf_df.iterrows()
-            ]
-            all_events = sorted(htf_events + mtf_events, key=lambda x: x[0])
-
-            for ts, kind, row in all_events:
-                tf = tc.HTF_MINUTES if kind == "htf" else tc.MTF_MINUTES
-                candle = _make_candle(symbol, tf, ts, row)
-                if kind == "htf":
-                    sandbox_eng._process_htf(candle)
-                else:
-                    sandbox_eng._process_mtf(candle)
-
-            # Collect results
-            trade_log = sandbox_eng.backtest_log()
-            phase_map  = {
-                sym: st.phase.name
-                for sym, st in sandbox_eng._states.items()
-            }
-
-            return {
-                "ok":          True,
-                "symbol":      symbol,
-                "start_date":  payload.start_date,
-                "end_date":    payload.end_date,
-                "bars_total":  len(rows),
-                "htf_bars":    len(htf_df),
-                "mtf_bars":    len(mtf_df),
-                "trades":      trade_log,
-                "trade_count": len(trade_log),
-                "final_phase": phase_map,
-                "signal_count": sandbox_eng.signal_count(),
-            }
-
-        # ── ADMIN — Historical API replay (Upstox live data, no local DB) ────
-
-        @app.post("/api/strategies/trap_trading/historical_replay", tags=["Admin"])
-        async def api_trap_historical_replay(
-            payload: _TrapHistoricalReplaySchema,
-            _: dict = Depends(_require_admin),
-        ):
-            """
-            Pull real 1-min bars from Upstox historical API, run DTE ITM
-            strike selection, and replay through the TrapTradingEngine sandbox.
-
-            No local DB data required — works on weekends or when paper mode
-            has not accumulated bars yet.
-            """
-            import math
-            import pandas as pd
-            from datetime import date as _date, timedelta
-            from strategies.trap_trading_engine import TrapTradingEngine
-            from data_layer.base_feeder import CandleEvent, EventBus as _EB
-
-            script = payload.script.upper()
-            provider = payload.provider.lower()
-
-            # 1. Parse backtest_date
-            try:
-                bd = _date.fromisoformat(payload.backtest_date)
-            except ValueError as exc:
-                return {"ok": False, "error": f"Invalid backtest_date: {exc}"}
-
-            # 2. Provider + access token
-            if provider != "upstox":
-                return {"ok": False, "error": f"Provider '{provider}' not yet supported. Use 'upstox'."}
-            if _srv._client_db is None:
-                return {"ok": False, "error": "ClientDB not available."}
-
-            creds = await asyncio.to_thread(_srv._client_db.get_feeder_creds_sync, "upstox")
-            if not creds or not creds.get("access_token"):
-                return {
-                    "ok": False,
-                    "error": "No Upstox access token in DB. Authenticate via Admin > Feeder > Upstox first.",
-                }
-            access_token = creds["access_token"]
-
-            # 3. Load registry first — expiry must come from real contract dates, not weekday math
-            from data_layer.instrument_registry import REGISTRY as _REG
-            if not _REG.is_loaded(script):
-                try:
-                    await asyncio.to_thread(_REG.load_sync, script, access_token)
-                except Exception as exc:
-                    return {"ok": False, "error": f"Failed to load instrument registry [{script}]: {exc}"}
-
-            # 4. Active weekly expiry and DTE — always from registry
-            expiry = _next_weekly_expiry(bd, script)
-            dte    = (expiry - bd).days
-            step   = _STRIKE_STEPS.get(script, 50)
-            lot    = _LOT_SIZES_MAP.get(script, 75)
-
-            # 5. Prior trading day → underlying open/close → base_strike
-            prior_day  = _prior_trading_day(bd)
-            index_key  = _UPSTOX_INDEX_KEY.get(script, f"NSE_INDEX|{script}")
-            prior_str  = prior_day.isoformat()
-            bd_str     = bd.isoformat()
-
-            try:
-                prior_bars = await asyncio.to_thread(
-                    _fetch_upstox_candles_sync, access_token, index_key, prior_str, prior_str,
-                )
-            except Exception as exc:
-                return {"ok": False, "error": f"Failed to fetch prior-day bars ({prior_str}): {exc}"}
-
-            if not prior_bars:
-                return {"ok": False, "error": f"No bars for {script} on {prior_str} (market holiday?). Try another date."}
-
-            prior_open  = prior_bars[0]["open"]
-            prior_close = prior_bars[-1]["close"]
-            prior_high  = max(b["high"] for b in prior_bars)
-            prior_low   = min(b["low"]  for b in prior_bars)
-            base_strike = int(round(((prior_high + prior_low) / 2) / step) * step)
-
-            # 6. DTE ITM matrix
-            offset    = _dte_itm_offset(dte, step)
-            ce_strike = int(round((base_strike - offset) / step) * step)
-            pe_strike = int(round((base_strike + offset) / step) * step)
-
-            # 6b. Instrument keys from already-loaded registry
-            ce_key = _REG.get_upstox_key(script, expiry, ce_strike, "CE")
-            pe_key = _REG.get_upstox_key(script, expiry, pe_strike, "PE")
-
-            # Fallback: show constructed key if not found in registry (for display only)
-            ce_key_display = ce_key or _upstox_option_key(script, expiry, ce_strike, "CE")
-            pe_key_display = pe_key or _upstox_option_key(script, expiry, pe_strike, "PE")
-
-            if not ce_key and not pe_key:
-                diag_lines = _REG.get_diagnostics(script)
-                return {
-                    "ok": False,
-                    "error": (
-                        f"Contracts not found in Upstox registry for "
-                        f"{script} expiry={expiry.isoformat()} CE={ce_strike} PE={pe_strike}."
-                    ),
-                    "registry_diagnostics": diag_lines,
-                    "debug_hint": (
-                        f"Registry loaded {len(_REG._upstox_keys.get(script, {}))} contracts. "
-                        f"Known expiries: {[e.isoformat() for e in _REG.all_expiries(script)]}. "
-                        f"Check registry_diagnostics for full step-by-step log."
-                    ),
-                }
-
-            # 6. Fetch option premium bars — 2 prior trading days + backtest_date
-            #    The engine runs on OPTION PREMIUM bars (not spot).
-            #    Spot was only used to calculate which strike to select.
-            lookback_days = max(1, int(payload.lookback_days))
-            fetch_from = bd
-            for _ in range(lookback_days):
-                fetch_from = _prior_trading_day(fetch_from)
-            fetch_from_str = fetch_from.isoformat()
-
-            ce_bars: list = []
-            pe_bars: list = []
-            ce_fetch_error: str = ""
-            pe_fetch_error: str = ""
-
-            try:
-                ce_bars = await asyncio.to_thread(
-                    _fetch_upstox_candles_sync, access_token, ce_key, fetch_from_str, bd_str,
-                )
-            except Exception as exc:
-                ce_fetch_error = str(exc)
-                logger.warning("historical_replay CE fetch failed [%s]: %s", ce_key, exc)
-
-            try:
-                pe_bars = await asyncio.to_thread(
-                    _fetch_upstox_candles_sync, access_token, pe_key, fetch_from_str, bd_str,
-                )
-            except Exception as exc:
-                pe_fetch_error = str(exc)
-                logger.warning("historical_replay PE fetch failed [%s]: %s", pe_key, exc)
-
-            if not ce_bars and not pe_bars:
-                err = f"CE error: {ce_fetch_error}" if ce_fetch_error else ""
-                err += f" PE error: {pe_fetch_error}" if pe_fetch_error else ""
-                return {"ok": False, "error": f"No option premium bars fetched. {err}".strip()}
-
-            # 7. Helper: resample + run engine on one option's premium bars
-            tc  = _srv._cfg.trap_engine
-            agg = {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
-            from zoneinfo import ZoneInfo as _ZI
-            _IST = _ZI("Asia/Kolkata")
-
-            def _to_df(bars):
-                df = pd.DataFrame(bars)
-                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Kolkata")
-                return df.set_index("timestamp").sort_index()
-
-            def _mk_candle(sym, tf, ts, row):
-                ts_dt = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
-                if getattr(ts_dt, "tzinfo", None) is None:
-                    ts_dt = ts_dt.replace(tzinfo=_IST)
-                return CandleEvent(
-                    symbol=sym, timeframe=tf, timestamp=ts_dt,
-                    open=float(row["open"]),  high=float(row["high"]),
-                    low=float(row["low"]),    close=float(row["close"]),
-                    volume=int(row.get("volume", 0)),
-                )
-
-            from strategies.trap_trading_engine import _Phase as _TPhase
-
-            def _run_engine_on_bars(bars: list, sym_label: str):
-                """
-                Full 5-stage backtest on option premium 1m bars.
-
-                Stage 1+2: HTF (75m) candle processing
-                Stage 3:   1m bars used as synthetic ticks — check if premium
-                           retraces to entry_origin ± RETEST_ZONE_PERCENT
-                Stage 4:   MTF (5m) candle processing (only when in RETEST_ALERT)
-                Stage 5:   1m bars as ticks — check if premium touches ltf_entry_line
-                """
-                df = _to_df(bars)
-                _origin = df.index[0].normalize().replace(hour=9, minute=15, second=0)
-                htf = df.resample(f"{tc.HTF_MINUTES}min", closed="left", label="right", origin=_origin).agg(agg).dropna()
-                mtf = df.resample(f"{tc.MTF_MINUTES}min", closed="left", label="right").agg(agg).dropna()
-
-                eng = TrapTradingEngine(_EB(), _srv._cfg, client_db=None)
-                _orig = eng._get_state
-                def _bt(s):
-                    st = _orig(s)
-                    st.is_backtest = True
-                    return st
-                eng._get_state = _bt
-
-                transitions: list = []
-                htf_table:   list = []   # every HTF bar with remarks
-                mtf_table:   list = []   # every MTF bar with remarks
-                prev_phase = "IDLE"
-                retest_pct = tc.RETEST_ZONE_PERCENT / 100.0
-                slippage   = tc.SLIPPAGE_BUFFER
-
-                # Build chronological event list: HTF, MTF, and 1m ticks
-                htf_events = [(ts, "htf", row) for ts, row in htf.iterrows()]
-                mtf_events = [(ts, "mtf", row) for ts, row in mtf.iterrows()]
-                one_m_events = [(ts, "1m",  row) for ts, row in df.iterrows()]
-
-                all_events = sorted(htf_events + mtf_events + one_m_events, key=lambda x: x[0])
-
-                for ts, kind, row in all_events:
-                    st = eng._states.get(sym_label)
-                    prem = float(row["close"])
-
-                    if kind == "htf":
-                        tf = tc.HTF_MINUTES
-                        candle = _mk_candle(sym_label, tf, ts, row)
-                        eng._process_htf(candle)
-                        st = eng._states.get(sym_label)
-
-                        # Determine remark for HTF table
-                        new_phase = st.phase.name if st else "IDLE"
-                        remark = ""
-                        if prev_phase == "IDLE" and new_phase == "TRAP_LOCKED":
-                            lvs = st.trap_levels
-                            lv0 = lvs[0] if lvs else None
-                            remark = (
-                                f"STAGE 1+2 SINGLE-CANDLE TRAP — swept prev high, bearish close. "
-                                + (f"entry_origin={lv0.entry_origin:.2f} target={lv0.target_high:.2f}" if lv0 else "")
-                            )
-                        elif prev_phase == "IDLE" and new_phase == "HTF_BEARISH":
-                            remark = f"STAGE 1 — Bearish candle noted (H:{st.htf_bearish_high:.2f} L:{float(row['low']):.2f}). Waiting for sweep above H:{st.htf_bearish_high:.2f} to lock trap."
-                        elif prev_phase == "HTF_BEARISH" and new_phase == "HTF_BEARISH":
-                            remark = f"Stage 1 additional level added ({len(st.pending_levels)} pending, sweep needed above {st.htf_bearish_high:.2f})"
-                        elif prev_phase == "HTF_BEARISH" and new_phase == "TRAP_LOCKED":
-                            lvs = st.trap_levels
-                            levels_str = " | ".join(f"{lv.entry_origin:.0f}" for lv in lvs)
-                            remark = (
-                                f"STAGE 2 — SWEEP CONFIRMED. {len(lvs)} level(s) activated: [{levels_str}]  "
-                                f"target={st.target_high:.2f}"
-                            )
-                        elif prev_phase == "HTF_BEARISH" and new_phase == "IDLE":
-                            remark = "Bullish — no sweep. Reset to IDLE."
-                        elif new_phase == "HTF_BEARISH":
-                            remark = "Stage 1 candidate updated (still bearish, no sweep yet)."
-                        elif prev_phase == "TRAP_LOCKED" and new_phase not in ("TRAP_LOCKED", "RETEST_ALERT", "MTF_BEARISH", "MTF_LOCKED", "ARMED", "LIVE"):
-                            remark = "HTF bar after trap locked (monitoring for retest)."
-                        elif new_phase in ("RETEST_ALERT",):
-                            remark = f"STAGE 3 — Retest zone entered. premium={prem:.2f}"
-                        elif new_phase == "ARMED":
-                            remark = (
-                                f"STAGE 4 — MTF nested trap confirmed. "
-                                f"ltf_entry={st.ltf_entry_line:.2f}  ltf_sl={st.ltf_sl_line:.2f}"
-                            )
-                        elif new_phase == "LIVE":
-                            remark = f"STAGE 5 — ENTRY TRIGGERED. entry_price={st.entry_price:.2f}"
-
-                        htf_table.append({
-                            "ts":     str(ts)[:19],
-                            "open":   round(float(row["open"]),  2),
-                            "high":   round(float(row["high"]),  2),
-                            "low":    round(float(row["low"]),   2),
-                            "close":  round(float(row["close"]), 2),
-                            "phase":  new_phase,
-                            "remark": remark,
-                        })
-
-                    elif kind == "mtf":
-                        tf = tc.MTF_MINUTES
-                        candle = _mk_candle(sym_label, tf, ts, row)
-                        phase_before = eng._states.get(sym_label)
-                        phase_before_name = phase_before.phase.name if phase_before else "IDLE"
-                        eng._process_mtf(candle)
-                        st = eng._states.get(sym_label)
-                        new_phase_mtf = st.phase.name if st else "IDLE"
-                        mtf_remark = ""
-                        if phase_before_name == "RETEST_ALERT" and new_phase_mtf == "ARMED":
-                            mtf_remark = f"STAGE 4 — Bearish 5m candle → ARMED immediately. ltf_entry={st.ltf_entry_line:.2f}"
-                        elif phase_before_name == "MTF_BEARISH" and new_phase_mtf == "ARMED":
-                            mtf_remark = f"STAGE 4 — ARMED. ltf_entry={st.ltf_entry_line:.2f}"
-                        elif new_phase_mtf == "MTF_BEARISH":
-                            mtf_remark = "Stage 4 — legacy MTF_BEARISH (updating candidate)."
-                        mtf_table.append({
-                            "ts":     str(ts)[:19],
-                            "open":   round(float(row["open"]),  2),
-                            "high":   round(float(row["high"]),  2),
-                            "low":    round(float(row["low"]),   2),
-                            "close":  round(float(row["close"]), 2),
-                            "phase":  new_phase_mtf,
-                            "remark": mtf_remark,
-                        })
-
-                    elif kind == "1m" and st is not None:
-                        ts_time = ts.time() if hasattr(ts, "time") else None
-
-                        # Stage 3: scan all active trap levels highest-first
-                        if st.phase == _TPhase.TRAP_LOCKED:
-                            for lv in st.trap_levels:
-                                if not lv.active:
-                                    continue
-                                lo = lv.entry_origin * (1.0 - retest_pct)
-                                hi = lv.entry_origin * (1.0 + retest_pct)
-                                if lo <= prem <= hi:
-                                    st.active_level = lv
-                                    st.entry_origin = lv.entry_origin
-                                    st.target_high  = lv.target_high
-                                    st.phase = _TPhase.RETEST_ALERT
-                                    break
-
-                        # Stage 5: synthetic tick check — ARMED → LIVE (backtest entry)
-                        elif st.phase == _TPhase.ARMED and st.ltf_entry_line > 0:
-                            if prem <= st.ltf_entry_line + slippage:
-                                eng._record_backtest_entry(sym_label, sym_label, prem, st)
-
-                        # LTF exit guard — LIVE: check SL, target, EOD
-                        elif st.phase == _TPhase.LIVE and st.trade_id:
-                            exit_reason = None
-                            if st.ltf_sl_line > 0 and prem < st.ltf_sl_line:
-                                exit_reason = "SL_HIT"
-                            elif st.target_high > 0 and prem >= st.target_high:
-                                exit_reason = "TARGET_HIT"
-                            elif ts_time and ts_time.hour == 15 and ts_time.minute >= 25:
-                                exit_reason = "EOD_1530"
-                            if exit_reason:
-                                # Record exit into the backtest log entry
-                                for rec in eng._backtest_log:
-                                    if rec.get("trade_id") == st.trade_id:
-                                        entry_px = float(rec.get("entry_price", 0))
-                                        pnl_pts  = prem - entry_px
-                                        rec["exit_price"]  = round(prem, 2)
-                                        rec["exit_time"]   = str(ts)[:19]
-                                        rec["exit_reason"] = exit_reason
-                                        rec["pnl_pts"]     = round(pnl_pts, 2)
-                                        rec["pnl_rs"]      = round(pnl_pts * lot, 2)
-                                        break
-                                rb          = st.rolling_base
-                                trap_levels = st.trap_levels
-                                act_level   = st.active_level
-                                eng._reset_state(sym_label)
-                                eng._states[sym_label].rolling_base = rb
-                                eng._states[sym_label].trap_levels  = trap_levels
-                                eng._states[sym_label].active_level = act_level
-                                if exit_reason == "SL_HIT":
-                                    eng._reset_to_next_level(sym_label)
-
-                    # Track phase transitions
-                    st_now = eng._states.get(sym_label)
-                    new_phase = st_now.phase.name if st_now else "IDLE"
-                    if new_phase != prev_phase:
-                        transitions.append({
-                            "ts":         str(ts)[:19],
-                            "timeframe":  kind,
-                            "from_phase": prev_phase,
-                            "to_phase":   new_phase,
-                            "bar": {
-                                "open":  round(float(row["open"]),  2),
-                                "high":  round(float(row["high"]),  2),
-                                "low":   round(float(row["low"]),   2),
-                                "close": round(float(row["close"]), 2),
-                            },
-                        })
-                        prev_phase = new_phase
-
-                final = eng._states.get(sym_label)
-                trades_raw = eng.backtest_log()
-                return {
-                    "htf_bars":          len(htf),
-                    "mtf_bars":          len(mtf),
-                    "htf_table":         htf_table,
-                    "mtf_table":         mtf_table,
-                    "phase_transitions": [t for t in transitions if t["timeframe"] in ("htf","mtf")],
-                    "all_transitions":   transitions,
-                    "final_phase":       final.phase.name if final else "IDLE",
-                    "signal_count":      eng.signal_count(),
-                    "trades_raw":        trades_raw,
-                    "entry_origin":      round(final.entry_origin,   2) if final else 0,
-                    "target_high":       round(final.target_high,    2) if final else 0,
-                    "trap_levels":       [
-                        {"entry_origin": lv.entry_origin, "target": lv.target_high,
-                         "active": lv.active}
-                        for lv in (final.trap_levels if final else [])
-                    ],
-                    "ltf_entry_line":    round(final.ltf_entry_line, 2) if final else 0,
-                    "ltf_sl_line":       round(final.ltf_sl_line,    2) if final else 0,
-                    "rolling_base":      round(final.rolling_base,   2) if final else 0,
-                }
-
-            # 8. Run engine on CE premium bars and PE premium bars separately
-            ce_result = _run_engine_on_bars(ce_bars, "CE") if ce_bars else None
-            pe_result = _run_engine_on_bars(pe_bars, "PE") if pe_bars else None
-
-            # 9. Build trade logs with position sizing + exit summary
-            def _build_trade_logs(trades_raw, opt_type):
-                logs = []
-                for t in trades_raw:
-                    ep   = float(t.get("entry_price", 0))
-                    qty  = max(math.floor(payload.capital / (ep * lot)) * lot if ep > 0 else lot, lot)
-                    lots = qty // lot
-                    xp   = t.get("exit_price")
-                    pnl_pts = t.get("pnl_pts")
-                    pnl_rs  = round(float(pnl_pts) * lots, 2) if pnl_pts is not None else None
-                    logs.append({
-                        "timestamp":         t.get("timestamp", "")[:19],
-                        "type":              opt_type,
-                        "entry_price":       round(ep, 2),
-                        "quantity":          qty,
-                        "lots":              lots,
-                        "ltf_sl_line":       round(float(t.get("ltf_sl",       0)), 2),
-                        "macro_high_target": round(float(t.get("target_high",  0)), 2),
-                        "entry_origin":      round(float(t.get("entry_origin", 0)), 2),
-                        "margin_est":        round(ep * qty, 2),
-                        "exit_price":        round(xp, 2) if xp is not None else None,
-                        "exit_time":         t.get("exit_time", ""),
-                        "exit_reason":       t.get("exit_reason", "OPEN"),
-                        "pnl_pts":           round(float(pnl_pts), 2) if pnl_pts is not None else None,
-                        "pnl_rs":            pnl_rs,
-                    })
-                return logs
-
-            ce_trade_logs = _build_trade_logs(ce_result["trades_raw"], "CE") if ce_result else []
-            pe_trade_logs = _build_trade_logs(pe_result["trades_raw"], "PE") if pe_result else []
-            all_trade_logs = ce_trade_logs + pe_trade_logs
-
-            def _prem_summary(bars, key):
-                if not bars:
-                    return {"instrument_key": key, "bars": 0, "open": 0, "close": 0, "day_high": 0, "day_low": 0}
-                return {
-                    "instrument_key": key,
-                    "bars":      len(bars),
-                    "open":      round(bars[0]["open"],              2),
-                    "close":     round(bars[-1]["close"],            2),
-                    "day_high":  round(max(b["high"] for b in bars), 2),
-                    "day_low":   round(min(b["low"]  for b in bars), 2),
-                    "fetch_from": fetch_from_str,
-                    "fetch_to":   bd_str,
-                }
-
-            return {
-                "ok": True,
-                "contract_info": {
-                    "script":                 script,
-                    "backtest_date":          bd_str,
-                    "fetch_from":             fetch_from_str,
-                    "prior_day":              prior_str,
-                    "prior_day_open":         round(prior_open,  2),
-                    "prior_day_close":        round(prior_close, 2),
-                    "prior_day_high":         round(prior_high,  2),
-                    "prior_day_low":          round(prior_low,   2),
-                    "calculated_base_strike": base_strike,
-                    "days_to_expiry":         dte,
-                    "itm_offset_pts":         offset,
-                    "target_expiry":          expiry.isoformat(),
-                    "ce_strike":              ce_strike,
-                    "pe_strike":              pe_strike,
-                    "selected_ce_symbol":     ce_key_display,
-                    "selected_pe_symbol":     pe_key_display,
-                    "lot_size":               lot,
-                    "capital":                payload.capital,
-                    "engine_note": (
-                        "Engine runs on OPTION PREMIUM bars (CE and PE separately). "
-                        f"Bars fetched from {fetch_from_str} to {bd_str} ({lookback_days+1} trading days)."
-                    ),
-                },
-                "data_summary": {
-                    "ce_premium":     _prem_summary(ce_bars, ce_key_display),
-                    "pe_premium":     _prem_summary(pe_bars, pe_key_display),
-                    "ce_fetch_error": ce_fetch_error,
-                    "pe_fetch_error": pe_fetch_error,
-                },
-                "ce_engine": ce_result,
-                "pe_engine": pe_result,
-                # Flattened for UI compatibility
-                "phase_transitions": (ce_result or {}).get("phase_transitions", []),
-                "trade_logs":        all_trade_logs,
-                "trade_count":       len(all_trade_logs),
-                "final_phase": (
-                    f"CE:{(ce_result or {}).get('final_phase','N/A')} "
-                    f"PE:{(pe_result or {}).get('final_phase','N/A')}"
-                ),
-                "signal_count": (
-                    ((ce_result or {}).get("signal_count", 0)) +
-                    ((pe_result or {}).get("signal_count", 0))
-                ),
-                "option_data_note": "",
-            }
 
         # ── ADMIN — AMO connectivity test ─────────────────────────────────────
 
@@ -4397,13 +3564,14 @@ class DashboardServer:
                         ),
                     }
             else:
-                # Try spot from trap engine's spot cache (populated from live index ticks)
+                # Try ATM from the rebalancer's live state (updated from index ticks)
                 spot = 0.0
-                if _srv._trap_engine:
-                    try:
-                        spot = _srv._trap_engine._spot_cache.get(underlying, 0.0)
-                    except Exception:
-                        pass
+                try:
+                    _st = _srv._rebalancer._state.get(underlying) if _srv._rebalancer else None
+                    if _st is not None and _st.current_atm:
+                        spot = float(_st.current_atm)
+                except Exception:
+                    pass
                 if spot <= 0:
                     step = _STRIKE_STEPS.get(underlying, 50)
                     examples = {"NIFTY": "24500", "BANKNIFTY": "52000", "FINNIFTY": "23000"}
@@ -5896,7 +5064,6 @@ class DashboardServer:
             clients = self._registry.all_active() if self._registry else []
             sslist  = self._sell_straddles or []
             iclist  = self._iron_condors or []
-            trap    = self._trap_engine
             from data_layer import trade_history as _th
             _today = datetime.now(IST).date().isoformat()
 
@@ -5936,16 +5103,6 @@ class DashboardServer:
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
-                    elif sname == "trap_trading" and trap is not None:
-                        op   = getattr(trap, "_open_positions", {}) or {}
-                        prem = getattr(trap, "_prem_cache", {}) or {}
-                        for _tid, tup in op.items():
-                            try:
-                                _t, osym, ep, q = tup
-                            except Exception:
-                                continue
-                            ltp = float(prem.get(osym, ep) or ep)
-                            running += (float(ep) - ltp) * abs(int(q))
                 try:
                     c._daily_pnl = round(booked + running, 2)
                 except Exception:
