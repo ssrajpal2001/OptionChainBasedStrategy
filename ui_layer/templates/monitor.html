@@ -4779,9 +4779,26 @@ function amoTest() {
               </template>
               <!-- Contracts table: per-leg zone + LTF status (matches NiftyTrapScanner reference) -->
               <template x-if="bk.contracts">
-                <div class="mt-2 text-xs font-mono">
+                <div class="mt-2 text-xs font-mono" x-data="{ contractsOpen: false }">
+                  <!-- Collapsible header row -->
+                  <div class="flex items-center gap-2 cursor-pointer select-none" @click="contractsOpen=!contractsOpen"
+                       style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
+                    <span x-text="contractsOpen?'▾':'▸'" style="font-size:10px"></span>
+                    <span style="font-weight:600" x-text="bk.htf_source==='futures'?'HTF ZONE (FUT PRICE)':'HTF ZONE (OPT PRICE)'"></span>
+                    <!-- Compact summary when collapsed: LEG@STRIKE LTP (dist) -->
+                    <template x-if="!contractsOpen">
+                      <span style="color:var(--t-dim);margin-left:4px">
+                        <template x-for="[leg, ct] in Object.entries(bk.contracts)" :key="leg">
+                          <span :style="leg.startsWith('CE')?'color:var(--t-green)':'color:var(--t-red)'"
+                                x-text="leg+'@'+ct.strike+' '+(ct.ltp!=null?ct.ltp.toFixed(1):'—')+(ct.zone?.dist_pts!=null?' ('+ct.zone.dist_pts+'pts)':'')+' · '"></span>
+                        </template>
+                      </span>
+                    </template>
+                  </div>
+                  <!-- Expanded table -->
+                  <div x-show="contractsOpen">
                   <!-- Header -->
-                  <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;color:var(--t-muted)">
+                  <div class="grid mt-1 mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;color:var(--t-muted)">
                     <span>LEG</span><span>STRIKE</span><span>LTP</span>
                     <span x-text="bk.htf_source==='futures'?'HTF ZONE (FUT PRICE)':'HTF ZONE (OPT PRICE)'"></span>
                     <span>LTF STATUS</span>
@@ -4854,6 +4871,7 @@ function amoTest() {
                       </div>
                     </template>
                   </template>
+                  </div><!-- /x-show contractsOpen -->
                 </div>
               </template>
               <!-- Option zones (CE/PE) — TRAPPED/NEAR always visible; FAR collapsed -->
