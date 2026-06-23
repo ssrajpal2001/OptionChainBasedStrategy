@@ -629,9 +629,22 @@ def _run_day(index: str, cfg: dict, td: date,
         df_opp   = side_data.get(opp_type, {}).get("df_today", pd.DataFrame())
 
         # ── HTF zones for today ────────────────────────────────────────────
+        INTRADAY_SWITCH_DIST = 40.0   # pts: if no zone trigger within this of open → intraday
         zones = _htf_zones_for_today(df_all, htf_min, td)
+
+        # If no zones OR all zones far from today's open → fall back to intraday
+        today_open = float(df_today.iloc[0]["open"]) if not df_today.empty else None
+        if today_open is not None:
+            close_zones = [z for z in zones
+                           if abs(float(z["zone_trigger"]) - today_open) <= INTRADAY_SWITCH_DIST]
+            if not close_zones:
+                intra_zones = _htf_zones_for_today(df_all, htf_min, td, zone_lookback_days=0)
+                if intra_zones:
+                    zones = intra_zones
+                    print(f"  {opt_type}: zones far (open={today_open:.0f}) → intraday scan ({len(zones)} zone(s))")
+
         if not zones:
-            print(f"  {opt_type}: no TRAPPED/CLOSED HTF zones for {td}")
+            print(f"  {opt_type}: no TRAPPED HTF zones for {td}")
             continue
 
         # ── OPP zone trigger (for R:R and exit) ───────────────────────────
