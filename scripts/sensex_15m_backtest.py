@@ -56,20 +56,34 @@ def _load_bse_master() -> list:
 
 
 def find_option_key(strike: int, otype: str, min_expiry: date) -> str:
-    """Find BSE_FO instrument key for SENSEX option."""
+    """Find BSE_FO instrument key for SENSEX option.
+
+    BSE master quirks vs NSE:
+      - strike field is 'strike_price' (not 'strike')
+      - expiry is epoch-milliseconds integer (not ISO string)
+      - underlying_symbol must match exactly 'SENSEX' (SENSEX50 is a different product)
+    """
     master = _load_bse_master()
     ot = otype.upper()
     candidates = []
     for row in master:
+        # Only BSE F&O instruments
+        if not str(row.get("instrument_key", "")).startswith("BSE_FO|"):
+            continue
+        # Exact underlying match — SENSEX ≠ SENSEX50
+        row_und = str(row.get("underlying_symbol", "") or row.get("asset_symbol", "") or "").upper()
+        if row_und != "SENSEX":
+            continue
+        # Option type (instrument_type = "CE"/"PE" for BSE_FO options)
         itype = str(row.get("instrument_type", "")).upper()
         row_ot = itype if itype in ("CE", "PE") else str(row.get("option_type", "")).upper()
         if row_ot != ot:
             continue
-        row_strike = float(row.get("strike", 0) or 0)
-        if abs(row_strike - strike) > 0.5:
+        # Strike: BSE master uses 'strike_price', not 'strike'
+        row_strike = float(row.get("strike_price", 0) or row.get("strike", 0) or 0)
+        if row_strike <= 0 or abs(row_strike - strike) > 0.5:
             continue
-        # BSE master stores expiry as epoch-ms integer (e.g. 1751049600000),
-        # NOT an ISO string — date.fromisoformat fails silently and skips all rows.
+        # Expiry: epoch-ms integer in BSE master
         exp_raw = row.get("expiry", "")
         try:
             if isinstance(exp_raw, (int, float)) or (
@@ -85,20 +99,16 @@ def find_option_key(strike: int, otype: str, min_expiry: date) -> str:
             continue
         if exp_dt < min_expiry:
             continue
-        row_und = str(row.get("underlying_symbol", "") or "").upper()
-        sym_str = str(row.get("tradingsymbol", "") or row.get("name", "")).upper()
-        if "SENSEX" not in row_und and "SENSEX" not in sym_str:
-            continue
         key = str(row.get("instrument_key", ""))
         if key:
             candidates.append((exp_dt, key))
     if not candidates:
-        # Debug: print first BSE_FO row so field names are visible if lookup keeps failing
         sample = next((r for r in master if str(r.get("instrument_key","")).startswith("BSE_FO|")), None)
         if sample:
-            print(f"    [DEBUG] First BSE_FO row keys: {list(sample.keys())[:10]} "
-                  f"expiry={sample.get('expiry')} itype={sample.get('instrument_type')} "
-                  f"strike={sample.get('strike')} name={sample.get('name')}")
+            print(f"    [DEBUG] ALL BSE_FO keys: {list(sample.keys())}")
+            print(f"    [DEBUG] strike_price={sample.get('strike_price')} "
+                  f"underlying_symbol={sample.get('underlying_symbol')} "
+                  f"asset_symbol={sample.get('asset_symbol')} name={sample.get('name')}")
         return ""
     candidates.sort(key=lambda x: x[0])
     return candidates[0][1]
