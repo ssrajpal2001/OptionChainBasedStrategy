@@ -748,17 +748,10 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
             _log.info(f"  {trade_date} {ot}{strike}: no today bars (key={key}, have {len(available)} days: {[str(d) for d in available[:5]]}{'...' if len(available)>5 else ''})")
             continue
 
-        # HTF 75-min scan on PREVIOUS days only — today's bars must NOT be included.
-        # Using today's spike to form a zone and then "entering" that same spike is circular.
-        df_prev_opt = df_all[df_all["datetime"].dt.date < td].copy()
-        htf = _rs(df_prev_opt, HTF_MIN)
-        if len(htf) < 2:
-            _log.info(f"  {trade_date} {ot}{strike}: not enough HTF bars")
-            continue
-
-        _, htf_zones = scanner.scan_htf(htf)
-
-        # Only use zones trapped strictly BEFORE today (HTF scanned on prev-day bars only)
+        # Zone source depends on gap:
+        #   gap < 0.5%  → HTF 75-min from prev-day bars (fresh levels match today's premium)
+        #   gap ≥ 0.5%  → skip HTF (prev-day levels are stale at gapped premium); go straight
+        #                  to intraday 15-min cascade (zones form at today's actual levels)
         def _trapped_before_today(z):
             ts = z.get("trapped_on")
             if not ts:
@@ -768,23 +761,28 @@ def _run_day(trade_date: str, df_spot_all: pd.DataFrame,
             except Exception:
                 return False
 
-        valid = [z for z in htf_zones
-                 if z.get("status") in ("TRAPPED", "CLOSED") and _trapped_before_today(z)]
+        valid = []
+        if not gap_fired:
+            df_prev_opt = df_all[df_all["datetime"].dt.date < td].copy()
+            htf = _rs(df_prev_opt, HTF_MIN)
+            if len(htf) >= 2:
+                _, htf_zones = scanner.scan_htf(htf)
+                valid = [z for z in htf_zones
+                         if z.get("status") in ("TRAPPED", "CLOSED") and _trapped_before_today(z)]
 
         if not valid:
-            # Intraday 15-min cascade: scan today's bars for zones that completed
-            # (TRAPPED) earlier in the day. Entry is gated to bars AFTER trapped_on
-            # in _simulate(), so the morning-spike circular problem is prevented.
-            # Rule: zone valid only after C1 closes + C2 low < C1 low + C3 hits C1 high.
+            # Intraday 15-min cascade — primary on gap days, fallback on non-gap days.
+            # Entry gated to bars AFTER trapped_on in _simulate() (no circular lookahead).
             df_15 = _rs(df_today_opt, 15)
-            if len(df_15) >= 3:   # need at least 3 bars: C1, C2 (sellers), C3 (trap)
+            if len(df_15) >= 3:
                 _, cas = scanner.scan_htf(df_15)
                 valid = [z for z in cas if z.get("status") in ("TRAPPED", "CLOSED")
                          and z.get("trapped_on")]
                 if valid:
-                    _log.info(f"  {trade_date} {ot}{strike}: no HTF zone -> cascade 15m ({len(valid)} zones)")
+                    src = "cascade 15m (gap)" if gap_fired else "cascade 15m (fallback)"
+                    _log.info(f"  {trade_date} {ot}{strike} [{strike_mode} {bias_label}]: {len(valid)} {src} zone(s)")
                 else:
-                    _log.info(f"  {trade_date} {ot}{strike}: no zones (HTF or 15m) - skip")
+                    _log.info(f"  {trade_date} {ot}{strike}: no zones - skip")
                     continue
             else:
                 _log.info(f"  {trade_date} {ot}{strike}: no zones - skip")
