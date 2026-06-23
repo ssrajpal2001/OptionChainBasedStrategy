@@ -21,7 +21,7 @@ Usage:
 """
 from __future__ import annotations
 import argparse, gzip, json, sys, os, time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 import requests
 import pandas as pd
@@ -68,9 +68,19 @@ def find_option_key(strike: int, otype: str, min_expiry: date) -> str:
         row_strike = float(row.get("strike", 0) or 0)
         if abs(row_strike - strike) > 0.5:
             continue
-        exp_str = str(row.get("expiry", "") or "")
+        # BSE master stores expiry as epoch-ms integer (e.g. 1751049600000),
+        # NOT an ISO string — date.fromisoformat fails silently and skips all rows.
+        exp_raw = row.get("expiry", "")
         try:
-            exp_dt = date.fromisoformat(exp_str[:10])
+            if isinstance(exp_raw, (int, float)) or (
+                isinstance(exp_raw, str) and str(exp_raw).strip().lstrip("-").isdigit()
+            ):
+                _epoch = int(exp_raw)
+                if _epoch > 10_000_000_000:   # milliseconds → seconds
+                    _epoch //= 1000
+                exp_dt = datetime.fromtimestamp(_epoch, tz=timezone.utc).date()
+            else:
+                exp_dt = date.fromisoformat(str(exp_raw)[:10])
         except Exception:
             continue
         if exp_dt < min_expiry:
@@ -83,6 +93,12 @@ def find_option_key(strike: int, otype: str, min_expiry: date) -> str:
         if key:
             candidates.append((exp_dt, key))
     if not candidates:
+        # Debug: print first BSE_FO row so field names are visible if lookup keeps failing
+        sample = next((r for r in master if str(r.get("instrument_key","")).startswith("BSE_FO|")), None)
+        if sample:
+            print(f"    [DEBUG] First BSE_FO row keys: {list(sample.keys())[:10]} "
+                  f"expiry={sample.get('expiry')} itype={sample.get('instrument_type')} "
+                  f"strike={sample.get('strike')} name={sample.get('name')}")
         return ""
     candidates.sort(key=lambda x: x[0])
     return candidates[0][1]
