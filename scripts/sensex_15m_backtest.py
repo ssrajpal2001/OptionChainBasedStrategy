@@ -182,7 +182,8 @@ def round_strike(price: float) -> int:
 def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
                 max_trades: int = 999, cutoff: str = "15:25",
                 min_rr: float = 0.0, ltf_min: int = 1,
-                max_consec_sl: int = 999, sl_pts: float = 0.0) -> list[dict]:
+                max_consec_sl: int = 999, sl_pts: float = 0.0,
+                lots: int = 1) -> list[dict]:
     """
     Simulate intraday 15-min trap entries on 1-min bars.
 
@@ -196,10 +197,14 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
       sl_pts        – flat SL distance from entry in pts (e.g. 50 = entry-50).
                       0 = zone-based SL (zone_low − SL_BUF). TSL trail buffer
                       always uses SL_BUF regardless.
+      lots          – number of lots per entry (1 or 2).
+                      With lots=2: lot-1 exits at T1, lot-2 trails with BE SL.
 
     TSL target ladder (post-T1):
       T1 = zone sl field (1R), T2 = T1+1R, T3 = T1+2R
-      T1 hit → SL to entry(BE), T2 hit → SL to T1, T3 hit → SL to T2
+      T1 hit (lots=1): SL to entry(BE), keep running
+      T1 hit (lots=2): close lot-1 at T1, lot-2 continues with SL at BE
+      T2 hit → SL to T1, T3 hit → SL to T2
       TSL: trail to (prev LTF bar low − SL_BUF), only moves up
     """
     trades = []
@@ -272,18 +277,24 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
 
             if bar_close <= position["sl"]:
                 reason = f"SL(stage{stage})" if stage > 0 else "SL"
-                # Exit at SL price, not bar close — SL order fills at the level,
-                # not wherever the bar happens to close (100 not 80).
                 trades.append(_close(position, position["sl"], ts, reason))
                 consec_sl = consec_sl + 1 if stage == 0 else 0
                 position  = None
             elif stage < len(targets) and bar_close >= targets[stage]:
-                if stage == 0:
-                    position["sl"] = round(position["entry"], 2)    # T1 → BE
+                if stage == 0 and position.get("qty_lots", 1) >= 2:
+                    # 2-lot: close lot-1 at T1, trail lot-2 with SL at BE
+                    lot1 = {**position, "qty_lots": 1}
+                    trades.append(_close(lot1, targets[0], ts, "T1"))
+                    position["qty_lots"] = position["qty_lots"] - 1
+                    position["sl"]   = round(position["entry"], 2)
+                    position["stage"] = 1
+                elif stage == 0:
+                    position["sl"]   = round(position["entry"], 2)  # 1-lot T1 → BE
+                    position["stage"] = 1
                 else:
-                    position["sl"] = round(targets[stage - 1], 2)   # Tn → T(n-1)
-                position["stage"] = stage + 1
-                consec_sl = 0   # runner advanced = reset streak
+                    position["sl"]   = round(targets[stage - 1], 2) # Tn → T(n-1)
+                    position["stage"] = stage + 1
+                consec_sl = 0
             continue   # in trade or just closed, skip entry
 
         # ── Entry filters ──────────────────────────────────────────────────────
@@ -324,6 +335,7 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
                 "t1": targets[0], "sl": round(sl, 2),
                 "targets": targets, "stage": 0,
                 "rr": round(reward / risk, 2),
+                "qty_lots": lots,
             }
             notified_uids.add(uid)
             trades_taken += 1
@@ -335,7 +347,7 @@ def run_day_leg(df_1m: pd.DataFrame, leg: str, trade_date: str,
 
 def _close(pos: dict, exit_price: float, ts, reason: str) -> dict:
     pnl_pts = round(exit_price - pos["entry"], 2)
-    pnl_rs  = round(pnl_pts * LOT, 2)
+    pnl_rs  = round(pnl_pts * pos.get("qty_lots", 1) * LOT, 2)
     return {**pos, "exit_ts": ts.strftime("%H:%M"), "exit": round(exit_price, 2),
             "reason": reason, "pnl_pts": pnl_pts, "pnl_rs": pnl_rs}
 
@@ -358,6 +370,8 @@ def main():
     ap.add_argument("--sl-pts",          type=float, default=0.0,
                     help="Flat SL distance from entry in pts (e.g. 50 → SL=entry-50). "
                          "0 = zone-based SL (default)")
+    ap.add_argument("--lots",            type=int,   default=1,
+                    help="Lots per entry: 1=single lot TSL, 2=lot1 exits at T1 lot2 trails")
     ap.add_argument("--ce-only",    action="store_true")
     ap.add_argument("--pe-only",    action="store_true")
     args = ap.parse_args()
@@ -379,6 +393,7 @@ def main():
     if args.ltf > 1:             filters.append(f"ltf={args.ltf}m (entry+SL on bar close)")
     if args.max_consec_sl < 999: filters.append(f"max_consec_sl={args.max_consec_sl}")
     if args.sl_pts > 0:          filters.append(f"sl_pts={args.sl_pts:.0f} (₹{args.sl_pts*LOT:.0f}/lot)")
+    if args.lots > 1:            filters.append(f"lots={args.lots} (lot1→T1, lot2→trail)")
     if filters: print(f"Filters: {', '.join(filters)}")
 
     all_trades: list[dict] = []
@@ -419,7 +434,8 @@ def main():
                                      min_rr=args.min_rr,
                                      ltf_min=args.ltf,
                                      max_consec_sl=args.max_consec_sl,
-                                     sl_pts=args.sl_pts)
+                                     sl_pts=args.sl_pts,
+                                     lots=args.lots)
             if not day_trades:
                 print(f"  [{leg}] No trades today")
             else:
