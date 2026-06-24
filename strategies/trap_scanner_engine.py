@@ -77,7 +77,7 @@ _INDEX_CFG: Dict[str, dict] = {
     "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 500,
                    "sl_buf": 20.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": [[14, 30], [22, 45]], "exchange": "MCX",
-                   "htf_source": "futures", "htf_min_override": 30},
+                   "htf_source": "futures", "htf_min_override": 60},
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
                    "sl_buf": 50.0, "cutoff": "23:00", "sq_off": "23:15",
                    "window": None, "exchange": "DELTA", "htf_source": "futures"},
