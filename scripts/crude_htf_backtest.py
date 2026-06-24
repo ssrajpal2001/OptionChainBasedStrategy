@@ -154,27 +154,45 @@ def calc_atr(bars: pd.DataFrame, period: int = 14) -> float:
 
 
 # ── HTF trend direction filter ────────────────────────────────────────────────
+def _morning_htf(htf_bars: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return only morning-session HTF bars (09:00–17:00).
+
+    MCX runs 09:00–23:30. The evening session (17:00–23:30) is thin/global and
+    often bounces against the day trend on low volume. Using the full-day last-N
+    bars means the trend tag for Jun 17 (a big down day) comes out BULL because
+    Jun 16's evening had a small overnight bounce. Morning-only bars give the
+    correct signal: Jun 16 morning fell from 7650 → BEAR → SHORT allowed Jun 17.
+    """
+    if htf_bars.empty or "datetime" not in htf_bars.columns:
+        return htf_bars
+    mask = (htf_bars["datetime"].dt.strftime("%H:%M") >= "09:00") & \
+           (htf_bars["datetime"].dt.strftime("%H:%M") <= "17:00")
+    return htf_bars.loc[mask].reset_index(drop=True)
+
+
 def htf_trend_allows_long(htf_bars: pd.DataFrame, n: int = 3) -> bool:
     """
-    Allow LONG only if the last N HTF candles are NOT clearly bearish.
-    Blocks LONG when 2+ of the last N bars closed lower than they opened.
-    Catches downtrend days (e.g. Jun 18) where every bounce gets sold.
+    Allow LONG only if prev-day MORNING HTF is not clearly bearish.
+    Blocks LONG when 2+ of the last N morning bars closed below open.
     """
-    if len(htf_bars) < n:
-        return True   # not enough history — allow
-    recent  = htf_bars.tail(n)
+    bars = _morning_htf(htf_bars)
+    if len(bars) < n:
+        return True   # not enough morning bars — allow
+    recent  = bars.tail(n)
     bearish = int((recent["close"] < recent["open"]).sum())
     return bearish < 2
 
 
 def htf_trend_allows_short(htf_bars: pd.DataFrame, n: int = 3) -> bool:
     """
-    Allow SHORT only if the last N HTF candles are NOT clearly bullish.
-    Blocks SHORT when 2+ of the last N bars closed higher than they opened.
+    Allow SHORT only if prev-day MORNING HTF is not clearly bullish.
+    Blocks SHORT when 2+ of the last N morning bars closed above open.
     """
-    if len(htf_bars) < n:
+    bars = _morning_htf(htf_bars)
+    if len(bars) < n:
         return True
-    recent  = htf_bars.tail(n)
+    recent  = bars.tail(n)
     bullish = int((recent["close"] > recent["open"]).sum())
     return bullish < 2
 
