@@ -232,6 +232,9 @@ class TrapScannerEngine:
         self._chart_series: deque = deque(maxlen=375)
         self._chart_last_min: int = -1
 
+        # 1-min OHLCV spot bars for the index candlestick chart (all htf_source modes)
+        self._spot_chart_bars: deque = deque(maxlen=390)
+
         # 1m bars — SPOT for HTF scan (htf_source="spot"); per-option for LTF/HTF
         self._bars_spot: List[dict] = []
         self._bars_ce1: List[dict] = []
@@ -1034,6 +1037,9 @@ class TrapScannerEngine:
                     )
                 self._spot_bad_cnt = 0
                 self._spot_cache = raw_ltp
+                _s = self._update_bucket("SPOT_DISPLAY", raw_ltp, tick.timestamp)
+                if _s:
+                    self._spot_chart_bars.append(_s)
                 # Re-subscribe tracked option keys every 60s — survives feeder reconnect
                 now = datetime.now(IST)
                 if (now - _last_resub).total_seconds() >= 60:
@@ -1154,6 +1160,10 @@ class TrapScannerEngine:
     def get_premium_series(self) -> list:
         """1-min option premium chart series for the client chart endpoint."""
         return list(self._chart_series)
+
+    def get_spot_bars(self) -> list:
+        """1-min OHLCV spot bars for the index candlestick chart."""
+        return list(self._spot_chart_bars)
 
     def _on_candle_close(self, leg: str, ts: datetime) -> None:
         self._append_chart_point(ts)

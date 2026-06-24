@@ -11,10 +11,8 @@
 
   <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Lightweight Charts (TradingView open-source) — premium chart with VWAP/RSI/SLOPE -->
+  <!-- Lightweight Charts (TradingView open-source) — candlestick + premium charts -->
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
-  <!-- TradingView Advanced Widget — free index chart embed (no account needed) -->
-  <script src="https://s3.tradingview.com/tv.js"></script>
   <!-- Alpine.js CDN (deferred so LW Charts global is ready before Alpine inits) -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
 
@@ -817,9 +815,10 @@ document.addEventListener('alpine:init', () => {
     chartData: {},        // deploy_id → series array
     _chartInst: {},       // deploy_id → { prem, rsi, slope } Lightweight Charts instances
     _chartTimer: {},      // deploy_id → setInterval handle
-    // TradingView index-chart widget state
-    tvChartOpen: {},      // uid → bool (TV chart expanded)
-    _tvWidgets: {},       // uid → TradingView.widget instance
+    // Spot index candlestick chart state (Lightweight Charts, Upstox data)
+    spotChartOpen: {},
+    _spotChartInst: {},
+    _spotChartTimer: {},
     // IC + TrapScanner premium chart state
     icChartOpen: {},      // deploy_id → bool
     icChartData: {},      // deploy_id → series array
@@ -913,46 +912,64 @@ document.addEventListener('alpine:init', () => {
       return best;
     },
 
-    // ── TradingView index chart widget ──────────────────────────────────
-    _tvSymbol(underlying) {
-      const m = {
-        'NIFTY': 'NSE:NIFTY', 'BANKNIFTY': 'NSE:BANKNIFTY',
-        'SENSEX': 'BSE:SENSEX', 'FINNIFTY': 'NSE:NIFTY_FIN_SERVICE',
-        'MIDCPNIFTY': 'NSE:MIDCPNIFTY', 'CRUDEOIL': 'MCX:CRUDEOIL1!',
-        'NATURALGAS': 'MCX:NATURALGAS1!', 'GOLD': 'MCX:GOLD1!',
-        'SILVER': 'MCX:SILVER1!', 'COPPER': 'MCX:COPPER1!',
-      };
-      return m[(underlying || '').toUpperCase()] || 'NSE:NIFTY';
+    // ── Spot index candlestick chart (Lightweight Charts, Upstox 1-min data) ──
+    toggleSpotChart(uid, underlying) {
+      const open = !this.spotChartOpen[uid];
+      this.spotChartOpen = { ...this.spotChartOpen, [uid]: open };
+      if (!open) {
+        clearInterval(this._spotChartTimer[uid]);
+        const el = document.getElementById('spot_' + uid);
+        if (el && el._lwChart) { el._lwChart.remove(); el._lwChart = null; }
+        delete this._spotChartInst[uid];
+        return;
+      }
+      this.$nextTick(() => this._loadSpotChart(uid, underlying));
     },
 
-    toggleTVChart(uid, underlying) {
-      const open = !this.tvChartOpen[uid];
-      this.tvChartOpen = { ...this.tvChartOpen, [uid]: open };
-      if (!open) return;
-      this.$nextTick(() => {
-        if (this._tvWidgets[uid]) return; // already created, just reveal
-        if (typeof TradingView === 'undefined') {
-          console.warn('TradingView widget script not loaded'); return;
-        }
-        const theme = (localStorage.getItem('terminus_theme') || 'dark') === 'daylight' ? 'light' : 'dark';
-        this._tvWidgets[uid] = new TradingView.widget({
-          container_id:       'tv_' + uid,
-          symbol:             this._tvSymbol(underlying),
-          interval:           '5',
-          timezone:           'Asia/Kolkata',
-          theme:              theme,
-          style:              '1',
-          locale:             'en',
-          width:              '100%',
-          height:             360,
-          allow_symbol_change: false,
-          save_image:         false,
-          hide_side_toolbar:  true,
-          hide_legend:        false,
-          withdateranges:     false,
-          studies:            ['RSI@tv-basicstudies'],
-        });
+    async _loadSpotChart(uid, underlying) {
+      try {
+        const deployId = 'spot_' + (underlying || '').toUpperCase();
+        const resp = await fetch(`/api/client/strategy/${deployId}/spot_bars`,
+          { headers: { 'Authorization': 'Bearer ' + this.authToken } });
+        const data = await resp.json();
+        if (data.ok) this._renderSpotChart(uid, data.series || []);
+      } catch(e) {}
+      clearInterval(this._spotChartTimer[uid]);
+      this._spotChartTimer[uid] = setInterval(() => this._loadSpotChart(uid, underlying), 30000);
+    },
+
+    _renderSpotChart(uid, bars) {
+      if (typeof LightweightCharts === 'undefined') return;
+      const el = document.getElementById('spot_' + uid);
+      if (!el) return;
+      if (el._lwChart) { el._lwChart.remove(); el._lwChart = null; }
+      const isDark = (localStorage.getItem('terminus_theme') || 'dark') !== 'daylight';
+      const chart = LightweightCharts.createChart(el, {
+        width: el.clientWidth || 600, height: 240,
+        layout: { background: { color: isDark ? '#0d1117' : '#ffffff' }, textColor: isDark ? '#8b949e' : '#555' },
+        grid: { vertLines: { color: isDark ? '#1c2128' : '#f0f0f0' }, horzLines: { color: isDark ? '#1c2128' : '#f0f0f0' } },
+        timeScale: { timeVisible: true, secondsVisible: false, timezone: 'Asia/Kolkata' },
+        crosshair: { mode: 1 },
+        rightPriceScale: { borderColor: isDark ? '#30363d' : '#ccc' },
       });
+      const cs = chart.addCandlestickSeries({
+        upColor: '#3fb950', downColor: '#f85149',
+        borderUpColor: '#3fb950', borderDownColor: '#f85149',
+        wickUpColor: '#3fb950', wickDownColor: '#f85149',
+      });
+      const pts = (bars || []).map(b => ({
+        time: Math.floor(new Date(b.datetime).getTime() / 1000),
+        open: b.open, high: b.high, low: b.low, close: b.close,
+      })).filter(p => p.time > 0).sort((a, b) => a.time - b.time);
+      if (pts.length) {
+        cs.setData(pts);
+        chart.timeScale().fitContent();
+      }
+      el._lwChart = chart;
+      this._spotChartInst[uid] = chart;
+      if (!bars || !bars.length) {
+        el.innerHTML = '<div style="text-align:center;padding:20px;font-size:11px;color:#8b949e;font-family:monospace">No spot bars yet — fills as market ticks arrive</div>';
+      }
     },
 
     // ── Client premium chart (Lightweight Charts) ────────────────────────
@@ -5301,17 +5318,16 @@ function amoTest() {
                   </div>
                 </div>
               </div>
-              <!-- TradingView index chart (free, no account) -->
+              <!-- Spot index candlestick chart (1-min OHLCV from Upstox) -->
               <div class="mt-2 text-xs font-mono">
                 <div class="flex items-center gap-2 cursor-pointer select-none"
-                     @click="toggleTVChart(bk.underlying+'_'+bk.client_id+'_ts', bk.underlying)"
+                     @click="toggleSpotChart(bk.underlying+'_ts', bk.underlying)"
                      style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
-                  <span x-text="tvChartOpen[bk.underlying+'_'+bk.client_id+'_ts']?'▾':'▸'" style="font-size:10px"></span>
-                  <span style="font-weight:600" x-text="bk.underlying+' · INDEX CHART'"></span>
-                  <span style="font-size:9px;opacity:0.5">TradingView · 5m</span>
+                  <span x-text="spotChartOpen[bk.underlying+'_ts']?'▾':'▸'" style="font-size:10px"></span>
+                  <span style="font-weight:600" x-text="bk.underlying+' · INDEX CHART · 1M'"></span>
                 </div>
-                <div x-show="tvChartOpen[bk.underlying+'_'+bk.client_id+'_ts']" class="mt-1">
-                  <div :id="'tv_'+bk.underlying+'_'+bk.client_id+'_ts'" style="height:360px;border-radius:4px;overflow:hidden"></div>
+                <div x-show="spotChartOpen[bk.underlying+'_ts']" class="mt-1">
+                  <div :id="'spot_'+bk.underlying+'_ts'" style="height:240px;border-radius:4px;overflow:hidden"></div>
                 </div>
               </div>
             </div>
@@ -7963,20 +7979,19 @@ function amoTest() {
                     </div>
                   </template>
 
-                  <!-- ── TradingView index chart (free, no account) — all strategies ── -->
+                  <!-- ── Spot index candlestick chart (1-min OHLCV from Upstox) — all strategies ── -->
                   <div class="mt-3 pt-2 border-t" style="border-color:var(--t-border)">
                     <div class="flex items-center justify-between mb-1">
                       <span class="sec-label" style="color:var(--t-muted)">
-                        <span x-text="dep.underlying"></span> · INDEX CHART
-                        <span style="font-size:9px;opacity:0.55"> · TradingView · 5m</span>
+                        <span x-text="dep.underlying"></span> · INDEX CHART · 1M
                       </span>
                       <button class="text-xs px-2 py-0.5 rounded border font-mono"
                               style="border-color:var(--t-border);color:var(--t-muted)"
-                              @click="toggleTVChart(dep.deploy_id+'_tv', dep.underlying)"
-                              x-text="tvChartOpen[dep.deploy_id+'_tv'] ? '▾ hide' : '▸ show'"></button>
+                              @click="toggleSpotChart(dep.deploy_id+'_spot', dep.underlying)"
+                              x-text="spotChartOpen[dep.deploy_id+'_spot'] ? '▾ hide' : '▸ show'"></button>
                     </div>
-                    <div x-show="tvChartOpen[dep.deploy_id+'_tv']">
-                      <div :id="'tv_'+dep.deploy_id+'_tv'" style="height:360px;border-radius:4px;overflow:hidden"></div>
+                    <div x-show="spotChartOpen[dep.deploy_id+'_spot']">
+                      <div :id="'spot_'+dep.deploy_id+'_spot'" style="height:240px;border-radius:4px;overflow:hidden"></div>
                     </div>
                   </div>
                 </div>

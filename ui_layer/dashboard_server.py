@@ -2129,6 +2129,18 @@ class DashboardServer:
             return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
                     "series": eng.get_premium_series()}
 
+        @app.get("/api/client/strategy/{deploy_id}/spot_bars", tags=["Client"])
+        async def api_ts_spot_bars(deploy_id: str, _: dict = Depends(_current_user)):
+            underlying = deploy_id.rsplit("_", 1)[-1].upper()
+            mgr = getattr(_srv, "_trap_scanner_manager", None)
+            if mgr is None:
+                return {"ok": True, "series": []}
+            eng = next((e for e in mgr.books
+                        if str(getattr(e, "_und", "")).upper() == underlying), None)
+            if eng is None or not hasattr(eng, "get_spot_bars"):
+                return {"ok": True, "series": []}
+            return {"ok": True, "series": eng.get_spot_bars()}
+
         # ── CLIENT — set target index ─────────────────────────────────────────
 
         @app.post("/api/client/set_index", tags=["Client"])
