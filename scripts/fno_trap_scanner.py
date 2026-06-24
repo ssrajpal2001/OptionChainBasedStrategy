@@ -74,12 +74,12 @@ FNO_STOCKS = [
     "ITC", "BHARTIARTL", "ADANIPORTS", "NESTLEIND", "TECHM", "M&M",
     "POWERGRID", "NTPC", "BPCL", "COALINDIA", "INDUSINDBK", "TATASTEEL",
     "TATACONSUM", "GRASIM", "JSWSTEEL", "HINDALCO", "DRREDDY", "CIPLA",
-    "DIVISLAB", "EICHERMOT", "ONGC", "IOC", "TATAMOTORS", "BAJAJ-AUTO",
+    "DIVISLAB", "EICHERMOT", "ONGC", "IOC", "TMCV", "BAJAJ-AUTO",
     "HEROMOTOCO", "APOLLOHOSP", "PIDILITIND", "BRITANNIA", "SHREECEM",
-    "BAJAJFINSV", "ADANIENT", "SBILIFE", "LTIM",
+    "BAJAJFINSV", "ADANIENT", "SBILIFE", "LTTS",
     # Additional high-OI F&O names with liquid options
     "BANKBARODA", "CANBK", "FEDERALBNK", "IDFCFIRSTB", "PNB",
-    "BANDHANBNK", "IDEA", "TATAPOWER", "ADANIGREEN", "ZOMATO",
+    "BANDHANBNK", "IDEA", "TATAPOWER", "ADANIGREEN", "ETERNAL",
     "IRCTC", "JUBLFOOD", "BIOCON", "LUPIN", "TORNTPHARM",
     "AUROPHARMA", "DLF", "GODREJPROP", "OBEROIRLTY", "PRESTIGE",
     "INDUSTOWER", "JSWENERGY", "MOTHERSON", "ASHOKLEY", "HAL",
@@ -186,9 +186,13 @@ def load_nse_key_map() -> dict:
 
     key_map: dict = {}
     for inst in instruments:
-        sym = inst.get("tradingsymbol", "")
         key = inst.get("instrument_key", "")
-        if sym and key.startswith("NSE_EQ|") and sym not in key_map:
+        if not key.startswith("NSE_EQ|"):
+            continue
+        # Upstox uses "trading_symbol" (underscore), equity symbols may have "-EQ"/"-BE" suffix
+        raw_sym = inst.get("trading_symbol", "") or inst.get("tradingsymbol", "")
+        sym = raw_sym.replace("-EQ", "").replace("-BE", "").upper()
+        if sym and sym not in key_map:
             key_map[sym] = key
 
     os.makedirs("data", exist_ok=True)
