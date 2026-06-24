@@ -3492,7 +3492,7 @@ class TrapScannerEngine:
                 "t1_target":    round(best.get("sl", 0), 2),
                 "dist_pts":     dist,
                 "trapped_on":   str(best.get("trapped_on", "") or ""),
-                "htf_label":    ("intraday " if best.get("_source") == "intraday" else "prev-day ") + f"{self._htf_min}-min",
+                "htf_label":    f"{self._htf_min}-min",
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
                 "kind":         best.get("kind", kind_filter),
                 "source":       best.get("_source", "prev-day"),
