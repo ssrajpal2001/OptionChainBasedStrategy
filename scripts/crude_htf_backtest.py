@@ -155,9 +155,11 @@ def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
     Simulate trades for one day.
     - htf_zones: TRAPPED zones from prev-day (or intraday fallback)
     - Entry bar-by-bar; one position at a time; intraday fallback added progressively
+    - Each zone may only be entered ONCE per day (uid dedup — mirrors live _notified_uids).
     """
     trades: list[dict] = []
     position: dict | None = None
+    entered_zones: set[str] = set()   # zone UIDs entered today — no re-entry per zone
 
     # Pre-build 1m index for slicing
     today_bars = today_bars.reset_index(drop=True)
@@ -171,11 +173,12 @@ def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
         bar_low = float(row["low"])
         bar_high= float(row["high"])
 
-        # ── EOD square-off ──────────────────────────────────────────────────
-        if ts_str >= SQ_OFF and position:
-            trades.append({**position, "exit_ts": ts, "exit_price": ltp, "reason": "EOD"})
-            position = None
-            continue
+        # ── EOD square-off (blocks both open position and new entries) ───────
+        if ts_str >= SQ_OFF:
+            if position:
+                trades.append({**position, "exit_ts": ts, "exit_price": ltp, "reason": "EOD"})
+                position = None
+            continue          # no new entries at or after SQ_OFF
 
         if ts_str < ENTRY_OPEN:
             continue
@@ -211,7 +214,10 @@ def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
             zh   = float(z.get("zone_high", 0))
             zsl  = float(z.get("sl",        0))
             kind = z.get("kind", "BEAR")
+            zuid = f"{kind}_{zl:.1f}_{zh:.1f}"
 
+            if zuid in entered_zones:
+                continue        # one entry per zone per day
             if not (zl <= ltp <= zh):
                 continue
             if zsl <= 0:
@@ -236,6 +242,7 @@ def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
                 t1_price  = zsl
                 opt_type  = "PE"
 
+            entered_zones.add(zuid)
             position = {
                 "entry_ts":    ts,
                 "entry_price": ltp,
