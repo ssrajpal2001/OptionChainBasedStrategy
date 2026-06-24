@@ -970,19 +970,11 @@ class TrapScannerEngine:
                 # exec_key is used ONLY for order placement — never for price monitoring.
                 if self._position:
                     ps = self._position.get("leg", "")
+                    # Futures-mode SL/T1 driven by _idx_tick_loop (futures LTP).
+                    # Option-mode SL/T1 driven here by the scan-strike option LTP.
                     if ((is_ce1 and ps == "CE1") or (is_ce2 and ps == "CE2") or
-                            (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2") or
-                            (is_fut and ps == "FUT")):
+                            (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2")):
                         await self._check_tick_exit(ltp, ts)
-
-                    # Futures-mode T1 is in option domain — check option ltp here.
-                    # SL stays in futures domain (_idx_tick_loop). Only T1 uses option ltp.
-                    if (self._htf_source == "futures" and ps == "FUT"
-                            and not self._position.get("t1_hit")
-                            and self._position.get("t1_price", 0) > 0):
-                        opt_side = self._position.get("opt_type", "CE")
-                        if (opt_side == "CE" and is_ce1) or (opt_side == "PE" and is_pe1):
-                            await self._check_option_t1(ltp, ts)
         except asyncio.CancelledError:
             pass
 
@@ -1243,11 +1235,10 @@ class TrapScannerEngine:
                           Only ORDER and post-entry exits use options.
         """
         if self._htf_source == "futures":
-            # Futures zones = BIAS only. LTF detection on OPTION bars (CE1/PE1).
-            # Bear futures zone → CE bias → scan CE1 option bars for bear traps → buy CE.
-            # Bull futures zone → PE bias → scan PE1 option bars for bear traps → buy PE.
-            # FUT candle close does not trigger LTF — option ticks do.
-            if leg == "FUT":
+            # Futures mode: 5-min LTF scan runs on FUTURES bars (not option bars).
+            # HTF zone (30-min) TRAPPED → wait for 5-min futures trap to form + clear → buy 1 ITM option.
+            # Only FUT candle closes trigger the scan; option ticks are not scanned.
+            if leg != "FUT":
                 return
             spot = self._spot_cache or 0.0
             fut_bear = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
@@ -1255,12 +1246,12 @@ class TrapScannerEngine:
                         and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
             fut_bull = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
                         and e.get("kind", "BEAR") == "BULL"
-                        and spot >= e.get("zone_low", 0)]
-            if leg == "CE1" and fut_bear:
-                self._run_ltf_on("CE1", self._bars_ce1, fut_bear, "CE",
+                        and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
+            if fut_bear:
+                self._run_ltf_on("FUT", self._bars_fut, fut_bear, "CE",
                                  require_closed=True, price_override=spot, all_cleared_entry=True)
-            elif leg == "PE1" and fut_bull:
-                self._run_ltf_on("PE1", self._bars_pe1, fut_bull, "PE",
+            if fut_bull:
+                self._run_ltf_on("FUT", self._bars_fut, fut_bull, "PE",
                                  require_closed=True, price_override=spot, all_cleared_entry=True)
             return
 
@@ -1325,25 +1316,29 @@ class TrapScannerEngine:
         df = _bars_to_df(today_bars[-200:])
         current_price = price_override if price_override > 0 else (self._ltp_cache.get(leg_key, 0) or self._ltp_cache.get("SPOT", 0))
 
-        # Futures-mode: ALL-CLEARED entry — when every LTF bear trap in option bars
-        # is CLOSED (all option sellers have covered), sellers are exhausted → enter now.
+        # Futures-mode: ALL-CLEARED entry — when every LTF trap in futures bars is CLOSED
+        # (all 5-min sellers exhausted), enter immediately (no retest wait).
+        # Timestamp gate: only consider LTF zones that formed AFTER the HTF zone was created
+        # (ref_ts), same as the NIFTY/SENSEX path — prevents stale morning zones from firing.
         if all_cleared_entry:
             uid = _zone_uid(htf_zones[0]) if htf_zones else "fut_mode"
             if uid in self._notified_uids:
                 return
+            htf_ref_bar  = str(htf_zones[0].get("ref_ts", "")) if htf_zones else ""
+            htf_trap_bar = str(htf_zones[0].get("trapped_on") or htf_zones[0].get("closed_on") or "") if htf_zones else ""
             _, ltf_entries = scanner.scan_ltf(
                 df,
                 htf_zone_high=9999999,  # no zone bounds — scan full today's bars
                 htf_zone_low=0,
-                htf_ref_bar="",
-                htf_trap_bar="",
+                htf_ref_bar=htf_ref_bar,
+                htf_trap_bar=htf_trap_bar,
                 htf_target=0.0,
             )
             trapped_now  = [e for e in ltf_entries if e["status"] == "TRAPPED"]
             closed_today = [e for e in ltf_entries if e["status"] == "CLOSED"]
             self._log.info(
-                "_run_ltf_on [%s] all_cleared: trapped=%d closed=%d",
-                leg_key, len(trapped_now), len(closed_today),
+                "_run_ltf_on [%s] all_cleared: trapped=%d closed=%d htf_ref=%s htf_trap=%s",
+                leg_key, len(trapped_now), len(closed_today), htf_ref_bar, htf_trap_bar,
             )
             if closed_today and not trapped_now:
                 # All sellers out — pick the most recent closed zone as reference
@@ -2006,15 +2001,19 @@ class TrapScannerEngine:
         atm  = _round_strike(spot, self._step)
 
         if self._htf_source == "futures":
-            # CrudeOil/BTC/ETH: order goes to scan strike (S1 CE / R1 PE).
-            # S1/R1 pivot strikes are naturally ITM — no separate 1-ITM computation needed.
-            # Spread check: if scan strike too wide, fall back to ATM.
-            primary_strike = scan_strike
-            primary_key    = self._build_upstox_key(primary_strike, opt_type)
+            # CrudeOil/MCX: same 1-ITM selection as NSE/BSE — ATM ± 1 step.
+            # LTF scan now runs on futures bars so scan_strike (ce1/pe1 startup strike) is irrelevant.
+            if opt_type == "CE":
+                primary_1itm = atm - self._step
+            elif opt_type == "PE":
+                primary_1itm = atm + self._step
+            else:
+                primary_1itm = atm
+            primary_key    = self._build_upstox_key(primary_1itm, opt_type)
             atm_key        = self._build_upstox_key(atm, opt_type)
             max_spread_pct = float(self._admin_cfg.get("max_spread_pct", 3.0))
             strike, exec_key = await self._pick_liquid_strike(
-                primary_strike, primary_key, atm, atm_key, opt_type, max_spread_pct
+                primary_1itm, primary_key, atm, atm_key, opt_type, max_spread_pct
             )
         else:
             # Sensex/Nifty: 1-ITM option is primary; ATM as fallback if spread too wide.
@@ -2053,18 +2052,18 @@ class TrapScannerEngine:
         #   scan_key = scan strike option key (tracked_sym fixed; NOT the exec/1-ITM key).
         if self._htf_source == "futures":
             tracking_leg = "FUT"
-            # CE (bear trap): SL = floor below zone → exit if FUT drops to sl (ltp <= sl)
-            # PE (bull trap): SL = ceiling above zone → exit if FUT rises to sl (ltp >= sl)
+            # SL uses the HTF (30-min) zone boundary, not the 5-min LTF entry zone.
+            # The big zone defines the invalidation level; the 5-min trap is just the entry trigger.
+            # CE (bear trap): SL below HTF zone_low → exit if FUT drops to sl (ltp <= sl)
+            # PE (bull trap): SL above HTF zone_high → exit if FUT rises to sl (ltp >= sl)
             if opt_type == "CE":
-                sl_price = round(entry["zone_low"]  - self._sl_buf, 2)
+                sl_price = round(htf_zone.get("zone_low", entry["zone_low"]) - self._sl_buf, 2)
             else:
-                sl_price = round(entry["zone_high"] + self._sl_buf, 2)
-            # T1 = option chart HTF: latest TRAPPED bear zone sl on CE1/PE1 bars.
-            # Bears shorted the option → their SL (ref bar HIGH on option chart) = our T1.
-            # Checked against option ltp (not futures) in _opt_tick_loop.
-            opt_bars = self._bars_ce1 if opt_type == "CE" else self._bars_pe1
-            t1_price     = self._compute_option_t1(opt_bars)
-            t1_price_fut = round(htf_zone.get("sl", 0), 2)  # kept for logging/UI reference
+                sl_price = round(htf_zone.get("zone_high", entry["zone_high"]) + self._sl_buf, 2)
+            # T1 = HTF zone's "sl" field in futures price terms (bears' SL level = our target).
+            # Checked against futures LTP in _idx_tick_loop (same as SL), not option LTP.
+            t1_price     = round(htf_zone.get("sl", 0), 2)
+            t1_price_fut = t1_price  # same — both in futures domain
         else:
             tracking_leg = leg   # CE1 or PE1 — scan strike option bars
             sl_price     = round(htf_zone.get("zone_low", entry["zone_low"]) - self._sl_buf, 2)  # HTF zone_low − buffer
@@ -2308,19 +2307,23 @@ class TrapScannerEngine:
                     return
         else:
             # ── Standard mode: T1 half-exit + TSL ───────────────────────────
-            # T1: 50% at HTF target (option-mode only; futures-mode T1 in _check_option_t1)
-            if not pos["t1_hit"] and ltp >= pos["t1_price"] and self._htf_source != "futures":
-                pos["t1_hit"] = True
-                pos["remaining_qty"] -= pos["t1_qty"]
-                pos["trail_sl"] = pos.get("spot_at_entry", pos["entry_price"])
-                pos["t1_realised_pnl"] = (ltp - pos["entry_price"]) * pos["t1_qty"]
-                self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d → trail_sl=%.2f  t1_pnl=%.0f",
-                               ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"],
-                               pos["t1_realised_pnl"])
-                oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
-                pos["order_id_t1"] = oid
-                self._record_closed_trade(pos, exit_price=ltp, exit_reason="T1", qty_override=pos["t1_qty"])
-                self._persist_position()
+            # T1: 50% at HTF target.
+            # Direction: CE (option or futures-CE) → ltp >= t1; futures PE → ltp <= t1.
+            if not pos["t1_hit"] and pos.get("t1_price", 0) > 0:
+                _is_pe_fut_t1 = (self._htf_source == "futures" and pos.get("opt_type") == "PE")
+                _t1_hit = (ltp <= pos["t1_price"]) if _is_pe_fut_t1 else (ltp >= pos["t1_price"])
+                if _t1_hit:
+                    pos["t1_hit"] = True
+                    pos["remaining_qty"] -= pos["t1_qty"]
+                    pos["trail_sl"] = pos.get("spot_at_entry", pos["entry_price"])
+                    pos["t1_realised_pnl"] = (ltp - pos["entry_price"]) * pos["t1_qty"]
+                    self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d → trail_sl=%.2f  t1_pnl=%.0f",
+                                   ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"],
+                                   pos["t1_realised_pnl"])
+                    oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
+                    pos["order_id_t1"] = oid
+                    self._record_closed_trade(pos, exit_price=ltp, exit_reason="T1", qty_override=pos["t1_qty"])
+                    self._persist_position()
 
             # Advance 5m trail SL using OPTION bar lows (only after T1)
             if pos["t1_hit"] and ts is not None:
@@ -3516,6 +3519,8 @@ class TrapScannerEngine:
             "bars_spot":      len(self._bars_spot),
             "bars_ce1":       len(self._bars_ce1),
             "bars_pe1":       len(self._bars_pe1),
+            "bars_fut":       len(self._bars_fut),
+            "fut_ltp":        self._ltp_cache.get("FUT", 0.0),
             "notified_uids":  len(self._notified_uids),
             "position": {
                 "leg":           pos["leg"],
