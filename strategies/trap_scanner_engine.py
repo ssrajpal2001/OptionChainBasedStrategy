@@ -215,6 +215,7 @@ class TrapScannerEngine:
         self._pe2_key: Optional[str] = None
         self._fut_key: Optional[str] = None
         self._expiry_str: Optional[str] = None
+        self._broker_provider: str = ""   # e.g. "zerodha", "angelone" — set by _ensure_broker
 
         self._gap_fired     = False
         self._gap_direction = "FLAT"   # "UP" | "DOWN" | "FLAT" (no gap)
@@ -2710,6 +2711,7 @@ class TrapScannerEngine:
             if not await broker.authenticate():
                 return None
             self._broker = broker
+            self._broker_provider = (row.get("provider") or "").lower()
             return broker
         except Exception as exc:
             self._log.error("_ensure_broker: %s", exc)
@@ -3165,6 +3167,18 @@ class TrapScannerEngine:
         return fallback
 
     def _build_broker_symbol(self, strike: Optional[int], opt_type: str) -> str:
+        if strike is None:
+            return ""
+        if self._expiry_date and self._broker_provider:
+            try:
+                from data_layer.instrument_registry import REGISTRY
+                sym = REGISTRY.get_broker_symbol(
+                    self._und, self._expiry_date, int(strike), opt_type, self._broker_provider
+                )
+                if sym:
+                    return sym
+            except Exception as _e:
+                self._log.warning("_build_broker_symbol registry lookup failed: %s", _e)
         exp = self._expiry_str or ""
         return f"{self._und}{exp}{strike}{opt_type}"
 
