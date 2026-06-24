@@ -1377,22 +1377,25 @@ class TrapScannerEngine:
             # Jump directly to 5m LTF within this zone's bounds.
             # HTF mode (75m): outer gate already passed → scan 5m inside [z_low, z_high].
             # Cascade mode (15m): same → scan 5m inside [z_low, z_high].
-            # Only scan bars from when price entered the HTF zone (trapped_on timestamp),
-            # not all of today — bears before the HTF trigger are irrelevant.
+            # Scan from zone CREATION time (ref_ts = bear candle low timestamp), not from
+            # when price entered. Example: zone created at 10:30, price entered at 13:30 —
+            # scan starts at 10:30 so all 5m bears formed inside the zone are captured.
             # Entry fires when ALL 5m bear traps inside the zone are CLOSED (sellers
             # exhausted) and none are still TRAPPED.
+            ref_ts_str  = str(zone.get("ref_ts", ""))
             trap_ts_str = str(zone.get("trapped_on") or zone.get("closed_on") or "")
+            zone_start  = ref_ts_str or trap_ts_str   # prefer zone-creation ts
             df_ltf = df
-            if trap_ts_str:
+            if zone_start:
                 try:
-                    df_ltf = df[pd.to_datetime(df["datetime"]) >= pd.to_datetime(trap_ts_str)].copy()
+                    df_ltf = df[pd.to_datetime(df["datetime"]) >= pd.to_datetime(zone_start)].copy()
                 except Exception:
                     pass
             _, ltf_entries = scanner.scan_ltf(
                 df_ltf,
                 htf_zone_high=z_high,
                 htf_zone_low=z_low,
-                htf_ref_bar=str(zone.get("ref_ts", "")),
+                htf_ref_bar=ref_ts_str,
                 htf_trap_bar=trap_ts_str,
                 htf_target=zone.get("sl", 0.0),
             )
@@ -1505,20 +1508,23 @@ class TrapScannerEngine:
                 z_low, z_high = zone["zone_low"], zone["zone_high"]
                 if last_close > 0 and (last_close < z_low or last_close > z_high):
                     continue  # last bar already outside zone — skip
-                # Only scan bars from when price entered the HTF zone (trapped_on),
-                # not all of today — 5m bears before the HTF trigger are irrelevant.
+                # Scan from zone CREATION time (ref_ts = bear candle low timestamp).
+                # Example: zone created at 10:30, market came down at 13:30 →
+                # scan starts at 10:30 so all 5m bears inside the zone are captured.
+                ref_ts_str  = str(zone.get("ref_ts", ""))
                 trap_ts_str = str(zone.get("trapped_on") or zone.get("closed_on") or "")
+                zone_start  = ref_ts_str or trap_ts_str
                 df_ltf = df
-                if trap_ts_str:
+                if zone_start:
                     try:
-                        df_ltf = df[pd.to_datetime(df["datetime"]) >= pd.to_datetime(trap_ts_str)].copy()
+                        df_ltf = df[pd.to_datetime(df["datetime"]) >= pd.to_datetime(zone_start)].copy()
                     except Exception:
                         pass
                 _, ltf_entries = scanner.scan_ltf(
                     df_ltf,
                     htf_zone_high=z_high,
                     htf_zone_low=z_low,
-                    htf_ref_bar=str(zone.get("ref_ts", "")),
+                    htf_ref_bar=ref_ts_str,
                     htf_trap_bar=trap_ts_str,
                     htf_target=zone.get("sl", 0.0),
                 )
