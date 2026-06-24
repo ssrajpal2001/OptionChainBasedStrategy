@@ -615,6 +615,7 @@ class TrapScannerEngine:
             self._run_htf_scan()
             self._htf_atr_val = self._compute_htf_atr()
             self._check_zone_reachability()
+            self._seed_ltf_state()
             # Point 11: restore today's position if restarted mid-day; discard yesterday's.
             self._load_persisted_position()
             self._log.info(
@@ -1416,6 +1417,89 @@ class TrapScannerEngine:
                     leg_key, uid, z_low, z_high,
                     "cascade" if not require_closed else "htf",
                 )
+
+    def _seed_ltf_state(self) -> None:
+        """
+        After HTF scan: pre-compute 5m bear state for every TRAPPED zone using today's
+        already-seeded bars. Runs once at end of _morning_init so the engine knows
+        the LTF position immediately after restart — entry fires on the first tick
+        rather than waiting for the next 5m boundary.
+
+        For no-gap days: uses prev-day 75m zones + today's intraday bars.
+        For gap-up/down days: uses today's intraday 15m cascade zones (no prev-day HTF needed).
+        """
+        today = datetime.now(IST).date()
+
+        def _seed_zones(leg_key: str, bars: list, zones: list) -> None:
+            today_bars = [b for b in bars
+                          if pd.to_datetime(b.get("datetime", "")).date() == today]
+            if len(today_bars) < 3:
+                return
+            last_close = today_bars[-1].get("close") or 0
+            df = _bars_to_df(today_bars)
+            for zone in zones:
+                uid = _zone_uid(zone)
+                if uid in self._notified_uids:
+                    continue
+                z_low, z_high = zone["zone_low"], zone["zone_high"]
+                if last_close > 0 and (last_close < z_low or last_close > z_high):
+                    continue  # last bar already outside zone — skip
+                _, ltf_entries = scanner.scan_ltf(
+                    df,
+                    htf_zone_high=z_high,
+                    htf_zone_low=z_low,
+                    htf_ref_bar=str(zone.get("ref_ts", "")),
+                    htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
+                    htf_target=zone.get("sl", 0.0),
+                )
+                trapped_now  = [e for e in ltf_entries if e["status"] == "TRAPPED"]
+                closed_today = [e for e in ltf_entries if e["status"] == "CLOSED"]
+                if not trapped_now and closed_today:
+                    self._zone_ltf_status[uid] = "seed_all_cleared"
+                    self._log.info(
+                        "SEED [%s] zone %.1f-%.1f: all %d 5m bears cleared "
+                        "→ entry fires on first live tick",
+                        leg_key, z_low, z_high, len(closed_today),
+                    )
+                elif trapped_now:
+                    self._zone_ltf_status[uid] = "waiting_5m_clear"
+                    self._log.info(
+                        "SEED [%s] zone %.1f-%.1f: %d 5m bear(s) still active (closed=%d)",
+                        leg_key, z_low, z_high, len(trapped_now), len(closed_today),
+                    )
+                else:
+                    self._zone_ltf_status[uid] = "watching_5m"
+
+        def _seed_cascade_15m(leg_key: str, bars: list) -> None:
+            """Gap day: resample today's 1m bars → 15m zones → seed 5m within those."""
+            today_bars = [b for b in bars
+                          if pd.to_datetime(b.get("datetime", "")).date() == today]
+            if len(today_bars) < 4:
+                return
+            df15 = _resample_htf(_bars_to_df(today_bars[:-1]), 15)  # drop incomplete bar
+            if len(df15) < 2:
+                return
+            _, zones_15 = scanner.scan_htf(df15)
+            trapped_15 = [z for z in zones_15 if z.get("status") == "TRAPPED"]
+            _seed_zones(leg_key, bars, trapped_15)
+
+        if self._htf_source == "futures":
+            fut_bear = [z for z in self._htf_fut_zones
+                        if z.get("status") == "TRAPPED" and z.get("kind", "BEAR") == "BEAR"]
+            fut_bull = [z for z in self._htf_fut_zones
+                        if z.get("status") == "TRAPPED" and z.get("kind", "BEAR") == "BULL"]
+            _seed_zones("CE1", self._bars_ce1, fut_bear)
+            _seed_zones("PE1", self._bars_pe1, fut_bull)
+        elif self._gap_fired:
+            # Gap day: no prev-day 75m context — use 15m zones from today's bars only.
+            _seed_cascade_15m("CE1", self._bars_ce1)
+            _seed_cascade_15m("PE1", self._bars_pe1)
+        else:
+            # No-gap day: prev-day 75m zones are the primary source.
+            bear_trapped = [z for z in self._htf_bear_zones if z.get("status") == "TRAPPED"]
+            bull_trapped = [z for z in self._htf_bull_zones if z.get("status") == "TRAPPED"]
+            _seed_zones("CE1", self._bars_ce1, bear_trapped)
+            _seed_zones("PE1", self._bars_pe1, bull_trapped)
 
     def _find_closed_15m_zone(self, today_bars: List[dict],
                                htf_zone: Optional[dict]) -> Optional[dict]:
