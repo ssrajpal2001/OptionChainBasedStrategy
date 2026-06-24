@@ -132,11 +132,14 @@ class DhanBroker(BaseBroker):
                 undl = (row.get("SEM_LOT_UNITS") or "").strip()
                 series = (row.get("SEM_SERIES") or "").strip()
 
-                if not sid or seg not in ("NSE", "BSE") or inst not in ("OPTIDX", "OPTSTK"):
+                # NSE/BSE equity & index options; MCX commodity options (OPTFUT)
+                is_nse_bse = seg in ("NSE", "BSE") and inst in ("OPTIDX", "OPTSTK")
+                is_mcx     = seg == "MCX" and inst in ("OPTFUT", "OPTIDX")
+                if not sid or not (is_nse_bse or is_mcx):
                     continue
                 # Build canonical key: UNDERLYING:DDMONYY:STRIKE:CE/PE
                 # Match format used by to_dhan_lookup_key (InternalSymbol.__str__)
-                # InternalSymbol str: "NIFTY:02JUN26:24450:CE"
+                # InternalSymbol str: "CRUDEOIL:22JUL26:6800:CE"
                 try:
                     from datetime import date as _date
                     exp_d = _date.fromisoformat(exp)
@@ -144,10 +147,14 @@ class DhanBroker(BaseBroker):
                     mon = exp_d.strftime("%b").upper()
                     yy  = exp_d.strftime("%y")
                     strike_i = int(float(strike_raw))
-                    # Extract underlying from trading symbol (strip expiry/strike suffix)
+                    # Extract underlying from trading symbol
                     underlying = sym  # fallback
-                    # Dhan trading symbol for NIFTY options starts with "NIFTY"
-                    for prefix in ("NIFTY","BANKNIFTY","FINNIFTY","SENSEX","MIDCPNIFTY"):
+                    _all_prefixes = (
+                        "BANKNIFTY", "MIDCPNIFTY", "FINNIFTY", "SENSEX", "NIFTY",
+                        "CRUDEOILM", "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER",
+                        "COPPER", "ZINC", "LEAD", "NICKEL", "ALUMINIUM",
+                    )
+                    for prefix in _all_prefixes:
                         if sym.startswith(prefix):
                             underlying = prefix
                             break

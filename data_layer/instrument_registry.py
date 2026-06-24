@@ -598,13 +598,15 @@ class InstrumentRegistry:
         if underlying.upper() in _MCX_UNDERLYINGS:
             yy = expiry.strftime("%y")
             mon = _MONTH_ABBR_UP[expiry.month - 1]
-            core = f"{underlying.upper()}{yy}{mon}{int(strike)}{opt_type}"  # CRUDEOIL26JUN8500CE
+            core = f"{underlying.upper()}{yy}{mon}{int(strike)}{opt_type}"  # CRUDEOIL26JUL6800CE
             if p == "fyers":
                 return f"MCX:{core}"
             if p == "zerodha":
                 return core
             if p == "upstox":
                 return self.get_upstox_key(underlying.upper(), expiry, int(strike), opt_type)
+            if p == "dhan":
+                return SymbolTranslator.to_dhan_lookup_key(internal)   # CRUDEOIL:22JUL26:6800:CE
             return core
 
         if p == "upstox":
