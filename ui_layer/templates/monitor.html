@@ -7540,12 +7540,12 @@ function amoTest() {
                         <span :style="(bk&&bk.initialized)?'color:var(--t-green)':'color:var(--t-yellow)'"
                               x-text="bk?(bk.initialized?(bk.intraday_mode?'INTRADAY CASCADE':'HTF READY'):'WARMING'):'Not started'"></span>
                         <span x-show="bk&&bk.gap_fired" style="color:var(--t-red)">GAP</span>
-                        <span style="color:var(--t-muted)" x-show="bk&&bk.spot_ltp" x-text="'Spot '+bk.spot_ltp"></span>
-                        <span style="color:var(--t-muted)" x-show="bk&&bk.htf_atr>0" x-text="'ATR '+bk.htf_atr"></span>
-                        <span x-show="bk&&bk.ce1_strike" x-text="'CE='+bk.ce1_strike" style="color:var(--t-green)"></span>
-                        <span x-show="bk&&bk.ce2_strike" x-text="'CE2='+bk.ce2_strike" style="color:var(--t-green)"></span>
-                        <span x-show="bk&&bk.pe1_strike" x-text="'PE='+bk.pe1_strike" style="color:var(--t-red)"></span>
-                        <span x-show="bk&&bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
+                        <span style="color:var(--t-muted)" x-show="bk&&bk.spot_ltp" x-text="bk?'Spot '+bk.spot_ltp:''"></span>
+                        <span style="color:var(--t-muted)" x-show="bk&&bk.htf_atr>0" x-text="bk?'ATR '+bk.htf_atr:''"></span>
+                        <span x-show="bk&&bk.ce1_strike" x-text="bk?'CE='+bk.ce1_strike:''" style="color:var(--t-green)"></span>
+                        <span x-show="bk&&bk.ce2_strike" x-text="bk?'CE2='+bk.ce2_strike:''" style="color:var(--t-green)"></span>
+                        <span x-show="bk&&bk.pe1_strike" x-text="bk?'PE='+bk.pe1_strike:''" style="color:var(--t-red)"></span>
+                        <span x-show="bk&&bk.pe2_strike" x-text="bk?'PE2='+bk.pe2_strike:''" style="color:var(--t-red)"></span>
                       </div>
                       <!-- Contracts table (CE1/CE2/PE1/PE2 LTP + zone — mirrors NiftyTrapScanner) -->
                       <template x-if="bk&&bk.contracts">
