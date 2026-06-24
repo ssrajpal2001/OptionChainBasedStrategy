@@ -233,17 +233,19 @@ def get_trapped_zones(bars: pd.DataFrame, htf_min: int) -> list[dict]:
 # ── One-day simulation ─────────────────────────────────────────────────────────
 def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
                  htf_min: int, sl_buf: float, lots: int, day_str: str,
-                 bias: str = "BOTH") -> list[dict]:
+                 bias: str = "BOTH", max_day_loss: float = 0.0) -> list[dict]:
     """
     Simulate trades for one day.
     - htf_zones: TRAPPED zones from prev-day (or intraday fallback)
     - bias: 'BOTH'|'LONG_OK'|'SHORT_OK' — filters entry direction (prev-day trend filter)
+    - max_day_loss: stop new entries once cumulative realized loss >= this amount (0=off)
     - Entry bar-by-bar; one position at a time; intraday fallback added progressively
     - Each zone may only be entered ONCE per day (uid dedup — mirrors live _notified_uids).
     """
     trades: list[dict] = []
     position: dict | None = None
     entered_zones: set[str] = set()   # zone UIDs entered today — no re-entry per zone
+    realized_loss: float   = 0.0      # cumulative realized loss this day (positive number)
 
     # Pre-build 1m index for slicing
     today_bars = today_bars.reset_index(drop=True)
@@ -269,20 +271,27 @@ def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
 
         # ── Manage open position ────────────────────────────────────────────
         if position:
+            closed: dict | None = None
             if position["direction"] == "LONG":
                 if bar_low <= position["sl"]:
-                    trades.append({**position, "exit_ts": ts, "exit_price": position["sl"], "reason": "SL"})
-                    position = None
+                    closed = {**position, "exit_ts": ts, "exit_price": position["sl"], "reason": "SL"}
                 elif bar_high >= position["t1"]:
-                    trades.append({**position, "exit_ts": ts, "exit_price": position["t1"], "reason": "T1"})
-                    position = None
+                    closed = {**position, "exit_ts": ts, "exit_price": position["t1"], "reason": "T1"}
             else:  # SHORT
                 if bar_high >= position["sl"]:
-                    trades.append({**position, "exit_ts": ts, "exit_price": position["sl"], "reason": "SL"})
-                    position = None
+                    closed = {**position, "exit_ts": ts, "exit_price": position["sl"], "reason": "SL"}
                 elif bar_low <= position["t1"]:
-                    trades.append({**position, "exit_ts": ts, "exit_price": position["t1"], "reason": "T1"})
-                    position = None
+                    closed = {**position, "exit_ts": ts, "exit_price": position["t1"], "reason": "T1"}
+            if closed:
+                trades.append(closed)
+                pnl = trade_pnl(closed)
+                if pnl < 0:
+                    realized_loss += abs(pnl)
+                position = None
+            continue
+
+        # ── Daily loss cap: stop new entries if cumulative loss >= limit ─────
+        if max_day_loss > 0 and realized_loss >= max_day_loss:
             continue
 
         # ── Build active zone list: prev-day + intraday fallback ────────────
@@ -369,7 +378,8 @@ def trade_pts(t: dict) -> float:
 
 # ── One-HTF full backtest ──────────────────────────────────────────────────────
 def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int,
-            bias_mult: float = 0.0, trend_n: int = 3) -> dict:
+            bias_mult: float = 0.0, trend_n: int = 3,
+            max_day_loss: float = 0.0) -> dict:
     all_trades: list[dict] = []
     day_results: list[dict] = []
 
@@ -412,7 +422,8 @@ def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int,
         print(f"prev={len(prev_bars)} today={len(today_bars)} prev_zones={len(htf_zones)} "
               f"trend={trend_tag} bias={bias}", end=" ", flush=True)
 
-        day_trades = simulate_day(today_bars, htf_zones, htf_min, sl_buf, lots, day_str, bias)
+        day_trades = simulate_day(today_bars, htf_zones, htf_min, sl_buf, lots, day_str,
+                                  bias, max_day_loss)
         day_pnl    = sum(trade_pnl(t) for t in day_trades)
 
         print(f"trades={len(day_trades)} pnl=₹{day_pnl:,.0f}")
@@ -528,6 +539,9 @@ def main():
     ap.add_argument("--trend_n", type=int, default=3,
                     help="HTF trend filter: look at last N HTF candles of prev-day (default 3). "
                          "If 2+ are bearish → skip LONG; 2+ bullish → skip SHORT. 0=disable.")
+    ap.add_argument("--max_day_loss", type=float, default=0.0,
+                    help="Daily loss cap in Rs (default 0=off). No new entries once cumulative "
+                         "realized loss >= this amount. e.g. 5000 = stop after losing ₹5,000.")
     args = ap.parse_args()
 
     global HEADERS
@@ -546,7 +560,8 @@ def main():
     print(f"Backtest: {days[0]} to {days[-1]}  ({len(days)} trading days)")
     print(f"HTF list: {htf_list}  |  Lots: {args.lots}  |  SL_buf: ₹{args.sl_buf}")
 
-    results = [run_htf(days, h, args.sl_buf, args.lots, args.bias_mult, args.trend_n)
+    results = [run_htf(days, h, args.sl_buf, args.lots, args.bias_mult, args.trend_n,
+                       args.max_day_loss)
                for h in htf_list]
 
     print_summary(results, args.lots, args.sl_buf)
