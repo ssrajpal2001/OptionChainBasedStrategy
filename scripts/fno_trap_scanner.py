@@ -178,7 +178,10 @@ def load_nse_key_map() -> dict:
         with open(NSE_CACHE_DATE) as f:
             if f.read().strip() == today_str:
                 with open(NSE_CACHE_FILE) as f2:
-                    return json.load(f2)
+                    cached = json.load(f2)
+                if cached:          # skip empty/corrupt cache — re-download
+                    return cached
+                print("  Stale/empty cache detected — re-downloading...")
 
     print("  Downloading NSE master JSON from Upstox (once per day)...", flush=True)
     r = requests.get(NSE_MASTER_URL, timeout=60)
