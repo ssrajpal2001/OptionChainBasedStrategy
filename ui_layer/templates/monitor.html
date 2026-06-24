@@ -5159,7 +5159,7 @@ function amoTest() {
                            style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
                         <span x-text="ceZoneOpen[bk.underlying+'_'+bk.client_id]?'▾':'▸'" style="font-size:10px"></span>
                         <span style="font-weight:600;color:var(--t-green)">CE ZONES</span>
-                        <span x-text="'('+bk.zones.filter(z=>z.opt_type===\'CE\').length+' · '+bk.zones.filter(z=>z.opt_type===\'CE\'&&z.status===\'TRAPPED\').length+' trapped)'"></span>
+                        <span x-text="'('+bk.zones.filter(z=>z.opt_type==='CE').length+' · '+bk.zones.filter(z=>z.opt_type==='CE'&&z.status==='TRAPPED').length+' trapped)'"></span>
                       </div>
                       <div x-show="ceZoneOpen[bk.underlying+'_'+bk.client_id]">
                         <div class="grid text-center mb-1 mt-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
@@ -5183,7 +5183,7 @@ function amoTest() {
                         <template x-if="bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
                           <div class="mt-1">
                             <button @click="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]=!ceFarZoneOpen[bk.underlying+'_'+bk.client_id]" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                              <span x-text="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide CE FAR':'▼ CE FAR ('+bk.zones.filter(z=>z.opt_type===\'CE\'&&!z.reachable&&z.status!==\'TRAPPED\'&&z.ltf_status!==\'entered\'&&z.ltf_status!==\'ltf_signal\').length+')'"></span>
+                              <span x-text="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide CE FAR':'▼ CE FAR ('+bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length+')'"></span>
                             </button>
                             <template x-if="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]">
                               <div class="mt-1">
@@ -5213,7 +5213,7 @@ function amoTest() {
                            style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
                         <span x-text="peZoneOpen[bk.underlying+'_'+bk.client_id]?'▾':'▸'" style="font-size:10px"></span>
                         <span style="font-weight:600;color:var(--t-red)">PE ZONES</span>
-                        <span x-text="'('+bk.zones.filter(z=>z.opt_type===\'PE\').length+' · '+bk.zones.filter(z=>z.opt_type===\'PE\'&&z.status===\'TRAPPED\').length+' trapped)'"></span>
+                        <span x-text="'('+bk.zones.filter(z=>z.opt_type==='PE').length+' · '+bk.zones.filter(z=>z.opt_type==='PE'&&z.status==='TRAPPED').length+' trapped)'"></span>
                       </div>
                       <div x-show="peZoneOpen[bk.underlying+'_'+bk.client_id]">
                         <div class="grid text-center mb-1 mt-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
@@ -5237,7 +5237,7 @@ function amoTest() {
                         <template x-if="bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
                           <div class="mt-1">
                             <button @click="peFarZoneOpen[bk.underlying+'_'+bk.client_id]=!peFarZoneOpen[bk.underlying+'_'+bk.client_id]" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                              <span x-text="peFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide PE FAR':'▼ PE FAR ('+bk.zones.filter(z=>z.opt_type===\'PE\'&&!z.reachable&&z.status!==\'TRAPPED\'&&z.ltf_status!==\'entered\'&&z.ltf_status!==\'ltf_signal\').length+')'"></span>
+                              <span x-text="peFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide PE FAR':'▼ PE FAR ('+bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length+')'"></span>
                             </button>
                             <template x-if="peFarZoneOpen[bk.underlying+'_'+bk.client_id]">
                               <div class="mt-1">
