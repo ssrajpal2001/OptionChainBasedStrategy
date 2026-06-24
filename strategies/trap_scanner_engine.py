@@ -3447,12 +3447,12 @@ class TrapScannerEngine:
                 w = zh - zl
                 return (zl + 2 * w / 3) if kf == "BEAR" else (zh - 2 * w / 3)
 
-            # Build candidate pool: prev-day zones
+            # Build candidate pool: prev-day zones — ONLY genuinely TRAPPED (SL hit).
+            # ACTIVE zones (SL not yet hit) are not confirmed traps and must not show.
             typed = [z for z in self._htf_fut_zones if z.get("kind") == kind_filter]
             if not typed:
                 typed = list(self._htf_fut_zones)
-            pool = [z for z in typed if z["status"] == "TRAPPED"] or \
-                   [z for z in typed if z.get("status")]
+            pool = [z for z in typed if z.get("status") == "TRAPPED"]
 
             # Intraday supplement: if no prev-day trapped zone is in range, also scan today
             prev_in_range = any(
@@ -3474,9 +3474,10 @@ class TrapScannerEngine:
                                 _z["_source"] = "intraday"
                                 intraday_zones.append(_z)
 
-            # Prefer intraday trapped-in-range zones first, then prev-day pool
+            # Prefer intraday trapped-in-range zones first, then prev-day pool.
+            # Never show ACTIVE zones (SL not hit = trap not confirmed).
             intra_trapped = [z for z in intraday_zones if z.get("status") == "TRAPPED"]
-            combined = intra_trapped + pool if intra_trapped else pool + intraday_zones
+            combined = intra_trapped + pool if intra_trapped else pool
 
             if not combined or not ltp:
                 return None
