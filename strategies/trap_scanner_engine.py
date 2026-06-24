@@ -1247,6 +1247,31 @@ class TrapScannerEngine:
             fut_bull = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"
                         and e.get("kind", "BEAR") == "BULL"
                         and e.get("zone_low", 0) <= spot <= e.get("zone_high", 0)]
+            # Intraday fallback: prev-day zones are often far from current price (gap days,
+            # overnight moves). When no prev-day zone matches current spot, scan today's
+            # intraday bars for fresh TRAPPED zones at the current price level.
+            if not fut_bear and not fut_bull and self._bars_fut:
+                _today = datetime.now(IST).date()
+                _today_bars = [b for b in self._bars_fut
+                               if pd.to_datetime(b.get("datetime", "")).date() == _today]
+                if len(_today_bars) >= 4:
+                    _df_t = _bars_to_df(_today_bars)
+                    _htf_t = _resample_htf(_df_t, self._htf_min)
+                    if len(_htf_t) >= 2:
+                        _, _today_zones = scanner.scan_htf_spot(_htf_t)
+                        for _z in _today_zones:
+                            if _z.get("status") != "TRAPPED":
+                                continue
+                            if _z.get("zone_low", 0) <= spot <= _z.get("zone_high", 0):
+                                if _z.get("kind", "BEAR") == "BEAR":
+                                    fut_bear.append(_z)
+                                elif _z.get("kind") == "BULL":
+                                    fut_bull.append(_z)
+                        if fut_bear or fut_bull:
+                            self._log.info(
+                                "_ltf_scan_normal intraday fallback: bear=%d bull=%d spot=%.0f",
+                                len(fut_bear), len(fut_bull), spot,
+                            )
             if fut_bear:
                 self._run_ltf_on("FUT", self._bars_fut, fut_bear, "CE",
                                  require_closed=True, price_override=spot, all_cleared_entry=True)
@@ -1767,14 +1792,22 @@ class TrapScannerEngine:
                 return
             # Scan today's bars inline — do NOT call _run_htf_scan which would overwrite
             # self._htf_fut_zones (the 75-min prev-day zones we want to preserve).
+            # Use scan_htf_spot (returns kind=BEAR/BULL) for both directions.
             df_today = _bars_to_df(today_bars)
             htf_today = _resample_htf(df_today, self._cascade_min)
             if len(htf_today) >= 2:
-                _, cas_entries = scanner.scan_htf(htf_today)
-                zones_15m = [e for e in cas_entries if e["status"] == "TRAPPED"]
+                _, cas_entries = scanner.scan_htf_spot(htf_today)
+                bear_cas = [e for e in cas_entries if e["status"] == "TRAPPED"
+                            and e.get("kind", "BEAR") == "BEAR"]
+                bull_cas = [e for e in cas_entries if e["status"] == "TRAPPED"
+                            and e.get("kind") == "BULL"]
             else:
-                zones_15m = []
-            self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE", require_closed=False)
+                bear_cas = []
+                bull_cas = []
+            if bear_cas:
+                self._run_ltf_on("FUT", self._bars_fut, bear_cas, "CE", require_closed=False)
+            if bull_cas:
+                self._run_ltf_on("FUT", self._bars_fut, bull_cas, "PE", require_closed=False)
         elif self._htf_source == "option":
             # Per-leg: only scan the leg(s) that are in cascade mode
             bear_15: list = []
@@ -3408,25 +3441,49 @@ class TrapScannerEngine:
             # CE → BEAR zones (sellers trapped, entry on price falling through zone)
             # PE → BULL zones (buyers trapped, entry on price rising through zone)
             kind_filter = "BEAR" if side == "CE" else "BULL"
-            typed = [z for z in self._htf_fut_zones if z.get("kind") == kind_filter]
-            if not typed:
-                typed = list(self._htf_fut_zones)  # fallback if kind not set
-            trapped = [z for z in typed if z["status"] == "TRAPPED"]
-            pool = trapped or [z for z in typed if z.get("status")]
-            if not pool or not ltp:
-                return None
-            def _zone_trig(z: dict) -> float:
-                # zone_trigger not stored in scan_htf_spot entries; compute from 2/3 rule
+
+            def _zone_trig(z: dict, kf: str) -> float:
                 zl, zh = z.get("zone_low", 0), z.get("zone_high", 0)
                 w = zh - zl
-                if kind_filter == "BEAR":
-                    return zl + 2 * w / 3   # lower 2/3 = bear entry region
-                else:
-                    return zh - 2 * w / 3   # upper 2/3 = bull entry region
+                return (zl + 2 * w / 3) if kf == "BEAR" else (zh - 2 * w / 3)
 
-            best = min(pool, key=lambda z: abs(_zone_trig(z) - ltp))
+            # Build candidate pool: prev-day zones
+            typed = [z for z in self._htf_fut_zones if z.get("kind") == kind_filter]
+            if not typed:
+                typed = list(self._htf_fut_zones)
+            pool = [z for z in typed if z["status"] == "TRAPPED"] or \
+                   [z for z in typed if z.get("status")]
+
+            # Intraday supplement: if no prev-day trapped zone is in range, also scan today
+            prev_in_range = any(
+                z["status"] == "TRAPPED" and z.get("zone_low", 0) <= ltp <= z.get("zone_high", 0)
+                for z in pool
+            )
+            intraday_zones: list = []
+            if not prev_in_range and self._bars_fut and ltp:
+                _today_d = datetime.now(IST).date()
+                _t_bars = [b for b in self._bars_fut
+                           if pd.to_datetime(b.get("datetime", "")).date() == _today_d]
+                if len(_t_bars) >= 4:
+                    _df_t = _bars_to_df(_t_bars)
+                    _htf_t = _resample_htf(_df_t, self._htf_min)
+                    if len(_htf_t) >= 2:
+                        _, _t_zones = scanner.scan_htf_spot(_htf_t)
+                        for _z in _t_zones:
+                            if _z.get("kind") == kind_filter:
+                                _z["_source"] = "intraday"
+                                intraday_zones.append(_z)
+
+            # Prefer intraday trapped-in-range zones first, then prev-day pool
+            intra_trapped = [z for z in intraday_zones if z.get("status") == "TRAPPED"]
+            combined = intra_trapped + pool if intra_trapped else pool + intraday_zones
+
+            if not combined or not ltp:
+                return None
+
+            best = min(combined, key=lambda z: abs(_zone_trig(z, kind_filter) - ltp))
             uid  = _zone_uid(best)
-            trig = round(_zone_trig(best), 2)
+            trig = round(_zone_trig(best, kind_filter), 2)
             dist = round(abs(ltp - trig), 1) if ltp else None
             return {
                 "zone_high":    round(best.get("zone_high",    0), 2),
@@ -3435,9 +3492,10 @@ class TrapScannerEngine:
                 "t1_target":    round(best.get("sl", 0), 2),
                 "dist_pts":     dist,
                 "trapped_on":   str(best.get("trapped_on", "") or ""),
-                "htf_label":    f"{self._htf_min}-min",
+                "htf_label":    ("intraday " if best.get("_source") == "intraday" else "prev-day ") + f"{self._htf_min}-min",
                 "ltf_status":   self._zone_ltf_status.get(uid, "watching"),
                 "kind":         best.get("kind", kind_filter),
+                "source":       best.get("_source", "prev-day"),
             }
 
         # Per-leg LTPs — each leg uses its own premium to pick the closest zone

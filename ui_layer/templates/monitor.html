@@ -5062,32 +5062,40 @@ function amoTest() {
                       <span>DIR</span><span>ZONE LOW</span><span>ZONE HIGH</span><span>TARGET</span><span>TRAPPED</span><span>5M STATUS</span>
                     </div>
                     <template x-if="bk.nearest_ce_zone">
-                      <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
-                        <span style="color:var(--t-green);font-weight:700">BEAR→CE</span>
-                        <span x-text="bk.nearest_ce_zone.zone_low"></span>
-                        <span x-text="bk.nearest_ce_zone.zone_high"></span>
-                        <span style="color:var(--t-green)" x-text="bk.nearest_ce_zone.t1_target||'—'"></span>
-                        <span style="color:var(--t-dim)" x-text="bk.nearest_ce_zone.trapped_on?bk.nearest_ce_zone.trapped_on.slice(5,16):'—'"></span>
-                        <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                              x-text="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_ce_zone.ltf_status||'watching'"></span>
+                      <div>
+                        <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
+                          <span style="color:var(--t-green);font-weight:700">BEAR→CE</span>
+                          <span x-text="bk.nearest_ce_zone.zone_low"></span>
+                          <span x-text="bk.nearest_ce_zone.zone_high"></span>
+                          <span style="color:var(--t-green)" x-text="bk.nearest_ce_zone.t1_target||'—'"></span>
+                          <span style="color:var(--t-dim)" x-text="bk.nearest_ce_zone.trapped_on?bk.nearest_ce_zone.trapped_on.slice(5,16):'—'"></span>
+                          <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                                x-text="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_ce_zone.ltf_status||'watching'"></span>
+                        </div>
+                        <div style="color:var(--t-muted);font-size:10px;padding-left:2px"
+                             x-text="(bk.nearest_ce_zone.source==='intraday'?'★ intraday ':'  prev-day ')+(bk.nearest_ce_zone.htf_label||'')"></div>
                       </div>
                     </template>
                     <template x-if="!bk.nearest_ce_zone">
-                      <div style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BEAR — no TRAPPED HTF zone · scanning 30-min FUT bars</div>
+                      <div style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BEAR — no TRAPPED zone (prev-day or intraday)</div>
                     </template>
                     <template x-if="bk.nearest_pe_zone">
-                      <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
-                        <span style="color:var(--t-red);font-weight:700">BULL→PE</span>
-                        <span x-text="bk.nearest_pe_zone.zone_low"></span>
-                        <span x-text="bk.nearest_pe_zone.zone_high"></span>
-                        <span style="color:var(--t-red)" x-text="bk.nearest_pe_zone.t1_target||'—'"></span>
-                        <span style="color:var(--t-dim)" x-text="bk.nearest_pe_zone.trapped_on?bk.nearest_pe_zone.trapped_on.slice(5,16):'—'"></span>
-                        <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                              x-text="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_pe_zone.ltf_status||'watching'"></span>
+                      <div>
+                        <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
+                          <span style="color:var(--t-red);font-weight:700">BULL→PE</span>
+                          <span x-text="bk.nearest_pe_zone.zone_low"></span>
+                          <span x-text="bk.nearest_pe_zone.zone_high"></span>
+                          <span style="color:var(--t-red)" x-text="bk.nearest_pe_zone.t1_target||'—'"></span>
+                          <span style="color:var(--t-dim)" x-text="bk.nearest_pe_zone.trapped_on?bk.nearest_pe_zone.trapped_on.slice(5,16):'—'"></span>
+                          <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                                x-text="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_pe_zone.ltf_status||'watching'"></span>
+                        </div>
+                        <div style="color:var(--t-muted);font-size:10px;padding-left:2px"
+                             x-text="(bk.nearest_pe_zone.source==='intraday'?'★ intraday ':'  prev-day ')+(bk.nearest_pe_zone.htf_label||'')"></div>
                       </div>
                     </template>
                     <template x-if="!bk.nearest_pe_zone">
-                      <div style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BULL — no TRAPPED HTF zone · scanning 30-min FUT bars</div>
+                      <div style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BULL — no TRAPPED zone (prev-day or intraday)</div>
                     </template>
                   </div>
                 </div>
@@ -7597,29 +7605,37 @@ function amoTest() {
                             <span>DIR</span><span>ZONE LOW</span><span>ZONE HIGH</span><span>TARGET</span><span>TRAPPED</span><span>5M STATUS</span>
                           </div>
                           <template x-if="bk.nearest_ce_zone">
-                            <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
-                              <span style="color:var(--t-green);font-weight:700">BEAR→CE</span>
-                              <span x-text="bk.nearest_ce_zone.zone_low"></span>
-                              <span x-text="bk.nearest_ce_zone.zone_high"></span>
-                              <span style="color:var(--t-green)" x-text="bk.nearest_ce_zone.t1_target||'—'"></span>
-                              <span style="color:var(--t-dim)" x-text="bk.nearest_ce_zone.trapped_on?bk.nearest_ce_zone.trapped_on.slice(5,16):'—'"></span>
-                              <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                                    x-text="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_ce_zone.ltf_status||'watching'"></span>
+                            <div>
+                              <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
+                                <span style="color:var(--t-green);font-weight:700">BEAR→CE</span>
+                                <span x-text="bk.nearest_ce_zone.zone_low"></span>
+                                <span x-text="bk.nearest_ce_zone.zone_high"></span>
+                                <span style="color:var(--t-green)" x-text="bk.nearest_ce_zone.t1_target||'—'"></span>
+                                <span style="color:var(--t-dim)" x-text="bk.nearest_ce_zone.trapped_on?bk.nearest_ce_zone.trapped_on.slice(5,16):'—'"></span>
+                                <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                                      x-text="bk.nearest_ce_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_ce_zone.ltf_status||'watching'"></span>
+                              </div>
+                              <div style="color:var(--t-muted);font-size:10px;padding-left:2px"
+                                   x-text="(bk.nearest_ce_zone.source==='intraday'?'★ intraday ':'  prev-day ')+(bk.nearest_ce_zone.htf_label||'')"></div>
                             </div>
                           </template>
-                          <div x-show="!bk.nearest_ce_zone" style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BEAR — no TRAPPED zone</div>
+                          <div x-show="!bk.nearest_ce_zone" style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BEAR — no TRAPPED zone (prev-day or intraday)</div>
                           <template x-if="bk.nearest_pe_zone">
-                            <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
-                              <span style="color:var(--t-red);font-weight:700">BULL→PE</span>
-                              <span x-text="bk.nearest_pe_zone.zone_low"></span>
-                              <span x-text="bk.nearest_pe_zone.zone_high"></span>
-                              <span style="color:var(--t-red)" x-text="bk.nearest_pe_zone.t1_target||'—'"></span>
-                              <span style="color:var(--t-dim)" x-text="bk.nearest_pe_zone.trapped_on?bk.nearest_pe_zone.trapped_on.slice(5,16):'—'"></span>
-                              <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                                    x-text="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_pe_zone.ltf_status||'watching'"></span>
+                            <div>
+                              <div class="grid py-1" style="grid-template-columns:3.5rem 1fr 1fr 1fr 4.5rem 6.5rem;gap:4px;border-top:1px solid var(--t-border);color:var(--t-bright)">
+                                <span style="color:var(--t-red);font-weight:700">BULL→PE</span>
+                                <span x-text="bk.nearest_pe_zone.zone_low"></span>
+                                <span x-text="bk.nearest_pe_zone.zone_high"></span>
+                                <span style="color:var(--t-red)" x-text="bk.nearest_pe_zone.t1_target||'—'"></span>
+                                <span style="color:var(--t-dim)" x-text="bk.nearest_pe_zone.trapped_on?bk.nearest_pe_zone.trapped_on.slice(5,16):'—'"></span>
+                                <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                                      x-text="bk.nearest_pe_zone.ltf_status==='ltf_signal_all_cleared'?'5M CLEAR → ENTRY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':bk.nearest_pe_zone.ltf_status||'watching'"></span>
+                              </div>
+                              <div style="color:var(--t-muted);font-size:10px;padding-left:2px"
+                                   x-text="(bk.nearest_pe_zone.source==='intraday'?'★ intraday ':'  prev-day ')+(bk.nearest_pe_zone.htf_label||'')"></div>
                             </div>
                           </template>
-                          <div x-show="!bk.nearest_pe_zone" style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BULL — no TRAPPED zone</div>
+                          <div x-show="!bk.nearest_pe_zone" style="color:var(--t-dim);padding:4px 0;border-top:1px solid var(--t-border)">BULL — no TRAPPED zone (prev-day or intraday)</div>
                         </div>
                       </template>
                       <!-- Option-mode contracts table (CE1/CE2/PE1/PE2 LTP + zone) -->
