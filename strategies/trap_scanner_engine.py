@@ -1368,69 +1368,54 @@ class TrapScannerEngine:
             if current_price > 0 and (current_price < z_low or current_price > z_high):
                 continue
 
-            # 15m intermediate gate — applies to BOTH normal and cascade paths.
-            # A 15m zone must be CLOSED (SL hit + price returned to zone_high) before
-            # the 5m LTF scan fires.
-            # Normal (require_closed=True): 15m zone must be inside HTF zone bounds.
-            # Cascade (require_closed=False): no HTF zone bound — any CLOSED 15m zone today.
-            if require_closed:
-                mtf = self._find_closed_15m_zone(today_bars, zone)
-            else:
-                mtf = self._find_closed_15m_zone(today_bars, None)
-
-            if mtf is None:
-                status_key = "waiting_15m"
-                if self._zone_ltf_status.get(uid) != status_key:
-                    self._zone_ltf_status[uid] = status_key
-                    self._log.info(
-                        "_run_ltf_on [%s] uid=%s: waiting for 15m CLOSED zone "
-                        "(mode=%s zone_high=%.1f zone_low=%.1f)",
-                        leg_key, uid,
-                        "normal" if require_closed else "cascade",
-                        z_high, z_low,
-                    )
-                continue
-
-            ltf_zone_high = mtf["zone_high"]
-            ltf_zone_low  = mtf["zone_low"]
-            self._log.info(
-                "_run_ltf_on [%s] uid=%s: 15m gate PASSED (mode=%s) "
-                "(15m zone_high=%.1f zone_low=%.1f sl=%.1f closed_on=%s)",
-                leg_key, uid,
-                "normal" if require_closed else "cascade",
-                ltf_zone_high, ltf_zone_low,
-                mtf.get("sl", 0), str(mtf.get("closed_on", ""))[:16],
-            )
-
+            # Jump directly to 5m LTF within this zone's bounds.
+            # HTF mode (75m): outer gate already passed → scan 5m inside [z_low, z_high].
+            # Cascade mode (15m): same → scan 5m inside [z_low, z_high].
+            # Entry fires when ALL 5m bear traps inside the zone are CLOSED (sellers
+            # exhausted) and none are still TRAPPED.
             _, ltf_entries = scanner.scan_ltf(
                 df,
-                htf_zone_high=ltf_zone_high,
-                htf_zone_low=ltf_zone_low,
+                htf_zone_high=z_high,
+                htf_zone_low=z_low,
                 htf_ref_bar=str(zone.get("ref_ts", "")),
                 htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
                 htf_target=zone.get("sl", 0.0),
             )
-            best = scanner.select_best_ltf_entry(ltf_entries)  # CLOSED only (both modes)
-            if best:
-                # Entry is at zone_high = LTF sellers' entry level (C1.LOW).
-                # After TRAPPED (price shot above C1.HIGH), we wait for price to pull
-                # back to zone_high — that re-test of sellers' entry IS our entry signal.
-                # Both CE and PE use same check: option premium must retrace to zone_high.
-                entry_level = best["zone_high"]
-                tol = entry_level * 0.005  # 0.5% tolerance for tick noise
-                if current_price > entry_level + tol:
-                    # Price still above sellers' entry — trap fired but retest not yet.
-                    self._zone_ltf_status[uid] = "waiting_retest"
-                    self._log.debug(
-                        "_run_ltf_on [%s] WAITING RETEST: ltp=%.2f > zone_high=%.2f",
-                        leg_key, current_price, entry_level,
+            trapped_now  = [e for e in ltf_entries if e["status"] == "TRAPPED"]
+            closed_today = [e for e in ltf_entries if e["status"] == "CLOSED"]
+
+            if trapped_now:
+                if self._zone_ltf_status.get(uid) != "waiting_5m_clear":
+                    self._zone_ltf_status[uid] = "waiting_5m_clear"
+                    self._log.info(
+                        "_run_ltf_on [%s] uid=%s: %d 5m bear(s) still active in zone "
+                        "%.1f-%.1f (closed=%d)",
+                        leg_key, uid, len(trapped_now), z_low, z_high, len(closed_today),
                     )
-                    continue
+                continue
+
+            if closed_today:
+                best = max(closed_today, key=lambda e: str(e.get("closed_on", "")))
+                self._log.info(
+                    "_run_ltf_on [%s] uid=%s: all 5m bears cleared (closed=%d trapped=0) "
+                    "in zone %.1f-%.1f → entry",
+                    leg_key, uid, len(closed_today), z_low, z_high,
+                )
                 self._zone_ltf_status[uid] = "ltf_signal"
                 asyncio.get_event_loop().create_task(
                     self._on_entry_signal(leg_key, opt_type, best, zone)
                 )
                 return
+
+            # No 5m traps yet inside zone — still watching
+            if self._zone_ltf_status.get(uid) == "watching":
+                self._zone_ltf_status[uid] = "watching_5m"
+                self._log.info(
+                    "_run_ltf_on [%s] uid=%s: in zone %.1f-%.1f, watching for 5m traps "
+                    "(mode=%s)",
+                    leg_key, uid, z_low, z_high,
+                    "cascade" if not require_closed else "htf",
+                )
 
     def _find_closed_15m_zone(self, today_bars: List[dict],
                                htf_zone: Optional[dict]) -> Optional[dict]:
