@@ -1978,7 +1978,7 @@ class TrapScannerEngine:
             t1_price_fut = round(htf_zone.get("sl", 0), 2)  # kept for logging/UI reference
         else:
             tracking_leg = leg   # CE1 or PE1 — scan strike option bars
-            sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # option zone_low (option ₹)
+            sl_price     = round(htf_zone.get("zone_low", entry["zone_low"]) - self._sl_buf, 2)  # HTF zone_low − buffer
             t1_price     = round(htf_zone.get("sl", 0), 2)             # HTF ref bar HIGH (bears' SL)
             t1_price_fut = None
 
