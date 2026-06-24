@@ -116,25 +116,31 @@ def trading_days_last_n(n: int) -> list[str]:
 
 
 # ── Prev-day bias filter ──────────────────────────────────────────────────────
-def day_bias(prev_bars: pd.DataFrame, atr: float, bias_atr_mult: float = 0.5) -> str:
+def day_bias(prev_bars: pd.DataFrame, today_bars: pd.DataFrame,
+             gap_pct: float = 0.005) -> str:
     """
-    Returns 'LONG_OK', 'SHORT_OK', or 'BOTH' based on prev-day candle direction.
+    Gap-based bias: compare today's opening price to prev-day's closing price.
 
-    If prev-day was a strong bearish candle (close < open - bias_atr_mult*ATR):
-      → next day skip LONG entries (price likely to continue down).
-    If prev-day was a strong bullish candle (close > open + bias_atr_mult*ATR):
-      → next day skip SHORT entries.
-    Otherwise: both directions allowed.
+    A gap-down open (today_open < prev_close * (1 - gap_pct)) means the market
+    opened bearish — skip LONG entries (buyers likely to lose in continuation).
+    A gap-up open means skip SHORT entries.
+
+    Why gap vs prev-day direction: MCX runs 09:00–23:30. A day can look bullish
+    overall (open to close) even if it had a massive evening fall — the full-day
+    direction misses the overnight/pre-session momentum. The gap is the cleaner
+    read: it captures how the market RESUMED vs where it LEFT OFF.
     """
-    if prev_bars.empty or atr <= 0:
+    if prev_bars.empty or today_bars.empty:
         return "BOTH"
-    prev_open  = float(prev_bars.iloc[0]["open"])
     prev_close = float(prev_bars.iloc[-1]["close"])
-    threshold  = bias_atr_mult * atr
-    if prev_close < prev_open - threshold:
-        return "SHORT_OK"   # bearish prev-day → avoid LONG next day
-    if prev_close > prev_open + threshold:
-        return "LONG_OK"    # bullish prev-day → avoid SHORT next day
+    today_open = float(today_bars.iloc[0]["open"])
+    if prev_close <= 0:
+        return "BOTH"
+    gap = (today_open - prev_close) / prev_close
+    if gap < -gap_pct:
+        return "SHORT_OK"   # gap-down → don't buy (bearish continuation expected)
+    if gap > gap_pct:
+        return "LONG_OK"    # gap-up → don't sell
     return "BOTH"
 
 
@@ -144,7 +150,7 @@ def calc_atr(bars: pd.DataFrame, period: int = 14) -> float:
         return 0.0
     df = bars.copy()
     df["tr"] = (df["high"] - df["low"]).abs()
-    return float(df["tr"].tail(period * 60).mean())  # last ~14 sessions of 1m bars
+    return float(df["tr"].tail(period * 60).mean())
 
 
 # ── LTF confirmation ────────────────────────────────────────────────────────────
@@ -342,7 +348,7 @@ def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int,
         # Prev-day TRAPPED zones + prev-day bias
         htf_zones  = get_trapped_zones(prev_bars, htf_min) if not prev_bars.empty else []
         atr_val    = calc_atr(prev_bars) if not prev_bars.empty else 0.0
-        bias       = day_bias(prev_bars, atr_val, bias_mult) if not prev_bars.empty and bias_mult > 0 else "BOTH"
+        bias       = day_bias(prev_bars, today_bars, bias_mult) if bias_mult > 0 else "BOTH"
 
         print(f"prev={len(prev_bars)} today={len(today_bars)} prev_zones={len(htf_zones)} "
               f"bias={bias}", end=" ", flush=True)
@@ -457,9 +463,9 @@ def main():
     ap.add_argument("--sl_buf", type=float, default=20.0, help="SL buffer Rs (default 20)")
     ap.add_argument("--htf",    default="30,60,120",    help="Comma-sep HTF list (default 30,60,120)")
     ap.add_argument("--csv",    action="store_true",    help="Save trade CSV per HTF")
-    ap.add_argument("--bias_mult", type=float, default=0.5,
-                    help="Prev-day bias ATR multiplier (default 0.5). "
-                         "0=disable, 1.0=stricter filter (only block on big trend days)")
+    ap.add_argument("--bias_mult", type=float, default=0.005,
+                    help="Gap filter threshold as fraction of price (default 0.005 = 0.5%%). "
+                         "0=disable. Gap-down > threshold blocks LONG; gap-up blocks SHORT.")
     args = ap.parse_args()
 
     global HEADERS
