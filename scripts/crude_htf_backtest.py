@@ -115,6 +115,38 @@ def trading_days_last_n(n: int) -> list[str]:
     return list(reversed(days))
 
 
+# ── Prev-day bias filter ──────────────────────────────────────────────────────
+def day_bias(prev_bars: pd.DataFrame, atr: float, bias_atr_mult: float = 0.5) -> str:
+    """
+    Returns 'LONG_OK', 'SHORT_OK', or 'BOTH' based on prev-day candle direction.
+
+    If prev-day was a strong bearish candle (close < open - bias_atr_mult*ATR):
+      → next day skip LONG entries (price likely to continue down).
+    If prev-day was a strong bullish candle (close > open + bias_atr_mult*ATR):
+      → next day skip SHORT entries.
+    Otherwise: both directions allowed.
+    """
+    if prev_bars.empty or atr <= 0:
+        return "BOTH"
+    prev_open  = float(prev_bars.iloc[0]["open"])
+    prev_close = float(prev_bars.iloc[-1]["close"])
+    threshold  = bias_atr_mult * atr
+    if prev_close < prev_open - threshold:
+        return "SHORT_OK"   # bearish prev-day → avoid LONG next day
+    if prev_close > prev_open + threshold:
+        return "LONG_OK"    # bullish prev-day → avoid SHORT next day
+    return "BOTH"
+
+
+def calc_atr(bars: pd.DataFrame, period: int = 14) -> float:
+    """Simple ATR from 1-min bars (true range avg)."""
+    if len(bars) < 2:
+        return 0.0
+    df = bars.copy()
+    df["tr"] = (df["high"] - df["low"]).abs()
+    return float(df["tr"].tail(period * 60).mean())  # last ~14 sessions of 1m bars
+
+
 # ── LTF confirmation ────────────────────────────────────────────────────────────
 def _sellers_cleared(bars_5m: pd.DataFrame) -> bool:
     """BEAR sellers cleared: at least one CLOSED BEAR zone, zero TRAPPED."""
@@ -150,10 +182,12 @@ def get_trapped_zones(bars: pd.DataFrame, htf_min: int) -> list[dict]:
 
 # ── One-day simulation ─────────────────────────────────────────────────────────
 def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
-                 htf_min: int, sl_buf: float, lots: int, day_str: str) -> list[dict]:
+                 htf_min: int, sl_buf: float, lots: int, day_str: str,
+                 bias: str = "BOTH") -> list[dict]:
     """
     Simulate trades for one day.
     - htf_zones: TRAPPED zones from prev-day (or intraday fallback)
+    - bias: 'BOTH'|'LONG_OK'|'SHORT_OK' — filters entry direction (prev-day trend filter)
     - Entry bar-by-bar; one position at a time; intraday fallback added progressively
     - Each zone may only be entered ONCE per day (uid dedup — mirrors live _notified_uids).
     """
@@ -228,6 +262,8 @@ def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
             ltf_bars    = resample_htf(bars_so_far, LTF_MIN)
 
             if kind == "BEAR":
+                if bias == "SHORT_OK":
+                    continue        # prev-day was bearish → skip LONG
                 if not _sellers_cleared(ltf_bars):
                     continue
                 direction = "LONG"
@@ -235,6 +271,8 @@ def simulate_day(today_bars: pd.DataFrame, htf_zones: list[dict],
                 t1_price  = zsl
                 opt_type  = "CE"
             else:  # BULL
+                if bias == "LONG_OK":
+                    continue        # prev-day was bullish → skip SHORT
                 if not _buyers_cleared(ltf_bars):
                     continue
                 direction = "SHORT"
@@ -280,7 +318,8 @@ def trade_pts(t: dict) -> float:
 
 
 # ── One-HTF full backtest ──────────────────────────────────────────────────────
-def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int) -> dict:
+def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int,
+            bias_mult: float = 0.5) -> dict:
     all_trades: list[dict] = []
     day_results: list[dict] = []
 
@@ -300,12 +339,15 @@ def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int) -> dict:
             print("no bars (holiday?)")
             continue
 
-        # Prev-day TRAPPED zones
-        htf_zones = get_trapped_zones(prev_bars, htf_min) if not prev_bars.empty else []
+        # Prev-day TRAPPED zones + prev-day bias
+        htf_zones  = get_trapped_zones(prev_bars, htf_min) if not prev_bars.empty else []
+        atr_val    = calc_atr(prev_bars) if not prev_bars.empty else 0.0
+        bias       = day_bias(prev_bars, atr_val, bias_mult) if not prev_bars.empty and bias_mult > 0 else "BOTH"
 
-        print(f"prev={len(prev_bars)} today={len(today_bars)} prev_zones={len(htf_zones)}", end=" ", flush=True)
+        print(f"prev={len(prev_bars)} today={len(today_bars)} prev_zones={len(htf_zones)} "
+              f"bias={bias}", end=" ", flush=True)
 
-        day_trades = simulate_day(today_bars, htf_zones, htf_min, sl_buf, lots, day_str)
+        day_trades = simulate_day(today_bars, htf_zones, htf_min, sl_buf, lots, day_str, bias)
         day_pnl    = sum(trade_pnl(t) for t in day_trades)
 
         print(f"trades={len(day_trades)} pnl=₹{day_pnl:,.0f}")
@@ -415,6 +457,9 @@ def main():
     ap.add_argument("--sl_buf", type=float, default=20.0, help="SL buffer Rs (default 20)")
     ap.add_argument("--htf",    default="30,60,120",    help="Comma-sep HTF list (default 30,60,120)")
     ap.add_argument("--csv",    action="store_true",    help="Save trade CSV per HTF")
+    ap.add_argument("--bias_mult", type=float, default=0.5,
+                    help="Prev-day bias ATR multiplier (default 0.5). "
+                         "0=disable, 1.0=stricter filter (only block on big trend days)")
     args = ap.parse_args()
 
     global HEADERS
@@ -433,7 +478,7 @@ def main():
     print(f"Backtest: {days[0]} to {days[-1]}  ({len(days)} trading days)")
     print(f"HTF list: {htf_list}  |  Lots: {args.lots}  |  SL_buf: ₹{args.sl_buf}")
 
-    results = [run_htf(days, h, args.sl_buf, args.lots) for h in htf_list]
+    results = [run_htf(days, h, args.sl_buf, args.lots, args.bias_mult) for h in htf_list]
 
     print_summary(results, args.lots, args.sl_buf)
 
