@@ -515,42 +515,17 @@ class TrapScannerEngine:
                 except Exception:
                     fk = ""
                 self._fut_key = fk or _SPOT_KEYS.get(self._und, "")
-                # Guard: skip re-fetch if bars already seeded (retry path or live ticks already added)
+                # Futures mode: only the FUT bar series is needed.
+                # Option bars are fetched on-demand when a trade entry fires.
                 if not self._bars_fut:
                     self._bars_fut = await self._fetch_1m_history(self._fut_key)
-                # Also seed option bars (needed for LTF scan)
-                self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
-                self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
-                self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
-                self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
-                if not self._bars_ce1:
-                    self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
-                if not self._bars_ce2:
-                    self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
-                if not self._bars_pe1:
-                    self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
-                if not self._bars_pe2:
-                    self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
-                # Merge today's intraday bars (historical API ends at prev day)
-                for attr, key in [
-                    ("_bars_fut", self._fut_key),
-                    ("_bars_ce1", self._ce1_key), ("_bars_ce2", self._ce2_key),
-                    ("_bars_pe1", self._pe1_key), ("_bars_pe2", self._pe2_key),
-                ]:
-                    intra = await self._fetch_intraday_bars(key)
-                    if intra:
-                        existing = {b["datetime"] for b in getattr(self, attr)}
-                        merged = getattr(self, attr) + [b for b in intra if b["datetime"] not in existing]
-                        merged.sort(key=lambda b: b["datetime"])
-                        setattr(self, attr, merged)
-                self._log.info(
-                    "Bars seeded — FUT(%s)=%d CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
-                    self._fut_key, len(self._bars_fut),
-                    self._ce1_key, len(self._bars_ce1),
-                    self._ce2_key, len(self._bars_ce2),
-                    self._pe1_key, len(self._bars_pe1),
-                    self._pe2_key, len(self._bars_pe2),
-                )
+                intra_fut = await self._fetch_intraday_bars(self._fut_key)
+                if intra_fut:
+                    existing = {b["datetime"] for b in self._bars_fut}
+                    merged = self._bars_fut + [b for b in intra_fut if b["datetime"] not in existing]
+                    merged.sort(key=lambda b: b["datetime"])
+                    self._bars_fut = merged
+                self._log.info("Bars seeded — FUT(%s)=%d", self._fut_key, len(self._bars_fut))
             elif self._htf_source == "spot":
                 # Legacy: SPOT bars for HTF, option bars for LTF
                 spot_key = _SPOT_KEYS.get(self._und, "")
@@ -2116,6 +2091,19 @@ class TrapScannerEngine:
             except Exception:
                 pass
 
+        # Futures-mode: subscribe exec_key option on-demand so ltp_cache populates
+        # before order placement (price hint for MARKET order; not strictly required).
+        if self._htf_source == "futures" and exec_key:
+            feeder = (self._mcx_feeder if self._mcx_feeder is not None
+                      else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
+            if feeder and hasattr(feeder, "subscribe_tokens"):
+                try:
+                    await feeder.subscribe_tokens([exec_key])
+                    await asyncio.sleep(0.3)  # brief wait for first tick
+                    self._log.info("on-demand subscribed exec_key: %s", exec_key)
+                except Exception as _se:
+                    self._log.warning("exec_key subscribe failed: %s", _se)
+
         broker = await self._ensure_broker()
         if not broker:
             self._log.error("No broker — entry aborted")
@@ -3211,8 +3199,29 @@ class TrapScannerEngine:
         return None, None
 
     async def _subscribe_instruments(self) -> None:
-        """Pin + force-subscribe all tracked option keys so ticks arrive regardless of ATM window."""
-        # Step 1: pin strikes so rebalancer never unsubscribes them on ATM drift
+        """Subscribe and pin required instrument keys.
+
+        Futures mode: only the FUT key at startup. Option key is subscribed
+        on-demand when a trade entry fires (_subscribe_exec_option).
+
+        Spot mode: pin CE1/CE2/PE1/PE2 strikes + force-subscribe their keys.
+        """
+        if self._htf_source == "futures":
+            # Only subscribe the futures contract — no option subscriptions at startup.
+            if not self._fut_key:
+                self._log.warning("_subscribe_instruments: no fut_key")
+                return
+            feeder = (self._mcx_feeder if self._mcx_feeder is not None
+                      else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
+            if feeder and hasattr(feeder, "subscribe_tokens"):
+                try:
+                    await feeder.subscribe_tokens([self._fut_key])
+                    self._log.info("subscribed FUT key: %s", self._fut_key)
+                except Exception as exc:
+                    self._log.warning("feeder.subscribe_tokens(fut) failed: %s", exc)
+            return
+
+        # Spot mode: pin strikes so rebalancer never unsubscribes them on ATM drift
         if self._rebalancer is not None:
             for strike in [self._ce1_strike, self._ce2_strike, self._pe1_strike, self._pe2_strike]:
                 if strike:
@@ -3223,17 +3232,11 @@ class TrapScannerEngine:
         else:
             self._log.warning("No rebalancer set — falling back to direct feeder subscription only")
 
-        # Step 2: force-subscribe the specific instrument keys directly via feeder.
-        # pin_strike alone only prevents UNsubscription; it does NOT subscribe a key that
-        # was never in the ATM window.  Deep-ITM / OTM legs used by TrapScanner are often
-        # outside the ±N-strike window, so they never receive ticks without this call.
-        # For futures-mode (CrudeOil) also subscribe the futures key so INDEX_TICK arrives.
-        keys = [k for k in [self._fut_key,
-                             self._ce1_key, self._ce2_key,
+        # Force-subscribe deep-ITM/OTM option keys (outside ATM window → no ticks without this)
+        keys = [k for k in [self._ce1_key, self._ce2_key,
                              self._pe1_key, self._pe2_key] if k]
         if keys:
-            feeder = (self._mcx_feeder if self._mcx_feeder is not None
-                      else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
+            feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
             if feeder and hasattr(feeder, "subscribe_tokens"):
                 try:
                     await feeder.subscribe_tokens(keys)
