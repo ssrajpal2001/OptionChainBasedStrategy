@@ -16,14 +16,14 @@ Key = Tuple[int, str]
 
 
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
-                       spot, step, offset, ltp_target, rule_pass, max_itm_steps=None):
+                       spot, step, offset, ltp_target, rule_pass, max_itm_steps=None,
+                       ratio_threshold=0.0):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
-    `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target,
-    with premium STRICTLY <= the kept leg's premium (never roll into a leg richer than the leg we
-    keep), and passing rule_pass(ce_strike, pe_strike). Among the eligible (<= kept_ltp) strikes it
-    picks the one CLOSEST to kept_ltp (most balanced from below).
-    `max_itm_steps` (optional): cap how deep ITM the re-sold leg may be (in strike steps) so the
-    roll stays near ATM (a real straddle) instead of selling a deep-ITM strike.
+    `roll_side` to re-sell, within ATM±offset, >= ltp_target, passing ratio_threshold check
+    and rule_pass(ce_strike, pe_strike). Picks the strike closest to kept_ltp (most balanced).
+    NO anchor constraint (ltp <= kept_ltp removed) — rollover does not use the anchor concept;
+    a ratio check replaces the hard cap so any reasonably balanced pair is eligible.
+    `max_itm_steps` (optional): cap how deep ITM the re-sold leg may be (in strike steps).
     Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
     atm = round(spot / step) * step if spot > 0 else 0
     best = None  # (premium_diff, strike, ltp)
@@ -40,8 +40,11 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
         ltp = float(v.get("ltp", 0.0) or 0.0)
         if ltp < ltp_target:
             continue
-        if kept_ltp and ltp > float(kept_ltp):
-            continue   # strict: partner must NOT be richer than the kept (losing) leg
+        # Ratio check: combined pair must not be too skewed (no hard anchor cap).
+        if ratio_threshold > 0 and kept_ltp and kept_ltp > 0 and ltp > 0:
+            _r = max(ltp, float(kept_ltp)) / min(ltp, float(kept_ltp))
+            if _r > ratio_threshold:
+                continue
         ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
         if not rule_pass(ce_s, pe_s):
             continue
@@ -136,8 +139,21 @@ def select_balanced_pair(
     ce_corr = strip_intrinsic(ce_ltp, "CE", atm, spot)
     pe_corr = strip_intrinsic(pe_ltp, "PE", atm, spot)
 
-    _basis = str(entry_basis).lower()
-    _floor = float(theta_target) if _basis == "theta" else float(ltp_target)
+    # Fresh-start (beginning / re-entry after failed rollover): BOTH ltp AND theta must pass.
+    # Anchor = side with lower time-value (lower intrinsic-stripped LTP). Partner must also
+    # satisfy both floors. Rollover uses select_partner_for which only checks ltp_target.
+    _floor_ltp   = float(ltp_target)
+    _floor_theta = float(theta_target) if theta_target and theta_target > 0 else 0.0
+    _need_theta  = _floor_theta > 0
+
+    def _leg_passes(side: str, strike: float, ltp_val: float) -> bool:
+        if ltp_val < _floor_ltp:
+            return False
+        if _need_theta:
+            tv = leg_entry_value(side, strike, ltp_val, spot, "theta")
+            if tv < _floor_theta:
+                return False
+        return True
 
     if ce_corr < pe_corr:
         anchor_side, anchor_strike, anchor_ltp, partner_side = "CE", atm, ce_ltp, "PE"
@@ -145,17 +161,21 @@ def select_balanced_pair(
         anchor_side, anchor_strike, anchor_ltp, partner_side = "PE", atm, pe_ltp, "CE"
 
     if trace is not None:
+        _tv_anchor = leg_entry_value(anchor_side, anchor_strike, anchor_ltp, spot, "theta")
         trace.append(
             f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
-            f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} "
-            f"(basis={_basis} need {_basis}>={_floor:.0f}); partner={partner_side} "
-            f"wants {_basis}>={_floor:.0f} and ltp<{anchor_ltp:.2f}"
+            f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} tv={_tv_anchor:.2f} "
+            f"(need ltp>={_floor_ltp:.0f}"
+            f"{f' AND theta>={_floor_theta:.0f}' if _need_theta else ''}); "
+            f"partner={partner_side} wants same + ltp<{anchor_ltp:.2f}"
         )
 
-    anchor_val = leg_entry_value(anchor_side, anchor_strike, anchor_ltp, spot, _basis)
-    if anchor_val < _floor:
+    if not _leg_passes(anchor_side, anchor_strike, anchor_ltp):
         if trace is not None:
-            trace.append(f"REJECT anchor {_basis} {anchor_val:.2f} < target {_floor:.0f}")
+            _tv = leg_entry_value(anchor_side, anchor_strike, anchor_ltp, spot, "theta")
+            trace.append(f"REJECT anchor ltp={anchor_ltp:.2f} tv={_tv:.2f} vs "
+                         f"floor ltp>={_floor_ltp:.0f}"
+                         f"{f' theta>={_floor_theta:.0f}' if _need_theta else ''}")
         return None
 
     best = None  # (ltp, strike)
@@ -165,13 +185,13 @@ def select_balanced_pair(
         if not leg:
             continue
         ltp = leg.get("ltp", 0.0)
-        # Floor on the chosen metric (ltp or time value); balance on LTP (< anchor_ltp).
-        val = leg_entry_value(partner_side, s, ltp, spot, _basis)
-        _ok = (val >= _floor) and (ltp < anchor_ltp)
+        _tv = leg_entry_value(partner_side, s, ltp, spot, "theta") if _need_theta else 0.0
+        _ok = _leg_passes(partner_side, s, ltp) and (ltp < anchor_ltp)
         if trace is not None:
             trace.append(
-                f"  cand {partner_side}{s} ltp={ltp:.2f} {_basis}={val:.2f} "
-                f"{'OK' if _ok else 'skip(out-of-band)'}"
+                f"  cand {partner_side}{s} ltp={ltp:.2f}"
+                f"{f' tv={_tv:.2f}' if _need_theta else ''} "
+                f"{'OK' if _ok else 'skip'}"
             )
         if _ok:
             if best is None or ltp > best[0]:

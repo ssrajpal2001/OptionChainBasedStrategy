@@ -101,8 +101,9 @@ class StraddlePosition:
 
     entry_indicators: Dict[str, float] = field(default_factory=dict)
 
-    # Session VWAP tracking for VWAP Rise SL
+    # Session VWAP tracking for VWAP Rise SL (1-min granularity)
     session_min_vwap: float = float("inf")
+    session_min_vwap_min: str = ""   # "HH:MM" of the minute that set session_min_vwap
 
     # Trailing-SL (lock-%/floor-%) peak profit % since entry (basis ltp or theta). Highest
     # profit% seen; once it crosses lock%, exit when profit drops floor% below this peak.
@@ -732,6 +733,7 @@ class SellStraddleStrategy:
         self._prem_volumes.clear()
         self._chart_series.clear()
         self._chart_last_min = None
+        self._vwap_last_check_min: str = ""   # gate: only check vwap_rise once per 1-min
         self._idx_highs.clear()
         self._idx_lows.clear()
         self._idx_closes.clear()
@@ -1996,54 +1998,45 @@ class SellStraddleStrategy:
                     return
 
         # 9. VWAP Rise SL → smart roll first.
-        # VWAP comes STRICTLY from the pool engine's continuous per-strike broker ATP for the EXACT
-        # current pair — NOT the ATM/fallback path. Right after a roll the fallback can read a stale
-        # or single-leg ATP and produce a corrupted-LOW VWAP that poisons session_min_vwap and fires
-        # a FALSE vwap_rise (the cause of the constant vwap_rise churn). The pool engine stores every
-        # subscribed pool strike's real-time ATP, so a rolled-to strike (always from the pool) is
-        # already warm and gives the exact combined VWAP immediately. If a leg isn't warm yet, _vp is
-        # None → skip this tick. Also reject a reading absurdly below the live combined premium
-        # (close): combined ATP can never be ~half of combined LTP, so <60% of close is corruption.
-        # STALENESS GUARD: if either leg's broker ATP hasn't ticked within _vwap_stale_sec, the
-        # combined VWAP is built on a frozen leg (illiquid CRUDEOIL PE forward-filled). Skip the
-        # whole vwap_rise step — do NOT read/update session_min_vwap — so a stale read can't set a
-        # low baseline that later normal reads "rise" above (the false vwap_rise churn).
-        if self._vwap_rise_enabled and self._pool_engine.pair_atp_fresh(
-                int(pos.ce_leg.strike), int(pos.pe_leg.strike), self._vwap_stale_sec):
-            _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
-            curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
-            _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
-            # DROPOUT FILTER: a combined VWAP that suddenly craters >20% vs the last accepted
-            # reading is a single-leg ATP dropout (seen on illiquid CRUDEOIL — VWAP 435→98→435).
-            # Accepting it would set session_min to an absurd low and fire false vwap_rise on every
-            # normal tick thereafter. Skip the whole step on such a glitch (don't read/update min).
-            _glitch = (pos.vwap_last_good > 0 and curr_vwap > 0
-                       and curr_vwap < 0.80 * pos.vwap_last_good)
-            if curr_vwap > 0 and not _glitch and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
-                pos.vwap_last_good = curr_vwap
-                if curr_vwap < pos.session_min_vwap:
-                    pos.session_min_vwap = curr_vwap
-                if pos.session_min_vwap < float("inf"):
-                    rise_pct = (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100
-                    if rise_pct >= self._vwap_rise_threshold:
-                        # ROLLOVER (not full exit): close the LESS-BURNING (most-decayed/profitable)
-                        # leg and re-sell it balanced against the running (burning) leg. For a short
-                        # leg, pnl = entry - ltp; the higher pnl is the less-burning side.
-                        _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
-                        _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
-                        _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
-                        logger.info(
-                            "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → roll "
-                            "less-burning %s (CE pnl=%.2f PE pnl=%.2f)",
-                            self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
-                            _less_burning, _ce_pnl, _pe_pnl,
-                        )
-                        await self._single_side_roll(_less_burning, now, "vwap_rise_roll")
-                        # Re-baseline the VWAP-rise low against the new (rolled) position so it does
-                        # not immediately re-trigger every tick (natural cooldown until it rises again).
-                        if self._position and self._position.status == "open":
-                            self._position.session_min_vwap = float("inf")
-                        return
+        # Checked once per 1-minute candle close (not every tick) so transient intra-minute
+        # ATP fluctuations can't set a false low baseline. session_min_vwap tracks the minimum
+        # of all 1-min VWAP readings; if the current 1-min VWAP rises X% above that min → roll.
+        # STALENESS GUARD: skip when either leg's broker ATP is frozen (illiquid contract).
+        _now_min = now.strftime("%H:%M")
+        if _now_min != self._vwap_last_check_min:
+            # New 1-minute boundary — stamp first so we don't re-enter this block mid-minute.
+            self._vwap_last_check_min = _now_min
+            if self._vwap_rise_enabled and self._pool_engine.pair_atp_fresh(
+                    int(pos.ce_leg.strike), int(pos.pe_leg.strike), self._vwap_stale_sec):
+                _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+                curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
+                _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
+                # DROPOUT FILTER: a combined VWAP that suddenly craters >20% vs the last accepted
+                # reading is a single-leg ATP dropout (seen on illiquid CRUDEOIL).
+                _glitch = (pos.vwap_last_good > 0 and curr_vwap > 0
+                           and curr_vwap < 0.80 * pos.vwap_last_good)
+                if curr_vwap > 0 and not _glitch and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
+                    pos.vwap_last_good = curr_vwap
+                    if curr_vwap < pos.session_min_vwap:
+                        pos.session_min_vwap = curr_vwap
+                        pos.session_min_vwap_min = _now_min
+                    if pos.session_min_vwap < float("inf"):
+                        rise_pct = (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100
+                        if rise_pct >= self._vwap_rise_threshold:
+                            _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
+                            _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
+                            _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
+                            logger.info(
+                                "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f@%s → roll "
+                                "less-burning %s (CE pnl=%.2f PE pnl=%.2f)",
+                                self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
+                                pos.session_min_vwap_min, _less_burning, _ce_pnl, _pe_pnl,
+                            )
+                            await self._single_side_roll(_less_burning, now, "vwap_rise_roll")
+                            if self._position and self._position.status == "open":
+                                self._position.session_min_vwap = float("inf")
+                                self._vwap_last_check_min = ""  # re-arm for new position
+                            return
 
         # EXIT-EVAL — once per max-TF bucket, log EVERY active exit criterion's live
         # evaluation (mirrors the entry EVAL line), then act on the dynamic exit_rules.
@@ -2243,6 +2236,7 @@ class SellStraddleStrategy:
             self._spot, step, offset, ltp_target,
             rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
             max_itm_steps=max_itm,
+            ratio_threshold=getattr(self, "_ratio_threshold", 0.0),
         )
         if sel and int(sel[0]) == orig_strike:
             logger.info("SellStraddle[%s]: roll %s SKIPPED — best partner is the SAME strike %d "
