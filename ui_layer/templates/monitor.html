@@ -4926,37 +4926,37 @@ function amoTest() {
             <label class="flex flex-col gap-1">
               <span style="color:var(--t-muted)">Entry Cutoff (IST, HH:MM)</span>
               <input type="text" class="t-input" placeholder="13:45"
-                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].entry_cutoff||'')">
+                     x-model="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).entry_cutoff">
             </label>
             <label class="flex flex-col gap-1">
               <span style="color:var(--t-muted)">Square Off (IST, HH:MM)</span>
               <input type="text" class="t-input" placeholder="14:00"
-                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].sq_off_time||'')">
+                     x-model="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).sq_off_time">
             </label>
             <label class="flex flex-col gap-1">
               <span style="color:var(--t-muted)">SL Buffer (pts below zone_low)</span>
               <input type="number" step="0.5" class="t-input" placeholder="2.0"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].sl_buffer||2.0)">
+                     x-model.number="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).sl_buffer">
             </label>
             <label class="flex flex-col gap-1">
               <span style="color:var(--t-muted)">Gap ITM Near (pts, no-zone pivot)</span>
               <input type="number" class="t-input" placeholder="200"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].gap_itm_near||0)">
+                     x-model.number="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).gap_itm_near">
             </label>
             <label class="flex flex-col gap-1">
               <span style="color:var(--t-muted)">Gap ITM Far (pts, fallback)</span>
               <input type="number" class="t-input" placeholder="400"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].gap_itm_far||0)">
+                     x-model.number="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).gap_itm_far">
             </label>
             <label class="flex flex-col gap-1 col-span-2">
               <span style="color:var(--t-muted)">Entry Window (CrudeOil W2 only — leave blank for other indices)</span>
               <input type="text" class="t-input" placeholder='e.g. "18:45-19:15"'
-                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].entry_window_str||'')">
+                     x-model="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).entry_window_str">
             </label>
             <label class="flex flex-col gap-1 col-span-2">
               <span style="color:var(--t-yellow);font-weight:700">Profit Floor ₹ (0 = off)</span>
               <input type="number" min="0" step="1000" class="t-input" placeholder="0"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].profit_floor??0)">
+                     x-model.number="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).profit_floor">
               <span style="color:var(--t-dim);font-size:10px">Lock ₹N total once hit · exit at that tick if P&L drops back below · 12000 = ₹12K floor</span>
             </label>
             <label class="flex flex-col gap-1 col-span-2">
@@ -5004,16 +5004,16 @@ function amoTest() {
                       x-text="bk.entry_window_open?'WINDOW OPEN':'WINDOW CLOSED'"
                       x-show="bk.entry_window_status"></span>
                 <span x-show="bk.entry_window_status" style="color:var(--t-dim)" x-text="bk.entry_window_status"></span>
-                <span x-text="(bk.htf_source==='futures'?'FUT':'SPOT')+'='+bk.spot_ltp" style="color:var(--t-bright);font-weight:700"></span>
-                <span x-show="bk.htf_atr>0" x-text="'ATR='+bk.htf_atr" style="color:var(--t-dim)"></span>
+                <span x-text="bk?((bk.htf_source==='futures'?'FUT':'SPOT')+'='+bk.spot_ltp):''" style="color:var(--t-bright);font-weight:700"></span>
+                <span x-show="bk&&bk.htf_atr>0" x-text="bk?'ATR='+bk.htf_atr:''" style="color:var(--t-dim)"></span>
               </div>
               <!-- Strike selection row -->
               <div class="flex gap-3 flex-wrap mt-1">
-                <span x-show="bk.ce1_strike" x-text="'CE1='+bk.ce1_strike" style="color:var(--t-green)"></span>
-                <span x-show="bk.ce2_strike" x-text="'CE2='+bk.ce2_strike" style="color:var(--t-green)"></span>
-                <span x-show="bk.pe1_strike" x-text="'PE1='+bk.pe1_strike" style="color:var(--t-red)"></span>
-                <span x-show="bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
-                <span x-show="bk.expiry" style="color:var(--t-dim)" x-text="'exp='+bk.expiry"></span>
+                <span x-show="bk&&bk.ce1_strike" x-text="bk?'CE1='+bk.ce1_strike:''" style="color:var(--t-green)"></span>
+                <span x-show="bk&&bk.ce2_strike" x-text="bk?'CE2='+bk.ce2_strike:''" style="color:var(--t-green)"></span>
+                <span x-show="bk&&bk.pe1_strike" x-text="bk?'PE1='+bk.pe1_strike:''" style="color:var(--t-red)"></span>
+                <span x-show="bk&&bk.pe2_strike" x-text="bk?'PE2='+bk.pe2_strike:''" style="color:var(--t-red)"></span>
+                <span x-show="bk&&bk.expiry" style="color:var(--t-dim)" x-text="bk?'exp='+bk.expiry:''"></span>
               </div>
               <!-- Nearest zone info (futures-mode: most important line — where to watch) -->
               <template x-if="bk.htf_source==='futures' && (bk.nearest_ce_zone||bk.nearest_pe_zone)">
