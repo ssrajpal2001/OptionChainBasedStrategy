@@ -132,9 +132,14 @@ class AngelBroker(BaseBroker):
                         break
 
             if not resolved[0]:
-                m = re.match(r'^([A-Z]+?)(\d{2})([A-Z]{3})(\d+)(CE|PE)$', tradingsymbol)
+                # Format: UNDERLYING + DD + MON + YY + strike + CE/PE
+                # e.g. SENSEX25JUN2681000CE or NIFTY02JUN2624500CE
+                # We extract strike by stripping the trailing CE/PE, then
+                # stripping the 2-digit YY that precedes it: the remaining
+                # digits after DD+MON are YY(2d)+strike, so skip first 2 digits.
+                m = re.match(r'^([A-Z]+?)(\d{2})([A-Z]{3})(\d{2})(\d+)(CE|PE)$', tradingsymbol)
                 if m:
-                    name, yy, mon, strike, opt = m.groups()
+                    name, dd, mon, yy, strike, opt = m.groups()
                     lst = self._scrip_cache.get((exchange, name))
                     if lst is None:
                         r2 = self._smartapi.searchScrip(exchange, name)
@@ -142,7 +147,7 @@ class AngelBroker(BaseBroker):
                         self._scrip_cache[(exchange, name)] = lst
                     for it in lst:
                         ts = str(it.get("tradingsymbol", "")).upper()
-                        if (ts.endswith(opt) and mon in ts and yy in ts
+                        if (ts.endswith(opt) and mon in ts and dd in ts
                                 and re.search(rf'(?<!\d){int(strike)}(?={opt}$)', ts)):
                             resolved = (str(it.get("symboltoken", "")), it.get("tradingsymbol", tradingsymbol))
                             break
