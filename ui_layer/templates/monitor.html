@@ -5165,8 +5165,8 @@ function amoTest() {
                         <div class="grid text-center mb-1 mt-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
                           <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                         </div>
-                        <!-- CE CLOSE / TRAPPED / IN TRADE zones -->
-                        <template x-for="z in bk.zones.filter(z=>z.opt_type==='CE'&&(z.status==='TRAPPED'||z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'))" :key="z.uid">
+                        <!-- CE CLOSE / ACTIVE-LTF zones always visible; FAR collapsed below -->
+                        <template x-for="z in bk.zones.filter(z=>z.opt_type==='CE'&&(z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'||z.ltf_status==='waiting_5m_clear'||z.ltf_status==='seed_all_cleared'))" :key="z.uid">
                           <div class="grid text-center py-0.5"
                                :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
                             <span style="color:var(--t-green)" x-text="z.opt_type"></span>
@@ -5180,14 +5180,14 @@ function amoTest() {
                           </div>
                         </template>
                         <!-- CE FAR zones collapsed -->
-                        <template x-if="bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
+                        <template x-if="bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length>0">
                           <div class="mt-1">
                             <button @click="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]=!ceFarZoneOpen[bk.underlying+'_'+bk.client_id]" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                              <span x-text="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide CE FAR':'▼ CE FAR ('+bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length+')'"></span>
+                              <span x-text="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide CE FAR':'▼ CE FAR ('+bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length+')'"></span>
                             </button>
                             <template x-if="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]">
                               <div class="mt-1">
-                                <template x-for="z in bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal')" :key="z.uid">
+                                <template x-for="z in bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared')" :key="z.uid">
                                   <div class="grid text-center py-0.5" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
                                     <span style="color:var(--t-green)" x-text="z.opt_type"></span>
                                     <span x-text="z.zone_low"></span>
@@ -5219,8 +5219,8 @@ function amoTest() {
                         <div class="grid text-center mb-1 mt-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
                           <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                         </div>
-                        <!-- PE CLOSE / TRAPPED / IN TRADE zones -->
-                        <template x-for="z in bk.zones.filter(z=>z.opt_type==='PE'&&(z.status==='TRAPPED'||z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'))" :key="z.uid">
+                        <!-- PE CLOSE / ACTIVE-LTF zones always visible; FAR collapsed below -->
+                        <template x-for="z in bk.zones.filter(z=>z.opt_type==='PE'&&(z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'||z.ltf_status==='waiting_5m_clear'||z.ltf_status==='seed_all_cleared'))" :key="z.uid">
                           <div class="grid text-center py-0.5"
                                :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
                             <span style="color:var(--t-red)" x-text="z.opt_type"></span>
@@ -5234,14 +5234,14 @@ function amoTest() {
                           </div>
                         </template>
                         <!-- PE FAR zones collapsed -->
-                        <template x-if="bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
+                        <template x-if="bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length>0">
                           <div class="mt-1">
                             <button @click="peFarZoneOpen[bk.underlying+'_'+bk.client_id]=!peFarZoneOpen[bk.underlying+'_'+bk.client_id]" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                              <span x-text="peFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide PE FAR':'▼ PE FAR ('+bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length+')'"></span>
+                              <span x-text="peFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide PE FAR':'▼ PE FAR ('+bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length+')'"></span>
                             </button>
                             <template x-if="peFarZoneOpen[bk.underlying+'_'+bk.client_id]">
                               <div class="mt-1">
-                                <template x-for="z in bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal')" :key="z.uid">
+                                <template x-for="z in bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared')" :key="z.uid">
                                   <div class="grid text-center py-0.5" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
                                     <span style="color:var(--t-red)" x-text="z.opt_type"></span>
                                     <span x-text="z.zone_low"></span>
@@ -7614,8 +7614,8 @@ function amoTest() {
                           <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
                             <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                           </div>
-                          <!-- TRAPPED / NEAR / IN TRADE always visible -->
-                          <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&(z.status==='TRAPPED'||z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'))" :key="z.uid">
+                          <!-- NEAR / ACTIVE-LTF always visible; FAR collapsed below -->
+                          <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&(z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'||z.ltf_status==='waiting_5m_clear'||z.ltf_status==='seed_all_cleared'))" :key="z.uid">
                             <div class="grid text-center py-0.5 text-xs font-mono"
                                  :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
                               <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
@@ -7629,14 +7629,14 @@ function amoTest() {
                             </div>
                           </template>
                           <!-- FAR zones collapsed -->
-                          <template x-if="bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
+                          <template x-if="bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length>0">
                             <div class="mt-1">
                               <button @click="farOpen=!farOpen" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                                <span x-text="farOpen?'▲ Hide FAR':'▼ FAR zones ('+bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length+')'"></span>
+                                <span x-text="farOpen?'▲ Hide FAR':'▼ FAR zones ('+bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length+')'"></span>
                               </button>
                               <template x-if="farOpen">
                                 <div class="mt-1">
-                                  <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal')" :key="z.uid">
+                                  <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared')" :key="z.uid">
                                     <div class="grid text-center py-0.5 text-xs font-mono"
                                          style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
                                       <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
