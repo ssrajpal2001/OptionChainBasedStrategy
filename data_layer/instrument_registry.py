@@ -129,6 +129,15 @@ class InstrumentRegistry:
             self._load_from_master_json(underlying, today, diag)
             return
 
+        # BSE indices (SENSEX, BANKEX): monthly expiry falls on a different weekday
+        # than the weekly — formula-computed dates miss it entirely. Master JSON
+        # contains ALL actual contracts with real expiry dates (weekly + monthly).
+        if underlying in ("SENSEX", "BANKEX"):
+            diag.append(f"BSE index {underlying}: using master JSON — formula expiry skipped "
+                        f"(monthly expiry weekday differs from weekly)")
+            self._load_from_master_json(underlying, today, diag)
+            return
+
         diag.append(f"underlying_key = {underlying_key}")
         diag.append(f"access_token present = {bool(access_token)} (len={len(access_token)})")
 
