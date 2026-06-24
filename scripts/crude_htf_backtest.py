@@ -153,6 +153,32 @@ def calc_atr(bars: pd.DataFrame, period: int = 14) -> float:
     return float(df["tr"].tail(period * 60).mean())
 
 
+# ── HTF trend direction filter ────────────────────────────────────────────────
+def htf_trend_allows_long(htf_bars: pd.DataFrame, n: int = 3) -> bool:
+    """
+    Allow LONG only if the last N HTF candles are NOT clearly bearish.
+    Blocks LONG when 2+ of the last N bars closed lower than they opened.
+    Catches downtrend days (e.g. Jun 18) where every bounce gets sold.
+    """
+    if len(htf_bars) < n:
+        return True   # not enough history — allow
+    recent  = htf_bars.tail(n)
+    bearish = int((recent["close"] < recent["open"]).sum())
+    return bearish < 2
+
+
+def htf_trend_allows_short(htf_bars: pd.DataFrame, n: int = 3) -> bool:
+    """
+    Allow SHORT only if the last N HTF candles are NOT clearly bullish.
+    Blocks SHORT when 2+ of the last N bars closed higher than they opened.
+    """
+    if len(htf_bars) < n:
+        return True
+    recent  = htf_bars.tail(n)
+    bullish = int((recent["close"] > recent["open"]).sum())
+    return bullish < 2
+
+
 # ── LTF confirmation ────────────────────────────────────────────────────────────
 def _sellers_cleared(bars_5m: pd.DataFrame) -> bool:
     """BEAR sellers cleared: at least one CLOSED BEAR zone, zero TRAPPED."""
@@ -325,7 +351,7 @@ def trade_pts(t: dict) -> float:
 
 # ── One-HTF full backtest ──────────────────────────────────────────────────────
 def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int,
-            bias_mult: float = 0.5) -> dict:
+            bias_mult: float = 0.0, trend_n: int = 3) -> dict:
     all_trades: list[dict] = []
     day_results: list[dict] = []
 
@@ -345,13 +371,28 @@ def run_htf(days: list[str], htf_min: int, sl_buf: float, lots: int,
             print("no bars (holiday?)")
             continue
 
-        # Prev-day TRAPPED zones + prev-day bias
-        htf_zones  = get_trapped_zones(prev_bars, htf_min) if not prev_bars.empty else []
-        atr_val    = calc_atr(prev_bars) if not prev_bars.empty else 0.0
-        bias       = day_bias(prev_bars, today_bars, bias_mult) if bias_mult > 0 else "BOTH"
+        # Resample prev-day to HTF — reused for both zone detection + trend filter
+        htf_prev  = resample_htf(prev_bars, htf_min) if not prev_bars.empty else pd.DataFrame()
+        htf_zones = []
+        if not htf_prev.empty and len(htf_prev) >= 2:
+            _, entries = scanner.scan_htf_spot(htf_prev)
+            htf_zones  = [e for e in entries if e.get("status") == "TRAPPED"]
+
+        # Gap bias (off by default) — then HTF trend filter overrides if enabled
+        bias = day_bias(prev_bars, today_bars, bias_mult) if bias_mult > 0 else "BOTH"
+        trend_tag = "NEUTRAL"
+        if trend_n > 0 and not htf_prev.empty:
+            long_ok  = htf_trend_allows_long(htf_prev,  trend_n)
+            short_ok = htf_trend_allows_short(htf_prev, trend_n)
+            if not long_ok:
+                bias      = "SHORT_OK"   # prev-day HTF trending bearish → skip LONG
+                trend_tag = "BEAR"
+            elif not short_ok:
+                bias      = "LONG_OK"    # prev-day HTF trending bullish → skip SHORT
+                trend_tag = "BULL"
 
         print(f"prev={len(prev_bars)} today={len(today_bars)} prev_zones={len(htf_zones)} "
-              f"bias={bias}", end=" ", flush=True)
+              f"trend={trend_tag} bias={bias}", end=" ", flush=True)
 
         day_trades = simulate_day(today_bars, htf_zones, htf_min, sl_buf, lots, day_str, bias)
         day_pnl    = sum(trade_pnl(t) for t in day_trades)
@@ -463,9 +504,12 @@ def main():
     ap.add_argument("--sl_buf", type=float, default=20.0, help="SL buffer Rs (default 20)")
     ap.add_argument("--htf",    default="30,60,120",    help="Comma-sep HTF list (default 30,60,120)")
     ap.add_argument("--csv",    action="store_true",    help="Save trade CSV per HTF")
-    ap.add_argument("--bias_mult", type=float, default=0.005,
-                    help="Gap filter threshold as fraction of price (default 0.005 = 0.5%%). "
-                         "0=disable. Gap-down > threshold blocks LONG; gap-up blocks SHORT.")
+    ap.add_argument("--bias_mult", type=float, default=0.0,
+                    help="Gap filter threshold as fraction of price (default 0=OFF). "
+                         "Gap-down > threshold blocks LONG; gap-up blocks SHORT.")
+    ap.add_argument("--trend_n", type=int, default=3,
+                    help="HTF trend filter: look at last N HTF candles of prev-day (default 3). "
+                         "If 2+ are bearish → skip LONG; 2+ bullish → skip SHORT. 0=disable.")
     args = ap.parse_args()
 
     global HEADERS
@@ -484,7 +528,8 @@ def main():
     print(f"Backtest: {days[0]} to {days[-1]}  ({len(days)} trading days)")
     print(f"HTF list: {htf_list}  |  Lots: {args.lots}  |  SL_buf: ₹{args.sl_buf}")
 
-    results = [run_htf(days, h, args.sl_buf, args.lots, args.bias_mult) for h in htf_list]
+    results = [run_htf(days, h, args.sl_buf, args.lots, args.bias_mult, args.trend_n)
+               for h in htf_list]
 
     print_summary(results, args.lots, args.sl_buf)
 
