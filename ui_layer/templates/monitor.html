@@ -810,6 +810,10 @@ document.addEventListener('alpine:init', () => {
     exitAudit: {},
     auditOpen: {},   // underlying → collapsible open/closed
     futZonesOpen: {},    // bk uid → bool (FUT zone table expanded)
+    ceZoneOpen: {},      // bk uid → bool (CE zones expanded)
+    peZoneOpen: {},      // bk uid → bool (PE zones expanded)
+    ceFarZoneOpen: {},   // bk uid → bool (CE FAR sub-list expanded)
+    peFarZoneOpen: {},   // bk uid → bool (PE FAR sub-list expanded)
     // Client premium-chart state (per deploy_id)
     chartOpen: {},        // deploy_id → bool (panel open)
     chartData: {},        // deploy_id → series array
@@ -5145,19 +5149,19 @@ function amoTest() {
                 </div><!-- /x-show contractsOpen -->
               </div><!-- /x-data contractsOpen -->
               <!-- Option zones — CE/PE separate collapsible sections (default hidden) -->
-              <div x-data="{ ceOpen: false, peOpen: false, ceFarOpen: false, peFarOpen: false }">
               <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
                 <div class="mt-2">
                   <!-- CE Zones section -->
                   <template x-if="bk.zones.filter(z=>z.opt_type==='CE').length>0">
                     <div>
-                      <div class="flex items-center gap-2 cursor-pointer select-none" @click="ceOpen=!ceOpen"
+                      <div class="flex items-center gap-2 cursor-pointer select-none"
+                           @click="ceZoneOpen[bk.underlying+'_'+bk.client_id]=!ceZoneOpen[bk.underlying+'_'+bk.client_id]"
                            style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
-                        <span x-text="ceOpen?'▾':'▸'" style="font-size:10px"></span>
+                        <span x-text="ceZoneOpen[bk.underlying+'_'+bk.client_id]?'▾':'▸'" style="font-size:10px"></span>
                         <span style="font-weight:600;color:var(--t-green)">CE ZONES</span>
                         <span x-text="'('+bk.zones.filter(z=>z.opt_type===\'CE\').length+' · '+bk.zones.filter(z=>z.opt_type===\'CE\'&&z.status===\'TRAPPED\').length+' trapped)'"></span>
                       </div>
-                      <div x-show="ceOpen">
+                      <div x-show="ceZoneOpen[bk.underlying+'_'+bk.client_id]">
                         <div class="grid text-center mb-1 mt-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
                           <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                         </div>
@@ -5178,10 +5182,10 @@ function amoTest() {
                         <!-- CE FAR zones collapsed -->
                         <template x-if="bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
                           <div class="mt-1">
-                            <button @click="ceFarOpen=!ceFarOpen" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                              <span x-text="ceFarOpen?'▲ Hide CE FAR':'▼ CE FAR ('+bk.zones.filter(z=>z.opt_type===\'CE\'&&!z.reachable&&z.status!==\'TRAPPED\'&&z.ltf_status!==\'entered\'&&z.ltf_status!==\'ltf_signal\').length+')'"></span>
+                            <button @click="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]=!ceFarZoneOpen[bk.underlying+'_'+bk.client_id]" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
+                              <span x-text="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide CE FAR':'▼ CE FAR ('+bk.zones.filter(z=>z.opt_type===\'CE\'&&!z.reachable&&z.status!==\'TRAPPED\'&&z.ltf_status!==\'entered\'&&z.ltf_status!==\'ltf_signal\').length+')'"></span>
                             </button>
-                            <template x-if="ceFarOpen">
+                            <template x-if="ceFarZoneOpen[bk.underlying+'_'+bk.client_id]">
                               <div class="mt-1">
                                 <template x-for="z in bk.zones.filter(z=>z.opt_type==='CE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal')" :key="z.uid">
                                   <div class="grid text-center py-0.5" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
@@ -5198,19 +5202,20 @@ function amoTest() {
                             </template>
                           </div>
                         </template>
-                      </div><!-- /x-show ceOpen -->
+                      </div><!-- /x-show ceZoneOpen -->
                     </div>
                   </template>
                   <!-- PE Zones section -->
                   <template x-if="bk.zones.filter(z=>z.opt_type==='PE').length>0">
                     <div>
-                      <div class="flex items-center gap-2 cursor-pointer select-none" @click="peOpen=!peOpen"
+                      <div class="flex items-center gap-2 cursor-pointer select-none"
+                           @click="peZoneOpen[bk.underlying+'_'+bk.client_id]=!peZoneOpen[bk.underlying+'_'+bk.client_id]"
                            style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
-                        <span x-text="peOpen?'▾':'▸'" style="font-size:10px"></span>
+                        <span x-text="peZoneOpen[bk.underlying+'_'+bk.client_id]?'▾':'▸'" style="font-size:10px"></span>
                         <span style="font-weight:600;color:var(--t-red)">PE ZONES</span>
                         <span x-text="'('+bk.zones.filter(z=>z.opt_type===\'PE\').length+' · '+bk.zones.filter(z=>z.opt_type===\'PE\'&&z.status===\'TRAPPED\').length+' trapped)'"></span>
                       </div>
-                      <div x-show="peOpen">
+                      <div x-show="peZoneOpen[bk.underlying+'_'+bk.client_id]">
                         <div class="grid text-center mb-1 mt-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
                           <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                         </div>
@@ -5231,10 +5236,10 @@ function amoTest() {
                         <!-- PE FAR zones collapsed -->
                         <template x-if="bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
                           <div class="mt-1">
-                            <button @click="peFarOpen=!peFarOpen" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                              <span x-text="peFarOpen?'▲ Hide PE FAR':'▼ PE FAR ('+bk.zones.filter(z=>z.opt_type===\'PE\'&&!z.reachable&&z.status!==\'TRAPPED\'&&z.ltf_status!==\'entered\'&&z.ltf_status!==\'ltf_signal\').length+')'"></span>
+                            <button @click="peFarZoneOpen[bk.underlying+'_'+bk.client_id]=!peFarZoneOpen[bk.underlying+'_'+bk.client_id]" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
+                              <span x-text="peFarZoneOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide PE FAR':'▼ PE FAR ('+bk.zones.filter(z=>z.opt_type===\'PE\'&&!z.reachable&&z.status!==\'TRAPPED\'&&z.ltf_status!==\'entered\'&&z.ltf_status!==\'ltf_signal\').length+')'"></span>
                             </button>
-                            <template x-if="peFarOpen">
+                            <template x-if="peFarZoneOpen[bk.underlying+'_'+bk.client_id]">
                               <div class="mt-1">
                                 <template x-for="z in bk.zones.filter(z=>z.opt_type==='PE'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal')" :key="z.uid">
                                   <div class="grid text-center py-0.5" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
@@ -5251,12 +5256,11 @@ function amoTest() {
                             </template>
                           </div>
                         </template>
-                      </div><!-- /x-show peOpen -->
+                      </div><!-- /x-show peZoneOpen -->
                     </div>
                   </template>
                 </div>
               </template>
-              </div><!-- /x-data ceOpen peOpen -->
               <!-- FUT zones (futures bias — collapsible, hidden by default) -->
               <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type==='FUT').length>0">
                 <div class="mt-1">
