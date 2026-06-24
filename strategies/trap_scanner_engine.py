@@ -1810,11 +1810,21 @@ class TrapScannerEngine:
                 _binds = {b.get("binding_id"): b
                           for b in db.get_bindings_safe_sync(self._cid)}
                 _b = _binds.get(self._bid)
-                active = bool(
-                    _b
-                    and _b.get("terminal_connected")
-                    and _b.get("is_trade_enabled")
-                )
+                terminal_ok = bool(_b and _b.get("terminal_connected"))
+                if terminal_ok:
+                    # Check deployment-level is_running (set by the per-strategy
+                    # Start/Stop toggle in the UI — replaces the old binding-level
+                    # is_trade_enabled which the new UI no longer sets).
+                    import sqlite3 as _sq3
+                    _con = _sq3.connect(db._db_path)
+                    _row = _con.execute(
+                        "SELECT is_running FROM strategy_deployments "
+                        "WHERE client_id=? AND binding_id=? AND underlying=? "
+                        "AND strategy_name='trap_scanner'",
+                        (self._cid, self._bid, self._und),
+                    ).fetchone()
+                    _con.close()
+                    active = bool(_row and _row[0])
         except Exception as _exc:
             logger.debug("TrapScanner[%s]: _can_trade check error: %s", self._und, _exc)
             active = False
