@@ -2096,6 +2096,39 @@ class DashboardServer:
             return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
                     "series": strat.get_premium_series()}
 
+        # ── CLIENT — 1-min Iron Condor leg-premium + P&L chart series ──────────
+        @app.get("/api/client/strategy/{deploy_id}/ic_premium_series", tags=["Client"])
+        async def api_client_ic_premium_series(
+            deploy_id: str, _: dict = Depends(_require_client),
+        ):
+            """1-min IC leg LTPs + P&L while position is open."""
+            underlying = deploy_id.rsplit("_", 1)[-1].upper()
+            strat = next((s for s in (getattr(_srv, "_iron_condors", []) or [])
+                          if str(getattr(s, "_underlying", "")).upper() == underlying), None)
+            if strat is None or not hasattr(strat, "get_premium_series"):
+                return {"ok": True, "deploy_id": deploy_id, "underlying": underlying, "series": []}
+            return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
+                    "series": strat.get_premium_series()}
+
+        # ── CLIENT — 1-min TrapScanner option-premium chart series ─────────────
+        @app.get("/api/client/strategy/{deploy_id}/ts_premium_series", tags=["Client"])
+        async def api_client_ts_premium_series(
+            deploy_id: str, user: dict = Depends(_current_user),
+        ):
+            """1-min CE1/PE1/CE2/PE2 option LTP series for TrapScanner chart."""
+            underlying = deploy_id.rsplit("_", 1)[-1].upper()
+            cid = user.get("client_id") or user.get("username", "")
+            mgr = getattr(_srv, "_trap_scanner_manager", None)
+            if mgr is None:
+                return {"ok": True, "series": []}
+            eng = next((e for e in mgr.books
+                        if str(getattr(e, "_und", "")).upper() == underlying
+                        and str(getattr(e, "_cid", "")) == str(cid)), None)
+            if eng is None or not hasattr(eng, "get_premium_series"):
+                return {"ok": True, "deploy_id": deploy_id, "underlying": underlying, "series": []}
+            return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
+                    "series": eng.get_premium_series()}
+
         # ── CLIENT — set target index ─────────────────────────────────────────
 
         @app.post("/api/client/set_index", tags=["Client"])

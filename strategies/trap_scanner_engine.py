@@ -43,6 +43,7 @@ import asyncio
 import json
 import logging
 import os
+from collections import deque
 from datetime import datetime, date, time, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -226,6 +227,10 @@ class TrapScannerEngine:
         # Live option LTP cache: bkey → last seen LTP
         # Used by zone-reachability check when htf_source="option" (option units vs spot units)
         self._ltp_cache: Dict[str, float] = {}
+
+        # 1-min chart series for the dashboard option premium chart
+        self._chart_series: deque = deque(maxlen=375)
+        self._chart_last_min: int = -1
 
         # 1m bars — SPOT for HTF scan (htf_source="spot"); per-option for LTF/HTF
         self._bars_spot: List[dict] = []
@@ -1131,7 +1136,27 @@ class TrapScannerEngine:
         # (trapped above zone_high, coming back). Keep the 1-min gate alive until retest.
         return any(z["zone_low"] <= ltp <= z["zone_high"] * 1.02 for z in all_zones)
 
+    def _append_chart_point(self, ts: datetime) -> None:
+        """Append one 1-min point to the option premium chart series (idempotent per minute)."""
+        _m = ts.hour * 60 + ts.minute
+        if _m == self._chart_last_min:
+            return
+        self._chart_last_min = _m
+        self._chart_series.append({
+            "ts":   round(ts.timestamp()),
+            "spot": round(self._spot_cache or 0.0, 2),
+            "ce1":  round(self._ltp_cache.get("CE1", 0.0), 2),
+            "pe1":  round(self._ltp_cache.get("PE1", 0.0), 2),
+            "ce2":  round(self._ltp_cache.get("CE2", 0.0), 2),
+            "pe2":  round(self._ltp_cache.get("PE2", 0.0), 2),
+        })
+
+    def get_premium_series(self) -> list:
+        """1-min option premium chart series for the client chart endpoint."""
+        return list(self._chart_series)
+
     def _on_candle_close(self, leg: str, ts: datetime) -> None:
+        self._append_chart_point(ts)
         # Futures-mode TSL: on every FUT candle close while in position,
         # check for new bear traps ABOVE entry → advance trail_sl
         if self._position and self._htf_source == "futures" and leg == "FUT":

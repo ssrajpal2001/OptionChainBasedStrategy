@@ -28,6 +28,7 @@ import logging
 import os
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, date, time as dtime
 from typing import Dict, List, Optional, Tuple
@@ -198,6 +199,9 @@ class IronCondorStrategy:
         self._tasks:     list = []
         self._adjusting: bool = False  # lock to prevent re-entrant adjustments
         self._clog: logging.Logger = _make_ic_logger(underlying)
+        # 1-min chart series — short CE/PE + long CE/PE + P&L per minute while in position
+        self._chart_series: deque = deque(maxlen=375)
+        self._chart_last_min: int = -1
         self._load_thresholds()
 
     # ── Config ────────────────────────────────────────────────────────────────
@@ -394,6 +398,7 @@ class IronCondorStrategy:
                     self._ask_cache[key] = tick.ask
             if self._position and self._position.underlying == tick.underlying:
                 self._update_leg_ltp(tick)
+                self._append_chart_point(tick.timestamp)
 
     # ── Entry logic ───────────────────────────────────────────────────────────
 
@@ -899,6 +904,31 @@ class IronCondorStrategy:
             logger.warning("IronCondor[%s]: DB log failed: %s", self._underlying, exc)
 
     # ── Leg LTP updater ───────────────────────────────────────────────────────
+
+    def _append_chart_point(self, ts: datetime) -> None:
+        """Append one 1-min point to the IC premium chart series (only while position is open)."""
+        if not self._position or self._position.status != "open":
+            return
+        _m = ts.hour * 60 + ts.minute
+        if _m == self._chart_last_min:
+            return
+        self._chart_last_min = _m
+        pos = self._position
+        closing_cost = (pos.short_ce.ltp + pos.short_pe.ltp) - (pos.long_ce.ltp + pos.long_pe.ltp)
+        self._chart_series.append({
+            "ts":           round(ts.timestamp()),
+            "short_ce":     round(pos.short_ce.ltp, 2),
+            "short_pe":     round(pos.short_pe.ltp, 2),
+            "long_ce":      round(pos.long_ce.ltp, 2),
+            "long_pe":      round(pos.long_pe.ltp, 2),
+            "credit":       round(pos.net_credit, 2),
+            "closing_cost": round(closing_cost, 2),
+            "pnl":          round(pos.net_credit - closing_cost, 2),
+        })
+
+    def get_premium_series(self) -> list:
+        """1-min IC position premium series for the client chart endpoint."""
+        return list(self._chart_series)
 
     def _update_leg_ltp(self, tick) -> None:
         if not self._position:
