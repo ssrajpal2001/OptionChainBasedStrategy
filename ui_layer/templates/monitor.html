@@ -11,9 +11,11 @@
 
   <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Chart.js CDN — client-side 1-min combined-premium chart (VWAP/RSI/SLOPE overlays) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <!-- Alpine.js CDN (deferred so Chart global is ready before Alpine inits) -->
+  <!-- Lightweight Charts (TradingView open-source) — premium chart with VWAP/RSI/SLOPE -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <!-- TradingView Advanced Widget — free index chart embed (no account needed) -->
+  <script src="https://s3.tradingview.com/tv.js"></script>
+  <!-- Alpine.js CDN (deferred so LW Charts global is ready before Alpine inits) -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
 
   <script>
@@ -813,8 +815,11 @@ document.addEventListener('alpine:init', () => {
     // Client premium-chart state (per deploy_id)
     chartOpen: {},        // deploy_id → bool (panel open)
     chartData: {},        // deploy_id → series array
-    _chartInst: {},       // deploy_id → { prem, rsi, slope } Chart.js instances
+    _chartInst: {},       // deploy_id → { prem, rsi, slope } Lightweight Charts instances
     _chartTimer: {},      // deploy_id → setInterval handle
+    // TradingView index-chart widget state
+    tvChartOpen: {},      // uid → bool (TV chart expanded)
+    _tvWidgets: {},       // uid → TradingView.widget instance
     // Strategy deployment modal
     showDeployModal: false,
     deployBindingId: '',           // which broker the modal is open for
@@ -899,7 +904,49 @@ document.addEventListener('alpine:init', () => {
       return best;
     },
 
-    // ── Client premium chart (Chart.js) ─────────────────────────────────
+    // ── TradingView index chart widget ──────────────────────────────────
+    _tvSymbol(underlying) {
+      const m = {
+        'NIFTY': 'NSE:NIFTY', 'BANKNIFTY': 'NSE:BANKNIFTY',
+        'SENSEX': 'BSE:SENSEX', 'FINNIFTY': 'NSE:NIFTY_FIN_SERVICE',
+        'MIDCPNIFTY': 'NSE:MIDCPNIFTY', 'CRUDEOIL': 'MCX:CRUDEOIL1!',
+        'NATURALGAS': 'MCX:NATURALGAS1!', 'GOLD': 'MCX:GOLD1!',
+        'SILVER': 'MCX:SILVER1!', 'COPPER': 'MCX:COPPER1!',
+      };
+      return m[(underlying || '').toUpperCase()] || 'NSE:NIFTY';
+    },
+
+    toggleTVChart(uid, underlying) {
+      const open = !this.tvChartOpen[uid];
+      this.tvChartOpen = { ...this.tvChartOpen, [uid]: open };
+      if (!open) return;
+      this.$nextTick(() => {
+        if (this._tvWidgets[uid]) return; // already created, just reveal
+        if (typeof TradingView === 'undefined') {
+          console.warn('TradingView widget script not loaded'); return;
+        }
+        const theme = (localStorage.getItem('terminus_theme') || 'dark') === 'daylight' ? 'light' : 'dark';
+        this._tvWidgets[uid] = new TradingView.widget({
+          container_id:       'tv_' + uid,
+          symbol:             this._tvSymbol(underlying),
+          interval:           '5',
+          timezone:           'Asia/Kolkata',
+          theme:              theme,
+          style:              '1',
+          locale:             'en',
+          width:              '100%',
+          height:             360,
+          allow_symbol_change: false,
+          save_image:         false,
+          hide_side_toolbar:  true,
+          hide_legend:        false,
+          withdateranges:     false,
+          studies:            ['RSI@tv-basicstudies'],
+        });
+      });
+    },
+
+    // ── Client premium chart (Lightweight Charts) ────────────────────────
     togglePremiumChart(deployId) {
       const open = !this.chartOpen[deployId];
       this.chartOpen = { ...this.chartOpen, [deployId]: open };
@@ -926,39 +973,82 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderChart(deployId, series) {
-      if (typeof Chart === 'undefined' || !series.length) return;
-      const labels = series.map(p => {
-        const dt = new Date((p.ts||0) * 1000);
-        return dt.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:false });
-      });
-      const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
-      const cyan = css('--t-cyan'), green = css('--t-green'), amber = css('--t-amber'), red = css('--t-red');
-      const baseOpts = (title) => ({
-        responsive:true, maintainAspectRatio:false, animation:false,
-        plugins:{ legend:{ display:true, labels:{ color: css('--t-muted'), font:{ size:9 }, boxWidth:10 } },
-                  title:{ display:!!title, text:title, color: css('--t-muted'), font:{ size:9 } } },
-        scales:{ x:{ ticks:{ color: css('--t-muted'), font:{ size:8 }, maxTicksLimit:8 }, grid:{ display:false } },
-                 y:{ ticks:{ color: css('--t-muted'), font:{ size:8 } }, grid:{ color:'rgba(128,128,128,0.1)' } } },
-        elements:{ point:{ radius:0 } },
-      });
-      const mk = (canvasId, datasets, title) => {
-        const el = document.getElementById(canvasId);
+      if (typeof LightweightCharts === 'undefined' || !series.length) return;
+      const LW = LightweightCharts;
+      const cyan = '#00b0ff', amber = '#ffa726', green = '#26a69a', red = '#ef5350', violet = '#7c4dff', orange = '#ff7043';
+
+      // Helper: create one chart panel, destroy any prior instance on that element
+      const mkChart = (elId, height, priceFormat) => {
+        const el = document.getElementById(elId);
         if (!el) return null;
-        return new Chart(el.getContext('2d'), { type:'line', data:{ labels, datasets }, options: baseOpts(title) });
+        if (el._lwChart) { try { el._lwChart.remove(); } catch {} }
+        el.style.height = height + 'px';
+        const c = LW.createChart(el, {
+          width: el.clientWidth || 300,
+          height,
+          layout: { background: { type: 'solid', color: 'transparent' }, textColor: 'rgba(170,170,170,0.85)' },
+          grid: { vertLines: { color: 'rgba(128,128,128,0.06)' }, horzLines: { color: 'rgba(128,128,128,0.06)' } },
+          rightPriceScale: { borderVisible: false },
+          leftPriceScale:  { visible: false },
+          timeScale: {
+            borderVisible: false, timeVisible: true, secondsVisible: false,
+            tickMarkFormatter: t => {
+              const d = new Date(t * 1000);
+              return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+            },
+          },
+          crosshair: { mode: LW.CrosshairMode.Normal },
+          handleScroll: true, handleScale: true,
+          ...(priceFormat ? { priceFormat } : {}),
+        });
+        el._lwChart = c;
+        return c;
       };
+
+      // Clean up any prior instances
       const inst = this._chartInst[deployId] || {};
-      // Destroy old instances before re-creating (avoids canvas reuse error)
-      ['prem','rsi','slope'].forEach(k => { if (inst[k]) { try { inst[k].destroy(); } catch {} } });
-      inst.prem = mk('premchart_'+deployId, [
-        { label:'Combined', data: series.map(p=>p.combined), borderColor: cyan,  borderWidth:1.4, tension:0.2 },
-        { label:'VWAP',     data: series.map(p=>p.vwap),     borderColor: amber, borderWidth:1.1, borderDash:[4,3], tension:0.2 },
-      ]);
-      inst.rsi = mk('rsichart_'+deployId, [
-        { label:'RSI', data: series.map(p=>p.rsi), borderColor: green, borderWidth:1.1, tension:0.2 },
-      ], 'RSI');
-      inst.slope = mk('slopechart_'+deployId, [
-        { label:'SLOPE', data: series.map(p=>p.slope), borderColor: red, borderWidth:1.1, tension:0.2 },
-      ], 'SLOPE (VWAP Δ)');
+      ['prem', 'rsi', 'slope'].forEach(k => {
+        if (inst[k]) { try { inst[k].remove(); } catch {} delete inst[k]; }
+      });
+
+      const pts = series.filter(p => p.ts > 0);
+
+      // ── Premium panel: Combined (area) + VWAP + CE line + PE line ──────
+      const premChart = mkChart('premchart_' + deployId, 160);
+      if (premChart) {
+        const combined = premChart.addAreaSeries({ lineColor: cyan, topColor: 'rgba(0,176,255,0.12)', bottomColor: 'rgba(0,176,255,0)', lineWidth: 2, title: 'Premium' });
+        const vwap    = premChart.addLineSeries({ color: amber, lineWidth: 1, lineStyle: LW.LineStyle.Dashed, title: 'VWAP' });
+        const ce      = premChart.addLineSeries({ color: green, lineWidth: 1, title: 'CE' });
+        const pe      = premChart.addLineSeries({ color: red,   lineWidth: 1, title: 'PE' });
+        combined.setData(pts.map(p => ({ time: Math.round(p.ts), value: p.combined || 0 })));
+        vwap.setData(pts.filter(p => p.vwap > 0).map(p => ({ time: Math.round(p.ts), value: p.vwap })));
+        ce.setData(pts.filter(p => p.ce_ltp > 0).map(p => ({ time: Math.round(p.ts), value: p.ce_ltp })));
+        pe.setData(pts.filter(p => p.pe_ltp > 0).map(p => ({ time: Math.round(p.ts), value: p.pe_ltp })));
+        premChart.timeScale().fitContent();
+        inst.prem = premChart;
+      }
+
+      // ── RSI panel: line + 30/50/70 reference levels ──────────────────
+      const rsiChart = mkChart('rsichart_' + deployId, 80);
+      if (rsiChart) {
+        const rsiSeries = rsiChart.addLineSeries({ color: violet, lineWidth: 1.5, title: 'RSI' });
+        rsiSeries.setData(pts.filter(p => p.rsi > 0).map(p => ({ time: Math.round(p.ts), value: p.rsi })));
+        [{ v: 30, c: 'rgba(239,83,80,0.45)', t: '30' }, { v: 50, c: 'rgba(128,128,128,0.3)', t: '50' }, { v: 70, c: 'rgba(38,166,154,0.45)', t: '70' }]
+          .forEach(({ v, c, t }) => rsiSeries.createPriceLine({ price: v, color: c, lineWidth: 1, lineStyle: LW.LineStyle.Dotted, axisLabelVisible: true, title: t }));
+        rsiChart.timeScale().fitContent();
+        inst.rsi = rsiChart;
+      }
+
+      // ── SLOPE panel: line + 0 centre line ────────────────────────────
+      const slopeChart = mkChart('slopechart_' + deployId, 70);
+      if (slopeChart) {
+        const slopeSeries = slopeChart.addLineSeries({ color: orange, lineWidth: 1.5, title: 'SLOPE' });
+        slopeSeries.setData(pts.filter(p => p.slope !== undefined && p.slope !== null).map(p => ({ time: Math.round(p.ts), value: p.slope })));
+        slopeSeries.createPriceLine({ price: 0, color: 'rgba(200,200,200,0.4)', lineWidth: 1, lineStyle: LW.LineStyle.Solid, axisLabelVisible: true, title: '0' });
+        slopeChart.timeScale().fitContent();
+        inst.slope = slopeChart;
+      }
+
       this._chartInst[deployId] = inst;
     },
 
@@ -5031,6 +5121,19 @@ function amoTest() {
                   <span x-show="bk.position.t1_hit" style="color:var(--t-green)">T1✓</span>
                 </div>
               </template>
+              <!-- TradingView index chart (free, no account) -->
+              <div class="mt-2 text-xs font-mono">
+                <div class="flex items-center gap-2 cursor-pointer select-none"
+                     @click="toggleTVChart(bk.underlying+'_'+bk.client_id+'_ts', bk.underlying)"
+                     style="color:var(--t-muted);border-top:1px solid var(--t-border);padding-top:4px">
+                  <span x-text="tvChartOpen[bk.underlying+'_'+bk.client_id+'_ts']?'▾':'▸'" style="font-size:10px"></span>
+                  <span style="font-weight:600" x-text="bk.underlying+' · INDEX CHART'"></span>
+                  <span style="font-size:9px;opacity:0.5">TradingView · 5m</span>
+                </div>
+                <div x-show="tvChartOpen[bk.underlying+'_'+bk.client_id+'_ts']" class="mt-1">
+                  <div :id="'tv_'+bk.underlying+'_'+bk.client_id+'_ts'" style="height:360px;border-radius:4px;overflow:hidden"></div>
+                </div>
+              </div>
             </div>
           </template>
         </div>
@@ -7650,15 +7753,32 @@ function amoTest() {
                                 x-text="chartOpen[dep.deploy_id] ? '▾ hide' : '▸ show'"></button>
                       </div>
                       <div x-show="chartOpen[dep.deploy_id]">
-                        <div style="height:160px"><canvas :id="'premchart_'+dep.deploy_id"></canvas></div>
-                        <div style="height:70px" class="mt-1"><canvas :id="'rsichart_'+dep.deploy_id"></canvas></div>
-                        <div style="height:70px" class="mt-1"><canvas :id="'slopechart_'+dep.deploy_id"></canvas></div>
+                        <div :id="'premchart_'+dep.deploy_id" style="height:160px"></div>
+                        <div :id="'rsichart_'+dep.deploy_id" style="height:80px" class="mt-1"></div>
+                        <div :id="'slopechart_'+dep.deploy_id" style="height:70px" class="mt-1"></div>
                         <div x-show="(chartData[dep.deploy_id]||[]).length===0" class="text-xs text-center py-3 font-mono" style="color:var(--t-muted)">
                           No 1-min data yet today.
                         </div>
                       </div>
                     </div>
                   </template>
+
+                  <!-- ── TradingView index chart (free, no account) — all strategies ── -->
+                  <div class="mt-3 pt-2 border-t" style="border-color:var(--t-border)">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="sec-label" style="color:var(--t-muted)">
+                        <span x-text="dep.underlying"></span> · INDEX CHART
+                        <span style="font-size:9px;opacity:0.55"> · TradingView · 5m</span>
+                      </span>
+                      <button class="text-xs px-2 py-0.5 rounded border font-mono"
+                              style="border-color:var(--t-border);color:var(--t-muted)"
+                              @click="toggleTVChart(dep.deploy_id+'_tv', dep.underlying)"
+                              x-text="tvChartOpen[dep.deploy_id+'_tv'] ? '▾ hide' : '▸ show'"></button>
+                    </div>
+                    <div x-show="tvChartOpen[dep.deploy_id+'_tv']">
+                      <div :id="'tv_'+dep.deploy_id+'_tv'" style="height:360px;border-radius:4px;overflow:hidden"></div>
+                    </div>
+                  </div>
                 </div>
               </template>
             </div>
