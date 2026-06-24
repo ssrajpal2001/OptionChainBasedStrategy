@@ -265,6 +265,9 @@ class TrapScannerEngine:
 
         # Per-zone LTF status for telemetry: uid → "watching"|"ltf_signal"|"entered"
         self._zone_ltf_status: Dict[str, str] = {}
+        # Retrace trigger: uid → (trigger_price, best_5m_zone, htf_zone, leg_key, opt_type)
+        # Set when all 5m bears are cleared; entry fires when LTP retraces to trigger_price.
+        self._ltf_retrace_trigger: Dict[str, tuple] = {}
         # HTF ATR for zone-reachability check (Point 1)
         self._htf_atr_val: float = 0.0
 
@@ -953,6 +956,7 @@ class TrapScannerEngine:
                     if not active:
                         continue
                     self._ltp_cache[bkey] = ltp   # track live option LTP per leg
+                    await self._check_retrace_entry(bkey, ltp)
                     closed = self._update_bucket(bkey, ltp, ts)
                     if closed:
                         bars_list.append(closed)
@@ -1373,14 +1377,23 @@ class TrapScannerEngine:
             # Jump directly to 5m LTF within this zone's bounds.
             # HTF mode (75m): outer gate already passed → scan 5m inside [z_low, z_high].
             # Cascade mode (15m): same → scan 5m inside [z_low, z_high].
+            # Only scan bars from when price entered the HTF zone (trapped_on timestamp),
+            # not all of today — bears before the HTF trigger are irrelevant.
             # Entry fires when ALL 5m bear traps inside the zone are CLOSED (sellers
             # exhausted) and none are still TRAPPED.
+            trap_ts_str = str(zone.get("trapped_on") or zone.get("closed_on") or "")
+            df_ltf = df
+            if trap_ts_str:
+                try:
+                    df_ltf = df[pd.to_datetime(df["datetime"]) >= pd.to_datetime(trap_ts_str)].copy()
+                except Exception:
+                    pass
             _, ltf_entries = scanner.scan_ltf(
-                df,
+                df_ltf,
                 htf_zone_high=z_high,
                 htf_zone_low=z_low,
                 htf_ref_bar=str(zone.get("ref_ts", "")),
-                htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
+                htf_trap_bar=trap_ts_str,
                 htf_target=zone.get("sl", 0.0),
             )
             trapped_now  = [e for e in ltf_entries if e["status"] == "TRAPPED"]
@@ -1397,17 +1410,35 @@ class TrapScannerEngine:
                 continue
 
             if closed_today:
-                best = max(closed_today, key=lambda e: str(e.get("closed_on", "")))
-                self._log.info(
-                    "_run_ltf_on [%s] uid=%s: all 5m bears cleared (closed=%d trapped=0) "
-                    "in zone %.1f-%.1f → entry",
-                    leg_key, uid, len(closed_today), z_low, z_high,
-                )
-                self._zone_ltf_status[uid] = "ltf_signal"
-                asyncio.get_event_loop().create_task(
-                    self._on_entry_signal(leg_key, opt_type, best, zone)
-                )
-                return
+                # Entry trigger = zone_high of the LOWEST closed 5m bear (closest to HTF
+                # zone_low). This is where the last seller gave up. We wait for LTP to
+                # retrace back down to this level before entering — not the first tick.
+                lowest = min(closed_today, key=lambda e: e.get("zone_high", 9999.0))
+                trigger = lowest["zone_high"]
+                self._ltf_retrace_trigger[uid] = (trigger, lowest, zone, leg_key, opt_type)
+
+                if current_price <= trigger:
+                    self._log.info(
+                        "_run_ltf_on [%s] uid=%s: all %d 5m bears cleared in zone "
+                        "%.1f-%.1f, LTP=%.2f ≤ trigger=%.2f → entry now",
+                        leg_key, uid, len(closed_today), z_low, z_high,
+                        current_price, trigger,
+                    )
+                    self._zone_ltf_status[uid] = "ltf_signal"
+                    asyncio.get_event_loop().create_task(
+                        self._on_entry_signal(leg_key, opt_type, lowest, zone)
+                    )
+                    return
+                else:
+                    if self._zone_ltf_status.get(uid) != "waiting_retrace":
+                        self._zone_ltf_status[uid] = "waiting_retrace"
+                        self._log.info(
+                            "_run_ltf_on [%s] uid=%s: all %d 5m bears cleared in zone "
+                            "%.1f-%.1f — waiting retrace to %.2f (LTP=%.2f)",
+                            leg_key, uid, len(closed_today), z_low, z_high,
+                            trigger, current_price,
+                        )
+                continue
 
             # No 5m traps yet inside zone — still watching
             if self._zone_ltf_status.get(uid) == "watching":
@@ -1418,6 +1449,35 @@ class TrapScannerEngine:
                     leg_key, uid, z_low, z_high,
                     "cascade" if not require_closed else "htf",
                 )
+
+    async def _check_retrace_entry(self, leg_key: str, ltp: float) -> None:
+        """
+        Called on every option tick. Fires entry when LTP retraces to the zone_high
+        of the lowest closed 5m bear — the precision entry point after all sellers cleared.
+        """
+        if self._position:
+            return
+        if not self._can_trade():
+            return
+        for uid, (trigger, best_zone, htf_zone, zleg, opt_type) in list(
+                self._ltf_retrace_trigger.items()):
+            if self._zone_ltf_status.get(uid) not in ("waiting_retrace", "seed_all_cleared"):
+                continue
+            if zleg != leg_key:
+                continue
+            if uid in self._notified_uids:
+                continue
+            if ltp <= trigger:
+                self._log.info(
+                    "RETRACE ENTRY [%s] uid=%s: LTP=%.2f ≤ trigger=%.2f → entry",
+                    leg_key, uid, ltp, trigger,
+                )
+                self._zone_ltf_status[uid] = "ltf_signal"
+                del self._ltf_retrace_trigger[uid]
+                asyncio.get_event_loop().create_task(
+                    self._on_entry_signal(zleg, opt_type, best_zone, htf_zone)
+                )
+                break
 
     def _seed_ltf_state(self) -> None:
         """
@@ -1445,23 +1505,46 @@ class TrapScannerEngine:
                 z_low, z_high = zone["zone_low"], zone["zone_high"]
                 if last_close > 0 and (last_close < z_low or last_close > z_high):
                     continue  # last bar already outside zone — skip
+                # Only scan bars from when price entered the HTF zone (trapped_on),
+                # not all of today — 5m bears before the HTF trigger are irrelevant.
+                trap_ts_str = str(zone.get("trapped_on") or zone.get("closed_on") or "")
+                df_ltf = df
+                if trap_ts_str:
+                    try:
+                        df_ltf = df[pd.to_datetime(df["datetime"]) >= pd.to_datetime(trap_ts_str)].copy()
+                    except Exception:
+                        pass
                 _, ltf_entries = scanner.scan_ltf(
-                    df,
+                    df_ltf,
                     htf_zone_high=z_high,
                     htf_zone_low=z_low,
                     htf_ref_bar=str(zone.get("ref_ts", "")),
-                    htf_trap_bar=str(zone.get("trapped_on", zone.get("closed_on", ""))),
+                    htf_trap_bar=trap_ts_str,
                     htf_target=zone.get("sl", 0.0),
                 )
                 trapped_now  = [e for e in ltf_entries if e["status"] == "TRAPPED"]
                 closed_today = [e for e in ltf_entries if e["status"] == "CLOSED"]
                 if not trapped_now and closed_today:
-                    self._zone_ltf_status[uid] = "seed_all_cleared"
-                    self._log.info(
-                        "SEED [%s] zone %.1f-%.1f: all %d 5m bears cleared "
-                        "→ entry fires on first live tick",
-                        leg_key, z_low, z_high, len(closed_today),
-                    )
+                    # Entry trigger = zone_high of the LOWEST (closest to HTF zone_low) bear.
+                    # Wait for LTP to retrace back down to this level, not first tick.
+                    lowest = min(closed_today, key=lambda e: e.get("zone_high", 9999.0))
+                    trigger = lowest["zone_high"]
+                    self._ltf_retrace_trigger[uid] = (trigger, lowest, zone, leg_key,
+                                                       "CE" if "CE" in leg_key else "PE")
+                    if last_close <= trigger:
+                        self._zone_ltf_status[uid] = "seed_all_cleared"
+                        self._log.info(
+                            "SEED [%s] zone %.1f-%.1f: all %d 5m bears cleared, "
+                            "last=%.2f ≤ trigger=%.2f → entry fires on first live tick",
+                            leg_key, z_low, z_high, len(closed_today), last_close, trigger,
+                        )
+                    else:
+                        self._zone_ltf_status[uid] = "waiting_retrace"
+                        self._log.info(
+                            "SEED [%s] zone %.1f-%.1f: all %d 5m bears cleared, "
+                            "waiting retrace to %.2f (last=%.2f)",
+                            leg_key, z_low, z_high, len(closed_today), trigger, last_close,
+                        )
                 elif trapped_now:
                     self._zone_ltf_status[uid] = "waiting_5m_clear"
                     self._log.info(
