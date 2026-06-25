@@ -1277,8 +1277,10 @@ def run_nifty_backtest_optimize(
     # Parameter grid  6×4×2 = 48 combinations.
     # "far" depth excluded — deep-ITM strikes are illiquid live.
     # spike_min removed — irrelevant for pure_intraday cascade path.
+    # SL buffer is scaled to index: SENSEX premiums are ~3× NIFTY, so the buffer
+    # needs proportionally more room to avoid noise stops.
     max_ltf_grid = [0, 5, 8, 10, 15, 20]
-    sl_buf_grid  = [5, 8, 10, 15]
+    sl_buf_grid  = [10, 15, 20, 30] if index.upper() == "SENSEX" else [5, 8, 10, 15]
     depth_grid   = ["near", "both"]
 
     total_combos = len(max_ltf_grid) * len(sl_buf_grid) * len(depth_grid)
