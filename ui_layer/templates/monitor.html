@@ -2740,6 +2740,7 @@ document.addEventListener('alpine:init', () => {
             // OPEN rows (sold to open). `_ts` = raw timestamp used for chronological sort.
             // Skip junk rows whose price is 0/missing — these are rejected-order / dry fills
             // (no real broker price was ever captured) and only clutter the ledger.
+            const isOpenOrder = tr.status === 'open';
             for (const lg of legs) {
               if (!(lg.entry > 0)) continue;
               flat.push({
@@ -2749,6 +2750,7 @@ document.addEventListener('alpine:init', () => {
                 strategy: strat, instrument: inst, strike: _sk(lg),
                 price: lg.entry,
                 pnl: null, reason: (lg.entry_reason || 'entry'),
+                open: isOpenOrder,
               });
             }
             // CLOSE rows (bought to close).
@@ -7487,6 +7489,11 @@ function amoTest() {
                   <!-- Live legs -->
                   <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.strategy_name]&&(csPositions[b.binding_id][dep.strategy_name].legs||[]).length>0">
                     <div class="space-y-1.5">
+                      <!-- Entry time badge -->
+                      <div x-show="csPositions[b.binding_id][dep.strategy_name].open_time" class="flex items-center gap-1.5 text-xs font-mono" style="color:var(--t-muted)">
+                        <span>ENTRY</span>
+                        <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.strategy_name].open_time"></span>
+                      </div>
                       <!-- Scroll the leg matrix as a UNIT on narrow screens: header + rows share
                            a min-width so columns stay aligned and never widen the card. -->
                       <div class="pos-legs">
@@ -8111,7 +8118,7 @@ function amoTest() {
 
       <div class="t-card rounded">
         <div class="flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-b" style="border-color:var(--t-border)">
-          <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Trade History</div>
+          <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Orders</div>
           <div class="flex items-center gap-2">
             <!-- View toggle: grouped by script+day vs flat order-book ledger -->
             <div class="flex rounded border overflow-hidden" style="border-color:var(--t-border)">
@@ -8229,7 +8236,10 @@ function amoTest() {
                   <td data-label="P&amp;L" class="px-4 py-2 font-mono font-bold text-right"
                       :style="`color:${rw.pnl==null?'var(--t-muted)':((rw.pnl||0)>=0?'var(--t-green)':'var(--t-red)')}`"
                       x-text="rw.pnl==null?'—':(((rw.pnl||0)>=0?'+':'')+'₹'+(rw.pnl||0).toFixed(0))"></td>
-                  <td data-label="Reason" class="px-4 py-2 text-xs" style="color:var(--t-muted)" x-text="reasonLabel(rw.reason)"></td>
+                  <td data-label="Reason" class="px-4 py-2 text-xs" style="color:var(--t-muted)">
+                    <span x-show="rw.open" class="px-1.5 py-0.5 rounded text-xs font-mono mr-1" style="background:rgba(var(--t-amber-rgb),0.12);color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.3)">OPEN</span>
+                    <span x-text="reasonLabel(rw.reason)"></span>
+                  </td>
                 </tr>
               </template>
             </tbody>

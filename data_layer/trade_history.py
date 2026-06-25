@@ -84,6 +84,76 @@ def record(
         logger.warning("trade_history.record[%s] failed: %s", client_id, exc)
 
 
+def record_open(
+    client_id: str,
+    strategy: str,
+    instrument: str,
+    binding_id: str = "",
+    legs: Optional[list] = None,
+) -> None:
+    """Record an order at entry time (status=open, no exit yet).
+    Shown in Orders as SELL rows immediately. Replaced by record() on close."""
+    try:
+        os.makedirs(_DIR, exist_ok=True)
+        now_ts = datetime.now().isoformat(timespec="seconds")
+        rec = {
+            "ts": now_ts,
+            "status": "open",
+            "strategy": strategy,
+            "instrument": instrument,
+            "binding_id": binding_id,
+            "entry_price": 0.0,
+            "exit_price": 0.0,
+            "exit_reason": "",
+            "pnl": 0.0,
+        }
+        if legs:
+            rec["legs"] = [
+                {
+                    "side": str(l.get("side", "")),
+                    "strike": int(l.get("strike", 0) or 0),
+                    "entry": round(float(l.get("entry", 0.0) or 0.0), 2),
+                    "exit": 0.0,
+                    "pnl": 0.0,
+                    "entry_ts": l.get("entry_ts") or now_ts,
+                    "exit_ts": None,
+                    "entry_reason": str(l.get("entry_reason", "") or ""),
+                }
+                for l in legs
+            ]
+        trades = _load_raw(client_id)
+        trades.append(rec)
+        if len(trades) > _CAP:
+            trades = trades[-_CAP:]
+        tmp = _path(client_id) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"trades": trades}, f, indent=2)
+        os.replace(tmp, _path(client_id))
+    except Exception as exc:
+        logger.warning("trade_history.record_open[%s] failed: %s", client_id, exc)
+
+
+def close_open(client_id: str, binding_id: str, instrument: str) -> None:
+    """Remove any status=open record for this binding+instrument before writing the closed record."""
+    try:
+        trades = _load_raw(client_id)
+        before = len(trades)
+        trades = [
+            t for t in trades
+            if not (t.get("status") == "open"
+                    and t.get("binding_id") == binding_id
+                    and t.get("instrument") == instrument)
+        ]
+        if len(trades) == before:
+            return
+        tmp = _path(client_id) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"trades": trades}, f, indent=2)
+        os.replace(tmp, _path(client_id))
+    except Exception as exc:
+        logger.warning("trade_history.close_open[%s] failed: %s", client_id, exc)
+
+
 def _load_raw(client_id: str) -> List[dict]:
     p = _path(client_id)
     if not os.path.exists(p):

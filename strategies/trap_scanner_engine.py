@@ -2250,6 +2250,16 @@ class TrapScannerEngine:
             "ENTRY PLACED scan=%d exec=%d%s spot=%.2f fill=%.2f sl=%.2f t1=%.2f order=%s",
             scan_strike, strike, opt_type, spot, avg, sl_price, t1_price, order_id,
         )
+        try:
+            from data_layer.trade_history import record_open as _ro
+            _instr = f"{self._und} {opt_type} {strike}"
+            _ro(client_id=self._cid, strategy="trap_scanner",
+                instrument=_instr, binding_id=self._bid,
+                legs=[{"side": opt_type, "strike": strike, "entry": round(avg, 2),
+                       "entry_ts": now.isoformat(timespec="seconds"),
+                       "entry_reason": pos.get("signal_source", "HTF")}])
+        except Exception:
+            pass
 
     # ── Tick exit ─────────────────────────────────────────────────────────────
 
@@ -2727,11 +2737,13 @@ class TrapScannerEngine:
                              exit_reason: str, qty_override: int = 0) -> None:
         """Write one closed-trade record to data/history and logs/trades."""
         try:
-            from data_layer.trade_history import record as _hist_record
+            from data_layer.trade_history import record as _hist_record, close_open as _co
             qty   = qty_override or pos.get("remaining_qty", 0)
             ep    = float(pos.get("entry_price", 0))
             xp    = float(exit_price)
             pnl   = round((xp - ep) * qty, 2)
+            _instr_key = f"{self._und} {pos.get('side','')} {pos.get('strike','')}"
+            _co(self._cid, self._bid, _instr_key)
             _hist_record(
                 client_id   = self._cid,
                 strategy    = "trap_scanner",

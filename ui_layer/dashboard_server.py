@@ -2448,9 +2448,23 @@ class DashboardServer:
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
                 except Exception as exc:
                     logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
+                # Entry time: from straddle position open_time or trap-scanner position
+                _open_time = None
+                if sname == "sell_straddle":
+                    strat2 = _srv._find_ss_book(cid, bid, underlying)
+                    _pos2 = getattr(strat2, "_position", None) if strat2 else None
+                    if _pos2 and getattr(_pos2, "open_time", None):
+                        _open_time = _pos2.open_time.strftime("%H:%M:%S")
+                elif sname == "trap_scanner":
+                    for _bk in getattr(_srv, "_trap_books", []):
+                        if getattr(_bk, "_underlying", None) == underlying:
+                            _tp = getattr(_bk, "_v2_position", None) or getattr(_bk, "position", None)
+                            if _tp and getattr(_tp, "entry_ts", None):
+                                _open_time = str(_tp.entry_ts)[11:19]
+                            break
                 by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
                                           "booked": booked, "tracking": tracking,
-                                          "straddle": straddle_info,
+                                          "straddle": straddle_info, "open_time": _open_time,
                                           "ccy": (legs[0].get("ccy", "₹") if legs else
                                                   ("$" if str(underlying).upper() in ("BTC", "ETH") else "₹"))}
             return {"ok": True, "by_broker": by_broker}
