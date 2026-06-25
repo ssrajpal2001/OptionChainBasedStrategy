@@ -592,6 +592,18 @@ class TrapScannerEngine:
                     self._pe2_key, len(self._bars_pe2),
                 )
 
+            # Seed LTP cache from last historical bar so _check_zone_reachability
+            # gets a real LTP at startup instead of 0 (which forces cascade mode
+            # after every restart, blocking HTF zones until next 75-min boundary).
+            if self._htf_source == "option":
+                for _bkey, _battr in [("CE1", "_bars_ce1"), ("CE2", "_bars_ce2"),
+                                       ("PE1", "_bars_pe1"), ("PE2", "_bars_pe2")]:
+                    _bars = getattr(self, _battr, [])
+                    if _bars and not self._ltp_cache.get(_bkey):
+                        _seed_ltp = float(_bars[-1].get("close", 0.0) or 0.0)
+                        if _seed_ltp > 0:
+                            self._ltp_cache[_bkey] = _seed_ltp
+
             self._run_htf_scan()
             self._htf_atr_val = self._compute_htf_atr()
             self._check_zone_reachability()

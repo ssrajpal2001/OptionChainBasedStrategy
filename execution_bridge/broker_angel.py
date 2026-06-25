@@ -95,10 +95,10 @@ class AngelBroker(BaseBroker):
             self._trading_mode_raw = "live" if mode == "live" else "paper"
             if pt in ("MIS", "INTRADAY"):
                 self._product = "INTRADAY"
-            elif pt in ("NRML", "NORMAL"):
-                self._product = "DELIVERY"
+            elif pt in ("NRML", "NORMAL", "CARRYFORWARD"):
+                self._product = "CARRYFORWARD"
             else:
-                self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "DELIVERY"
+                self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "CARRYFORWARD"
             logger.info("AngelBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
             # Warm BFO scrip master so SENSEX symbol tokens resolve without searchScrip.
             await self._warm_bfo_master()
