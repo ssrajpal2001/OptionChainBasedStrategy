@@ -4928,6 +4928,12 @@ function amoTest() {
                      x-model.number="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).sl_buffer">
             </label>
             <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Max SL (pts from entry, 0=no cap)</span>
+              <input type="number" step="1" class="t-input" placeholder="0"
+                     x-model.number="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).max_sl_pts">
+              <span style="color:var(--t-dim);font-size:10px">NIFTY=20 · SENSEX=50 · 0=unlimited</span>
+            </label>
+            <label class="flex flex-col gap-1">
               <span style="color:var(--t-muted)">Gap ITM Near (pts, no-zone pivot)</span>
               <input type="number" class="t-input" placeholder="200"
                      x-model.number="((trapScannerCfg.per_index||{})[adminSelectedIndex]||{}).gap_itm_near">
