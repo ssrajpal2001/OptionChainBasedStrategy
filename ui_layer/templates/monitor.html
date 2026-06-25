@@ -7300,8 +7300,17 @@ function amoTest() {
                 <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
               </div>
             </div>
-            <!-- TOTP Secret -->
-            <!-- TOTP/PIN not stored — 2FA handled on broker's secure login portal -->
+            <!-- Angel One headless: MPIN + TOTP secret -->
+            <div x-show="portalBroker.provider==='angelone'" class="grid grid-cols-2 gap-3">
+              <div>
+                <div class="sec-label mb-1">MPIN (4-digit login PIN)</div>
+                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password" placeholder="leave blank to keep existing"/>
+              </div>
+              <div>
+                <div class="sec-label mb-1">TOTP SECRET (base32 seed key)</div>
+                <input class="t-input" type="text" x-model="portalBroker.totp_secret" autocomplete="off" placeholder="leave blank to keep existing"/>
+              </div>
+            </div>
             <!-- Mock / Dhan info notes -->
             <div x-show="portalBroker.provider==='mock'" class="text-xs px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.06);color:var(--t-muted)">
               Mock/Paper mode — no real broker credentials needed. Orders will be simulated.
