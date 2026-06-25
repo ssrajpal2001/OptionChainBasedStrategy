@@ -2249,10 +2249,22 @@ class SellStraddleStrategy:
         # SELECT THE REPLACEMENT BEFORE CLOSING — so a same-strike / no-op roll fires NO orders.
         # (Previously we closed first, then if selection returned the SAME strike we'd re-sell it:
         #  a buy-to-close + re-sell on the identical strike — a pointless wash + 2 broker orders.)
+        def _rule_pass_debug(cs: int, ps: int) -> bool:
+            ind = self._ind_by_tf(cs, ps, rules)
+            passed, reason = _eval_rules(rules, ind)
+            if not passed:
+                _ind_short = {tf: {k: round(v, 2) for k, v in d.items()
+                                   if k in ("close", "vwap", "slope", "rsi", "roc")}
+                              for tf, d in ind.items()}
+                logger.info("SellStraddle[%s]: roll %s → %s%d BLOCKED — %s | ind=%s",
+                            self._underlying, side, side, ps if side == "PE" else cs,
+                            reason, _ind_short)
+            return passed
+
         sel = select_partner_for(
             self._strike_prem, side, run_strike, run_ltp,
             self._spot, step, offset, ltp_target,
-            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
+            rule_pass=_rule_pass_debug,
             max_itm_steps=max_itm,
             ratio_threshold=getattr(self, "_ratio_threshold", 0.0),
         )
