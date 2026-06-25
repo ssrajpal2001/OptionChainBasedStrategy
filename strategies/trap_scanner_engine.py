@@ -60,16 +60,16 @@ _INDEX_CFG: Dict[str, dict] = {
     # htf_source="option": HTF and LTF both scan OPTION premium bars (same units → scan_ltf works)
     # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
     "NIFTY":      {"step": 100, "lot": 65,  "gap_near": 200, "gap_far": 400,
-                   "sl_buf": 10.0, "cutoff": "15:10", "sq_off": "15:20",
+                   "sl_buf": 10.0, "max_sl_pts": 20.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
-                   "sl_buf": 4.0, "cutoff": "15:10", "sq_off": "15:20",
+                   "sl_buf": 4.0, "max_sl_pts": 0.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
-                   "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
+                   "sl_buf": 2.0, "max_sl_pts": 0.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "SENSEX":     {"step": 100, "lot": 20,  "gap_near": 300, "gap_far": 600,
-                   "sl_buf": 15.0, "cutoff": "15:20", "sq_off": "15:25",
+                   "sl_buf": 20.0, "max_sl_pts": 50.0, "cutoff": "15:20", "sq_off": "15:25",
                    "window": None, "exchange": "BFO", "htf_source": "option"},
     "MIDCPNIFTY": {"step": 25,  "lot": 75,  "gap_near": 100, "gap_far": 200,
                    "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
@@ -172,6 +172,7 @@ class TrapScannerEngine:
         self._step       = int(_def["step"])
         self._lot_size   = int(_adm.get("lot_size",     _def["lot"]))
         self._sl_buf     = float(_adm.get("sl_buffer",  _def["sl_buf"]))
+        self._max_sl_pts = float(_adm.get("max_sl_pts", _def.get("max_sl_pts", 0.0)))
         self._gap_near   = int(_adm.get("gap_itm_near", _def["gap_near"]))
         self._gap_far    = int(_adm.get("gap_itm_far",  _def["gap_far"]))
         self._cutoff_str = _adm.get("entry_cutoff",     _def["cutoff"])
@@ -2075,6 +2076,9 @@ class TrapScannerEngine:
         else:
             tracking_leg = leg   # CE1 or PE1 — scan strike option bars
             sl_price     = round(htf_zone.get("zone_low", entry["zone_low"]) - self._sl_buf, 2)  # HTF zone_low − buffer
+            # Cap: SL cannot be more than max_sl_pts below entry reference (avoids runaway SL on wide zones).
+            if self._max_sl_pts > 0 and (ep - sl_price) > self._max_sl_pts:
+                sl_price = round(ep - self._max_sl_pts, 2)
             t1_price     = round(htf_zone.get("sl", 0), 2)             # HTF ref bar HIGH (bears' SL)
             t1_price_fut = None
 
