@@ -345,6 +345,19 @@
           </label>
         </div>
 
+        <!-- Pure Intraday Mode (15-3-1) -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">Pure Intraday Mode (15m→3m→1m)</p>
+            <p class="text-xs text-t-muted">Skip all HTF prev-day zones · ATM±offset strikes · scan ALL 15m intraday zones → 3m sub-traps → 1m HIGH breakout</p>
+          </div>
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" x-model="pureIntraday" class="accent-[var(--t-cyan)]" />
+            <span class="text-xs" x-text="pureIntraday ? 'ON' : 'OFF'"
+              :class="pureIntraday ? 'text-[var(--t-cyan)]' : 'text-t-muted'"></span>
+          </label>
+        </div>
+
         <!-- Skip Opening Spike Zones -->
         <div class="flex items-center justify-between">
           <div>
@@ -696,6 +709,7 @@ function backtestNifty() {
     useHighBreakout:  true,
     skipOpenSpike:    true,
     openSpikeMin:     30,
+    pureIntraday:     false,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -757,6 +771,7 @@ function backtestNifty() {
         use_high_breakout: this.useHighBreakout,
         skip_open_spike:   this.skipOpenSpike,
         open_spike_min:    this.openSpikeMin,
+        pure_intraday:     this.pureIntraday,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks

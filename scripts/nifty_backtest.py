@@ -571,7 +571,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              rr_min_ratio: float = 1.0,
              use_high_breakout: bool = True,
              skip_open_spike: bool = True,
-             open_spike_min: int = 30) -> list[dict]:
+             open_spike_min: int = 30,
+             pure_intraday: bool = False) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -629,6 +630,27 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             ("PE", pe_strike, _option_key(index, pe_strike, "PE", trade_dt_obj), "R1"),
         ]
 
+    # Pure intraday mode: override strike selection to ATM±offset (both sides, no pivot/gap bias)
+    if pure_intraday:
+        atm       = _round_strike(today_open, step)
+        ce_near   = atm - cfg["gap_near"]
+        ce_far    = atm - cfg.get("gap_far", cfg["gap_near"] * 2)
+        pe_near   = atm + cfg["gap_near"]
+        pe_far    = atm + cfg.get("gap_far", cfg["gap_near"] * 2)
+        base_mode = f"INTRADAY ATM={atm}"
+        all_legs  = [
+            ("CE", ce_near, _option_key(index, ce_near, "CE", trade_dt_obj), "NEAR"),
+            ("CE", ce_far,  _option_key(index, ce_far,  "CE", trade_dt_obj), "FAR"),
+            ("PE", pe_near, _option_key(index, pe_near, "PE", trade_dt_obj), "NEAR"),
+            ("PE", pe_far,  _option_key(index, pe_far,  "PE", trade_dt_obj), "FAR"),
+        ]
+        if strike_depth == "near":
+            legs = [l for l in all_legs if l[3] == "NEAR"]
+        elif strike_depth == "far":
+            legs = [l for l in all_legs if l[3] == "FAR"]
+        else:
+            legs = all_legs
+
     fetch_from = (td - timedelta(days=14)).isoformat()
     fetch_to   = (td + timedelta(days=1)).isoformat()
     cache = opt_bar_cache if opt_bar_cache is not None else {}
@@ -647,7 +669,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         # Gap UP → CE = entry; PE = exit tracker only (close CE if PE trap fires)
         # Gap DOWN → PE = entry; CE = exit tracker only
         exit_only = False
-        if use_bias and gap_fired:
+        if use_bias and gap_fired and not pure_intraday:
             if gap_dir == "UP" and opt_type == "PE":
                 exit_only = True   # scan PE but only for closing CE
             if gap_dir == "DOWN" and opt_type == "CE":
@@ -698,7 +720,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             except Exception:
                 return False
 
-        htf_zones = [e for e in htf_entries if e.get("status") == "CLOSED" and _closed_today(e)]
+        # pure_intraday: skip all HTF prev-day zones — only intraday cascade
+        htf_zones = [] if pure_intraday else [
+            e for e in htf_entries if e.get("status") == "CLOSED" and _closed_today(e)
+        ]
 
         entry_signals = []   # list of (entry_ts, entry_price, sl, t1, zone_low, zone_high, mode_tag)
 
@@ -752,14 +777,14 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
             print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} HTF zone(s)")
         else:
-            # ── Step 2: No HTF zone (or zone is far) → 15min intraday cascade ──
+            # ── Step 2: No HTF zone → 15min intraday cascade ──────────────────
+            # pure_intraday: scan ALL 15m zones + 3m sub-zones (15-3-1 mode)
+            # normal cascade: pick lowest 15m zone + 5m sub-zones
             df_15 = _resample(df_opt_today, 15)
             _, cas15 = scanner.scan_htf(df_15) if len(df_15) >= 2 else (None, [])
 
-            # TRAPPED or CLOSED on 15min intraday bars — pick LOWEST zone_low
-            # (tightest SL, nearest to HTF zone_low, strongest confirmation)
             cas_zones = sorted(
-                [e for e in cas15 if e.get("status") in ("TRAPPED", "CLOSED")],
+                [e for e in (cas15 or []) if e.get("status") in ("TRAPPED", "CLOSED")],
                 key=lambda z: float(z.get("zone_low", 9999))
             )
 
@@ -767,35 +792,36 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 print(f"  {trade_date} {opt_type} {strike}: no zones (HTF or 15m)")
                 continue
 
-            # Pick the single lowest 15min zone
-            cz   = cas_zones[0]
-            zh   = float(cz["zone_high"])
-            zl   = float(cz["zone_low"])
-            trap_ts = pd.to_datetime(cz.get("trapped_on") or cz.get("ref_ts"))
-            if trap_ts is not pd.NaT:
-                trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
+            # Sub-zone timeframe: 3m for pure_intraday, 5m for normal cascade
+            sub_min  = 3 if pure_intraday else ltf_min
+            df_5     = _resample(df_opt_today, 5)   # always compute for _simulate_exit TSL
+            df_sub   = _resample(df_opt_today, sub_min) if sub_min != 5 else df_5
+            _, ltf_sub_all = scanner.scan_htf(df_sub) if len(df_sub) >= 2 else (None, [])
 
-            # Scan ALL of today's 5min bars within the 15min zone for fresh sub-trap
-            df_5 = _resample(df_opt_today, 5)
-            _, ltf5_all = scanner.scan_htf(df_5) if len(df_5) >= 2 else (None, [])
-            ltf5_in = [e for e in (ltf5_all or [])
-                       if e.get("status") in ("TRAPPED", "CLOSED")
-                       and float(e.get("zone_high", 0)) <= zh * 1.02
-                       and float(e.get("zone_low",  0)) >= zl * 0.98]
+            # pure_intraday: all 15m zones (complete day); normal: only the lowest one
+            zones_to_scan = cas_zones if pure_intraday else cas_zones[:1]
+            mode_tag      = f"INTRADAY-15m→{sub_min}m" if pure_intraday else f"CASCADE-15m→{sub_min}m"
 
-            if ltf5_in:
-                # Take ALL valid 5min sub-traps; SL = 15min zone_low (parent zone)
-                ltf5_in.sort(key=lambda e: float(e.get("zone_low", 9999)))
-                for idx, best in enumerate(ltf5_in):
-                    best["_mode"]     = "CASCADE-15m→5m"
-                    best["_trap_pos"] = f"LTF-{idx+1}"
-                    best["_htf_t1"]   = zh   # T1 = 15min zone_high
-                    best["_htf_sl"]   = zl   # SL = 15min zone_low
-                    entry_signals.append(best)
-                print(f"  {trade_date} {opt_type} {strike}: CASCADE 15m {zl:.0f}-{zh:.0f} → 5m sub-trap at {best.get('zone_low'):.0f}-{best.get('zone_high'):.0f}")
-            else:
-                # No 5min sub-trap inside 15min zone → skip
-                print(f"  {trade_date} {opt_type} {strike}: CASCADE 15m {zl:.0f}-{zh:.0f} → no 5m sub-trap — SKIP")
+            for cz in zones_to_scan:
+                zh = float(cz["zone_high"])
+                zl = float(cz["zone_low"])
+
+                ltf_in = [e for e in (ltf_sub_all or [])
+                          if e.get("status") in ("TRAPPED", "CLOSED")
+                          and float(e.get("zone_high", 0)) <= zh * 1.02
+                          and float(e.get("zone_low",  0)) >= zl * 0.98]
+
+                if ltf_in:
+                    ltf_in.sort(key=lambda e: float(e.get("zone_low", 9999)))
+                    for idx, best in enumerate(ltf_in):
+                        best["_mode"]     = mode_tag
+                        best["_trap_pos"] = f"LTF-{idx+1}"
+                        best["_htf_t1"]   = zh
+                        best["_htf_sl"]   = zl
+                        entry_signals.append(best)
+                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} → {sub_min}m ×{len(ltf_in)}")
+                else:
+                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} → no {sub_min}m sub-trap — SKIP")
 
         if not entry_signals:
             continue
@@ -1034,7 +1060,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        next_week: bool = False,
                        use_high_breakout: bool = True,
                        skip_open_spike: bool = True,
-                       open_spike_min: int = 30) -> dict:
+                       open_spike_min: int = 30,
+                       pure_intraday: bool = False) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -1093,7 +1120,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                               profit_floor_per_lot, no_target_tsl, rr_filter, rr_min_ratio,
                               use_high_breakout=use_high_breakout,
                               skip_open_spike=skip_open_spike,
-                              open_spike_min=open_spike_min)
+                              open_spike_min=open_spike_min,
+                              pure_intraday=pure_intraday)
         all_trades.extend(day_trades)
 
     # Summary

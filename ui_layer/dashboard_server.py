@@ -753,6 +753,7 @@ class DashboardServer:
             use_high_breakout    = bool(p.get("use_high_breakout", True))
             skip_open_spike      = bool(p.get("skip_open_spike", True))
             open_spike_min       = int(p.get("open_spike_min", 30))
+            pure_intraday        = bool(p.get("pure_intraday", False))
             if not token:
                 # Auto-pull Upstox access token from DB if already authenticated
                 try:
@@ -770,7 +771,7 @@ class DashboardServer:
                     run_nifty_backtest, token, index, weeks, start, end, bias, sl_buf,
                     monthly, strike_depth, profit_cap_per_lot, use_1itm, profit_floor_per_lot,
                     htf_min, no_target_tsl, rr_filter, rr_min_ratio, next_week,
-                    use_high_breakout, skip_open_spike, open_spike_min
+                    use_high_breakout, skip_open_spike, open_spike_min, pure_intraday
                 )
                 return result
             except Exception as exc:
