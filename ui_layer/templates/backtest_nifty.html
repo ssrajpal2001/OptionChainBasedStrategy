@@ -360,10 +360,11 @@
       </div>
     </div>
 
-    <!-- Token -->
+    <!-- Token — optional if Upstox feeder is already active in DB -->
     <div>
-      <p class="sec-label mb-2">Upstox Token</p>
-      <input type="password" x-model="token" class="t-input font-mono text-xs" placeholder="Bearer token…" />
+      <p class="sec-label mb-1">Upstox Token</p>
+      <p class="text-xs text-t-muted mb-2">Leave blank — auto-used from active feeder session</p>
+      <input type="password" x-model="token" class="t-input font-mono text-xs" placeholder="Leave blank if feeder is running…" />
     </div>
 
     <button class="btn-primary" @click="runBacktest(); ctrlOpen=false"

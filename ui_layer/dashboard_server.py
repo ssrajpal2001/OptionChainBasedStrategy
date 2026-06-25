@@ -752,7 +752,16 @@ class DashboardServer:
             next_week            = bool(p.get("next_week", False))
             use_high_breakout    = bool(p.get("use_high_breakout", True))
             if not token:
-                return {"ok": False, "error": "token required"}
+                # Auto-pull Upstox access token from DB if already authenticated
+                try:
+                    fc = await asyncio.to_thread(
+                        _shared_client_db.get_feeder_creds_sync, "upstox"
+                    )
+                    token = (fc or {}).get("access_token", "")
+                except Exception:
+                    pass
+            if not token:
+                return {"ok": False, "error": "token required — log in to Upstox feeder first"}
             try:
                 from scripts.nifty_backtest import run_nifty_backtest
                 result = await asyncio.to_thread(
