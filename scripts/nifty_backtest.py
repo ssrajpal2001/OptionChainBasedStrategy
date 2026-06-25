@@ -1240,10 +1240,12 @@ def run_nifty_backtest_optimize(
     shared_cache: dict = {}
 
     # Parameter grid
-    max_ltf_grid   = [0, 5, 8, 10, 12, 15, 20]
-    sl_buf_grid    = [5, 8, 10, 12, 15]
-    depth_grid     = ["near", "far", "both"]
-    spike_min_grid = [15, 30, 45]
+    # Reduced grid: 6×4×2×2 = 96 combinations (~90s on cached runs).
+    # "far" depth excluded — deep-ITM strikes are illiquid live; "near"+"both" cover real cases.
+    max_ltf_grid   = [0, 5, 8, 10, 15, 20]
+    sl_buf_grid    = [5, 8, 10, 15]
+    depth_grid     = ["near", "both"]
+    spike_min_grid = [15, 30]
 
     total_combos = len(max_ltf_grid) * len(sl_buf_grid) * len(depth_grid) * len(spike_min_grid)
     print(f"\n[OPTIMIZE] {index}  {s_date}→{e_date}  "
