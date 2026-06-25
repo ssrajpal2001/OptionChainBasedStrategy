@@ -750,6 +750,7 @@ class DashboardServer:
             rr_filter            = bool(p.get("rr_filter", False))
             rr_min_ratio         = float(p.get("rr_min_ratio", 1.0))
             next_week            = bool(p.get("next_week", False))
+            use_high_breakout    = bool(p.get("use_high_breakout", True))
             if not token:
                 return {"ok": False, "error": "token required"}
             try:
@@ -757,7 +758,8 @@ class DashboardServer:
                 result = await asyncio.to_thread(
                     run_nifty_backtest, token, index, weeks, start, end, bias, sl_buf,
                     monthly, strike_depth, profit_cap_per_lot, use_1itm, profit_floor_per_lot,
-                    htf_min, no_target_tsl, rr_filter, rr_min_ratio, next_week
+                    htf_min, no_target_tsl, rr_filter, rr_min_ratio, next_week,
+                    use_high_breakout
                 )
                 return result
             except Exception as exc:

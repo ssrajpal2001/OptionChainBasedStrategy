@@ -306,7 +306,8 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                    profit_floor_per_lot: float = 0.0,
                    df1m_scan: pd.DataFrame | None = None,
                    force_exit_ts: pd.Timestamp | None = None,
-                   no_target_tsl: bool = False) -> Optional[dict]:
+                   no_target_tsl: bool = False,
+                   use_high_breakout: bool = True) -> Optional[dict]:
     """
     df1m       = exec strike bars (prices for entry/exit P&L)
     df1m_scan  = scan strike bars (SL/T1/TSL trigger logic); if None, uses df1m (no 1ITM)
@@ -337,9 +338,10 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
 
     # ── 1min rejection-candle entry confirmation ─────────────────────────
-    # At zone_low, wait for a 1min candle to form (rejection candle):
-    #   small (< BIG_CANDLE_PTS): enter when next bar breaks above its HIGH
-    #   big  (>= BIG_CANDLE_PTS): enter when price reaches 50% from candle LOW
+    # At zone_low area, wait for a 1min setup candle, then:
+    #   use_high_breakout=True  → enter only when next bar breaks ABOVE setup candle HIGH
+    #                             (avoids entering on continued downtrends after bears cleared)
+    #   use_high_breakout=False → enter at 50% midpoint (earlier entry, less confirmation)
     # If no confirmation within session → no trade.
     entry_price  = None
     actual_entry_ts = None
@@ -358,13 +360,19 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 rejection_bar = (rb_high, rb_low, rb_ts)
         else:
             rej_high, rej_low, _ = rejection_bar
-            # Entry when price reaches 50% from rejection candle low (midpoint going up)
-            # This gives earlier entry than waiting for HIGH break on big candles
-            midpoint = round(rej_low + (rej_high - rej_low) * 0.5, 2)
-            if rb_high >= midpoint:
-                entry_price     = midpoint
-                actual_entry_ts = rb_ts
-                break
+            if use_high_breakout:
+                # HIGH breakout: price must break ABOVE the setup candle's high
+                if rb_high >= rej_high:
+                    entry_price     = round(rej_high, 2)
+                    actual_entry_ts = rb_ts
+                    break
+            else:
+                # Midpoint entry: enter when price reaches 50% from rejection candle low
+                midpoint = round(rej_low + (rej_high - rej_low) * 0.5, 2)
+                if rb_high >= midpoint:
+                    entry_price     = midpoint
+                    actual_entry_ts = rb_ts
+                    break
 
     if entry_price is None or entry_price <= 0:
         return None   # no 1min confirmation → skip trade
@@ -560,7 +568,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              profit_floor_per_lot: float = 0.0,
              no_target_tsl: bool = False,
              rr_filter: bool = False,
-             rr_min_ratio: float = 1.0) -> list[dict]:
+             rr_min_ratio: float = 1.0,
+             use_high_breakout: bool = True) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -867,6 +876,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         df1m_scan=rt["scan_bars_arg"],
                         force_exit_ts=z_ts,
                         no_target_tsl=no_target_tsl,
+                        use_high_breakout=use_high_breakout,
                     )
                     if re_result:
                         re_result["index"]       = index
@@ -949,6 +959,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 profit_floor_per_lot=profit_floor_per_lot,
                 df1m_scan=scan_bars_arg,
                 no_target_tsl=no_target_tsl,
+                use_high_breakout=use_high_breakout,
             )
             if result:
                 result["index"]        = index
@@ -1008,7 +1019,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        no_target_tsl: bool = False,
                        rr_filter: bool = False,
                        rr_min_ratio: float = 1.0,
-                       next_week: bool = False) -> dict:
+                       next_week: bool = False,
+                       use_high_breakout: bool = True) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -1064,7 +1076,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     for td in days:
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
                               opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm,
-                              profit_floor_per_lot, no_target_tsl, rr_filter, rr_min_ratio)
+                              profit_floor_per_lot, no_target_tsl, rr_filter, rr_min_ratio,
+                              use_high_breakout=use_high_breakout)
         all_trades.extend(day_trades)
 
     # Summary

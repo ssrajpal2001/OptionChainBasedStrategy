@@ -187,6 +187,10 @@ class TrapScannerEngine:
         # No-Target-TSL mode: skip T1 half-exit and TSL; floor locks from total P&L directly.
         # Exit only on: SL, OPP_SIGNAL (opposite side), Floor breach, EOD.
         self._no_target_tsl = bool(_adm.get("no_target_tsl", False))
+        # 1-min HIGH breakout confirmation: after 5m bears cleared + retrace to trigger,
+        # wait for the setup 1m candle's HIGH to be broken before entering.
+        # Prevents entering on continued downtrends that cleared bears but kept falling.
+        self._require_1m_confirm = bool(_adm.get("require_1m_confirm", False))
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
         self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 0.5))
@@ -269,6 +273,9 @@ class TrapScannerEngine:
         # Retrace trigger: uid → (trigger_price, best_5m_zone, htf_zone, leg_key, opt_type)
         # Set when all 5m bears are cleared; entry fires when LTP retraces to trigger_price.
         self._ltf_retrace_trigger: Dict[str, tuple] = {}
+        # 1-min HIGH confirm: uid → (setup_high, best_5m_zone, htf_zone, leg_key, opt_type)
+        # Active when require_1m_confirm=True and trigger was hit; entry fires when LTP > setup_high.
+        self._1m_confirm: Dict[str, tuple] = {}
         # HTF ATR for zone-reachability check (Point 1)
         self._htf_atr_val: float = 0.0
 
@@ -1489,11 +1496,37 @@ class TrapScannerEngine:
         """
         Called on every option tick. Fires entry when LTP retraces to the zone_high
         of the lowest closed 5m bear — the precision entry point after all sellers cleared.
+
+        When require_1m_confirm=True: instead of entering immediately at trigger, records
+        the current 1m bar's HIGH as the setup candle high, then fires entry only when
+        LTP breaks ABOVE that HIGH (prevents entering on continued downtrends).
         """
         if self._position:
             return
         if not self._can_trade():
             return
+
+        # Stage 2: check existing 1-min confirms (require_1m_confirm path)
+        for uid, (setup_high, best_zone, htf_zone, zleg, opt_type) in list(
+                self._1m_confirm.items()):
+            if zleg != leg_key:
+                continue
+            if uid in self._notified_uids:
+                del self._1m_confirm[uid]
+                continue
+            if ltp > setup_high:
+                self._log.info(
+                    "1M CONFIRM [%s] uid=%s: LTP=%.2f > setup_high=%.2f → entry",
+                    leg_key, uid, ltp, setup_high,
+                )
+                del self._1m_confirm[uid]
+                self._zone_ltf_status[uid] = "ltf_signal"
+                asyncio.get_event_loop().create_task(
+                    self._on_entry_signal(zleg, opt_type, best_zone, htf_zone)
+                )
+                return
+
+        # Stage 1: check retrace triggers
         for uid, (trigger, best_zone, htf_zone, zleg, opt_type) in list(
                 self._ltf_retrace_trigger.items()):
             if self._zone_ltf_status.get(uid) not in ("waiting_retrace", "seed_all_cleared"):
@@ -1503,15 +1536,30 @@ class TrapScannerEngine:
             if uid in self._notified_uids:
                 continue
             if ltp <= trigger:
-                self._log.info(
-                    "RETRACE ENTRY [%s] uid=%s: LTP=%.2f ≤ trigger=%.2f → entry",
-                    leg_key, uid, ltp, trigger,
-                )
-                self._zone_ltf_status[uid] = "ltf_signal"
-                del self._ltf_retrace_trigger[uid]
-                asyncio.get_event_loop().create_task(
-                    self._on_entry_signal(zleg, opt_type, best_zone, htf_zone)
-                )
+                if self._require_1m_confirm:
+                    # Get last completed 1m bar's HIGH as the setup candle
+                    _bars_attr = {"CE1": "_bars_ce1", "CE2": "_bars_ce2",
+                                  "PE1": "_bars_pe1", "PE2": "_bars_pe2"}.get(leg_key, "")
+                    _bars = getattr(self, _bars_attr, []) if _bars_attr else []
+                    setup_high = float(_bars[-1].get("high", ltp)) if _bars else ltp
+                    self._1m_confirm[uid] = (setup_high, best_zone, htf_zone, zleg, opt_type)
+                    del self._ltf_retrace_trigger[uid]
+                    self._zone_ltf_status[uid] = "waiting_1m_confirm"
+                    self._log.info(
+                        "1M SETUP [%s] uid=%s: LTP=%.2f ≤ trigger=%.2f → "
+                        "waiting 1m HIGH=%.2f breakout",
+                        leg_key, uid, ltp, trigger, setup_high,
+                    )
+                else:
+                    self._log.info(
+                        "RETRACE ENTRY [%s] uid=%s: LTP=%.2f ≤ trigger=%.2f → entry",
+                        leg_key, uid, ltp, trigger,
+                    )
+                    self._zone_ltf_status[uid] = "ltf_signal"
+                    del self._ltf_retrace_trigger[uid]
+                    asyncio.get_event_loop().create_task(
+                        self._on_entry_signal(zleg, opt_type, best_zone, htf_zone)
+                    )
                 break
 
     def _seed_ltf_live(self, leg_key: str, bars: list, zones: list) -> None:
@@ -2732,6 +2780,8 @@ class TrapScannerEngine:
         self._notified_uids  = set()
         self._cascade_momentum_fired = set()
         self._zone_ltf_status = {}
+        self._ltf_retrace_trigger = {}
+        self._1m_confirm  = {}
         self._htf_atr_val = 0.0
         self._ltp_cache   = {}
         self._ce1_strike = None; self._ce2_strike = None

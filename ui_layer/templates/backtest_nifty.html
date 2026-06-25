@@ -332,6 +332,19 @@
           </div>
         </template>
 
+        <!-- 1-min HIGH breakout confirmation toggle -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">1-min HIGH Breakout Confirm</p>
+            <p class="text-xs text-t-muted">After 5m bears cleared: enter only when next 1m bar breaks above setup candle HIGH</p>
+          </div>
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" x-model="useHighBreakout" class="accent-[var(--t-cyan)]" />
+            <span class="text-xs" x-text="useHighBreakout ? 'ON' : 'OFF'"
+              :class="useHighBreakout ? 'text-[var(--t-cyan)]' : 'text-t-muted'"></span>
+          </label>
+        </div>
+
         <!-- 1 ITM Execution toggle -->
         <div class="flex items-center justify-between">
           <div>
@@ -657,10 +670,11 @@ function backtestNifty() {
     profitCap:    10000,
     profitFloorOn: false,
     profitFloor:   10000,
-    noTargetTsl:   false,
-    rrFilter:      false,
-    rrMinRatio:    1.0,
-    use1itm:      false,
+    noTargetTsl:      false,
+    rrFilter:         false,
+    rrMinRatio:       1.0,
+    use1itm:          false,
+    useHighBreakout:  true,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -715,10 +729,11 @@ function backtestNifty() {
         strike_depth:       this.strikeDepth,
         profit_cap_per_lot:   this.profitCapOn   ? this.profitCap   : 0,
         profit_floor_per_lot: this.profitFloorOn ? this.profitFloor : 0,
-        no_target_tsl: this.noTargetTsl,
-        rr_filter:     this.rrFilter,
-        rr_min_ratio:  this.rrMinRatio,
-        use_1itm:             this.use1itm,
+        no_target_tsl:    this.noTargetTsl,
+        rr_filter:        this.rrFilter,
+        rr_min_ratio:     this.rrMinRatio,
+        use_1itm:         this.use1itm,
+        use_high_breakout: this.useHighBreakout,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks
