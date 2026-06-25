@@ -814,6 +814,7 @@ document.addEventListener('alpine:init', () => {
     peZoneOpen: {},      // bk uid → bool (PE zones expanded)
     ceFarZoneOpen: {},   // bk uid → bool (CE FAR sub-list expanded)
     peFarZoneOpen: {},   // bk uid → bool (PE FAR sub-list expanded)
+    scanFarOpen: {},     // bk key → bool (combined FAR zone list expanded)
     // Client premium-chart state (per deploy_id)
     chartOpen: {},        // deploy_id → bool (panel open)
     chartData: {},        // deploy_id → series array
@@ -7701,7 +7702,7 @@ function amoTest() {
                       </template>
                       <!-- Option zones (CE/PE) — always visible -->
                       <template x-if="bk&&bk.zones&&bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
-                        <div class="mt-1" x-data="{ farOpen: false }">
+                        <div class="mt-1">
                           <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
                             <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                           </div>
@@ -7722,10 +7723,10 @@ function amoTest() {
                           <!-- FAR zones collapsed -->
                           <template x-if="bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length>0">
                             <div class="mt-1">
-                              <button @click="farOpen=!farOpen" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                                <span x-text="farOpen?'▲ Hide FAR':'▼ FAR zones ('+bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length+')'"></span>
+                              <button @click="scanFarOpen[bk.underlying+'_'+bk.client_id]=!scanFarOpen[bk.underlying+'_'+bk.client_id]" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
+                                <span x-text="scanFarOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide FAR':'▼ FAR zones ('+bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared').length+')'"></span>
                               </button>
-                              <template x-if="farOpen">
+                              <template x-if="scanFarOpen[bk.underlying+'_'+bk.client_id]">
                                 <div class="mt-1">
                                   <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal'&&z.ltf_status!=='waiting_5m_clear'&&z.ltf_status!=='seed_all_cleared')" :key="z.uid">
                                     <div class="grid text-center py-0.5 text-xs font-mono"
