@@ -569,7 +569,9 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              no_target_tsl: bool = False,
              rr_filter: bool = False,
              rr_min_ratio: float = 1.0,
-             use_high_breakout: bool = True) -> list[dict]:
+             use_high_breakout: bool = True,
+             skip_open_spike: bool = True,
+             open_spike_min: int = 30) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -715,6 +717,16 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     trap_ts = None
                 if trap_ts is not None and getattr(trap_ts, 'tzinfo', None):
                     trap_ts = trap_ts.tz_localize(None)
+
+                # Skip zones trapped during opening spike (e.g. first 30 min of session).
+                # A spike to 780 at 09:20 creates a fake HTF zone — real traps need time to form.
+                if skip_open_spike and trap_ts is not None:
+                    _spike_end = pd.Timestamp(f"{td} 09:14:00") + pd.Timedelta(minutes=open_spike_min)
+                    if trap_ts.date() == td and trap_ts <= _spike_end:
+                        print(f"  {trade_date} SPIKE-SKIP {opt_type} {strike}: "
+                              f"zone trapped at {trap_ts.time()} (within {open_spike_min}m of open) "
+                              f"zone={zl:.0f}-{zh:.0f}")
+                        continue
 
                 # Scan ALL of today's 5min bars within the HTF zone for a fresh trap.
                 _, ltf5_all = scanner.scan_htf(df_5) if len(df_5) >= 2 else (None, [])
@@ -1020,7 +1032,9 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        rr_filter: bool = False,
                        rr_min_ratio: float = 1.0,
                        next_week: bool = False,
-                       use_high_breakout: bool = True) -> dict:
+                       use_high_breakout: bool = True,
+                       skip_open_spike: bool = True,
+                       open_spike_min: int = 30) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -1077,7 +1091,9 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         day_trades = _run_day(index, cfg, td, df_spot_all, use_bias, sl_buf,
                               opt_bar_cache, strike_depth, profit_cap_per_lot, use_1itm,
                               profit_floor_per_lot, no_target_tsl, rr_filter, rr_min_ratio,
-                              use_high_breakout=use_high_breakout)
+                              use_high_breakout=use_high_breakout,
+                              skip_open_spike=skip_open_spike,
+                              open_spike_min=open_spike_min)
         all_trades.extend(day_trades)
 
     # Summary

@@ -345,6 +345,24 @@
           </label>
         </div>
 
+        <!-- Skip Opening Spike Zones -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">Skip Opening Spike Zones</p>
+            <p class="text-xs text-t-muted">Ignore HTF zones trapped in the first N min of session — these are opening-volatility fakes, not real traps</p>
+          </div>
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input type="checkbox" x-model="skipOpenSpike" class="accent-[var(--t-cyan)]" />
+            <span class="text-xs" x-text="skipOpenSpike ? 'ON' : 'OFF'"
+              :class="skipOpenSpike ? 'text-[var(--t-cyan)]' : 'text-t-muted'"></span>
+          </label>
+        </div>
+        <div class="flex items-center justify-between" x-show="skipOpenSpike">
+          <p class="text-xs text-t-muted">Spike window (minutes from open)</p>
+          <input type="number" x-model.number="openSpikeMin" min="5" max="90" step="5"
+            class="t-input w-20 text-right text-sm" />
+        </div>
+
         <!-- 1 ITM Execution toggle -->
         <div class="flex items-center justify-between">
           <div>
@@ -676,6 +694,8 @@ function backtestNifty() {
     rrMinRatio:       1.0,
     use1itm:          false,
     useHighBreakout:  true,
+    skipOpenSpike:    true,
+    openSpikeMin:     30,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -735,6 +755,8 @@ function backtestNifty() {
         rr_min_ratio:     this.rrMinRatio,
         use_1itm:         this.use1itm,
         use_high_breakout: this.useHighBreakout,
+        skip_open_spike:   this.skipOpenSpike,
+        open_spike_min:    this.openSpikeMin,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks
