@@ -574,7 +574,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              skip_open_spike: bool = True,
              open_spike_min: int = 30,
              pure_intraday: bool = False,
-             max_ltf_index: int = 0) -> list[dict]:
+             max_ltf_index: int = 0,
+             zone_scan_cache: dict | None = None) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -655,7 +656,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
     fetch_from = (td - timedelta(days=14)).isoformat()
     fetch_to   = (td + timedelta(days=1)).isoformat()
-    cache = opt_bar_cache if opt_bar_cache is not None else {}
+    cache  = opt_bar_cache if opt_bar_cache is not None else {}
+    zcache = zone_scan_cache if zone_scan_cache is not None else {}
 
     trades = []
     # One-trade-at-a-time: persists across CE and PE legs
@@ -699,8 +701,14 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             print(f"  {trade_date} {opt_type} {strike}: no option data")
             continue
 
-        df_opt_all   = _mkt_hours(df_opt_raw)
-        df_opt_today = df_opt_all[df_opt_all["datetime"].dt.date == td].copy()
+        _today_ck = (td, key, "opt_today")
+        if _today_ck in zcache:
+            df_opt_today = zcache[_today_ck]
+            df_opt_all   = None  # not needed when cache hit (HTF path uses df_opt_all for htf_min>=60)
+        else:
+            df_opt_all   = _mkt_hours(df_opt_raw)
+            df_opt_today = df_opt_all[df_opt_all["datetime"].dt.date == td].copy()
+            zcache[_today_ck] = df_opt_today
 
         if df_opt_today.empty:
             print(f"  {trade_date} {opt_type} {strike}: no today option bars")
@@ -709,9 +717,15 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         # ── Step 1: HTF scan ────────────────────────────────────────────────
         # >= 60min: institutional memory → scan full prev-week + today history
         # <  60min: pure intraday concept → scan TODAY's bars only (no prev day reference)
-        htf_source = df_opt_all if htf_min >= 60 else df_opt_today
-        htf_bars = _resample(htf_source, htf_min)
-        _, htf_entries = scanner.scan_htf(htf_bars) if len(htf_bars) >= 2 else (None, [])
+        # (pure_intraday skips this entirely — htf_zones always set to [] below)
+        if not pure_intraday:
+            if df_opt_all is None:
+                df_opt_all = _mkt_hours(df_opt_raw)
+            htf_source = df_opt_all if htf_min >= 60 else df_opt_today
+            htf_bars = _resample(htf_source, htf_min)
+            _, htf_entries = scanner.scan_htf(htf_bars) if len(htf_bars) >= 2 else (None, [])
+        else:
+            htf_entries = []
 
         def _closed_today(e):
             ts = e.get("closed_on")   # CLOSED = price returned to zone = entry ready
@@ -786,13 +800,17 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             # ── Step 2: No HTF zone → 15min intraday cascade ──────────────────
             # pure_intraday: scan ALL 15m zones + 3m sub-zones (15-3-1 mode)
             # normal cascade: pick lowest 15m zone + 5m sub-zones
-            df_15 = _resample(df_opt_today, 15)
-            _, cas15 = scanner.scan_htf(df_15) if len(df_15) >= 2 else (None, [])
-
-            cas_zones = sorted(
-                [e for e in (cas15 or []) if e.get("status") in ("TRAPPED", "CLOSED")],
-                key=lambda z: float(z.get("zone_low", 9999))
-            )
+            _cas_ck = (td, key, "cas15")
+            if _cas_ck in zcache:
+                cas_zones = zcache[_cas_ck]
+            else:
+                df_15 = _resample(df_opt_today, 15)
+                _, cas15 = scanner.scan_htf(df_15) if len(df_15) >= 2 else (None, [])
+                cas_zones = sorted(
+                    [e for e in (cas15 or []) if e.get("status") in ("TRAPPED", "CLOSED")],
+                    key=lambda z: float(z.get("zone_low", 9999))
+                )
+                zcache[_cas_ck] = cas_zones
 
             if not cas_zones:
                 print(f"  {trade_date} {opt_type} {strike}: no zones (HTF or 15m)")
@@ -800,9 +818,21 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
             # Sub-zone timeframe: 3m for pure_intraday, 5m for normal cascade
             sub_min  = 3 if pure_intraday else ltf_min
-            df_5     = _resample(df_opt_today, 5)   # always compute for _simulate_exit TSL
-            df_sub   = _resample(df_opt_today, sub_min) if sub_min != 5 else df_5
-            _, ltf_sub_all = scanner.scan_htf(df_sub) if len(df_sub) >= 2 else (None, [])
+
+            _df5_ck = (td, key, "df5")
+            if _df5_ck in zcache:
+                df_5 = zcache[_df5_ck]
+            else:
+                df_5 = _resample(df_opt_today, 5)
+                zcache[_df5_ck] = df_5
+
+            _ltf_ck = (td, key, sub_min, "ltf")
+            if _ltf_ck in zcache:
+                ltf_sub_all = zcache[_ltf_ck]
+            else:
+                df_sub = _resample(df_opt_today, sub_min) if sub_min != 5 else df_5
+                _, ltf_sub_all = scanner.scan_htf(df_sub) if len(df_sub) >= 2 else (None, [])
+                zcache[_ltf_ck] = ltf_sub_all
 
             # pure_intraday: all 15m zones (complete day); normal: only the lowest one
             zones_to_scan = cas_zones if pure_intraday else cas_zones[:1]
@@ -1235,19 +1265,23 @@ def run_nifty_backtest_optimize(
         return {"ok": False, "error": "No spot data"}
     df_spot_all = _mkt_hours(df_spot_all)
 
-    # Shared option-bar cache — populated on first combination (BOTH depth) so
-    # all subsequent combinations hit cache with zero Upstox API calls.
-    shared_cache: dict = {}
+    # Shared caches:
+    # opt_bar_cache  — raw 1-min option bars (skip Upstox API calls after first combo)
+    # zone_scan_cache — computed zone scan results; scan_htf() runs ONCE per (day, strike)
+    #   instead of once per combo. spike_min has no effect in pure_intraday mode (spike
+    #   filter only fires in the HTF path which pure_intraday always skips), so that
+    #   dimension is removed — reducing the grid from 96 → 48 combinations.
+    shared_bar_cache:  dict = {}
+    shared_zone_cache: dict = {}
 
-    # Parameter grid
-    # Reduced grid: 6×4×2×2 = 96 combinations (~90s on cached runs).
-    # "far" depth excluded — deep-ITM strikes are illiquid live; "near"+"both" cover real cases.
-    max_ltf_grid   = [0, 5, 8, 10, 15, 20]
-    sl_buf_grid    = [5, 8, 10, 15]
-    depth_grid     = ["near", "both"]
-    spike_min_grid = [15, 30]
+    # Parameter grid  6×4×2 = 48 combinations.
+    # "far" depth excluded — deep-ITM strikes are illiquid live.
+    # spike_min removed — irrelevant for pure_intraday cascade path.
+    max_ltf_grid = [0, 5, 8, 10, 15, 20]
+    sl_buf_grid  = [5, 8, 10, 15]
+    depth_grid   = ["near", "both"]
 
-    total_combos = len(max_ltf_grid) * len(sl_buf_grid) * len(depth_grid) * len(spike_min_grid)
+    total_combos = len(max_ltf_grid) * len(sl_buf_grid) * len(depth_grid)
     print(f"\n[OPTIMIZE] {index}  {s_date}→{e_date}  "
           f"{len(days)} days  {total_combos} combinations  monthly={monthly}")
 
@@ -1255,56 +1289,56 @@ def run_nifty_backtest_optimize(
     combo_n = 0
     for sl_buf in sl_buf_grid:
         for depth in depth_grid:
-            for spike_min in spike_min_grid:
-                for max_ltf in max_ltf_grid:
-                    combo_n += 1
-                    trades: list[dict] = []
-                    for td in days:
-                        day_trades = _run_day(
-                            index, cfg, td, df_spot_all,
-                            use_bias=False, sl_buf=sl_buf,
-                            opt_bar_cache=shared_cache,
-                            strike_depth=depth,
-                            profit_cap_per_lot=0.0,
-                            use_1itm=False,
-                            profit_floor_per_lot=0.0,
-                            no_target_tsl=False,
-                            rr_filter=False,
-                            rr_min_ratio=1.0,
-                            use_high_breakout=use_high_breakout,
-                            skip_open_spike=True,
-                            open_spike_min=spike_min,
-                            pure_intraday=True,
-                            max_ltf_index=max_ltf,
-                        )
-                        trades.extend(day_trades)
+            for max_ltf in max_ltf_grid:
+                combo_n += 1
+                trades: list[dict] = []
+                for td in days:
+                    day_trades = _run_day(
+                        index, cfg, td, df_spot_all,
+                        use_bias=False, sl_buf=sl_buf,
+                        opt_bar_cache=shared_bar_cache,
+                        strike_depth=depth,
+                        profit_cap_per_lot=0.0,
+                        use_1itm=False,
+                        profit_floor_per_lot=0.0,
+                        no_target_tsl=False,
+                        rr_filter=False,
+                        rr_min_ratio=1.0,
+                        use_high_breakout=use_high_breakout,
+                        skip_open_spike=True,
+                        open_spike_min=30,
+                        pure_intraday=True,
+                        max_ltf_index=max_ltf,
+                        zone_scan_cache=shared_zone_cache,
+                    )
+                    trades.extend(day_trades)
 
-                    n       = len(trades)
-                    wins    = [t for t in trades if t["pnl_rs"] > 0]
-                    losses  = [t for t in trades if t["pnl_rs"] <= 0]
-                    total   = sum(t["pnl_rs"] for t in trades)
-                    gw      = sum(t["pnl_rs"] for t in wins)
-                    gl      = abs(sum(t["pnl_rs"] for t in losses))
-                    pf      = round(gw / gl, 2) if gl > 0 else (99.0 if gw > 0 else 0.0)
-                    win_pct = round(100 * len(wins) / n, 1) if n else 0.0
+                n       = len(trades)
+                wins    = [t for t in trades if t["pnl_rs"] > 0]
+                losses  = [t for t in trades if t["pnl_rs"] <= 0]
+                total   = sum(t["pnl_rs"] for t in trades)
+                gw      = sum(t["pnl_rs"] for t in wins)
+                gl      = abs(sum(t["pnl_rs"] for t in losses))
+                pf      = round(gw / gl, 2) if gl > 0 else (99.0 if gw > 0 else 0.0)
+                win_pct = round(100 * len(wins) / n, 1) if n else 0.0
 
-                    results.append({
-                        "combo":         combo_n,
-                        "sl_buf":        sl_buf,
-                        "depth":         depth,
-                        "spike_min":     spike_min,
-                        "max_ltf":       max_ltf,
-                        "trades":        n,
-                        "wins":          len(wins),
-                        "losses":        len(losses),
-                        "win_pct":       win_pct,
-                        "total_rs":      int(total),
-                        "profit_factor": pf,
-                        "avg_win":       round(gw / len(wins), 0) if wins else 0,
-                        "avg_loss":      round(-gl / len(losses), 0) if losses else 0,
-                    })
-                    if combo_n % 20 == 0 or combo_n == total_combos:
-                        print(f"  [{combo_n}/{total_combos}] cache={len(shared_cache)} keys")
+                results.append({
+                    "combo":         combo_n,
+                    "sl_buf":        sl_buf,
+                    "depth":         depth,
+                    "spike_min":     30,
+                    "max_ltf":       max_ltf,
+                    "trades":        n,
+                    "wins":          len(wins),
+                    "losses":        len(losses),
+                    "win_pct":       win_pct,
+                    "total_rs":      int(total),
+                    "profit_factor": pf,
+                    "avg_win":       round(gw / len(wins), 0) if wins else 0,
+                    "avg_loss":      round(-gl / len(losses), 0) if losses else 0,
+                })
+                if combo_n % 12 == 0 or combo_n == total_combos:
+                    print(f"  [{combo_n}/{total_combos}] bar_cache={len(shared_bar_cache)} zone_cache={len(shared_zone_cache)}")
 
     # Rank: primary = Profit Factor (desc), secondary = total_rs (desc)
     results.sort(key=lambda r: (r["profit_factor"], r["total_rs"]), reverse=True)

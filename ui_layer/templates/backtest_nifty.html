@@ -484,9 +484,9 @@
       <div class="flex-1 flex items-center justify-center mt-20">
         <div class="text-center text-t-muted">
           <p class="text-2xl mb-2">⚡</p>
-          <p class="font-600 text-t-bright">Running 96 parameter combinations…</p>
-          <p class="text-sm mt-1">Sweeping sl_buf × depth × spike_min × max_ltf_index</p>
-          <p class="text-sm">First 2 combos fetch data; rest use cache. Should finish in ~90s.</p>
+          <p class="font-600 text-t-bright">Running 48 parameter combinations…</p>
+          <p class="text-sm mt-1">Sweeping sl_buf × depth × max_ltf_index (zone scans cached across combos)</p>
+          <p class="text-sm">First 2 combos fetch data + scan zones; rest reuse zone cache. ~30–60s.</p>
         </div>
       </div>
     </template>
