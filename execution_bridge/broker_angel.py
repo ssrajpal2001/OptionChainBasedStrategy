@@ -30,6 +30,7 @@ class AngelBroker(BaseBroker):
         # Symboltoken resolution caches (avoid per-order searchScrip → rate limit).
         self._tok_cache: dict = {}     # (exchange, our_symbol) -> (token, angel_symbol)
         self._scrip_cache: dict = {}   # (exchange, underlying) -> [scrip dicts]
+        self._bfo_master: dict = {}    # tradingsymbol -> {"token":..., "tradingsymbol":...}
 
     async def authenticate(self) -> bool:
         try:
@@ -99,6 +100,8 @@ class AngelBroker(BaseBroker):
             else:
                 self._product = "INTRADAY" if mode not in ("carryforward", "normal", "nrml") else "DELIVERY"
             logger.info("AngelBroker [%s]: Authenticated. product=%s", self.client_id, self._product)
+            # Warm BFO scrip master so SENSEX symbol tokens resolve without searchScrip.
+            await self._warm_bfo_master()
             return True
 
         except Exception as exc:
@@ -109,6 +112,50 @@ class AngelBroker(BaseBroker):
         # AngelOne terminateSession requires the refresh token; skip silently if not available
         self._authenticated = False
         self._smartapi = None
+
+    async def _warm_bfo_master(self) -> None:
+        """Download AngelOne scrip master JSON, filter to BFO options, cache daily.
+        Avoids searchScrip("BFO",...) which returns empty for most SENSEX strikes."""
+        import json, os, urllib.request
+        from datetime import date as _date
+        cache_path = os.path.join("data", "cache", "angel_bfo_master.json")
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        today = str(_date.today())
+        # Load from daily cache if available
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    cached = json.load(f)
+                if cached.get("date") == today and cached.get("instruments"):
+                    self._bfo_master = cached["instruments"]
+                    logger.info("AngelBroker[%s]: BFO master loaded from cache (%d instruments)",
+                                self.client_id, len(self._bfo_master))
+                    return
+            except Exception:
+                pass
+        # Download full scrip master from AngelOne public URL
+        url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+        try:
+            logger.info("AngelBroker[%s]: downloading scrip master for BFO cache...", self.client_id)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = json.loads(resp.read())
+            bfo: dict = {}
+            for it in raw:
+                if it.get("exch_seg") == "BFO" and it.get("instrumenttype") == "OPTIDX":
+                    ts  = str(it.get("symbol") or "").upper()
+                    tok = str(it.get("token") or "")
+                    if ts and tok:
+                        bfo[ts] = {"token": tok, "tradingsymbol": ts}
+            with open(cache_path, "w") as f:
+                json.dump({"date": today, "instruments": bfo}, f)
+            self._bfo_master = bfo
+            logger.info("AngelBroker[%s]: BFO master cached (%d SENSEX option instruments)",
+                        self.client_id, len(bfo))
+        except Exception as exc:
+            logger.warning("AngelBroker[%s]: BFO master download failed — will use searchScrip fallback: %s",
+                           self.client_id, exc)
+            self._bfo_master = {}
 
     def _lookup_symbol(self, exchange: str, tradingsymbol: str):
         """Resolve (symboltoken, angel_tradingsymbol). Cached so we never re-hit
@@ -123,6 +170,15 @@ class AngelBroker(BaseBroker):
         if key in self._tok_cache:
             return self._tok_cache[key]
         resolved = ("", tradingsymbol)
+        # BFO (BSE F&O / SENSEX): use pre-downloaded master — searchScrip("BFO",...) returns empty.
+        if exchange == "BFO" and self._bfo_master:
+            hit = self._bfo_master.get(tradingsymbol.upper())
+            if hit:
+                resolved = (hit["token"], hit["tradingsymbol"])
+                self._tok_cache[key] = resolved
+                return resolved
+            logger.warning("AngelBroker[%s]: %s not in BFO master (%d entries) — trying searchScrip",
+                           self.client_id, tradingsymbol, len(self._bfo_master))
         try:
             res = self._smartapi.searchScrip(exchange, tradingsymbol)
             if res and res.get("status") and res.get("data"):
