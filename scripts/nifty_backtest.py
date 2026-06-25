@@ -494,10 +494,11 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                 exit_ts     = bar_ts
                 break
 
-        # SL trigger on scan bar close (active in both modes)
+        # SL trigger: intrabar (bar_low crosses SL level) → exit AT SL price, not close
         active_sl = trail_sl if (t1_hit and not no_target_tsl) else init_sl
-        if bar_close < round(active_sl - sl_buf, 2):
-            exit_price  = _price_at_ts(exec_bars, bar_ts) or exec_close
+        sl_trigger = round(active_sl - sl_buf, 2)
+        if bar_low < sl_trigger:
+            exit_price  = sl_trigger   # exit at the SL price itself
             exit_reason = "TRAIL_SL" if t1_hit else "SL"
             exit_ts     = bar_ts
             break
@@ -1184,6 +1185,130 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         "trades": all_trades,
         "equity": [{"date": d, "equity": v} for d, v in sorted(eq_map.items())],
     }
+
+
+def run_nifty_backtest_optimize(
+    token: str, index: str = "NIFTY",
+    start: str = "", end: str = "",
+    monthly: bool = True,
+    htf_min: int = 0,
+    use_high_breakout: bool = True,
+) -> dict:
+    """Sweep key backtest parameters and return all combinations ranked by Profit Factor.
+
+    Fixed settings (not swept): pure_intraday=True, use_bias=False,
+    skip_open_spike=True, use_high_breakout=use_high_breakout.
+
+    Swept grid:
+        max_ltf_index : [0, 5, 8, 10, 12, 15, 20]
+        sl_buf        : [5, 8, 10, 12, 15]
+        strike_depth  : ["near", "far", "both"]
+        open_spike_min: [15, 30, 45]
+
+    The option-bar cache is shared across all combinations so API calls happen
+    only once (first time a strike key is seen).
+    """
+    global _HEADERS, _USE_MONTHLY
+    _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    _USE_MONTHLY = monthly
+
+    cfg = dict(INDEX_CFG.get(index.upper(), {}))
+    if not cfg:
+        return {"ok": False, "error": f"Unknown index {index}"}
+    if htf_min > 0:
+        cfg["htf_min"] = htf_min
+
+    try:
+        REGISTRY.load_sync(index.upper(), access_token=token)
+    except Exception as exc:
+        print(f"[REGISTRY] load failed ({exc}) — will use NSE symbol fallback")
+
+    s_date = date.fromisoformat(start)
+    e_date = date.fromisoformat(end)
+    days   = _trading_days(s_date, e_date)
+
+    # Fetch spot bars once
+    spot_from  = (s_date - timedelta(days=14)).isoformat()
+    spot_to    = (e_date + timedelta(days=1)).isoformat()
+    df_spot_all = _fetch_1m(cfg["spot_key"], spot_from, spot_to)
+    if df_spot_all.empty:
+        return {"ok": False, "error": "No spot data"}
+    df_spot_all = _mkt_hours(df_spot_all)
+
+    # Shared option-bar cache — populated on first combination (BOTH depth) so
+    # all subsequent combinations hit cache with zero Upstox API calls.
+    shared_cache: dict = {}
+
+    # Parameter grid
+    max_ltf_grid   = [0, 5, 8, 10, 12, 15, 20]
+    sl_buf_grid    = [5, 8, 10, 12, 15]
+    depth_grid     = ["near", "far", "both"]
+    spike_min_grid = [15, 30, 45]
+
+    total_combos = len(max_ltf_grid) * len(sl_buf_grid) * len(depth_grid) * len(spike_min_grid)
+    print(f"\n[OPTIMIZE] {index}  {s_date}→{e_date}  "
+          f"{len(days)} days  {total_combos} combinations  monthly={monthly}")
+
+    results = []
+    combo_n = 0
+    for sl_buf in sl_buf_grid:
+        for depth in depth_grid:
+            for spike_min in spike_min_grid:
+                for max_ltf in max_ltf_grid:
+                    combo_n += 1
+                    trades: list[dict] = []
+                    for td in days:
+                        day_trades = _run_day(
+                            index, cfg, td, df_spot_all,
+                            use_bias=False, sl_buf=sl_buf,
+                            opt_bar_cache=shared_cache,
+                            strike_depth=depth,
+                            profit_cap_per_lot=0.0,
+                            use_1itm=False,
+                            profit_floor_per_lot=0.0,
+                            no_target_tsl=False,
+                            rr_filter=False,
+                            rr_min_ratio=1.0,
+                            use_high_breakout=use_high_breakout,
+                            skip_open_spike=True,
+                            open_spike_min=spike_min,
+                            pure_intraday=True,
+                            max_ltf_index=max_ltf,
+                        )
+                        trades.extend(day_trades)
+
+                    n       = len(trades)
+                    wins    = [t for t in trades if t["pnl_rs"] > 0]
+                    losses  = [t for t in trades if t["pnl_rs"] <= 0]
+                    total   = sum(t["pnl_rs"] for t in trades)
+                    gw      = sum(t["pnl_rs"] for t in wins)
+                    gl      = abs(sum(t["pnl_rs"] for t in losses))
+                    pf      = round(gw / gl, 2) if gl > 0 else (99.0 if gw > 0 else 0.0)
+                    win_pct = round(100 * len(wins) / n, 1) if n else 0.0
+
+                    results.append({
+                        "combo":         combo_n,
+                        "sl_buf":        sl_buf,
+                        "depth":         depth,
+                        "spike_min":     spike_min,
+                        "max_ltf":       max_ltf,
+                        "trades":        n,
+                        "wins":          len(wins),
+                        "losses":        len(losses),
+                        "win_pct":       win_pct,
+                        "total_rs":      int(total),
+                        "profit_factor": pf,
+                        "avg_win":       round(gw / len(wins), 0) if wins else 0,
+                        "avg_loss":      round(-gl / len(losses), 0) if losses else 0,
+                    })
+                    if combo_n % 20 == 0 or combo_n == total_combos:
+                        print(f"  [{combo_n}/{total_combos}] cache={len(shared_cache)} keys")
+
+    # Rank: primary = Profit Factor (desc), secondary = total_rs (desc)
+    results.sort(key=lambda r: (r["profit_factor"], r["total_rs"]), reverse=True)
+
+    print(f"\n[OPTIMIZE] done — top combo: {results[0]}")
+    return {"ok": True, "results": results, "total": len(results)}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

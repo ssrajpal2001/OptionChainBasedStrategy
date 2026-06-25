@@ -408,11 +408,19 @@
       <input type="password" x-model="token" class="t-input font-mono text-xs" placeholder="Leave blank if feeder is running…" />
     </div>
 
-    <button class="btn-primary" @click="runBacktest(); ctrlOpen=false"
-      :disabled="running || !token">
-      <span x-show="!running">▶ Run Backtest</span>
-      <span x-show="running" x-cloak>⏳ Running…</span>
-    </button>
+    <div class="flex gap-2">
+      <button class="btn-primary flex-1" @click="runBacktest(); ctrlOpen=false"
+        :disabled="running || optimizing">
+        <span x-show="!running">▶ Run Backtest</span>
+        <span x-show="running" x-cloak>⏳ Running…</span>
+      </button>
+      <button class="btn-secondary flex-1" @click="runOptimize(); ctrlOpen=false"
+        :disabled="running || optimizing || dateMode==='weeks'"
+        title="Sweeps 315 combinations of sl_buf / depth / spike_min / max_ltf_index. Requires Custom date range.">
+        <span x-show="!optimizing">⚡ Optimize</span>
+        <span x-show="optimizing" x-cloak>⏳ Optimizing…</span>
+      </button>
+    </div>
 
     <p x-show="error" x-text="error" class="text-t-red text-xs text-center" x-cloak></p>
 
@@ -454,7 +462,7 @@
   <div class="results-panel">
 
     <!-- Empty state -->
-    <template x-if="!result && !running">
+    <template x-if="!result && !optResult && !running && !optimizing">
       <div class="flex-1 flex flex-col items-center justify-center text-t-muted gap-3 mt-20">
         <div class="text-5xl">📊</div>
         <p class="font-600 text-t-bright">Configure and run a backtest</p>
@@ -471,6 +479,57 @@
         </div>
       </div>
     </template>
+
+    <template x-if="optimizing">
+      <div class="flex-1 flex items-center justify-center mt-20">
+        <div class="text-center text-t-muted">
+          <p class="text-2xl mb-2">⚡</p>
+          <p class="font-600 text-t-bright">Running 315 parameter combinations…</p>
+          <p class="text-sm mt-1">Sweeping sl_buf × depth × spike_min × max_ltf_index</p>
+          <p class="text-sm">First run fetches data; all subsequent combos use cache. May take 3–6 min.</p>
+        </div>
+      </div>
+    </template>
+
+    <!-- Optimization results -->
+    <div x-show="optResult && !optimizing" x-cloak class="flex flex-col gap-4">
+      <div class="flex items-center justify-between">
+        <h2 class="text-lg font-700 text-t-bright">Optimization Results
+          <span class="text-xs text-t-muted font-400 ml-2"
+            x-text="(optResult||{}).total + ' combinations · ranked by Profit Factor'"></span>
+        </h2>
+        <button class="btn-ghost text-xs" @click="optResult=null">✕ Clear</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="t-table text-xs w-full">
+          <thead>
+            <tr>
+              <th>#</th><th>SL Buf</th><th>Depth</th><th>Spike Min</th><th>Max LTF</th>
+              <th>Trades</th><th>Win%</th><th>Total P&L</th><th>PF</th><th>Avg W</th><th>Avg L</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="(r,i) in ((optResult||{}).results||[]).slice(0,50)" :key="r.combo">
+              <tr :class="i===0 ? 'bg-[var(--t-cyan)]/10 font-700' : (i<5 ? 'bg-[var(--t-green)]/5' : '')">
+                <td x-text="i+1"></td>
+                <td x-text="r.sl_buf"></td>
+                <td x-text="r.depth.toUpperCase()"></td>
+                <td x-text="r.spike_min"></td>
+                <td x-text="r.max_ltf===0 ? '∞' : r.max_ltf"></td>
+                <td x-text="r.trades"></td>
+                <td x-text="r.win_pct+'%'" :class="r.win_pct>=55?'text-[var(--t-green)]':r.win_pct<45?'text-t-red':''"></td>
+                <td x-text="'₹'+(r.total_rs>=0?'+':'')+r.total_rs.toLocaleString('en-IN')"
+                    :class="r.total_rs>0?'text-[var(--t-green)]':'text-t-red'"></td>
+                <td x-text="r.profit_factor" :class="r.profit_factor>=2?'text-[var(--t-green)]':r.profit_factor<1?'text-t-red':''"></td>
+                <td x-text="'₹'+r.avg_win.toLocaleString('en-IN')"></td>
+                <td x-text="'₹'+r.avg_loss.toLocaleString('en-IN')"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+      <p class="text-xs text-t-muted">Showing top 50 of <span x-text="(optResult||{}).total"></span> combinations. Click ▶ Run Backtest with the top combo's settings to see full trade log.</p>
+    </div>
 
     <div x-show="result && !running" x-cloak class="flex flex-col gap-6">
 
@@ -735,10 +794,12 @@ function backtestNifty() {
     zoneResult:  null,
 
     // State
-    running: false,
-    error:   '',
-    result:  null,
-    _chart:  null,
+    running:   false,
+    optimizing: false,
+    error:     '',
+    result:    null,
+    optResult: null,
+    _chart:    null,
 
     init() {
       const today = new Date()
@@ -809,6 +870,39 @@ function backtestNifty() {
         this.error = 'Request failed: ' + e.message
       } finally {
         this.running = false
+      }
+    },
+
+    async runOptimize() {
+      if (this.dateMode === 'weeks') {
+        this.error = 'Optimization requires Custom date range (not Rolling weeks)'
+        return
+      }
+      this.optimizing = true
+      this.error      = ''
+      this.optResult  = null
+      this.result     = null
+      const payload = {
+        token:             this.token,
+        index:             this.index,
+        start:             this.startDate,
+        end:               this.endDate,
+        monthly:           this.monthly,
+        use_high_breakout: this.useHighBreakout,
+      }
+      try {
+        const r = await fetch('/api/backtest/nifty/optimize', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        })
+        const data = await r.json()
+        if (!data.ok) { this.error = data.error || 'Optimize error'; return }
+        this.optResult = data
+      } catch(e) {
+        this.error = 'Request failed: ' + e.message
+      } finally {
+        this.optimizing = false
       }
     },
 

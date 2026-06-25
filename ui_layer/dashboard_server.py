@@ -780,6 +780,43 @@ class DashboardServer:
                 import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
 
+        @app.post("/api/backtest/nifty/optimize", tags=["Admin"])
+        async def run_backtest_nifty_optimize(request: Request):
+            """Parameter sweep — sweeps max_ltf/sl_buf/depth/spike_min, returns all combos ranked."""
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            token   = str(p.get("token", ""))
+            index   = str(p.get("index", "NIFTY")).upper()
+            start   = str(p.get("start", ""))
+            end     = str(p.get("end", ""))
+            monthly = bool(p.get("monthly", True))
+            htf_min = int(p.get("htf_min", 0))
+            use_high_breakout = bool(p.get("use_high_breakout", True))
+            if not token:
+                try:
+                    fc = await asyncio.to_thread(
+                        _shared_client_db.get_feeder_creds_sync, "upstox"
+                    )
+                    token = (fc or {}).get("access_token", "")
+                except Exception:
+                    pass
+            if not token:
+                return {"ok": False, "error": "token required — log in to Upstox feeder first"}
+            if not start or not end:
+                return {"ok": False, "error": "start and end dates required for optimization"}
+            try:
+                from scripts.nifty_backtest import run_nifty_backtest_optimize
+                result = await asyncio.to_thread(
+                    run_nifty_backtest_optimize,
+                    token, index, start, end, monthly, htf_min, use_high_breakout
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
+
         @app.post("/api/backtest/nifty3m", tags=["Admin"])
         async def run_backtest_nifty_3m(request: Request):
             """3m-confirmation trap backtest (opposite-zone exit)."""
