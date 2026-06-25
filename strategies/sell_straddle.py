@@ -271,6 +271,7 @@ class SellStraddleStrategy:
         self._last_exit_rules_bucket: str  = ""
         self._last_entry_bucket_b:    str  = ""   # beginning rule-set max-tf bucket
         self._last_entry_bucket_r:    str  = ""   # reentry rule-set max-tf bucket
+        self._vwap_last_check_min:    str  = ""   # gate: only check vwap_rise once per 1-min
 
         self._guardrail_pnl_enabled:    bool  = False
         self._guardrail_pnl_target_pts: float = 0.0
@@ -890,6 +891,23 @@ class SellStraddleStrategy:
                         self._position.pe_leg.symbol = fill.pe_symbol
                 self._position.net_credit = self._position.ce_leg.entry_price + self._position.pe_leg.entry_price
                 self._persist()   # re-persist confirmed entry so it survives a restart
+                # Register open orders in the Orders section immediately on confirmed fill
+                try:
+                    from data_layer.trade_history import record_open as _ro
+                    _now_ts = datetime.now(IST).isoformat(timespec="seconds")
+                    _pos = self._position
+                    _ro(client_id=self._client_id, strategy="sell_straddle",
+                        instrument=self._underlying, binding_id=self._binding_id,
+                        legs=[
+                            {"side": "CE", "strike": int(_pos.ce_leg.strike),
+                             "entry": round(_pos.ce_leg.entry_price, 2),
+                             "entry_ts": _now_ts, "entry_reason": "sell-open"},
+                            {"side": "PE", "strike": int(_pos.pe_leg.strike),
+                             "entry": round(_pos.pe_leg.entry_price, 2),
+                             "entry_ts": _now_ts, "entry_reason": "sell-open"},
+                        ])
+                except Exception:
+                    pass
                 _ce_disp = self._position.ce_leg.symbol or f"CE{int(self._position.ce_leg.strike)}"
                 _pe_disp = self._position.pe_leg.symbol or f"PE{int(self._position.pe_leg.strike)}"
                 logger.info(
