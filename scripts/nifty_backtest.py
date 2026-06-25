@@ -1351,28 +1351,108 @@ def run_nifty_backtest_optimize(
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--token",   required=True)
-    ap.add_argument("--index",   default="NIFTY", choices=["NIFTY", "SENSEX"])
-    ap.add_argument("--weeks",   type=int, default=2)
-    ap.add_argument("--start",   default="")
-    ap.add_argument("--end",     default="")
-    ap.add_argument("--no-bias", action="store_true", help="Scan both CE+PE on gap days too")
-    ap.add_argument("--sl-buf",  type=float, default=2.0)
-    ap.add_argument("--monthly", action="store_true",
-                    help="Use monthly expiry contract (last Thu/Fri of month) instead of weekly")
+    ap = argparse.ArgumentParser(
+        description="NIFTY / SENSEX options backtest — pure intraday cascade mode",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    # Auth
+    ap.add_argument("--token",   required=True, help="Upstox access token")
+    # Index
+    ap.add_argument("--index",   default="NIFTY", choices=["NIFTY", "SENSEX"],
+                    help="Index to backtest (default: NIFTY)")
+    # Date range
+    ap.add_argument("--start",   default="", help="Start date YYYY-MM-DD (default: today-weeks*7)")
+    ap.add_argument("--end",     default="", help="End date YYYY-MM-DD   (default: today)")
+    ap.add_argument("--weeks",   type=int, default=4, help="Rolling weeks if --start/--end not given")
+    # Expiry
+    ap.add_argument("--monthly", action="store_true", default=True,
+                    help="Monthly expiry (default ON — always use for this strategy)")
+    ap.add_argument("--weekly",  action="store_true",
+                    help="Override to weekly expiry")
+    # Entry / zone params
+    ap.add_argument("--sl-buf",        type=float, default=None,
+                    help="SL buffer pts below zone_low  [NIFTY default: 5  SENSEX default: 20]")
+    ap.add_argument("--strike-depth",  default="near", choices=["near", "far", "both"],
+                    help="Strike depth: near=ATM±1ITM, both=near+far  (default: near)")
+    ap.add_argument("--max-ltf",       type=int, default=None,
+                    help="Max LTF sub-zone index  [NIFTY default: 10  SENSEX default: 8]")
+    ap.add_argument("--pure-intraday", action="store_true", default=True,
+                    help="Pure intraday cascade 15m→3m→1m (default ON)")
+    ap.add_argument("--no-pure-intraday", dest="pure_intraday", action="store_false",
+                    help="Disable pure intraday (use HTF prev-day zones)")
+    ap.add_argument("--high-breakout", action="store_true", default=True,
+                    help="1m HIGH breakout confirmation (default ON)")
+    ap.add_argument("--no-high-breakout", dest="high_breakout", action="store_false",
+                    help="Disable 1m HIGH breakout filter")
+    # Bias / gap
+    ap.add_argument("--no-bias", action="store_true",
+                    help="Disable gap-bias filter (scan CE+PE both on gap days)")
+    ap.add_argument("--gap-thresh", type=float, default=0.5,
+                    help="Gap %% threshold to classify as gap day (default: 0.5)")
     args = ap.parse_args()
 
+    # Index-specific defaults for params not explicitly passed
+    _DEFAULTS = {
+        "NIFTY":  {"sl_buf": 5.0,  "max_ltf": 10},
+        "SENSEX": {"sl_buf": 20.0, "max_ltf": 8},
+    }
+    _def = _DEFAULTS.get(args.index.upper(), _DEFAULTS["NIFTY"])
+    sl_buf    = args.sl_buf  if args.sl_buf  is not None else _def["sl_buf"]
+    max_ltf   = args.max_ltf if args.max_ltf is not None else _def["max_ltf"]
+    use_monthly = not args.weekly  # --weekly overrides default monthly=True
+
+    print(f"\n{'='*60}")
+    print(f"  {args.index} Backtest — Pure Intraday Cascade (15m→3m→1m)")
+    print(f"{'='*60}")
+    print(f"  Date       : {args.start or 'rolling'} → {args.end or 'today'}  (weeks={args.weeks})")
+    print(f"  Expiry     : {'Monthly' if use_monthly else 'Weekly'}")
+    print(f"  Depth      : {args.strike_depth.upper()}")
+    print(f"  SL Buffer  : {sl_buf} pts")
+    print(f"  Max LTF    : {max_ltf}  (sub-zones LTF-{max_ltf}+ filtered)")
+    print(f"  High BrkOut: {'ON' if args.high_breakout else 'OFF'}")
+    print(f"  Gap Bias   : {'OFF' if args.no_bias else 'ON'}")
+    print(f"{'='*60}\n")
+
     result = run_nifty_backtest(
-        token    = args.token,
-        index    = args.index,
-        weeks    = args.weeks,
-        start    = args.start,
-        end      = args.end,
-        use_bias = not args.no_bias,
-        sl_buf   = args.sl_buf,
-        monthly  = args.monthly,
+        token             = args.token,
+        index             = args.index,
+        weeks             = args.weeks,
+        start             = args.start,
+        end               = args.end,
+        use_bias          = not args.no_bias,
+        sl_buf            = sl_buf,
+        monthly           = use_monthly,
+        strike_depth      = args.strike_depth,
+        use_high_breakout = args.high_breakout,
+        skip_open_spike   = True,
+        open_spike_min    = 30,
+        pure_intraday     = args.pure_intraday,
+        max_ltf_index     = max_ltf,
     )
     if not result["ok"]:
         print(f"ERROR: {result['error']}")
         sys.exit(1)
+
+    trades = result.get("trades", [])
+    wins   = [t for t in trades if t["pnl_rs"] > 0]
+    losses = [t for t in trades if t["pnl_rs"] <= 0]
+    total  = sum(t["pnl_rs"] for t in trades)
+    gw     = sum(t["pnl_rs"] for t in wins)
+    gl     = abs(sum(t["pnl_rs"] for t in losses))
+    pf     = round(gw / gl, 2) if gl > 0 else (99.0 if gw > 0 else 0.0)
+
+    print(f"\n{'='*60}")
+    print(f"  RESULTS — {len(trades)} trades")
+    print(f"{'='*60}")
+    print(f"  Win Rate     : {len(wins)}/{len(trades)}  ({round(100*len(wins)/len(trades),1) if trades else 0}%)")
+    print(f"  Total P&L    : ₹{total:+,.0f}")
+    print(f"  Profit Factor: {pf}")
+    print(f"  Avg Win      : ₹{round(gw/len(wins),0) if wins else 0:,.0f}")
+    print(f"  Avg Loss     : ₹{-round(gl/len(losses),0) if losses else 0:,.0f}")
+    print(f"\n  {'Date':<12} {'Opt':<4} {'Strike':<8} {'LTF':<8} {'Entry':>7} {'Exit':>7} {'Reason':<12} {'P&L':>9}")
+    print(f"  {'-'*75}")
+    for t in trades:
+        print(f"  {t['date']:<12} {t['opt_type']:<4} {t['strike']:<8} "
+              f"{t.get('trap_pos',''):<8} {t['entry']:>7.1f} {t['exit']:>7.1f} "
+              f"{t['reason']:<12} ₹{t['pnl_rs']:>+8,}")
+    print(f"{'='*60}\n")
