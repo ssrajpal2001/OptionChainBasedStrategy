@@ -69,7 +69,7 @@ _INDEX_CFG: Dict[str, dict] = {
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "SENSEX":     {"step": 100, "lot": 20,  "gap_near": 300, "gap_far": 600,
-                   "sl_buf": 2.0, "cutoff": "15:20", "sq_off": "15:25",
+                   "sl_buf": 15.0, "cutoff": "15:20", "sq_off": "15:25",
                    "window": None, "exchange": "BFO", "htf_source": "option"},
     "MIDCPNIFTY": {"step": 25,  "lot": 75,  "gap_near": 100, "gap_far": 200,
                    "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
