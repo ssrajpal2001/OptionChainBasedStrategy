@@ -358,6 +358,16 @@
           </label>
         </div>
 
+        <!-- Max LTF Index -->
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-600 text-t-bright">Max LTF Index</p>
+            <p class="text-xs text-t-muted">Skip sub-zones beyond LTF-N (0 = no limit). High-index sub-zones are near zone top → tiny reward, big risk. Recommended: 10–15</p>
+          </div>
+          <input type="number" x-model.number="maxLtfIndex" min="0" max="50" step="1"
+            class="t-input w-20 text-right text-sm" />
+        </div>
+
         <!-- Skip Opening Spike Zones -->
         <div class="flex items-center justify-between">
           <div>
@@ -710,6 +720,7 @@ function backtestNifty() {
     skipOpenSpike:    true,
     openSpikeMin:     30,
     pureIntraday:     false,
+    maxLtfIndex:      0,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -772,6 +783,7 @@ function backtestNifty() {
         skip_open_spike:   this.skipOpenSpike,
         open_spike_min:    this.openSpikeMin,
         pure_intraday:     this.pureIntraday,
+        max_ltf_index:     this.maxLtfIndex,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks

@@ -572,7 +572,8 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              use_high_breakout: bool = True,
              skip_open_spike: bool = True,
              open_spike_min: int = 30,
-             pure_intraday: bool = False) -> list[dict]:
+             pure_intraday: bool = False,
+             max_ltf_index: int = 0) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
@@ -763,13 +764,17 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 if ltf5_in:
                     # Take ALL valid 5min sub-traps inside HTF zone (more trade opportunities)
                     ltf5_in.sort(key=lambda e: float(e.get("zone_low", 9999)))
+                    added = 0
                     for idx, best in enumerate(ltf5_in):
+                        if max_ltf_index > 0 and idx + 1 > max_ltf_index:
+                            break  # sorted ascending; all remaining have higher index
                         best["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m→5m"
                         best["_trap_pos"] = f"LTF-{idx+1}"
-                        best["_htf_t1"]   = zh   # T1 = zone_high = bears' SL level
-                        best["_htf_sl"]   = zl   # SL = HTF zone_low
+                        best["_htf_t1"]   = zh
+                        best["_htf_sl"]   = zl
                         entry_signals.append(best)
-                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → {len(ltf5_in)} 5m sub-trap(s)")
+                        added += 1
+                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → {added}/{len(ltf5_in)} 5m sub-trap(s)")
                 else:
                     # No fresh 5min trap found inside HTF zone — skip (no trade).
                     # Do not enter blindly at HTF trigger without LTF confirmation.
@@ -813,13 +818,17 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
                 if ltf_in:
                     ltf_in.sort(key=lambda e: float(e.get("zone_low", 9999)))
+                    added = 0
                     for idx, best in enumerate(ltf_in):
+                        if max_ltf_index > 0 and idx + 1 > max_ltf_index:
+                            break  # sorted ascending; all remaining have higher index
                         best["_mode"]     = mode_tag
                         best["_trap_pos"] = f"LTF-{idx+1}"
                         best["_htf_t1"]   = zh
                         best["_htf_sl"]   = zl
                         entry_signals.append(best)
-                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} → {sub_min}m ×{len(ltf_in)}")
+                        added += 1
+                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} → {sub_min}m ×{added}/{len(ltf_in)}")
                 else:
                     print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} → no {sub_min}m sub-trap — SKIP")
 
@@ -1061,7 +1070,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        use_high_breakout: bool = True,
                        skip_open_spike: bool = True,
                        open_spike_min: int = 30,
-                       pure_intraday: bool = False) -> dict:
+                       pure_intraday: bool = False,
+                       max_ltf_index: int = 0) -> dict:
     # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
     global _HEADERS, _USE_MONTHLY
     _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -1121,7 +1131,8 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                               use_high_breakout=use_high_breakout,
                               skip_open_spike=skip_open_spike,
                               open_spike_min=open_spike_min,
-                              pure_intraday=pure_intraday)
+                              pure_intraday=pure_intraday,
+                              max_ltf_index=max_ltf_index)
         all_trades.extend(day_trades)
 
     # Summary
