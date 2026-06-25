@@ -1161,10 +1161,34 @@ class TrapScannerEngine:
                 (self._htf_source == "futures" and leg == "FUT")
             )
             if htf_trigger:
+                # Capture currently TRAPPED zone UIDs before re-scan so we can
+                # detect zones that NEWLY become TRAPPED on this boundary.
+                _pre_bear = {_zone_uid(z) for z in self._htf_bear_zones
+                             if z.get("status") == "TRAPPED"}
+                _pre_bull = {_zone_uid(z) for z in self._htf_bull_zones
+                             if z.get("status") == "TRAPPED"}
+
                 self._run_htf_scan()
                 self._htf_atr_val = self._compute_htf_atr()
                 prev_mode = self._intraday_mode
                 self._check_zone_reachability()
+
+                # Immediately seed LTF for zones that NEWLY became TRAPPED this scan.
+                # Scans historical bars from zone ref_ts (SELLERS_IN start time),
+                # including prev-day bars, without the current-price gate.
+                _new_bear = [z for z in self._htf_bear_zones
+                             if z.get("status") == "TRAPPED"
+                             and _zone_uid(z) not in _pre_bear]
+                _new_bull = [z for z in self._htf_bull_zones
+                             if z.get("status") == "TRAPPED"
+                             and _zone_uid(z) not in _pre_bull]
+                if _new_bear:
+                    self._seed_ltf_live("CE1", self._bars_ce1, _new_bear)
+                    self._seed_ltf_live("CE2", self._bars_ce2, _new_bear)
+                if _new_bull:
+                    self._seed_ltf_live("PE1", self._bars_pe1, _new_bull)
+                    self._seed_ltf_live("PE2", self._bars_pe2, _new_bull)
+
                 self._log.info(
                     "HTF scan: bear=%d bull=%d fut=%d ATR=%.2f intraday_mode=%s position=%s",
                     sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED"),
@@ -1477,6 +1501,82 @@ class TrapScannerEngine:
                     self._on_entry_signal(zleg, opt_type, best_zone, htf_zone)
                 )
                 break
+
+    def _seed_ltf_live(self, leg_key: str, bars: list, zones: list) -> None:
+        """Immediately seed LTF when a zone newly becomes TRAPPED during live trading.
+
+        Unlike _seed_ltf_state (init-time, today-only), this:
+        - Uses ALL bars from zone ref_ts onwards (incl. prev-day) so SELLERS_IN that
+          happened yesterday are captured in the 5-min scan.
+        - Has NO current-price gate: runs even if LTP is already above zone_high
+          (which is the normal state right after TRAPPED fires).
+
+        Per user spec: scan starts from the SELLERS_IN timestamp, approximated by
+        zone ref_ts (zone creation bar). SELLERS_IN always follows ref_ts, so all
+        bars from ref_ts onwards cover the full 09:15→now window on a prev-day zone.
+        """
+        if not bars:
+            return
+        for zone in zones:
+            uid = _zone_uid(zone)
+            if uid in self._notified_uids or uid in self._ltf_retrace_trigger:
+                continue
+            z_low, z_high = zone["zone_low"], zone["zone_high"]
+            ref_ts_str  = str(zone.get("ref_ts", ""))
+            trap_ts_str = str(zone.get("trapped_on") or zone.get("closed_on") or "")
+            zone_start  = ref_ts_str or trap_ts_str
+
+            # Include ALL bars (prev-day + today) from zone_start — covers SELLERS_IN
+            # that happened on a prior session.
+            df = _bars_to_df(bars)
+            df_ltf = df
+            if zone_start:
+                try:
+                    df_ltf = df[pd.to_datetime(df["datetime"]) >=
+                                pd.to_datetime(zone_start)].copy()
+                except Exception:
+                    pass
+
+            _, ltf_entries = scanner.scan_ltf(
+                df_ltf,
+                htf_zone_high=z_high,
+                htf_zone_low=z_low,
+                htf_ref_bar=ref_ts_str,
+                htf_trap_bar=trap_ts_str,
+                htf_target=zone.get("sl", 0.0),
+            )
+            trapped_now  = [e for e in ltf_entries if e["status"] == "TRAPPED"]
+            closed_today = [e for e in ltf_entries if e["status"] == "CLOSED"]
+
+            if not trapped_now and closed_today:
+                lowest  = min(closed_today, key=lambda e: e.get("zone_high", 9999.0))
+                trigger = lowest["zone_high"]
+                self._ltf_retrace_trigger[uid] = (
+                    trigger, lowest, zone, leg_key,
+                    "CE" if "CE" in leg_key else "PE",
+                )
+                self._zone_ltf_status[uid] = "waiting_retrace"
+                self._log.info(
+                    "LIVE-SEED [%s] zone %.1f→%.1f: all %d 5m bears cleared "
+                    "→ retrace trigger=%.2f (scan from %s)",
+                    leg_key, z_low, z_high, len(closed_today), trigger,
+                    zone_start[:16] if zone_start else "start",
+                )
+            elif trapped_now:
+                self._zone_ltf_status[uid] = "waiting_5m_clear"
+                self._log.info(
+                    "LIVE-SEED [%s] zone %.1f→%.1f: %d 5m bears still active "
+                    "(closed=%d) → waiting_5m_clear",
+                    leg_key, z_low, z_high, len(trapped_now), len(closed_today),
+                )
+            else:
+                self._zone_ltf_status[uid] = "watching_5m"
+                self._log.info(
+                    "LIVE-SEED [%s] zone %.1f→%.1f: no 5m activity yet → watching_5m "
+                    "(scan from %s)",
+                    leg_key, z_low, z_high,
+                    zone_start[:16] if zone_start else "start",
+                )
 
     def _seed_ltf_state(self) -> None:
         """
