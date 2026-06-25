@@ -136,8 +136,8 @@ class ExecutionRouter:
                         client.client_id, binding.binding_id, binding.provider,
                     )
                 else:
-                    logger.critical(
-                        "Router: Auth FAILED for %s/%s (%s). System cannot start.",
+                    logger.warning(
+                        "Router: Auth FAILED for %s/%s (%s). Binding skipped — fix credentials in the dashboard.",
                         client.client_id, binding.binding_id, binding.provider,
                     )
                     failed.append(f"{client.client_id}/{binding.binding_id}({binding.provider})")
@@ -151,9 +151,10 @@ class ExecutionRouter:
             self._pool.register(worker)
 
         if failed:
-            raise RuntimeError(
-                f"Broker authentication failed for: {', '.join(failed)}. "
-                "Fix credentials or remove the binding before starting in live mode."
+            logger.warning(
+                "Router: %d broker binding(s) failed auth and were skipped: %s. "
+                "Fix credentials via the dashboard.",
+                len(failed), ", ".join(failed),
             )
 
         await self._pool.start_all()
