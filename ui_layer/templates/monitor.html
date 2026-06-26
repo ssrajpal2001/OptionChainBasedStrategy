@@ -602,7 +602,7 @@ document.addEventListener('alpine:init', () => {
     ws:           null,
     wsConnected:  false,
     activeIndex:  'NIFTY',
-    indices:      ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','BTC','ETH'],
+    indices:      ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH'],
     spots:        {},
     snapshots:    {},
     clients:      [],
@@ -688,7 +688,7 @@ document.addEventListener('alpine:init', () => {
       { id: 'sell_straddle', name: 'Sell Straddle',  desc: 'ATM straddle — premium decay (theta)' },
       { id: 'iron_condor',   name: 'Iron Condor',    desc: 'OTM 4-leg credit spread (range-bound)' },
     ],
-    availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','BTC','ETH'],
+    availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
     csSaving: false, csSaveMsg: '', csSaveOk: null,
     csSelectionsLoaded: false,
