@@ -422,17 +422,26 @@ def _run_day_csv(
                 if breakout.empty:
                     continue
 
-                entry_ts_bar = breakout.iloc[0]["datetime"]
-                entry_price  = float(breakout.iloc[0]["close"])
+                bo_bar = breakout.iloc[0]
+                # Enter at NEXT bar's open (breakout detected at bar close → enter next bar)
+                next_bars = opt_1m[opt_1m["datetime"] > bo_bar["datetime"]]
+                if next_bars.empty:
+                    continue
+                entry_ts_bar = next_bars.iloc[0]["datetime"]
+                entry_price  = float(next_bars.iloc[0]["open"])
                 if entry_price <= 0:
                     continue
                 if open_trade is not None and entry_ts_bar <= open_trade["exit_ts"]:
                     continue
 
+                # Skip if entry already above T1 — no valid reward
+                if entry_price >= zh:
+                    continue
+
                 trap_pos = f"LTF-{idx+1}"
                 ts_str   = entry_ts_bar.strftime("%H:%M")
                 print(f"  {trade_date} {opt_type} {strike}: 15m→3m {sz_low:.0f}-{sz_high:.0f} "
-                      f"→ 1m breakout @ {ts_str}  entry={entry_price:.1f}  [{trap_pos}]")
+                      f"→ 1m entry @ {ts_str}  open={entry_price:.1f}  T1={zh:.0f}  [{trap_pos}]")
 
                 # OPP_SIGNAL: close PE when first CE fired; CE runs first so opp_pe_ts stays None
                 opp_ts = opp_ce_ts if opt_type == "PE" else opp_pe_ts
