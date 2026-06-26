@@ -1386,6 +1386,22 @@ class TrapScannerEngine:
                 return
             htf_ref_bar  = str(htf_zones[0].get("ref_ts", "")) if htf_zones else ""
             htf_trap_bar = str(htf_zones[0].get("trapped_on") or htf_zones[0].get("closed_on") or "") if htf_zones else ""
+            # For prev-day HTF zones: clamp the LTF scan start to today's session open.
+            # Sub-traps from the zone-formation day (e.g. Jun 24) can remain TRAPPED for days
+            # and would block entry forever. Only TODAY's fresh sub-traps need to clear.
+            try:
+                import pandas as _pd
+                _sess_open = self._cfg.get("sess_open", "09:00")
+                _h, _m = int(_sess_open.split(":")[0]), int(_sess_open.split(":")[1])
+                _today_open = _pd.Timestamp.now(tz="Asia/Kolkata").normalize() + _pd.Timedelta(hours=_h, minutes=_m)
+                if htf_ref_bar:
+                    _ref_ts = _pd.Timestamp(htf_ref_bar)
+                    if _ref_ts.tzinfo is None:
+                        _ref_ts = _ref_ts.tz_localize("Asia/Kolkata")
+                    if _ref_ts < _today_open:
+                        htf_ref_bar = str(_today_open)
+            except Exception:
+                pass
             _, ltf_entries = scanner.scan_ltf(
                 df,
                 htf_zone_high=9999999,  # no zone bounds — scan full today's bars
