@@ -88,7 +88,7 @@ class TrapBookManager:
                     lots = max(2, lots + 1)   # enforce multiple of 2
             except Exception:
                 lots = 2
-            expiry_mode = str(d.get("expiry_mode", "current") or "current").strip()
+            expiry_mode = str(d.get("expiry_mode", "monthly") or "monthly").strip()
             wanted[(cid, bid, und)] = (lots, expiry_mode)
         return wanted
 

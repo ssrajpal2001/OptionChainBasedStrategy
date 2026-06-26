@@ -59,8 +59,8 @@ logger = logging.getLogger(__name__)
 _INDEX_CFG: Dict[str, dict] = {
     # htf_source="option": HTF and LTF both scan OPTION premium bars (same units → scan_ltf works)
     # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
-    "NIFTY":      {"step": 100, "lot": 65,  "gap_near": 200, "gap_far": 400,
-                   "sl_buf": 10.0, "max_sl_pts": 20.0, "cutoff": "15:10", "sq_off": "15:20",
+    "NIFTY":      {"step": 100, "lot": 75,  "gap_near": 200, "gap_far": 400,
+                   "sl_buf": 5.0, "max_sl_pts": 20.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
                    "sl_buf": 4.0, "max_sl_pts": 0.0, "cutoff": "15:10", "sq_off": "15:20",
