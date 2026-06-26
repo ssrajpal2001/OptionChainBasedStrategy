@@ -314,6 +314,12 @@ class SellStraddleStrategy:
         # client-side chart endpoint. One point per 1-min candle close.
         self._chart_series: deque = deque(maxlen=375)   # ~one full trading day of 1-min bars
 
+        # Live CSV recorder — writes one row per 1m close to data/live_records/
+        # so the full indicator series (VWAP/SLOPE/RSI/ROC at 1m/2m/3m) is available
+        # for post-market analysis without needing the broker ATP replay.
+        self._csv_file   = None
+        self._csv_writer = None
+
         from strategies.pool_indicator_engine import PoolIndicatorEngine
         self._pool_engine = PoolIndicatorEngine(rsi_len=14, roc_len=10)
 
@@ -543,6 +549,7 @@ class SellStraddleStrategy:
 
     def start(self) -> None:
         self._running = True
+        self._open_csv_recorder()
         # Restore an open position across restarts (MIS prior-day positions are
         # discarded by the store — broker squared them off at EOD).
         self._restore_session()
@@ -711,6 +718,13 @@ class SellStraddleStrategy:
         for t in self._tasks:
             if not t.done():
                 t.cancel()
+        if self._csv_file:
+            try:
+                self._csv_file.close()
+            except Exception:
+                pass
+            self._csv_file   = None
+            self._csv_writer = None
         # Tasks are awaited by the event loop after cancel(); callers that need to
         # guarantee cleanup should await stop_async() instead.
 
@@ -749,6 +763,7 @@ class SellStraddleStrategy:
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
         self._beginning_failed = False
+        self._open_csv_recorder()
         logger.info("SellStraddleStrategy[%s]: session reset.", self._underlying)
 
     # ── EventBus loops ────────────────────────────────────────────────────────
@@ -1290,6 +1305,89 @@ class SellStraddleStrategy:
             "rsi":      round(float(_ci.get("rsi", 0.0) or 0.0), 2),
             "slope":    round(float(_ci.get("slope", 0.0) or 0.0), 2),
         })
+        self._write_csv_row(ts, _ce_l, _pe_l, _ci)
+
+    def _open_csv_recorder(self) -> None:
+        """Open (or reopen) the day CSV file for this book. Called at session start."""
+        import csv as _csv
+        try:
+            os.makedirs("data/live_records", exist_ok=True)
+            date_str = datetime.now(IST).strftime("%Y%m%d")
+            parts = [self._underlying]
+            if self._client_id:
+                parts.append(self._client_id)
+            if self._binding_id:
+                parts.append(self._binding_id)
+            fname = f"data/live_records/ss_{'_'.join(parts)}_{date_str}.csv"
+            f = open(fname, "a", newline="", buffering=1)
+            w = _csv.writer(f)
+            if f.tell() == 0:
+                w.writerow([
+                    "datetime",
+                    "ce_strike", "pe_strike",
+                    "ce_ltp", "pe_ltp", "combined_ltp",
+                    "ce_atp", "pe_atp", "combined_vwap",
+                    "slope_1m", "rsi_1m", "roc_1m",
+                    "slope_2m", "rsi_2m", "roc_2m",
+                    "slope_3m", "rsi_3m", "roc_3m",
+                    "position", "entry_price", "pnl_pts",
+                ])
+            if self._csv_file:
+                try:
+                    self._csv_file.close()
+                except Exception:
+                    pass
+            self._csv_file   = f
+            self._csv_writer = w
+            logger.info("SellStraddle[%s]: CSV recorder opened → %s", self._underlying, fname)
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: CSV recorder open failed: %s", self._underlying, exc)
+
+    def _write_csv_row(self, ts: datetime, ce_ltp: float, pe_ltp: float, ci: dict) -> None:
+        """Write one row per 1m close. Multi-tf indicators fetched from pool engine."""
+        if not self._csv_writer:
+            return
+        try:
+            pos = self._position
+            ce_s = pe_s = ""
+            entry_px = pnl_pts = ""
+            ce_atp = pe_atp = 0.0
+            if pos and pos.status == "open":
+                ce_s     = int(pos.ce_leg.strike)
+                pe_s     = int(pos.pe_leg.strike)
+                entry_px = round(float(pos.net_credit or 0), 2)
+                pnl_pts  = round(float(pos.unrealized_pnl), 2)
+                ce_atp   = float(self._pool_engine._latest.get((ce_s, "CE"), (0, 0))[1])
+                pe_atp   = float(self._pool_engine._latest.get((pe_s, "PE"), (0, 0))[1])
+
+            def _ind(tf):
+                if ce_s and pe_s:
+                    d = self._pool_engine.pair_indicators_tf(int(ce_s), int(pe_s), tf) or {}
+                else:
+                    d = ci if tf == 1 else {}
+                return (round(float(d.get("slope", 0) or 0), 4),
+                        round(float(d.get("rsi",   50) or 50), 2),
+                        round(float(d.get("roc",   0) or 0), 4))
+
+            s1, r1, rc1 = _ind(1)
+            s2, r2, rc2 = _ind(2)
+            s3, r3, rc3 = _ind(3)
+
+            self._csv_writer.writerow([
+                ts.strftime("%Y-%m-%d %H:%M"),
+                ce_s, pe_s,
+                round(float(ce_ltp), 2), round(float(pe_ltp), 2),
+                round(float(ce_ltp + pe_ltp), 2),
+                round(ce_atp, 2), round(pe_atp, 2),
+                round(ce_atp + pe_atp, 2),
+                s1, r1, rc1,
+                s2, r2, rc2,
+                s3, r3, rc3,
+                "open" if (pos and pos.status == "open") else "flat",
+                entry_px, pnl_pts,
+            ])
+        except Exception as exc:
+            logger.debug("SellStraddle[%s]: CSV write error: %s", self._underlying, exc)
 
     def _any_active_terminal(self) -> bool:
         """True if at least one client has a binding with terminal_connected AND engine_active,
