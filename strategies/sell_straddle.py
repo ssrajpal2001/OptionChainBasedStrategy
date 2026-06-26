@@ -303,6 +303,8 @@ class SellStraddleStrategy:
 
         self._tasks: list = []
         self._sl_cooldown_until: Optional[datetime] = None
+        self._pending_roll: Optional[dict] = None          # {"side": "CE"/"PE", "reason": str}
+        self._last_pending_roll_bucket: str = ""
         self._event_counter: int = 0
 
         # Combined CE+PE premium candle buffer
@@ -724,6 +726,8 @@ class SellStraddleStrategy:
         self._trades_today              = 0
         self._position                  = None
         self._sl_cooldown_until         = None
+        self._pending_roll              = None
+        self._last_pending_roll_bucket  = ""
         self._market_open_dt            = None
         self._primed                    = False
         self._session_realized_pnl_pts  = 0.0
@@ -1940,8 +1944,37 @@ class SellStraddleStrategy:
                     await self._close_position(f"trailing_sl_{self._trail_basis}")
                     return
 
-        # LTP Decay → single-side roll per decayed leg (reference exit_logic step 2)
-        if self._ltp_decay_enabled:
+        # ── PENDING ROLL RETRY ────────────────────────────────────────────────────
+        # When the last roll attempt found no partner, both legs stay alive and we
+        # retry here at the re-entry rules' max-tf cadence instead of closing.
+        # Roll triggers below are all skipped while a pending roll is active.
+        if self._pending_roll:
+            _ss_pr    = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+            _pr_rules = _ss_pr.get("entry_rules_reentry", [])
+            _pr_tf    = max((int(r.get("tf", 1)) for r in _pr_rules), default=1) if _pr_rules else 1
+            _pr_bkt   = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _pr_tf) * _pr_tf:02d}"
+            if _pr_bkt != self._last_pending_roll_bucket:
+                self._last_pending_roll_bucket = _pr_bkt
+                _pr_side   = self._pending_roll["side"]
+                _pr_reason = self._pending_roll["reason"]
+                if not self._is_pending_roll_trigger_active(_pr_reason, pos, pnl):
+                    logger.info(
+                        "SellStraddle[%s]: PENDING ROLL CANCELLED — trigger '%s' no longer active "
+                        "(CE=%.2f PE=%.2f); resuming normal trade.",
+                        self._underlying, _pr_reason, pos.ce_leg.ltp, pos.pe_leg.ltp,
+                    )
+                    self._pending_roll = None
+                else:
+                    logger.info(
+                        "SellStraddle[%s]: PENDING ROLL RETRY — trigger '%s' still active "
+                        "(CE=%.2f PE=%.2f); searching for partner.",
+                        self._underlying, _pr_reason, pos.ce_leg.ltp, pos.pe_leg.ltp,
+                    )
+                    await self._single_side_roll(_pr_side, now, _pr_reason)
+            # Full exits (ROC guardrail / exit_rules) still run below; roll triggers are skipped.
+
+        # LTP Decay → single-side roll per decayed leg (skipped when pending roll active)
+        if not self._pending_roll and self._ltp_decay_enabled:
             rolled_any = False
             for _side, _ltp in (("CE", pos.ce_leg.ltp), ("PE", pos.pe_leg.ltp)):
                 if 0 < _ltp < self._ltp_exit_min and self._position and self._position.status == "open":
@@ -1956,9 +1989,8 @@ class SellStraddleStrategy:
         #    Trailing-SL (lock/floor, ltp|theta) → LTP-decay → Ratio → Scalable TSL →
         #    ROC guardrail → VWAP-Rise → exit_rules.
 
-        # 6. Ratio exit → ROLLOVER: close the LESS-PAIN (cheaper) leg and re-sell it closer,
-        #    keeping the expensive (running) leg. Partner balanced against the running leg.
-        if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
+        # 6. Ratio exit → ROLLOVER (skipped when pending roll active)
+        if not self._pending_roll and pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
             ratio = max(pos.ce_leg.ltp, pos.pe_leg.ltp) / min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if ratio >= self._ratio_threshold:
                 cheap = "PE" if pos.ce_leg.ltp > pos.pe_leg.ltp else "CE"   # less-pain side → roll
@@ -1968,10 +2000,8 @@ class SellStraddleStrategy:
                 await self._single_side_roll(cheap, now, "ratio_exit")
                 return
 
-        # 7. Scalable TSL → SINGLE-SIDE roll (keep the losing/expensive leg, roll only the
-        #    decayed/cheaper leg) — same rule as ltp_decay/ratio/vwap_rise. _single_side_roll
-        #    re-pairs near ATM and closes both only if no valid partner exists.
-        if self._tsl_enabled:
+        # 7. Scalable TSL → SINGLE-SIDE roll (skipped when pending roll active)
+        if not self._pending_roll and self._tsl_enabled:
             # Profit fed to the TSL staircase: LTP P&L (default) or combined time-value decay
             # (points) when tsl_basis="theta" — so the trail measures theta decay, not LTP.
             _tsl_pnl = pnl
@@ -1989,7 +2019,7 @@ class SellStraddleStrategy:
                 await self._single_side_roll(_roll_side, now, "scalable_tsl")
                 return
 
-        # 8. guardrail_roc — TF-boundary ROC of combined premium → smart roll first
+        # 8. guardrail_roc — TF-boundary ROC of combined premium (full exit, always runs)
         if self._guardrail_roc_enabled and len(self._prem_closes) >= self._guardrail_roc_length + 1:
             _rg_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // self._guardrail_roc_tf) * self._guardrail_roc_tf:02d}"
             if _rg_bucket != self._last_roc_guard_bucket:
@@ -2015,13 +2045,13 @@ class SellStraddleStrategy:
                     await self._close_position("guardrail_roc_sl")  # full exit → fresh re-entry
                     return
 
-        # 9. VWAP Rise SL → smart roll first.
+        # 9. VWAP Rise SL → smart roll first (skipped when pending roll active).
         # Checked once per 1-minute candle close (not every tick) so transient intra-minute
         # ATP fluctuations can't set a false low baseline. session_min_vwap tracks the minimum
         # of all 1-min VWAP readings; if the current 1-min VWAP rises X% above that min → roll.
         # STALENESS GUARD: skip when either leg's broker ATP is frozen (illiquid contract).
         _now_min = now.strftime("%H:%M")
-        if _now_min != self._vwap_last_check_min:
+        if not self._pending_roll and _now_min != self._vwap_last_check_min:
             # New 1-minute boundary — stamp first so we don't re-enter this block mid-minute.
             self._vwap_last_check_min = _now_min
             if self._vwap_rise_enabled and self._pool_engine.pair_atp_fresh(
@@ -2273,11 +2303,11 @@ class SellStraddleStrategy:
                         "(no-op, no orders sent).", self._underlying, side, orig_strike)
             return
 
-        await self._close_leg(side, reason, now)
         if sel:
             new_strike, new_ltp = sel
             logger.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (balanced vs running %s%d @%.2f)",
                         self._underlying, side, side, new_strike, new_ltp, other, run_strike, run_ltp)
+            await self._close_leg(side, reason, now)
             await self._open_leg(side, new_strike, new_ltp, now, f"single_side_roll_{reason}")
             # Re-baseline the per-position trackers vs the NEW combined pair: a rolled leg shifts the
             # combined VWAP (else vwap_rise re-fires vs the OLD low) and the credit (else the scalable
@@ -2299,16 +2329,15 @@ class SellStraddleStrategy:
                         self._initial_entry_time_value = self._position.entry_time_value
                 except Exception:
                     pass
+            self._pending_roll = None
             self._persist()
             return
-        # No valid partner in the pool → close all and start fresh (re-entry loop re-enters).
-        # This is a FULL exit, so the re-entry cooldown applies (same as _close_position).
-        logger.warning("SellStraddle[%s]: roll %s found no partner for running %s — closing all (fresh).",
-                       self._underlying, side, other)
-        await self._close_leg(other, f"single_side_cleanup_{reason}", now)
-        self._position = None
-        self._persist()
-        self._apply_sl_cooldown()
+        # No partner found — keep BOTH legs alive. Set pending roll and retry at the
+        # re-entry max-tf cadence (_check_exits pending block). Never close either leg here.
+        logger.warning(
+            "SellStraddle[%s]: roll %s found no partner for running %s — PENDING (both legs kept alive).",
+            self._underlying, side, other)
+        self._pending_roll = {"side": side, "reason": reason}
 
     async def _single_side_roll_to(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Partial roll: close one side and open a pre-selected candidate strike on that side.
@@ -2362,6 +2391,33 @@ class SellStraddleStrategy:
         )
         self._position = None
         self._persist()   # no open position → clears data/positions/<key>.json
+
+    def _is_pending_roll_trigger_active(self, reason: str, pos, pnl: float) -> bool:
+        """Re-evaluate the trigger that set _pending_roll. Returns True if still active."""
+        if reason == "ratio_exit":
+            ce_ltp = float(getattr(pos.ce_leg, "ltp", 0) or 0)
+            pe_ltp = float(getattr(pos.pe_leg, "ltp", 0) or 0)
+            if ce_ltp > 0 and pe_ltp > 0:
+                return max(ce_ltp, pe_ltp) / min(ce_ltp, pe_ltp) >= self._ratio_threshold
+            return False
+        if reason.startswith("ltp_decay_"):
+            _side = reason.split("_")[-1]
+            _ltp = float(getattr(pos.ce_leg if _side == "CE" else pos.pe_leg, "ltp", 0) or 0)
+            return 0 < _ltp < self._ltp_exit_min
+        if reason == "vwap_rise_roll":
+            _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+            curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
+            if curr_vwap > 0 and pos.session_min_vwap < float("inf"):
+                return (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100 >= self._vwap_rise_threshold
+            return False
+        if reason == "scalable_tsl":
+            _tsl_pnl = pnl
+            if self._tsl_basis == "theta":
+                _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+                if _etv > 0:
+                    _tsl_pnl = _etv - pos.current_time_value(self._spot)
+            return self._check_scalable_tsl(pos, _tsl_pnl)
+        return True  # unknown reason — keep pending
 
     async def _close_position(self, reason: str) -> None:
         if not self._position:
@@ -2425,14 +2481,14 @@ class SellStraddleStrategy:
             self._initial_net_credit,
         )
 
-        self._position = None
+        self._position     = None
+        self._pending_roll = None   # any pending roll is moot after a full close
         self._persist()   # clears the stored position
-        # Apply the configured re-entry cooldown after EVERY full exit (was: only stop_loss).
-        # vwap_rise_sl / guardrail_roc / exit_rules now FULL-exit + re-enter, and with no cooldown
-        # they re-entered the same candle → exit → re-enter → order CHURN (many rejected broker
-        # orders). The cooldown (sl_cooldown_tf_multiplier, set in the UI) gives a one-candle
-        # breather before re-entry. EOD/day-stop already block re-entry, so it's a no-op there.
-        self._apply_sl_cooldown()
+        # Apply re-entry cooldown after every full exit EXCEPT day_loss_sl — when the day SL
+        # fires the user wants an immediate re-entry attempt (no breather needed; the day SL
+        # itself already acts as the gate that got them out).
+        if reason != "day_loss_sl":
+            self._apply_sl_cooldown()
 
     def _apply_sl_cooldown(self) -> None:
         """Block re-entry for the configured number of MINUTES after a full exit."""

@@ -40,14 +40,15 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
         ltp = float(v.get("ltp", 0.0) or 0.0)
         if ltp < ltp_target:
             continue
-        # Ratio check: combined pair must not be too skewed (no hard anchor cap).
+        # Entry rules first — filter by re-entry logic before ratio check.
+        ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
+        if not rule_pass(ce_s, pe_s):
+            continue
+        # Ratio check among rule-passing candidates: combined pair must not be too skewed.
         if ratio_threshold > 0 and kept_ltp and kept_ltp > 0 and ltp > 0:
             _r = max(ltp, float(kept_ltp)) / min(ltp, float(kept_ltp))
             if _r > ratio_threshold:
                 continue
-        ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
-        if not rule_pass(ce_s, pe_s):
-            continue
         diff = abs(ltp - float(kept_ltp))
         if best is None or diff < best[0]:
             best = (diff, int(strike), ltp)
