@@ -319,6 +319,11 @@ class SellStraddleStrategy:
         # for post-market analysis without needing the broker ATP replay.
         self._csv_file   = None
         self._csv_writer = None
+        # Pool CSV — one row per (minute, strike, side) for every tracked leg in the
+        # pool engine. Stores individual leg LTP + ATP so post-market optimization can
+        # reconstruct any pair combination's combined premium/VWAP/SLOPE/RSI/ROC.
+        self._pool_csv_file   = None
+        self._pool_csv_writer = None
 
         from strategies.pool_indicator_engine import PoolIndicatorEngine
         self._pool_engine = PoolIndicatorEngine(rsi_len=14, roc_len=10)
@@ -725,6 +730,13 @@ class SellStraddleStrategy:
                 pass
             self._csv_file   = None
             self._csv_writer = None
+        if self._pool_csv_file:
+            try:
+                self._pool_csv_file.close()
+            except Exception:
+                pass
+            self._pool_csv_file   = None
+            self._pool_csv_writer = None
         # Tasks are awaited by the event loop after cancel(); callers that need to
         # guarantee cleanup should await stop_async() instead.
 
@@ -1308,7 +1320,7 @@ class SellStraddleStrategy:
         self._write_csv_row(ts, _ce_l, _pe_l, _ci)
 
     def _open_csv_recorder(self) -> None:
-        """Open (or reopen) the day CSV file for this book. Called at session start."""
+        """Open (or reopen) the day position CSV + pool CSV for this book."""
         import csv as _csv
         try:
             os.makedirs("data/live_records", exist_ok=True)
@@ -1318,8 +1330,10 @@ class SellStraddleStrategy:
                 parts.append(self._client_id)
             if self._binding_id:
                 parts.append(self._binding_id)
-            fname = f"data/live_records/ss_{'_'.join(parts)}_{date_str}.csv"
-            f = open(fname, "a", newline="", buffering=1)
+            prefix = f"data/live_records/ss_{'_'.join(parts)}_{date_str}"
+
+            # ── position CSV ──────────────────────────────────────────────────
+            f = open(f"{prefix}.csv", "a", newline="", buffering=1)
             w = _csv.writer(f)
             if f.tell() == 0:
                 w.writerow([
@@ -1339,12 +1353,45 @@ class SellStraddleStrategy:
                     pass
             self._csv_file   = f
             self._csv_writer = w
-            logger.info("SellStraddle[%s]: CSV recorder opened → %s", self._underlying, fname)
+
+            # ── pool CSV ──────────────────────────────────────────────────────
+            # One row per (minute, strike, side) for EVERY leg tracked in the pool
+            # engine. Stores raw LTP + ATP so post-market analysis can reconstruct
+            # any pair combination: combined = CE_ltp + PE_ltp, vwap = CE_atp + PE_atp.
+            fp = open(f"{prefix}_pool.csv", "a", newline="", buffering=1)
+            wp = _csv.writer(fp)
+            if fp.tell() == 0:
+                wp.writerow(["datetime", "strike", "side", "ltp", "atp"])
+            if self._pool_csv_file:
+                try:
+                    self._pool_csv_file.close()
+                except Exception:
+                    pass
+            self._pool_csv_file   = fp
+            self._pool_csv_writer = wp
+
+            logger.info("SellStraddle[%s]: CSV recorders opened → %s[.csv/_pool.csv]",
+                        self._underlying, prefix)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: CSV recorder open failed: %s", self._underlying, exc)
 
     def _write_csv_row(self, ts: datetime, ce_ltp: float, pe_ltp: float, ci: dict) -> None:
-        """Write one row per 1m close. Multi-tf indicators fetched from pool engine."""
+        """Write one row per 1m close to position CSV + one row per pool leg to pool CSV."""
+        ts_str = ts.strftime("%Y-%m-%d %H:%M")
+
+        # ── pool CSV — every tracked leg regardless of position ───────────────
+        if self._pool_csv_writer:
+            try:
+                for (strike, side), (ltp, atp) in self._pool_engine._latest.items():
+                    if ltp > 0:
+                        self._pool_csv_writer.writerow([
+                            ts_str, strike, side,
+                            round(float(ltp), 2), round(float(atp), 2),
+                        ])
+            except Exception as exc:
+                logger.debug("SellStraddle[%s]: pool CSV write error: %s", self._underlying, exc)
+
+        # ── position CSV — active pair indicators ─────────────────────────────
         if not self._csv_writer:
             return
         try:
@@ -1374,7 +1421,7 @@ class SellStraddleStrategy:
             s3, r3, rc3 = _ind(3)
 
             self._csv_writer.writerow([
-                ts.strftime("%Y-%m-%d %H:%M"),
+                ts_str,
                 ce_s, pe_s,
                 round(float(ce_ltp), 2), round(float(pe_ltp), 2),
                 round(float(ce_ltp + pe_ltp), 2),
