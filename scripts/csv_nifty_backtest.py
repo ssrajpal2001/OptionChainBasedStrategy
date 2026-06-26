@@ -225,7 +225,7 @@ def _simulate_exit(
     OPP_SIGNAL: if opposite side fires, close at that timestamp.
     """
     sq_ts    = pd.Timestamp(f"{trade_date} {EOD_TIME}")
-    init_sl  = zone_low - sl_buf
+    init_sl  = zone_low          # sl_trigger = init_sl - sl_buf (applied below)
     t1_price = zone_high
 
     future_bars = opt_1m[opt_1m["datetime"] > entry_ts].copy()
@@ -242,7 +242,7 @@ def _simulate_exit(
          if e.get("status") in ("TRAPPED", "CLOSED") and float(e.get("zone_low", 0)) > 0]
     )
 
-    trail_sl    = init_sl
+    trail_sl    = zone_low
     t1_hit      = False
     t1_qty      = total_qty // 2
     rem_qty     = total_qty - t1_qty
@@ -342,10 +342,10 @@ def _run_day_csv(
     print(f"  {trade_date}  expiry={expiry}  ATM={atm}  CE={ce_strike}  PE={pe_strike}")
 
     all_trades: list[dict] = []
-    opp_ce_ts = None  # timestamp when CE trade fires (to close PE)
-    opp_pe_ts = None  # timestamp when PE trade fires (to close CE)
-    ce_trade  = None
-    pe_trade  = None
+    # opp_ce_ts = first CE entry time → used as OPP_SIGNAL for PE
+    # opp_pe_ts = first PE entry time → used as OPP_SIGNAL for CE (sequential: CE runs first so unused)
+    opp_ce_ts: pd.Timestamp | None = None
+    opp_pe_ts: pd.Timestamp | None = None
 
     for opt_type, strike in [("CE", ce_strike), ("PE", pe_strike)]:
         opt_1m = _opt_bars(df_day, strike, opt_type, expiry)
@@ -434,15 +434,15 @@ def _run_day_csv(
                 print(f"  {trade_date} {opt_type} {strike}: 15m→3m {sz_low:.0f}-{sz_high:.0f} "
                       f"→ 1m breakout @ {ts_str}  entry={entry_price:.1f}  [{trap_pos}]")
 
-                # OPP_SIGNAL: close this trade when opposite leg fires
+                # OPP_SIGNAL: close PE when first CE fired; CE runs first so opp_pe_ts stays None
                 opp_ts = opp_ce_ts if opt_type == "PE" else opp_pe_ts
 
                 exit_info = _simulate_exit(
                     opt_1m         = opt_1m,
                     entry_ts       = entry_ts_bar,
                     entry_price    = entry_price,
-                    zone_low       = sz_low,
-                    zone_high      = sz_high,
+                    zone_low       = sz_low,   # sub-zone low → SL anchor
+                    zone_high      = zh,        # PARENT 15m zone high → T1 target (above entry)
                     sl_buf         = sl_buf,
                     trade_date     = trade_date,
                     total_qty      = total_qty,
@@ -457,8 +457,8 @@ def _run_day_csv(
                     "trap_pos":  trap_pos,
                     "entry_ts":  str(entry_ts_bar)[:16],
                     "entry":     round(entry_price, 2),
-                    "zone":      f"{sz_low:.0f}-{sz_high:.0f}",
-                    "t1":        round(sz_high, 2),
+                    "sub_zone":  f"{sz_low:.0f}-{sz_high:.0f}",
+                    "t1":        round(zh, 2),        # parent 15m zone high
                     "sl":        round(sz_low - sl_buf, 2),
                     "exit":      exit_info["exit"],
                     "exit_ts":   str(exit_info["exit_ts"])[:16],
@@ -469,11 +469,11 @@ def _run_day_csv(
                 all_trades.append(trade)
                 open_trade = exit_info
 
-                # Register this trade's entry as OPP_SIGNAL trigger for other leg
-                if opt_type == "CE":
-                    opp_pe_ts = entry_ts_bar  # PE should close when CE fires
-                else:
+                # CE entry → mark opp_ce_ts so PE iteration closes on it
+                if opt_type == "CE" and opp_ce_ts is None:
                     opp_ce_ts = entry_ts_bar
+                elif opt_type == "PE" and opp_pe_ts is None:
+                    opp_pe_ts = entry_ts_bar
 
                 added += 1
 
@@ -577,14 +577,14 @@ if __name__ == "__main__":
     print(f"NIFTY CSV  Trades={len(trades)}  Win={wr}%  Rs {total:+,}  PF={pf}")
     print(f"{'─'*90}")
     print(f"  {'Date':<12} {'Opt':<4} {'Strike':<7} {'LTF':<7} {'Time':<6} "
-          f"{'Entry':>7} {'Zone':>13} {'Exit':>7} {'Reason':<12} {'P&L':>9}")
-    print(f"  {'─'*84}")
+          f"{'Entry':>7} {'SubZone':>11} {'T1':>6} {'SL':>6} {'Exit':>7} {'Reason':<12} {'P&L':>9}")
+    print(f"  {'─'*96}")
     for t in trades:
         ts = t["entry_ts"][11:16] if len(t["entry_ts"]) > 10 else t["entry_ts"]
         print(f"  {t['date']:<12} {t['opt_type']:<4} {t['strike']:<7} "
               f"{t['trap_pos']:<7} {ts:<6} "
-              f"{t['entry']:>7.1f} {t['zone']:>13} {t['exit']:>7.1f} "
-              f"{t['reason']:<12} ₹{t['pnl_rs']:>+8,}")
+              f"{t['entry']:>7.1f} {t['sub_zone']:>11} {t['t1']:>6.0f} {t['sl']:>6.0f} "
+              f"{t['exit']:>7.1f} {t['reason']:<12} ₹{t['pnl_rs']:>+8,}")
     print(f"\n{'='*65}")
     print(f"  Total P&L    : ₹{total:+,}")
     print(f"  Win Rate     : {len(wins)}/{len(trades)}  ({wr}%)")
