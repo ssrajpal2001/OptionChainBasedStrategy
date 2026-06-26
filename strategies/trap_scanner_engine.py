@@ -375,7 +375,7 @@ class TrapScannerEngine:
             try:
                 now = datetime.now(IST)
                 sq_h, sq_m = map(int, self._sq_off_str.split(":"))
-                is_mcx = self._und in ("CRUDEOIL",)
+                is_mcx = self._und in ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER")
                 market_open = time(9, 5) if is_mcx else time(9, 16)
 
                 if now.time() >= time(sq_h, sq_m) and self._initialized:
