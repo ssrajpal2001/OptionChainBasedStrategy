@@ -1514,17 +1514,20 @@ if __name__ == "__main__":
               f"{'Trades':>6}  {'Win%':>5}  {'P&L':>10}  {'PF':>6}")
         print(f"  {'-'*76}")
         for r in combos:
-            print(f"  {r['combo']:<4} {r['sl_buf']:>5.0f} {r['depth']:<6} {r.get('max_ltf_index', r.get('max_ltf', 0)):>4}  "
+            pf_val    = r.get("profit_factor", r.get("pf", 0))
+            pnl_val   = r.get("total_rs",      r.get("total_pnl", 0))
+            ltf_val   = r.get("max_ltf",       r.get("max_ltf_index", 0))
+            print(f"  {r['combo']:<4} {r['sl_buf']:>5.0f} {r['depth']:<6} {ltf_val:>4}  "
                   f"{r['trades']:>6}  {r['win_pct']:>5.1f}%  "
-                  f"Rs{r.get('total_pnl', r.get('total_rs', 0)):>+9,.0f}  {r.get('pf', r.get('profit_factor', 0)):>6.2f}")
+                  f"Rs{pnl_val:>+9,.0f}  {pf_val:>6.2f}")
         print(f"\n  Best by PF:")
-        best = max(combos, key=lambda x: x["pf"]) if combos else {}
+        best = max(combos, key=lambda x: x.get("profit_factor", x.get("pf", 0))) if combos else {}
         if best:
             print(f"    sl_buf={best['sl_buf']}  depth={best['depth']}  "
-                  f"max_ltf={best.get('max_ltf_index', best.get('max_ltf', 0))}  "
+                  f"max_ltf={best.get('max_ltf', best.get('max_ltf_index', 0))}  "
                   f"trades={best['trades']}  win%={best['win_pct']}%  "
-                  f"PF={best.get('pf', best.get('profit_factor', 0))}  "
-                  f"P&L=Rs{best.get('total_pnl', best.get('total_rs', 0)):+,.0f}")
+                  f"PF={best.get('profit_factor', best.get('pf', 0))}  "
+                  f"P&L=Rs{best.get('total_rs', best.get('total_pnl', 0)):+,.0f}")
         sys.exit(0)
 
     # -- Single backtest mode ---------------------------------------------------
