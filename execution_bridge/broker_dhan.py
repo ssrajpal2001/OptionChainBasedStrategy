@@ -192,7 +192,8 @@ class DhanBroker(BaseBroker):
             "transaction_type":   req.side.value,
             "quantity":           req.qty,
             "order_type":         _type_map[req.order_type],
-            "product_type":       self._product,
+            # MCX exchange always INTRADAY — MARGIN/NRML rejected on expiry day
+            "product_type":       "INTRADAY" if req.exchange.upper() == "MCX" else self._product,
             "price":              req.price,
             "trigger_price":      req.trigger_price if req.trigger_price > 0 else 0,
             "validity":           "DAY",

@@ -237,7 +237,8 @@ class AngelBroker(BaseBroker):
             "transactiontype": req.side.value,
             "exchange": req.exchange,
             "ordertype": _type_map[req.order_type],
-            "producttype": self._product,
+            # MCX exchange always INTRADAY — CARRYFORWARD/NRML rejected on expiry day
+            "producttype": "INTRADAY" if req.exchange.upper() == "MCX" else self._product,
             "duration": "DAY",
             "price": str(req.price),
             "squareoff": "0",

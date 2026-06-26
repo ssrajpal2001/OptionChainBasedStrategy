@@ -198,12 +198,15 @@ class ZerodhaBroker(BaseBroker):
                        if req.side == OrderSide.BUY
                        else kite.TRANSACTION_TYPE_SELL)
         # Product precedence (per client requirement — deployment-driven):
-        #   1. The CLIENT's explicit choice on THIS binding (deployment screen) — AUTHORITATIVE.
-        #   2. Else the ORDER's product (per-strategy default from the bridge), if valid MIS/NRML.
-        #   3. Else the binding's inferred default.
+        #   1. MCX exchange → always MIS (NRML/carry invalid for MCX intraday; fails on expiry day).
+        #   2. The CLIENT's explicit choice on THIS binding (deployment screen) — AUTHORITATIVE.
+        #   3. Else the ORDER's product (per-strategy default from the bridge), if valid MIS/NRML.
+        #   4. Else the binding's inferred default.
         # So the client picks MIS/NRML/carry per deployment, and that drives the order.
         _req_prod = (getattr(req, "product", "") or "").strip().upper()
-        if getattr(self, "_product_explicit", False):
+        if req.exchange.upper() == "MCX":
+            _prod_str = "MIS"  # MCX intraday always — NRML rejected on expiry day
+        elif getattr(self, "_product_explicit", False):
             _prod_str = self._product
         elif _req_prod in ("MIS", "NRML"):
             _prod_str = _req_prod
