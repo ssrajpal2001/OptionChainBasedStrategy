@@ -53,6 +53,10 @@ INDEX_CFG = {
         "htf_min":   75,
         "ltf_min":   5,
         "sq_time":   "15:25",
+        # -- June-2026 optimised pure-intraday params --
+        "intraday_htf_min": 20,   # HTF zone tf on option bars
+        "intraday_sub_min": 3,    # sub-zone confirmation tf
+        "tsl_min":          3,    # ratchet-TSL trail tf
     },
     "SENSEX": {
         "spot_key":  "BSE_INDEX|SENSEX",
@@ -98,10 +102,38 @@ INDEX_CFG = {
         "ltf_min":   5,
         "sq_time":   "15:25",
     },
+    # MCX Gold Mini — futures is the underlying (no separate index). Strikes are
+    # spaced 500 (NOT 100) on Upstox, so the nearest tradeable ITM offset is one
+    # strike = 500. Lot size 100. MCX session 09:00–23:30, EOD square-off 23:25.
+    "GOLDM": {
+        "spot_key":   "MCX_FO|510764",   # GOLDM FUT 03JUL26 (front month) — ATM source
+        "step":       500,
+        "lot":        100,
+        "gap_near":   500,   # CE1 = ATM-500 (1 strike ITM), PE1 = ATM+500
+        "gap_far":    1000,  # CE2 = ATM-1000, PE2 = ATM+1000
+        "gap_thresh": 0.5,
+        "htf_min":    75,
+        "ltf_min":    5,
+        "sess_open":  "09:00",
+        "sess_close": "23:30",
+        "sq_time":    "23:25",
+        "is_mcx":     True,
+        # -- June-2026 optimised pure-intraday params --
+        "intraday_htf_min": 10,   # HTF zone tf on option bars
+        "intraday_sub_min": 1,    # sub-zone confirmation tf
+        "tsl_min":          3,    # ratchet-TSL trail tf
+    },
 }
 
 _HEADERS:       dict = {}   # set by CLI / API caller
 _FIXED_EXPIRY:  str  = ""   # when set, all option keys use this expiry (e.g. "31JUL26")
+
+# Trading-session window + EOD square-off — defaults to NSE equity-index hours.
+# MCX commodities (GOLDM/CRUDEOIL) override these to 09:00–23:30 / EOD 23:25 via
+# _apply_session(cfg) at the top of each backtest/optimize entry point.
+_SESSION_OPEN:  str = "09:15"
+_SESSION_CLOSE: str = "15:30"
+_EOD_TIME:      str = "15:25"
 
 
 # -- Data fetch -----------------------------------------------------------------
@@ -148,8 +180,21 @@ def _fetch_1m(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
 
 
 def _mkt_hours(df: pd.DataFrame) -> pd.DataFrame:
-    return df[(df["datetime"].dt.time >= pd.Timestamp("09:15").time()) &
-              (df["datetime"].dt.time <= pd.Timestamp("15:30").time())]
+    return df[(df["datetime"].dt.time >= pd.Timestamp(_SESSION_OPEN).time()) &
+              (df["datetime"].dt.time <= pd.Timestamp(_SESSION_CLOSE).time())]
+
+
+def _apply_session(cfg: dict) -> None:
+    """Set the module-level trading-session window from an index cfg.
+
+    MCX commodities (GOLDM/CRUDEOIL) trade 09:00–23:30 with EOD square-off ~23:25;
+    NSE/BSE indices use 09:15–15:30 / EOD 15:25. Called once per backtest run so
+    _mkt_hours() and the _simulate_exit EOD guard apply the right session.
+    """
+    global _SESSION_OPEN, _SESSION_CLOSE, _EOD_TIME
+    _SESSION_OPEN  = cfg.get("sess_open",  "09:15")
+    _SESSION_CLOSE = cfg.get("sess_close", "15:30")
+    _EOD_TIME      = cfg.get("sq_time",    "15:25")
 
 
 def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
@@ -376,10 +421,14 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                    df1m_scan: pd.DataFrame | None = None,
                    force_exit_ts: pd.Timestamp | None = None,
                    no_target_tsl: bool = False,
-                   use_high_breakout: bool = True) -> Optional[dict]:
+                   use_high_breakout: bool = True,
+                   n_lots: int = 2) -> Optional[dict]:
     """
     df1m       = exec strike bars (prices for entry/exit P&L)
     df1m_scan  = scan strike bars (SL/T1/TSL trigger logic); if None, uses df1m (no 1ITM)
+    n_lots     = number of lots traded. The strategy books 50% at T1 and trails 50%,
+                 so n_lots MUST be even for a clean whole-lot split (1 lot would split
+                 32.5/32.5 of a 65-qty NIFTY lot = un-tradeable). Default 2.
     """
     # 1ITM: scan bars drive triggers (zone levels), exec bars drive entry/exit prices.
     # Only valid when scan and exec strikes are close (GAP trades: 150 pts apart).
@@ -388,7 +437,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     scan_bars = df1m_scan if use_1itm_mode else df1m
     exec_bars = df1m
 
-    total_qty = lot * 2
+    total_qty = lot * n_lots
     t1_qty    = total_qty // 2
     rem_qty   = total_qty - t1_qty
 
@@ -573,7 +622,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             break
 
         # 5. EOD
-        if bar_ts.time() >= pd.Timestamp("15:25").time():
+        if bar_ts.time() >= pd.Timestamp(_EOD_TIME).time():
             exit_price  = exec_close
             exit_reason = "EOD"
             exit_ts     = bar_ts
@@ -644,10 +693,20 @@ def _run_day(index: str, cfg: dict, trade_date: str,
              open_spike_min: int = 30,
              pure_intraday: bool = False,
              max_ltf_index: int = 0,
-             zone_scan_cache: dict | None = None) -> list[dict]:
+             zone_scan_cache: dict | None = None,
+             intraday_htf_min: int = 15,
+             intraday_sub_min: int = 3,
+             tsl_min: int = 5,
+             n_lots: int = 2) -> list[dict]:
     """
     Run one trading day. df_spot_all has spot 1m bars for prev week + today.
     Returns list of trade dicts (may be empty).
+
+    Timeframe cascade (pure_intraday):
+      intraday_htf_min : zone-detection HTF on option bars (default 15m)
+      intraday_sub_min : sub-zone confirmation tf inside the HTF zone (default 3m)
+      tsl_min          : ratchet-TSL trap scan tf after T1 (default 5m)
+      entry confirmation is always on 1m bars (use_high_breakout style).
     """
     td = pd.to_datetime(trade_date).date()
     step       = cfg["step"]
@@ -822,7 +881,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             if htf_min < 60 and len(htf_zones) > 1:
                 htf_zones = [min(htf_zones, key=lambda z: float(z.get("zone_low", 9999)))]
 
-            df_5 = _resample(df_opt_today, 5)
+            df_5 = _resample(df_opt_today, tsl_min)
 
             for htf_z in htf_zones:
                 zh = float(htf_z.get("zone_high", 0))
@@ -871,14 +930,15 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
             print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} HTF zone(s)")
         else:
-            # -- Step 2: No HTF zone -> 15min intraday cascade ------------------
-            # pure_intraday: scan ALL 15m zones + 3m sub-zones (15-3-1 mode)
-            # normal cascade: pick lowest 15m zone + 5m sub-zones
-            _cas_ck = (td, key, "cas15")
+            # -- Step 2: No HTF zone -> intraday cascade (htf_min -> sub_min) ----
+            # pure_intraday: scan ALL htf_min zones + sub_min sub-zones (HTF-sub-1m)
+            # normal cascade: pick lowest htf_min zone + ltf_min sub-zones
+            cas_htf = intraday_htf_min if pure_intraday else 15
+            _cas_ck = (td, key, f"cas{cas_htf}")
             if _cas_ck in zcache:
                 cas_zones = zcache[_cas_ck]
             else:
-                df_15 = _resample(df_opt_today, 15)
+                df_15 = _resample(df_opt_today, cas_htf)
                 _, cas15 = scanner.scan_htf(df_15) if len(df_15) >= 2 else (None, [])
                 cas_zones = sorted(
                     [e for e in (cas15 or []) if e.get("status") in ("TRAPPED", "CLOSED")],
@@ -887,30 +947,32 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 zcache[_cas_ck] = cas_zones
 
             if not cas_zones:
-                print(f"  {trade_date} {opt_type} {strike}: no zones (HTF or 15m)")
+                print(f"  {trade_date} {opt_type} {strike}: no zones (HTF or {cas_htf}m)")
                 continue
 
-            # Sub-zone timeframe: 3m for pure_intraday, 5m for normal cascade
-            sub_min  = 3 if pure_intraday else ltf_min
+            # Sub-zone timeframe: intraday_sub_min for pure_intraday, ltf_min for normal cascade
+            sub_min  = intraday_sub_min if pure_intraday else ltf_min
 
-            _df5_ck = (td, key, "df5")
+            # TSL ratchet bars (df_5) -- resampled at tsl_min (default 5m)
+            _df5_ck = (td, key, tsl_min, "tsl")
             if _df5_ck in zcache:
                 df_5 = zcache[_df5_ck]
             else:
-                df_5 = _resample(df_opt_today, 5)
+                df_5 = _resample(df_opt_today, tsl_min)
                 zcache[_df5_ck] = df_5
 
             _ltf_ck = (td, key, sub_min, "ltf")
             if _ltf_ck in zcache:
                 ltf_sub_all = zcache[_ltf_ck]
             else:
-                df_sub = _resample(df_opt_today, sub_min) if sub_min != 5 else df_5
+                df_sub = _resample(df_opt_today, sub_min)
                 _, ltf_sub_all = scanner.scan_htf(df_sub) if len(df_sub) >= 2 else (None, [])
                 zcache[_ltf_ck] = ltf_sub_all
 
-            # pure_intraday: all 15m zones (complete day); normal: only the lowest one
+            # pure_intraday: all htf_min zones (complete day); normal: only the lowest one
             zones_to_scan = cas_zones if pure_intraday else cas_zones[:1]
-            mode_tag      = f"INTRADAY-15m->{sub_min}m" if pure_intraday else f"CASCADE-15m->{sub_min}m"
+            mode_tag      = (f"INTRADAY-{cas_htf}m->{sub_min}m" if pure_intraday
+                             else f"CASCADE-{cas_htf}m->{sub_min}m")
 
             for cz in zones_to_scan:
                 zh = float(cz["zone_high"])
@@ -951,9 +1013,9 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         if not entry_signals:
             continue
 
-        # 5-min bars (may already exist from cascade path)
+        # TSL ratchet bars (may already exist from cascade path)
         if "df_5" not in dir():
-            df_5 = _resample(df_opt_today, 5)
+            df_5 = _resample(df_opt_today, tsl_min)
 
         # Store for pass 2
         leg_coll[(opt_type, strike, depth)] = {
@@ -1029,6 +1091,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         force_exit_ts=z_ts,
                         no_target_tsl=no_target_tsl,
                         use_high_breakout=use_high_breakout,
+                        n_lots=n_lots,
                     )
                     if re_result:
                         re_result["index"]       = index
@@ -1070,7 +1133,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     if not df_exec.empty:
                         exec_strike   = z_exec
                         df_exec_today = df_exec
-                        df_exec_5m    = _resample(df_exec, 5)
+                        df_exec_5m    = _resample(df_exec, tsl_min)
 
             # exit_only leg: only used to close running opposite trade, never opens new entry
             if exit_only:
@@ -1112,6 +1175,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 df1m_scan=scan_bars_arg,
                 no_target_tsl=no_target_tsl,
                 use_high_breakout=use_high_breakout,
+                n_lots=n_lots,
             )
             if result:
                 result["index"]        = index
@@ -1177,7 +1241,10 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        open_spike_min: int = 30,
                        pure_intraday: bool = False,
                        max_ltf_index: int = 0,
-                       fixed_expiry: str = "") -> dict:
+                       fixed_expiry: str = "",
+                       intraday_htf_min: int = 0,
+                       intraday_sub_min: int = 0,
+                       tsl_min: int = 0) -> dict:
     """fixed_expiry: e.g. '31JUL26' -- pins ALL option lookups to this one contract
     regardless of the trade date. Used for expiry-comparison backtest (Apr-Jun on July contracts).
     When set, `monthly` / `next_week` are ignored. REGISTRY is also bypassed for key lookup.
@@ -1194,6 +1261,12 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         return {"ok": False, "error": f"Unknown index {index}"}
     if htf_min > 0:
         cfg["htf_min"] = htf_min  # UI override
+    _apply_session(cfg)
+
+    # Resolve per-index optimised intraday TF defaults (caller may override with non-zero values)
+    _ihtf = intraday_htf_min or cfg.get("intraday_htf_min", 15)
+    _isub = intraday_sub_min or cfg.get("intraday_sub_min", 3)
+    _itsl = tsl_min          or cfg.get("tsl_min",          5)
 
     # Load REGISTRY for instrument key lookup (BSE_FO needs numeric tokens)
     try:
@@ -1243,7 +1316,10 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                               skip_open_spike=skip_open_spike,
                               open_spike_min=open_spike_min,
                               pure_intraday=pure_intraday,
-                              max_ltf_index=max_ltf_index)
+                              max_ltf_index=max_ltf_index,
+                              intraday_htf_min=_ihtf,
+                              intraday_sub_min=_isub,
+                              tsl_min=_itsl)
         all_trades.extend(day_trades)
 
     # Summary
@@ -1329,6 +1405,7 @@ def run_nifty_backtest_optimize(
         return {"ok": False, "error": f"Unknown index {index}"}
     if htf_min > 0:
         cfg["htf_min"] = htf_min
+    _apply_session(cfg)
 
     try:
         REGISTRY.load_sync(index.upper(), access_token=token)
@@ -1430,6 +1507,284 @@ def run_nifty_backtest_optimize(
     return {"ok": True, "results": results, "total": len(results)}
 
 
+# -- FULL staged optimizer (timeframe + SL + TSL + target + profit-lock + lots) -
+def _metrics(trades: list[dict]) -> dict:
+    """Aggregate a list of trade dicts into summary metrics."""
+    n      = len(trades)
+    wins   = [t for t in trades if t["pnl_rs"] > 0]
+    losses = [t for t in trades if t["pnl_rs"] <= 0]
+    total  = sum(t["pnl_rs"] for t in trades)
+    gw     = sum(t["pnl_rs"] for t in wins)
+    gl     = abs(sum(t["pnl_rs"] for t in losses))
+    pf     = round(gw / gl, 2) if gl > 0 else (99.0 if gw > 0 else 0.0)
+    return {
+        "trades":        n,
+        "wins":          len(wins),
+        "losses":        len(losses),
+        "win_pct":       round(100 * len(wins) / n, 1) if n else 0.0,
+        "total_rs":      int(total),
+        "profit_factor": pf,
+        "avg_win":       round(gw / len(wins), 0) if wins else 0,
+        "avg_loss":      round(-gl / len(losses), 0) if losses else 0,
+    }
+
+
+def _eval_config(index: str, cfg: dict, days: list[str], df_spot_all: pd.DataFrame,
+                 bar_cache: dict, zone_cache: dict, *,
+                 sl_buf: float, depth: str, max_ltf: int,
+                 htf_min: int, sub_min: int, tsl_min: int,
+                 use_high_breakout: bool,
+                 cap_per_lot: float, floor_per_lot: float,
+                 no_target_tsl: bool, n_lots: int) -> dict:
+    """Run every day for ONE complete parameter set and return aggregate metrics."""
+    trades: list[dict] = []
+    for td in days:
+        trades.extend(_run_day(
+            index, cfg, td, df_spot_all,
+            use_bias=False, sl_buf=sl_buf,
+            opt_bar_cache=bar_cache,
+            strike_depth=depth,
+            profit_cap_per_lot=cap_per_lot * n_lots,
+            use_1itm=False,
+            profit_floor_per_lot=floor_per_lot * n_lots,
+            no_target_tsl=no_target_tsl,
+            rr_filter=False, rr_min_ratio=1.0,
+            use_high_breakout=use_high_breakout,
+            skip_open_spike=True, open_spike_min=30,
+            pure_intraday=True,
+            max_ltf_index=max_ltf,
+            zone_scan_cache=zone_cache,
+            intraday_htf_min=htf_min,
+            intraday_sub_min=sub_min,
+            tsl_min=tsl_min,
+            n_lots=n_lots,
+        ))
+    return _metrics(trades)
+
+
+def run_full_optimize(
+    token: str, index: str = "NIFTY",
+    start: str = "", end: str = "",
+    monthly: bool = True, fixed_expiry: str = "",
+) -> dict:
+    """Staged ('coordinate-descent') optimization of the TRAP SCANNER across every
+    tunable axis. Each stage fixes the winner of the prior stage and prints a full
+    ranked table, so you can SEE all combinations at every step:
+
+      Stage 1  TIMEFRAME : intraday_htf_min x intraday_sub_min x entry-confirm(1m)
+      Stage 2  STOPLOSS  : sl_buf x tsl_min (ratchet trail timeframe)
+      Stage 3  EXIT      : target(profit cap /lot) x profit-lock(floor /lot) [+ no-target-TSL]
+      Stage 4  LOTS      : final config @ 2 vs 4 lots (win% invariant, P&L scales)
+
+    Ranking metric = Profit Factor (desc), tie-break total P&L (desc).
+    Returns {ok, stages:{...}, best:{...}}.
+    """
+    global _HEADERS, _USE_MONTHLY, _FIXED_EXPIRY
+    _HEADERS      = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    _USE_MONTHLY  = monthly
+    _FIXED_EXPIRY = fixed_expiry.strip().upper()
+
+    cfg = dict(INDEX_CFG.get(index.upper(), {}))
+    if not cfg:
+        return {"ok": False, "error": f"Unknown index {index}"}
+    _apply_session(cfg)
+
+    try:
+        REGISTRY.load_sync(index.upper(), access_token=token)
+    except Exception as exc:
+        print(f"[REGISTRY] load failed ({exc}) -- will use symbol fallback")
+
+    s_date = date.fromisoformat(start)
+    e_date = date.fromisoformat(end)
+    days   = _trading_days(s_date, e_date)
+
+    spot_from = (s_date - timedelta(days=14)).isoformat()
+    spot_to   = (e_date + timedelta(days=1)).isoformat()
+    df_spot_all = _fetch_1m(cfg["spot_key"], spot_from, spot_to)
+    if df_spot_all.empty:
+        return {"ok": False, "error": "No spot data"}
+    df_spot_all = _mkt_hours(df_spot_all)
+
+    bar_cache:  dict = {}
+    zone_cache: dict = {}
+
+    # Suppress the per-leg/day chatter from _run_day during the sweep (52 evals
+    # would otherwise emit megabytes). Stage headers/tables print outside this.
+    import io as _io, contextlib as _cl
+    def _qeval(**kw):
+        with _cl.redirect_stdout(_io.StringIO()):
+            return _eval_config(index, cfg, days, df_spot_all, bar_cache, zone_cache, **kw)
+
+    # Per-index defaults / grids -------------------------------------------------
+    _SL_GRIDS = {
+        "NIFTY":      [5, 8, 10, 15],
+        "SENSEX":     [10, 15, 20, 30],
+        "BANKNIFTY":  [15, 20, 25, 35],
+        "GOLDM":      [20, 40, 70, 100],   # gold premiums are large -> wider cushion
+        "CRUDEOIL":   [10, 15, 20, 30],
+    }
+    sl_grid       = _SL_GRIDS.get(index.upper(), [5, 8, 10, 15])
+    default_sl    = sl_grid[len(sl_grid) // 2]
+    htf_grid      = [10, 15, 20, 30]
+    sub_grid      = [1, 3, 5]
+    confirm_grid  = [True, False]      # True = 1m HIGH-breakout, False = 1m midpoint
+    tsl_grid      = [3, 5]
+    cap_grid      = [0, 2000, 3000, 5000, 8000]   # Rs PER LOT (0 = no target, ride TSL)
+    floor_grid    = [0, 1000, 1500, 2000]         # Rs PER LOT profit-lock (0 = off)
+
+    def _hdr(title: str):
+        print("\n" + "=" * 78)
+        print(f"  {title}")
+        print("=" * 78)
+
+    def _row_hdr():
+        print(f"  {'cfg':<34} {'Trd':>4} {'Win%':>6} {'P&L':>11} {'PF':>7}")
+        print("  " + "-" * 74)
+
+    def _row(label: str, m: dict, star: bool = False):
+        mark = " *" if star else "  "
+        print(f"{mark}{label:<34} {m['trades']:>4} {m['win_pct']:>5.1f}% "
+              f"Rs{m['total_rs']:>+9,} {m['profit_factor']:>7.2f}")
+
+    def _pick(rows: list[dict]) -> dict:
+        """Pick the most ROBUST config: highest total P&L among combos that clear a
+        minimum-trades floor (>= 40% of the busiest combo, min 5). A 100%-win / PF=99
+        combo with only 1-4 trades is overfit noise -- the floor excludes it. Falls
+        back to plain best-P&L if nothing clears the floor (very thin windows)."""
+        if not rows:
+            return {}
+        mx    = max(r["trades"] for r in rows)
+        floor = max(5, round(0.4 * mx))
+        elig  = [r for r in rows if r["trades"] >= floor]
+        pool  = elig if elig else rows
+        return max(pool, key=lambda r: (r["total_rs"], r["profit_factor"]))
+
+    def _show(rows: list[dict], labeler, best: dict):
+        """Print a stage table sorted by total P&L desc, starring the robust pick."""
+        rows.sort(key=lambda r: (r["total_rs"], r["profit_factor"]), reverse=True)
+        _row_hdr()
+        for m in rows:
+            _row(labeler(m), m, star=(m is best))
+
+    stages: dict = {}
+
+    # ---- Stage 1: TIMEFRAME --------------------------------------------------
+    _hdr(f"STAGE 1/4  TIMEFRAME  (HTF zone x sub-zone x 1m entry-confirm)  "
+         f"sl={default_sl} tsl=5 cap=0 floor=0")
+    s1 = []
+    for htf in htf_grid:
+        for sub in sub_grid:
+            if sub >= htf:
+                continue   # sub-zone tf must be finer than the HTF zone tf
+            for conf in confirm_grid:
+                m = _qeval(
+                                 sl_buf=default_sl, depth="near", max_ltf=10,
+                                 htf_min=htf, sub_min=sub, tsl_min=5,
+                                 use_high_breakout=conf,
+                                 cap_per_lot=0, floor_per_lot=0,
+                                 no_target_tsl=False, n_lots=2)
+                m.update({"htf": htf, "sub": sub, "confirm": conf})
+                s1.append(m)
+    best1 = _pick(s1)
+    _show(s1, lambda m: f"HTF {m['htf']:>2}m -> sub {m['sub']}m -> 1m[{'HIbrk' if m['confirm'] else 'mid'}]", best1)
+    stages["timeframe"] = s1
+    print(f"\n  >> BEST TIMEFRAME (robust): HTF={best1['htf']}m sub={best1['sub']}m "
+          f"entry={'HIGH-breakout' if best1['confirm'] else 'midpoint'}  "
+          f"{best1['trades']}trd {best1['win_pct']}% Rs{best1['total_rs']:+,} PF={best1['profit_factor']}")
+
+    HTF, SUB, CONF = best1["htf"], best1["sub"], best1["confirm"]
+
+    # ---- Stage 2: STOPLOSS x TSL --------------------------------------------
+    _hdr(f"STAGE 2/4  STOPLOSS x TSL-timeframe   (HTF={HTF} sub={SUB} "
+         f"entry={'HIbrk' if CONF else 'mid'})")
+    s2 = []
+    for sl in sl_grid:
+        for tsl in tsl_grid:
+            m = _qeval(
+                             sl_buf=sl, depth="near", max_ltf=10,
+                             htf_min=HTF, sub_min=SUB, tsl_min=tsl,
+                             use_high_breakout=CONF,
+                             cap_per_lot=0, floor_per_lot=0,
+                             no_target_tsl=False, n_lots=2)
+            m.update({"sl": sl, "tsl": tsl})
+            s2.append(m)
+    best2 = _pick(s2)
+    _show(s2, lambda m: f"SL buf {m['sl']:>2}  TSL {m['tsl']}m trail", best2)
+    stages["stoploss"] = s2
+    print(f"\n  >> BEST SL/TSL (robust): sl_buf={best2['sl']}  tsl_min={best2['tsl']}m  "
+          f"{best2['trades']}trd {best2['win_pct']}% Rs{best2['total_rs']:+,} PF={best2['profit_factor']}")
+    SL, TSL = best2["sl"], best2["tsl"]
+
+    # ---- Stage 3: TARGET x PROFIT-LOCK --------------------------------------
+    _hdr(f"STAGE 3/4  TARGET (cap/lot) x PROFIT-LOCK (floor/lot)   "
+         f"(HTF={HTF} sub={SUB} sl={SL} tsl={TSL})")
+    s3 = []
+    # 3a: target + ratchet-TSL (default exit machine)
+    for cap in cap_grid:
+        for floor in floor_grid:
+            m = _qeval(
+                             sl_buf=SL, depth="near", max_ltf=10,
+                             htf_min=HTF, sub_min=SUB, tsl_min=TSL,
+                             use_high_breakout=CONF,
+                             cap_per_lot=cap, floor_per_lot=floor,
+                             no_target_tsl=False, n_lots=2)
+            m.update({"cap": cap, "floor": floor, "mode": "T1+TSL"})
+            s3.append(m)
+    # 3b: no-target pure-TSL mode (floor only)
+    for floor in floor_grid:
+        m = _qeval(
+                         sl_buf=SL, depth="near", max_ltf=10,
+                         htf_min=HTF, sub_min=SUB, tsl_min=TSL,
+                         use_high_breakout=CONF,
+                         cap_per_lot=0, floor_per_lot=floor,
+                         no_target_tsl=True, n_lots=2)
+        m.update({"cap": 0, "floor": floor, "mode": "noTGT-TSL"})
+        s3.append(m)
+    def _lbl3(m):
+        cap_s = "noCap" if m["cap"] == 0 else f"cap{m['cap']//1000}k"
+        flr_s = "noLock" if m["floor"] == 0 else (f"lock{m['floor']//1000}k" if m['floor']>=1000 else f"lock{m['floor']}")
+        return f"{m['mode']:<9} {cap_s:<6} {flr_s}"
+    best3 = _pick(s3)
+    _show(s3, _lbl3, best3)
+    stages["exit"] = s3
+    print(f"\n  >> BEST EXIT (robust): mode={best3['mode']} cap/lot={best3['cap']} "
+          f"floor/lot={best3['floor']}  "
+          f"{best3['trades']}trd {best3['win_pct']}% Rs{best3['total_rs']:+,} PF={best3['profit_factor']}")
+
+    # ---- Stage 4: LOTS -------------------------------------------------------
+    _hdr("STAGE 4/4  LOTS  (final config @ 2 vs 4 lots -- win% invariant, P&L scales)")
+    s4 = []
+    for nl in (2, 4):
+        m = _qeval(
+                         sl_buf=SL, depth="near", max_ltf=10,
+                         htf_min=HTF, sub_min=SUB, tsl_min=TSL,
+                         use_high_breakout=CONF,
+                         cap_per_lot=best3["cap"], floor_per_lot=best3["floor"],
+                         no_target_tsl=(best3["mode"] == "noTGT-TSL"), n_lots=nl)
+        m["n_lots"] = nl
+        s4.append(m)
+    _row_hdr()
+    for m in s4:
+        _row(f"{m['n_lots']} lots (qty {cfg['lot']*m['n_lots']})", m)
+    stages["lots"] = s4
+    print("\n  NOTE: the scanner books 50% at T1 + trails 50% -> needs an EVEN lot count.")
+    print("        1 lot cannot split cleanly (half a lot is un-tradeable).")
+
+    best = {
+        "htf_min": HTF, "sub_min": SUB, "entry_confirm": "HIGH-breakout" if CONF else "midpoint",
+        "sl_buf": SL, "tsl_min": TSL,
+        "exit_mode": best3["mode"], "target_per_lot": best3["cap"], "lock_per_lot": best3["floor"],
+        "min_lots": 2, "trades": best3["trades"], "win_pct": best3["win_pct"],
+        "total_rs_2lot": best3["total_rs"], "profit_factor": best3["profit_factor"],
+    }
+    _hdr("RECOMMENDED CONFIG")
+    for k, v in best.items():
+        print(f"    {k:<18}: {v}")
+
+    return {"ok": True, "stages": stages, "best": best,
+            "bar_cache": len(bar_cache), "zone_cache": len(zone_cache)}
+
+
 # -- CLI ------------------------------------------------------------------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
@@ -1440,8 +1795,8 @@ if __name__ == "__main__":
     ap.add_argument("--token",   required=True, help="Upstox access token")
     # Index
     ap.add_argument("--index",   default="NIFTY",
-                    choices=["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
-                    help="Index to backtest (default: NIFTY)")
+                    choices=["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "GOLDM"],
+                    help="Index/commodity to backtest (default: NIFTY)")
     # Date range
     ap.add_argument("--start",   default="", help="Start date YYYY-MM-DD (default: today-weeks*7)")
     ap.add_argument("--end",     default="", help="End date YYYY-MM-DD   (default: today)")
@@ -1478,10 +1833,36 @@ if __name__ == "__main__":
     ap.add_argument("--optimize", action="store_true",
                     help="Run parameter sweep (sl_buf x max_ltf x depth) and print ranked table. "
                          "Requires --start and --end. Ignores --sl-buf and --max-ltf.")
+    ap.add_argument("--full-optimize", action="store_true",
+                    help="FULL staged optimization of EVERY axis: timeframe (HTF x sub x "
+                         "1m-confirm) -> stoploss x TSL-tf -> target x profit-lock -> lots. "
+                         "Prints a ranked table per stage. Requires --start and --end.")
     args = ap.parse_args()
 
     use_monthly = not args.weekly
     fixed_exp   = getattr(args, "fixed_expiry", "") or ""
+
+    # -- Full staged optimize mode ---------------------------------------------
+    if args.full_optimize:
+        if not args.start or not args.end:
+            print("ERROR: --full-optimize requires --start and --end dates")
+            sys.exit(1)
+        expiry_label = f"FIXED:{fixed_exp}" if fixed_exp else ("MONTHLY" if use_monthly else "WEEKLY")
+        print(f"\n{'='*78}")
+        print(f"  {args.index} FULL OPTIMIZE -- TRAP SCANNER (every axis, staged)")
+        print(f"{'='*78}")
+        print(f"  Date   : {args.start} -> {args.end}")
+        print(f"  Expiry : {expiry_label}")
+        print(f"{'='*78}")
+        res = run_full_optimize(
+            token=args.token, index=args.index,
+            start=args.start, end=args.end,
+            monthly=use_monthly, fixed_expiry=fixed_exp,
+        )
+        if not res.get("ok"):
+            print(f"ERROR: {res.get('error')}")
+            sys.exit(1)
+        sys.exit(0)
 
     # -- Optimize mode ----------------------------------------------------------
     if args.optimize:

@@ -56,7 +56,7 @@ _UPSTOX_UNDERLYING_KEY: Dict[str, str] = {
 }
 
 # MCX commodities — loaded from the MCX master JSON (futures-driven ATM).
-_MCX_UNDERLYINGS: Set[str] = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
+_MCX_UNDERLYINGS: Set[str] = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER"}
 _MCX_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz"
 _MONTH_ABBR_UP = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
                   "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]

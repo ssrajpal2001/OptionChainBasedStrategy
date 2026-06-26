@@ -137,6 +137,7 @@
         <option value="BANKNIFTY">BANKNIFTY (NSE monthly only)</option>
         <option value="FINNIFTY">FINNIFTY (NSE monthly only)</option>
         <option value="MIDCPNIFTY">MIDCAP NIFTY (NSE monthly only)</option>
+        <option value="GOLDM">GOLDM (MCX Gold Mini, PM session)</option>
       </select>
     </div>
 
@@ -266,7 +267,53 @@
             <span>SL Buffer (pts)</span>
             <span x-text="slBuf" class="font-mono font-600 text-t-bright"></span>
           </div>
-          <input type="range" x-model.number="slBuf" min="1" max="20" step="0.5" class="w-full accent-[var(--t-cyan)]" />
+          <input type="range" x-model.number="slBuf" min="1" max="50" step="0.5" class="w-full accent-[var(--t-cyan)]" />
+        </div>
+
+        <!-- Timeframe cascade -->
+        <div>
+          <p class="text-sm font-600 text-t-bright mb-2">Intraday Cascade TFs</p>
+          <div class="flex flex-col gap-2">
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-xs text-t-muted">HTF Zone (min)</p>
+                <p class="text-xs text-t-muted font-mono"><span x-text="intradayHtfMin"></span>m zone detection</p>
+              </div>
+              <div class="flex gap-1">
+                <template x-for="v in [10,15,20,30]" :key="v">
+                  <button @click="intradayHtfMin=v"
+                    :class="intradayHtfMin===v ? 'bg-[var(--t-cyan)] text-black' : 'bg-[var(--t-surface)] text-t-muted'"
+                    class="w-9 py-1 rounded text-xs font-700 transition-colors" x-text="v+'m'"></button>
+                </template>
+              </div>
+            </div>
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-xs text-t-muted">Sub-zone (min)</p>
+                <p class="text-xs text-t-muted font-mono"><span x-text="intradaySubMin"></span>m sub-trap</p>
+              </div>
+              <div class="flex gap-1">
+                <template x-for="v in [1,3,5]" :key="v">
+                  <button @click="intradaySubMin=v"
+                    :class="intradaySubMin===v ? 'bg-[var(--t-cyan)] text-black' : 'bg-[var(--t-surface)] text-t-muted'"
+                    class="w-9 py-1 rounded text-xs font-700 transition-colors" x-text="v+'m'"></button>
+                </template>
+              </div>
+            </div>
+            <div class="flex items-center justify-between">
+              <div>
+                <p class="text-xs text-t-muted">TSL Trail (min)</p>
+                <p class="text-xs text-t-muted font-mono">ratchet trail on <span x-text="tslMin"></span>m bars</p>
+              </div>
+              <div class="flex gap-1">
+                <template x-for="v in [3,5]" :key="v">
+                  <button @click="tslMin=v"
+                    :class="tslMin===v ? 'bg-[var(--t-cyan)] text-black' : 'bg-[var(--t-surface)] text-t-muted'"
+                    class="w-9 py-1 rounded text-xs font-700 transition-colors" x-text="v+'m'"></button>
+                </template>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Profit Cap toggle -->
@@ -307,7 +354,7 @@
               <div class="flex justify-between text-xs text-t-muted mb-1">
                 <span>Lock ₹<span x-text="profitFloor.toLocaleString('en-IN')"></span> total · TSL continues · exit if P&L drops below lock</span>
               </div>
-              <input type="range" x-model.number="profitFloor" min="2000" max="20000" step="1000"
+              <input type="range" x-model.number="profitFloor" min="500" max="20000" step="500"
                 class="w-full accent-[var(--t-cyan)]" />
             </div>
           </template>
@@ -362,11 +409,11 @@
           </label>
         </div>
 
-        <!-- Pure Intraday Mode (15-3-1) -->
+        <!-- Pure Intraday Mode -->
         <div class="flex items-center justify-between">
           <div>
-            <p class="text-sm font-600 text-t-bright">Pure Intraday Mode (15m→3m→1m)</p>
-            <p class="text-xs text-t-muted">Skip all HTF prev-day zones · ATM±offset strikes · scan ALL 15m intraday zones → 3m sub-traps → 1m HIGH breakout</p>
+            <p class="text-sm font-600 text-t-bright">Pure Intraday Mode (<span x-text="intradayHtfMin"></span>m→<span x-text="intradaySubMin"></span>m→1m)</p>
+            <p class="text-xs text-t-muted">Skip all HTF prev-day zones · ATM±offset strikes · scan ALL <span x-text="intradayHtfMin"></span>m intraday zones → <span x-text="intradaySubMin"></span>m sub-traps → 1m entry</p>
           </div>
           <label class="flex items-center gap-1 cursor-pointer">
             <input type="checkbox" x-model="pureIntraday" class="accent-[var(--t-cyan)]" />
@@ -787,17 +834,20 @@ function backtestNifty() {
     slBuf:        5.0,
     profitCapOn:  false,
     profitCap:    10000,
-    profitFloorOn: false,
-    profitFloor:   10000,
-    noTargetTsl:      false,
+    profitFloorOn: true,
+    profitFloor:   3000,
+    noTargetTsl:      true,
     rrFilter:         false,
     rrMinRatio:       1.0,
     use1itm:          false,
-    useHighBreakout:  true,
+    useHighBreakout:  false,
     skipOpenSpike:    true,
     openSpikeMin:     30,
     pureIntraday:     true,
-    maxLtfIndex:      10,
+    maxLtfIndex:      5,
+    intradayHtfMin:   20,
+    intradaySubMin:   3,
+    tslMin:           3,
     ctrlOpen:     false,
     isMd:         window.innerWidth >= 768,
     token:     sessionStorage.getItem('upstox_token') || '',
@@ -828,19 +878,22 @@ function backtestNifty() {
       mq.addEventListener('change', e => { this.isMd = e.matches })
     },
 
+    // Per-index optimised defaults (sourced from June-2026 full-optimization results)
+    _indexDefs() {
+      return {
+        'NIFTY':      {slBuf:5,  useHighBreakout:false, noTargetTsl:true,  profitFloorOn:true,  profitFloor:5000,  profitCapOn:false, profitCap:10000, intradayHtfMin:20, intradaySubMin:3, tslMin:3,  monthly:true,  nextWeek:false, fixedExpiry:''},
+        'SENSEX':     {slBuf:20, useHighBreakout:true,  noTargetTsl:false, profitFloorOn:false, profitFloor:5000,  profitCapOn:false, profitCap:10000, intradayHtfMin:20, intradaySubMin:3, tslMin:5,  monthly:false, nextWeek:false, fixedExpiry:''},
+        'BANKNIFTY':  {slBuf:20, useHighBreakout:true,  noTargetTsl:false, profitFloorOn:false, profitFloor:10000, profitCapOn:false, profitCap:10000, intradayHtfMin:20, intradaySubMin:3, tslMin:5,  monthly:true,  nextWeek:false, fixedExpiry:''},
+        'FINNIFTY':   {slBuf:8,  useHighBreakout:true,  noTargetTsl:false, profitFloorOn:false, profitFloor:5000,  profitCapOn:false, profitCap:10000, intradayHtfMin:20, intradaySubMin:3, tslMin:5,  monthly:true,  nextWeek:false, fixedExpiry:''},
+        'MIDCPNIFTY': {slBuf:8,  useHighBreakout:true,  noTargetTsl:false, profitFloorOn:false, profitFloor:5000,  profitCapOn:false, profitCap:10000, intradayHtfMin:20, intradaySubMin:3, tslMin:5,  monthly:true,  nextWeek:false, fixedExpiry:''},
+        'GOLDM':      {slBuf:20, useHighBreakout:false, noTargetTsl:false, profitFloorOn:true,  profitFloor:2000,  profitCapOn:true,  profitCap:8000,  intradayHtfMin:10, intradaySubMin:1, tslMin:3,  monthly:false, nextWeek:false, fixedExpiry:''},
+      }
+    },
+
     // Auto-adjust defaults when index changes
     onIndexChange() {
-      const monthly_only = ['BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-      if (monthly_only.includes(this.index)) {
-        this.monthly    = true
-        this.nextWeek   = false
-        this.fixedExpiry = ''
-        // BANKNIFTY needs bigger SL
-        if (this.index === 'BANKNIFTY') this.slBuf = 20
-        else this.slBuf = 8
-      } else {
-        // NIFTY/SENSEX: keep current settings
-      }
+      const d = this._indexDefs()[this.index]
+      if (d) Object.assign(this, d)
     },
 
     weekStart() {
@@ -876,6 +929,9 @@ function backtestNifty() {
         open_spike_min:    this.openSpikeMin,
         pure_intraday:     this.pureIntraday,
         max_ltf_index:     this.maxLtfIndex,
+        intraday_htf_min:  this.intradayHtfMin,
+        intraday_sub_min:  this.intradaySubMin,
+        tsl_min:           this.tslMin,
       }
       if (this.dateMode === 'weeks') {
         payload.weeks = this.weeks

@@ -756,6 +756,9 @@ class DashboardServer:
             pure_intraday        = bool(p.get("pure_intraday", False))
             max_ltf_index        = int(p.get("max_ltf_index", 0))
             fixed_expiry         = str(p.get("fixed_expiry", "")).strip().upper()
+            intraday_htf_min     = int(p.get("intraday_htf_min", 0))
+            intraday_sub_min     = int(p.get("intraday_sub_min", 0))
+            tsl_min              = int(p.get("tsl_min", 0))
             if not token:
                 # Auto-pull Upstox access token from DB if already authenticated
                 try:
@@ -774,7 +777,8 @@ class DashboardServer:
                     monthly, strike_depth, profit_cap_per_lot, use_1itm, profit_floor_per_lot,
                     htf_min, no_target_tsl, rr_filter, rr_min_ratio, next_week,
                     use_high_breakout, skip_open_spike, open_spike_min, pure_intraday,
-                    max_ltf_index, fixed_expiry
+                    max_ltf_index, fixed_expiry,
+                    intraday_htf_min, intraday_sub_min, tsl_min
                 )
                 return result
             except Exception as exc:
