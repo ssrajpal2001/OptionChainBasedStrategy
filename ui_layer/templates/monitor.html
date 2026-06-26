@@ -3910,7 +3910,7 @@ function amoTest() {
   <!-- ── Instrument Selector ───────────────────────────────────────────── -->
   <div class="flex items-center gap-2 px-4 pt-3 pb-1 border-b" style="border-color:var(--t-border)">
     <span class="sec-label mr-2">INSTRUMENT</span>
-    <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','BTC','ETH']" :key="idx">
+    <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH']" :key="idx">
       <button @click="selectAdminIndex(idx)"
               class="font-display font-bold text-xs px-3 py-1.5 rounded transition-all"
               :style="adminSelectedIndex===idx
@@ -7379,7 +7379,7 @@ function amoTest() {
             </div>
           </div>
           <div class="flex gap-1">
-            <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','BTC','ETH']" :key="idx">
+            <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH']" :key="idx">
               <button class="idx-tab" :class="{active:activeIndex===idx}" @click="setClientIndex(idx)" x-text="idx"></button>
             </template>
           </div>
