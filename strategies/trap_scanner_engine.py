@@ -3295,17 +3295,23 @@ class TrapScannerEngine:
                 mode      = self._expiry_mode
 
                 if mode == "monthly" or self._monthly_exp:
-                    # Last expiry of the current calendar month from REGISTRY
+                    # Last expiry of the current (or next) calendar month from REGISTRY.
+                    # Skip any month whose last expiry is < 7 days away — it's too close to
+                    # roll or expire. E.g. on Jun 29 with Jun 30 expiry tomorrow, we skip Jun
+                    # and return Jul 28 so we always trade the far-dated contract.
                     exp_date = None
                     for i, exp in enumerate(future):
-                        if i + 1 >= len(future) or future[i + 1].month != exp.month:
+                        is_last_of_month = (i + 1 >= len(future) or future[i + 1].month != exp.month)
+                        if is_last_of_month and (exp - today).days >= 7:
                             exp_date = exp
                             break
                     if exp_date is not None:
                         exp_str = exp_date.strftime("%d%b%y").upper()
-                        self._log.info("_get_expiry %s → MONTHLY: %s (%s)", self._und, exp_str, exp_date)
+                        days_away = (exp_date - today).days
+                        self._log.info("_get_expiry %s → MONTHLY: %s (%s, %d days away)",
+                                       self._und, exp_str, exp_date, days_away)
                         return exp_str, exp_date
-                    self._log.warning("_get_expiry %s → MONTHLY but no monthly expiry in REGISTRY", self._und)
+                    self._log.warning("_get_expiry %s → MONTHLY but no far-enough expiry in REGISTRY", self._und)
 
                 elif mode == "next_week" or self._next_week_exp:
                     # Skip the nearest expiry — get the one after it
