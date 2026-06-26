@@ -41,7 +41,7 @@ class ExchangeConfig:
     mcx_market_close: time = time(23, 30, 0)     # MCX evening session close (~23:30 IST)
 
     # Underlyings that trade on MCX (commodity segment, futures-driven ATM)
-    mcx_underlyings: tuple = ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER")
+    mcx_underlyings: tuple = ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER")
 
     # Crypto (Delta Exchange) underlyings — DAILY options, 24/7, expire 17:30 IST.
     crypto_underlyings: tuple = ("BTC", "ETH")
@@ -59,6 +59,7 @@ class ExchangeConfig:
         "CRUDEOIL": 100.0,
         "CRUDEOILM": 100.0,
         "NATURALGAS": 5.0,
+        "GOLDM": 500.0,
         # Crypto (Delta) — fallback near-ATM step; discover_chain overrides live
         "BTC": 200.0,
         "ETH": 20.0,
@@ -75,6 +76,7 @@ class ExchangeConfig:
         "CRUDEOIL": 100,        # 100 barrels
         "CRUDEOILM": 10,        # mini = 10 barrels
         "NATURALGAS": 1250,
+        "GOLDM": 100,           # Gold Mini = 100 grams
         # Crypto (Delta) — order size is in CONTRACTS (1 = min). lot_multiplier scales it.
         "BTC": 1,
         "ETH": 1,
@@ -120,7 +122,7 @@ class ExchangeConfig:
 
 # Module-level set + helper so execution bridges can pick the order exchange
 # without threading a config object through (kept in sync with ExchangeConfig).
-_MCX_UNDERLYINGS = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "SILVER"}
+_MCX_UNDERLYINGS = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER"}
 _CRYPTO_UNDERLYINGS = {"BTC", "ETH"}
 
 

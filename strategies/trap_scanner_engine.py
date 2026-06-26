@@ -78,6 +78,10 @@ _INDEX_CFG: Dict[str, dict] = {
                    "sl_buf": 20.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": [[14, 30], [22, 45]], "exchange": "MCX",
                    "htf_source": "futures", "htf_min_override": 60},
+    "GOLDM":      {"step": 500, "lot": 100, "gap_near": 500, "gap_far": 1000,
+                   "sl_buf": 20.0, "cutoff": "23:20", "sq_off": "23:25",
+                   "window": None, "exchange": "MCX",
+                   "htf_source": "futures", "htf_min_override": 10},
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
                    "sl_buf": 50.0, "cutoff": "23:00", "sq_off": "23:15",
                    "window": None, "exchange": "DELTA", "htf_source": "futures"},
@@ -94,6 +98,7 @@ _SPOT_KEYS: Dict[str, str] = {
     "SENSEX":     "BSE_INDEX|SENSEX",
     "MIDCPNIFTY": "NSE_INDEX|NIFTY MID SELECT",
     "CRUDEOIL":   "MCX_FO|499095",   # CRUDEOIL near-month futures (dynamic in production)
+    "GOLDM":      "MCX_FO|510764",   # GOLDM near-month futures (verify key each expiry)
 }
 
 
