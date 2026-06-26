@@ -1380,6 +1380,7 @@ def run_nifty_backtest_optimize(
     htf_min: int = 0,
     use_high_breakout: bool = True,
     fixed_expiry: str = "",
+    intraday_htf_min: int = 0,
 ) -> dict:
     """Sweep key backtest parameters and return all combinations ranked by Profit Factor.
 
@@ -1406,6 +1407,8 @@ def run_nifty_backtest_optimize(
     if htf_min > 0:
         cfg["htf_min"] = htf_min
     _apply_session(cfg)
+    # Use caller-specified intraday HTF; fall back to index config default then 15m
+    _intraday_htf = intraday_htf_min if intraday_htf_min > 0 else cfg.get("intraday_htf_min", 15)
 
     try:
         REGISTRY.load_sync(index.upper(), access_token=token)
@@ -1468,6 +1471,7 @@ def run_nifty_backtest_optimize(
                         skip_open_spike=True,
                         open_spike_min=30,
                         pure_intraday=True,
+                        intraday_htf_min=_intraday_htf,
                         max_ltf_index=max_ltf,
                         zone_scan_cache=shared_zone_cache,
                     )

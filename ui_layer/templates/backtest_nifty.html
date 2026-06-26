@@ -976,13 +976,14 @@ function backtestNifty() {
       this.optResult  = null
       this.result     = null
       const payload = {
-        token:             this.token,
-        index:             this.index,
-        start:             this.startDate,
-        end:               this.endDate,
-        monthly:           this.monthly,
-        fixed_expiry:      this.fixedExpiry,
-        use_high_breakout: this.useHighBreakout,
+        token:              this.token,
+        index:              this.index,
+        start:              this.startDate,
+        end:                this.endDate,
+        monthly:            this.monthly,
+        fixed_expiry:       this.fixedExpiry,
+        use_high_breakout:  this.useHighBreakout,
+        intraday_htf_min:   this.intradayHtfMin,
       }
       try {
         const r = await fetch('/api/backtest/nifty/optimize', {

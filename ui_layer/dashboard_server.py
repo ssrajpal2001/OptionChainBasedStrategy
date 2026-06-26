@@ -796,10 +796,11 @@ class DashboardServer:
             index   = str(p.get("index", "NIFTY")).upper()
             start   = str(p.get("start", ""))
             end     = str(p.get("end", ""))
-            monthly       = bool(p.get("monthly", True))
-            htf_min       = int(p.get("htf_min", 0))
+            monthly           = bool(p.get("monthly", True))
+            htf_min           = int(p.get("htf_min", 0))
+            intraday_htf_min  = int(p.get("intraday_htf_min", 0))
             use_high_breakout = bool(p.get("use_high_breakout", True))
-            fixed_expiry  = str(p.get("fixed_expiry", "")).strip().upper()
+            fixed_expiry      = str(p.get("fixed_expiry", "")).strip().upper()
             if not token:
                 try:
                     fc = await asyncio.to_thread(
@@ -816,7 +817,8 @@ class DashboardServer:
                 from scripts.nifty_backtest import run_nifty_backtest_optimize
                 result = await asyncio.to_thread(
                     run_nifty_backtest_optimize,
-                    token, index, start, end, monthly, htf_min, use_high_breakout, fixed_expiry
+                    token, index, start, end, monthly, htf_min, use_high_breakout, fixed_expiry,
+                    intraday_htf_min,
                 )
                 return result
             except Exception as exc:
