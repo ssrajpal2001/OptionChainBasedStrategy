@@ -1,18 +1,18 @@
 """
-scripts/nifty_backtest.py — NIFTY / SENSEX options backtest (2-week rolling).
+scripts/nifty_backtest.py -- NIFTY / SENSEX options backtest (2-week rolling).
 
 Strategy:
   Morning setup (spot only):
-    Prev day H/L/C → pivot (P, R1, R2, S1, S2)
-    Today open → gap check
+    Prev day H/L/C -> pivot (P, R1, R2, S1, S2)
+    Today open -> gap check
 
-  No gap  → CE = S1 strike, PE = R1 strike
+  No gap  -> CE = S1 strike, PE = R1 strike
              HTF 75min scan on BOTH option charts (prev week + today)
-             First trap that fires → entry (no directional bias from spot)
-             OR both fire → take both
+             First trap that fires -> entry (no directional bias from spot)
+             OR both fire -> take both
 
-  Gap     → CE = ATM-1ITM, PE = ATM+1ITM (gap direction gives bias)
-             Intraday cascade 30min→5min on option bars
+  Gap     -> CE = ATM-1ITM, PE = ATM+1ITM (gap direction gives bias)
+             Intraday cascade 30min->5min on option bars
 
   All zone detection and LTF entries run on OPTION PREMIUM bars.
   Spot is used only at morning setup (gap / pivot / strike selection).
@@ -69,7 +69,7 @@ INDEX_CFG = {
         "spot_key":  "NSE_INDEX|Nifty Bank",
         "step":      100,
         "lot":       15,
-        "gap_near":  400,  # CE1=ATM-400, PE1=ATM+400 (wider — BNF moves 2-3x NIFTY)
+        "gap_near":  400,  # CE1=ATM-400, PE1=ATM+400 (wider -- BNF moves 2-3x NIFTY)
         "gap_far":   800,
         "gap_thresh": 0.5,
         "htf_min":   75,
@@ -139,7 +139,7 @@ def _fetch_1m(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
                 chunks.append(chunk)
             time.sleep(0.1)
         except Exception as exc:
-            print(f"    [fetch] {key} {cur}→{nxt} failed: {exc}")
+            print(f"    [fetch] {key} {cur}->{nxt} failed: {exc}")
         cur = nxt + timedelta(days=1)
     if not chunks:
         return pd.DataFrame()
@@ -223,7 +223,7 @@ def _monthly_expiry(index: str, from_date: date) -> tuple[date, str]:
     Return the monthly expiry on or after from_date.
 
     Strategy: get all expiries from REGISTRY (sorted). A monthly expiry is
-    the LAST expiry of its calendar month — detected by comparing consecutive
+    the LAST expiry of its calendar month -- detected by comparing consecutive
     expiries: if expiry[i].month != expiry[i+1].month, expiry[i] is monthly.
     If REGISTRY unavailable, fall back to last-weekday-of-month math.
     """
@@ -231,7 +231,7 @@ def _monthly_expiry(index: str, from_date: date) -> tuple[date, str]:
         all_exp = sorted(REGISTRY.all_expiries(index))
         # Filter to on or after from_date
         future = [e for e in all_exp if e >= from_date]
-        # Walk pairs — if next expiry is a different month, this one is the monthly
+        # Walk pairs -- if next expiry is a different month, this one is the monthly
         for i, exp in enumerate(future):
             if i + 1 >= len(future) or future[i + 1].month != exp.month:
                 return exp, exp.strftime("%d%b%y").upper()
@@ -259,14 +259,14 @@ def _get_expiry(index: str, from_date: date,
         exp = REGISTRY.get_active_expiry(index, from_date=from_date)
         if exp:
             if next_week:
-                # Skip current week — get the expiry AFTER this one
+                # Skip current week -- get the expiry AFTER this one
                 exp2 = REGISTRY.get_active_expiry(index, from_date=exp + timedelta(days=1))
                 if exp2:
                     return exp2, exp2.strftime("%d%b%y").upper()
             else:
                 return exp, exp.strftime("%d%b%y").upper()
     # Fallback: weekday math (REGISTRY not loaded or no match).
-    # next_week cannot be resolved accurately without real contract list —
+    # next_week cannot be resolved accurately without real contract list --
     # calendar +7d can land on a holiday-shifted date; log warning.
     dow = _WEEKLY_DOW.get(index, 3)
     d = from_date
@@ -274,14 +274,14 @@ def _get_expiry(index: str, from_date: date,
         if d.weekday() == dow:
             if next_week:
                 print(f"  [WARN] next_week expiry: REGISTRY not loaded for {index}; "
-                      f"calendar +7d fallback may be inaccurate — load REGISTRY first")
+                      f"calendar +7d fallback may be inaccurate -- load REGISTRY first")
                 d += timedelta(days=7)
             return d, d.strftime("%d%b%y").upper()
         d += timedelta(days=1)
     return from_date, from_date.strftime("%d%b%y").upper()
 
 
-# Module-level flags — set by run_nifty_backtest before _run_day is called
+# Module-level flags -- set by run_nifty_backtest before _run_day is called
 _USE_MONTHLY:   bool = False
 _USE_NEXT_WEEK: bool = False
 
@@ -290,7 +290,7 @@ def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str
     """Resolve Upstox instrument key for an option strike.
 
     When _FIXED_EXPIRY is set (e.g. '31JUL26'), that expiry is used for ALL dates
-    instead of computing the nearest weekly/monthly — used for multi-expiry comparison
+    instead of computing the nearest weekly/monthly -- used for multi-expiry comparison
     where we want to test one specific July contract over the full Apr-Jun backtest period.
     REGISTRY lookup is skipped when fixed (NSE symbol format is always valid for NSE_FO).
     """
@@ -316,7 +316,7 @@ def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str
 
 # ── Exit simulation ────────────────────────────────────────────────────────────
 def _is_junk_day(df_today: pd.DataFrame, min_active: int = 10) -> bool:
-    """True if the option bars lack volume — far-dated contract not yet liquid on this day."""
+    """True if the option bars lack volume -- far-dated contract not yet liquid on this day."""
     if df_today.empty:
         return True
     cutoff = df_today["datetime"].iloc[0] + pd.Timedelta(minutes=60)
@@ -370,7 +370,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     """
     # 1ITM: scan bars drive triggers (zone levels), exec bars drive entry/exit prices.
     # Only valid when scan and exec strikes are close (GAP trades: 150 pts apart).
-    # For PIVOT trades df1m_scan is None → standard mode (scan=exec).
+    # For PIVOT trades df1m_scan is None -> standard mode (scan=exec).
     use_1itm_mode = df1m_scan is not None and not df1m_scan.empty
     scan_bars = df1m_scan if use_1itm_mode else df1m
     exec_bars = df1m
@@ -385,7 +385,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     t1_price    = round(float(e["_htf_t1"]) if "_htf_t1" in e else zh, 2)
     t2_price    = float(e["_t2"]) if e.get("_t2") else None
     # SL: if HTF zone_low override present (5min sub-trap inside HTF zone),
-    # use HTF zone_low as absolute stop — not the tight 5min zone_low.
+    # use HTF zone_low as absolute stop -- not the tight 5min zone_low.
     init_sl     = float(e["_htf_sl"]) if "_htf_sl" in e else zl
 
     trap_ts = pd.to_datetime(e.get("closed_on") or e.get("trapped_on"))
@@ -395,10 +395,10 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
 
     # ── 1min rejection-candle entry confirmation ─────────────────────────
     # At zone_low area, wait for a 1min setup candle, then:
-    #   use_high_breakout=True  → enter only when next bar breaks ABOVE setup candle HIGH
+    #   use_high_breakout=True  -> enter only when next bar breaks ABOVE setup candle HIGH
     #                             (avoids entering on continued downtrends after bears cleared)
-    #   use_high_breakout=False → enter at 50% midpoint (earlier entry, less confirmation)
-    # If no confirmation within session → no trade.
+    #   use_high_breakout=False -> enter at 50% midpoint (earlier entry, less confirmation)
+    # If no confirmation within session -> no trade.
     entry_price  = None
     actual_entry_ts = None
     future_1m_all = exec_bars[exec_bars["datetime"] > trap_ts]
@@ -431,7 +431,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                     break
 
     if entry_price is None or entry_price <= 0:
-        return None   # no 1min confirmation → skip trade
+        return None   # no 1min confirmation -> skip trade
 
     # Update trap_ts to actual entry timestamp for simulation start
     trap_ts = actual_entry_ts
@@ -480,7 +480,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         # Exec price at this bar timestamp (for P&L calcs)
         exec_close = _price_at_ts(exec_bars, bar_ts) or bar_close
 
-        # Force exit: opposite side signal fired — close at this bar's exec price
+        # Force exit: opposite side signal fired -- close at this bar's exec price
         if force_exit_ts is not None and bar_ts >= force_exit_ts:
             exit_price  = round(exec_close, 2)
             exit_reason = "OPP_SIGNAL"
@@ -519,7 +519,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                     exit_ts     = bar_ts
                     break
 
-            # Profit floor: lock ₹floor after T1; exit if P&L drops below
+            # Profit floor: lock Rsfloor after T1; exit if P&L drops below
             if t1_hit and profit_floor_per_lot > 0:
                 running_rem = (exec_close - entry_price) * rem_qty
                 current_pnl = t1_pnl + running_rem
@@ -543,14 +543,14 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
                         trail_sl = z_low
                     trap_idx += 1
 
-            # 3. T2: scan bar high crosses next zone → exit at exec price
+            # 3. T2: scan bar high crosses next zone -> exit at exec price
             if t1_hit and t2_price and bar_high >= t2_price:
                 exit_price  = _price_at_ts(exec_bars, bar_ts) or exec_close
                 exit_reason = "T2"
                 exit_ts     = bar_ts
                 break
 
-        # SL trigger: intrabar (bar_low crosses SL level) → exit AT SL price, not close
+        # SL trigger: intrabar (bar_low crosses SL level) -> exit AT SL price, not close
         active_sl = trail_sl if (t1_hit and not no_target_tsl) else init_sl
         sl_trigger = round(active_sl - sl_buf, 2)
         if bar_low < sl_trigger:
@@ -659,7 +659,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     gap_fired  = gap_pct >= gap_thresh
     gap_dir    = "UP" if today_open >= prev_C else "DOWN"
 
-    # Strike selection — mirrors live scanner CE1/CE2/PE1/PE2
+    # Strike selection -- mirrors live scanner CE1/CE2/PE1/PE2
     trade_dt_obj = td
     if gap_fired:
         atm        = _round_strike(today_open, step)
@@ -717,17 +717,17 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
     trades = []
     # One-trade-at-a-time: persists across CE and PE legs
-    # {exit_ts, opt_type, trade_idx} — trade_idx points to trades[] for re-simulation
+    # {exit_ts, opt_type, trade_idx} -- trade_idx points to trades[] for re-simulation
     day_running_trade: dict | None = None
 
     # ── PASS 1: collect signals + bars for all legs (no simulation yet) ──────
     # This allows cross-leg R:R check (CE reward = PE LTP - PE zone_trigger)
-    leg_coll: dict[tuple, dict] = {}   # (opt_type, strike, depth) → data
+    leg_coll: dict[tuple, dict] = {}   # (opt_type, strike, depth) -> data
 
     for opt_type, strike, key, depth in legs:
         # Bias filter: on gap days, opposing leg scanned for EXIT ONLY (not entry)
-        # Gap UP → CE = entry; PE = exit tracker only (close CE if PE trap fires)
-        # Gap DOWN → PE = entry; CE = exit tracker only
+        # Gap UP -> CE = entry; PE = exit tracker only (close CE if PE trap fires)
+        # Gap DOWN -> PE = entry; CE = exit tracker only
         exit_only = False
         if use_bias and gap_fired and not pure_intraday:
             if gap_dir == "UP" and opt_type == "PE":
@@ -737,7 +737,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         mode = f"{base_mode} {depth}"
 
         if not key:
-            print(f"  {trade_date} {opt_type} {strike}: no instrument key — skip")
+            print(f"  {trade_date} {opt_type} {strike}: no instrument key -- skip")
             continue
 
         # Use cached bars if available; otherwise fetch and cache
@@ -772,13 +772,13 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
         # Junk day guard: far-dated contracts may have zero/near-zero volume in early months
         if _is_junk_day(df_opt_today):
-            print(f"  {trade_date} {opt_type} {strike}: JUNK DAY — <10 active bars in first 60m, skip")
+            print(f"  {trade_date} {opt_type} {strike}: JUNK DAY -- <10 active bars in first 60m, skip")
             continue
 
         # ── Step 1: HTF scan ────────────────────────────────────────────────
-        # >= 60min: institutional memory → scan full prev-week + today history
-        # <  60min: pure intraday concept → scan TODAY's bars only (no prev day reference)
-        # (pure_intraday skips this entirely — htf_zones always set to [] below)
+        # >= 60min: institutional memory -> scan full prev-week + today history
+        # <  60min: pure intraday concept -> scan TODAY's bars only (no prev day reference)
+        # (pure_intraday skips this entirely -- htf_zones always set to [] below)
         if not pure_intraday:
             if df_opt_all is None:
                 df_opt_all = _mkt_hours(df_opt_raw)
@@ -797,7 +797,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             except Exception:
                 return False
 
-        # pure_intraday: skip all HTF prev-day zones — only intraday cascade
+        # pure_intraday: skip all HTF prev-day zones -- only intraday cascade
         htf_zones = [] if pure_intraday else [
             e for e in htf_entries if e.get("status") == "CLOSED" and _closed_today(e)
         ]
@@ -805,7 +805,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
         entry_signals = []   # list of (entry_ts, entry_price, sl, t1, zone_low, zone_high, mode_tag)
 
         if htf_zones:
-            # For small HTF (< 60min): multiple nearby zones → pick the LOWEST zone_low
+            # For small HTF (< 60min): multiple nearby zones -> pick the LOWEST zone_low
             if htf_min < 60 and len(htf_zones) > 1:
                 htf_zones = [min(htf_zones, key=lambda z: float(z.get("zone_low", 9999)))]
 
@@ -821,7 +821,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     trap_ts = trap_ts.tz_localize(None)
 
                 # Skip zones trapped during opening spike (e.g. first 30 min of session).
-                # A spike to 780 at 09:20 creates a fake HTF zone — real traps need time to form.
+                # A spike to 780 at 09:20 creates a fake HTF zone -- real traps need time to form.
                 if skip_open_spike and trap_ts is not None:
                     _spike_end = pd.Timestamp(f"{td} 09:14:00") + pd.Timedelta(minutes=open_spike_min)
                     if trap_ts.date() == td and trap_ts <= _spike_end:
@@ -844,21 +844,21 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     for idx, best in enumerate(ltf5_in):
                         if max_ltf_index > 0 and idx + 1 > max_ltf_index:
                             break  # sorted ascending; all remaining have higher index
-                        best["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m→5m"
+                        best["_mode"]     = f"{'INTRADAY' if htf_min < 60 else 'HTF'}-{htf_min}m->5m"
                         best["_trap_pos"] = f"LTF-{idx+1}"
                         best["_htf_t1"]   = zh
                         best["_htf_sl"]   = zl
                         entry_signals.append(best)
                         added += 1
-                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → {added}/{len(ltf5_in)} 5m sub-trap(s)")
+                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} -> {added}/{len(ltf5_in)} 5m sub-trap(s)")
                 else:
-                    # No fresh 5min trap found inside HTF zone — skip (no trade).
+                    # No fresh 5min trap found inside HTF zone -- skip (no trade).
                     # Do not enter blindly at HTF trigger without LTF confirmation.
-                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} → no 5m sub-trap — SKIP")
+                    print(f"  {trade_date} {opt_type} {strike}: HTF {zl:.0f}-{zh:.0f} -> no 5m sub-trap -- SKIP")
 
             print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} HTF zone(s)")
         else:
-            # ── Step 2: No HTF zone → 15min intraday cascade ──────────────────
+            # ── Step 2: No HTF zone -> 15min intraday cascade ──────────────────
             # pure_intraday: scan ALL 15m zones + 3m sub-zones (15-3-1 mode)
             # normal cascade: pick lowest 15m zone + 5m sub-zones
             _cas_ck = (td, key, "cas15")
@@ -897,7 +897,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
             # pure_intraday: all 15m zones (complete day); normal: only the lowest one
             zones_to_scan = cas_zones if pure_intraday else cas_zones[:1]
-            mode_tag      = f"INTRADAY-15m→{sub_min}m" if pure_intraday else f"CASCADE-15m→{sub_min}m"
+            mode_tag      = f"INTRADAY-15m->{sub_min}m" if pure_intraday else f"CASCADE-15m->{sub_min}m"
 
             for cz in zones_to_scan:
                 zh = float(cz["zone_high"])
@@ -920,14 +920,14 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         best["_htf_sl"]   = zl
                         entry_signals.append(best)
                         added += 1
-                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} → {sub_min}m ×{added}/{len(ltf_in)}")
+                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} -> {sub_min}m ×{added}/{len(ltf_in)}")
                 else:
-                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} → no {sub_min}m sub-trap — SKIP")
+                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} -> no {sub_min}m sub-trap -- SKIP")
 
         if not entry_signals:
             continue
 
-        # Merge zones at the same price level (within 10 pts) — keep earliest
+        # Merge zones at the same price level (within 10 pts) -- keep earliest
         entry_signals = _dedup_zones(entry_signals, price_tol=10.0)
 
         # Minimum zone width filter: T1 must be at least sl_buf pts above entry.
@@ -998,10 +998,10 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                 if z_ts is pd.NaT or z_ts >= rt["exit_ts"]:
                     day_running_trade = None   # previous trade already closed
                 elif rt["opt_type"] == opt_type:
-                    continue   # SAME side still running → skip
+                    continue   # SAME side still running -> skip
                 else:
-                    # OPPOSITE side fired while trade running → force-close running trade
-                    # (applies even if this leg is exit_only — that's exactly what exit_only is for)
+                    # OPPOSITE side fired while trade running -> force-close running trade
+                    # (applies even if this leg is exit_only -- that's exactly what exit_only is for)
                     # Re-simulate the running trade with forced exit at z_ts
                     prev_result = trades[rt["trade_idx"]]
                     prev_z      = rt["z"]
@@ -1028,7 +1028,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                     day_running_trade = None   # now open opposite side
 
             # 1 ITM: resolve exec strike from LIVE spot at entry time
-            # CE → live ATM − step (1 step ITM), PE → live ATM + step
+            # CE -> live ATM − step (1 step ITM), PE -> live ATM + step
             # SL/T1 triggers remain on scan strike (zone levels intact).
             # Only entry/exit prices are read from exec strike bars.
             exec_strike   = strike
@@ -1066,7 +1066,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             # ── R:R filter ────────────────────────────────────────────────────
             # Logic: find the historical timestamp when opposing leg was at its
             # zone_low (entry point for opp bears). At that same timestamp, get
-            # current leg's price → that is the current leg's TARGET (market
+            # current leg's price -> that is the current leg's TARGET (market
             # returning to that level = opp OPP_SIGNAL territory again).
             # Reward = target - entry_est.  Skip if reward < risk (< 1:1).
             if rr_filter and opp_zone_trigger is not None and opp_df is not None and not opp_df.empty:
@@ -1165,10 +1165,10 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        pure_intraday: bool = False,
                        max_ltf_index: int = 0,
                        fixed_expiry: str = "") -> dict:
-    """fixed_expiry: e.g. '31JUL26' — pins ALL option lookups to this one contract
+    """fixed_expiry: e.g. '31JUL26' -- pins ALL option lookups to this one contract
     regardless of the trade date. Used for expiry-comparison backtest (Apr-Jun on July contracts).
     When set, `monthly` / `next_week` are ignored. REGISTRY is also bypassed for key lookup.
-    For BANKNIFTY/FINNIFTY/MIDCPNIFTY (monthly only): leave empty — REGISTRY returns
+    For BANKNIFTY/FINNIFTY/MIDCPNIFTY (monthly only): leave empty -- REGISTRY returns
     the active June monthly automatically since May has expired."""
     global _HEADERS, _USE_MONTHLY, _USE_NEXT_WEEK, _FIXED_EXPIRY
     _HEADERS      = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -1186,7 +1186,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     try:
         REGISTRY.load_sync(index.upper(), access_token=token)
     except Exception as exc:
-        print(f"[REGISTRY] load failed ({exc}) — will use NSE symbol fallback")
+        print(f"[REGISTRY] load failed ({exc}) -- will use NSE symbol fallback")
 
     # Date range
     if start and end:
@@ -1213,7 +1213,7 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
     print(f"  {len(df_spot_all)} spot bars loaded\n")
 
     # Shared option bar cache.
-    # For monthly mode: same contract key covers the whole period → pre-note the
+    # For monthly mode: same contract key covers the whole period -> pre-note the
     # full range so each key is fetched ONCE with complete history.
     # _run_day will use fetch_from=td-14d which may miss early bars on later days;
     # pre-seeding with the full range fixes that and eliminates duplicate fetches.
@@ -1320,7 +1320,7 @@ def run_nifty_backtest_optimize(
     try:
         REGISTRY.load_sync(index.upper(), access_token=token)
     except Exception as exc:
-        print(f"[REGISTRY] load failed ({exc}) — will use NSE symbol fallback")
+        print(f"[REGISTRY] load failed ({exc}) -- will use NSE symbol fallback")
 
     s_date = date.fromisoformat(start)
     e_date = date.fromisoformat(end)
@@ -1334,12 +1334,12 @@ def run_nifty_backtest_optimize(
         return {"ok": False, "error": "No spot data"}
     df_spot_all = _mkt_hours(df_spot_all)
 
-    # Shared caches — option bars fetched once, zone scans cached per (day, strike, tf)
+    # Shared caches -- option bars fetched once, zone scans cached per (day, strike, tf)
     shared_bar_cache:  dict = {}
     shared_zone_cache: dict = {}
 
     # Per-index SL grids: scaled to typical ATM ITM premium range.
-    # BANKNIFTY premiums are ~3-4× NIFTY → needs wider SL to survive normal noise.
+    # BANKNIFTY premiums are ~3-4× NIFTY -> needs wider SL to survive normal noise.
     _SL_GRIDS = {
         "NIFTY":      [5, 8, 10, 15],
         "SENSEX":     [10, 15, 20, 30],
@@ -1352,7 +1352,7 @@ def run_nifty_backtest_optimize(
     depth_grid   = ["near", "both"]
 
     total_combos = len(max_ltf_grid) * len(sl_buf_grid) * len(depth_grid)
-    print(f"\n[OPTIMIZE] {index}  {s_date}→{e_date}  "
+    print(f"\n[OPTIMIZE] {index}  {s_date}->{e_date}  "
           f"{len(days)} days  {total_combos} combinations  monthly={monthly}")
 
     results = []
@@ -1413,14 +1413,14 @@ def run_nifty_backtest_optimize(
     # Rank: primary = Profit Factor (desc), secondary = total_rs (desc)
     results.sort(key=lambda r: (r["profit_factor"], r["total_rs"]), reverse=True)
 
-    print(f"\n[OPTIMIZE] done — top combo: {results[0]}")
+    print(f"\n[OPTIMIZE] done -- top combo: {results[0]}")
     return {"ok": True, "results": results, "total": len(results)}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
-        description="NIFTY / SENSEX options backtest — pure intraday cascade mode",
+        description="NIFTY / SENSEX options backtest -- pure intraday cascade mode",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     # Auth
@@ -1435,7 +1435,7 @@ if __name__ == "__main__":
     ap.add_argument("--weeks",   type=int, default=4, help="Rolling weeks if --start/--end not given")
     # Expiry
     ap.add_argument("--monthly", action="store_true", default=True,
-                    help="Monthly expiry (default ON — always use for this strategy)")
+                    help="Monthly expiry (default ON -- always use for this strategy)")
     ap.add_argument("--weekly",  action="store_true",
                     help="Override to weekly expiry")
     # Entry / zone params
@@ -1446,7 +1446,7 @@ if __name__ == "__main__":
     ap.add_argument("--max-ltf",       type=int, default=None,
                     help="Max LTF sub-zone index  [NIFTY default: 10  SENSEX default: 8]")
     ap.add_argument("--pure-intraday", action="store_true", default=True,
-                    help="Pure intraday cascade 15m→3m→1m (default ON)")
+                    help="Pure intraday cascade 15m->3m->1m (default ON)")
     ap.add_argument("--no-pure-intraday", dest="pure_intraday", action="store_false",
                     help="Disable pure intraday (use HTF prev-day zones)")
     ap.add_argument("--high-breakout", action="store_true", default=True,
@@ -1477,9 +1477,9 @@ if __name__ == "__main__":
             sys.exit(1)
         expiry_label = f"FIXED:{fixed_exp}" if fixed_exp else ("MONTHLY" if use_monthly else "WEEKLY")
         print(f"\n{'='*65}")
-        print(f"  {args.index} OPTIMIZE — Pure Intraday 15m→3m→1m")
+        print(f"  {args.index} OPTIMIZE -- Pure Intraday 15m->3m->1m")
         print(f"{'='*65}")
-        print(f"  Date   : {args.start} → {args.end}")
+        print(f"  Date   : {args.start} -> {args.end}")
         print(f"  Expiry : {expiry_label}")
         print(f"  Sweeps : sl_buf × max_ltf × depth  (all combos)")
         print(f"{'='*65}\n")
@@ -1503,14 +1503,14 @@ if __name__ == "__main__":
         for r in combos:
             print(f"  {r['combo']:<4} {r['sl_buf']:>5.0f} {r['depth']:<6} {r['max_ltf_index']:>4}  "
                   f"{r['trades']:>6}  {r['win_pct']:>5.1f}%  "
-                  f"₹{r['total_pnl']:>+9,.0f}  {r['pf']:>6.2f}")
+                  f"Rs{r['total_pnl']:>+9,.0f}  {r['pf']:>6.2f}")
         print(f"\n  Best by PF:")
         best = max(combos, key=lambda x: x["pf"]) if combos else {}
         if best:
             print(f"    sl_buf={best['sl_buf']}  depth={best['depth']}  "
                   f"max_ltf={best['max_ltf_index']}  "
                   f"trades={best['trades']}  win%={best['win_pct']}%  "
-                  f"PF={best['pf']}  P&L=₹{best['total_pnl']:+,.0f}")
+                  f"PF={best['pf']}  P&L=Rs{best['total_pnl']:+,.0f}")
         sys.exit(0)
 
     # ── Single backtest mode ───────────────────────────────────────────────────
@@ -1528,9 +1528,9 @@ if __name__ == "__main__":
     expiry_label = (f"FIXED:{fixed_exp}" if fixed_exp
                     else ("MONTHLY" if use_monthly else "WEEKLY"))
     print(f"\n{'='*60}")
-    print(f"  {args.index} Backtest — Pure Intraday Cascade (15m→3m→1m)")
+    print(f"  {args.index} Backtest -- Pure Intraday Cascade (15m->3m->1m)")
     print(f"{'='*60}")
-    print(f"  Date       : {args.start or 'rolling'} → {args.end or 'today'}  (weeks={args.weeks})")
+    print(f"  Date       : {args.start or 'rolling'} -> {args.end or 'today'}  (weeks={args.weeks})")
     print(f"  Expiry     : {expiry_label}")
     print(f"  Depth      : {args.strike_depth.upper()}")
     print(f"  SL Buffer  : {sl_buf} pts")
@@ -1569,17 +1569,17 @@ if __name__ == "__main__":
     pf     = round(gw / gl, 2) if gl > 0 else (99.0 if gw > 0 else 0.0)
 
     print(f"\n{'='*60}")
-    print(f"  RESULTS — {len(trades)} trades")
+    print(f"  RESULTS -- {len(trades)} trades")
     print(f"{'='*60}")
     print(f"  Win Rate     : {len(wins)}/{len(trades)}  ({round(100*len(wins)/len(trades),1) if trades else 0}%)")
-    print(f"  Total P&L    : ₹{total:+,.0f}")
+    print(f"  Total P&L    : Rs{total:+,.0f}")
     print(f"  Profit Factor: {pf}")
-    print(f"  Avg Win      : ₹{round(gw/len(wins),0) if wins else 0:,.0f}")
-    print(f"  Avg Loss     : ₹{-round(gl/len(losses),0) if losses else 0:,.0f}")
+    print(f"  Avg Win      : Rs{round(gw/len(wins),0) if wins else 0:,.0f}")
+    print(f"  Avg Loss     : Rs{-round(gl/len(losses),0) if losses else 0:,.0f}")
     print(f"\n  {'Date':<12} {'Opt':<4} {'Strike':<8} {'LTF':<8} {'Entry':>7} {'Exit':>7} {'Reason':<12} {'P&L':>9}")
     print(f"  {'-'*75}")
     for t in trades:
         print(f"  {t['date']:<12} {t['opt_type']:<4} {t['strike']:<8} "
               f"{t.get('trap_pos',''):<8} {t['entry']:>7.1f} {t['exit']:>7.1f} "
-              f"{t['reason']:<12} ₹{t['pnl_rs']:>+8,}")
+              f"{t['reason']:<12} Rs{t['pnl_rs']:>+8,}")
     print(f"{'='*60}\n")
