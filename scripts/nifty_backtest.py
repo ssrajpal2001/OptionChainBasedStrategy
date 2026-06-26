@@ -1426,7 +1426,8 @@ if __name__ == "__main__":
     # Auth
     ap.add_argument("--token",   required=True, help="Upstox access token")
     # Index
-    ap.add_argument("--index",   default="NIFTY", choices=["NIFTY", "SENSEX"],
+    ap.add_argument("--index",   default="NIFTY",
+                    choices=["NIFTY", "SENSEX", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
                     help="Index to backtest (default: NIFTY)")
     # Date range
     ap.add_argument("--start",   default="", help="Start date YYYY-MM-DD (default: today-weeks*7)")
@@ -1461,9 +1462,58 @@ if __name__ == "__main__":
                     help="Pin ALL option lookups to one contract (e.g. 31JUL26). "
                          "Use for Apr-Jun backtest on July contracts. "
                          "Overrides --monthly/--weekly. Leave empty for auto (REGISTRY).")
+    ap.add_argument("--optimize", action="store_true",
+                    help="Run parameter sweep (sl_buf × max_ltf × depth) and print ranked table. "
+                         "Requires --start and --end. Ignores --sl-buf and --max-ltf.")
     args = ap.parse_args()
 
-    # Index-specific defaults for params not explicitly passed
+    use_monthly = not args.weekly
+    fixed_exp   = getattr(args, "fixed_expiry", "") or ""
+
+    # ── Optimize mode ──────────────────────────────────────────────────────────
+    if args.optimize:
+        if not args.start or not args.end:
+            print("ERROR: --optimize requires --start and --end dates")
+            sys.exit(1)
+        expiry_label = f"FIXED:{fixed_exp}" if fixed_exp else ("MONTHLY" if use_monthly else "WEEKLY")
+        print(f"\n{'='*65}")
+        print(f"  {args.index} OPTIMIZE — Pure Intraday 15m→3m→1m")
+        print(f"{'='*65}")
+        print(f"  Date   : {args.start} → {args.end}")
+        print(f"  Expiry : {expiry_label}")
+        print(f"  Sweeps : sl_buf × max_ltf × depth  (all combos)")
+        print(f"{'='*65}\n")
+        opt_result = run_nifty_backtest_optimize(
+            token             = args.token,
+            index             = args.index,
+            start             = args.start,
+            end               = args.end,
+            monthly           = use_monthly,
+            use_high_breakout = args.high_breakout,
+            fixed_expiry      = fixed_exp,
+        )
+        if not opt_result.get("ok"):
+            print(f"ERROR: {opt_result.get('error')}")
+            sys.exit(1)
+        combos = opt_result.get("results", [])
+        print(f"\n{'─'*80}")
+        print(f"  {'#':<4} {'SL':>5} {'Depth':<6} {'LTF':>4}  "
+              f"{'Trades':>6}  {'Win%':>5}  {'P&L':>10}  {'PF':>6}")
+        print(f"  {'─'*76}")
+        for r in combos:
+            print(f"  {r['combo']:<4} {r['sl_buf']:>5.0f} {r['depth']:<6} {r['max_ltf_index']:>4}  "
+                  f"{r['trades']:>6}  {r['win_pct']:>5.1f}%  "
+                  f"₹{r['total_pnl']:>+9,.0f}  {r['pf']:>6.2f}")
+        print(f"\n  Best by PF:")
+        best = max(combos, key=lambda x: x["pf"]) if combos else {}
+        if best:
+            print(f"    sl_buf={best['sl_buf']}  depth={best['depth']}  "
+                  f"max_ltf={best['max_ltf_index']}  "
+                  f"trades={best['trades']}  win%={best['win_pct']}%  "
+                  f"PF={best['pf']}  P&L=₹{best['total_pnl']:+,.0f}")
+        sys.exit(0)
+
+    # ── Single backtest mode ───────────────────────────────────────────────────
     _DEFAULTS = {
         "NIFTY":      {"sl_buf": 5.0,  "max_ltf": 10},
         "SENSEX":     {"sl_buf": 20.0, "max_ltf": 8},
@@ -1474,12 +1524,9 @@ if __name__ == "__main__":
     _def = _DEFAULTS.get(args.index.upper(), _DEFAULTS["NIFTY"])
     sl_buf    = args.sl_buf  if args.sl_buf  is not None else _def["sl_buf"]
     max_ltf   = args.max_ltf if args.max_ltf is not None else _def["max_ltf"]
-    use_monthly = not args.weekly  # --weekly overrides default monthly=True
 
-    fixed_exp = getattr(args, "fixed_expiry", "") or ""
     expiry_label = (f"FIXED:{fixed_exp}" if fixed_exp
                     else ("MONTHLY" if use_monthly else "WEEKLY"))
-
     print(f"\n{'='*60}")
     print(f"  {args.index} Backtest — Pure Intraday Cascade (15m→3m→1m)")
     print(f"{'='*60}")
