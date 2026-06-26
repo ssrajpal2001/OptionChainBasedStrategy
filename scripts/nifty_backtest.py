@@ -41,7 +41,7 @@ sys.path.insert(0, ".")
 from strategies.trap_scanner import scanner
 from data_layer.instrument_registry import REGISTRY
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# -- Config ---------------------------------------------------------------------
 INDEX_CFG = {
     "NIFTY": {
         "spot_key":  "NSE_INDEX|Nifty 50",
@@ -88,7 +88,7 @@ INDEX_CFG = {
         "sq_time":   "15:25",
     },
     "MIDCPNIFTY": {
-        "spot_key":  "NSE_INDEX|Nifty Midcap Select",
+        "spot_key":  "NSE_INDEX|NIFTY MID SELECT",
         "step":      25,
         "lot":       75,
         "gap_near":  100,
@@ -104,7 +104,7 @@ _HEADERS:       dict = {}   # set by CLI / API caller
 _FIXED_EXPIRY:  str  = ""   # when set, all option keys use this expiry (e.g. "31JUL26")
 
 
-# ── Data fetch ─────────────────────────────────────────────────────────────────
+# -- Data fetch -----------------------------------------------------------------
 def _fetch_1m_chunk(key: str, from_dt: str, to_dt: str) -> pd.DataFrame:
     """Fetch one chunk (≤30 days) of 1min bars from Upstox."""
     import requests
@@ -161,7 +161,7 @@ def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     return htf
 
 
-# ── Zone dedup: merge zones within price_tol of each other ────────────────────
+# -- Zone dedup: merge zones within price_tol of each other --------------------
 def _dedup_zones(zones: list, price_tol: float = 10.0) -> list:
     """
     If multiple zones have zone_high within price_tol of each other they are
@@ -187,7 +187,7 @@ def _dedup_zones(zones: list, price_tol: float = 10.0) -> list:
     return kept
 
 
-# ── Pivot / gap ────────────────────────────────────────────────────────────────
+# -- Pivot / gap ----------------------------------------------------------------
 def _pivot(H: float, L: float, C: float) -> dict:
     P = (H + L + C) / 3
     return {"P": P, "R1": 2*P - L, "R2": P + (H - L),
@@ -198,7 +198,7 @@ def _round_strike(v: float, step: int) -> int:
     return int(round(v / step) * step)
 
 
-# ── Instrument key lookup ──────────────────────────────────────────────────────
+# -- Instrument key lookup ------------------------------------------------------
 
 # Expiry weekday per index: weekly
 _WEEKLY_DOW  = {"NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
@@ -295,11 +295,24 @@ def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str
     REGISTRY lookup is skipped when fixed (NSE symbol format is always valid for NSE_FO).
     """
     if _FIXED_EXPIRY:
-        exp_str = _FIXED_EXPIRY
+        # Parse DDMONYY string to a date so REGISTRY can resolve the numeric key
+        from datetime import datetime as _dt
+        _MONTH_MAP = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                      "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+        _fe = _FIXED_EXPIRY  # e.g. "28JUL26"
+        try:
+            _exp_date = date(2000 + int(_fe[5:7]), _MONTH_MAP[_fe[2:5]], int(_fe[:2]))
+        except Exception:
+            _exp_date = None
+        if _exp_date and REGISTRY.is_loaded(index):
+            key = REGISTRY.get_upstox_key(index, _exp_date, strike, opt_type)
+            if key:
+                return key
+        # Fallback: string format (may not work for all brokers)
         _PFX = {"NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
                 "SENSEX": "BSE_FO|", "FINNIFTY": "NSE_FO|", "MIDCPNIFTY": "NSE_FO|"}
         pfx = _PFX.get(index.upper(), "NSE_FO|")
-        return f"{pfx}{index}{exp_str}{strike}{opt_type}"
+        return f"{pfx}{index}{_FIXED_EXPIRY}{strike}{opt_type}"
 
     exp_date, exp_str = _get_expiry(index, trade_date, monthly=_USE_MONTHLY, next_week=_USE_NEXT_WEEK)
     # REGISTRY lookup (required for BSE_FO numeric token; also gives accurate expiry dates)
@@ -314,7 +327,7 @@ def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str
     return f"{pfx}{index}{exp_str}{strike}{opt_type}"
 
 
-# ── Exit simulation ────────────────────────────────────────────────────────────
+# -- Exit simulation ------------------------------------------------------------
 def _is_junk_day(df_today: pd.DataFrame, min_active: int = 10) -> bool:
     """True if the option bars lack volume -- far-dated contract not yet liquid on this day."""
     if df_today.empty:
@@ -393,7 +406,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
         return None
     trap_ts = trap_ts.tz_localize(None) if trap_ts.tzinfo else trap_ts
 
-    # ── 1min rejection-candle entry confirmation ─────────────────────────
+    # -- 1min rejection-candle entry confirmation -------------------------
     # At zone_low area, wait for a 1min setup candle, then:
     #   use_high_breakout=True  -> enter only when next bar breaks ABOVE setup candle HIGH
     #                             (avoids entering on continued downtrends after bears cleared)
@@ -488,7 +501,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
             break
 
         if no_target_tsl:
-            # ── No-Target-TSL mode: SL / OPP_SIGNAL / Floor / EOD only ──────
+            # -- No-Target-TSL mode: SL / OPP_SIGNAL / Floor / EOD only ------
             # Floor locks directly from total P&L (no T1 prerequisite)
             if profit_floor_per_lot > 0:
                 current_pnl = (exec_close - entry_price) * total_qty
@@ -614,7 +627,7 @@ def _simulate_exit(e: dict, df1m: pd.DataFrame, df5m: pd.DataFrame,
     }
 
 
-# ── Per-day backtest ───────────────────────────────────────────────────────────
+# -- Per-day backtest -----------------------------------------------------------
 def _run_day(index: str, cfg: dict, trade_date: str,
              df_spot_all: pd.DataFrame,
              use_bias: bool, sl_buf: float,
@@ -720,7 +733,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     # {exit_ts, opt_type, trade_idx} -- trade_idx points to trades[] for re-simulation
     day_running_trade: dict | None = None
 
-    # ── PASS 1: collect signals + bars for all legs (no simulation yet) ──────
+    # -- PASS 1: collect signals + bars for all legs (no simulation yet) ------
     # This allows cross-leg R:R check (CE reward = PE LTP - PE zone_trigger)
     leg_coll: dict[tuple, dict] = {}   # (opt_type, strike, depth) -> data
 
@@ -775,7 +788,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             print(f"  {trade_date} {opt_type} {strike}: JUNK DAY -- <10 active bars in first 60m, skip")
             continue
 
-        # ── Step 1: HTF scan ────────────────────────────────────────────────
+        # -- Step 1: HTF scan ------------------------------------------------
         # >= 60min: institutional memory -> scan full prev-week + today history
         # <  60min: pure intraday concept -> scan TODAY's bars only (no prev day reference)
         # (pure_intraday skips this entirely -- htf_zones always set to [] below)
@@ -858,7 +871,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
 
             print(f"  {trade_date} {opt_type} {strike} [{mode}]: {len(entry_signals)} HTF zone(s)")
         else:
-            # ── Step 2: No HTF zone -> 15min intraday cascade ──────────────────
+            # -- Step 2: No HTF zone -> 15min intraday cascade ------------------
             # pure_intraday: scan ALL 15m zones + 3m sub-zones (15-3-1 mode)
             # normal cascade: pick lowest 15m zone + 5m sub-zones
             _cas_ck = (td, key, "cas15")
@@ -920,7 +933,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
                         best["_htf_sl"]   = zl
                         entry_signals.append(best)
                         added += 1
-                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} -> {sub_min}m ×{added}/{len(ltf_in)}")
+                    print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} -> {sub_min}m x{added}/{len(ltf_in)}")
                 else:
                     print(f"  {trade_date} {opt_type} {strike}: {mode_tag} {zl:.0f}-{zh:.0f} -> no {sub_min}m sub-trap -- SKIP")
 
@@ -951,7 +964,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             "mode":       mode,
         }
 
-    # ── PASS 2: R:R filter + simulate ────────────────────────────────────────
+    # -- PASS 2: R:R filter + simulate ----------------------------------------
 
     # Sort signals by trap timestamp for chronological processing
     def _sig_ts(z):
@@ -1063,7 +1076,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             if exit_only:
                 continue
 
-            # ── R:R filter ────────────────────────────────────────────────────
+            # -- R:R filter ----------------------------------------------------
             # Logic: find the historical timestamp when opposing leg was at its
             # zone_low (entry point for opp bears). At that same timestamp, get
             # current leg's price -> that is the current leg's TARGET (market
@@ -1135,7 +1148,7 @@ def _run_day(index: str, cfg: dict, trade_date: str,
     return trades
 
 
-# ── Date helpers ───────────────────────────────────────────────────────────────
+# -- Date helpers ---------------------------------------------------------------
 def _trading_days(start: date, end: date) -> list[str]:
     result, d = [], start
     while d <= end:
@@ -1145,7 +1158,7 @@ def _trading_days(start: date, end: date) -> list[str]:
     return result
 
 
-# ── Public entry point (called by API + CLI) ───────────────────────────────────
+# -- Public entry point (called by API + CLI) -----------------------------------
 def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        start: str = "", end: str = "",
                        use_bias: bool = True, sl_buf: float = 10.0,
@@ -1258,14 +1271,14 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
         running += t["pnl_rs"]
         eq_map[t["date"]] = running
 
-    print(f"\n{'─'*100}")
+    print(f"\n{'-'*100}")
     print(f"{index}  {s_date} to {e_date}  Trades={len(all_trades)}  "
           f"Win={summary['win_pct']:.1f}%  Rs {total:+,.0f}  PF={pf}")
-    print(f"{'─'*100}")
+    print(f"{'-'*100}")
     print(f"  {'DATE':<10}  {'OPT':<3}  {'STRIKE':>6}  {'SPOT':>7}  "
           f"{'POS':<6}  {'MODE':<24}  {'TRAP@':5}  "
           f"{'ENTRY':>6}  {'T1':>6}  {'EXIT':>6}  {'REASON':<10}  {'T1?':3}  {'P&L Rs':>9}")
-    print(f"  {'─'*98}")
+    print(f"  {'-'*98}")
     for t in all_trades:
         t1_flag = "Y" if t["t1_hit"] else "N"
         spot_s = f"{t['spot_at_entry']:.0f}" if t.get("spot_at_entry", 0) > 0 else "-"
@@ -1339,7 +1352,7 @@ def run_nifty_backtest_optimize(
     shared_zone_cache: dict = {}
 
     # Per-index SL grids: scaled to typical ATM ITM premium range.
-    # BANKNIFTY premiums are ~3-4× NIFTY -> needs wider SL to survive normal noise.
+    # BANKNIFTY premiums are ~3-4x NIFTY -> needs wider SL to survive normal noise.
     _SL_GRIDS = {
         "NIFTY":      [5, 8, 10, 15],
         "SENSEX":     [10, 15, 20, 30],
@@ -1417,7 +1430,7 @@ def run_nifty_backtest_optimize(
     return {"ok": True, "results": results, "total": len(results)}
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# -- CLI ------------------------------------------------------------------------
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(
         description="NIFTY / SENSEX options backtest -- pure intraday cascade mode",
@@ -1463,14 +1476,14 @@ if __name__ == "__main__":
                          "Use for Apr-Jun backtest on July contracts. "
                          "Overrides --monthly/--weekly. Leave empty for auto (REGISTRY).")
     ap.add_argument("--optimize", action="store_true",
-                    help="Run parameter sweep (sl_buf × max_ltf × depth) and print ranked table. "
+                    help="Run parameter sweep (sl_buf x max_ltf x depth) and print ranked table. "
                          "Requires --start and --end. Ignores --sl-buf and --max-ltf.")
     args = ap.parse_args()
 
     use_monthly = not args.weekly
     fixed_exp   = getattr(args, "fixed_expiry", "") or ""
 
-    # ── Optimize mode ──────────────────────────────────────────────────────────
+    # -- Optimize mode ----------------------------------------------------------
     if args.optimize:
         if not args.start or not args.end:
             print("ERROR: --optimize requires --start and --end dates")
@@ -1481,7 +1494,7 @@ if __name__ == "__main__":
         print(f"{'='*65}")
         print(f"  Date   : {args.start} -> {args.end}")
         print(f"  Expiry : {expiry_label}")
-        print(f"  Sweeps : sl_buf × max_ltf × depth  (all combos)")
+        print(f"  Sweeps : sl_buf x max_ltf x depth  (all combos)")
         print(f"{'='*65}\n")
         opt_result = run_nifty_backtest_optimize(
             token             = args.token,
@@ -1496,24 +1509,25 @@ if __name__ == "__main__":
             print(f"ERROR: {opt_result.get('error')}")
             sys.exit(1)
         combos = opt_result.get("results", [])
-        print(f"\n{'─'*80}")
+        print(f"\n{'-'*80}")
         print(f"  {'#':<4} {'SL':>5} {'Depth':<6} {'LTF':>4}  "
               f"{'Trades':>6}  {'Win%':>5}  {'P&L':>10}  {'PF':>6}")
-        print(f"  {'─'*76}")
+        print(f"  {'-'*76}")
         for r in combos:
-            print(f"  {r['combo']:<4} {r['sl_buf']:>5.0f} {r['depth']:<6} {r['max_ltf_index']:>4}  "
+            print(f"  {r['combo']:<4} {r['sl_buf']:>5.0f} {r['depth']:<6} {r.get('max_ltf_index', r.get('max_ltf', 0)):>4}  "
                   f"{r['trades']:>6}  {r['win_pct']:>5.1f}%  "
-                  f"Rs{r['total_pnl']:>+9,.0f}  {r['pf']:>6.2f}")
+                  f"Rs{r.get('total_pnl', r.get('total_rs', 0)):>+9,.0f}  {r.get('pf', r.get('profit_factor', 0)):>6.2f}")
         print(f"\n  Best by PF:")
         best = max(combos, key=lambda x: x["pf"]) if combos else {}
         if best:
             print(f"    sl_buf={best['sl_buf']}  depth={best['depth']}  "
-                  f"max_ltf={best['max_ltf_index']}  "
+                  f"max_ltf={best.get('max_ltf_index', best.get('max_ltf', 0))}  "
                   f"trades={best['trades']}  win%={best['win_pct']}%  "
-                  f"PF={best['pf']}  P&L=Rs{best['total_pnl']:+,.0f}")
+                  f"PF={best.get('pf', best.get('profit_factor', 0))}  "
+                  f"P&L=Rs{best.get('total_pnl', best.get('total_rs', 0)):+,.0f}")
         sys.exit(0)
 
-    # ── Single backtest mode ───────────────────────────────────────────────────
+    # -- Single backtest mode ---------------------------------------------------
     _DEFAULTS = {
         "NIFTY":      {"sl_buf": 5.0,  "max_ltf": 10},
         "SENSEX":     {"sl_buf": 20.0, "max_ltf": 8},
