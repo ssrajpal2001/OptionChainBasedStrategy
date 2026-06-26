@@ -870,12 +870,18 @@ function backtestNifty() {
     _chart:    null,
 
     init() {
-      this.endDate   = '2026-06-26'
-      this.startDate = '2026-05-01'
+      const today = new Date()
+      this.endDate   = today.toISOString().slice(0, 10)
+      this.startDate = '2026-06-01'
       // mobile: track breakpoint
       const mq = window.matchMedia('(min-width:768px)')
       this.isMd = mq.matches
       mq.addEventListener('change', e => { this.isMd = e.matches })
+      // apply per-index defaults (floor, cap, HTF etc.) on page load
+      this.$nextTick(() => this.onIndexChange())
+      // restore token from session
+      const saved = sessionStorage.getItem('upstox_token')
+      if (saved) this.token = saved
     },
 
     // Per-index optimised defaults (sourced from June-2026 full-optimization results)
