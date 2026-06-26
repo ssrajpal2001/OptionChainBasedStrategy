@@ -131,9 +131,12 @@
 
     <div>
       <p class="sec-label mb-2">Index</p>
-      <select x-model="index" class="t-input">
-        <option value="NIFTY">NIFTY (NSE)</option>
-        <option value="SENSEX">SENSEX (BSE)</option>
+      <select x-model="index" @change="onIndexChange()" class="t-input">
+        <option value="NIFTY">NIFTY (NSE weekly + monthly)</option>
+        <option value="SENSEX">SENSEX (BSE weekly + monthly)</option>
+        <option value="BANKNIFTY">BANKNIFTY (NSE monthly only)</option>
+        <option value="FINNIFTY">FINNIFTY (NSE monthly only)</option>
+        <option value="MIDCPNIFTY">MIDCAP NIFTY (NSE monthly only)</option>
       </select>
     </div>
 
@@ -183,25 +186,39 @@
         <!-- Expiry selection -->
         <div>
           <p class="text-sm font-600 text-t-bright mb-2">Expiry</p>
-          <div class="flex gap-2">
-            <label class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
-              :class="!monthly && !nextWeek ? 'border-[var(--t-cyan)] text-[var(--t-cyan)] bg-[var(--t-cyan)]/10' : 'border-t-border text-t-muted'"
-              @click="monthly=false; nextWeek=false">
+          <div class="flex gap-1 flex-wrap">
+            <label class="flex-1 min-w-[70px] flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
+              :class="!monthly && !nextWeek && !fixedExpiry ? 'border-[var(--t-cyan)] text-[var(--t-cyan)] bg-[var(--t-cyan)]/10' : 'border-t-border text-t-muted'"
+              @click="monthly=false; nextWeek=false; fixedExpiry=''">
               <input type="radio" class="hidden" />
-              Current Week
+              Curr Week
             </label>
-            <label class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
-              :class="nextWeek ? 'border-[var(--t-yellow)] text-[var(--t-yellow)] bg-[var(--t-yellow)]/10' : 'border-t-border text-t-muted'"
-              @click="monthly=false; nextWeek=true">
+            <label class="flex-1 min-w-[70px] flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
+              :class="nextWeek && !fixedExpiry ? 'border-[var(--t-amber)] text-[var(--t-amber)] bg-[var(--t-amber)]/10' : 'border-t-border text-t-muted'"
+              @click="monthly=false; nextWeek=true; fixedExpiry=''">
               <input type="radio" class="hidden" />
               Next Week
             </label>
-            <label class="flex-1 flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
-              :class="monthly ? 'border-[var(--t-green)] text-[var(--t-green)] bg-[var(--t-green)]/10' : 'border-t-border text-t-muted'"
-              @click="monthly=true; nextWeek=false">
+            <label class="flex-1 min-w-[70px] flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
+              :class="monthly && !fixedExpiry ? 'border-[var(--t-green)] text-[var(--t-green)] bg-[var(--t-green)]/10' : 'border-t-border text-t-muted'"
+              @click="monthly=true; nextWeek=false; fixedExpiry=''">
               <input type="radio" class="hidden" />
               Monthly
             </label>
+            <label class="flex-1 min-w-[70px] flex items-center justify-center gap-1 px-2 py-1.5 rounded border cursor-pointer text-xs font-600"
+              :class="fixedExpiry ? 'border-[var(--t-red)] text-[var(--t-red)] bg-[var(--t-red)]/10' : 'border-t-border text-t-muted'"
+              @click="monthly=false; nextWeek=false; fixedExpiry=fixedExpiry||'31JUL26'">
+              <input type="radio" class="hidden" />
+              Fixed ▾
+            </label>
+          </div>
+          <!-- Fixed expiry input — shown only when Fixed is selected -->
+          <div x-show="fixedExpiry !== ''" class="mt-2">
+            <p class="text-xs text-t-muted mb-1">Contract code (e.g. 31JUL26, 03JUL26)</p>
+            <input type="text" x-model="fixedExpiry" class="t-input font-mono text-xs"
+              placeholder="31JUL26"
+              @input="fixedExpiry = $event.target.value.toUpperCase()" />
+            <p class="text-xs text-t-muted mt-1">All dates in range will use this one contract — for expiry comparison backtests.</p>
           </div>
         </div>
 
@@ -759,11 +776,12 @@ function backtestNifty() {
     index:     'NIFTY',
     dateMode:  'custom',
     weeks:     2,
-    startDate: '2026-06-01',
-    endDate:   '2026-06-30',
+    startDate: '2026-05-01',
+    endDate:   '2026-06-26',
     useBias:     true,
     monthly:     true,
     nextWeek:    false,
+    fixedExpiry: '',       // e.g. '31JUL26' — pins all dates to one contract
     strikeDepth:  'near',
     gapThresh:    0.5,
     slBuf:        5.0,
@@ -802,15 +820,27 @@ function backtestNifty() {
     _chart:    null,
 
     init() {
-      const today = new Date()
-      const twoWk = new Date(today)
-      twoWk.setDate(today.getDate() - 14)
-      this.endDate   = today.toISOString().slice(0, 10)
-      this.startDate = twoWk.toISOString().slice(0, 10)
+      this.endDate   = '2026-06-26'
+      this.startDate = '2026-05-01'
       // mobile: track breakpoint
       const mq = window.matchMedia('(min-width:768px)')
       this.isMd = mq.matches
       mq.addEventListener('change', e => { this.isMd = e.matches })
+    },
+
+    // Auto-adjust defaults when index changes
+    onIndexChange() {
+      const monthly_only = ['BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
+      if (monthly_only.includes(this.index)) {
+        this.monthly    = true
+        this.nextWeek   = false
+        this.fixedExpiry = ''
+        // BANKNIFTY needs bigger SL
+        if (this.index === 'BANKNIFTY') this.slBuf = 20
+        else this.slBuf = 8
+      } else {
+        // NIFTY/SENSEX: keep current settings
+      }
     },
 
     weekStart() {
@@ -832,6 +862,7 @@ function backtestNifty() {
         use_bias:     this.useBias,
         monthly:      this.monthly,
         next_week:    this.nextWeek,
+        fixed_expiry: this.fixedExpiry,
         sl_buf:             this.slBuf,
         strike_depth:       this.strikeDepth,
         profit_cap_per_lot:   this.profitCapOn   ? this.profitCap   : 0,
@@ -888,6 +919,7 @@ function backtestNifty() {
         start:             this.startDate,
         end:               this.endDate,
         monthly:           this.monthly,
+        fixed_expiry:      this.fixedExpiry,
         use_high_breakout: this.useHighBreakout,
       }
       try {

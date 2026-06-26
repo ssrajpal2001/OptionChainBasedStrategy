@@ -755,6 +755,7 @@ class DashboardServer:
             open_spike_min       = int(p.get("open_spike_min", 30))
             pure_intraday        = bool(p.get("pure_intraday", False))
             max_ltf_index        = int(p.get("max_ltf_index", 0))
+            fixed_expiry         = str(p.get("fixed_expiry", "")).strip().upper()
             if not token:
                 # Auto-pull Upstox access token from DB if already authenticated
                 try:
@@ -773,7 +774,7 @@ class DashboardServer:
                     monthly, strike_depth, profit_cap_per_lot, use_1itm, profit_floor_per_lot,
                     htf_min, no_target_tsl, rr_filter, rr_min_ratio, next_week,
                     use_high_breakout, skip_open_spike, open_spike_min, pure_intraday,
-                    max_ltf_index
+                    max_ltf_index, fixed_expiry
                 )
                 return result
             except Exception as exc:
@@ -791,9 +792,10 @@ class DashboardServer:
             index   = str(p.get("index", "NIFTY")).upper()
             start   = str(p.get("start", ""))
             end     = str(p.get("end", ""))
-            monthly = bool(p.get("monthly", True))
-            htf_min = int(p.get("htf_min", 0))
+            monthly       = bool(p.get("monthly", True))
+            htf_min       = int(p.get("htf_min", 0))
             use_high_breakout = bool(p.get("use_high_breakout", True))
+            fixed_expiry  = str(p.get("fixed_expiry", "")).strip().upper()
             if not token:
                 try:
                     fc = await asyncio.to_thread(
@@ -810,7 +812,7 @@ class DashboardServer:
                 from scripts.nifty_backtest import run_nifty_backtest_optimize
                 result = await asyncio.to_thread(
                     run_nifty_backtest_optimize,
-                    token, index, start, end, monthly, htf_min, use_high_breakout
+                    token, index, start, end, monthly, htf_min, use_high_breakout, fixed_expiry
                 )
                 return result
             except Exception as exc:

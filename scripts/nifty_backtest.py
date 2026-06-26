@@ -65,9 +65,43 @@ INDEX_CFG = {
         "ltf_min":   5,
         "sq_time":   "15:25",
     },
+    "BANKNIFTY": {
+        "spot_key":  "NSE_INDEX|Nifty Bank",
+        "step":      100,
+        "lot":       15,
+        "gap_near":  400,  # CE1=ATM-400, PE1=ATM+400 (wider — BNF moves 2-3x NIFTY)
+        "gap_far":   800,
+        "gap_thresh": 0.5,
+        "htf_min":   75,
+        "ltf_min":   5,
+        "sq_time":   "15:25",
+    },
+    "FINNIFTY": {
+        "spot_key":  "NSE_INDEX|Nifty Fin Service",
+        "step":      50,
+        "lot":       40,
+        "gap_near":  200,
+        "gap_far":   400,
+        "gap_thresh": 0.5,
+        "htf_min":   75,
+        "ltf_min":   5,
+        "sq_time":   "15:25",
+    },
+    "MIDCPNIFTY": {
+        "spot_key":  "NSE_INDEX|Nifty Midcap Select",
+        "step":      25,
+        "lot":       75,
+        "gap_near":  100,
+        "gap_far":   200,
+        "gap_thresh": 0.5,
+        "htf_min":   75,
+        "ltf_min":   5,
+        "sq_time":   "15:25",
+    },
 }
 
-_HEADERS: dict = {}   # set by CLI / API caller
+_HEADERS:       dict = {}   # set by CLI / API caller
+_FIXED_EXPIRY:  str  = ""   # when set, all option keys use this expiry (e.g. "31JUL26")
 
 
 # ── Data fetch ─────────────────────────────────────────────────────────────────
@@ -253,21 +287,43 @@ _USE_NEXT_WEEK: bool = False
 
 
 def _option_key(index: str, strike: int, opt_type: str, trade_date: date) -> str:
-    """Resolve Upstox instrument key for an option strike."""
+    """Resolve Upstox instrument key for an option strike.
+
+    When _FIXED_EXPIRY is set (e.g. '31JUL26'), that expiry is used for ALL dates
+    instead of computing the nearest weekly/monthly — used for multi-expiry comparison
+    where we want to test one specific July contract over the full Apr-Jun backtest period.
+    REGISTRY lookup is skipped when fixed (NSE symbol format is always valid for NSE_FO).
+    """
+    if _FIXED_EXPIRY:
+        exp_str = _FIXED_EXPIRY
+        _PFX = {"NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
+                "SENSEX": "BSE_FO|", "FINNIFTY": "NSE_FO|", "MIDCPNIFTY": "NSE_FO|"}
+        pfx = _PFX.get(index.upper(), "NSE_FO|")
+        return f"{pfx}{index}{exp_str}{strike}{opt_type}"
+
     exp_date, exp_str = _get_expiry(index, trade_date, monthly=_USE_MONTHLY, next_week=_USE_NEXT_WEEK)
-    # REGISTRY lookup (required for BSE_FO numeric token)
+    # REGISTRY lookup (required for BSE_FO numeric token; also gives accurate expiry dates)
     if REGISTRY.is_loaded(index):
         key = REGISTRY.get_upstox_key(index, exp_date, strike, opt_type)
         if key:
             return key
     # NSE fallback: symbol format works for historical API
     _PFX = {"NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
-            "SENSEX": "BSE_FO|", "FINNIFTY": "NSE_FO|"}
-    pfx = _PFX.get(index, "NSE_FO|")
+            "SENSEX": "BSE_FO|", "FINNIFTY": "NSE_FO|", "MIDCPNIFTY": "NSE_FO|"}
+    pfx = _PFX.get(index.upper(), "NSE_FO|")
     return f"{pfx}{index}{exp_str}{strike}{opt_type}"
 
 
 # ── Exit simulation ────────────────────────────────────────────────────────────
+def _is_junk_day(df_today: pd.DataFrame, min_active: int = 10) -> bool:
+    """True if the option bars lack volume — far-dated contract not yet liquid on this day."""
+    if df_today.empty:
+        return True
+    cutoff = df_today["datetime"].iloc[0] + pd.Timedelta(minutes=60)
+    first_hr = df_today[df_today["datetime"] <= cutoff]
+    return int((first_hr["volume"] > 0).sum()) < min_active
+
+
 def _zone_trigger(e: dict) -> float:
     if "zone_trigger" in e:
         return float(e["zone_trigger"])
@@ -714,6 +770,11 @@ def _run_day(index: str, cfg: dict, trade_date: str,
             print(f"  {trade_date} {opt_type} {strike}: no today option bars")
             continue
 
+        # Junk day guard: far-dated contracts may have zero/near-zero volume in early months
+        if _is_junk_day(df_opt_today):
+            print(f"  {trade_date} {opt_type} {strike}: JUNK DAY — <10 active bars in first 60m, skip")
+            continue
+
         # ── Step 1: HTF scan ────────────────────────────────────────────────
         # >= 60min: institutional memory → scan full prev-week + today history
         # <  60min: pure intraday concept → scan TODAY's bars only (no prev day reference)
@@ -1102,12 +1163,18 @@ def run_nifty_backtest(token: str, index: str = "NIFTY", weeks: int = 2,
                        skip_open_spike: bool = True,
                        open_spike_min: int = 30,
                        pure_intraday: bool = False,
-                       max_ltf_index: int = 0) -> dict:
-    # strike_depth: 'near'=ATM-200 only | 'far'=ATM-400 only | 'both'=scan+trade both
-    global _HEADERS, _USE_MONTHLY
-    _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    _USE_MONTHLY   = monthly
+                       max_ltf_index: int = 0,
+                       fixed_expiry: str = "") -> dict:
+    """fixed_expiry: e.g. '31JUL26' — pins ALL option lookups to this one contract
+    regardless of the trade date. Used for expiry-comparison backtest (Apr-Jun on July contracts).
+    When set, `monthly` / `next_week` are ignored. REGISTRY is also bypassed for key lookup.
+    For BANKNIFTY/FINNIFTY/MIDCPNIFTY (monthly only): leave empty — REGISTRY returns
+    the active June monthly automatically since May has expired."""
+    global _HEADERS, _USE_MONTHLY, _USE_NEXT_WEEK, _FIXED_EXPIRY
+    _HEADERS      = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    _USE_MONTHLY  = monthly
     _USE_NEXT_WEEK = next_week
+    _FIXED_EXPIRY  = fixed_expiry.strip().upper()
 
     cfg = dict(INDEX_CFG.get(index.upper(), {}))
     if not cfg:
@@ -1223,6 +1290,7 @@ def run_nifty_backtest_optimize(
     monthly: bool = True,
     htf_min: int = 0,
     use_high_breakout: bool = True,
+    fixed_expiry: str = "",
 ) -> dict:
     """Sweep key backtest parameters and return all combinations ranked by Profit Factor.
 
@@ -1238,9 +1306,10 @@ def run_nifty_backtest_optimize(
     The option-bar cache is shared across all combinations so API calls happen
     only once (first time a strike key is seen).
     """
-    global _HEADERS, _USE_MONTHLY
-    _HEADERS     = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    _USE_MONTHLY = monthly
+    global _HEADERS, _USE_MONTHLY, _FIXED_EXPIRY
+    _HEADERS      = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    _USE_MONTHLY  = monthly
+    _FIXED_EXPIRY = fixed_expiry.strip().upper()
 
     cfg = dict(INDEX_CFG.get(index.upper(), {}))
     if not cfg:
@@ -1265,22 +1334,21 @@ def run_nifty_backtest_optimize(
         return {"ok": False, "error": "No spot data"}
     df_spot_all = _mkt_hours(df_spot_all)
 
-    # Shared caches:
-    # opt_bar_cache  — raw 1-min option bars (skip Upstox API calls after first combo)
-    # zone_scan_cache — computed zone scan results; scan_htf() runs ONCE per (day, strike)
-    #   instead of once per combo. spike_min has no effect in pure_intraday mode (spike
-    #   filter only fires in the HTF path which pure_intraday always skips), so that
-    #   dimension is removed — reducing the grid from 96 → 48 combinations.
+    # Shared caches — option bars fetched once, zone scans cached per (day, strike, tf)
     shared_bar_cache:  dict = {}
     shared_zone_cache: dict = {}
 
-    # Parameter grid  6×4×2 = 48 combinations.
-    # "far" depth excluded — deep-ITM strikes are illiquid live.
-    # spike_min removed — irrelevant for pure_intraday cascade path.
-    # SL buffer is scaled to index: SENSEX premiums are ~3× NIFTY, so the buffer
-    # needs proportionally more room to avoid noise stops.
+    # Per-index SL grids: scaled to typical ATM ITM premium range.
+    # BANKNIFTY premiums are ~3-4× NIFTY → needs wider SL to survive normal noise.
+    _SL_GRIDS = {
+        "NIFTY":      [5, 8, 10, 15],
+        "SENSEX":     [10, 15, 20, 30],
+        "BANKNIFTY":  [15, 20, 25, 35],
+        "FINNIFTY":   [5, 8, 10, 15],
+        "MIDCPNIFTY": [5, 8, 10, 15],
+    }
     max_ltf_grid = [0, 5, 8, 10, 15, 20]
-    sl_buf_grid  = [10, 15, 20, 30] if index.upper() == "SENSEX" else [5, 8, 10, 15]
+    sl_buf_grid  = _SL_GRIDS.get(index.upper(), [5, 8, 10, 15])
     depth_grid   = ["near", "both"]
 
     total_combos = len(max_ltf_grid) * len(sl_buf_grid) * len(depth_grid)
@@ -1389,23 +1457,34 @@ if __name__ == "__main__":
                     help="Disable gap-bias filter (scan CE+PE both on gap days)")
     ap.add_argument("--gap-thresh", type=float, default=0.5,
                     help="Gap %% threshold to classify as gap day (default: 0.5)")
+    ap.add_argument("--fixed-expiry", dest="fixed_expiry", default="",
+                    help="Pin ALL option lookups to one contract (e.g. 31JUL26). "
+                         "Use for Apr-Jun backtest on July contracts. "
+                         "Overrides --monthly/--weekly. Leave empty for auto (REGISTRY).")
     args = ap.parse_args()
 
     # Index-specific defaults for params not explicitly passed
     _DEFAULTS = {
-        "NIFTY":  {"sl_buf": 5.0,  "max_ltf": 10},
-        "SENSEX": {"sl_buf": 20.0, "max_ltf": 8},
+        "NIFTY":      {"sl_buf": 5.0,  "max_ltf": 10},
+        "SENSEX":     {"sl_buf": 20.0, "max_ltf": 8},
+        "BANKNIFTY":  {"sl_buf": 20.0, "max_ltf": 10},
+        "FINNIFTY":   {"sl_buf": 8.0,  "max_ltf": 10},
+        "MIDCPNIFTY": {"sl_buf": 8.0,  "max_ltf": 10},
     }
     _def = _DEFAULTS.get(args.index.upper(), _DEFAULTS["NIFTY"])
     sl_buf    = args.sl_buf  if args.sl_buf  is not None else _def["sl_buf"]
     max_ltf   = args.max_ltf if args.max_ltf is not None else _def["max_ltf"]
     use_monthly = not args.weekly  # --weekly overrides default monthly=True
 
+    fixed_exp = getattr(args, "fixed_expiry", "") or ""
+    expiry_label = (f"FIXED:{fixed_exp}" if fixed_exp
+                    else ("MONTHLY" if use_monthly else "WEEKLY"))
+
     print(f"\n{'='*60}")
     print(f"  {args.index} Backtest — Pure Intraday Cascade (15m→3m→1m)")
     print(f"{'='*60}")
     print(f"  Date       : {args.start or 'rolling'} → {args.end or 'today'}  (weeks={args.weeks})")
-    print(f"  Expiry     : {'Monthly' if use_monthly else 'Weekly'}")
+    print(f"  Expiry     : {expiry_label}")
     print(f"  Depth      : {args.strike_depth.upper()}")
     print(f"  SL Buffer  : {sl_buf} pts")
     print(f"  Max LTF    : {max_ltf}  (sub-zones LTF-{max_ltf}+ filtered)")
@@ -1428,6 +1507,7 @@ if __name__ == "__main__":
         open_spike_min    = 30,
         pure_intraday     = args.pure_intraday,
         max_ltf_index     = max_ltf,
+        fixed_expiry      = fixed_exp,
     )
     if not result["ok"]:
         print(f"ERROR: {result['error']}")
