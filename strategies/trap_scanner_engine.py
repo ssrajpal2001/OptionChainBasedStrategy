@@ -1084,6 +1084,17 @@ class TrapScannerEngine:
                         if len(self._bars_fut) > 2000:
                             del self._bars_fut[:-2000]
                         self._on_candle_close("FUT", tick.timestamp)
+                    # Tick-level zone check: MCX ticks are sparse (35–68s intervals).
+                    # A zone touch+bounce can happen entirely between two 1m closes.
+                    # Run the LTF scan on EVERY tick when price is inside a TRAPPED zone
+                    # so we catch the entry on the first tick that lands in the zone.
+                    elif not self._position:
+                        _in_trapped = any(
+                            z.get("zone_low", 0) <= fut_ltp <= z.get("zone_high", 0)
+                            for z in self._htf_fut_zones if z.get("status") == "TRAPPED"
+                        )
+                        if _in_trapped:
+                            self._ltf_scan_normal("FUT", tick.timestamp)
                     # Futures-mode: SL/T1/trail all checked against futures LTP.
                     # Signal, SL level, and T1 level all in futures ₹ → consistent.
                     # When triggered, _place_exit closes the 1-ITM option via exec_key.
