@@ -390,6 +390,7 @@ _TEMPLATE_DIR      = os.path.join(os.path.dirname(__file__), "templates")
 _MONITOR_HTML       = os.path.join(_TEMPLATE_DIR, "monitor.html")
 _BACKTEST_HTML      = os.path.join(_TEMPLATE_DIR, "backtest.html")
 _BACKTEST_NIFTY_HTML = os.path.join(_TEMPLATE_DIR, "backtest_nifty.html")
+_BACKTEST_BTC_HTML   = os.path.join(_TEMPLATE_DIR, "backtest_btc.html")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Historical replay helpers  (pure functions — no I/O, no imports at module level)
@@ -936,6 +937,66 @@ class DashboardServer:
             except Exception as exc:
                 import traceback; traceback.print_exc()
                 return {"ok": False, "error": str(exc)}
+
+        # ── BTC Futures Backtest (Delta Exchange, no token needed for data) ──────
+        @app.get("/backtest/btc", include_in_schema=False)
+        async def backtest_btc_ui():
+            if not os.path.exists(_BACKTEST_BTC_HTML):
+                return HTMLResponse("<h1>backtest_btc.html not found</h1>", status_code=503)
+            return FileResponse(_BACKTEST_BTC_HTML, media_type="text/html")
+
+        @app.post("/api/backtest/btc", tags=["Admin"])
+        async def run_backtest_btc(request: Request):
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            days_back         = int(p.get("days_back", 30))
+            htf_min           = int(p.get("htf_min", 120))
+            sub_min           = int(p.get("sub_min", 15))
+            sl_buf            = float(p.get("sl_buf", 100.0))
+            lots              = int(p.get("lots", 100))
+            profit_floor_usdt = float(p.get("profit_floor_usdt", 0.0))
+            profit_cap_usdt   = float(p.get("profit_cap_usdt", 0.0))
+            lookback_days     = int(p.get("lookback_days", 3))
+            try:
+                from scripts.btc_backtest import run_btc_backtest
+                result = await asyncio.to_thread(
+                    run_btc_backtest,
+                    days_back, htf_min, sub_min, sl_buf, lots,
+                    profit_floor_usdt, profit_cap_usdt, lookback_days, False,
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
+
+        @app.post("/api/backtest/btc/optimize", tags=["Admin"])
+        async def run_backtest_btc_optimize(request: Request):
+            try:
+                p = await request.json()
+            except Exception:
+                return {"ok": False, "error": "Invalid JSON"}
+            days_back     = int(p.get("days_back", 90))
+            lots          = int(p.get("lots", 100))
+            lookback_days = int(p.get("lookback_days", 3))
+            try:
+                from scripts.btc_backtest import run_btc_optimize
+                result = await asyncio.to_thread(
+                    run_btc_optimize, days_back, lots, lookback_days,
+                )
+                return result
+            except Exception as exc:
+                import traceback; traceback.print_exc()
+                return {"ok": False, "error": str(exc)}
+
+        @app.post("/api/backtest/btc/clear_cache", tags=["Admin"])
+        async def clear_btc_cache(request: Request):
+            cache = os.path.join("data", "btc_1m_cache.parquet")
+            if os.path.exists(cache):
+                os.remove(cache)
+                return {"ok": True, "message": "BTC cache cleared"}
+            return {"ok": True, "message": "No cache to clear"}
 
         @app.post("/api/diagnostic/trap_zones", tags=["Admin"])
         async def diagnostic_trap_zones(request: Request):
