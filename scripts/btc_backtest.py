@@ -254,7 +254,7 @@ def _to_naive(ts) -> Optional[pd.Timestamp]:
     if ts is None:
         return None
     t = pd.Timestamp(ts)
-    return t.tz_localize(None) if t.tzinfo else t
+    return t.tz_convert(None) if t.tzinfo else t
 
 
 def _run_btc_day(
@@ -302,12 +302,13 @@ def _run_btc_day(
     _, sub_ents = scanner.scan_htf_spot(sub_bars) if len(sub_bars) >= 3 else (None, [])
     sub_zones   = [e for e in (sub_ents or []) if e.get("status") == "CLOSED"]
 
-    # Normalise datetime column to timezone-naive for comparison
+    # Strip timezone from datetime column so all comparisons are tz-naive.
+    # (df_day has UTC-aware datetimes; we work on a copy to avoid mutating caller's data.)
     df_day_naive = df_day.copy()
-    df_day_naive["dt_naive"] = df_day_naive["datetime"].dt.tz_localize(None) \
-        if df_day_naive["datetime"].dt.tz is not None else df_day_naive["datetime"]
+    if df_day_naive["datetime"].dt.tz is not None:
+        df_day_naive["datetime"] = df_day_naive["datetime"].dt.tz_convert(None)
 
-    force_ts_naive = df_day_naive["dt_naive"].iloc[-1] if not df_day_naive.empty else None
+    force_ts_naive = df_day_naive["datetime"].iloc[-1] if not df_day_naive.empty else None
 
     open_pos = False   # one position per day
 
@@ -334,7 +335,7 @@ def _run_btc_day(
             if t is None:
                 return pd.Timestamp.min
             ts = pd.Timestamp(t)
-            return ts.tz_localize(None) if ts.tzinfo else ts
+            return ts.tz_convert(None) if ts.tzinfo else ts
 
         best_sub    = max(sub_in, key=_ts_key)
         trigger     = _zone_trigger_price(best_sub)
@@ -346,7 +347,7 @@ def _run_btc_day(
         if close_ts_naive is None:
             df_after = df_day_naive.copy()
         else:
-            df_after = df_day_naive[df_day_naive["dt_naive"] >= close_ts_naive].copy()
+            df_after = df_day_naive[df_day_naive["datetime"] >= close_ts_naive].copy()
 
         if df_after.empty:
             continue
@@ -361,15 +362,14 @@ def _run_btc_day(
             continue
 
         entry_bar   = hit.index[0]
-        entry_ts    = df_after.loc[entry_bar, "dt_naive"]
+        entry_ts    = df_after.loc[entry_bar, "datetime"]
         entry_price = trigger
         df_for_exit = df_after.loc[entry_bar + 1:]   # bars after entry bar
 
         if df_for_exit.empty:
             continue
 
-        # Rename dt_naive → datetime for _simulate_trade
-        df_exit = df_for_exit.rename(columns={"dt_naive": "datetime"}).copy()
+        df_exit = df_for_exit.copy()
 
         result = _simulate_trade(
             entry_price       = entry_price,
