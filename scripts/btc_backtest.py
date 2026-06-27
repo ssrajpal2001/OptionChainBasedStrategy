@@ -260,19 +260,19 @@ def _run_btc_day(
     lots: int,
     profit_floor_pts: float,
     profit_cap_pts: float,
+    sl_zone_history: Optional[dict] = None,
+    cooldown_days: int = 1,
     verbose: bool = False,
 ) -> list:
     """
     Run trap scanner on one UTC calendar day.
 
-    Strategy:
-      1. Build HTF bars from lookback window → scan_htf_spot (BEAR+BULL zones).
-         If no CLOSED zones in lookback, fall back to today's own HTF bars (cascade).
-      2. For each CLOSED HTF zone find a confirming sub-zone (sub_min TF) inside it.
-      3. On 1m bars after the sub-zone trigger: enter LONG (BEAR zone) or SHORT (BULL zone).
-      4. Exit on TSL / profit target / force-close at UTC day end.
+    sl_zone_history : shared mutable dict {zone_key -> last_sl_date_str}.
+                      Zones that caused an SL exit within cooldown_days are skipped.
     """
     trades: list = []
+    if sl_zone_history is None:
+        sl_zone_history = {}
 
     # ── Step 1: HTF zones from lookback ──────────────────────────────────────
     df_combined = pd.concat([df_lookback, df_day], ignore_index=True) if not df_lookback.empty else df_day.copy()
@@ -312,6 +312,14 @@ def _run_btc_day(
         zl      = float(htf_z["zone_low"])
         kind    = htf_z.get("kind", "BEAR")
         is_long = (kind == "BEAR")
+        zone_key = f"{zl:.0f}-{zh:.0f}"
+
+        # Skip zone if it caused an SL within cooldown_days
+        if zone_key in sl_zone_history:
+            last_sl = sl_zone_history[zone_key]
+            days_since = (date.fromisoformat(day_str) - date.fromisoformat(last_sl)).days
+            if days_since <= cooldown_days:
+                continue
 
         # Entry from the HTF zone's own trigger (lower-third LONG, upper-third SHORT).
         trigger = _zone_trigger_price(htf_z)
@@ -374,10 +382,13 @@ def _run_btc_day(
                 "date"        : day_str,
                 "kind"        : kind,
                 "direction"   : "LONG" if is_long else "SHORT",
-                "htf_zone"    : f"{zl:.0f}-{zh:.0f}",
+                "htf_zone"    : zone_key,
                 "entry_price" : entry_price,
                 "entry_ts"    : str(entry_ts),
             })
+            # Record SL zones so next day can skip them
+            if result["exit_reason"] == "SL" and result["pnl_usdt"] <= 0:
+                sl_zone_history[zone_key] = day_str
             trades.append(result)
             open_pos = True
             if verbose:
@@ -457,6 +468,7 @@ def run_btc_backtest(
     all_dates  = [start_date + timedelta(days=i) for i in range(days_back)]
 
     all_trades: list = []
+    sl_zone_history: dict = {}   # shared across days — zones on cooldown after SL
     for d in all_dates:
         d_str  = d.isoformat()
         d_s    = pd.Timestamp(f"{d_str}T00:00:00", tz="UTC")
@@ -479,6 +491,7 @@ def run_btc_backtest(
             lots             = lots,
             profit_floor_pts = profit_floor_pts,
             profit_cap_pts   = profit_cap_pts,
+            sl_zone_history  = sl_zone_history,
             verbose          = verbose,
         )
         all_trades.extend(day_trades)
@@ -543,6 +556,7 @@ def run_btc_optimize(
     results: list = []
     for idx, (htf_min, sub_min, sl_buf, floor_pts, cap_pts) in enumerate(valid_combos):
         all_trades: list = []
+        sl_zone_history: dict = {}   # fresh per combo
         for d_str, (df_day, df_lb) in day_slices.items():
             all_trades.extend(_run_btc_day(
                 day_str          = d_str,
@@ -554,7 +568,8 @@ def run_btc_optimize(
                 lots             = lots,
                 profit_floor_pts = floor_pts,
                 profit_cap_pts   = cap_pts,
-                verbose           = False,
+                sl_zone_history  = sl_zone_history,
+                verbose          = False,
             ))
 
         params = {"htf_min": htf_min, "sub_min": sub_min, "sl_buf": sl_buf,
