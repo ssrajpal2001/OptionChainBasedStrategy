@@ -331,7 +331,10 @@ def _run_btc_day(
         # Use most recently closed sub-zone
         def _ts_key(s):
             t = s.get("closed_on") or s.get("trapped_on")
-            return pd.Timestamp(t) if t else pd.Timestamp.min
+            if t is None:
+                return pd.Timestamp.min
+            ts = pd.Timestamp(t)
+            return ts.tz_localize(None) if ts.tzinfo else ts
 
         best_sub    = max(sub_in, key=_ts_key)
         trigger     = _zone_trigger_price(best_sub)

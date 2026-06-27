@@ -1,62 +1,148 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>BTC Futures Backtest — Delta Exchange</title>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<style>
-  :root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--t-bright:#e6edf3;--t-main:#c9d1d9;--t-muted:#8b949e;--cyan:#79c0ff;--green:#3fb950;--red:#f85149;--orange:#d29922}
-  body{background:var(--bg);color:var(--t-main);font-family:'JetBrains Mono',monospace,sans-serif;font-size:13px}
-  .card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:16px}
-  .label{color:var(--t-muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
-  .btn-primary{background:var(--cyan);color:#000;font-weight:700;padding:8px 18px;border-radius:6px;cursor:pointer;border:none;font-size:13px}
-  .btn-primary:hover{opacity:.85}
-  .btn-secondary{background:var(--surface);color:var(--t-main);border:1px solid var(--border);padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px}
-  .btn-secondary:hover{border-color:var(--cyan);color:var(--cyan)}
-  .btn-warn{background:#6e330033;color:var(--orange);border:1px solid var(--orange);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px}
-  .seg-btn{padding:6px 14px;border-radius:4px;border:1px solid var(--border);cursor:pointer;font-size:12px}
-  .seg-btn.active{background:var(--cyan);color:#000;border-color:var(--cyan);font-weight:700}
-  .metric{background:#0d1117;border:1px solid var(--border);border-radius:6px;padding:12px;text-align:center}
-  .metric .val{font-size:20px;font-weight:700}
-  .metric .lbl{color:var(--t-muted);font-size:10px;margin-top:2px}
-  .pos{color:var(--green)}.neg{color:var(--red)}.neu{color:var(--cyan)}
-  input[type=range]{accent-color:var(--cyan);width:100%}
-  th{color:var(--t-muted);font-size:10px;text-transform:uppercase;text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
-  td{padding:5px 8px;border-bottom:1px solid #21262d;font-size:12px}
-  tr:last-child td{border-bottom:none}
-  tr:hover td{background:#1c2128}
-  .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--cyan);border-radius:50%;animation:spin .7s linear infinite}
-  @keyframes spin{to{transform:rotate(360deg)}}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BTC Futures Backtest — AlgoTrader</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono:    ['JetBrains Mono', 'monospace'],
+            display: ['Plus Jakarta Sans', 'sans-serif'],
+            ui:      ['Plus Jakarta Sans', 'sans-serif'],
+          },
+          colors: {
+            t: {
+              bg:'var(--t-bg)', surface:'var(--t-surface)', card:'var(--t-card)',
+              border:'var(--t-border)', dim:'var(--t-dim)', cyan:'var(--t-cyan)',
+              green:'var(--t-green)', red:'var(--t-red)', amber:'var(--t-amber)',
+              muted:'var(--t-muted)', text:'var(--t-text)', bright:'var(--t-bright)',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    :root {
+      --t-bg:#ffffff; --t-surface:#f9f9f9; --t-card:#ffffff; --t-border:#e9e9ed;
+      --t-dim:#d8d8dd; --t-cyan:#387ED1; --t-green:#4CA64C; --t-red:#FF5722;
+      --t-amber:#F5A623; --t-muted:#9b9b9b; --t-text:#3c3c3c; --t-bright:#1a1a1a;
+      --t-cyan-rgb:56,126,209; --t-green-rgb:76,166,76;
+      --t-red-rgb:255,87,34;   --t-amber-rgb:245,166,35;
+    }
+    [x-cloak]{display:none!important}
+    *{box-sizing:border-box} html,body{margin:0}
+    body{background:var(--t-bg);color:var(--t-text);font-family:'Plus Jakarta Sans',sans-serif;font-size:14px}
+    .t-card{background:var(--t-card);border:1px solid var(--t-border);border-radius:10px}
+    .sec-label{font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t-muted)}
+    .t-input{font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;background:var(--t-surface);
+             border:1px solid var(--t-border);color:var(--t-bright);padding:7px 10px;
+             border-radius:6px;width:100%;outline:none;transition:border-color .15s}
+    .t-input:focus{border-color:rgba(var(--t-cyan-rgb),.5);box-shadow:0 0 0 3px rgba(var(--t-cyan-rgb),.10)}
+    .btn-primary{font-size:13px;font-weight:700;letter-spacing:.04em;padding:10px 24px;
+                 border-radius:7px;background:var(--t-cyan);border:none;color:#fff;
+                 cursor:pointer;transition:all .15s;width:100%}
+    .btn-primary:hover{opacity:.85;box-shadow:0 0 18px rgba(var(--t-cyan-rgb),.35)}
+    .btn-primary:disabled{opacity:.45;cursor:not-allowed}
+    .btn-secondary{font-size:13px;font-weight:600;padding:8px 16px;border-radius:7px;
+                   background:var(--t-surface);border:1px solid var(--t-border);
+                   color:var(--t-text);cursor:pointer;transition:all .15s}
+    .btn-secondary:hover{border-color:var(--t-cyan);color:var(--t-cyan)}
+    .btn-warn{font-size:12px;font-weight:600;padding:7px 14px;border-radius:6px;
+              background:rgba(var(--t-amber-rgb),.08);border:1px solid var(--t-amber);
+              color:var(--t-amber);cursor:pointer}
+    .toggle-track{display:inline-flex;align-items:center;cursor:pointer;gap:8px;font-size:13px;font-weight:600}
+    .toggle-track input{display:none}
+    .toggle-pip{width:38px;height:20px;border-radius:99px;background:var(--t-dim);position:relative;transition:background .2s}
+    .toggle-pip::after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .2s}
+    input:checked ~ .toggle-pip{background:var(--t-cyan)}
+    input:checked ~ .toggle-pip::after{left:21px}
+    .bt-table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12px}
+    .bt-table th{padding:8px 10px;text-align:left;color:var(--t-muted);font-weight:600;font-size:11px;
+                 border-bottom:1px solid var(--t-border);position:sticky;top:0;background:var(--t-card);z-index:1}
+    .bt-table td{padding:7px 10px;border-bottom:1px solid var(--t-border);white-space:nowrap}
+    .bt-table tr:last-child td{border-bottom:none}
+    .bt-table tr:hover td{background:rgba(var(--t-cyan-rgb),.03)}
+    .stat-card{padding:14px 16px;border-radius:10px;border:1px solid var(--t-border)}
+    .stat-val{font-size:20px;font-weight:800;font-family:'JetBrains Mono',monospace}
+    .pnl-pos{color:var(--t-green)} .pnl-neg{color:var(--t-red)} .pnl-zero{color:var(--t-muted)}
+    .seg-btn{padding:5px 13px;border-radius:6px;border:1px solid var(--t-border);
+             background:var(--t-surface);color:var(--t-muted);cursor:pointer;font-size:12px;font-weight:600;transition:all .15s}
+    .seg-btn.active{background:rgba(var(--t-cyan-rgb),.1);border-color:var(--t-cyan);color:var(--t-cyan)}
+    .page-layout{display:flex;flex-direction:column;min-height:calc(100vh - 49px)}
+    .ctrl-panel{width:100%;padding:16px;border-bottom:1px solid var(--t-border);
+                background:var(--t-card);display:flex;flex-direction:column;gap:16px}
+    .results-panel{flex:1;padding:16px;display:flex;flex-direction:column;gap:16px;overflow-x:hidden}
+    .ctrl-toggle-btn{display:flex;align-items:center;justify-content:space-between;width:100%;
+                     background:none;border:none;padding:0;cursor:pointer;font-size:13px;font-weight:700;color:var(--t-bright)}
+    .ctrl-body{display:flex;flex-direction:column;gap:16px}
+    @media(min-width:768px){
+      .page-layout{flex-direction:row;height:calc(100vh - 49px)}
+      .ctrl-panel{width:300px;flex-shrink:0;border-right:1px solid var(--t-border);
+                  border-bottom:none;overflow-y:auto;height:100%}
+      .ctrl-toggle-btn{display:none}
+      .ctrl-body{display:flex!important}
+      .results-panel{overflow-y:auto;height:100%;padding:24px}
+    }
+    .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100vw}
+    .info-box{background:rgba(var(--t-cyan-rgb),.05);border:1px solid rgba(var(--t-cyan-rgb),.2);
+              border-radius:8px;padding:10px 14px;font-size:12px;color:var(--t-text)}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--t-border);
+             border-top-color:var(--t-cyan);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:6px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
 </head>
 <body x-data="btcApp()" x-init="init()">
 
-<div class="max-w-7xl mx-auto p-4 space-y-4">
-
-  <!-- Header -->
-  <div class="flex items-center justify-between">
-    <div>
-      <h1 class="text-xl font-bold" style="color:var(--t-bright)">⚡ BTC Futures Backtest</h1>
-      <p class="text-xs" style="color:var(--t-muted)">Delta Exchange India · BTCUSD Perpetual · 1 lot = 0.001 BTC · P&amp;L in USDT</p>
-    </div>
-    <div class="flex gap-2">
-      <a href="/backtest/nifty" class="btn-secondary text-xs">NIFTY Backtest →</a>
-      <button @click="clearCache()" class="btn-warn text-xs">Clear Data Cache</button>
-    </div>
+<!-- NAV -->
+<div class="flex items-center justify-between px-4 py-3 border-b border-t-border bg-t-card" style="min-height:49px">
+  <div class="flex items-center gap-2">
+    <span class="font-display font-800 text-t-bright text-sm md:text-base">AlgoTrader</span>
+    <span class="text-t-dim">|</span>
+    <span class="text-t-cyan font-semibold text-xs md:text-sm">BTC Futures Backtest</span>
   </div>
+  <div class="flex gap-3 text-xs md:text-sm">
+    <a href="/" class="text-t-muted hover:text-t-cyan transition-colors">Dashboard</a>
+    <a href="/backtest/nifty" class="text-t-muted hover:text-t-cyan transition-colors">NIFTY BT</a>
+    <button @click="clearCache()" class="btn-warn" style="padding:4px 10px;font-size:11px">Clear Cache</button>
+  </div>
+</div>
 
-  <!-- Controls -->
-  <div class="card">
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+<div class="page-layout">
 
-      <!-- Days back -->
+  <!-- CONTROL PANEL -->
+  <div class="ctrl-panel">
+
+    <button class="ctrl-toggle-btn" @click="ctrlOpen=!ctrlOpen">
+      <span>⚙ Settings</span>
+      <span x-text="ctrlOpen ? '▲' : '▼'" class="text-t-muted text-xs"></span>
+    </button>
+
+    <div class="ctrl-body" x-show="ctrlOpen || isMd" x-cloak>
+
+      <!-- Contract info -->
+      <div class="info-box">
+        <p class="font-bold text-t-bright mb-1">BTCUSD Perpetual · Delta Exchange India</p>
+        <p class="text-t-muted">1 lot = 0.001 BTC · No auth required · Data: public API</p>
+      </div>
+
+      <!-- History -->
       <div>
-        <div class="label">History (days)</div>
-        <div class="flex gap-2 flex-wrap mt-1">
-          <template x-for="d in [30,90,180,365]">
+        <p class="sec-label mb-2">History (days back)</p>
+        <div class="flex gap-1 flex-wrap">
+          <template x-for="d in [30,60,90,180,365]">
             <button @click="daysBack=d" :class="['seg-btn', daysBack===d?'active':'']" x-text="d+'d'"></button>
           </template>
         </div>
@@ -64,274 +150,323 @@
 
       <!-- HTF -->
       <div>
-        <div class="label">HTF Zone TF</div>
-        <div class="flex gap-2 flex-wrap mt-1">
-          <template x-for="h in [60,120,240]">
-            <button @click="htfMin=h" :class="['seg-btn', htfMin===h?'active':'']" x-text="(h/60)+'h'"></button>
+        <p class="sec-label mb-2">HTF Zone Timeframe</p>
+        <div class="flex gap-1 flex-wrap">
+          <template x-for="[v,lbl] in [[60,'1h'],[120,'2h'],[240,'4h']]">
+            <button @click="htfMin=v" :class="['seg-btn flex-1', htfMin===v?'active':'']" x-text="lbl"></button>
           </template>
         </div>
       </div>
 
       <!-- Sub-zone -->
       <div>
-        <div class="label">Sub-Zone TF</div>
-        <div class="flex gap-2 flex-wrap mt-1">
+        <p class="sec-label mb-2">Sub-Zone (LTF) Timeframe</p>
+        <div class="flex gap-1 flex-wrap">
           <template x-for="s in [5,15,30]">
-            <button @click="subMin=s" :class="['seg-btn', subMin===s?'active':'']" x-text="s+'m'"></button>
+            <button @click="subMin=s" :class="['seg-btn flex-1', subMin===s?'active':'']" x-text="s+'m'"></button>
           </template>
         </div>
       </div>
 
       <!-- Lots -->
       <div>
-        <div class="label">Lots (1 lot = 0.001 BTC)</div>
-        <div class="flex gap-2 flex-wrap mt-1">
+        <p class="sec-label mb-2">Lots <span class="text-t-muted normal-case font-normal">(1 lot = 0.001 BTC)</span></p>
+        <div class="flex gap-1 flex-wrap">
           <template x-for="l in [10,50,100,500,1000]">
             <button @click="lots=l" :class="['seg-btn', lots===l?'active':'']" x-text="l"></button>
           </template>
         </div>
+        <p class="text-xs text-t-muted mt-1">
+          Position: <span class="font-mono text-t-bright" x-text="(lots*0.001).toFixed(3)+' BTC'"></span>
+        </p>
       </div>
 
       <!-- SL Buffer -->
-      <div class="col-span-2 md:col-span-2">
-        <div class="label">SL Buffer: <span class="font-bold" style="color:var(--cyan)" x-text="'$'+slBuf.toFixed(0)"></span></div>
-        <input type="range" x-model.number="slBuf" min="20" max="1000" step="10" class="mt-1"/>
-        <div class="flex justify-between text-xs mt-1" style="color:var(--t-muted)">
-          <span>$20</span><span>$1000</span>
+      <div>
+        <div class="flex justify-between mb-1">
+          <p class="sec-label">SL Buffer (price pts)</p>
+          <span class="font-mono text-xs font-700 text-t-bright" x-text="'$'+slBuf"></span>
         </div>
+        <input type="range" x-model.number="slBuf" min="20" max="1000" step="10" class="w-full accent-[var(--t-cyan)]"/>
+        <p class="text-xs text-t-muted mt-1">
+          Max loss: <span class="font-mono text-t-red" x-text="'$'+(slBuf*lots*0.001).toFixed(2)+' USDT'"></span>
+        </p>
       </div>
 
-      <!-- Profit Floor (in BTC price pts) -->
+      <!-- Break-Even Floor -->
       <div>
-        <div class="label">
-          Break-Even Floor (price pts)
-          <input type="checkbox" x-model="profitFloorOn" class="ml-2" style="accent-color:var(--cyan)"/>
-          <span x-text="profitFloorOn?'ON':'OFF'" :style="profitFloorOn?'color:var(--cyan)':'color:var(--t-muted)'" class="text-xs ml-1"></span>
+        <div class="flex items-center justify-between mb-2">
+          <p class="sec-label">Break-Even Floor</p>
+          <label class="toggle-track">
+            <input type="checkbox" x-model="profitFloorOn"/>
+            <span class="toggle-pip"></span>
+            <span class="text-xs" x-text="profitFloorOn?'ON':'OFF'"
+              :class="profitFloorOn?'text-t-cyan':'text-t-muted'"></span>
+          </label>
         </div>
         <template x-if="profitFloorOn">
           <div>
-            <div class="text-xs mt-1" style="color:var(--t-muted)">
-              Lock SL at entry when BTC moves $<span x-text="profitFloor"></span> in our favour
-              <span style="color:var(--cyan)"> = $<span x-text="(profitFloor*lots*0.001).toFixed(2)"></span> USDT</span>
+            <div class="flex justify-between mb-1">
+              <span class="text-xs text-t-muted">BTC must move in our favour</span>
+              <span class="font-mono text-xs font-700 text-t-bright" x-text="'$'+profitFloor+' pts'"></span>
             </div>
-            <input type="range" x-model.number="profitFloor" min="50" max="2000" step="50" class="mt-1"/>
+            <input type="range" x-model.number="profitFloor" min="50" max="2000" step="50" class="w-full accent-[var(--t-cyan)]"/>
+            <p class="text-xs mt-1" style="color:var(--t-amber)">
+              = <span x-text="'$'+(profitFloor*lots*0.001).toFixed(2)"></span> USDT → then SL locks at entry
+            </p>
           </div>
         </template>
       </div>
 
-      <!-- Profit Cap (in BTC price pts) -->
+      <!-- Profit Cap -->
       <div>
-        <div class="label">
-          Profit Target (price pts)
-          <input type="checkbox" x-model="profitCapOn" class="ml-2" style="accent-color:var(--cyan)"/>
-          <span x-text="profitCapOn?'ON':'OFF'" :style="profitCapOn?'color:var(--cyan)':'color:var(--t-muted)'" class="text-xs ml-1"></span>
+        <div class="flex items-center justify-between mb-2">
+          <p class="sec-label">Profit Target</p>
+          <label class="toggle-track">
+            <input type="checkbox" x-model="profitCapOn"/>
+            <span class="toggle-pip"></span>
+            <span class="text-xs" x-text="profitCapOn?'ON':'OFF'"
+              :class="profitCapOn?'text-t-cyan':'text-t-muted'"></span>
+          </label>
         </div>
         <template x-if="profitCapOn">
           <div>
-            <div class="text-xs mt-1" style="color:var(--t-muted)">
-              Exit when BTC moves $<span x-text="profitCap"></span> in our favour
-              <span style="color:var(--green)"> = $<span x-text="(profitCap*lots*0.001).toFixed(2)"></span> USDT</span>
+            <div class="flex justify-between mb-1">
+              <span class="text-xs text-t-muted">Exit when BTC moves</span>
+              <span class="font-mono text-xs font-700 text-t-bright" x-text="'$'+profitCap+' pts'"></span>
             </div>
-            <input type="range" x-model.number="profitCap" min="100" max="2000" step="50" class="mt-1"/>
+            <input type="range" x-model.number="profitCap" min="100" max="2000" step="50" class="w-full accent-[var(--t-cyan)]"/>
+            <p class="text-xs mt-1 pnl-pos">
+              = <span x-text="'$'+(profitCap*lots*0.001).toFixed(2)"></span> USDT profit
+            </p>
           </div>
         </template>
       </div>
 
-    </div>
+      <!-- Action buttons -->
+      <div class="flex flex-col gap-2 pt-2 border-t border-t-border">
+        <button @click="runBacktest()" :disabled="loading" class="btn-primary">
+          <span x-show="loading"><span class="spinner"></span>Running…</span>
+          <span x-show="!loading">▶ Run Backtest</span>
+        </button>
+        <button @click="runOptimize()" :disabled="loading" class="btn-secondary">
+          <span x-show="loading"><span class="spinner"></span>Optimizing…</span>
+          <span x-show="!loading">⚙ Optimize Parameters</span>
+        </button>
+      </div>
 
-    <!-- Position info — all values in price pts, USDT auto-calculated -->
-    <div class="mt-3 p-3 rounded text-xs space-y-1" style="background:#0d1117;border:1px solid var(--border)">
+      <p x-show="statusMsg" x-text="statusMsg" class="text-xs text-t-muted"></p>
+
+    </div><!-- ctrl-body -->
+  </div><!-- ctrl-panel -->
+
+  <!-- RESULTS PANEL -->
+  <div class="results-panel">
+
+    <!-- Error -->
+    <template x-if="error">
+      <div class="t-card p-4" style="border-color:var(--t-red)">
+        <p class="text-xs pnl-neg" x-text="error"></p>
+      </div>
+    </template>
+
+    <!-- Empty state -->
+    <template x-if="!summary && !optResults.length && !loading && !error">
+      <div class="t-card p-10 flex flex-col items-center justify-center text-center gap-3">
+        <p class="text-4xl">₿</p>
+        <p class="font-bold text-t-bright">BTC Futures Trap Scanner</p>
+        <p class="text-sm text-t-muted max-w-sm">
+          Select parameters and run a backtest or optimization.<br/>
+          No API credentials needed — historical data is fetched from the public Delta Exchange API.
+        </p>
+      </div>
+    </template>
+
+    <!-- Loading state -->
+    <template x-if="loading">
+      <div class="t-card p-10 flex flex-col items-center justify-center gap-3">
+        <span class="spinner" style="width:24px;height:24px;border-width:3px"></span>
+        <p class="text-sm text-t-muted" x-text="statusMsg"></p>
+      </div>
+    </template>
+
+    <!-- Summary Metrics -->
+    <template x-if="summary && !loading">
       <div>
-        <span style="color:var(--t-muted)">Position size: </span>
-        <span style="color:var(--cyan)" x-text="lots+' lots = '+(lots*0.001).toFixed(3)+' BTC'"></span>
-      </div>
-      <div>
-        <span style="color:var(--t-muted)">Max loss (SL hit): </span>
-        <span style="color:var(--red)" x-text="'BTC moves $'+slBuf+' → $'+(slBuf*lots*0.001).toFixed(2)+' USDT loss'"></span>
-      </div>
-      <template x-if="profitFloorOn">
-        <div>
-          <span style="color:var(--t-muted)">Break-even locks when: </span>
-          <span style="color:var(--orange)" x-text="'BTC moves $'+profitFloor+' → $'+(profitFloor*lots*0.001).toFixed(2)+' USDT profit'"></span>
-        </div>
-      </template>
-      <template x-if="profitCapOn">
-        <div>
-          <span style="color:var(--t-muted)">Target exit at: </span>
-          <span style="color:var(--green)" x-text="'BTC moves $'+profitCap+' → $'+(profitCap*lots*0.001).toFixed(2)+' USDT profit'"></span>
-        </div>
-      </template>
-    </div>
+        <p class="sec-label mb-3">
+          Results ·
+          HTF=<span x-text="(summary.htf_min/60)+'h'"></span> ·
+          Sub=<span x-text="summary.sub_min+'m'"></span> ·
+          SL=$<span x-text="summary.sl_buf"></span>pts ·
+          <span x-text="summary.lots+' lots'"></span>
+          <template x-if="summary.profit_floor_pts>0">
+            <span> · Floor=$<span x-text="summary.profit_floor_pts"></span>pts</span>
+          </template>
+          <template x-if="summary.profit_cap_pts>0">
+            <span> · Cap=$<span x-text="summary.profit_cap_pts"></span>pts</span>
+          </template>
+        </p>
 
-    <!-- Action buttons -->
-    <div class="flex gap-3 mt-4">
-      <button @click="runBacktest()" :disabled="loading" class="btn-primary flex-1">
-        <span x-show="!loading">▶ Run Backtest</span>
-        <span x-show="loading" class="flex items-center justify-center gap-2"><span class="spinner"></span>Running…</span>
-      </button>
-      <button @click="runOptimize()" :disabled="loading" class="btn-secondary flex-1">
-        <span x-show="!loading">⚙ Optimize Parameters</span>
-        <span x-show="loading" class="flex items-center justify-center gap-2"><span class="spinner"></span>Optimizing…</span>
-      </button>
-    </div>
-    <p x-show="statusMsg" x-text="statusMsg" class="text-xs mt-2" style="color:var(--t-muted)"></p>
-  </div>
+        <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-4">
+          <div class="stat-card">
+            <div class="stat-val text-t-bright" x-text="summary.total"></div>
+            <div class="sec-label mt-1">Trades</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" :class="summary.win_rate_pct>=55?'pnl-pos':'pnl-neg'"
+                 x-text="summary.win_rate_pct+'%'"></div>
+            <div class="sec-label mt-1">Win Rate</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" :class="summary.profit_factor>=1.5?'pnl-pos':'pnl-neg'"
+                 x-text="summary.profit_factor>=9998?'∞':summary.profit_factor.toFixed(2)"></div>
+            <div class="sec-label mt-1">Profit Factor</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" :class="summary.net_pnl_usdt>=0?'pnl-pos':'pnl-neg'"
+                 x-text="'$'+summary.net_pnl_usdt.toFixed(2)"></div>
+            <div class="sec-label mt-1">Net P&amp;L (USDT)</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val pnl-pos" x-text="'$'+summary.avg_win_usdt.toFixed(2)"></div>
+            <div class="sec-label mt-1">Avg Win</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val pnl-neg" x-text="'$'+summary.avg_loss_usdt.toFixed(2)"></div>
+            <div class="sec-label mt-1">Avg Loss</div>
+          </div>
+        </div>
 
-  <!-- Summary Metrics -->
-  <template x-if="summary">
-    <div>
-      <div class="grid grid-cols-3 md:grid-cols-6 gap-3">
-        <div class="metric">
-          <div class="val neu" x-text="summary.total"></div>
-          <div class="lbl">Trades</div>
-        </div>
-        <div class="metric">
-          <div class="val" :class="summary.win_rate_pct>=55?'pos':'neg'" x-text="summary.win_rate_pct+'%'"></div>
-          <div class="lbl">Win Rate</div>
-        </div>
-        <div class="metric">
-          <div class="val" :class="summary.profit_factor>=1.5?'pos':'neg'"
-               x-text="summary.profit_factor===9999?'∞':summary.profit_factor.toFixed(2)"></div>
-          <div class="lbl">Profit Factor</div>
-        </div>
-        <div class="metric">
-          <div class="val" :class="summary.net_pnl_usdt>=0?'pos':'neg'"
-               x-text="'$'+summary.net_pnl_usdt.toFixed(2)"></div>
-          <div class="lbl">Net P&amp;L (USDT)</div>
-        </div>
-        <div class="metric">
-          <div class="val pos" x-text="'$'+summary.avg_win_usdt.toFixed(2)"></div>
-          <div class="lbl">Avg Win</div>
-        </div>
-        <div class="metric">
-          <div class="val neg" x-text="'$'+summary.avg_loss_usdt.toFixed(2)"></div>
-          <div class="lbl">Avg Loss</div>
+        <!-- Exit breakdown -->
+        <div class="flex gap-3 flex-wrap mb-4" x-show="Object.keys(summary.exit_breakdown||{}).length">
+          <template x-for="[reason, count] in Object.entries(summary.exit_breakdown||{})">
+            <div class="stat-card flex gap-2 items-center" style="padding:8px 14px">
+              <span class="font-mono font-700 text-xs" x-text="reason"
+                :class="reason==='SL'?'pnl-neg':reason==='T1'||reason==='TARGET'?'pnl-pos':'text-t-muted'"></span>
+              <span class="font-mono text-t-bright text-sm" x-text="count"></span>
+            </div>
+          </template>
         </div>
       </div>
-      <!-- Params display -->
-      <div class="mt-3 text-xs" style="color:var(--t-muted)">
-        Params: HTF=<span class="neu" x-text="(summary.htf_min/60)+'h'"></span>
-        · Sub=<span class="neu" x-text="summary.sub_min+'m'"></span>
-        · SL=$<span class="neu" x-text="summary.sl_buf"></span>
-        · Lots=<span class="neu" x-text="summary.lots"></span>
-        · Floor=$<span class="neu" x-text="summary.profit_floor_pts"></span>pts
-        · Cap=$<span class="neu" x-text="summary.profit_cap_pts"></span>pts
-      </div>
-    </div>
-  </template>
+    </template>
 
-  <!-- Equity Chart -->
-  <template x-if="trades.length > 0">
-    <div class="card">
-      <div class="label mb-3">Equity Curve</div>
-      <canvas id="equityChart" height="80"></canvas>
-    </div>
-  </template>
-
-  <!-- Optimization Results -->
-  <template x-if="optResults.length > 0">
-    <div class="card">
-      <div class="label mb-3">Optimization Results — Top 20 by Profit Factor
-        <span class="ml-2 text-xs" style="color:var(--t-muted)">(min 5 trades)</span>
+    <!-- Equity Chart -->
+    <template x-if="trades.length > 0 && !loading">
+      <div class="t-card p-4">
+        <p class="sec-label mb-3">Equity Curve</p>
+        <canvas id="equityChart" height="80"></canvas>
       </div>
-      <div class="overflow-x-auto">
-        <table class="w-full">
-          <thead>
-            <tr>
-              <th>#</th><th>HTF</th><th>Sub</th><th>SL pts</th><th>Floor pts</th><th>Cap pts</th>
-              <th>Trades</th><th>Wins</th><th>Win%</th><th>Gross+</th><th>Gross-</th><th>PF</th><th>Net USDT</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="(r,i) in optResults.slice(0,20)">
-              <tr @click="applyOptRow(r)" class="cursor-pointer">
-                <td x-text="i+1" style="color:var(--t-muted)"></td>
-                <td x-text="(r.htf_min/60)+'h'" class="neu"></td>
-                <td x-text="r.sub_min+'m'"></td>
-                <td x-text="'$'+r.sl_buf"></td>
-                <td x-text="'$'+r.profit_floor_pts"></td>
-                <td x-text="'$'+r.profit_cap_pts"></td>
-                <td x-text="r.total" class="neu"></td>
-                <td x-text="r.wins" class="pos"></td>
-                <td :class="r.win_rate_pct>=55?'pos':'neg'" x-text="r.win_rate_pct+'%'"></td>
-                <td class="pos" x-text="'$'+r.gross_profit.toFixed(2)"></td>
-                <td class="neg" x-text="'$'+r.gross_loss.toFixed(2)"></td>
-                <td :class="r.profit_factor>=1.5?'pos':'neg'"
-                    x-text="r.profit_factor===9999?'∞':r.profit_factor.toFixed(2)"
-                    class="font-bold"></td>
-                <td :class="r.net_pnl_usdt>=0?'pos':'neg'" x-text="'$'+r.net_pnl_usdt.toFixed(2)"></td>
-              </tr>
-            </template>
-          </tbody>
-        </table>
-      </div>
-      <p class="text-xs mt-2" style="color:var(--t-muted)">Click any row to load those parameters and run the full backtest.</p>
-    </div>
-  </template>
+    </template>
 
-  <!-- Trade Log -->
-  <template x-if="trades.length > 0">
-    <div class="card">
-      <div class="label mb-3">Trade Log — <span x-text="trades.length"></span> trades</div>
-      <div class="overflow-x-auto">
-        <table class="w-full">
-          <thead>
-            <tr>
-              <th>Date</th><th>Dir</th><th>Zone</th><th>Entry $</th><th>Exit $</th>
-              <th>P&amp;L USDT</th><th>Reason</th><th>Bars</th>
-            </tr>
-          </thead>
-          <tbody>
-            <template x-for="t in trades.slice((page-1)*25, page*25)">
+    <!-- Optimization Results Table -->
+    <template x-if="optResults.length > 0 && !loading">
+      <div class="t-card p-4">
+        <p class="sec-label mb-3">
+          Optimization — <span x-text="optResults.length"></span> combos ranked by Profit Factor
+          <span class="text-t-muted font-normal normal-case ml-1">(min 5 trades · click row to run)</span>
+        </p>
+        <div class="table-scroll">
+          <table class="bt-table">
+            <thead>
               <tr>
-                <td x-text="t.date" style="color:var(--t-muted)"></td>
-                <td :class="t.direction==='LONG'?'pos':'neg'" x-text="t.direction" class="font-bold"></td>
-                <td x-text="t.htf_zone" style="color:var(--t-muted)"></td>
-                <td x-text="t.entry_price?.toFixed(0)" class="neu"></td>
-                <td x-text="t.exit_price?.toFixed(0)"></td>
-                <td :class="t.pnl_usdt>0?'pos':'neg'" x-text="'$'+t.pnl_usdt?.toFixed(2)" class="font-bold"></td>
-                <td x-text="t.exit_reason"
-                    :style="t.exit_reason==='SL'?'color:var(--red)':t.exit_reason==='T1'?'color:var(--green)':'color:var(--t-muted)'"></td>
-                <td x-text="t.bars_held" style="color:var(--t-muted)"></td>
+                <th>#</th><th>HTF</th><th>Sub</th>
+                <th>SL pts</th><th>Floor pts</th><th>Cap pts</th>
+                <th>Trades</th><th>Win%</th><th>PF</th>
+                <th>Gross +</th><th>Gross −</th><th>Net USDT</th>
               </tr>
-            </template>
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              <template x-for="(r,i) in optResults.slice(0,25)" :key="i">
+                <tr @click="applyOptRow(r)" class="cursor-pointer">
+                  <td class="text-t-muted" x-text="i+1"></td>
+                  <td class="text-t-cyan font-mono" x-text="(r.htf_min/60)+'h'"></td>
+                  <td class="font-mono" x-text="r.sub_min+'m'"></td>
+                  <td class="font-mono" x-text="'$'+r.sl_buf"></td>
+                  <td class="font-mono" x-text="'$'+r.profit_floor_pts"></td>
+                  <td class="font-mono" x-text="'$'+r.profit_cap_pts"></td>
+                  <td class="font-mono text-t-bright" x-text="r.total"></td>
+                  <td class="font-mono" :class="r.win_rate_pct>=55?'pnl-pos':'pnl-neg'"
+                      x-text="r.win_rate_pct+'%'"></td>
+                  <td class="font-mono font-700" :class="r.profit_factor>=1.5?'pnl-pos':'pnl-neg'"
+                      x-text="r.profit_factor>=9998?'∞':r.profit_factor.toFixed(2)"></td>
+                  <td class="font-mono pnl-pos" x-text="'$'+r.gross_profit.toFixed(2)"></td>
+                  <td class="font-mono pnl-neg" x-text="'$'+r.gross_loss.toFixed(2)"></td>
+                  <td class="font-mono font-700"
+                      :class="r.net_pnl_usdt>=0?'pnl-pos':'pnl-neg'"
+                      x-text="'$'+r.net_pnl_usdt.toFixed(2)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
       </div>
-      <!-- Pagination -->
-      <div class="flex gap-2 mt-3 items-center" x-show="trades.length > 25">
-        <button @click="page=Math.max(1,page-1)" class="btn-secondary text-xs" :disabled="page===1">◀</button>
-        <span class="text-xs" style="color:var(--t-muted)">Page <span x-text="page"></span> / <span x-text="Math.ceil(trades.length/25)"></span></span>
-        <button @click="page=Math.min(Math.ceil(trades.length/25),page+1)" class="btn-secondary text-xs"
-                :disabled="page>=Math.ceil(trades.length/25)">▶</button>
-        <span class="text-xs ml-2" style="color:var(--t-muted)">(<span x-text="trades.length"></span> total)</span>
+    </template>
+
+    <!-- Trade Log -->
+    <template x-if="trades.length > 0 && !loading">
+      <div class="t-card p-4">
+        <div class="flex items-center justify-between mb-3">
+          <p class="sec-label">Trade Log — <span x-text="trades.length"></span> trades</p>
+          <div class="flex gap-2 items-center" x-show="trades.length > 25">
+            <button @click="page=Math.max(1,page-1)" class="btn-secondary" style="padding:4px 10px;font-size:12px" :disabled="page===1">◀</button>
+            <span class="text-xs text-t-muted font-mono">
+              <span x-text="page"></span>/<span x-text="Math.ceil(trades.length/25)"></span>
+            </span>
+            <button @click="page=Math.min(Math.ceil(trades.length/25),page+1)" class="btn-secondary" style="padding:4px 10px;font-size:12px"
+                    :disabled="page>=Math.ceil(trades.length/25)">▶</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="bt-table">
+            <thead>
+              <tr>
+                <th>Date</th><th>Dir</th><th>HTF Zone</th>
+                <th>Entry $</th><th>Exit $</th><th>Move pts</th>
+                <th>P&amp;L USDT</th><th>Reason</th><th>Bars</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="t in trades.slice((page-1)*25, page*25)">
+                <tr>
+                  <td class="text-t-muted" x-text="t.date"></td>
+                  <td class="font-700" :class="t.direction==='LONG'?'pnl-pos':'pnl-neg'"
+                      x-text="t.direction"></td>
+                  <td class="font-mono text-xs text-t-muted" x-text="t.htf_zone"></td>
+                  <td class="font-mono text-t-bright" x-text="t.entry_price?.toFixed(0)"></td>
+                  <td class="font-mono" x-text="t.exit_price?.toFixed(0)"></td>
+                  <td class="font-mono" :class="(t.exit_price-t.entry_price)*(t.direction==='LONG'?1:-1)>=0?'pnl-pos':'pnl-neg'"
+                      x-text="((t.exit_price-t.entry_price)*(t.direction==='LONG'?1:-1)).toFixed(0)"></td>
+                  <td class="font-mono font-700" :class="t.pnl_usdt>0?'pnl-pos':'pnl-neg'"
+                      x-text="'$'+t.pnl_usdt?.toFixed(4)"></td>
+                  <td class="font-mono text-xs"
+                      :class="t.exit_reason==='SL'?'pnl-neg':t.exit_reason==='T1'||t.exit_reason==='TARGET'?'pnl-pos':'text-t-muted'"
+                      x-text="t.exit_reason"></td>
+                  <td class="font-mono text-t-muted" x-text="t.bars_held"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
-  </template>
+    </template>
 
-  <!-- Error -->
-  <template x-if="error">
-    <div class="card" style="border-color:var(--red)">
-      <p class="text-xs" style="color:var(--red)" x-text="error"></p>
-    </div>
-  </template>
-
-</div><!-- end max-w -->
+  </div><!-- results-panel -->
+</div><!-- page-layout -->
 
 <script>
 function btcApp() {
   return {
     // Controls
-    daysBack:       90,
-    htfMin:         120,
-    subMin:         15,
-    slBuf:          100,
-    lots:           100,
-    profitFloorOn:  false,
-    profitFloor:    200,
-    profitCapOn:    false,
-    profitCap:      1000,
-    lookbackDays:   3,
+    daysBack:      90,
+    htfMin:        120,
+    subMin:        15,
+    slBuf:         100,
+    lots:          100,
+    profitFloorOn: false,
+    profitFloor:   200,
+    profitCapOn:   false,
+    profitCap:     500,
+    lookbackDays:  3,
 
     // State
     loading:    false,
@@ -341,41 +476,45 @@ function btcApp() {
     trades:     [],
     optResults: [],
     page:       1,
+    ctrlOpen:   false,
+    isMd:       false,
     _chart:     null,
 
     init() {
-      this.statusMsg = 'Ready. No auth required — data fetched from public Delta Exchange API.';
+      this.isMd = window.innerWidth >= 768;
+      window.addEventListener('resize', () => { this.isMd = window.innerWidth >= 768; });
+      this.statusMsg = 'Ready — no API credentials required.';
     },
 
     _params() {
       return {
-        days_back:         this.daysBack,
-        htf_min:           this.htfMin,
-        sub_min:           this.subMin,
-        sl_buf:            this.slBuf,
-        lots:              this.lots,
-        profit_floor_pts:  this.profitFloorOn ? this.profitFloor : 0,
-        profit_cap_pts:    this.profitCapOn   ? this.profitCap   : 0,
-        lookback_days:     this.lookbackDays,
+        days_back:        this.daysBack,
+        htf_min:          this.htfMin,
+        sub_min:          this.subMin,
+        sl_buf:           this.slBuf,
+        lots:             this.lots,
+        profit_floor_pts: this.profitFloorOn ? this.profitFloor : 0,
+        profit_cap_pts:   this.profitCapOn   ? this.profitCap   : 0,
+        lookback_days:    this.lookbackDays,
       };
     },
 
     async runBacktest() {
-      this.loading   = true;
-      this.error     = null;
-      this.statusMsg = `Fetching ${this.daysBack} days BTC 1m data from Delta Exchange…`;
+      this.loading    = true;
+      this.error      = null;
+      this.optResults = [];
+      this.statusMsg  = 'Fetching BTC 1m data from Delta Exchange…';
       try {
         const r = await fetch('/api/backtest/btc', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify(this._params()),
-        }).then(r=>r.json());
+        }).then(r => r.json());
         if (!r.ok) { this.error = r.error || 'Backtest failed'; return; }
-        this.summary   = r.summary;
-        this.trades    = r.trades || [];
-        this.optResults = [];
-        this.page      = 1;
-        this.statusMsg = `Done — ${r.trades?.length||0} trades found.`;
+        this.summary = r.summary;
+        this.trades  = r.trades || [];
+        this.page    = 1;
+        this.statusMsg = `Done — ${this.trades.length} trades over ${this.daysBack} days.`;
         this.$nextTick(() => this._drawChart());
       } catch(e) {
         this.error = String(e);
@@ -387,23 +526,19 @@ function btcApp() {
     async runOptimize() {
       this.loading    = true;
       this.error      = null;
-      this.statusMsg  = `Optimizing over ${this.daysBack} days… (may take 2-5 minutes)`;
       this.optResults = [];
       this.trades     = [];
       this.summary    = null;
+      this.statusMsg  = `Optimizing ${this.daysBack} days… this may take 3-5 minutes.`;
       try {
         const r = await fetch('/api/backtest/btc/optimize', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({
-            days_back:     this.daysBack,
-            lots:          this.lots,
-            lookback_days: this.lookbackDays,
-          }),
-        }).then(r=>r.json());
+          body: JSON.stringify({days_back: this.daysBack, lots: this.lots, lookback_days: this.lookbackDays}),
+        }).then(r => r.json());
         if (!r.ok) { this.error = r.error || 'Optimize failed'; return; }
         this.optResults = r.results || [];
-        this.statusMsg  = `Done — ${this.optResults.length} combinations ranked.`;
+        this.statusMsg  = `Optimization done — ${this.optResults.length} combinations ranked.`;
       } catch(e) {
         this.error = String(e);
       } finally {
@@ -413,7 +548,7 @@ function btcApp() {
 
     async clearCache() {
       await fetch('/api/backtest/btc/clear_cache', {method:'POST'}).then(r=>r.json());
-      this.statusMsg = 'Cache cleared. Next run will re-fetch from Delta Exchange API.';
+      this.statusMsg = 'Cache cleared. Next run will re-fetch from Delta Exchange.';
     },
 
     applyOptRow(r) {
@@ -432,7 +567,6 @@ function btcApp() {
       const canvas = document.getElementById('equityChart');
       if (!canvas) return;
       if (this._chart) { this._chart.destroy(); this._chart = null; }
-
       let cum = 0;
       const labels = [], data = [];
       for (const t of this.trades) {
@@ -447,8 +581,8 @@ function btcApp() {
           datasets: [{
             label: 'Cumulative P&L (USDT)',
             data,
-            borderColor: '#79c0ff',
-            backgroundColor: 'rgba(121,192,255,0.08)',
+            borderColor: '#387ED1',
+            backgroundColor: 'rgba(56,126,209,0.06)',
             tension: 0.3,
             pointRadius: 2,
             fill: true,
@@ -456,10 +590,10 @@ function btcApp() {
         },
         options: {
           responsive: true,
-          plugins: {legend:{labels:{color:'#8b949e',font:{size:11}}}},
+          plugins: {legend:{labels:{color:'#9b9b9b',font:{size:11}}}},
           scales: {
-            x: {ticks:{color:'#8b949e',maxTicksLimit:20,font:{size:10}}, grid:{color:'#21262d'}},
-            y: {ticks:{color:'#8b949e',font:{size:10},callback:v=>'$'+v}, grid:{color:'#21262d'}},
+            x: {ticks:{color:'#9b9b9b',maxTicksLimit:20,font:{size:10}},grid:{color:'#e9e9ed'}},
+            y: {ticks:{color:'#9b9b9b',font:{size:10},callback:v=>'$'+v},grid:{color:'#e9e9ed'}},
           }
         }
       });
