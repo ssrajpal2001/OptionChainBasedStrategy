@@ -423,13 +423,12 @@ class BtcLiveTrader:
     # ── daily reset ───────────────────────────────────────────────────────────
 
     def _daily_reset(self) -> None:
+        global log
         today = date.today().isoformat()
         if today != self._day_str:
             log.info("New day %s — prior day P&L=$%.2f", today, self._day_pnl)
             self._day_str = today
             self._day_pnl = 0.0
-            # Rotate log file
-            global log
             log = _setup_log()
 
     # ── main loop ─────────────────────────────────────────────────────────────

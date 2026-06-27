@@ -10,27 +10,26 @@ import sqlite3, json, os
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "clients.db")
 
 CONFIG = {
-    # ── Delta Exchange credentials (LIVE account) ──────────────────────────────
-    "api_key"           : "PASTE_YOUR_LIVE_API_KEY_HERE",
-    "api_secret"        : "PASTE_YOUR_LIVE_API_SECRET_HERE",
+    # ── Delta Exchange credentials ─────────────────────────────────────────────
+    "api_key"           : "PIHwljiMMoQsk9maAwEO83KVPhOmmB",
+    "api_secret"        : "SAYuGdY5ma7xhAPpQsl854sM03oPXQCHsrDWX8G7grM8Zp5lF1w8m80ZVqzJ",
 
-    # ── Strategy parameters (validated by 90-day backtest) ────────────────────
+    # ── Strategy parameters (validated by 90-day backtest, PF=1.508) ──────────
     "lots"              : 20,       # 20 lots = 0.02 BTC per trade
     "htf_min"           : 240,      # 4h HTF zone detection
     "sub_min"           : 30,       # 30m LTF confirmation
     "sl_buf"            : 500,      # SL buffer: $500 pts beyond zone
-    "profit_floor_pts"  : 200,      # break-even after $200 move in favour
+    "profit_floor_pts"  : 200,      # break-even after $200 pts move in favour
     "profit_cap_pts"    : 1000,     # profit target: $1000 pts move
-    "lookback_days"     : 3,        # lookback for HTF zone building
-    "cooldown_days"     : 1,        # skip zone for 1 day after SL
+    "lookback_days"     : 3,        # lookback days for HTF zone building
+    "cooldown_days"     : 1,        # skip zone for 1 day after losing SL
 
-    # ── Live / paper toggle ────────────────────────────────────────────────────
-    # Set paper_mode=True for dry-run (signals logged, NO real orders placed)
-    "paper_mode"        : False,
+    # ── Live mode ─────────────────────────────────────────────────────────────
+    "paper_mode"        : False,    # LIVE — real orders on Delta Exchange
 
     # ── Risk limits ───────────────────────────────────────────────────────────
-    "max_daily_loss_usdt": 300,     # halt trading if day loss exceeds this
-    "max_open_trades"   : 1,        # 1 trade at a time (positional)
+    "max_daily_loss_usdt": 300,     # halt if day loss exceeds $300 USDT
+    "max_open_trades"   : 1,        # 1 positional trade at a time
 }
 
 def main():
@@ -50,11 +49,15 @@ def main():
     conn.commit()
     conn.close()
     print(f"[setup] BTC live config saved to {DB_PATH}")
-    print(f"[setup] paper_mode = {CONFIG['paper_mode']}")
-    print(f"[setup] lots={CONFIG['lots']}  sl=${CONFIG['sl_buf']}pts  "
-          f"floor=${CONFIG['profit_floor_pts']}pts  cap=${CONFIG['profit_cap_pts']}pts")
-    if CONFIG["api_key"].startswith("PASTE"):
-        print("\n*** WARNING: Replace api_key / api_secret with your real credentials before going live! ***")
+    print(f"[setup] paper_mode  = {CONFIG['paper_mode']}")
+    print(f"[setup] lots        = {CONFIG['lots']}  (0.02 BTC per trade)")
+    print(f"[setup] HTF         = {CONFIG['htf_min']//60}h")
+    print(f"[setup] Sub         = {CONFIG['sub_min']}m")
+    print(f"[setup] SL buf      = ${CONFIG['sl_buf']} pts")
+    print(f"[setup] Floor       = ${CONFIG['profit_floor_pts']} pts (break-even)")
+    print(f"[setup] Cap         = ${CONFIG['profit_cap_pts']} pts (profit target)")
+    print(f"[setup] Day loss cap= ${CONFIG['max_daily_loss_usdt']} USDT")
+    print("\n[setup] Done. Run: python3 scripts/btc_live_trader.py")
 
 if __name__ == "__main__":
     main()
