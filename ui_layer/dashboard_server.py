@@ -956,15 +956,15 @@ class DashboardServer:
             sub_min           = int(p.get("sub_min", 15))
             sl_buf            = float(p.get("sl_buf", 100.0))
             lots              = int(p.get("lots", 100))
-            profit_floor_usdt = float(p.get("profit_floor_usdt", 0.0))
-            profit_cap_usdt   = float(p.get("profit_cap_usdt", 0.0))
+            profit_floor_pts  = float(p.get("profit_floor_pts", 0.0))
+            profit_cap_pts    = float(p.get("profit_cap_pts", 0.0))
             lookback_days     = int(p.get("lookback_days", 3))
             try:
                 from scripts.btc_backtest import run_btc_backtest
                 result = await asyncio.to_thread(
                     run_btc_backtest,
                     days_back, htf_min, sub_min, sl_buf, lots,
-                    profit_floor_usdt, profit_cap_usdt, lookback_days, False,
+                    profit_floor_pts, profit_cap_pts, lookback_days, False,
                 )
                 return result
             except Exception as exc:

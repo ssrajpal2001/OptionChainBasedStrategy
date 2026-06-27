@@ -163,19 +163,25 @@ def _simulate_trade(
     df1m: pd.DataFrame,
     lots: int,
     sl_buf: float,
-    profit_floor_usdt: float,
-    profit_cap_usdt: float,
+    profit_floor_pts: float,
+    profit_cap_pts: float,
     force_close_ts: Optional[pd.Timestamp],
 ) -> Optional[dict]:
     """
     Simulate one BTC futures trade on 1m bars starting from df1m.
 
-    P&L formula: (price_diff) × CONTRACT_SIZE × lots  (in USDT)
+    All thresholds (sl_buf, profit_floor_pts, profit_cap_pts) are in BTC PRICE POINTS
+    so they are lot-independent.  Actual USDT P&L = price_diff × CONTRACT_SIZE × lots.
+
+    profit_floor_pts : BTC price movement in our favour before break-even SL kicks in.
+                       e.g. 200 → if BTC moves $200 in our favour, lock SL at entry.
+    profit_cap_pts   : BTC price movement at which we exit with profit.
+                       e.g. 500 → exit when BTC is $500 above (LONG) / below (SHORT) entry.
     """
     if df1m.empty:
         return None
 
-    size        = CONTRACT_SIZE * lots   # BTC
+    size        = CONTRACT_SIZE * lots   # BTC — only used for final USDT P&L
     active_sl   = init_sl
     breakeven   = False
     entry_ts    = df1m["datetime"].iloc[0]
@@ -190,16 +196,17 @@ def _simulate_trade(
                     "bars_held": int((bar["datetime"] - entry_ts).total_seconds() / 60)}
 
         cur = bar["close"]
-        running = (cur - entry_price if is_long else entry_price - cur) * size
+        # Running P&L in PRICE POINTS (lot-independent)
+        running_pts = (cur - entry_price) if is_long else (entry_price - cur)
 
-        # Break-even gate: lock SL at entry once profit_floor is hit
-        if profit_floor_usdt > 0 and not breakeven and running >= profit_floor_usdt:
+        # Break-even gate: lock SL at entry once price moves profit_floor_pts in our favour
+        if profit_floor_pts > 0 and not breakeven and running_pts >= profit_floor_pts:
             active_sl = entry_price
             breakeven = True
 
-        # Profit-cap exit
-        if profit_cap_usdt > 0 and running >= profit_cap_usdt:
-            pnl = running
+        # Profit-cap exit: price moved profit_cap_pts in our favour
+        if profit_cap_pts > 0 and running_pts >= profit_cap_pts:
+            pnl = running_pts * size
             return {"exit_price": cur, "pnl_usdt": round(pnl, 4),
                     "exit_reason": "TARGET",
                     "bars_held": int((bar["datetime"] - entry_ts).total_seconds() / 60)}
@@ -258,8 +265,8 @@ def _run_btc_day(
     sub_min: int,
     sl_buf: float,
     lots: int,
-    profit_floor_usdt: float,
-    profit_cap_usdt: float,
+    profit_floor_pts: float,
+    profit_cap_pts: float,
     verbose: bool = False,
 ) -> list:
     """
@@ -369,8 +376,8 @@ def _run_btc_day(
             df1m              = df_exit,
             lots              = lots,
             sl_buf            = sl_buf,
-            profit_floor_usdt = profit_floor_usdt,
-            profit_cap_usdt   = profit_cap_usdt,
+            profit_floor_pts  = profit_floor_pts,
+            profit_cap_pts    = profit_cap_pts,
             force_close_ts    = force_ts_naive,
         )
 
@@ -432,19 +439,24 @@ def _summarize(trades: list, params: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_btc_backtest(
-    days_back: int         = 365,
-    htf_min: int           = 120,
-    sub_min: int           = 15,
-    sl_buf: float          = 100.0,
-    lots: int              = 100,
-    profit_floor_usdt: float = 0.0,
-    profit_cap_usdt: float   = 0.0,
-    lookback_days: int     = 3,
-    verbose: bool          = True,
+    days_back: int        = 365,
+    htf_min: int          = 120,
+    sub_min: int          = 15,
+    sl_buf: float         = 100.0,
+    lots: int             = 100,
+    profit_floor_pts: float = 0.0,
+    profit_cap_pts: float   = 0.0,
+    lookback_days: int    = 3,
+    verbose: bool         = True,
 ) -> dict:
     """
     Full BTC futures backtest.
-    Returns {"ok": True, "trades": [...], "summary": {...}}
+
+    sl_buf, profit_floor_pts, profit_cap_pts are all in BTC PRICE POINTS.
+    Actual USDT P&L = price_pts × CONTRACT_SIZE × lots.
+
+    profit_floor_pts: BTC must move this many $ in our favour before break-even SL locks in.
+    profit_cap_pts  : exit immediately when BTC moves this many $ in our favour.
     """
     df_all = _load_btc_1m(days_back + lookback_days + 2)
     if df_all.empty:
@@ -470,22 +482,21 @@ def run_btc_backtest(
             continue
 
         day_trades = _run_btc_day(
-            day_str           = d_str,
-            df_day            = df_day,
-            df_lookback       = df_lb,
-            htf_min           = htf_min,
-            sub_min           = sub_min,
-            sl_buf            = sl_buf,
-            lots              = lots,
-            profit_floor_usdt = profit_floor_usdt,
-            profit_cap_usdt   = profit_cap_usdt,
-            verbose           = verbose,
+            day_str          = d_str,
+            df_day           = df_day,
+            df_lookback      = df_lb,
+            htf_min          = htf_min,
+            sub_min          = sub_min,
+            sl_buf           = sl_buf,
+            lots             = lots,
+            profit_floor_pts = profit_floor_pts,
+            profit_cap_pts   = profit_cap_pts,
+            verbose          = verbose,
         )
         all_trades.extend(day_trades)
 
-    params = {"htf_min": htf_min, "sub_min": sub_min, "sl_buf": sl_buf,
-              "lots": lots, "profit_floor_usdt": profit_floor_usdt,
-              "profit_cap_usdt": profit_cap_usdt}
+    params = {"htf_min": htf_min, "sub_min": sub_min, "sl_buf": sl_buf, "lots": lots,
+              "profit_floor_pts": profit_floor_pts, "profit_cap_pts": profit_cap_pts}
     return {"ok": True, "trades": all_trades,
             "summary": _summarize(all_trades, params)}
 
@@ -521,12 +532,16 @@ def run_btc_optimize(
         if len(df_day) >= 60:
             day_slices[d_str] = (df_day, df_lb)
 
-    # ── Optimisation grid ─────────────────────────────────────────────────────
-    htf_grid   = [60, 120, 240]          # 1h / 2h / 4h
-    sub_grid   = [5, 15, 30]             # LTF confirmation TF
-    sl_grid    = [50, 100, 200, 500]     # SL buffer in USDT
-    floor_grid = [0, 100, 200, 500]     # min profit before break-even ($0 = off)
-    cap_grid   = [0, 500, 1000, 2000]   # profit target per lot in USDT ($0 = ride TSL)
+    # ── Optimisation grid (all values in BTC PRICE POINTS) ───────────────────
+    htf_grid   = [60, 120, 240]           # 1h / 2h / 4h
+    sub_grid   = [5, 15, 30]              # LTF confirmation TF
+    sl_grid    = [50, 100, 200, 500]      # SL buffer: price pts beyond zone
+    # Break-even floor: BTC must move this many $ in our favour before BE kicks in.
+    # e.g. 200 → lock SL at entry once BTC moves $200 in our direction
+    floor_grid = [0, 100, 200, 500]
+    # Profit cap: exit when BTC moves this many $ in our favour ($0 = ride TSL only)
+    # e.g. 500 → exit when BTC is $500 above entry (LONG) / below entry (SHORT)
+    cap_grid   = [0, 300, 500, 1000]
 
     valid_combos = [(h, s, sl, f, c)
                     for h  in htf_grid
@@ -538,24 +553,24 @@ def run_btc_optimize(
     print(f"[BTC Optimize] {total} combos × {len(day_slices)} days", flush=True)
 
     results: list = []
-    for idx, (htf_min, sub_min, sl_buf, floor_u, cap_u) in enumerate(valid_combos):
+    for idx, (htf_min, sub_min, sl_buf, floor_pts, cap_pts) in enumerate(valid_combos):
         all_trades: list = []
         for d_str, (df_day, df_lb) in day_slices.items():
             all_trades.extend(_run_btc_day(
-                day_str           = d_str,
-                df_day            = df_day,
-                df_lookback       = df_lb,
-                htf_min           = htf_min,
-                sub_min           = sub_min,
-                sl_buf            = sl_buf,
-                lots              = lots,
-                profit_floor_usdt = floor_u,
-                profit_cap_usdt   = cap_u,
+                day_str          = d_str,
+                df_day           = df_day,
+                df_lookback      = df_lb,
+                htf_min          = htf_min,
+                sub_min          = sub_min,
+                sl_buf           = sl_buf,
+                lots             = lots,
+                profit_floor_pts = floor_pts,
+                profit_cap_pts   = cap_pts,
                 verbose           = False,
             ))
 
         params = {"htf_min": htf_min, "sub_min": sub_min, "sl_buf": sl_buf,
-                  "profit_floor_usdt": floor_u, "profit_cap_usdt": cap_u, "lots": lots}
+                  "profit_floor_pts": floor_pts, "profit_cap_pts": cap_pts, "lots": lots}
         results.append(_summarize(all_trades, params))
 
         if (idx + 1) % 50 == 0:
