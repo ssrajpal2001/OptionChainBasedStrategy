@@ -414,7 +414,7 @@ def _summarize(trades: list, params: dict) -> dict:
     losses = [t for t in trades if t["pnl_usdt"] <= 0]
     gp     = sum(t["pnl_usdt"] for t in wins)
     gl     = abs(sum(t["pnl_usdt"] for t in losses))
-    pf     = round(gp / gl, 3) if gl > 0 else (float("inf") if gp > 0 else 0)
+    pf     = round(gp / gl, 3) if gl > 0 else (9999.0 if gp > 0 else 0.0)
 
     summary = {
         "total"          : len(trades),
