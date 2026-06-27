@@ -249,13 +249,6 @@ def _simulate_trade(
 # Core day runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _to_naive(ts) -> Optional[pd.Timestamp]:
-    """Convert any timestamp to timezone-naive pandas Timestamp."""
-    if ts is None:
-        return None
-    t = pd.Timestamp(ts)
-    return t.tz_convert(None) if t.tzinfo else t
-
 
 def _run_btc_day(
     day_str: str,
@@ -297,13 +290,12 @@ def _run_btc_day(
     if not htf_zones:
         return trades
 
-    # ── Step 2: sub-zone scan on today's bars ────────────────────────────────
+    # ── Step 2: sub-zone confirmation on today's LTF bars ────────────────────
     sub_bars = _resample(df_day, sub_min)
     _, sub_ents = scanner.scan_htf_spot(sub_bars) if len(sub_bars) >= 3 else (None, [])
     sub_zones   = [e for e in (sub_ents or []) if e.get("status") == "CLOSED"]
 
-    # Strip timezone from datetime column so all comparisons are tz-naive.
-    # (df_day has UTC-aware datetimes; we work on a copy to avoid mutating caller's data.)
+    # Strip timezone so all comparisons are tz-naive.
     df_day_naive = df_day.copy()
     if df_day_naive["datetime"].dt.tz is not None:
         df_day_naive["datetime"] = df_day_naive["datetime"].dt.tz_convert(None)
@@ -321,62 +313,55 @@ def _run_btc_day(
         kind    = htf_z.get("kind", "BEAR")
         is_long = (kind == "BEAR")
 
-        # Find confirming sub-zones inside the HTF zone (same direction)
-        sub_in  = [s for s in sub_zones
-                   if s.get("kind") == kind
-                   and float(s.get("zone_high", 0)) <= zh * 1.02
-                   and float(s.get("zone_low",  0)) >= zl * 0.98]
-        if not sub_in:
+        # Entry from the HTF zone's own trigger (lower-third LONG, upper-third SHORT).
+        trigger = _zone_trigger_price(htf_z)
+        sl      = _init_sl(htf_z, sl_buf)
+
+        # T1 = scanner's sl field = the trapped side's stop-loss = our profit target.
+        # For BEAR zone: bears shorted at zone_high, their SL (prev bar high) is above.
+        # For BULL zone: bulls bought at zone_low, their SL (prev bar low) is below.
+        t1 = float(htf_z.get("sl", 0))
+
+        # Sanity: T1 must be on the profit side of the entry.
+        if t1 <= 0:
+            continue
+        if is_long and t1 <= trigger:
+            continue
+        if not is_long and t1 >= trigger:
             continue
 
-        # Use most recently closed sub-zone
-        def _ts_key(s):
-            t = s.get("closed_on") or s.get("trapped_on")
-            if t is None:
-                return pd.Timestamp.min
-            ts = pd.Timestamp(t)
-            return ts.tz_convert(None) if ts.tzinfo else ts
+        # Optional: require a confirming sub-zone that is STRICTLY inside the HTF zone.
+        if sub_zones:
+            sub_in = [s for s in sub_zones
+                      if s.get("kind") == kind
+                      and float(s.get("zone_high", 0)) <= zh + (zh - zl) * 0.1
+                      and float(s.get("zone_low",  0)) >= zl - (zh - zl) * 0.1]
+            if not sub_in:
+                continue   # no LTF confirmation inside this HTF zone — skip
 
-        best_sub    = max(sub_in, key=_ts_key)
-        trigger     = _zone_trigger_price(best_sub)
-        sl          = _init_sl(best_sub, sl_buf)
-        t1          = zh if is_long else zl   # zone far edge as T1
-
-        # 1m bars after sub-zone closed_on
-        close_ts_naive = _to_naive(best_sub.get("closed_on"))
-        if close_ts_naive is None:
-            df_after = df_day_naive.copy()
-        else:
-            df_after = df_day_naive[df_day_naive["datetime"] >= close_ts_naive].copy()
-
-        if df_after.empty:
-            continue
-
-        # Find first 1m bar where trigger is hit
+        # Find first 1m bar today where the HTF trigger is touched.
         if is_long:
-            hit = df_after[df_after["low"] <= trigger]
+            hit = df_day_naive[df_day_naive["low"] <= trigger]
         else:
-            hit = df_after[df_after["high"] >= trigger]
+            hit = df_day_naive[df_day_naive["high"] >= trigger]
 
         if hit.empty:
             continue
 
         entry_bar   = hit.index[0]
-        entry_ts    = df_after.loc[entry_bar, "datetime"]
+        entry_ts    = df_day_naive.loc[entry_bar, "datetime"]
         entry_price = trigger
-        df_for_exit = df_after.loc[entry_bar + 1:]   # bars after entry bar
+        df_for_exit = df_day_naive.loc[entry_bar + 1:].copy()
 
         if df_for_exit.empty:
             continue
-
-        df_exit = df_for_exit.copy()
 
         result = _simulate_trade(
             entry_price       = entry_price,
             is_long           = is_long,
             init_sl           = sl,
             t1                = t1,
-            df1m              = df_exit,
+            df1m              = df_for_exit,
             lots              = lots,
             sl_buf            = sl_buf,
             profit_floor_pts  = profit_floor_pts,
