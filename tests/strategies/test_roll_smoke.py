@@ -34,7 +34,7 @@ def test_single_side_roll_emits_close_and_open_when_candidate_exists():
         for k in (23450, 23500, 23550):
             s._prev_atp_closed[(k, "CE")] = s._strike_prem[(k, "CE")]["atp"] + 5.0
             s._prev_atp_closed[(k, "PE")] = s._strike_prem[(k, "PE")]["atp"] + 5.0
-        await s._single_side_roll("CE", datetime.datetime.now(IST), "ltp_decay_CE")
+        await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
         while not q.empty():
             seen.append(q.get_nowait())
         actions = [(e.action, tuple(e.legs)) for e in seen if isinstance(e, StraddleOrderEvent)]
@@ -60,15 +60,16 @@ def test_single_side_roll_skips_when_best_partner_is_same_strike():
             pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
             net_credit=160.0, status="open",
         )
-        s._strike_prem[(23500, "CE")] = {"ltp": 70.0, "atp": 80.0}   # ==kept PE(70): eligible (<=70) & closest → picked (same strike → skip)
+        # Only the SAME strike (23500 CE) is eligible; adjacent CE strikes are below ltp_target.
+        s._strike_prem[(23500, "CE")] = {"ltp": 70.0, "atp": 80.0}
         s._strike_prem[(23500, "PE")] = {"ltp": 60.0, "atp": 65.0}
         for k in (23450, 23550):
-            s._strike_prem[(k, "CE")] = {"ltp": 60.0, "atp": 65.0}
+            s._strike_prem[(k, "CE")] = {"ltp": 10.0, "atp": 65.0}   # below ltp_target → skipped
             s._strike_prem[(k, "PE")] = {"ltp": 72.0, "atp": 78.0}
         for k in (23450, 23500, 23550):
             s._prev_atp_closed[(k, "CE")] = s._strike_prem[(k, "CE")]["atp"] + 5.0
             s._prev_atp_closed[(k, "PE")] = s._strike_prem[(k, "PE")]["atp"] + 5.0
-        await s._single_side_roll("CE", datetime.datetime.now(IST), "ltp_decay_CE")
+        await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
         while not q.empty():
             seen.append(q.get_nowait())
         orders = [e for e in seen if isinstance(e, StraddleOrderEvent)]

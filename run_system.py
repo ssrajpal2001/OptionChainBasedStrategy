@@ -337,9 +337,8 @@ async def _run_live(
     from matrix_engine.candle_cache import CandleCache
     from matrix_engine.gap_handler import GapHandler
     from matrix_engine.option_matrix import OptionMatrixEngine
-    from strategies.iron_condor import IronCondorStrategy
-    from strategies.sell_straddle import SellStraddleStrategy
     from execution_bridge import ExecutionRouter
+    from strategies.registry import STRATEGY_REGISTRY, create_strategy_manager
     from execution_bridge.straddle_bridge import StraddleExecutionBridge
     from execution_bridge.ic_bridge import ICExecutionBridge
     from management.client_manager import ClientManager
@@ -351,22 +350,9 @@ async def _run_live(
 
     bus = EventBus()
 
-    # Premium-selling strategies — one instance per monitored index
-    _iron_condors: List[IronCondorStrategy] = [
-        IronCondorStrategy(bus, cfg, underlying=idx)
-        for idx in cfg.monitored_indices
-    ]
-    # SellStraddle is now PER-BINDING: one independent book per (client, binding, index)
-    # deployment, spawned/managed by StraddleBookManager (auto-start on deploy). Created below,
-    # after the shared ClientDB exists. The dashboard/bridge read the live list via the manager.
-    straddle_manager = None  # set after _shared_client_db
     candle_cache  = CandleCache(bus, cfg)
     option_matrix = OptionMatrixEngine(bus, cfg)
     feeder        = GlobalFeeder(bus, cfg)
-    # Give each Iron Condor the feeder so it can subscribe next-expiry strikes
-    # for the min-LTP expiry shift (no-op if the feature is unused).
-    for _ic in _iron_condors:
-        _ic.set_feeder(feeder)
     router        = ExecutionRouter(bus, registry, cfg)
     from data_layer.client_db import ClientDB as _ClientDB
     _shared_client_db = _ClientDB()
@@ -374,11 +360,22 @@ async def _run_live(
     cfg.exchange.load_from_db(_shared_client_db)
     # Share the same DB instance across bridge + dashboard so engine_active state is consistent
     router._client_db = _shared_client_db
-    # Now the DB exists → build the per-binding SellStraddle book manager.
-    from strategies.straddle_book_manager import StraddleBookManager
-    straddle_manager = StraddleBookManager(bus, cfg, _shared_client_db, cfg.monitored_indices)
-    from strategies.trap_book_manager import TrapBookManager
-    trap_scanner_manager = TrapBookManager(bus, cfg, _shared_client_db, cfg.monitored_indices)
+    # Build all enabled strategy managers from the registry.
+    managers: dict = {}
+    for name in _enabled_strats:
+        if name in STRATEGY_REGISTRY:
+            managers[name] = create_strategy_manager(name, bus, cfg, _shared_client_db, cfg.monitored_indices)
+
+    # Backward-compat variables consumed by the dashboard and bridges.
+    straddle_manager = managers.get("sell_straddle")
+    trap_scanner_manager = managers.get("trap_scanner")
+    iron_condor_manager = managers.get("iron_condor")
+    _iron_condors = iron_condor_manager.books if iron_condor_manager else []
+
+    # Give each Iron Condor the feeder so it can subscribe next-expiry strikes
+    # for the min-LTP expiry shift (no-op if the feature is unused).
+    if iron_condor_manager is not None and hasattr(iron_condor_manager, "set_feeder"):
+        iron_condor_manager.set_feeder(feeder)
     # Crypto (Delta) feed: for any BTC/ETH in monitored_indices, run a DeltaChainManager that
     # drives a DeltaFeeder (spot + ATM±N strikes for the active daily expiry + 17:30 rollover) onto
     # the SAME EventBus the sell-straddle books consume. Runs alongside the NSE GlobalFeeder.
@@ -435,10 +432,10 @@ async def _run_live(
 
     # ── Data-layer operational modules ────────────────────────────────────────
     rebalancer     = StrikeRebalancer(bus, cfg, feeder)
-    # Give the trap scanner book manager the rebalancer so new engines can pin their strikes.
-    trap_scanner_manager.set_rebalancer(rebalancer)
-    # Give the straddle manager the rebalancer so it can call enable_chain() when a book spawns
-    straddle_manager.set_rebalancer(rebalancer)
+    # Give each manager the rebalancer so new books can pin their strikes / subscribe chains.
+    for manager in managers.values():
+        if hasattr(manager, "set_rebalancer"):
+            manager.set_rebalancer(rebalancer)
     # Iron condor needs the full ATM chain — enable for all IC indices
     for _ic in _iron_condors:
         if hasattr(rebalancer, "enable_chain"):
@@ -521,10 +518,9 @@ async def _run_live(
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
         asyncio.create_task(option_matrix.run(),        name="option_matrix"),
     ]
-    if "sell_straddle" in _enabled_strats and straddle_manager is not None:
-        tasks.append(asyncio.create_task(straddle_manager.run(), name="straddle_books"))
-    if "trap_scanner" in _enabled_strats:
-        tasks.append(asyncio.create_task(trap_scanner_manager.run(), name="trap_scanner_books"))
+    for name, manager in managers.items():
+        if STRATEGY_REGISTRY[name].get("per_binding"):
+            tasks.append(asyncio.create_task(manager.run(), name=f"{name}_books"))
     if delta_chain is not None:
         tasks.append(asyncio.create_task(delta_chain.run(), name="delta_chain"))
     async def _memory_watchdog() -> None:
@@ -571,13 +567,9 @@ async def _run_live(
                 logger.warning("Task '%s' completed normally — triggered shutdown.", name)
 
     logger.info("Shutting down…")
-    if "iron_condor" in _enabled_strats:
-        for _ic in _iron_condors:
-            _ic.stop()
-    if straddle_manager is not None:
-        await straddle_manager.stop_async()   # awaits task cancellation → frees EventBus queues
-    if trap_scanner_manager is not None:
-        await trap_scanner_manager.stop_async()
+    for manager in managers.values():
+        if hasattr(manager, "stop_async"):
+            await manager.stop_async()
     risk_mgr.stop()
     rebalancer.stop()
     strike_cleanup.stop()
