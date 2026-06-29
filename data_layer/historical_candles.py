@@ -45,6 +45,9 @@ def _http_get_json(url: str, access_token: str) -> dict:
         return {}
 
 
+_ORIGINAL_HTTP_GET_JSON = _http_get_json  # used to skip cache when tests monkeypatch
+
+
 async def fetch_upstox_1m(instrument_key: str, access_token: str, max_step_back: int = 7) -> List[dict]:
     """Most recent available day's 1-min candles (oldest-first) for an Upstox instrument_key,
     stepping back day-by-day over holidays/empties up to max_step_back days. Each candle:
@@ -82,17 +85,23 @@ async def fetch_upstox_warm_1m(instrument_key: str, access_token: str, min_bars:
 
     Results are cached per (instrument_key, today) for 5 minutes so N clients trading
     the same underlying share the same warm-up data without duplicate Upstox calls."""
+    # Skip cache when tests monkeypatch _http_get_json; otherwise share results
+    # across strategy books for the same instrument on the same day.
+    use_cache = _http_get_json is _ORIGINAL_HTTP_GET_JSON
     cache_key = (instrument_key, date.today())
-    cached, cached_at = _WARM_CACHE.get(cache_key, (None, 0.0))
-    if cached is not None and (time.monotonic() - cached_at) < _WARM_CACHE_TTL_SECONDS:
-        logger.debug("fetch_upstox_warm_1m cache hit: %s", instrument_key)
-        return cached
+    if use_cache:
+        cached, cached_at = _WARM_CACHE.get(cache_key, (None, 0.0))
+        if cached is not None and (time.monotonic() - cached_at) < _WARM_CACHE_TTL_SECONDS:
+            logger.debug("fetch_upstox_warm_1m cache hit: %s", instrument_key)
+            return cached
 
     today = await fetch_upstox_intraday_1m(instrument_key, access_token)
     if len(today) >= min_bars:
-        _WARM_CACHE[cache_key] = (today, time.monotonic())
+        if use_cache:
+            _WARM_CACHE[cache_key] = (today, time.monotonic())
         return today
     prev = await fetch_upstox_1m(instrument_key, access_token)
     result = prev + today
-    _WARM_CACHE[cache_key] = (result, time.monotonic())
+    if use_cache:
+        _WARM_CACHE[cache_key] = (result, time.monotonic())
     return result
