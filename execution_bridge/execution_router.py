@@ -135,12 +135,17 @@ class ExecutionRouter:
                         "Router: Authenticated %s/%s (%s).",
                         client.client_id, binding.binding_id, binding.provider,
                     )
-                else:
+                elif binding.is_trade_enabled:
                     logger.critical(
                         "Router: Auth FAILED for %s/%s (%s). System cannot start.",
                         client.client_id, binding.binding_id, binding.provider,
                     )
                     failed.append(f"{client.client_id}/{binding.binding_id}({binding.provider})")
+                else:
+                    logger.warning(
+                        "Router: Auth FAILED for %s/%s (%s) but trading is disabled; skipping.",
+                        client.client_id, binding.binding_id, binding.provider,
+                    )
 
             worker = ClientExecutionWorker(
                 client=client,
