@@ -1000,8 +1000,8 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
       setInterval(() => { this.loadTrapScannerBooks(); }, 5000);
-      // Live positions — auto-refresh every 3s while viewing the positions tab.
-      setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 1500);
+      // Live positions — auto-refresh every 500ms while viewing the positions tab.
+      setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 500);
     },
 
     /* Hydrate all admin panels — called right after login or session restore */
@@ -1162,6 +1162,7 @@ document.addEventListener('alpine:init', () => {
         this.snapshots = { ...this.snapshots, [msg.sym]: msg };
       } else if (msg.type === 'fill') {
         this._addEvent({ type:'fill', ...msg });
+        if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions();
       } else if (msg.type === 'sys') {
         this._addEvent({ type:'sys', ...msg });
       } else if (msg.type === 'stats') {
