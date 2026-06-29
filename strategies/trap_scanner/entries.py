@@ -22,11 +22,18 @@ class EntryMixin:
     """Strike selection, liquidity check and entry order placement."""
 
     async def _on_entry_signal(self, leg: str, opt_type: str,
-                                entry: dict, htf_zone: dict) -> None:
+                                entry: dict, htf_zone: dict,
+                                qty_override: Optional[int] = None,
+                                stage: Optional[str] = None) -> None:
         if self._no_margin_today:
             self._log.debug("Entry blocked — no margin today (add funds)")
             return
-        if self._position:
+        is_probe = stage == "probe"
+        # Scale-in adds are handled by _add_to_position, not here.
+        if self._position and not is_probe:
+            return
+        if self._position and is_probe:
+            self._log.debug("Probe entry skipped — position already exists")
             return
         # Terminal + Trade gate: never fire if THIS binding's broker terminal is
         # disconnected or the Trade toggle is OFF (fixes trade firing with terminal/trade OFF).
@@ -50,7 +57,10 @@ class EntryMixin:
         uid = _zone_uid(htf_zone)
         if uid in self._notified_uids:
             return
-        self._notified_uids.add(uid)
+        # For probe entries, delay uid consumption until the full position is built.
+        # This allows stage-2 and stage-3 scale-in adds on the same HTF zone.
+        if not is_probe:
+            self._notified_uids.add(uid)
         self._zone_ltf_status[uid] = "entered"
 
         # Scan strike (S1 CE / R1 PE) is naturally ITM relative to futures LTP
@@ -95,7 +105,10 @@ class EntryMixin:
         # Entry reference = zone_high (sellers' entry level = C1.LOW).
         # We entered when premium re-tested this level after TRAPPED.
         ep       = round(entry.get("zone_high", entry.get("zone_trigger", 0)), 2)
-        total_qty = self._lot_size * self._lot_mul
+        if qty_override is not None and qty_override > 0:
+            total_qty = int(qty_override)
+        else:
+            total_qty = self._lot_size * self._lot_mul
         t1_qty    = total_qty // 2
 
         # Price domain for SL/T1/monitoring depends on htf_source:
@@ -283,12 +296,99 @@ class EntryMixin:
             "order_id_t1":    None,
             "htf_zone":       htf_zone,
             "opt_type":       opt_type,
+            # Scale-in bookkeeping
+            "scale_stage":    stage or "full",
+            "scale_5m_added": False,
+            "scale_1m_added": False,
+            "htf_zone_uid":   uid,
+            "scale_fills":    [],
         }
         self._persist_position()
         self._log.info(
             "ENTRY PLACED scan=%d exec=%d%s spot=%.2f fill=%.2f sl=%.2f t1=%.2f order=%s",
             scan_strike, strike, opt_type, spot, avg, sl_price, t1_price, order_id,
         )
+
+    async def _add_to_position(self, qty: int, reason: str, entry: dict) -> bool:
+        """Add `qty` lots to an existing scaled-in position and recompute average entry.
+
+        Returns True if the add-order filled completely, False otherwise.
+        Does NOT advance scale_stage — caller must do that after confirming True.
+        """
+        pos = self._position
+        if not pos:
+            return False
+        if pos.get("t1_hit"):
+            self._log.info("Scale-in %s blocked — T1 already hit", reason)
+            return False
+        if not self._can_trade():
+            self._log.info("Scale-in %s blocked — terminal/trade OFF for %s/%s",
+                           reason, self._cid, self._bid)
+            return False
+        now = datetime.now(IST)
+        ch, cm = map(int, self._cutoff_str.split(":"))
+        if now.time() >= time(ch, cm):
+            self._log.info("Scale-in %s blocked — after cutoff", reason)
+            return False
+
+        strike = pos["strike"]
+        opt_type = pos["side"]
+        broker = await self._ensure_broker()
+        if not broker:
+            self._log.error("Scale-in %s aborted — no broker", reason)
+            return False
+
+        broker_sym = self._build_broker_symbol(strike, opt_type)
+        from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType, OrderStatus
+        ltp_hint = self._ltp_cache.get(pos.get("leg"), 0) or 0
+        req = OrderRequest(
+            broker_symbol=broker_sym,
+            exchange=self._exchange,
+            side=OrderSide.BUY,
+            qty=qty,
+            order_type=OrderType.MARKET,
+            price=ltp_hint,
+            tag=f"TRAP_SCALE_{self._und}_{opt_type}_{reason}",
+            client_id=self._cid,
+        )
+        try:
+            oid = await broker.place_order(req)
+            fl = None
+            for attempt in range(6):
+                fl = await broker.get_order_status(oid)
+                if fl and fl.status in (OrderStatus.COMPLETE, OrderStatus.CANCELLED):
+                    break
+                await asyncio.sleep(1)
+            if not fl or fl.status != OrderStatus.COMPLETE or fl.avg_price <= 0:
+                self._log.warning("Scale-in %s rejected: status=%s", reason,
+                                  fl.status if fl else "none")
+                return False
+
+            fill_price = fl.avg_price
+            old_total = pos["total_qty"]
+            old_avg = pos["entry_price"]
+            new_total = old_total + qty
+            new_avg = round((old_avg * old_total + fill_price * qty) / new_total, 2)
+            pos["total_qty"] = new_total
+            pos["remaining_qty"] += qty
+            pos["entry_price"] = new_avg
+            pos["t1_qty"] = new_total // 2
+            pos.setdefault("scale_fills", []).append({
+                "reason": reason,
+                "qty": qty,
+                "price": fill_price,
+                "ts": now.isoformat(),
+                "order_id": oid,
+            })
+            self._persist_position()
+            self._log.info(
+                "SCALE-IN %s: +%d qty @%.2f | new avg=%.2f total=%d remaining=%d",
+                reason, qty, fill_price, new_avg, new_total, pos["remaining_qty"],
+            )
+            return True
+        except Exception as exc:
+            self._log.error("Scale-in %s failed: %s", reason, exc)
+            return False
 
     def _compute_option_t1(self, opt_bars: list) -> float:
         """T1 = latest TRAPPED bear zone sl on the option chart (ref bar HIGH = bears' SL)."""

@@ -130,6 +130,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
         # Per-zone LTF status for telemetry: uid → "watching"|"ltf_signal"|"entered"
         self._zone_ltf_status: Dict[str, str] = {}
+        # Scale-in state per HTF zone uid: "probe" | "added_5m" | "full"
+        self._zone_scale_state: Dict[str, str] = {}
         # HTF ATR for zone-reachability check (Point 1)
         self._htf_atr_val: float = 0.0
 
@@ -733,6 +735,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._buckets        = {}
         self._notified_uids  = set()
         self._zone_ltf_status = {}
+        self._zone_scale_state = {}
         self._htf_atr_val = 0.0
         self._ltp_cache   = {}
         self._ce1_strike = None; self._ce2_strike = None

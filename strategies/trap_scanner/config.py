@@ -84,6 +84,9 @@ class ConfigMixin:
         # No-Target-TSL mode: skip T1 half-exit and TSL; floor locks from total P&L directly.
         # Exit only on: SL, OPP_SIGNAL (opposite side), Floor breach, EOD.
         self._no_target_tsl = bool(_adm.get("no_target_tsl", False))
+        # Scale-in mode: split entry into 1 lot probe + 3 lot add + rest on 1m breach.
+        # Default False — keeps original retest logic until explicitly enabled per index.
+        self._scale_in_enabled = bool(_adm.get("scale_in_enabled", False))
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
         self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 0.5))

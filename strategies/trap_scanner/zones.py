@@ -348,6 +348,12 @@ class ZonesMixin:
             self._update_futures_tsl(ts)
             return
         if self._position:
+            # Scale-in watcher: if we have a probe/add position, check for next stage.
+            # Only for option/spot mode (position leg is CE1/CE2/PE1/PE2), not futures-mode.
+            if (self._scale_in_enabled
+                    and self._position.get("scale_stage") in ("probe", "added_5m")
+                    and self._position.get("leg") in ("CE1", "CE2", "PE1", "PE2")):
+                asyncio.get_event_loop().create_task(self._maybe_scale_in(self._position["leg"], ts))
             return
 
         # Refresh HTF scan on HTF boundary
@@ -573,6 +579,23 @@ class ZonesMixin:
                 mtf.get("sl", 0), str(mtf.get("closed_on", ""))[:16],
             )
 
+            # Scale-in probe: enter 1 lot immediately on 15m zone_high touch.
+            # The full position is built later via _maybe_scale_in on lower-TF confirmation.
+            if self._scale_in_enabled and not self._position:
+                if self._zone_scale_state.get(uid) != "probe":
+                    self._zone_scale_state[uid] = "probe"
+                    self._zone_ltf_status[uid] = "probe_signal"
+                    probe_qty = self._lot_size * 1
+                    asyncio.get_event_loop().create_task(
+                        self._on_entry_signal(leg_key, opt_type, mtf, zone,
+                                              qty_override=probe_qty, stage="probe")
+                    )
+                    self._log.info(
+                        "SCALE-IN PROBE triggered [%s] uid=%s: %d lots @%.1f",
+                        leg_key, uid, probe_qty, ltf_zone_high,
+                    )
+                    return
+
             _, ltf_entries = scanner.scan_ltf(
                 df,
                 htf_zone_high=ltf_zone_high,
@@ -630,6 +653,106 @@ class ZonesMixin:
         if not closed:
             return None
         return max(closed, key=lambda e: str(e.get("closed_on", "")))
+
+    async def _maybe_scale_in(self, leg_key: str, ts: datetime) -> None:
+        """Add to an existing probe position on 5m closed zone (3 lots) and 1m breach (rest)."""
+        pos = self._position
+        if not pos:
+            return
+        if pos.get("leg") != leg_key:
+            return
+        stage = pos.get("scale_stage")
+        if stage not in ("probe", "added_5m"):
+            return
+        if pos.get("t1_hit"):
+            return
+
+        htf_zone = pos.get("htf_zone")
+        if not htf_zone:
+            return
+        z_low = htf_zone.get("zone_low", 0)
+        z_high = htf_zone.get("zone_high", 0)
+        current_price = self._ltp_cache.get(leg_key, 0)
+        if current_price <= 0 or current_price < z_low or current_price > z_high:
+            return
+
+        opt_type = pos["side"]
+        bars = {
+            "CE1": self._bars_ce1, "CE2": self._bars_ce2,
+            "PE1": self._bars_pe1, "PE2": self._bars_pe2,
+        }.get(leg_key, [])
+        if len(bars) < 3:
+            return
+
+        today = datetime.now(IST).date()
+        today_bars = [b for b in bars
+                      if pd.to_datetime(b.get("datetime", "")).date() == today]
+        if len(today_bars) < 3:
+            return
+
+        # Stage 2: add 3 lots when a CLOSED 5m zone exists inside the 15m context.
+        if stage == "probe" and not pos.get("scale_5m_added"):
+            mtf = self._find_closed_15m_zone(today_bars, None)
+            if mtf:
+                df = _bars_to_df(today_bars[-200:])
+                _, ltf_entries = scanner.scan_ltf(
+                    df,
+                    htf_zone_high=mtf["zone_high"],
+                    htf_zone_low=mtf["zone_low"],
+                    htf_ref_bar=str(htf_zone.get("ref_ts", "")),
+                    htf_trap_bar=str(htf_zone.get("trapped_on", htf_zone.get("closed_on", ""))),
+                    htf_target=htf_zone.get("sl", 0.0),
+                )
+                best = scanner.select_best_ltf_entry(ltf_entries)
+                if best:
+                    add_qty = self._lot_size * 3
+                    ok = await self._add_to_position(add_qty, "SCALE_5M", best)
+                    if ok:
+                        pos["scale_stage"] = "added_5m"
+                        pos["scale_5m_added"] = True
+                        self._persist_position()
+
+        # Stage 3: add remaining lots on 1m zone-high breach.
+        if pos.get("scale_stage") == "added_5m" and not pos.get("scale_1m_added"):
+            if self._is_1m_zone_breached(today_bars, htf_zone, opt_type, current_price):
+                target_total = self._lot_size * self._lot_mul
+                add_qty = max(0, target_total - pos["total_qty"])
+                if add_qty > 0:
+                    ok = await self._add_to_position(add_qty, "SCALE_1M", htf_zone)
+                    if ok:
+                        pos["scale_stage"] = "full"
+                        pos["scale_1m_added"] = True
+                        uid = pos.get("htf_zone_uid")
+                        if uid:
+                            self._notified_uids.add(uid)
+                        self._persist_position()
+                        self._log.info(
+                            "SCALE-IN COMPLETE [%s] uid=%s: total_qty=%d avg=%.2f",
+                            leg_key, uid, pos["total_qty"], pos["entry_price"],
+                        )
+
+    def _is_1m_zone_breached(self, today_bars: List[dict], htf_zone: dict,
+                             opt_type: str, current_price: float) -> bool:
+        """Return True if the most recent trapped 1m zone high is touched/breached."""
+        if len(today_bars) < 3 or current_price <= 0:
+            return False
+        df = _bars_to_df(today_bars[-60:])
+        if len(df) < 2:
+            return False
+        _, entries = scanner.scan_htf(df)
+        if not entries:
+            return False
+        # Use the most recent trapped zone inside today's 1m bars.
+        trapped = [e for e in entries if e["status"] == "TRAPPED"]
+        if not trapped:
+            return False
+        zone = max(trapped, key=lambda e: str(e.get("trapped_on", "")))
+        z_high = zone.get("zone_high", 0)
+        if z_high <= 0:
+            return False
+        # Require price to have reached the 1m sellers' entry level (zone_high).
+        tol = z_high * 0.005
+        return current_price >= z_high - tol
 
     def _run_ltf_futures_mode(self, leg_key: str, bars: List[dict],
                                htf_zones: List[dict], opt_type: str) -> None:
