@@ -341,6 +341,9 @@ class UpstoxFeeder(BaseFeeder):
         self._streamer.on("message", _on_message)
         self._streamer.on("error", _on_error)
         self._streamer.on("close", _on_close)
+        # Disable the SDK's internal 1-second auto-reconnect loop.  We manage
+        # reconnect ourselves in DualFeeder._run_stream with exponential backoff.
+        self._streamer.auto_reconnect(False)
 
         logger.info("UpstoxFeeder: streamer created — will connect in _ws_loop.")
         return True
