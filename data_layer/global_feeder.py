@@ -427,6 +427,12 @@ class UpstoxFeeder(BaseFeeder):
         self._running = True
         try:
             await asyncio.to_thread(self._streamer.connect)
+            # Upstox SDK connect() returns after handshake but keeps a background
+            # thread alive.  Stay in this coroutine until on_close fires or stop()
+            # is called, so DualFeeder._run_stream doesn't treat a healthy return
+            # as a disconnect.
+            while self._running and self._connected:
+                await asyncio.sleep(1.0)
         except Exception as exc:
             logger.error("UpstoxFeeder: _ws_loop ended with error: %s", exc)
         finally:
@@ -844,9 +850,13 @@ class FyersFeeder(BaseFeeder):
         if not self._socket:
             return
         self._running = True
-        # socket.connect() is a blocking call that runs until closed
         try:
             await asyncio.to_thread(self._socket.connect)
+            # FyersDataSocket.connect() may return after starting the background
+            # thread.  Stay alive until on_close sets _connected=False or stop()
+            # is called, so DualFeeder._run_stream doesn't spin-reconnect.
+            while self._running and self._connected:
+                await asyncio.sleep(1.0)
         except Exception as exc:
             logger.error("FyersFeeder: _ws_loop ended with error: %s", exc)
         finally:
