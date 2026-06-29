@@ -190,6 +190,7 @@ class Topic:
     ORDER_FILL       = "order_fill"
     SYSTEM_EVENT     = "system_event"
     EXIT_AUDIT       = "exit_audit"    # per-tick exit-criteria validation stream (granular UI)
+    POSITION_UPDATE  = "position_update"  # strategy book position snapshot (entry/exit/roll)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

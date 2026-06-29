@@ -8,6 +8,7 @@ from strategies.core.book_manager import StrategyBookManager
 from strategies.core.gate import can_trade
 from strategies.core.order_emitter import OrderEmitter
 from strategies.core.position import PositionStoreMixin
+from strategies.core.position_update import PositionUpdateMixin
 from strategies.core.rule_evaluator import RuleEvaluator, eval_rules
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "can_trade",
     "OrderEmitter",
     "PositionStoreMixin",
+    "PositionUpdateMixin",
     "RuleEvaluator",
     "eval_rules",
 ]

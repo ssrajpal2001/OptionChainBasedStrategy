@@ -1191,6 +1191,11 @@ document.addEventListener('alpine:init', () => {
           this.feederMsg[msg.provider]    =
             `✓ ${(msg.provider||'').toUpperCase()} connected via OAuth`;
         }
+      } else if (msg.type === 'position_update') {
+        // Strategy book position changed (entry / exit / roll) — refresh positions panel.
+        if (this.screen === 'client' && (this.clientMenu === 'positions' || this.clientMenu === 'dashboard')) {
+          this.loadClientPositions();
+        }
       }
     },
 

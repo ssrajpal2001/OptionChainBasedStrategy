@@ -21,6 +21,7 @@ from config.global_config import IST, Topic, GlobalConfig
 from data_layer.base_feeder import EventBus, OptionTick, IndexTick
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.core.gate import can_trade
+from strategies.core.position_update import PositionUpdateMixin
 from strategies.trap_scanner import scanner
 from strategies.trap_scanner.config import ConfigMixin, _pivot_levels, _round_strike, _SPOT_KEYS
 from strategies.trap_scanner.data import DataMixin
@@ -31,8 +32,8 @@ from strategies.trap_scanner.exits import ExitMixin
 logger = logging.getLogger(__name__)
 
 
-class TrapScannerEngine(AbstractStrategyBook, ConfigMixin, DataMixin, ZonesMixin,
-                        EntryMixin, ExitMixin):
+class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, DataMixin,
+                        ZonesMixin, EntryMixin, ExitMixin):
     """
     One independent trading book per (client_id, binding_id, underlying).
 
@@ -57,6 +58,7 @@ class TrapScannerEngine(AbstractStrategyBook, ConfigMixin, DataMixin, ZonesMixin
         expiry_mode: str = "current",  # current|next_week|monthly|YYYY-MM-DD (per-client DB value)
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
+        PositionUpdateMixin.__init__(self, bus, client_id, binding_id, "trap_scanner", underlying)
         self._und = underlying.upper()
         self._lot_mul = lot_multiplier
         self._cid = client_id
@@ -728,6 +730,7 @@ class TrapScannerEngine(AbstractStrategyBook, ConfigMixin, DataMixin, ZonesMixin
 
             with open(self._position_file(), "w") as f:
                 json.dump(self._position, f, default=_default)
+            self.notify_position_update(self._position, force=True)
         except Exception as exc:
             self._log.warning("_persist_position failed: %s", exc)
 
@@ -736,6 +739,7 @@ class TrapScannerEngine(AbstractStrategyBook, ConfigMixin, DataMixin, ZonesMixin
             p = self._position_file()
             if os.path.exists(p):
                 os.remove(p)
+            self.notify_position_update(None, force=True)
         except Exception:
             pass
 

@@ -18,7 +18,7 @@ from data_layer.base_feeder import CandleEvent, EventBus
 from data_layer.runtime_config import RuntimeConfig
 # Indicator computations live in strategies.sell_straddle.indicators
 
-from strategies.core import OrderEmitter, PositionStoreMixin
+from strategies.core import OrderEmitter, PositionStoreMixin, PositionUpdateMixin
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.pool_indicator_engine import PoolIndicatorEngine
 from strategies.sell_straddle.config import ConfigMixin
@@ -52,8 +52,8 @@ def pool_strike_set(atm: float, step: float, itm_depth: int, otm_depth: int,
     return out
 
 
-class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, ConfigMixin,
-                           IndicatorMixin, EntryMixin, ExitMixin, RollingMixin):
+class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpdateMixin,
+                           ConfigMixin, IndicatorMixin, EntryMixin, ExitMixin, RollingMixin):
 
     def __init__(
         self,
@@ -68,6 +68,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, ConfigMixin
             from config.global_config import GlobalConfig
             cfg = GlobalConfig()
         super().__init__(bus, cfg, underlying, client_id, binding_id)
+        PositionUpdateMixin.__init__(self, bus, client_id, binding_id, "sell_straddle", underlying)
         self._lot_multiplier = lot_multiplier
         self._client_db = None
 
@@ -156,8 +157,10 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, ConfigMixin
             if self._position and self._position.status == "open":
                 self.persist(self._persist_key, self._position.to_dict(),
                              product_type=getattr(self, "_product_type", "MIS"))
+                self.notify_position_update(self._position.to_dict(), force=True)
             else:
                 self.clear(self._persist_key)
+                self.notify_position_update(None, force=True)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: persist failed: %s", self._underlying, exc)
         self._persist_session()
@@ -506,6 +509,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, ConfigMixin
                         self._position.pe_leg.symbol = fill.pe_symbol
                 self._position.net_credit = self._position.ce_leg.entry_price + self._position.pe_leg.entry_price
                 self._persist()
+                self.notify_position_update(self._position.to_dict(), force=True)
                 _ce_disp = self._position.ce_leg.symbol or f"CE{int(self._position.ce_leg.strike)}"
                 _pe_disp = self._position.pe_leg.symbol or f"PE{int(self._position.pe_leg.strike)}"
                 logger.info(
