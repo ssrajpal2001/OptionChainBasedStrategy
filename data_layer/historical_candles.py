@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import List, Tuple
+
+from config.global_config import IST
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,11 @@ def _parse_candles(r: dict) -> List[dict]:
     rows = (r.get("data", {}) or {}).get("candles", []) or []
     return [{"ts": c[0], "open": c[1], "high": c[2], "low": c[3], "close": c[4],
              "volume": c[5]} for c in reversed(rows)]
+
+
+def _fyers_ts_to_iso(ts: int) -> str:
+    """Fyers history returns epoch seconds; convert to ISO with IST offset."""
+    return datetime.fromtimestamp(ts, tz=IST).isoformat()
 
 
 def _http_get_json(url: str, access_token: str) -> dict:
@@ -76,6 +83,53 @@ async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> Li
         return _parse_candles(_http_get_json(url, access_token))
 
     return await asyncio.to_thread(_get)
+
+
+async def fetch_fyers_intraday_1m(symbol: str, client_id: str, access_token: str) -> List[dict]:
+    """TODAY's 1-min candles (oldest-first) for a Fyers symbol.
+
+    Symbol examples:
+      NSE:NIFTY50-INDEX
+      NSE:NIFTY26JUN24000CE
+      BSE:SENSEX-INDEX
+      BSE:SENSEX26JUN77100PE
+    """
+    if not symbol or not client_id or not access_token:
+        return []
+    try:
+        from fyers_apiv3 import fyersModel  # type: ignore[import]
+    except ImportError:
+        logger.warning("fetch_fyers_intraday_1m: fyers-apiv3 not installed")
+        return []
+
+    try:
+        today = date.today().isoformat()
+        fyers = fyersModel.FyersModel(
+            client_id=client_id,
+            token=access_token,
+            log_path="logs/",
+        )
+        data = {
+            "symbol": symbol,
+            "resolution": "1",
+            "date_format": "1",
+            "range_from": today,
+            "range_to": today,
+            "cont_flag": "1",
+        }
+        resp = await asyncio.to_thread(fyers.get_history, data=data)
+        if not resp or resp.get("s") != "ok":
+            logger.warning("fetch_fyers_intraday_1m %s: %s", symbol, resp)
+            return []
+        candles = resp.get("candles", [])
+        return [
+            {"ts": _fyers_ts_to_iso(c[0]), "open": float(c[1]), "high": float(c[2]),
+             "low": float(c[3]), "close": float(c[4]), "volume": int(c[5] or 0)}
+            for c in candles
+        ]
+    except Exception as exc:
+        logger.warning("fetch_fyers_intraday_1m %s: %s", symbol, exc)
+        return []
 
 
 async def fetch_upstox_warm_1m(instrument_key: str, access_token: str, min_bars: int = 15) -> List[dict]:

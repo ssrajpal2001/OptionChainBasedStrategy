@@ -393,18 +393,22 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
                 if not self._bars_pe2:
                     self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
-                # Merge today's intraday bars (historical API ends at prev day)
-                for attr, key in [
-                    ("_bars_fut", self._fut_key),
-                    ("_bars_ce1", self._ce1_key), ("_bars_ce2", self._ce2_key),
-                    ("_bars_pe1", self._pe1_key), ("_bars_pe2", self._pe2_key),
-                ]:
-                    intra = await self._fetch_intraday_bars(key)
+                # Merge today's intraday bars (historical API ends at prev day).
+                # Upstox primary, Fyers fallback; cached per key for 5 minutes so a
+                # reconnect-storm re-init does not hammer the REST API.
+                merge_map = [
+                    ("_bars_fut", self._fut_key, None, None),
+                    ("_bars_ce1", self._ce1_key, self._ce1_strike, "CE"),
+                    ("_bars_ce2", self._ce2_key, self._ce2_strike, "CE"),
+                    ("_bars_pe1", self._pe1_key, self._pe1_strike, "PE"),
+                    ("_bars_pe2", self._pe2_key, self._pe2_strike, "PE"),
+                ]
+                for attr, key, strike, otype in merge_map:
+                    if not key:
+                        continue
+                    intra = await self._fetch_intraday_bars_with_fallback(key, strike, otype)
                     if intra:
-                        existing = {b["datetime"] for b in getattr(self, attr)}
-                        merged = getattr(self, attr) + [b for b in intra if b["datetime"] not in existing]
-                        merged.sort(key=lambda b: b["datetime"])
-                        setattr(self, attr, merged)
+                        setattr(self, attr, self._merge_bars(getattr(self, attr), intra))
                 self._log.info(
                     "Bars seeded — FUT(%s)=%d CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
                     self._fut_key, len(self._bars_fut),
@@ -430,6 +434,26 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
                 if not self._bars_pe2:
                     self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                # Merge today's intraday bars for LTF cascade; Upstox primary + Fyers fallback.
+                for attr, key, strike, otype in [
+                    ("_bars_ce1", self._ce1_key, self._ce1_strike, "CE"),
+                    ("_bars_ce2", self._ce2_key, self._ce2_strike, "CE"),
+                    ("_bars_pe1", self._pe1_key, self._pe1_strike, "PE"),
+                    ("_bars_pe2", self._pe2_key, self._pe2_strike, "PE"),
+                ]:
+                    if not key:
+                        continue
+                    intra = await self._fetch_intraday_bars_with_fallback(key, strike, otype)
+                    if intra:
+                        setattr(self, attr, self._merge_bars(getattr(self, attr), intra))
+                self._log.info(
+                    "Bars seeded — SPOT(%s)=%d CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
+                    spot_key, len(self._bars_spot),
+                    self._ce1_key, len(self._bars_ce1),
+                    self._ce2_key, len(self._bars_ce2),
+                    self._pe1_key, len(self._bars_pe1),
+                    self._pe2_key, len(self._bars_pe2),
+                )
             else:
                 # htf_source="option" (NSE/BSE): option bars for BOTH HTF and LTF
                 # CE1=S1 bars detect bear seller traps; PE1=R1 bars detect bull seller traps
@@ -446,6 +470,18 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
                 if not self._bars_pe2:
                     self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                # Merge today's intraday bars for LTF cascade; Upstox primary + Fyers fallback.
+                for attr, key, strike, otype in [
+                    ("_bars_ce1", self._ce1_key, self._ce1_strike, "CE"),
+                    ("_bars_ce2", self._ce2_key, self._ce2_strike, "CE"),
+                    ("_bars_pe1", self._pe1_key, self._pe1_strike, "PE"),
+                    ("_bars_pe2", self._pe2_key, self._pe2_strike, "PE"),
+                ]:
+                    if not key:
+                        continue
+                    intra = await self._fetch_intraday_bars_with_fallback(key, strike, otype)
+                    if intra:
+                        setattr(self, attr, self._merge_bars(getattr(self, attr), intra))
                 self._log.info(
                     "Bars seeded — CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
                     self._ce1_key, len(self._bars_ce1),

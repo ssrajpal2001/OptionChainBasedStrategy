@@ -4,8 +4,15 @@ strategies/trap_scanner/data.py — Upstox REST helpers and instrument-key build
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+
+# Intraday warm cache: (provider_symbol, date) -> (bars, monotonic_ts)
+# Shared across all trap-scanner engine instances to honor
+# "historical REST API called only once per CE1/CE2/PE1/PE2".
+_INTRADAY_CACHE: Dict[Tuple[str, date], Tuple[List[dict], float]] = {}
+_INTRADAY_CACHE_TTL_SECONDS = 300.0
 
 from strategies.trap_scanner.config import _SPOT_KEYS
 
@@ -22,6 +29,15 @@ class DataMixin:
         # Upstox WebSocket handles both NSE/BSE and MCX on the same connection.
         creds = self._db.get_feeder_creds_sync("upstox")
         return (creds or {}).get("access_token") or ""
+
+    def _get_fyers_token(self) -> Tuple[Optional[str], Optional[str]]:
+        """Return (client_id, access_token) from feeder creds, or (None, None)."""
+        try:
+            creds = self._db.get_feeder_creds_sync("fyers") or {}
+            return creds.get("api_key"), creds.get("access_token")
+        except Exception as exc:
+            self._log.debug("_get_fyers_token: %s", exc)
+            return None, None
 
     async def _ensure_broker(self):
         if self._broker and self._broker.is_authenticated:
@@ -205,6 +221,107 @@ class DataMixin:
         except Exception as exc:
             self._log.warning("_fetch_intraday_bars(%s) error: %s", instrument_key, exc)
             return []
+
+    def _build_fyers_symbol(self, strike: int, opt_type: str) -> str:
+        """Build Fyers symbol for an option strike using current expiry."""
+        try:
+            from data_layer.symbol_translator import InternalSymbol, SymbolTranslator
+            from data_layer.instrument_registry import REGISTRY
+            sym = InternalSymbol(
+                underlying=self._und,
+                strike=float(strike),
+                option_type=opt_type,
+                expiry=self._expiry_date or date.today(),
+            )
+            # Monthly detection: expiry is the last expiry of its month in REGISTRY.
+            is_monthly = False
+            if self._expiry_date and REGISTRY.is_loaded(self._und):
+                all_exp = REGISTRY.all_expiries(self._und)
+                month_exps = [e for e in all_exp if e.month == self._expiry_date.month]
+                is_monthly = self._expiry_date == max(month_exps) if month_exps else False
+            return SymbolTranslator.to_fyers(sym, is_monthly=is_monthly)
+        except Exception as exc:
+            self._log.warning("_build_fyers_symbol %s %s%s: %s", self._und, strike, opt_type, exc)
+            return ""
+
+    def _build_fyers_spot_symbol(self) -> str:
+        """Build Fyers spot/index symbol (e.g. NSE:NIFTY50-INDEX)."""
+        exchange = "BSE" if self._und == "SENSEX" else "NSE"
+        name = {
+            "NIFTY": "NIFTY50",
+            "BANKNIFTY": "NIFTYBANK",
+            "FINNIFTY": "FINNIFTY",
+            "MIDCPNIFTY": "MIDCPNIFTY",
+            "SENSEX": "SENSEX",
+        }.get(self._und, self._und)
+        return f"{exchange}:{name}-INDEX"
+
+    async def _fetch_fyers_intraday_bars(self, symbol: str) -> List[dict]:
+        """Fetch today's intraday 1-min bars from Fyers data/history endpoint."""
+        if not symbol:
+            return []
+        client_id, token = self._get_fyers_token()
+        if not client_id or not token:
+            return []
+        try:
+            from data_layer.historical_candles import fetch_fyers_intraday_1m
+            bars = await fetch_fyers_intraday_1m(symbol, client_id, token)
+            self._log.info("_fetch_fyers_intraday_bars(%s): %d bars today", symbol, len(bars))
+            return [{"datetime": b["ts"], "open": b["open"], "high": b["high"],
+                     "low": b["low"], "close": b["close"], "volume": b["volume"]} for b in bars]
+        except Exception as exc:
+            self._log.warning("_fetch_fyers_intraday_bars(%s) error: %s", symbol, exc)
+            return []
+
+    async def _fetch_intraday_bars_with_fallback(
+        self, upstox_key: str, strike: Optional[int] = None, opt_type: Optional[str] = None
+    ) -> List[dict]:
+        """Fetch today's 1-min bars: Upstox primary, Fyers fallback, with TTL cache.
+
+        Args:
+            upstox_key: Upstox instrument key for the instrument.
+            strike: Option strike (required for Fyers fallback on options).
+            opt_type: "CE" or "PE" (required for Fyers fallback on options).
+        """
+        if not upstox_key:
+            return []
+        cache_key = (upstox_key, date.today())
+        cached, cached_at = _INTRADAY_CACHE.get(cache_key, (None, 0.0))
+        if cached is not None and (time.monotonic() - cached_at) < _INTRADAY_CACHE_TTL_SECONDS:
+            self._log.debug("_fetch_intraday_bars_with_fallback cache hit: %s", upstox_key)
+            return cached
+
+        # Primary: Upstox
+        bars = await self._fetch_intraday_bars(upstox_key)
+        source = "upstox"
+
+        # Fallback: Fyers (only for option strikes with known strike/type)
+        if not bars and strike and opt_type:
+            fyers_symbol = self._build_fyers_symbol(int(strike), opt_type)
+            if fyers_symbol:
+                bars = await self._fetch_fyers_intraday_bars(fyers_symbol)
+                if bars:
+                    source = "fyers"
+
+        self._log.info(
+            "_fetch_intraday_bars_with_fallback(%s): %d bars from %s",
+            upstox_key, len(bars), source,
+        )
+        if bars:
+            _INTRADAY_CACHE[cache_key] = (bars, time.monotonic())
+        return bars
+
+    @staticmethod
+    def _merge_bars(existing: List[dict], new_bars: List[dict]) -> List[dict]:
+        """Merge two oldest-first bar lists, deduping by datetime."""
+        if not new_bars:
+            return existing
+        if not existing:
+            return list(new_bars)
+        seen = {b["datetime"] for b in existing}
+        merged = existing + [b for b in new_bars if b["datetime"] not in seen]
+        merged.sort(key=lambda b: b["datetime"])
+        return merged
 
     async def _fetch_1m_history(self, instrument_key: str) -> List[dict]:
         if not instrument_key:
