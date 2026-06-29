@@ -243,6 +243,9 @@ class UpstoxFeeder(BaseFeeder):
             self._sdk_available = True
         except ImportError:
             self._sdk_available = False
+        # Upstox SDK has its own auto-reconnect loop; DualFeeder should not
+        # fight it by creating a new streamer on every close.
+        self._uses_sdk_reconnect = True
 
     def set_credentials(self, creds: Dict[str, str]) -> None:
         self._creds = creds
@@ -341,9 +344,9 @@ class UpstoxFeeder(BaseFeeder):
         self._streamer.on("message", _on_message)
         self._streamer.on("error", _on_error)
         self._streamer.on("close", _on_close)
-        # Disable the SDK's internal 1-second auto-reconnect loop.  We manage
-        # reconnect ourselves in DualFeeder._run_stream with exponential backoff.
-        self._streamer.auto_reconnect(False)
+        # Let the Upstox SDK manage its own reconnects with a sensible interval.
+        # DualFeeder will not spin-reconnect for this provider.
+        self._streamer.auto_reconnect(True, interval=5, retry_count=99999)
 
         logger.info("UpstoxFeeder: streamer created — will connect in _ws_loop.")
         return True
@@ -430,12 +433,6 @@ class UpstoxFeeder(BaseFeeder):
         self._running = True
         try:
             await asyncio.to_thread(self._streamer.connect)
-            # Upstox SDK connect() returns after handshake but keeps a background
-            # thread alive.  Stay in this coroutine until on_close fires or stop()
-            # is called, so DualFeeder._run_stream doesn't treat a healthy return
-            # as a disconnect.
-            while self._running and self._connected:
-                await asyncio.sleep(1.0)
         except Exception as exc:
             logger.error("UpstoxFeeder: _ws_loop ended with error: %s", exc)
         finally:
@@ -675,6 +672,8 @@ class FyersFeeder(BaseFeeder):
             self._sdk_available = True
         except ImportError:
             self._sdk_available = False
+        # Fyers SDK reconnect is disabled; DualFeeder manages reconnect with backoff.
+        self._uses_sdk_reconnect = False
 
     def set_credentials(self, creds: Dict[str, str]) -> None:
         self._creds = creds
@@ -1024,6 +1023,18 @@ class DualFeeder:
         logger.info("DualFeeder: stopped.")
 
     async def _run_stream(self, provider: str, feeder: BaseFeeder) -> None:
+        # If the provider's own SDK handles reconnects, run it once and let the
+        # SDK manage the lifecycle.  Fighting it with external reconnects creates
+        # a spin of overlapping connections.
+        if getattr(feeder, "_uses_sdk_reconnect", False):
+            try:
+                await feeder.run()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("DualFeeder: %s stream error: %s", provider, exc)
+            return
+
         reconnect_attempts = 0
         while self._running:
             exit_reason: Optional[str] = None
