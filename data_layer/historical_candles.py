@@ -15,10 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import date, timedelta
-from typing import List
+from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
+
+# TTL cache for warm-up candles so multiple strategy books starting on the same
+# underlying do not hammer Upstox with identical REST calls.
+_WARM_CACHE: dict[Tuple[str, date], tuple[List[dict], float]] = {}
+_WARM_CACHE_TTL_SECONDS = 300.0
 
 
 def _parse_candles(r: dict) -> List[dict]:
@@ -72,9 +78,21 @@ async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> Li
 async def fetch_upstox_warm_1m(instrument_key: str, access_token: str, min_bars: int = 15) -> List[dict]:
     """Warm-up series (oldest-first) for RSI/ROC: today's intraday bars, backfilled with the
     previous trading day's bars (prepended, older-first) when the session is too young to have
-    >= min_bars. Returns [] if both sources are empty."""
+    >= min_bars. Returns [] if both sources are empty.
+
+    Results are cached per (instrument_key, today) for 5 minutes so N clients trading
+    the same underlying share the same warm-up data without duplicate Upstox calls."""
+    cache_key = (instrument_key, date.today())
+    cached, cached_at = _WARM_CACHE.get(cache_key, (None, 0.0))
+    if cached is not None and (time.monotonic() - cached_at) < _WARM_CACHE_TTL_SECONDS:
+        logger.debug("fetch_upstox_warm_1m cache hit: %s", instrument_key)
+        return cached
+
     today = await fetch_upstox_intraday_1m(instrument_key, access_token)
     if len(today) >= min_bars:
+        _WARM_CACHE[cache_key] = (today, time.monotonic())
         return today
     prev = await fetch_upstox_1m(instrument_key, access_token)
-    return prev + today
+    result = prev + today
+    _WARM_CACHE[cache_key] = (result, time.monotonic())
+    return result

@@ -63,6 +63,7 @@ class WsBridge:
         self._bus = bus
         self._cfg = cfg
         self._connections: Set[Any] = set()
+        self._conn_meta: Dict[Any, dict] = {}   # ws -> {client_id, role}
         self._running = False
         self._stats_providers: Dict[str, Callable[[], Any]] = {}
 
@@ -91,12 +92,15 @@ class WsBridge:
 
     # ── Connection management ─────────────────────────────────────────────────
 
-    def add_connection(self, ws: Any) -> None:
+    def add_connection(self, ws: Any, client_id: str = "", role: str = "") -> None:
         self._connections.add(ws)
-        logger.debug("WsBridge: client connected (%d total).", len(self._connections))
+        self._conn_meta[ws] = {"client_id": client_id or "", "role": role or ""}
+        logger.debug("WsBridge: client connected (%d total) cid=%s role=%s.",
+                     len(self._connections), client_id, role)
 
     def remove_connection(self, ws: Any) -> None:
         self._connections.discard(ws)
+        self._conn_meta.pop(ws, None)
         logger.debug("WsBridge: client disconnected (%d total).", len(self._connections))
 
     def register_stats_provider(self, name: str, fn: Callable[[], Any]) -> None:
@@ -109,13 +113,33 @@ class WsBridge:
 
     # ── Broadcast ────────────────────────────────────────────────────────────
 
+    def _allowed(self, ws: Any, payload: dict) -> bool:
+        """Return True if ``ws`` may receive ``payload``.
+
+        Client-scoped events (position_update, fill) are filtered so a client
+        browser only sees its own data. Admins see everything. Market data
+        (tick, snapshot) is broadcast to all connections.
+        """
+        meta = self._conn_meta.get(ws)
+        if not meta:
+            return True
+        role = meta.get("role", "")
+        if role == "admin":
+            return True
+        ptype = payload.get("type", "")
+        if ptype in ("position_update", "fill"):
+            return meta.get("client_id") == payload.get("client_id")
+        return True
+
     async def broadcast(self, payload: dict) -> None:
-        """Send JSON payload to all connected browsers; prune dead connections."""
+        """Send JSON payload to allowed connected browsers; prune dead connections."""
         if not self._connections:
             return
         text = json.dumps(payload, default=str)
         dead: Set[Any] = set()
         for ws in list(self._connections):
+            if not self._allowed(ws, payload):
+                continue
             try:
                 await ws.send_text(text)
             except Exception:

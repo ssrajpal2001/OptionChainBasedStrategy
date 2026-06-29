@@ -4721,13 +4721,17 @@ class DashboardServer:
                 await websocket.close(code=1008, reason="auth required")
                 return
             try:
-                verify_token(token)
+                token_payload = verify_token(token)
             except ValueError as exc:
                 await websocket.close(code=1008, reason=str(exc))
                 return
 
             await websocket.accept()
-            bridge.add_connection(websocket)
+            bridge.add_connection(
+                websocket,
+                client_id=token_payload.get("client_id", ""),
+                role=token_payload.get("role", ""),
+            )
             try:
                 while True:
                     await websocket.receive_text()
