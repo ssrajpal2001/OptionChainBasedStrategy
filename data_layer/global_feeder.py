@@ -328,8 +328,8 @@ class UpstoxFeeder(BaseFeeder):
         def _on_error(error) -> None:
             logger.warning("UpstoxFeeder: WS error: %s", error)
 
-        def _on_close() -> None:
-            logger.info("UpstoxFeeder: WebSocket closed.")
+        def _on_close(*args, **kwargs) -> None:
+            logger.info("UpstoxFeeder: WebSocket closed. args=%s", args)
             self._connected = False
 
         self._streamer = upstox_client.MarketDataStreamerV3(
