@@ -712,12 +712,12 @@ class FyersFeeder(BaseFeeder):
             access_token=access_token,
             write_to_file=False,
             litemode=False,  # full mode needed for continuous option tick streaming
-            reconnect=True,
+            reconnect=False,  # managed by DualFeeder._run_stream with exponential backoff
             on_message=_on_message,
             on_error=_on_error,
             on_connect=_on_connect,
             on_close=_on_close,
-            reconnect_retry=5,
+            reconnect_retry=0,
         )
         logger.info("FyersFeeder: socket created — will connect in _ws_loop.")
         return True
@@ -1013,28 +1013,35 @@ class DualFeeder:
     async def _run_stream(self, provider: str, feeder: BaseFeeder) -> None:
         reconnect_attempts = 0
         while self._running:
+            exit_reason: Optional[str] = None
             try:
                 await feeder.run()
-                break  # clean exit
+                exit_reason = "clean disconnect"
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                delay = min(2 ** reconnect_attempts, self.MAX_RECONNECT_DELAY)
-                logger.error(
-                    "DualFeeder: %s stream error: %s — reconnecting in %.0fs (attempt %d).",
-                    provider, exc, delay, reconnect_attempts + 1,
-                )
-                await asyncio.sleep(delay)
-                reconnect_attempts += 1
-                try:
-                    await feeder.disconnect()
-                    ok = await feeder.connect()
-                except Exception as reconnect_exc:
-                    logger.warning("DualFeeder: %s reconnect raised: %s", provider, reconnect_exc)
-                    ok = False
-                if ok:
-                    reconnect_attempts = 0
-                    logger.info("DualFeeder: %s reconnected successfully.", provider)
+                exit_reason = f"stream error: {exc}"
+
+            if not self._running:
+                break
+
+            delay = min(2 ** reconnect_attempts, self.MAX_RECONNECT_DELAY)
+            delay = delay * (0.75 + 0.5 * random.random())  # jitter 0.75x–1.25x
+            logger.warning(
+                "DualFeeder: %s %s — reconnecting in %.0fs (attempt %d).",
+                provider, exit_reason, delay, reconnect_attempts + 1,
+            )
+            await asyncio.sleep(delay)
+            reconnect_attempts += 1
+            try:
+                await feeder.disconnect()
+                ok = await feeder.connect()
+            except Exception as reconnect_exc:
+                logger.warning("DualFeeder: %s reconnect raised: %s", provider, reconnect_exc)
+                ok = False
+            if ok:
+                reconnect_attempts = 0
+                logger.info("DualFeeder: %s reconnected successfully.", provider)
 
     async def _wrap_publish_index(self, provider: str, feeder: BaseFeeder, tick: IndexTick) -> None:
         t0 = time.monotonic()
