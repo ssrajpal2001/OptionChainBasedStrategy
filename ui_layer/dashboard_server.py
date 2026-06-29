@@ -2103,7 +2103,7 @@ class DashboardServer:
             body: _SetIndexSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM", "BTC", "ETH"}
             idx = body.index.upper()
             if idx not in allowed:
                 raise HTTPException(400, f"Invalid index. Allowed: {sorted(allowed)}")
@@ -2135,7 +2135,7 @@ class DashboardServer:
         ):
             cid = user.get("client_id", "")
             allowed_strategies = {"sell_straddle", "iron_condor", "trap_scanner"}
-            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"}
+            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
             import json as _json
             validated = []
             for item in (body.selections or []):
@@ -3423,7 +3423,7 @@ class DashboardServer:
         async def api_index_config_get(index: str, _: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             idx = index.upper()
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM", "BTC", "ETH"}
             if idx not in allowed:
                 raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
             return {
@@ -3438,7 +3438,7 @@ class DashboardServer:
         ):
             from data_layer.runtime_config import RuntimeConfig
             idx = index.upper()
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM", "BTC", "ETH"}
             if idx not in allowed:
                 raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
             try:

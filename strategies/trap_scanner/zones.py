@@ -466,18 +466,15 @@ class ZonesMixin:
 
         _rc = self._htf_source not in ("option", "spot")
 
-        # Gap bias (option-mode only, always ON): UP gap → CE trades only; DOWN gap → PE trades only.
-        # Counter-trend leg is skipped — backtest shows 84.8% win vs 71.4% without bias.
-        _bias_ce_only = self._gap_fired and self._gap_direction == "UP"
-        _bias_pe_only = self._gap_fired and self._gap_direction == "DOWN"
-
-        if leg == "CE1" and bear_zones and not _bias_pe_only:
+        # No gap bias: if a bear trap forms, focus on CE; if a bull trap forms, focus on PE.
+        # Both sides are allowed to fire independently when their respective zones are trapped.
+        if leg == "CE1" and bear_zones:
             self._run_ltf_on("CE1", self._bars_ce1, bear_zones, "CE", require_closed=_rc)
-        elif leg == "CE2" and bear_zones_2 and not _bias_pe_only:
+        elif leg == "CE2" and bear_zones_2:
             self._run_ltf_on("CE2", self._bars_ce2, bear_zones_2, "CE", require_closed=_rc)
-        elif leg == "PE1" and bull_zones and not _bias_ce_only:
+        elif leg == "PE1" and bull_zones:
             self._run_ltf_on("PE1", self._bars_pe1, bull_zones, "PE", require_closed=_rc)
-        elif leg == "PE2" and bull_zones_2 and not _bias_ce_only:
+        elif leg == "PE2" and bull_zones_2:
             self._run_ltf_on("PE2", self._bars_pe2, bull_zones_2, "PE", require_closed=_rc)
 
     def _run_ltf_on(self, leg_key: str, bars: List[dict],
