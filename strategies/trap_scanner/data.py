@@ -456,7 +456,7 @@ class DataMixin:
         _PFX = {
             "NIFTY": "NSE_FO|", "BANKNIFTY": "NSE_FO|",
             "FINNIFTY": "NSE_FO|", "SENSEX": "BSE_FO|", "MIDCPNIFTY": "NSE_FO|",
-            "CRUDEOIL": "MCX_FO|",
+            "CRUDEOIL": "MCX_FO|", "GOLDM": "MCX_FO|",
         }
         pfx = _PFX.get(self._und, "NSE_FO|")
         fallback = f"{pfx}{self._und}{exp}{strike}{opt_type}"

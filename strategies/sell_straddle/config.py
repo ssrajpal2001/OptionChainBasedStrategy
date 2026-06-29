@@ -120,7 +120,7 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
     _vwap_sl = ss.get("vwap_rise_sl", {})
     vwap_rise_enabled = bool(_vwap_sl.get("enabled", ss.get("vwap_rise_sl_enabled", False)))
     vwap_rise_threshold = float(_vwap_sl.get("threshold", ss.get("vwap_rise_sl_threshold_pct", 1.0)))
-    _stale_default = 150.0 if str(underlying).upper() in ("CRUDEOIL", "NATURALGAS", "GOLD", "SILVER") else 90.0
+    _stale_default = 150.0 if str(underlying).upper() in ("CRUDEOIL", "NATURALGAS", "GOLD", "GOLDM", "SILVER") else 90.0
     vwap_stale_sec = float(_vwap_sl.get("stale_sec", ss.get("vwap_stale_sec", _stale_default)))
 
     _ratio = ss.get("ratio_exit", {})
