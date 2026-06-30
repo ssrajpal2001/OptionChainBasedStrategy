@@ -30,7 +30,8 @@ class _DB:
     def get_all_clients_sync(self): return [{"client_id": "C1"}, {"client_id": "C2"}]
     def get_bindings_safe_sync(self, cid):
         return [{"binding_id": ("Z1" if cid == "C1" else "Z9"),
-                 "terminal_connected": True}]
+                 "terminal_connected": True,
+                 "is_trade_enabled": True}]
     def get_deployments_sync(self, cid):
         return [{"strategy_name": "sell_straddle", "underlying": "NIFTY",
                  "binding_id": ("Z1" if cid == "C1" else "Z9"), "is_running": 1}]

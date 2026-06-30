@@ -6,9 +6,14 @@ class _FakeDB:
     def __init__(self, active): self._active = active
     def get_all_clients_sync(self): return [{"client_id": "c1"}]
     def get_bindings_safe_sync(self, cid):
-        return [{"binding_id": "b1", "engine_active": self._active, "terminal_connected": self._active}]
+        return [{
+            "binding_id": "b1",
+            "engine_active": self._active,
+            "terminal_connected": self._active,
+            "is_trade_enabled": self._active,
+        }]
     def get_deployments_sync(self, cid):
-        return [{"strategy_name": "sell_straddle", "underlying": "NIFTY", "binding_id": "b1"}]
+        return [{"strategy_name": "sell_straddle", "underlying": "NIFTY", "binding_id": "b1", "is_running": 1}]
 
 def test_gate_open_when_no_db():
     ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")

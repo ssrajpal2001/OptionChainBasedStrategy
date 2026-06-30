@@ -45,11 +45,26 @@ def _evaluate(client_id: str, binding_id: str, client_db: Any, strategy_name: st
 
         strategy = strategy_name.lower()
         if strategy == "trap_scanner":
-            return bool(binding.get("is_trade_enabled"))
+            if not binding.get("is_trade_enabled"):
+                return False
+            try:
+                deployments = client_db.get_deployments_sync(client_id)
+            except Exception:
+                deployments = []
+            return any(
+                d.get("binding_id") == binding_id
+                and str(d.get("strategy_name", "")).lower() == "trap_scanner"
+                and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
+                == (underlying or "").upper()
+                and int(d.get("is_running", 0) or 0) == 1
+                for d in deployments
+            )
 
         if strategy == "sell_straddle":
-            # Per-binding path: the deployment's per-strategy Run toggle
-            # (is_running) is the authority.
+            # Trade toggle must be ON for this binding (same dual-toggle gate as
+            # trap scanner). Then check the deployment's per-strategy Run toggle.
+            if not binding.get("is_trade_enabled"):
+                return False
             try:
                 deployments = client_db.get_deployments_sync(client_id)
             except Exception:
@@ -80,9 +95,8 @@ def can_trade(
     """
     Return True if the binding may trade for the given strategy.
 
-    Trap scanner: terminal_connected AND is_trade_enabled.
-    Sell straddle: terminal_connected AND a running sell_straddle deployment
-    for this underlying on this binding.
+    Both strategies: terminal_connected AND is_trade_enabled AND a running
+    deployment of that strategy for this underlying on this binding.
 
     Fail-open when ``client_db`` is None. Result is cached for 5 seconds.
     """

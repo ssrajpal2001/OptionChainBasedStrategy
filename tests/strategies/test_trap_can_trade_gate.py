@@ -1,8 +1,7 @@
-"""TrapScannerEngine._can_trade() — terminal + trade gating per binding.
+"""TrapScannerEngine._can_trade() — terminal + trade + deployment gating.
 
-Reproduces the live bug: a trade fired while the broker terminal AND the Trade
-toggle were OFF. The gate must block firing unless BOTH terminal_connected=1
-AND is_trade_enabled=1 for THIS book's (client, binding).
+The gate must block firing unless terminal_connected=1, is_trade_enabled=1,
+AND a trap_scanner deployment for this underlying/binding is running.
 """
 import pytest
 
@@ -12,16 +11,25 @@ from strategies.trap_scanner_engine import TrapScannerEngine
 
 
 class _FakeDB:
-    """Minimal stand-in exposing get_bindings_safe_sync for one binding."""
-    def __init__(self, terminal, trade):
+    """Minimal stand-in exposing get_bindings_safe_sync and get_deployments_sync."""
+    def __init__(self, terminal, trade, running=1):
         self._terminal = terminal
         self._trade = trade
+        self._running = running
 
     def get_bindings_safe_sync(self, client_id):
         return [{
             "binding_id": "b1",
             "terminal_connected": 1 if self._terminal else 0,
             "is_trade_enabled": 1 if self._trade else 0,
+        }]
+
+    def get_deployments_sync(self, client_id):
+        return [{
+            "binding_id": "b1",
+            "strategy_name": "trap_scanner",
+            "underlying": "NIFTY",
+            "is_running": self._running,
         }]
 
 
@@ -57,6 +65,14 @@ def test_allows_when_terminal_and_trade_on():
 def test_fail_open_without_db():
     eng = _engine(None)
     assert eng._can_trade() is True
+
+
+def test_blocks_when_deployment_not_running():
+    # Clear module-level cache so a recycled object id doesn't return a stale True.
+    from strategies.core import gate as _gate
+    _gate._cache.clear()
+    eng = _engine(_FakeDB(terminal=True, trade=True, running=0))
+    assert eng._can_trade() is False
 
 
 def test_caches_within_5s():
