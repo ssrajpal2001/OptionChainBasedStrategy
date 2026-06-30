@@ -341,23 +341,22 @@ def _zones_overlap(parent: dict, child: dict, tol: float = 0.15) -> bool:
 
 # ── numpy simulation ──────────────────────────────────────────────────────────
 
-def _simulate_numpy(H, L, C, entry, init_sl, t1, sl_buf, cap_pts, size) -> dict:
-    active_sl = init_sl
+def _simulate_numpy(H, L, C, entry, struct_sl, t1, _unused_buf, cap_pts, size) -> dict:
+    """
+    Fixed structural SL at struct_sl (= htf_zone_low - buffer).  No trailing.
+    The live engine does 5m-candle-low trailing which cannot be cleanly replicated
+    in backtest — fixed structural SL is the honest conservative equivalent.
+    Exits: SL if bar low <= struct_sl | T1 if bar high >= t1 | CAP | EOD at close.
+    """
     for i in range(len(H)):
         h, l, c = float(H[i]), float(L[i]), float(C[i])
-        run       = c - entry
-        new_trail = h - sl_buf
-        if new_trail > active_sl:
-            active_sl = new_trail
-        if cap_pts > 0 and run >= cap_pts:
-            return {"pnl": round(run * size, 2), "exit_reason": "CAP"}
-        if l <= active_sl:
-            pnl = (active_sl - entry) * size
-            return {"pnl": round(pnl, 2), "exit_reason": "SL"}
+        if l <= struct_sl:
+            return {"pnl": round((struct_sl - entry) * size, 2), "exit_reason": "SL"}
         if h >= t1:
-            pnl = (t1 - entry) * size
-            return {"pnl": round(pnl, 2), "exit_reason": "T1"}
-    ep  = float(C[-1]) if len(C) > 0 else entry
+            return {"pnl": round((t1 - entry) * size, 2), "exit_reason": "T1"}
+        if cap_pts > 0 and (c - entry) >= cap_pts:
+            return {"pnl": round((c - entry) * size, 2), "exit_reason": "CAP"}
+    ep = float(C[-1]) if len(C) > 0 else entry
     return {"pnl": round((ep - entry) * size, 2), "exit_reason": "EOD"}
 
 def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot) -> Optional[dict]:
