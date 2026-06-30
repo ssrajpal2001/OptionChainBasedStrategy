@@ -105,19 +105,23 @@ LOT  = LOT_SIZES.get(SYMBOL, 25)
 STEP = STRIKE_STEPS.get(SYMBOL, 50)
 
 # Optimization grids
-# SL_GRID / CAP_GRID = OPTION PREMIUM points (e.g. 20 = ₹20 move in ATM option).
-# Internally converted to spot points: spot_sl = option_pts / ATM_delta (0.5) → ×2.
-# So SL=20 → 40 spot pts, SL=100 → 200 spot pts (reasonable BANKNIFTY SL).
 # NSE session = 375 min (9:15-15:30). Only 75m divides it perfectly (5 candles).
-# 60/120/180/240 all leave a 15m stub at day-end → distorts zone detection.
 # Zone detection bars are capped at 15:14 (ZONE_CUTOFF) to exclude any partial candle.
-HTF_GRID  = [75, 120, 150, 180]   # 75m = session-aligned; 120/150/180 also tested
-MTF_GRID  = [15, 30]
-LTF_GRID  = [3, 5]
-EXEC_GRID = [1, 3]
-SL_GRID   = [20, 50, 100, 200]    # option premium points
-CAP_GRID  = [0, 100, 200, 500]    # option premium points (0 = trailing only)
-ZONE_CUTOFF = "15:14"             # strip last 15-min stub from zone bars
+HTF_GRID    = [75, 120, 150, 180]   # 75m = session-aligned; 120/150/180 also tested
+MTF_GRID    = [15, 30]
+LTF_GRID    = [3, 5]
+EXEC_GRID   = [1, 3]
+# SL_GRID: values are in their SL_SRC unit (see below).
+# SL_SRC="option" → option premium pts (50 opt pts = exit when premium drops 50).
+# SL_SRC="spot"   → spot index pts (200 spot pts = exit when BANKNIFTY drops 200).
+# On spot-proxy bars: "option" mode divides by delta to get spot equivalent;
+#                     "spot" mode uses value directly.
+# On real option bars: "option" mode uses value directly;
+#                      "spot" mode multiplies by delta to get premium equivalent.
+SL_GRID     = [50, 100, 200, 400]   # native pts in SL_SRC unit
+CAP_GRID    = [0, 200, 500]         # 0 = trailing only; in same SL_SRC unit
+SL_SRC_GRID = ["option", "spot"]    # what unit the SL is measured in
+ZONE_CUTOFF = "15:14"               # strip last 15-min stub from zone bars
 
 STRIKES_OFFSET = [-2, -1, 0, 1, 2]   # x STEP from ATM
 
@@ -712,27 +716,27 @@ if __name__ == "__main__":
 
     # ── Combos ─────────────────────────────────────────────────────────────────
     combos = [
-        (htf, mtf, ltf, exc, sl, cap, nsec)
-        for htf  in HTF_GRID
-        for mtf  in MTF_GRID   if mtf  < htf
-        for ltf  in LTF_GRID   if ltf  < mtf
-        for exc  in EXEC_GRID  if exc  <= ltf
-        for sl   in SL_GRID
-        for cap  in CAP_GRID
-        for nsec in [0, 1, 2]
+        (htf, mtf, ltf, exc, sl, cap, nsec, sl_src)
+        for htf    in HTF_GRID
+        for mtf    in MTF_GRID    if mtf  < htf
+        for ltf    in LTF_GRID    if ltf  < mtf
+        for exc    in EXEC_GRID   if exc  <= ltf
+        for sl     in SL_GRID
+        for cap    in CAP_GRID
+        for nsec   in [0, 1, 2]
+        for sl_src in SL_SRC_GRID
     ]
     total = len(combos)
-    print(f"[{SYMBOL}] {total} combos ...", flush=True)
+    print(f"[{SYMBOL}] {total} combos (incl. SL-in-option vs SL-in-spot) ...", flush=True)
 
     results = []
     t0 = time.time()
 
-    for idx, (htf_min, mtf_min, ltf_min, exec_min, sl_buf, cap_pts, n_sec) in enumerate(combos):
+    for idx, (htf_min, mtf_min, ltf_min, exec_min, sl_buf, cap_pts, n_sec, sl_src) in enumerate(combos):
         all_trades = []
         sl_hist: Dict[str, str] = {}
 
         for d_str in all_days:
-            # Build sector_zones_day for this day + htf
             sector_zones_day: Dict[tuple, list] = {}
             for sec in sector_list:
                 sector_zones_day[(sec, htf_min)] = sector_zones.get((sec, htf_min, d_str), [])
@@ -744,17 +748,36 @@ if __name__ == "__main__":
             if not htf_z or ex_arr is None:
                 continue
 
-            # sl_buf / cap_pts are in option premium points.
-            # Spot-proxy days: convert to spot units (÷ delta); PnL scaled by delta×lot.
-            # Real option days: use as-is; PnL = premium_move × lot.
-            if day_mode.get(d_str) == "option":
-                sim_sl  = sl_buf
-                sim_cap = cap_pts if cap_pts > 0 else 0
-                sim_lot = float(LOT)
-            else:
-                sim_sl  = sl_buf  / ATM_DELTA
-                sim_cap = cap_pts / ATM_DELTA if cap_pts > 0 else 0
+            is_opt_day = day_mode.get(d_str) == "option"
+
+            # Convert SL/cap to the simulation chart's native units, and set lot size.
+            # sl_src="option" → SL measured in option premium pts.
+            # sl_src="spot"   → SL measured in spot index pts.
+            #
+            # Spot-proxy day (is_opt_day=False): chart is in spot pts.
+            #   "option" SL → divide by delta → spot pts.  lot = delta × LOT.
+            #   "spot"   SL → use directly.                lot = delta × LOT (P&L still needs delta).
+            #
+            # Real-option day (is_opt_day=True): chart is in premium pts.
+            #   "option" SL → use directly.                lot = LOT.
+            #   "spot"   SL → multiply by delta → premium. lot = LOT.
+            if not is_opt_day:
                 sim_lot = ATM_DELTA * LOT
+                if sl_src == "option":
+                    sim_sl  = sl_buf  / ATM_DELTA
+                    sim_cap = cap_pts / ATM_DELTA if cap_pts > 0 else 0
+                else:  # "spot"
+                    sim_sl  = sl_buf
+                    sim_cap = cap_pts if cap_pts > 0 else 0
+            else:
+                sim_lot = float(LOT)
+                if sl_src == "option":
+                    sim_sl  = sl_buf
+                    sim_cap = cap_pts if cap_pts > 0 else 0
+                else:  # "spot" SL on option chart → convert to premium
+                    sim_sl  = sl_buf  * ATM_DELTA
+                    sim_cap = cap_pts * ATM_DELTA if cap_pts > 0 else 0
+
             res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
                                    sim_sl, sim_cap, sl_hist, sim_lot,
                                    sector_zones_day, htf_min, n_sec)
@@ -763,7 +786,7 @@ if __name__ == "__main__":
 
         params = {"htf_min": htf_min, "mtf_min": mtf_min, "ltf_min": ltf_min,
                   "exec_min": exec_min, "sl_buf": sl_buf, "cap_pts": cap_pts,
-                  "sector_confirm": n_sec, "symbol": SYMBOL, "lot": LOT}
+                  "sl_src": sl_src, "sector_confirm": n_sec, "symbol": SYMBOL, "lot": LOT}
         results.append(_summarize(all_trades, params))
 
         if (idx + 1) % 50 == 0:
@@ -775,20 +798,21 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
     pd.DataFrame(results).to_csv(OUT_CSV, index=False)
 
-    print(f"\n{'='*130}")
-    print(f"  {SYMBOL} Option Chart Cascade — Top 30  ({START_DATE} to {END_DATE})")
-    print(f"  Sector confirm: 0=none, 1=primary({SECTORS.get(SYMBOL,['?'])[0] if SECTORS.get(SYMBOL) else '?'}), "
-          f"2=primary+secondary")
-    print(f"{'='*130}")
+    W = 145
+    print(f"\n{'='*W}")
+    print(f"  {SYMBOL} Cascade — Top 30  ({START_DATE} to {END_DATE})")
+    print(f"  Sector: 0=none  1=primary({SECTORS.get(SYMBOL,['?'])[0] if SECTORS.get(SYMBOL) else '?'})"
+          f"  2=both  |  SL-src: opt=option-premium pts  spt=spot pts")
+    print(f"{'='*W}")
     print(f"{'Rank':>4}  {'HTF':>5}  {'MTF':>5}  {'LTF':>4}  {'Exc':>4}  "
-          f"{'SL':>4}  {'Cap':>4}  {'Sec':>3}  "
+          f"{'SL':>4}  {'Cap':>4}  {'SLsrc':>6}  {'Sec':>3}  "
           f"{'#':>4}  {'Win%':>5}  {'PF':>7}  {'Net INR':>10}  "
           f"{'AvgW':>8}  {'AvgL':>8}  {'SLs':>4}  {'T1s':>4}  {'EOD':>4}")
-    print(f"{'-'*130}")
+    print(f"{'-'*W}")
     for rank, r in enumerate(results[:30], 1):
         print(f"{rank:>4}  {r['htf_min']:>4}m  {r['mtf_min']:>4}m  {r['ltf_min']:>3}m  "
               f"{r['exec_min']:>3}m  {r['sl_buf']:>4.0f}  {r['cap_pts']:>4.0f}  "
-              f"{r['sector_confirm']:>3}  "
+              f"{str(r.get('sl_src','?')):>6}  {r['sector_confirm']:>3}  "
               f"{r['total']:>4}  {r['win_rate_pct']:>4.0f}%  {r['profit_factor']:>7.3f}  "
               f"{r['net_pnl_inr']:>10.2f}  {r['avg_win_inr']:>8.2f}  {r['avg_loss_inr']:>8.2f}  "
               f"{r['exits_sl']:>4}  {r['exits_t1']:>4}  {r['exits_eod']:>4}")
