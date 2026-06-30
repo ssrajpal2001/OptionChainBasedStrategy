@@ -34,13 +34,13 @@ _INDEX_CFG: Dict[str, dict] = {
                    "htf_source": "futures", "htf_min_override": 30},
     # BTC/ETH are 24/7 — no daily EOD squareoff and no entry cutoff.
     # sq_off=None → lifecycle loop skips EOD; cutoff=None → entries.py skips cutoff gate.
-    # BTC/ETH are 24/7 — no daily EOD squareoff and no entry cutoff.
-    # sq_off=None → lifecycle loop skips EOD; cutoff=None → entries.py skips cutoff gate.
-    # htf_min_override=240 (4h), ltf_min_override=30m — validated in btc_backtest (PF=1.508).
+    # htf_min_override=120 (2h), ltf_min_override=5m — 90-day cascade backtest best:
+    #   PF=2.888, 49% WR, trailing-SL only (cap irrelevant — no trade hits T1 or cap).
+    #   LONG (bear trap) dominates: +$2.17 vs SHORT +$0.16. SL=$50 sufficient with 4-tier cascade.
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
                    "sl_buf": 50.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures",
-                   "htf_min_override": 240, "ltf_min_override": 30},
+                   "htf_min_override": 120, "ltf_min_override": 5},
     "ETH":        {"step": 100, "lot": 1,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 5.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures",
