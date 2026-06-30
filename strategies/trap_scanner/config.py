@@ -9,12 +9,20 @@ from typing import Dict
 _INDEX_CFG: Dict[str, dict] = {
     # htf_source="option": HTF and LTF both scan OPTION premium bars (same units → scan_ltf works)
     # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
-    "NIFTY":      {"step": 100, "lot": 65,  "gap_near": 200, "gap_far": 400,
+    # Cascade backtest optimised 2026-06-30 (Apr–Jun 2026, 59 days, fixed structural SL):
+    # NIFTY:     HTF=150m / LTF=5m / SLbuf=10 opt-pts / Sec=2(BANKNIFTY+NIFTYIT) → PF=11.4, 77% WR
+    # BANKNIFTY: HTF=120m / LTF=3m / SLbuf=15 opt-pts / Sec=0(none)              → PF=3.86, 73% WR
+    # htf_source="option": zone detection + SL on OPTION premium chart (not spot).
+    # sl_buf = pts buffer below zone_low in option-premium units (ATM delta ≈ 0.5).
+    # Sector confirmation (Sec) is not yet implemented in live engine — planned next.
+    "NIFTY":      {"step": 50,  "lot": 65,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 10.0, "cutoff": "15:10", "sq_off": "15:20",
-                   "window": None, "exchange": "NFO", "htf_source": "option"},
+                   "window": None, "exchange": "NFO", "htf_source": "option",
+                   "htf_min_override": 150, "ltf_min_override": 5},
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
-                   "sl_buf": 4.0, "cutoff": "15:10", "sq_off": "15:20",
-                   "window": None, "exchange": "NFO", "htf_source": "option"},
+                   "sl_buf": 15.0, "cutoff": "15:10", "sq_off": "15:20",
+                   "window": None, "exchange": "NFO", "htf_source": "option",
+                   "htf_min_override": 120, "ltf_min_override": 3},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
