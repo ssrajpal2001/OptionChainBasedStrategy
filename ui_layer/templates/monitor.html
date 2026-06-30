@@ -4807,7 +4807,7 @@ function amoTest() {
                         <div x-show="ct.zone">
                           <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
                           <div :style="ct.zone?.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'"
-                               x-text="'Seller trap'"></div>
+                               x-text="ct.zone?.kind==='BEAR'?'Bear seller trap → '+( bk.exchange==='DELTA'?'BUY perp':'BUY call'):'Bull buyer trap → '+(bk.exchange==='DELTA'?'SELL perp':'BUY put')"></div>
                           <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
                           <div style="color:var(--t-cyan)"
                                x-text="ct.zone?(bk.htf_source==='futures'?(ct.zone.kind==='BEAR'?'Entry if FUT < ':'Entry if FUT > ')+ct.zone.zone_trigger:(ct.zone.kind==='BEAR'?'Entry if OPT < ':'Entry if OPT > ')+ct.zone.zone_trigger):'—'"></div>
@@ -4823,7 +4823,7 @@ function amoTest() {
                             <div>
                               <div style="color:var(--t-muted)" x-text="'Nearest FUT zone ('+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.htf_label||'30-min')+') · '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.trapped_on?.slice(5,16))"></div>
                               <div :style="(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'"
-                                   x-text="'Seller trap'"></div>
+                                   x-text="(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.kind==='BEAR'?'Bear seller trap → '+(bk.exchange==='DELTA'?'BUY perp':'BUY call'):'Bull buyer trap → '+(bk.exchange==='DELTA'?'SELL perp':'BUY put')"></div>
                               <div style="color:var(--t-dim)" x-text="'Zone '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_low)+' → '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_high)"></div>
                               <div style="color:var(--t-cyan)" x-text="((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.kind==='BEAR'?'Entry if FUT < ':'Entry if FUT > ')+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_trigger)"></div>
                               <div :style="((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.dist_pts||999)<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
@@ -4835,9 +4835,9 @@ function amoTest() {
                         <!-- LTF Status -->
                         <div>
                           <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
-                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':'Monitoring'):'—'"></span>
+                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?(bk.ltf_min||5)+'M TRAP READY!':'Monitoring'):'—'"></span>
                           <div x-show="ct.zone&&ct.zone.ltf_status==='watching'" style="color:var(--t-dim);margin-top:2px"
-                               x-text="'5-min trap needed'+(bk.htf_source==='futures'?' inside FUT zone':' inside zone')"></div>
+                               x-text="(bk.ltf_min||5)+'-min trap needed'+(bk.htf_source==='futures'?' inside FUT zone':' inside zone')"></div>
                         </div>
                       </div>
                     </template>
@@ -7191,7 +7191,7 @@ function amoTest() {
                                 <div x-show="ct.zone">
                                   <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
                                   <div :style="ct.zone?.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'"
-                                       x-text="'Seller trap'"></div>
+                                       x-text="ct.zone?.kind==='BEAR'?'Bear seller trap → '+(bk.exchange==='DELTA'?'BUY perp':'BUY call'):'Bull buyer trap → '+(bk.exchange==='DELTA'?'SELL perp':'BUY put')"></div>
                                   <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
                                   <div style="color:var(--t-cyan)"
                                        x-text="ct.zone?(bk.htf_source==='futures'?(ct.zone.kind==='BEAR'?'Entry if FUT < ':'Entry if FUT > ')+ct.zone.zone_trigger:(ct.zone.kind==='BEAR'?'Entry if OPT < ':'Entry if OPT > ')+ct.zone.zone_trigger):'—'"></div>
@@ -7203,9 +7203,9 @@ function amoTest() {
                                 <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
                                 <div>
                                   <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
-                                        x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':'Monitoring'):'—'"></span>
+                                        x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?(bk.ltf_min||5)+'M TRAP READY!':'Monitoring'):'—'"></span>
                                   <div x-show="ct.zone&&ct.zone.ltf_status==='watching'" style="color:var(--t-dim);margin-top:2px"
-                                       x-text="'5-min trap needed'+(bk.htf_source==='futures'?' inside FUT zone':' inside zone')"></div>
+                                       x-text="(bk.ltf_min||5)+'-min trap needed'+(bk.htf_source==='futures'?' inside FUT zone':' inside zone')"></div>
                                 </div>
                               </div>
                             </template>
