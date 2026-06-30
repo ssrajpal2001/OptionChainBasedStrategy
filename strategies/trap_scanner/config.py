@@ -80,6 +80,10 @@ class ConfigMixin:
         self._gap_far    = int(_adm.get("gap_itm_far",  _def["gap_far"]))
         self._cutoff_str = _adm.get("entry_cutoff",     _def["cutoff"])  # None = no cutoff (crypto 24/7)
         self._sq_off_str = _adm.get("sq_off_time",      _def["sq_off"])  # None = no EOD squareoff
+        # DELTA (crypto) is 24/7 — override any DB-stored squareoff/cutoff time
+        if _def.get("exchange") == "DELTA":
+            self._sq_off_str = None
+            self._cutoff_str = None
         self._entry_win    = _adm.get("entry_window",    _def["window"])
         # Profit floor: lock ₹N once total P&L (T1+remainder) hits it.
         # If P&L drops back below floor → exit immediately at that tick. 0 = disabled.

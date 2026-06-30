@@ -24,7 +24,8 @@ class TrapBookManager(StrategyBookManager):
     def __init__(self, bus, cfg, client_db, monitored_indices,
                  reconcile_sec: float = 5.0) -> None:
         super().__init__(bus, cfg, client_db, monitored_indices, reconcile_sec)
-        self._mcx_feeder = None   # dedicated Upstox2 feeder for MCX indices
+        self._mcx_feeder = None    # dedicated Upstox2 feeder for MCX indices
+        self._delta_feeder = None  # DeltaFeeder for BTC/ETH (client's Delta exchange)
 
     def set_rebalancer(self, rebalancer) -> None:
         super().set_rebalancer(rebalancer)
@@ -34,6 +35,13 @@ class TrapBookManager(StrategyBookManager):
         for eng in self.books:
             if eng._cfg.exchange.is_mcx(eng._und):
                 eng.set_mcx_feeder(feeder)
+
+    def set_delta_feeder(self, feeder) -> None:
+        """Wire DeltaFeeder to all existing and future BTC/ETH books."""
+        self._delta_feeder = feeder
+        for eng in self.books:
+            if eng._cfg.exchange.is_crypto(eng._und):
+                eng.set_mcx_feeder(feeder)  # reuses same slot; crypto and MCX never coexist
 
     def _ts_admin_cfg(self) -> dict:
         """Fetch current trap_scanner admin config from system settings DB."""
@@ -58,7 +66,9 @@ class TrapBookManager(StrategyBookManager):
             und = str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
             if not cid or not bid:
                 continue
-            if self._indices and und not in self._indices:
+            # Crypto (BTC/ETH) is always deployable — has its own Delta feed, not dependent on
+            # monitored_indices / Upstox. Only filter non-crypto by the index whitelist.
+            if self._indices and und not in self._indices and not self._cfg.exchange.is_crypto(und):
                 continue
             try:
                 lots = int(round(float(d.get("lot_multiplier", 2) or 2)))
@@ -89,6 +99,8 @@ class TrapBookManager(StrategyBookManager):
             eng.set_rebalancer(self._rebalancer)
         if self._mcx_feeder is not None and self._cfg.exchange.is_mcx(und):
             eng.set_mcx_feeder(self._mcx_feeder)
+        if self._delta_feeder is not None and self._cfg.exchange.is_crypto(und):
+            eng.set_mcx_feeder(self._delta_feeder)
         return eng
 
     def _stop_book(self, book) -> None:

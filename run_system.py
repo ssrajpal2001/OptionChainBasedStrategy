@@ -379,12 +379,14 @@ async def _run_live(
     # Crypto (Delta) feed: for any BTC/ETH in monitored_indices, run a DeltaChainManager that
     # drives a DeltaFeeder (spot + ATM±N strikes for the active daily expiry + 17:30 rollover) onto
     # the SAME EventBus the sell-straddle books consume. Runs alongside the NSE GlobalFeeder.
-    delta_chain = None
-    _crypto_idx = [u for u in cfg.monitored_indices if cfg.exchange.is_crypto(u)]
-    if _crypto_idx:
-        from data_layer.delta_chain_manager import DeltaChainManager
-        delta_chain = DeltaChainManager(bus, cfg, _crypto_idx)
-        logger.info("Delta crypto feed enabled for %s.", _crypto_idx)
+    # DeltaChainManager always starts for BTC/ETH — crypto has its own Delta feed independent
+    # of monitored_indices (Upstox/Fyers). A client can deploy BTC even if --index BTC is absent.
+    from data_layer.delta_chain_manager import DeltaChainManager
+    _crypto_idx_base = list({u for u in cfg.monitored_indices if cfg.exchange.is_crypto(u)})
+    _crypto_all = list({u for u in (cfg.exchange.crypto_underlyings or ("BTC", "ETH"))})
+    # Always run for BTC + ETH so a deploy works even without --index BTC in pm2 args
+    delta_chain = DeltaChainManager(bus, cfg, _crypto_all)
+    logger.info("Delta crypto feed always-on for %s (monitored: %s).", _crypto_all, _crypto_idx_base)
     straddle_bridge = StraddleExecutionBridge(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
@@ -443,14 +445,10 @@ async def _run_live(
     # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
     # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
     _mcx_feeder = None  # Upstox1 handles MCX options (Upstox2 lacks MCX options data plan)
-    # Wire DeltaFeeder to BTC/ETH trap scanner books — crypto data comes from Delta, not Upstox.
-    # DeltaFeeder is the market-data half of the Delta integration (public WS, no client auth needed).
-    if delta_chain and trap_scanner_manager and hasattr(trap_scanner_manager, "books"):
-        for _book in trap_scanner_manager.books:
-            if getattr(_book, "_und", None) in ("BTC", "ETH"):
-                _book.set_mcx_feeder(delta_chain._feeder)
-                logger.info("Wired DeltaFeeder to %s trap scanner book (client=%s).",
-                            _book._und, getattr(_book, "_cid", "?"))
+    # Wire DeltaFeeder to TrapBookManager — it propagates to all current + future BTC/ETH books.
+    if trap_scanner_manager and hasattr(trap_scanner_manager, "set_delta_feeder"):
+        trap_scanner_manager.set_delta_feeder(delta_chain._feeder)
+        logger.info("DeltaFeeder wired to TrapBookManager for all crypto books.")
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 
