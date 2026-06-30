@@ -379,9 +379,16 @@ class EntryMixin:
             if _new_etv > self._initial_entry_time_value:
                 self._initial_entry_time_value = _new_etv
 
+        _cid = getattr(self, "_client_id", "") or "-"
+        _bid = getattr(self, "_binding_id", "") or "-"
         logger.info(
-            "SellStraddle[%s]: ENTERED — CE%d=%.2f PE%d=%.2f credit=%.2f | %s=PASS [%s]",
-            self._underlying, ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
+            "SellStraddle[%s|%s|%s]: ENTERED — CE%d=%.2f PE%d=%.2f credit=%.2f | %s=PASS [%s]",
+            self._underlying, _cid, _bid, ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
+            rule_key, reason,
+        )
+        self._clog.info(
+            "ENTERED — CE%d=%.2f PE%d=%.2f credit=%.2f | %s=PASS [%s]",
+            ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
             rule_key, reason,
         )
 

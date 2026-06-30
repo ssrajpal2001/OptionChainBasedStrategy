@@ -386,10 +386,12 @@ class ExitMixin:
         pos.realized_pnl = pos.unrealized_pnl
         pos.status = "closed"
         self._session_realized_pnl_pts += pos.realized_pnl
+        _cid = getattr(self, "_client_id", "") or "-"
+        _bid = getattr(self, "_binding_id", "") or "-"
         logger.info(
-            "SellStraddle[%s]: position DISCARDED after external square-off (%s) — pnl=%.2f pts; "
+            "SellStraddle[%s|%s|%s]: position DISCARDED after external square-off (%s) — pnl=%.2f pts; "
             "cleared persisted store so it will NOT restore on restart.",
-            self._underlying, reason, pos.realized_pnl,
+            self._underlying, _cid, _bid, reason, pos.realized_pnl,
         )
         self._position = None
         self._persist()
@@ -406,11 +408,19 @@ class ExitMixin:
         pos.pe_leg.close_time = pos.close_time
         pos.status = "closed"
 
+        _cid = getattr(self, "_client_id", "") or "-"
+        _bid = getattr(self, "_binding_id", "") or "-"
         logger.info(
-            "SellStraddle[%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) "
+            "SellStraddle[%s|%s|%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) "
             "CE %.2f→%.2f PE %.2f→%.2f",
-            self._underlying, reason,
+            self._underlying, _cid, _bid, reason,
             self._ccy_symbol, self._pnl_rs(pos.realized_pnl), pos.realized_pnl,
+            pos.ce_leg.entry_price, pos.ce_leg.ltp,
+            pos.pe_leg.entry_price, pos.pe_leg.ltp,
+        )
+        self._clog.info(
+            "CLOSED — reason=%s pnl=%.2fpts CE %.2f→%.2f PE %.2f→%.2f",
+            reason, pos.realized_pnl,
             pos.ce_leg.entry_price, pos.ce_leg.ltp,
             pos.pe_leg.entry_price, pos.pe_leg.ltp,
         )
@@ -487,8 +497,12 @@ class ExitMixin:
         )
         await self._emit_order(order_ev)
         self._session_realized_pnl_pts += leg_pnl
-        logger.info("SellStraddle[%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
-                    self._underlying, side, leg.strike, leg_pnl, reason)
+        _cid = getattr(self, "_client_id", "") or "-"
+        _bid = getattr(self, "_binding_id", "") or "-"
+        logger.info("SellStraddle[%s|%s|%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
+                    self._underlying, _cid, _bid, side, leg.strike, leg_pnl, reason)
+        self._clog.info("CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
+                        side, leg.strike, leg_pnl, reason)
         return leg_pnl
 
     async def _open_leg(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
@@ -518,5 +532,9 @@ class ExitMixin:
             legs=[side],
         )
         await self._emit_order(order_ev)
-        logger.info("SellStraddle[%s]: OPEN LEG %s strike=%.0f @%.2f [%s]",
-                    self._underlying, side, strike, ltp, reason)
+        _cid = getattr(self, "_client_id", "") or "-"
+        _bid = getattr(self, "_binding_id", "") or "-"
+        logger.info("SellStraddle[%s|%s|%s]: OPEN LEG %s strike=%.0f @%.2f [%s]",
+                    self._underlying, _cid, _bid, side, strike, ltp, reason)
+        self._clog.info("OPEN LEG %s strike=%.0f @%.2f [%s]",
+                        side, strike, ltp, reason)

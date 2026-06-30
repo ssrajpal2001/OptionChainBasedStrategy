@@ -513,17 +513,28 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _ce_disp = self._position.ce_leg.symbol or f"CE{int(self._position.ce_leg.strike)}"
                 _pe_disp = self._position.pe_leg.symbol or f"PE{int(self._position.pe_leg.strike)}"
                 logger.info(
-                    "SellStraddle[%s]: ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f [%s/%s] legs=%s",
-                    self._underlying, _ce_disp, self._position.ce_leg.entry_price,
+                    "SellStraddle[%s|%s|%s]: ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f legs=%s",
+                    self._underlying, fill.client_id, fill.binding_id,
+                    _ce_disp, self._position.ce_leg.entry_price,
                     _pe_disp, self._position.pe_leg.entry_price,
-                    self._position.net_credit, fill.client_id, fill.binding_id, _legs,
+                    self._position.net_credit, _legs,
+                )
+                self._clog.info(
+                    "ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f legs=%s",
+                    _ce_disp, self._position.ce_leg.entry_price,
+                    _pe_disp, self._position.pe_leg.entry_price,
+                    self._position.net_credit, _legs,
                 )
             self._order_pending = False
         elif fill.action == "EXIT":
             logger.info(
-                "SellStraddle[%s]: EXIT confirmed — CE=%.2f PE=%.2f [%s/%s]",
-                self._underlying, fill.ce_fill, fill.pe_fill,
-                fill.client_id, fill.binding_id,
+                "SellStraddle[%s|%s|%s]: EXIT confirmed — CE=%.2f PE=%.2f",
+                self._underlying, fill.client_id, fill.binding_id,
+                fill.ce_fill, fill.pe_fill,
+            )
+            self._clog.info(
+                "EXIT confirmed — CE=%.2f PE=%.2f",
+                fill.ce_fill, fill.pe_fill,
             )
             self._order_pending = False
 
