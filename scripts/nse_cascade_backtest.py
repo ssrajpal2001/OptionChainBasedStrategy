@@ -466,9 +466,74 @@ def _summarize(trades, params) -> dict:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _get_expiry_for_day(d_str: str) -> date:
+    """Monthly expiry that covers this trading day."""
+    d = date.fromisoformat(d_str)
+    exp = _get_monthly_expiry(SYMBOL, d.year, d.month)
+    if d > exp:
+        nm = d.month % 12 + 1
+        ny = d.year + (1 if d.month == 12 else 0)
+        exp = _get_monthly_expiry(SYMBOL, ny, nm)
+    return exp
+
+
+def _build_option_bars_for_day(d_str: str, expiry: date,
+                                contracts: Dict[Tuple[int, str], str],
+                                daily_map: dict, token: str,
+                                fetch_fr: date, fetch_to: date,
+                                option_bar_cache: dict) -> Optional[pd.DataFrame]:
+    """
+    Return combined CE+PE ATM option 1m bar series for this day.
+    Tries ATM, then ATM±1 step (mirror of trap scanner strike selection).
+    Returns the first strike pair that has data, or None.
+    P&L unit: raw option premium (no delta scaling needed — already priced).
+    """
+    atm = _get_atm_close(d_str, daily_map)
+    if not atm:
+        return None
+    for offset in [0, -1, 1]:    # ATM → 1 ITM → 1 OTM
+        ce_strike = atm + offset * STEP
+        pe_strike = atm - offset * STEP
+        ce_key = contracts.get((ce_strike, "CE"))
+        pe_key = contracts.get((pe_strike, "PE"))
+        if not ce_key or not pe_key:
+            continue
+        for key, label in [(ce_key, f"{SYMBOL}CE{ce_strike}"), (pe_key, f"{SYMBOL}PE{pe_strike}")]:
+            if (key, d_str) not in option_bar_cache:
+                cache_f = os.path.join(CACHE_DIR, f"bars_{label}_{fetch_fr}_{fetch_to}.parquet")
+                if os.path.exists(cache_f):
+                    df_c = pd.read_parquet(cache_f)
+                else:
+                    df_c = _fetch_option_1m(key, label, token, fetch_fr, fetch_to)
+                    if not df_c.empty:
+                        df_c.to_parquet(cache_f, index=False)
+                option_bar_cache[(key, d_str)] = df_c
+        ce_full = option_bar_cache.get((ce_key, d_str), pd.DataFrame())
+        pe_full = option_bar_cache.get((pe_key, d_str), pd.DataFrame())
+        d_s  = pd.Timestamp(f"{d_str}T09:15:00")
+        d_e  = pd.Timestamp(f"{d_str}T15:30:00")
+        ce_day = ce_full[(ce_full["datetime"] >= d_s) & (ce_full["datetime"] <= d_e)] if not ce_full.empty else pd.DataFrame()
+        pe_day = pe_full[(pe_full["datetime"] >= d_s) & (pe_full["datetime"] <= d_e)] if not pe_full.empty else pd.DataFrame()
+        if len(ce_day) < 30 and len(pe_day) < 30:
+            continue
+        # Use whichever leg has more data; prefer CE for BEAR trap (buying CE premium)
+        return ce_day if len(ce_day) >= len(pe_day) else pe_day
+    return None
+
+
+def _get_atm_close(d_str: str, daily_map: dict) -> int:
+    """ATM = prev-day close rounded to STEP."""
+    prev_d = (date.fromisoformat(d_str) - timedelta(days=1)).isoformat()
+    for _ in range(7):
+        if prev_d in daily_map:
+            return int(round(float(daily_map[prev_d]["close"]) / STEP) * STEP)
+        prev_d = (date.fromisoformat(prev_d) - timedelta(days=1)).isoformat()
+    return 0
+
+
 if __name__ == "__main__":
-    print(f"=== {SYMBOL} Cascade Backtest (SPOT proxy) — Sector Confirmation ===", flush=True)
-    print(f"    Period: {START_DATE} -> {END_DATE}  |  Lot: {LOT}  |  ATM delta: 0.5", flush=True)
+    print(f"=== {SYMBOL} Cascade Backtest (hybrid: spot proxy + real July options) ===", flush=True)
+    print(f"    Period: {START_DATE} -> {END_DATE}  |  Lot: {LOT}  |  ATM delta: 0.5 (spot proxy)", flush=True)
 
     token = _get_upstox_token()
     if not token:
@@ -476,33 +541,46 @@ if __name__ == "__main__":
         sys.exit(1)
     print("[OK] Upstox token loaded", flush=True)
 
-    # Use daily index bars only to determine valid trading days
-    fetch_fr = START_DATE - timedelta(days=LOOKBACK + 5)
+    fetch_fr  = START_DATE - timedelta(days=LOOKBACK + 5)
+    fetch_fr2 = START_DATE - timedelta(days=LOOKBACK + 1)
+
+    # ── Daily bars — trading-day calendar + ATM computation ───────────────────
     print(f"[{SYMBOL}] Fetching daily index bars ...", flush=True)
     daily_df = _fetch_index_daily(SYMBOL, token, fetch_fr, END_DATE)
     if daily_df.empty:
         print("[ERROR] Could not fetch daily index data. Check token.", flush=True)
         sys.exit(1)
     daily_df["date"] = daily_df["date"].astype(str)
-    trading_day_set = set(daily_df["date"].tolist())
-    print(f"[{SYMBOL}] {len(trading_day_set)} trading days in calendar", flush=True)
-
-    # Build list of trading days in our window
-    all_days = []
-    d = START_DATE
-    while d <= END_DATE:
-        if d.isoformat() in trading_day_set:
-            all_days.append(d.isoformat())
-        d += timedelta(days=1)
+    daily_map        = {r["date"]: r for _, r in daily_df.iterrows()}
+    trading_day_set  = set(daily_map.keys())
+    all_days = [d.isoformat() for d in
+                (START_DATE + timedelta(i) for i in range((END_DATE - START_DATE).days + 1))
+                if d.isoformat() in trading_day_set]
     print(f"[{SYMBOL}] {len(all_days)} trading days in window", flush=True)
 
-    # ── NOTE: Using SPOT 1m bars as zone-detection proxy ──────────────────────
-    # Historical option bars for expired contracts are unavailable without a
-    # dedicated data vendor. SPOT chart produces the same trap pattern (just scaled).
-    # P&L simulation: spot_move × ATM_delta(0.5) × lot_size.
-    # Replace df_spot with real option 1m bars once July data accumulates.
-    print(f"[{SYMBOL}] Downloading SPOT 1m bars (zone-detection proxy) ...", flush=True)
-    fetch_fr2 = START_DATE - timedelta(days=LOOKBACK + 1)
+    # ── July option contracts (active expiry → real instrument keys available) ─
+    FUTURE_CUTOFF = date.today()   # days >= today use real option bars
+    july_contracts: Dict[date, Dict[Tuple[int, str], str]] = {}
+    july_expiries_needed = set(
+        _get_expiry_for_day(d) for d in all_days
+        if date.fromisoformat(d) >= FUTURE_CUTOFF
+    )
+    if july_expiries_needed:
+        print(f"[{SYMBOL}] Loading July option contracts for: {sorted(july_expiries_needed)} ...", flush=True)
+        # Delete stale NSE master cache so we get today's active contracts
+        for f in os.listdir(CACHE_DIR) if os.path.isdir(CACHE_DIR) else []:
+            if f.startswith("nse_master_") and not f.endswith(f"{date.today()}.json"):
+                try: os.remove(os.path.join(CACHE_DIR, f))
+                except Exception: pass
+        for exp in sorted(july_expiries_needed):
+            c = _get_option_contracts(SYMBOL, exp)
+            july_contracts[exp] = c
+            print(f"  {exp}: {len(c)} contracts", flush=True)
+
+    option_bar_cache: dict = {}   # (instrument_key, d_str) -> DataFrame
+
+    # ── SPOT 1m bars (proxy for historical April-June days) ───────────────────
+    print(f"[{SYMBOL}] Downloading SPOT 1m bars (proxy for historical days) ...", flush=True)
     df_spot = _fetch_index_1m(SYMBOL, token, fetch_fr2, END_DATE)
     if df_spot.empty:
         print("[ERROR] No spot 1m data", flush=True)
@@ -511,7 +589,7 @@ if __name__ == "__main__":
         df_spot["datetime"] = df_spot["datetime"].dt.tz_localize(None)
     print(f"  {SYMBOL} spot: {len(df_spot)} bars", flush=True)
 
-    # ── Download sector index 1m bars ──────────────────────────────────────────
+    # ── Sector index 1m bars ──────────────────────────────────────────────────
     sector_list = SECTORS.get(SYMBOL, [])
     sector_df: Dict[str, pd.DataFrame] = {}
     if sector_list:
@@ -526,31 +604,72 @@ if __name__ == "__main__":
                 sector_df[sec] = df_sec
                 print(f"  {sec}: {len(df_sec)} bars", flush=True)
 
-    # ── Precompute SPOT zones + exec arrays per (tf, day) ──────────────────────
-    print(f"\n[{SYMBOL}] Precomputing spot zones ...", flush=True)
-    all_tfs = sorted(set(HTF_GRID) | set(MTF_GRID) | set(LTF_GRID))
-    ATM_DELTA = 0.50   # ATM option delta ≈ 0.5 for P&L scaling
+    # ── Precompute zones + exec arrays per (tf, day) ──────────────────────────
+    # For July days with real option bars: use option premium series.
+    # For Apr–Jun days: use SPOT as proxy (P&L scaled by ATM_delta later).
+    print(f"\n[{SYMBOL}] Precomputing zones ...", flush=True)
+    all_tfs   = sorted(set(HTF_GRID) | set(MTF_GRID) | set(LTF_GRID))
+    ATM_DELTA = 0.50
 
-    zones_cache: Dict[tuple, list] = {}   # (tf, d_str) -> zones
-    exec_cache:  Dict[tuple, Optional[dict]] = {}   # (exc_min, d_str) -> arrays
+    zones_cache: Dict[tuple, list] = {}
+    exec_cache:  Dict[tuple, Optional[dict]] = {}
+    day_mode:    Dict[str, str] = {}   # d_str -> "option" | "spot"
 
     for d_str in all_days:
         d_s  = pd.Timestamp(f"{d_str}T09:15:00")
         d_e  = pd.Timestamp(f"{d_str}T15:30:00")
         lb_s = d_s - pd.Timedelta(days=LOOKBACK)
-        df_day = df_spot[(df_spot["datetime"] >= d_s) & (df_spot["datetime"] <= d_e)].copy()
-        df_lb  = df_spot[(df_spot["datetime"] >= lb_s) & (df_spot["datetime"] < d_s)].copy()
-        if len(df_day) < 30:
-            continue
-        combined = pd.concat([df_lb, df_day], ignore_index=True)
+
+        # Try real option bars first (July days)
+        df_src = None
+        if date.fromisoformat(d_str) >= FUTURE_CUTOFF:
+            expiry = _get_expiry_for_day(d_str)
+            contracts = july_contracts.get(expiry, {})
+            if contracts:
+                df_opt = _build_option_bars_for_day(
+                    d_str, expiry, contracts, daily_map,
+                    token, fetch_fr2, END_DATE, option_bar_cache)
+                if df_opt is not None and not df_opt.empty:
+                    if df_opt["datetime"].dt.tz is not None:
+                        df_opt["datetime"] = df_opt["datetime"].dt.tz_localize(None)
+                    df_src = df_opt
+                    day_mode[d_str] = "option"
+
+        # Fall back to spot proxy
+        if df_src is None:
+            df_day_spot = df_spot[(df_spot["datetime"] >= d_s) & (df_spot["datetime"] <= d_e)].copy()
+            df_lb_spot  = df_spot[(df_spot["datetime"] >= lb_s) & (df_spot["datetime"] < d_s)].copy()
+            if len(df_day_spot) < 30:
+                continue
+            df_src = pd.concat([df_lb_spot, df_day_spot], ignore_index=True)
+            day_mode[d_str] = "spot"
+
+        # Build zones for all TFs
+        if day_mode.get(d_str) == "option":
+            df_day_src = df_src
+            df_lb_src  = pd.DataFrame()   # no lookback for live option bars
+        else:
+            d_s2 = pd.Timestamp(f"{d_str}T09:15:00")
+            df_day_src = df_src[(df_src["datetime"] >= d_s2)] if "datetime" in df_src else df_src
+            df_lb_src  = df_src[(df_src["datetime"] < d_s2)]  if "datetime" in df_src else pd.DataFrame()
+
+        combined = df_src   # already has lookback if spot; just today if option
         for tf in all_tfs:
             bars  = _resample(combined, tf)
             zones = _get_zones(bars)
-            if not zones:
-                zones = _get_zones(_resample(df_day, tf))
+            if not zones and day_mode.get(d_str) == "option":
+                zones = _get_zones(_resample(df_src, tf))
             zones_cache[(tf, d_str)] = zones
+
+        # Exec arrays — always from today's session only
+        if day_mode.get(d_str) == "option":
+            df_exec_src = df_src
+        else:
+            d_s2 = pd.Timestamp(f"{d_str}T09:15:00")
+            df_exec_src = df_src[(df_src["datetime"] >= d_s2)] if "datetime" in df_src else df_src
+
         for exc in EXEC_GRID:
-            df_ex = _resample(df_day, exc)
+            df_ex = _resample(df_exec_src, exc)
             if df_ex.empty:
                 exec_cache[(exc, d_str)] = None
                 continue
@@ -559,6 +678,9 @@ if __name__ == "__main__":
                 "low":   df_ex["low"].to_numpy(dtype=np.float64),
                 "close": df_ex["close"].to_numpy(dtype=np.float64),
             }
+
+    opt_days  = sum(1 for v in day_mode.values() if v == "option")
+    spot_days = sum(1 for v in day_mode.values() if v == "spot")
 
     # ── Precompute sector zones ─────────────────────────────────────────────────
     sector_zones: Dict[tuple, list] = {}
@@ -581,7 +703,8 @@ if __name__ == "__main__":
                         zones = _get_zones(_resample(df_day, tf))
                     sector_zones[(sec, tf, d_str)] = zones
 
-    print(f"[{SYMBOL}] Precompute done — {len(all_days)} days", flush=True)
+    print(f"[{SYMBOL}] Precompute done — {len(all_days)} days "
+          f"({spot_days} spot-proxy, {opt_days} real-option)", flush=True)
 
     # ── Combos ─────────────────────────────────────────────────────────────────
     combos = [
@@ -618,13 +741,18 @@ if __name__ == "__main__":
                 continue
 
             # sl_buf / cap_pts are in option premium points.
-            # Convert → spot points (÷ ATM_delta) for simulation on spot bars.
-            # P&L = spot_move × ATM_delta × lot → eff_lot = ATM_DELTA * LOT.
-            sl_spot  = sl_buf  / ATM_DELTA
-            cap_spot = cap_pts / ATM_DELTA if cap_pts > 0 else 0
-            eff_lot  = ATM_DELTA * LOT
+            # Spot-proxy days: convert to spot units (÷ delta); PnL scaled by delta×lot.
+            # Real option days: use as-is; PnL = premium_move × lot.
+            if day_mode.get(d_str) == "option":
+                sim_sl  = sl_buf
+                sim_cap = cap_pts if cap_pts > 0 else 0
+                sim_lot = float(LOT)
+            else:
+                sim_sl  = sl_buf  / ATM_DELTA
+                sim_cap = cap_pts / ATM_DELTA if cap_pts > 0 else 0
+                sim_lot = ATM_DELTA * LOT
             res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
-                                   sl_spot, cap_spot, sl_hist, eff_lot,
+                                   sim_sl, sim_cap, sl_hist, sim_lot,
                                    sector_zones_day, htf_min, n_sec)
             if res:
                 all_trades.append(res)
