@@ -338,54 +338,57 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             self._gap_fired = gap_pct >= self._gap_thresh
             self._gap_direction = ("UP" if today_open >= C else "DOWN") if self._gap_fired else "FLAT"
 
-            # Futures-mode underlyings (CrudeOil etc.) always use ATM ± fixed ITM offsets —
-            # pivot-based S1/S2/R1/R2 is meaningless for commodity options.
-            use_atm_offsets = self._htf_source == "futures" or self._gap_fired
-
-            if use_atm_offsets:
-                direction = self._gap_direction if self._gap_fired else ("UP" if today_open >= C else "DOWN")
-                atm = _round_strike(today_open, self._step)
-                # Futures mode: always buy ITM options → CE = ATM-offset (ITM call),
-                # PE = ATM+offset (ITM put). Direction never flips strike assignment.
-                self._ce1_strike = atm - self._gap_near
-                self._ce2_strike = atm - self._gap_far
-                self._pe1_strike = atm + self._gap_near
-                self._pe2_strike = atm + self._gap_far
-                label = f"GAP {direction} {gap_pct:.1f}%" if self._gap_fired else f"ATM±offsets (no gap {gap_pct:.1f}%)"
-                self._log.info(
-                    "%s → CE1=%d CE2=%d PE1=%d PE2=%d",
-                    label,
-                    self._ce1_strike, self._ce2_strike,
-                    self._pe1_strike, self._pe2_strike,
-                )
+            if self._exchange == "DELTA":
+                # BTC/ETH perpetual: no CE/PE options, no strike selection, no expiry.
+                # All zone detection + SL/T1 use _bars_fut (BTCUSD/ETHUSD perpetual) only.
+                self._ce1_strike = 0; self._ce2_strike = 0
+                self._pe1_strike = 0; self._pe2_strike = 0
+                self._ce1_key = "";   self._ce2_key = ""
+                self._pe1_key = "";   self._pe2_key = ""
+                self._expiry_str = "PERP"; self._expiry_date = None
+                self._log.info("DELTA perpetual mode: no CE/PE strikes; trading BTCUSD/ETHUSD directly")
             else:
-                # CE at support (S1/S2): CE option tracks support zone traps
-                # PE at resistance (R1/R2): PE option tracks resistance zone traps
-                self._ce1_strike = _round_strike(pivots["s1"], self._step)
-                self._ce2_strike = _round_strike(pivots["s2"], self._step)
-                self._pe1_strike = _round_strike(pivots["r1"], self._step)
-                self._pe2_strike = _round_strike(pivots["r2"], self._step)
-                # Deduplicate: if two strikes collide after rounding (e.g. R1=24073
-                # and R2=24133 both round to 24100 with step=100), push CE2 one step
-                # lower and PE2 one step higher so all 4 strikes are distinct.
-                if self._ce2_strike == self._ce1_strike:
-                    self._ce2_strike -= self._step
-                if self._pe2_strike == self._pe1_strike:
-                    self._pe2_strike += self._step
-                self._log.info(
-                    "No gap (%.1f%%) → CE1=%d(S1=%.0f) CE2=%d(S2=%.0f) "
-                    "PE1=%d(R1=%.0f) PE2=%d(R2=%.0f)",
-                    gap_pct,
-                    self._ce1_strike, pivots["s1"],
-                    self._ce2_strike, pivots["s2"],
-                    self._pe1_strike, pivots["r1"],
-                    self._pe2_strike, pivots["r2"],
-                )
+                # Futures-mode underlyings (CrudeOil): ATM ± fixed ITM offsets for option strikes.
+                # Option-mode (NSE/BSE): pivot-based S1/S2/R1/R2 strike selection.
+                use_atm_offsets = self._htf_source == "futures" or self._gap_fired
 
-            self._expiry_str, self._expiry_date = await self._get_expiry()
-            if not self._expiry_str:
-                self._log.warning("No expiry found")
-                return False
+                if use_atm_offsets:
+                    direction = self._gap_direction if self._gap_fired else ("UP" if today_open >= C else "DOWN")
+                    atm = _round_strike(today_open, self._step)
+                    self._ce1_strike = atm - self._gap_near
+                    self._ce2_strike = atm - self._gap_far
+                    self._pe1_strike = atm + self._gap_near
+                    self._pe2_strike = atm + self._gap_far
+                    label = f"GAP {direction} {gap_pct:.1f}%" if self._gap_fired else f"ATM±offsets (no gap {gap_pct:.1f}%)"
+                    self._log.info(
+                        "%s → CE1=%d CE2=%d PE1=%d PE2=%d",
+                        label,
+                        self._ce1_strike, self._ce2_strike,
+                        self._pe1_strike, self._pe2_strike,
+                    )
+                else:
+                    self._ce1_strike = _round_strike(pivots["s1"], self._step)
+                    self._ce2_strike = _round_strike(pivots["s2"], self._step)
+                    self._pe1_strike = _round_strike(pivots["r1"], self._step)
+                    self._pe2_strike = _round_strike(pivots["r2"], self._step)
+                    if self._ce2_strike == self._ce1_strike:
+                        self._ce2_strike -= self._step
+                    if self._pe2_strike == self._pe1_strike:
+                        self._pe2_strike += self._step
+                    self._log.info(
+                        "No gap (%.1f%%) → CE1=%d(S1=%.0f) CE2=%d(S2=%.0f) "
+                        "PE1=%d(R1=%.0f) PE2=%d(R2=%.0f)",
+                        gap_pct,
+                        self._ce1_strike, pivots["s1"],
+                        self._ce2_strike, pivots["s2"],
+                        self._pe1_strike, pivots["r1"],
+                        self._pe2_strike, pivots["r2"],
+                    )
+
+                self._expiry_str, self._expiry_date = await self._get_expiry()
+                if not self._expiry_str:
+                    self._log.warning("No expiry found")
+                    return False
 
             if self._htf_source == "futures":
                 if self._exchange == "DELTA":
@@ -687,18 +690,30 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 # Re-subscribe tracked option keys every 60s — survives feeder reconnect
                 now = datetime.now(IST)
                 if (now - _last_resub).total_seconds() >= 60:
-                    ce1_ltp = self._ltp_cache.get("CE1", 0)
-                    pe1_ltp = self._ltp_cache.get("PE1", 0)
-                    self._log.info(
-                        "heartbeat: spot=%.2f CE1=%.1f PE1=%.1f pos=%s [keys: ce1=%s pe1=%s]",
-                        raw_ltp, ce1_ltp, pe1_ltp,
-                        self._position["side"] if self._position else "none",
-                        self._ce1_key, self._pe1_key,
-                    )
+                    if self._exchange == "DELTA":
+                        self._log.info(
+                            "heartbeat: %s=%.2f pos=%s [perp_side=%s]",
+                            self._fut_key, raw_ltp,
+                            self._position["side"] if self._position else "none",
+                            (self._position or {}).get("perp_side", "—"),
+                        )
+                    else:
+                        ce1_ltp = self._ltp_cache.get("CE1", 0)
+                        pe1_ltp = self._ltp_cache.get("PE1", 0)
+                        self._log.info(
+                            "heartbeat: spot=%.2f CE1=%.1f PE1=%.1f pos=%s [keys: ce1=%s pe1=%s]",
+                            raw_ltp, ce1_ltp, pe1_ltp,
+                            self._position["side"] if self._position else "none",
+                            self._ce1_key, self._pe1_key,
+                        )
                     _last_resub = now
-                    keys = [k for k in [self._fut_key,
-                                        self._ce1_key, self._ce2_key,
-                                        self._pe1_key, self._pe2_key] if k]
+                    # DELTA perpetuals: only re-subscribe the perpetual key — no option keys
+                    if self._exchange == "DELTA":
+                        keys = [k for k in [self._fut_key] if k]
+                    else:
+                        keys = [k for k in [self._fut_key,
+                                            self._ce1_key, self._ce2_key,
+                                            self._pe1_key, self._pe2_key] if k]
                     if keys:
                         feeder = (self._mcx_feeder if self._mcx_feeder is not None
                                   else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
