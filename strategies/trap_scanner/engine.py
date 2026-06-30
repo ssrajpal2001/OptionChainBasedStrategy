@@ -335,7 +335,17 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
             self._spot_open = today_open
             gap_pct = abs(today_open - C) / C * 100 if C > 0 else 0.0
-            self._gap_fired = gap_pct >= self._gap_thresh
+            _raw_gap = gap_pct >= self._gap_thresh
+            # Near-expiry gap skip: backtest shows GapWR=0% when DTE<=gap_skip_dte.
+            # MTF intraday cascade unreliable near monthly expiry (IV spike distorts zones).
+            _dte = (self._expiry_date - date.today()).days if self._expiry_date else 999
+            _near_expiry_skip = _raw_gap and self._gap_skip_dte > 0 and _dte <= self._gap_skip_dte
+            if _near_expiry_skip:
+                self._log.info(
+                    "Gap %.1f%% >= %.1f%% BUT DTE=%d <= %d → suppressing gap-fired (near-expiry skip)",
+                    gap_pct, self._gap_thresh, _dte, self._gap_skip_dte,
+                )
+            self._gap_fired = _raw_gap and not _near_expiry_skip
             self._gap_direction = ("UP" if today_open >= C else "DOWN") if self._gap_fired else "FLAT"
 
             if self._exchange == "DELTA":
