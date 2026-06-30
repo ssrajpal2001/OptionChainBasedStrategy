@@ -119,7 +119,7 @@ CAP_GRID     = [0, 200, 500]        # profit cap (0 = hold to T1 or EOD)
 # day is unreachable intraday.  Skip HTF entirely → run MTF→LTF→Exec (3-tier intraday).
 # GAP_PCT_GRID = threshold % of spot.  e.g. 0.3 → 75 NIFTY pts / 155 BANKNIFTY pts.
 # "both" = run BOTH modes on same day (HTF if zone exists AND gap-mode independently).
-GAP_PCT_GRID = [0.2, 0.3, 0.5]     # gap thresholds to optimise
+GAP_PCT_GRID = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0]   # fine-grained gap threshold sweep
 ZONE_CUTOFF  = "15:14"              # strip last 15-min stub from zone bars
 
 STRIKES_OFFSET = [-2, -1, 0, 1, 2]   # x STEP from ATM
@@ -519,6 +519,9 @@ def _summarize(trades, params) -> dict:
         # gap-mode breakdown: how many trades came from gap-day intraday vs normal HTF cascade
         "gap_trades"   : sum(1 for t in trades if t.get("mode") == "gap"),
         "normal_trades": sum(1 for t in trades if t.get("mode") != "gap"),
+        # Gap-mode WR separately — shows if gap trades are dragging down overall WR
+        "gap_wins"     : sum(1 for t in trades if t.get("mode") == "gap" and t["pnl"] > 0),
+        "nrm_wins"     : sum(1 for t in trades if t.get("mode") != "gap" and t["pnl"] > 0),
     }
     s.update(params)
     return s
@@ -861,23 +864,29 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
     pd.DataFrame(results).to_csv(OUT_CSV, index=False)
 
-    W = 165
+    W = 180
     pri = SECTORS.get(SYMBOL, ['?'])[0] if SECTORS.get(SYMBOL) else '?'
     print(f"\n{'='*W}")
     print(f"  {SYMBOL} Cascade — Top 30  ({START_DATE} to {END_DATE})")
-    print(f"  SL=zone_low-buf  |  Gap>thr→MTF-LTF-Exec  |  Sec: 0=none 1={pri} 2=both")
+    print(f"  SL=zone_low-buf | Gap>thr→MTF-LTF-Exec | Sec:0=none 1={pri} 2=both")
+    print(f"  NrmWR=normal-day win% | GapWR=gap-day win%")
     print(f"{'='*W}")
     print(f"{'Rank':>4}  {'HTF':>5}  {'MTF':>5}  {'LTF':>4}  {'Exc':>4}  "
           f"{'SLbuf':>6}  {'Cap':>4}  {'Sec':>3}  {'GapThr':>7}  "
-          f"{'#':>4}  {'Nrm':>4}  {'Gap':>4}  {'Win%':>5}  {'PF':>7}  {'Net INR':>10}  "
+          f"{'#':>4}  {'Nrm':>4}  {'NrmWR':>6}  {'Gap':>4}  {'GapWR':>6}  "
+          f"{'PF':>7}  {'Net INR':>10}  "
           f"{'AvgW':>8}  {'AvgL':>8}  {'AvgSLd':>7}  {'SLs':>4}  {'T1s':>4}  {'EOD':>4}")
     print(f"{'-'*W}")
     for rank, r in enumerate(results[:30], 1):
+        nrm   = r.get("normal_trades", 0)
+        gap   = r.get("gap_trades", 0)
+        nrmwr = f"{r.get('nrm_wins',0)/nrm*100:.0f}%" if nrm > 0 else " — "
+        gapwr = f"{r.get('gap_wins',0)/gap*100:.0f}%" if gap > 0 else " — "
         print(f"{rank:>4}  {r['htf_min']:>4}m  {r['mtf_min']:>4}m  {r['ltf_min']:>3}m  "
               f"{r['exec_min']:>3}m  {r['sl_buf']:>6.0f}  {r['cap_pts']:>4.0f}  "
               f"{r['sector_confirm']:>3}  {r.get('gap_thr_pct',0):>6.1f}%  "
-              f"{r['total']:>4}  {r.get('normal_trades',0):>4}  {r.get('gap_trades',0):>4}  "
-              f"{r['win_rate_pct']:>4.0f}%  {r['profit_factor']:>7.3f}  "
+              f"{r['total']:>4}  {nrm:>4}  {nrmwr:>6}  {gap:>4}  {gapwr:>6}  "
+              f"{r['profit_factor']:>7.3f}  "
               f"{r['net_pnl_inr']:>10.2f}  {r['avg_win_inr']:>8.2f}  {r['avg_loss_inr']:>8.2f}  "
               f"{r.get('avg_sl_dist', 0):>7.1f}  "
               f"{r['exits_sl']:>4}  {r['exits_t1']:>4}  {r['exits_eod']:>4}")
