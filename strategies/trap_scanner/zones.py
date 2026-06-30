@@ -542,11 +542,11 @@ class ZonesMixin:
             if current_price > 0 and (current_price < z_low or current_price > z_high):
                 continue
 
-            # 15m intermediate gate — applies to BOTH normal and cascade paths.
-            # A 15m zone must be CLOSED (SL hit + price returned to zone_high) before
-            # the 5m LTF scan fires.
-            # Normal (require_closed=True): 15m zone must be inside HTF zone bounds.
-            # Cascade (require_closed=False): no HTF zone bound — any CLOSED 15m zone today.
+            # MTF intermediate gate — applies to BOTH normal and cascade paths.
+            # An MTF zone (_cascade_min, default 15m) must be CLOSED (SL hit + price
+            # returned to zone_high) before the LTF scan fires.
+            # Normal (require_closed=True): MTF zone must be inside HTF zone bounds.
+            # Cascade (require_closed=False): no HTF zone bound — any CLOSED MTF zone today.
             if require_closed:
                 mtf = self._find_closed_15m_zone(today_bars, zone)
             else:
@@ -557,9 +557,9 @@ class ZonesMixin:
                 if self._zone_ltf_status.get(uid) != status_key:
                     self._zone_ltf_status[uid] = status_key
                     self._log.info(
-                        "_run_ltf_on [%s] uid=%s: waiting for 15m CLOSED zone "
+                        "_run_ltf_on [%s] uid=%s: waiting for %dm CLOSED zone "
                         "(mode=%s zone_high=%.1f zone_low=%.1f)",
-                        leg_key, uid,
+                        leg_key, uid, self._cascade_min,
                         "normal" if require_closed else "cascade",
                         z_high, z_low,
                     )
@@ -568,11 +568,11 @@ class ZonesMixin:
             ltf_zone_high = mtf["zone_high"]
             ltf_zone_low  = mtf["zone_low"]
             self._log.info(
-                "_run_ltf_on [%s] uid=%s: 15m gate PASSED (mode=%s) "
-                "(15m zone_high=%.1f zone_low=%.1f sl=%.1f closed_on=%s)",
-                leg_key, uid,
+                "_run_ltf_on [%s] uid=%s: %dm gate PASSED (mode=%s) "
+                "(%dm zone_high=%.1f zone_low=%.1f sl=%.1f closed_on=%s)",
+                leg_key, uid, self._cascade_min,
                 "normal" if require_closed else "cascade",
-                ltf_zone_high, ltf_zone_low,
+                self._cascade_min, ltf_zone_high, ltf_zone_low,
                 mtf.get("sl", 0), str(mtf.get("closed_on", ""))[:16],
             )
 
@@ -626,15 +626,15 @@ class ZonesMixin:
     def _find_closed_15m_zone(self, today_bars: List[dict],
                                htf_zone: Optional[dict]) -> Optional[dict]:
         """
-        Find the most-recently CLOSED 15m seller-trap zone.
+        Find the most-recently CLOSED MTF seller-trap zone (_cascade_min, default 15m).
         CLOSED = SL hit (TRAPPED) + price subsequently returned to zone_high.
         htf_zone: if provided, zone_high must be within [htf_zone_low, htf_zone_high].
-                  if None (cascade mode), any CLOSED 15m zone qualifies.
+                  if None (cascade mode), any CLOSED MTF zone qualifies.
         """
         if len(today_bars) < 2:
             return None
         df = _bars_to_df(today_bars)
-        mtf = _resample_htf(df, 15)
+        mtf = _resample_htf(df, self._cascade_min)
         if len(mtf) < 2:
             return None
         _, entries = scanner.scan_htf(mtf)
