@@ -50,23 +50,45 @@ DB_PATH   = os.path.join(_ROOT, "data", "clients.db")
 CACHE_DIR = os.path.join(_ROOT, "data", "nse_option_cache")
 OUT_CSV   = os.path.join(_ROOT, "data", f"{SYMBOL.lower()}_cascade_results.csv")
 
-MONTHLY_EXP = {
-    ("NIFTY",     2026, 6): ("25JUN26", date(2026, 6, 25)),
-    ("NIFTY",     2026, 7): ("30JUL26", date(2026, 7, 30)),
-    ("BANKNIFTY", 2026, 6): ("24JUN26", date(2026, 6, 24)),
-    ("BANKNIFTY", 2026, 7): ("29JUL26", date(2026, 7, 29)),
+import calendar as _calendar
+
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    """Return the last occurrence of weekday (0=Mon..6=Sun) in given month."""
+    last = _calendar.monthrange(year, month)[1]
+    d = date(year, month, last)
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+    return d
+
+# Weekly expiry weekday per underlying (matches REGISTRY)
+_EXPIRY_WEEKDAY = {
+    "NIFTY": 1, "BANKNIFTY": 2, "FINNIFTY": 1,
+    "MIDCPNIFTY": 0, "SENSEX": 1,
 }
+
+def _get_monthly_expiry(symbol: str, year: int, month: int) -> date:
+    """Last weekly-expiry-weekday of the month = monthly expiry."""
+    wd = _EXPIRY_WEEKDAY.get(symbol, 3)
+    return _last_weekday_of_month(year, month, wd)
 
 LOT_SIZES    = {"NIFTY": 25, "BANKNIFTY": 15, "FINNIFTY": 40, "SENSEX": 10}
 STRIKE_STEPS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "SENSEX": 100}
 
-# Upstox instrument keys for spot indices (URL-encoded)
+# Upstox raw instrument keys for spot indices (NOT URL-encoded — encoded at call site)
 INDEX_KEY = {
-    "NIFTY":     "NSE_INDEX%7CNifty%2050",
-    "BANKNIFTY": "NSE_INDEX%7CNifty%20Bank",
-    "NIFTYIT":   "NSE_INDEX%7CNifty%20IT",
-    "FINNIFTY":  "NSE_INDEX%7CNifty%20Fin%20Service",
-    "SENSEX":    "BSE_INDEX%7CSENSEX",
+    "NIFTY":     "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "NIFTYIT":   "NSE_INDEX|Nifty IT",
+    "FINNIFTY":  "NSE_INDEX|Nifty Fin Service",
+    "SENSEX":    "BSE_INDEX|SENSEX",
+}
+
+# Upstox underlying keys for option/contract API
+UNDERLYING_KEY = {
+    "NIFTY":     "NSE_INDEX|Nifty 50",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+    "FINNIFTY":  "NSE_INDEX|Nifty Fin Service",
+    "SENSEX":    "BSE_INDEX|SENSEX",
 }
 
 # Sector confirmation indices per symbol
@@ -119,7 +141,8 @@ def _hdr(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 def _fetch_index_daily(sym: str, token: str, fr: date, to: date) -> pd.DataFrame:
-    enc = INDEX_KEY.get(sym, f"NSE_INDEX%7C{sym}")
+    raw_key = INDEX_KEY.get(sym, f"NSE_INDEX|{sym}")
+    enc     = _quote(raw_key, safe="")
     url = f"{UPSTOX_BASE}/historical-candle/{enc}/day/{to}/{fr}"
     r   = requests.get(url, headers=_hdr(token), timeout=15)
     if r.status_code != 200:
@@ -135,7 +158,8 @@ def _fetch_index_1m(sym: str, token: str, fr: date, to: date) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)
     if os.path.exists(cache_f):
         return pd.read_parquet(cache_f)
-    enc = INDEX_KEY.get(sym, f"NSE_INDEX%7C{sym}")
+    raw_key = INDEX_KEY.get(sym, f"NSE_INDEX|{sym}")   # raw (not pre-encoded)
+    enc     = _quote(raw_key, safe="")
     url = f"{UPSTOX_BASE}/historical-candle/{enc}/1minute/{to + timedelta(days=1)}/{fr}"
     r   = requests.get(url, headers=_hdr(token), timeout=20)
     time.sleep(0.3)
@@ -153,12 +177,52 @@ def _fetch_index_1m(sym: str, token: str, fr: date, to: date) -> pd.DataFrame:
     df.to_parquet(cache_f, index=False)
     return df
 
-def _fetch_option_1m(symbol: str, exp_str: str, strike: int, ot: str,
+def _get_option_contracts(underlying_upstox_key: str, expiry_date: date,
+                          token: str) -> Dict[Tuple[int, str], str]:
+    """
+    Call Upstox GET /v2/option/contract to get REAL instrument keys per (strike, opt_type).
+    Returns {(strike, 'CE'|'PE'): instrument_key}.
+    Cached to disk per expiry date.
+    """
+    cache_f = os.path.join(CACHE_DIR,
+        f"contracts_{underlying_upstox_key.replace('|','_').replace(' ','_')}_{expiry_date}.json")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    if os.path.exists(cache_f):
+        with open(cache_f) as f:
+            raw = json.load(f)
+        return {(int(k.split("|")[0]), k.split("|")[1]): v for k, v in raw.items()}
+
+    url = f"{UPSTOX_BASE}/option/contract"
+    params = {"instrument_key": underlying_upstox_key,
+              "expiry_date": expiry_date.isoformat()}
+    r = requests.get(url, headers=_hdr(token), params=params, timeout=15)
+    time.sleep(0.3)
+    if r.status_code != 200:
+        print(f"  [WARN] option/contract HTTP {r.status_code}: {r.text[:200]}", flush=True)
+        return {}
+    data = r.json().get("data", []) or []
+    result: Dict[Tuple[int, str], str] = {}
+    for item in data:
+        ikey   = item.get("instrument_key", "")
+        strike = int(float(item.get("strike_price", 0)))
+        itype  = str(item.get("instrument_type", "")).upper()
+        if not ikey or not strike:
+            continue
+        ot = "CE" if "CE" in itype or "CALL" in itype else ("PE" if "PE" in itype or "PUT" in itype else "")
+        if not ot:
+            continue
+        result[(strike, ot)] = ikey
+    # Cache to disk
+    with open(cache_f, "w") as f:
+        json.dump({f"{k[0]}|{k[1]}": v for k, v in result.items()}, f)
+    print(f"  [contracts] {expiry_date} → {len(result)} contracts", flush=True)
+    return result
+
+def _fetch_option_1m(instrument_key: str, label: str,
                      token: str, fr: date, to: date) -> pd.DataFrame:
-    exc_pfx = "BSE_FO" if symbol == "SENSEX" else "NSE_FO"
-    raw_key = f"{exc_pfx}|{symbol}{exp_str}{strike}{ot}"
-    enc_key = _quote(raw_key, safe="")
-    cache_f = os.path.join(CACHE_DIR, f"{symbol}_{exp_str}_{strike}{ot}_{fr}_{to}.parquet")
+    """Fetch 1m historical bars using the REAL Upstox instrument key."""
+    enc_key = _quote(instrument_key, safe="")
+    cache_f = os.path.join(CACHE_DIR, f"bars_{label}_{fr}_{to}.parquet")
     os.makedirs(CACHE_DIR, exist_ok=True)
     if os.path.exists(cache_f):
         return pd.read_parquet(cache_f)
@@ -166,7 +230,7 @@ def _fetch_option_1m(symbol: str, exp_str: str, strike: int, ot: str,
     r   = requests.get(url, headers=_hdr(token), timeout=20)
     time.sleep(0.3)
     if r.status_code != 200:
-        print(f"  [WARN] {raw_key} HTTP {r.status_code}", flush=True)
+        print(f"  [WARN] {label} HTTP {r.status_code}: {r.text[:100]}", flush=True)
         return pd.DataFrame()
     candles = r.json().get("data", {}).get("candles", [])
     if not candles:
@@ -371,16 +435,17 @@ if __name__ == "__main__":
     print(f"[{SYMBOL}] {len(all_days)} trading days", flush=True)
 
     # Helpers
-    def _get_expiry(d_str):
+    def _get_expiry_date(d_str) -> Optional[date]:
+        """Return monthly expiry date for the given trading day."""
         d = date.fromisoformat(d_str)
-        exp_str, exp_date = MONTHLY_EXP.get((SYMBOL, d.year, d.month), (None, None))
-        if exp_date and d > exp_date:
+        exp = _get_monthly_expiry(SYMBOL, d.year, d.month)
+        if d > exp:   # after this month's expiry → use next month
             nm = d.month + 1 if d.month < 12 else 1
             ny = d.year if d.month < 12 else d.year + 1
-            exp_str, exp_date = MONTHLY_EXP.get((SYMBOL, ny, nm), (None, None))
-        return exp_str, exp_date
+            exp = _get_monthly_expiry(SYMBOL, ny, nm)
+        return exp
 
-    def _get_atm(d_str):
+    def _get_atm(d_str) -> int:
         prev_d = (date.fromisoformat(d_str) - timedelta(days=1)).isoformat()
         for _ in range(7):
             if prev_d in daily_map:
@@ -391,12 +456,28 @@ if __name__ == "__main__":
 
     opt_sides = ["CE", "PE"] if OPT_SIDE == "BOTH" else [OPT_SIDE]
 
+    # ── Discover monthly expiries needed for our period ─────────────────────────
+    expiry_dates_needed: set = set()
+    for d_str in all_days:
+        exp = _get_expiry_date(d_str)
+        if exp:
+            expiry_dates_needed.add(exp)
+    print(f"[{SYMBOL}] Monthly expiries in period: {sorted(expiry_dates_needed)}", flush=True)
+
+    # ── Get real instrument keys from Upstox option/contract API ───────────────
+    underlying_upstox_key = UNDERLYING_KEY.get(SYMBOL, f"NSE_INDEX|{SYMBOL}")
+    contracts: Dict[date, Dict[Tuple[int, str], str]] = {}   # expiry_date -> {(strike,ot): ikey}
+    for exp_date in sorted(expiry_dates_needed):
+        c = _get_option_contracts(underlying_upstox_key, exp_date, token)
+        contracts[exp_date] = c
+        print(f"  {exp_date}: {len(c)} contracts loaded", flush=True)
+
     # ── Download sector index 1m bars ──────────────────────────────────────────
     sector_list = SECTORS.get(SYMBOL, [])
     sector_df: Dict[str, pd.DataFrame] = {}
+    fetch_fr2 = START_DATE - timedelta(days=LOOKBACK + 1)
     if sector_list:
         print(f"[{SYMBOL}] Downloading sector indices: {sector_list} ...", flush=True)
-        fetch_fr2 = START_DATE - timedelta(days=LOOKBACK + 1)
         for sec in sector_list:
             df_sec = _fetch_index_1m(sec, token, fetch_fr2, END_DATE)
             if df_sec.empty:
@@ -408,26 +489,31 @@ if __name__ == "__main__":
                 print(f"  {sec}: {len(df_sec)} bars", flush=True)
 
     # ── Download option 1m bars ────────────────────────────────────────────────
+    # Build set of (exp_date, strike, ot) we need based on daily ATM
     fetch_set: set = set()
     for d_str in all_days:
-        exp_str, _ = _get_expiry(d_str)
-        if not exp_str:
+        exp_date = _get_expiry_date(d_str)
+        if not exp_date or exp_date not in contracts:
             continue
         atm = _get_atm(d_str)
         if not atm:
             continue
+        day_contracts = contracts[exp_date]
         for offset in STRIKES_OFFSET:
+            strike = atm + offset * STEP
             for ot in opt_sides:
-                fetch_set.add((exp_str, atm + offset * STEP, ot))
+                if (strike, ot) in day_contracts:
+                    fetch_set.add((exp_date, strike, ot))
 
     print(f"[{SYMBOL}] Downloading {len(fetch_set)} option series ...", flush=True)
-    fetch_fr2 = START_DATE - timedelta(days=LOOKBACK + 1)
     option_bars: Dict[tuple, pd.DataFrame] = {}
-    for i, (exp_str, strike, ot) in enumerate(sorted(fetch_set)):
-        df = _fetch_option_1m(SYMBOL, exp_str, strike, ot, token, fetch_fr2, END_DATE)
-        option_bars[(exp_str, strike, ot)] = df
+    for i, (exp_date, strike, ot) in enumerate(sorted(fetch_set)):
+        ikey  = contracts[exp_date][(strike, ot)]
+        label = f"{SYMBOL}{exp_date.strftime('%d%b%y').upper()}{strike}{ot}"
+        df    = _fetch_option_1m(ikey, label, token, fetch_fr2, END_DATE)
+        option_bars[(exp_date, strike, ot)] = df
         status = f"{len(df)} bars" if not df.empty else "NO DATA"
-        print(f"  [{i+1}/{len(fetch_set)}] {SYMBOL}{exp_str}{strike}{ot} — {status}", flush=True)
+        print(f"  [{i+1}/{len(fetch_set)}] {label} — {status}", flush=True)
 
     # ── Precompute zones ────────────────────────────────────────────────────────
     print(f"\n[{SYMBOL}] Precomputing option zones ...", flush=True)
@@ -436,13 +522,16 @@ if __name__ == "__main__":
     zones_cache: Dict[tuple, list] = {}
     exec_cache:  Dict[tuple, Optional[dict]] = {}
 
-    for (exp_str, strike, ot), df_full in option_bars.items():
+    for (exp_date, strike, ot), df_full in option_bars.items():
         if df_full.empty:
             continue
         if df_full["datetime"].dt.tz is not None:
             df_full = df_full.copy()
             df_full["datetime"] = df_full["datetime"].dt.tz_localize(None)
         for d_str in all_days:
+            # Only use this option series on days when it's the active expiry
+            if _get_expiry_date(d_str) != exp_date:
+                continue
             d_s  = pd.Timestamp(f"{d_str}T09:15:00")
             d_e  = pd.Timestamp(f"{d_str}T15:30:00")
             lb_s = d_s - pd.Timedelta(days=LOOKBACK)
@@ -456,13 +545,13 @@ if __name__ == "__main__":
                 zones = _get_zones(bars)
                 if not zones:
                     zones = _get_zones(_resample(df_day, tf))
-                zones_cache[(exp_str, strike, ot, tf, d_str)] = zones
+                zones_cache[(exp_date, strike, ot, tf, d_str)] = zones
             for exc in EXEC_GRID:
                 df_ex = _resample(df_day, exc)
                 if df_ex.empty:
-                    exec_cache[(exp_str, strike, ot, exc, d_str)] = None
+                    exec_cache[(exp_date, strike, ot, exc, d_str)] = None
                     continue
-                exec_cache[(exp_str, strike, ot, exc, d_str)] = {
+                exec_cache[(exp_date, strike, ot, exc, d_str)] = {
                     "high":  df_ex["high"].to_numpy(dtype=np.float64),
                     "low":   df_ex["low"].to_numpy(dtype=np.float64),
                     "close": df_ex["close"].to_numpy(dtype=np.float64),
@@ -514,8 +603,8 @@ if __name__ == "__main__":
         sl_hist: Dict[str, str] = {}
 
         for d_str in all_days:
-            exp_str, _ = _get_expiry(d_str)
-            if not exp_str:
+            exp_date = _get_expiry_date(d_str)
+            if not exp_date or exp_date not in contracts:
                 continue
             atm = _get_atm(d_str)
             if not atm:
@@ -532,13 +621,13 @@ if __name__ == "__main__":
                     break
                 strike = atm + offset * STEP
                 for ot in opt_sides:
-                    key = (exp_str, strike, ot)
+                    key = (exp_date, strike, ot)
                     if key not in option_bars or option_bars[key].empty:
                         continue
-                    htf_z  = zones_cache.get((exp_str, strike, ot, htf_min, d_str), [])
-                    mtf_z  = zones_cache.get((exp_str, strike, ot, mtf_min, d_str), [])
-                    ltf_z  = zones_cache.get((exp_str, strike, ot, ltf_min, d_str), [])
-                    ex_arr = exec_cache.get((exp_str, strike, ot, exec_min, d_str))
+                    htf_z  = zones_cache.get((exp_date, strike, ot, htf_min, d_str), [])
+                    mtf_z  = zones_cache.get((exp_date, strike, ot, mtf_min, d_str), [])
+                    ltf_z  = zones_cache.get((exp_date, strike, ot, ltf_min, d_str), [])
+                    ex_arr = exec_cache.get((exp_date, strike, ot, exec_min, d_str))
                     if not htf_z or ex_arr is None:
                         continue
                     res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
