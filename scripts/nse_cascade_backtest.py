@@ -153,28 +153,37 @@ def _fetch_index_daily(sym: str, token: str, fr: date, to: date) -> pd.DataFrame
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 def _fetch_index_1m(sym: str, token: str, fr: date, to: date) -> pd.DataFrame:
-    """Fetch 1m bars for a spot index (for sector confirmation zones)."""
+    """Fetch 1m bars for a spot index — chunked in 28-day windows (Upstox limit)."""
     cache_f = os.path.join(CACHE_DIR, f"idx_{sym}_{fr}_{to}.parquet")
     os.makedirs(CACHE_DIR, exist_ok=True)
     if os.path.exists(cache_f):
         return pd.read_parquet(cache_f)
     raw_key = INDEX_KEY.get(sym, f"NSE_INDEX|{sym}")
     enc     = _quote(raw_key, safe="")
-    to_use  = min(to, date.today())   # Upstox rejects future dates
-    url = f"{UPSTOX_BASE}/historical-candle/{enc}/1minute/{to_use}/{fr}"
-    r   = requests.get(url, headers=_hdr(token), timeout=20)
-    time.sleep(0.3)
-    if r.status_code != 200:
-        print(f"  [WARN] {sym} index 1m HTTP {r.status_code}: {r.text[:150]}", flush=True)
+    all_rows = []
+    chunk_fr = fr
+    CHUNK = 28
+    while chunk_fr <= to:
+        chunk_to = min(chunk_fr + timedelta(days=CHUNK - 1), to, date.today())
+        url = f"{UPSTOX_BASE}/historical-candle/{enc}/1minute/{chunk_to}/{chunk_fr}"
+        r   = requests.get(url, headers=_hdr(token), timeout=20)
+        time.sleep(0.35)
+        if r.status_code != 200:
+            print(f"  [WARN] {sym} 1m {chunk_fr}→{chunk_to} HTTP {r.status_code}: {r.text[:120]}",
+                  flush=True)
+        else:
+            candles = r.json().get("data", {}).get("candles", [])
+            all_rows.extend(
+                {"datetime": c[0], "open": float(c[1]), "high": float(c[2]),
+                 "low": float(c[3]), "close": float(c[4])}
+                for c in reversed(candles)
+            )
+        chunk_fr = chunk_to + timedelta(days=1)
+    if not all_rows:
         return pd.DataFrame()
-    candles = r.json().get("data", {}).get("candles", [])
-    if not candles:
-        return pd.DataFrame()
-    rows = [{"datetime": c[0], "open": float(c[1]), "high": float(c[2]),
-             "low": float(c[3]), "close": float(c[4])}
-            for c in reversed(candles)]
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows).drop_duplicates("datetime")
     df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("datetime").reset_index(drop=True)
     df.to_parquet(cache_f, index=False)
     return df
 
