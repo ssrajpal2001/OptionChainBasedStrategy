@@ -101,21 +101,14 @@ def _get_upstox_token() -> str:
         return ""
     try:
         conn = sqlite3.connect(DB_PATH)
-        row  = conn.execute(
-            "SELECT creds FROM feeder_creds WHERE provider='upstox' LIMIT 1"
+        # system_feeder_creds has individual columns (not a JSON blob)
+        row = conn.execute(
+            "SELECT access_token FROM system_feeder_creds WHERE provider='upstox' LIMIT 1"
         ).fetchone()
         conn.close()
         if not row:
             return ""
-        raw = row[0]
-        try:
-            key  = b"AlgoSoft2024"
-            data = base64.b64decode(raw.encode())
-            dec  = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
-            creds = json.loads(dec.decode())
-        except Exception:
-            creds = json.loads(raw) if isinstance(raw, str) else {}
-        return creds.get("access_token", "")
+        return row[0] or ""
     except Exception as exc:
         print(f"[WARN] token read error: {exc}", flush=True)
         return ""
