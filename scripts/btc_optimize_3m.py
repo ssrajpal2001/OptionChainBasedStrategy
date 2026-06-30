@@ -1,19 +1,16 @@
 """
 BTC 3-Month Optimization — Delta Exchange India (public API, no credentials needed)
 ===================================================================================
-Sweeps HTF/LTF timeframes + SL/floor/cap over the last 90 days of BTCUSD perpetual data.
-Saves full CSV + prints top-20 ranked by Profit Factor.
+Precomputes HTF zones and LTF sub-zones for each unique timeframe ONCE, then sweeps
+all SL/floor/cap combinations over the precomputed zones. ~10-20x faster than
+resampling on every combo.
 
 Usage:
-    python scripts/btc_optimize_3m.py
+    python3 scripts/btc_optimize_3m.py
 """
 from __future__ import annotations
 
-import os
-import sys
-import json
-import time
-import itertools
+import os, sys, time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -28,35 +25,35 @@ from strategies.trap_scanner import scanner  # noqa: E402
 
 DELTA_BASE    = "https://api.india.delta.exchange"
 SYMBOL        = "BTCUSD"
-CONTRACT_SIZE = 0.001   # BTC per lot (standard perpetual contract)
+CONTRACT_SIZE = 0.001
 CACHE_FILE    = os.path.join(_ROOT, "data", "btc_1m_cache.parquet")
 OUT_CSV       = os.path.join(_ROOT, "data", "btc_optimize_3m_results.csv")
-DAYS_BACK     = 90      # 3 months
+DAYS_BACK     = 90
+LOOKBACK      = 3
+LOTS          = 1
+
+HTF_GRID   = [60, 120, 180, 240, 360]
+SUB_GRID   = [5, 15, 30, 60]
+SL_GRID    = [50, 100, 200, 300]
+FLOOR_GRID = [0, 100, 200]
+CAP_GRID   = [0, 300, 500, 1000]
 
 
-# ─── Data fetch ───────────────────────────────────────────────────────────────
-
-def _fetch_page(start_ts: int, end_ts: int) -> list:
-    r = requests.get(
-        DELTA_BASE + "/v2/history/candles",
-        params={"symbol": SYMBOL, "resolution": "1m", "start": start_ts, "end": end_ts},
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json().get("result", [])
-
+# ── Data fetch ────────────────────────────────────────────────────────────────
 
 def _fetch_all_candles(start_date: date, end_date: date) -> pd.DataFrame:
-    end_ts   = int(datetime(end_date.year, end_date.month, end_date.day,
-                            23, 59, 59, tzinfo=timezone.utc).timestamp())
-    start_ts = int(datetime(start_date.year, start_date.month, start_date.day,
-                            0, 0, 0, tzinfo=timezone.utc).timestamp())
+    end_ts   = int(datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+    start_ts = int(datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=timezone.utc).timestamp())
     all_candles: list = []
     current_end = end_ts
     page = 0
     print(f"[BTC] Fetching 1m candles {start_date} -> {end_date} ...", flush=True)
     while current_end > start_ts:
-        candles = _fetch_page(start_ts, current_end)
+        r = requests.get(DELTA_BASE + "/v2/history/candles",
+                         params={"symbol": SYMBOL, "resolution": "1m",
+                                 "start": start_ts, "end": current_end}, timeout=30)
+        r.raise_for_status()
+        candles = r.json().get("result", [])
         if not candles:
             break
         all_candles.extend(candles)
@@ -66,35 +63,33 @@ def _fetch_all_candles(start_date: date, end_date: date) -> pd.DataFrame:
         current_end = oldest - 60
         page += 1
         if page % 10 == 0:
-            print(f"  ... {len(all_candles):,} bars "
-                  f"(oldest {datetime.utcfromtimestamp(oldest).date()})", flush=True)
+            print(f"  ... {len(all_candles):,} bars (oldest {datetime.fromtimestamp(oldest, tz=timezone.utc).date()})", flush=True)
         time.sleep(0.2)
     if not all_candles:
         return pd.DataFrame()
     df = pd.DataFrame(all_candles)
     df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df = (df.drop_duplicates("time").sort_values("time").reset_index(drop=True))
+    df = df.drop_duplicates("time").sort_values("time").reset_index(drop=True)
     df = df[(df["time"] >= start_ts) & (df["time"] <= end_ts)].reset_index(drop=True)
-    print(f"[BTC] {len(df):,} 1m bars total", flush=True)
+    print(f"[BTC] {len(df):,} 1m bars", flush=True)
     return df
 
 
-def _load_btc_1m(days_back: int = 95) -> pd.DataFrame:
-    extra   = 5
+def _load_btc_1m() -> pd.DataFrame:
     end_d   = date.today()
-    start_d = end_d - timedelta(days=days_back + extra)
+    start_d = end_d - timedelta(days=DAYS_BACK + LOOKBACK + 2)
     if os.path.exists(CACHE_FILE):
         try:
             cached    = pd.read_parquet(CACHE_FILE)
             cache_min = pd.to_datetime(cached["time"].min(), unit="s").date()
             cache_max = pd.to_datetime(cached["time"].max(), unit="s").date()
             if cache_min <= start_d and cache_max >= end_d - timedelta(days=1):
-                print(f"[BTC] Cache hit: {cache_min} → {cache_max} ({len(cached):,} bars)", flush=True)
+                print(f"[BTC] Cache: {cache_min} -> {cache_max} ({len(cached):,} bars)", flush=True)
                 if cached["datetime"].dt.tz is None:
                     cached["datetime"] = cached["datetime"].dt.tz_localize("UTC")
                 return cached
         except Exception as exc:
-            print(f"[BTC] Cache miss ({exc}), re-fetching …", flush=True)
+            print(f"[BTC] Cache miss ({exc}), re-fetching ...", flush=True)
     df = _fetch_all_candles(start_d, end_d)
     if not df.empty:
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
@@ -105,17 +100,23 @@ def _load_btc_1m(days_back: int = 95) -> pd.DataFrame:
 def _resample(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     if df.empty or len(df) < 2:
         return pd.DataFrame()
-    df2  = df.set_index("datetime")
-    agg  = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-    out  = df2.resample(f"{minutes}min", closed="left", label="left")[list(agg)].agg(agg)
-    out  = out.dropna(subset=["open"]).copy()
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    out = df.set_index("datetime").resample(f"{minutes}min", closed="left", label="left")[list(agg)].agg(agg)
+    out = out.dropna(subset=["open"]).copy()
     out["datetime"] = out.index
     return out.reset_index(drop=True)
 
 
-# ─── Trade simulation ─────────────────────────────────────────────────────────
+def _get_zones(htf_bars: pd.DataFrame) -> list:
+    if len(htf_bars) < 3:
+        return []
+    _, ents = scanner.scan_htf_spot(htf_bars)
+    return [e for e in (ents or []) if e.get("status") == "CLOSED"]
 
-def _zone_trigger_price(e: dict) -> float:
+
+# ── Trade simulation ──────────────────────────────────────────────────────────
+
+def _zone_trigger(e: dict) -> float:
     if "zone_trigger" in e:
         return float(e["zone_trigger"])
     zh, zl = float(e["zone_high"]), float(e["zone_low"])
@@ -130,32 +131,27 @@ def _init_sl(e: dict, sl_buf: float) -> float:
     return round(float(e["zone_low"]) - sl_buf, 2)
 
 
-def _simulate_trade(entry_price, is_long, init_sl, t1, df1m, lots, sl_buf,
-                    profit_floor_pts, profit_cap_pts) -> Optional[dict]:
+def _simulate(entry_price, is_long, init_sl, t1, df1m, sl_buf, floor_pts, cap_pts) -> Optional[dict]:
     if df1m.empty:
         return None
-    size      = CONTRACT_SIZE * lots
+    size      = CONTRACT_SIZE * LOTS
     active_sl = init_sl
     breakeven = False
     entry_ts  = df1m["datetime"].iloc[0]
     for _, bar in df1m.iterrows():
         cur = bar["close"]
-        running_pts = (cur - entry_price) if is_long else (entry_price - cur)
-        if profit_floor_pts > 0 and not breakeven and running_pts >= profit_floor_pts:
+        run = (cur - entry_price) if is_long else (entry_price - cur)
+        if floor_pts > 0 and not breakeven and run >= floor_pts:
             active_sl = entry_price
             breakeven = True
-        if profit_cap_pts > 0 and running_pts >= profit_cap_pts:
-            pnl = running_pts * size
-            return {"exit_price": cur, "pnl_usdt": round(pnl, 4), "exit_reason": "TARGET",
+        if cap_pts > 0 and run >= cap_pts:
+            return {"exit_price": cur, "pnl_usdt": round(run * size, 4), "exit_reason": "TARGET",
                     "bars_held": int((bar["datetime"] - entry_ts).total_seconds() / 60)}
-        if is_long:
-            new_trail = bar["high"] - sl_buf
-            if new_trail > active_sl:
-                active_sl = new_trail
-        else:
-            new_trail = bar["low"] + sl_buf
-            if new_trail < active_sl:
-                active_sl = new_trail
+        new_trail = (bar["high"] - sl_buf) if is_long else (bar["low"] + sl_buf)
+        if is_long and new_trail > active_sl:
+            active_sl = new_trail
+        elif not is_long and new_trail < active_sl:
+            active_sl = new_trail
         if (is_long and bar["low"] <= active_sl) or (not is_long and bar["high"] >= active_sl):
             pnl = (active_sl - entry_price if is_long else entry_price - active_sl) * size
             return {"exit_price": active_sl, "pnl_usdt": round(pnl, 4), "exit_reason": "SL",
@@ -166,29 +162,12 @@ def _simulate_trade(entry_price, is_long, init_sl, t1, df1m, lots, sl_buf,
                     "bars_held": int((bar["datetime"] - entry_ts).total_seconds() / 60)}
     ep  = df1m["close"].iloc[-1]
     pnl = (ep - entry_price if is_long else entry_price - ep) * size
-    return {"exit_price": ep, "pnl_usdt": round(pnl, 4), "exit_reason": "EOD",
-            "bars_held": len(df1m)}
+    return {"exit_price": ep, "pnl_usdt": round(pnl, 4), "exit_reason": "EOD", "bars_held": len(df1m)}
 
 
-def _run_day(day_str, df_day, df_lb, htf_min, sub_min, sl_buf, lots,
-             profit_floor_pts, profit_cap_pts, sl_zone_history) -> list:
+def _run_day_precomputed(day_str, df_day_naive, htf_zones, sub_zones,
+                         sl_buf, floor_pts, cap_pts, sl_zone_history) -> list:
     trades = []
-    df_combined = pd.concat([df_lb, df_day], ignore_index=True) if not df_lb.empty else df_day.copy()
-    htf_bars    = _resample(df_combined, htf_min)
-    _, htf_ents = scanner.scan_htf_spot(htf_bars) if len(htf_bars) >= 3 else (None, [])
-    htf_zones   = [e for e in (htf_ents or []) if e.get("status") == "CLOSED"]
-    if not htf_zones:
-        htf_today = _resample(df_day, htf_min)
-        _, today_ents = scanner.scan_htf_spot(htf_today) if len(htf_today) >= 3 else (None, [])
-        htf_zones = [e for e in (today_ents or []) if e.get("status") == "CLOSED"]
-    if not htf_zones:
-        return trades
-    sub_bars = _resample(df_day, sub_min)
-    _, sub_ents = scanner.scan_htf_spot(sub_bars) if len(sub_bars) >= 3 else (None, [])
-    sub_zones   = [e for e in (sub_ents or []) if e.get("status") == "CLOSED"]
-    df_naive = df_day.copy()
-    if df_naive["datetime"].dt.tz is not None:
-        df_naive["datetime"] = df_naive["datetime"].dt.tz_convert(None)
     open_pos = False
     for htf_z in htf_zones:
         if open_pos:
@@ -201,7 +180,7 @@ def _run_day(day_str, df_day, df_lb, htf_min, sub_min, sl_buf, lots,
             days_since = (date.fromisoformat(day_str) - date.fromisoformat(sl_zone_history[zone_key])).days
             if days_since <= 1:
                 continue
-        trigger = _zone_trigger_price(htf_z)
+        trigger = _zone_trigger(htf_z)
         sl      = _init_sl(htf_z, sl_buf)
         t1      = float(htf_z.get("sl", 0))
         if t1 <= 0:
@@ -217,21 +196,19 @@ def _run_day(day_str, df_day, df_lb, htf_min, sub_min, sl_buf, lots,
                       and float(s.get("zone_low",  0)) >= zl - (zh - zl) * 0.1]
             if not sub_in:
                 continue
-        hit = df_naive[df_naive["low"] <= trigger] if is_long else df_naive[df_naive["high"] >= trigger]
+        hit = df_day_naive[df_day_naive["low"] <= trigger] if is_long else df_day_naive[df_day_naive["high"] >= trigger]
         if hit.empty:
             continue
         entry_bar   = hit.index[0]
-        entry_ts    = df_naive.loc[entry_bar, "datetime"]
         entry_price = trigger
-        df_exit     = df_naive.loc[entry_bar + 1:].copy()
+        df_exit     = df_day_naive.loc[entry_bar + 1:].copy()
         if df_exit.empty:
             continue
-        result = _simulate_trade(entry_price, is_long, sl, t1, df_exit,
-                                 lots, sl_buf, profit_floor_pts, profit_cap_pts)
+        result = _simulate(entry_price, is_long, sl, t1, df_exit, sl_buf, floor_pts, cap_pts)
         if result:
             result.update({"date": day_str, "kind": kind,
                            "direction": "LONG" if is_long else "SHORT",
-                           "entry_price": entry_price, "entry_ts": str(entry_ts)})
+                           "entry_price": entry_price})
             if result["exit_reason"] == "SL":
                 sl_zone_history[zone_key] = day_str
             trades.append(result)
@@ -240,11 +217,11 @@ def _run_day(day_str, df_day, df_lb, htf_min, sub_min, sl_buf, lots,
 
 
 def _summarize(trades, params) -> dict:
-    wins = [t for t in trades if t["pnl_usdt"] > 0]
+    wins   = [t for t in trades if t["pnl_usdt"] > 0]
     losses = [t for t in trades if t["pnl_usdt"] <= 0]
-    gp  = sum(t["pnl_usdt"] for t in wins)
-    gl  = abs(sum(t["pnl_usdt"] for t in losses))
-    pf  = round(gp / gl, 3) if gl > 0 else (9999.0 if gp > 0 else 0.0)
+    gp     = sum(t["pnl_usdt"] for t in wins)
+    gl     = abs(sum(t["pnl_usdt"] for t in losses))
+    pf     = round(gp / gl, 3) if gl > 0 else (9999.0 if gp > 0 else 0.0)
     long_t  = [t for t in trades if t["direction"] == "LONG"]
     short_t = [t for t in trades if t["direction"] == "SHORT"]
     s = {
@@ -267,13 +244,13 @@ def _summarize(trades, params) -> dict:
     return s
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print(f"=== BTC 3-Month Optimization ({DAYS_BACK} days) ===", flush=True)
-    print("Delta Exchange public API — no credentials required", flush=True)
+    print("Delta Exchange public API -- no credentials required", flush=True)
 
-    df_all = _load_btc_1m(DAYS_BACK + 10)
+    df_all = _load_btc_1m()
     if df_all.empty:
         print("ERROR: No BTC data", flush=True)
         sys.exit(1)
@@ -284,9 +261,9 @@ if __name__ == "__main__":
     start_date = end_date - timedelta(days=DAYS_BACK)
     all_dates  = [start_date + timedelta(days=i) for i in range(DAYS_BACK)]
 
-    # Pre-slice all days once (shared across all param combos)
-    day_slices: dict = {}
-    LOOKBACK = 3
+    # Build per-day 1m data slices (naive timestamps for fast comparison in simulation)
+    day_slices_1m: dict = {}   # d_str -> df_day_naive
+    day_raw: dict = {}         # d_str -> (df_day_utc, df_lb_utc) for resampling
     for d in all_dates:
         d_str = d.isoformat()
         d_s   = pd.Timestamp(f"{d_str}T00:00:00", tz="UTC")
@@ -294,52 +271,74 @@ if __name__ == "__main__":
         lb_s  = d_s - pd.Timedelta(days=LOOKBACK)
         df_day = df_all[(df_all["datetime"] >= d_s) & (df_all["datetime"] <= d_e)].copy()
         df_lb  = df_all[(df_all["datetime"] >= lb_s) & (df_all["datetime"] < d_s)].copy()
-        if len(df_day) >= 60:
-            day_slices[d_str] = (df_day, df_lb)
+        if len(df_day) < 60:
+            continue
+        df_naive = df_day.copy()
+        df_naive["datetime"] = df_naive["datetime"].dt.tz_convert(None)
+        day_slices_1m[d_str] = df_naive
+        day_raw[d_str] = (df_day, df_lb)
 
-    print(f"[BTC] {len(day_slices)} trading days in window", flush=True)
+    print(f"[BTC] {len(day_raw)} trading days with data", flush=True)
 
-    # ── Optimisation grid ─────────────────────────────────────────────────────
-    # HTF: the zone-forming timeframe (bear/bull traps detected here)
-    # sub: LTF confirmation inside HTF zone (must be < HTF)
-    # sl_buf: stop-loss distance beyond zone edge (BTC price points)
-    # floor: break-even lock distance (0 = no break-even)
-    # cap: profit-cap exit (0 = trail only)
-    HTF_GRID   = [60, 120, 180, 240, 360]     # 1h / 2h / 3h / 4h / 6h
-    SUB_GRID   = [5, 15, 30, 60]              # 5m / 15m / 30m / 1h
-    SL_GRID    = [50, 100, 200, 300]
-    FLOOR_GRID = [0, 100, 200]
-    CAP_GRID   = [0, 300, 500, 1000]
-    LOTS       = 1   # 1 contract for comparison (scale as needed)
+    # ── PRECOMPUTE HTF zones and sub-zones for every unique TF × day ──────────
+    # There are only 5 HTF + 4 sub values = 9 unique resample jobs.
+    # Each runs over 90 days. This replaces 912 × 90 = 82,080 resample calls
+    # with 9 × 90 = 810 calls.
+    all_tfs = sorted(set(HTF_GRID) | set(SUB_GRID))
+    print(f"[BTC] Precomputing zones for {len(all_tfs)} unique TFs x {len(day_raw)} days ...", flush=True)
+    t_pre = time.time()
 
+    # zones_cache[(tf, d_str)] -> list of CLOSED zones
+    zones_cache: dict = {}
+    for tf in all_tfs:
+        n_with_zones = 0
+        for d_str, (df_day, df_lb) in day_raw.items():
+            df_combined = pd.concat([df_lb, df_day], ignore_index=True)
+            htf_bars    = _resample(df_combined, tf)
+            zones       = _get_zones(htf_bars)
+            if not zones:
+                # Cascade: today-only
+                htf_today = _resample(df_day, tf)
+                zones     = _get_zones(htf_today)
+            zones_cache[(tf, d_str)] = zones
+            if zones:
+                n_with_zones += 1
+        print(f"  TF={tf:3d}m: {n_with_zones}/{len(day_raw)} days have zones", flush=True)
+
+    print(f"[BTC] Precompute done in {time.time()-t_pre:.1f}s", flush=True)
+
+    # ── Build combos ──────────────────────────────────────────────────────────
     combos = [(h, s, sl, fl, cap)
-              for h  in HTF_GRID
-              for s  in SUB_GRID if s < h
-              for sl in SL_GRID
-              for fl in FLOOR_GRID
+              for h   in HTF_GRID
+              for s   in SUB_GRID  if s < h
+              for sl  in SL_GRID
+              for fl  in FLOOR_GRID
               for cap in CAP_GRID]
     total = len(combos)
-    print(f"[BTC] Sweeping {total} parameter combinations …", flush=True)
+    print(f"[BTC] Sweeping {total} combos (SL/floor/cap only, zones precomputed) ...", flush=True)
 
     results: list = []
     t0 = time.time()
     for idx, (htf_min, sub_min, sl_buf, floor_pts, cap_pts) in enumerate(combos):
         all_trades: list = []
         sl_hist: dict = {}
-        for d_str, (df_day, df_lb) in day_slices.items():
-            all_trades.extend(_run_day(
-                d_str, df_day, df_lb, htf_min, sub_min, sl_buf, LOTS,
-                floor_pts, cap_pts, sl_hist,
+        for d_str in day_raw:
+            htf_zones = zones_cache[(htf_min, d_str)]
+            sub_zones = zones_cache[(sub_min, d_str)]
+            df_naive  = day_slices_1m[d_str]
+            all_trades.extend(_run_day_precomputed(
+                d_str, df_naive, htf_zones, sub_zones,
+                sl_buf, floor_pts, cap_pts, sl_hist,
             ))
         params = {"htf_min": htf_min, "sub_min": sub_min, "sl_buf": sl_buf,
                   "profit_floor_pts": floor_pts, "profit_cap_pts": cap_pts, "lots": LOTS}
         results.append(_summarize(all_trades, params))
         if (idx + 1) % 100 == 0:
             elapsed = time.time() - t0
-            eta_s   = elapsed / (idx + 1) * (total - idx - 1)
-            print(f"  {idx+1}/{total}  elapsed={elapsed:.0f}s  ETA={eta_s:.0f}s", flush=True)
+            eta     = elapsed / (idx + 1) * (total - idx - 1)
+            print(f"  {idx+1}/{total}  elapsed={elapsed:.0f}s  ETA={eta:.0f}s", flush=True)
 
-    # Sort by PF (require ≥5 trades to qualify)
+    # Sort by PF (min 5 trades)
     def _pf_key(r):
         return (r["profit_factor"] if r["profit_factor"] != 9999.0 else 9998) if r["total"] >= 5 else -1
 
@@ -347,22 +346,33 @@ if __name__ == "__main__":
 
     # Save CSV
     os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
-    df_res = pd.DataFrame(results)
-    df_res.to_csv(OUT_CSV, index=False)
-    print(f"\n[BTC] Full results → {OUT_CSV}", flush=True)
+    pd.DataFrame(results).to_csv(OUT_CSV, index=False)
+    print(f"\n[BTC] Results -> {OUT_CSV}", flush=True)
 
     # Print top 20
-    print(f"\n{'='*95}")
-    print(f"{'Rank':>4}  {'HTF':>5}  {'LTF':>5}  {'SL':>6}  {'Floor':>6}  {'Cap':>6}  "
-          f"{'Trades':>7}  {'Win%':>6}  {'PF':>7}  {'NetPnL$':>10}  {'Long':>6}  {'Short':>6}")
-    print(f"{'='*95}")
+    print(f"\n{'='*100}")
+    print(f"  BTC Trap Scanner -- Top 20 Configurations (90-day backtest, {DAYS_BACK} days)")
+    print(f"  Contract size: {CONTRACT_SIZE} BTC/lot  |  Lots: {LOTS}")
+    print(f"{'='*100}")
+    print(f"{'Rank':>4}  {'HTF':>5}  {'LTF':>5}  {'SL$':>5}  {'Floor':>5}  {'Cap':>5}  "
+          f"{'Trades':>6}  {'Win%':>5}  {'PF':>6}  {'Net$':>8}  {'AvgW':>7}  {'AvgL':>7}  "
+          f"{'Long$':>7}  {'Short$':>7}  {'SLs':>4}  {'T1s':>4}")
+    print(f"{'-'*100}")
     for rank, r in enumerate(results[:20], 1):
-        print(f"{rank:>4}  {r['htf_min']:>5}m  {r['sub_min']:>5}m  "
-              f"{r['sl_buf']:>6.0f}  {r['profit_floor_pts']:>6.0f}  {r['profit_cap_pts']:>6.0f}  "
-              f"{r['total']:>7}  {r['win_rate_pct']:>5.1f}%  {r['profit_factor']:>7.3f}  "
-              f"{r['net_pnl_usdt']:>10.4f}  {r['long_pnl']:>+6.4f}  {r['short_pnl']:>+6.4f}")
+        print(f"{rank:>4}  {r['htf_min']:>4}m  {r['sub_min']:>4}m  "
+              f"{r['sl_buf']:>5.0f}  {r['profit_floor_pts']:>5.0f}  {r['profit_cap_pts']:>5.0f}  "
+              f"{r['total']:>6}  {r['win_rate_pct']:>4.0f}%  {r['profit_factor']:>6.3f}  "
+              f"{r['net_pnl_usdt']:>8.4f}  {r['avg_win']:>7.4f}  {r['avg_loss']:>7.4f}  "
+              f"{r['long_pnl']:>+7.4f}  {r['short_pnl']:>+7.4f}  "
+              f"{r['exits_sl']:>4}  {r['exits_t1']:>4}")
 
-    print(f"\n[BTC] Done. Total time: {time.time()-t0:.0f}s")
-    print(f"\nKey: HTF=zone timeframe, LTF=confirmation TF, SL=stop pts, Floor=BE lock pts, Cap=profit cap pts")
-    print(f"     PnL is per contract (0.001 BTC) × lots={LOTS}")
-    print(f"\nCurrent live config: HTF=240m LTF=30m SL=50pts (validated PF=1.508)")
+    # Show current live config result
+    print(f"\n{'='*100}")
+    print("  Current live config: HTF=240m LTF=30m SL=$50 Floor=$0 Cap=$0")
+    live = next((r for r in results if r["htf_min"]==240 and r["sub_min"]==30
+                 and r["sl_buf"]==50 and r["profit_floor_pts"]==0 and r["profit_cap_pts"]==0), None)
+    if live:
+        print(f"  -> Trades={live['total']}  Win%={live['win_rate_pct']}  "
+              f"PF={live['profit_factor']}  Net=${live['net_pnl_usdt']:.4f}")
+    print(f"{'='*100}")
+    print(f"\n[BTC] Total time: {time.time()-t0:.0f}s")
