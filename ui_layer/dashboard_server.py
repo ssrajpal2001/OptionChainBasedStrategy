@@ -2654,6 +2654,7 @@ class DashboardServer:
                     _nb = create_broker(_bb, cid)
                     if await _nb.authenticate():
                         await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                        await _srv._client_db.set_trade_enabled(cid, binding_id, True)
                         if _srv._router is not None:
                             _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
                             try:
@@ -2688,6 +2689,7 @@ class DashboardServer:
                     _nb = create_broker(_bb, cid)
                     if await _nb.authenticate():
                         await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                        await _srv._client_db.set_trade_enabled(cid, binding_id, True)
                         if _srv._router is not None:
                             _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
                             try:
@@ -2706,6 +2708,7 @@ class DashboardServer:
 
             if ok:
                 await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                await _srv._client_db.set_trade_enabled(cid, binding_id, True)
                 # CRITICAL: refresh the cached ORDER-ROUTING broker with the just-refreshed
                 # token. The execution broker in _router._brokers is authenticated ONCE at
                 # ExecutionRouter.start(); if the process booted before today's token was
@@ -3097,6 +3100,7 @@ class DashboardServer:
                     bid = match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, access_token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
+                    await _srv._client_db.set_trade_enabled(cid, bid, True)
                     await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] Dhan [%s/%s] token stored, terminal=ON in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, f"Dhan broker connected!"))
@@ -3138,6 +3142,7 @@ class DashboardServer:
                     cid, bid = match["client_id"], match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
+                    await _srv._client_db.set_trade_enabled(cid, bid, True)
                     await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] AliceBlue [%s/%s] token stored in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, "AliceBlue broker connected!"))
@@ -3205,6 +3210,7 @@ class DashboardServer:
                         now = datetime.now(IST).isoformat()
                         await _srv._client_db.update_access_token(client_id, binding_id, clean_token, now, _ist_eod())
                         await _srv._client_db.set_terminal_connected(client_id, binding_id, True)
+                        await _srv._client_db.set_trade_enabled(client_id, binding_id, True)
                         # Refresh the cached order-routing broker with the fresh OAuth token
                         # (same stale-token issue as the terminal-connect path).
                         try:
