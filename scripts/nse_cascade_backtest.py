@@ -42,7 +42,7 @@ from strategies.trap_scanner import scanner
 SYMBOL   = sys.argv[1].upper() if len(sys.argv) > 1 else "NIFTY"
 OPT_SIDE = sys.argv[2].upper() if len(sys.argv) > 2 else "BOTH"
 
-START_DATE = date(2026, 6,  1)
+START_DATE = date(2026, 4,  1)
 END_DATE   = date(2026, 6, 30)
 LOOKBACK   = 5
 
