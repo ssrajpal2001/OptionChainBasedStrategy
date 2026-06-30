@@ -531,6 +531,9 @@ class DataMixin:
         return fallback
 
     def _build_broker_symbol(self, strike: Optional[int], opt_type: str) -> str:
+        # DELTA exchange: trade perpetual futures (BTCUSD/ETHUSD), not options
+        if self._exchange == "DELTA":
+            return "BTCUSD" if self._und == "BTC" else "ETHUSD"
         exp = self._expiry_str or ""
         return f"{self._und}{exp}{strike}{opt_type}"
 

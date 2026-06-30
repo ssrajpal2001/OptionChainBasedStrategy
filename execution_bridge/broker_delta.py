@@ -122,14 +122,17 @@ class DeltaBroker(BaseBroker):
         self._authenticated = False
 
     async def _load_products(self) -> None:
-        """GET /v2/products (public) → index option contracts. Real Delta India shape:
-        contract_type in {call_options, put_options}, symbol like 'C-BTC-60000-310726',
-        strike_price, settlement_time (…T12:00:00Z == 17:30 IST), tick_size, contract_value."""
+        """GET /v2/products (public) → options + perpetual futures.
+        Options: contract_type in {call_options, put_options}, symbol like 'C-BTC-60000-310726'.
+        Perpetuals: contract_type='perpetual_futures', symbol like 'BTCUSD' — needed for
+        trap scanner crypto trades (BUY/SELL BTCUSD perpetual, no option involved)."""
         res = await self._request("GET", "/v2/products", auth=False)
         rows = (res or {}).get("result", []) or []
         n = 0
+        _wanted_types = {"call_options", "put_options", "perpetual_futures"}
         for p in rows:
-            if str(p.get("contract_type", "")) not in ("call_options", "put_options"):
+            ct = str(p.get("contract_type", ""))
+            if ct not in _wanted_types:
                 continue
             sym = str(p.get("symbol", "")).upper()
             pid = p.get("id")
@@ -138,7 +141,7 @@ class DeltaBroker(BaseBroker):
             self._symbol_to_pid[sym] = int(pid)
             self._products[sym] = p
             n += 1
-        logger.info("DeltaBroker[%s]: loaded %d option products.", self.client_id, n)
+        logger.info("DeltaBroker[%s]: loaded %d products (options + perpetuals).", self.client_id, n)
 
     # ── exchange-derived chain (strikes / steps / expiries are NOT hardcoded) ──
     def discover_chain(self, underlying: str) -> Dict[str, Any]:

@@ -293,10 +293,19 @@ class ExitMixin:
         pos = self._position
         broker_sym = self._build_broker_symbol(pos["strike"], pos["side"])
         from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
+        # DELTA perpetuals: close is opposite of entry (LONG → SELL to close; SHORT → BUY to cover)
+        # All other exchanges: always SELL (selling back the option we bought)
+        perp_side = pos.get("perp_side")
+        if perp_side == "buy":
+            close_side = OrderSide.SELL   # close LONG position
+        elif perp_side == "sell":
+            close_side = OrderSide.BUY    # close SHORT position (cover)
+        else:
+            close_side = OrderSide.SELL   # standard option exit
         req = OrderRequest(
             broker_symbol=broker_sym,
             exchange=self._exchange,
-            side=OrderSide.SELL,
+            side=close_side,
             qty=qty,
             order_type=OrderType.MARKET,
             price=price,

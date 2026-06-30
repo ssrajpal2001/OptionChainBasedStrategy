@@ -75,8 +75,14 @@ class EntryMixin:
         spot = self._spot_cache or self._spot_open
         atm  = _round_strike(spot, self._step)
 
-        if self._htf_source == "futures":
-            # CrudeOil/BTC/ETH: order goes to scan strike (S1 CE / R1 PE).
+        if self._exchange == "DELTA":
+            # BTC/ETH: trade perpetual futures (BTCUSD/ETHUSD) — no option strike needed.
+            # CE trap = bear sellers trapped → price squeezes UP → go LONG perpetual.
+            # PE trap = bull buyers trapped → price squeezes DOWN → go SHORT perpetual.
+            perp_sym = "BTCUSD" if self._und == "BTC" else "ETHUSD"
+            strike, exec_key = 0, perp_sym
+        elif self._htf_source == "futures":
+            # CrudeOil: order goes to scan strike (S1 CE / R1 PE).
             # S1/R1 pivot strikes are naturally ITM — no separate 1-ITM computation needed.
             # Spread check: if scan strike too wide, fall back to ATM.
             primary_strike = scan_strike
@@ -164,10 +170,16 @@ class EntryMixin:
 
         broker_sym = self._build_broker_symbol(strike, opt_type)
         from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
+        # DELTA perpetuals: CE trap → LONG (BUY); PE trap → SHORT (SELL)
+        # All other exchanges: always BUY (buying an option)
+        if self._exchange == "DELTA":
+            entry_side = OrderSide.BUY if opt_type == "CE" else OrderSide.SELL
+        else:
+            entry_side = OrderSide.BUY
         req = OrderRequest(
             broker_symbol=broker_sym,
             exchange=self._exchange,
-            side=OrderSide.BUY,
+            side=entry_side,
             qty=total_qty,
             order_type=OrderType.MARKET,
             price=ep,
@@ -295,6 +307,9 @@ class EntryMixin:
             "signal_source":  f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
             "order_id_entry": order_id,
             "order_id_t1":    None,
+            # Perpetual direction (DELTA only): "buy" = long, "sell" = short
+            # Needed by _place_exit to send the closing opposite-side order.
+            "perp_side":      ("buy" if opt_type == "CE" else "sell") if self._exchange == "DELTA" else None,
             "htf_zone":       htf_zone,
             "opt_type":       opt_type,
             # Scale-in bookkeeping

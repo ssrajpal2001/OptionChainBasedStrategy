@@ -34,12 +34,17 @@ _INDEX_CFG: Dict[str, dict] = {
                    "htf_source": "futures", "htf_min_override": 30},
     # BTC/ETH are 24/7 — no daily EOD squareoff and no entry cutoff.
     # sq_off=None → lifecycle loop skips EOD; cutoff=None → entries.py skips cutoff gate.
+    # BTC/ETH are 24/7 — no daily EOD squareoff and no entry cutoff.
+    # sq_off=None → lifecycle loop skips EOD; cutoff=None → entries.py skips cutoff gate.
+    # htf_min_override=240 (4h), ltf_min_override=30m — validated in btc_backtest (PF=1.508).
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
                    "sl_buf": 50.0, "cutoff": None, "sq_off": None,
-                   "window": None, "exchange": "DELTA", "htf_source": "futures"},
+                   "window": None, "exchange": "DELTA", "htf_source": "futures",
+                   "htf_min_override": 240, "ltf_min_override": 30},
     "ETH":        {"step": 100, "lot": 1,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 5.0, "cutoff": None, "sq_off": None,
-                   "window": None, "exchange": "DELTA", "htf_source": "futures"},
+                   "window": None, "exchange": "DELTA", "htf_source": "futures",
+                   "htf_min_override": 240, "ltf_min_override": 30},
 }
 
 # Upstox REST instrument keys for spot / futures data
@@ -101,7 +106,9 @@ class ConfigMixin:
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
         self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 0.5))
         self._admin_cfg   = ts_admin_cfg
-        # CrudeOil HTF = 30-min (frozen per spec); all others = admin-configurable (default 75)
+        # HTF: per-index override (CrudeOil=30m, BTC/ETH=4h) else admin config (default 75m)
         _htf_override     = _def.get("htf_min_override")
         self._htf_min     = _htf_override if _htf_override else int(ts_admin_cfg.get("htf_minutes", 75))
-        self._ltf_min     = int(ts_admin_cfg.get("ltf_minutes", 5))
+        # LTF: per-index override (BTC/ETH=30m) else admin config (default 5m)
+        _ltf_override     = _def.get("ltf_min_override")
+        self._ltf_min     = _ltf_override if _ltf_override else int(ts_admin_cfg.get("ltf_minutes", 5))
