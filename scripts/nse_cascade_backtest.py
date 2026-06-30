@@ -42,8 +42,8 @@ from strategies.trap_scanner import scanner
 SYMBOL   = sys.argv[1].upper() if len(sys.argv) > 1 else "NIFTY"
 OPT_SIDE = sys.argv[2].upper() if len(sys.argv) > 2 else "BOTH"
 
-START_DATE = date(2026, 6,  1)
-END_DATE   = date(2026, 6, 30)
+START_DATE = date(2026, 7,  1)
+END_DATE   = date.today()
 LOOKBACK   = 5
 
 DB_PATH   = os.path.join(_ROOT, "data", "clients.db")
@@ -158,13 +158,14 @@ def _fetch_index_1m(sym: str, token: str, fr: date, to: date) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)
     if os.path.exists(cache_f):
         return pd.read_parquet(cache_f)
-    raw_key = INDEX_KEY.get(sym, f"NSE_INDEX|{sym}")   # raw (not pre-encoded)
+    raw_key = INDEX_KEY.get(sym, f"NSE_INDEX|{sym}")
     enc     = _quote(raw_key, safe="")
-    url = f"{UPSTOX_BASE}/historical-candle/{enc}/1minute/{to + timedelta(days=1)}/{fr}"
+    to_use  = min(to, date.today())   # Upstox rejects future dates
+    url = f"{UPSTOX_BASE}/historical-candle/{enc}/1minute/{to_use}/{fr}"
     r   = requests.get(url, headers=_hdr(token), timeout=20)
     time.sleep(0.3)
     if r.status_code != 200:
-        print(f"  [WARN] {sym} index 1m HTTP {r.status_code}", flush=True)
+        print(f"  [WARN] {sym} index 1m HTTP {r.status_code}: {r.text[:150]}", flush=True)
         return pd.DataFrame()
     candles = r.json().get("data", {}).get("candles", [])
     if not candles:
@@ -177,45 +178,93 @@ def _fetch_index_1m(sym: str, token: str, fr: date, to: date) -> pd.DataFrame:
     df.to_parquet(cache_f, index=False)
     return df
 
-def _get_option_contracts(underlying_upstox_key: str, expiry_date: date,
-                          token: str) -> Dict[Tuple[int, str], str]:
+_NSE_MASTER_CACHE: Optional[list] = None   # loaded once per run
+
+def _load_nse_master() -> list:
+    """Download Upstox public NSE master JSON (no auth). Cached in memory per run."""
+    global _NSE_MASTER_CACHE
+    if _NSE_MASTER_CACHE is not None:
+        return _NSE_MASTER_CACHE
+    cache_f = os.path.join(CACHE_DIR, f"nse_master_{date.today()}.json")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    if os.path.exists(cache_f):
+        with open(cache_f) as f:
+            _NSE_MASTER_CACHE = json.load(f)
+        print(f"  [master] loaded {len(_NSE_MASTER_CACHE):,} instruments from cache", flush=True)
+        return _NSE_MASTER_CACHE
+    import gzip, io
+    print("  [master] Downloading NSE instruments master JSON ...", flush=True)
+    url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+    r   = requests.get(url, timeout=30)
+    if r.status_code != 200:
+        print(f"  [WARN] NSE master HTTP {r.status_code}", flush=True)
+        _NSE_MASTER_CACHE = []
+        return []
+    data = json.loads(gzip.decompress(r.content))
+    with open(cache_f, "w") as f:
+        json.dump(data, f)
+    _NSE_MASTER_CACHE = data
+    print(f"  [master] {len(data):,} instruments downloaded", flush=True)
+    return data
+
+def _get_option_contracts(symbol: str, expiry_date: date) -> Dict[Tuple[int, str], str]:
     """
-    Call Upstox GET /v2/option/contract to get REAL instrument keys per (strike, opt_type).
+    Parse the NSE master instruments JSON to get REAL instrument keys
+    for (strike, CE/PE) for a given symbol and expiry date.
     Returns {(strike, 'CE'|'PE'): instrument_key}.
-    Cached to disk per expiry date.
+    Works for both current and recently-expired contracts.
     """
-    cache_f = os.path.join(CACHE_DIR,
-        f"contracts_{underlying_upstox_key.replace('|','_').replace(' ','_')}_{expiry_date}.json")
+    cache_f = os.path.join(CACHE_DIR, f"contracts_{symbol}_{expiry_date}.json")
     os.makedirs(CACHE_DIR, exist_ok=True)
     if os.path.exists(cache_f):
         with open(cache_f) as f:
             raw = json.load(f)
-        return {(int(k.split("|")[0]), k.split("|")[1]): v for k, v in raw.items()}
+        if raw:   # empty cache = no contracts found, re-try
+            return {(int(k.split("|")[0]), k.split("|")[1]): v for k, v in raw.items()}
 
-    url = f"{UPSTOX_BASE}/option/contract"
-    params = {"instrument_key": underlying_upstox_key,
-              "expiry_date": expiry_date.isoformat()}
-    r = requests.get(url, headers=_hdr(token), params=params, timeout=15)
-    time.sleep(0.3)
-    if r.status_code != 200:
-        print(f"  [WARN] option/contract HTTP {r.status_code}: {r.text[:200]}", flush=True)
-        return {}
-    data = r.json().get("data", []) or []
+    master = _load_nse_master()
     result: Dict[Tuple[int, str], str] = {}
-    for item in data:
-        ikey   = item.get("instrument_key", "")
-        strike = int(float(item.get("strike_price", 0)))
-        itype  = str(item.get("instrument_type", "")).upper()
+    exp_str = expiry_date.isoformat()   # "2026-06-24"
+
+    for inst in master:
+        # Filter: underlying symbol + option type + matching expiry
+        name = str(inst.get("trading_symbol", "") or inst.get("name", "")).upper()
+        itype = str(inst.get("instrument_type", "")).upper()
+        if symbol not in name:
+            continue
+        if itype not in ("CE", "PE", "CALL", "PUT"):
+            continue
+        # Expiry field varies: epoch ms, ISO string, or DDMONYY
+        exp_raw = inst.get("expiry") or inst.get("expiry_date") or ""
+        if not exp_raw:
+            continue
+        # Normalise to ISO date
+        try:
+            if isinstance(exp_raw, (int, float)):
+                exp_d = datetime.utcfromtimestamp(int(exp_raw) / 1000).date()
+            elif len(str(exp_raw)) == 10 and "-" in str(exp_raw):
+                exp_d = date.fromisoformat(str(exp_raw))
+            elif len(str(exp_raw)) == 7:   # epoch seconds
+                exp_d = datetime.utcfromtimestamp(int(exp_raw)).date()
+            else:
+                continue
+        except Exception:
+            continue
+        if exp_d != expiry_date:
+            continue
+        ikey   = inst.get("instrument_key", "")
+        strike = inst.get("strike_price") or inst.get("strike") or 0
+        try:
+            strike = int(float(strike))
+        except Exception:
+            continue
         if not ikey or not strike:
             continue
-        ot = "CE" if "CE" in itype or "CALL" in itype else ("PE" if "PE" in itype or "PUT" in itype else "")
-        if not ot:
-            continue
+        ot = "CE" if "CE" in itype or "CALL" in itype else "PE"
         result[(strike, ot)] = ikey
-    # Cache to disk
+
     with open(cache_f, "w") as f:
         json.dump({f"{k[0]}|{k[1]}": v for k, v in result.items()}, f)
-    print(f"  [contracts] {expiry_date} → {len(result)} contracts", flush=True)
     return result
 
 def _fetch_option_1m(instrument_key: str, label: str,
@@ -226,7 +275,8 @@ def _fetch_option_1m(instrument_key: str, label: str,
     os.makedirs(CACHE_DIR, exist_ok=True)
     if os.path.exists(cache_f):
         return pd.read_parquet(cache_f)
-    url = f"{UPSTOX_BASE}/historical-candle/{enc_key}/1minute/{to + timedelta(days=1)}/{fr}"
+    to_use = min(to, date.today())
+    url = f"{UPSTOX_BASE}/historical-candle/{enc_key}/1minute/{to_use}/{fr}"
     r   = requests.get(url, headers=_hdr(token), timeout=20)
     time.sleep(0.3)
     if r.status_code != 200:
@@ -465,10 +515,9 @@ if __name__ == "__main__":
     print(f"[{SYMBOL}] Monthly expiries in period: {sorted(expiry_dates_needed)}", flush=True)
 
     # ── Get real instrument keys from Upstox option/contract API ───────────────
-    underlying_upstox_key = UNDERLYING_KEY.get(SYMBOL, f"NSE_INDEX|{SYMBOL}")
-    contracts: Dict[date, Dict[Tuple[int, str], str]] = {}   # expiry_date -> {(strike,ot): ikey}
+    contracts: Dict[date, Dict[Tuple[int, str], str]] = {}
     for exp_date in sorted(expiry_dates_needed):
-        c = _get_option_contracts(underlying_upstox_key, exp_date, token)
+        c = _get_option_contracts(SYMBOL, exp_date)
         contracts[exp_date] = c
         print(f"  {exp_date}: {len(c)} contracts loaded", flush=True)
 
