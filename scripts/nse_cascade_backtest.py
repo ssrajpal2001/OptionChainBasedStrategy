@@ -113,9 +113,13 @@ LTF_GRID     = [3, 5]
 EXEC_GRID    = [1, 3]
 # Structural SL = htf_zone_low - SL_BUF.  Small buffer only — the zone bottom is the
 # invalidation level.  Once price closes below zone_low the trap is dead.
-# P&L scales by ATM_delta on spot-proxy days; used directly on real option bar days.
-SL_BUF_GRID  = [5, 10, 20, 30]     # buffer below htf zone_low (spot pts on proxy, premium pts on option)
-CAP_GRID     = [0, 200, 500]        # trailing profit cap (same units; 0 = trail only to EOD)
+SL_BUF_GRID  = [5, 10, 20, 30]     # buffer below anchor zone_low (spot pts proxy / premium pts on option bars)
+CAP_GRID     = [0, 200, 500]        # profit cap (0 = hold to T1 or EOD)
+# Gap-open mode: if spot gaps more than GAP_PCT vs prev close, the HTF zone from prior
+# day is unreachable intraday.  Skip HTF entirely → run MTF→LTF→Exec (3-tier intraday).
+# GAP_PCT_GRID = threshold % of spot.  e.g. 0.3 → 75 NIFTY pts / 155 BANKNIFTY pts.
+# "both" = run BOTH modes on same day (HTF if zone exists AND gap-mode independently).
+GAP_PCT_GRID = [0.2, 0.3, 0.5]     # gap thresholds to optimise
 ZONE_CUTOFF  = "15:14"              # strip last 15-min stub from zone bars
 
 STRIKES_OFFSET = [-2, -1, 0, 1, 2]   # x STEP from ATM
@@ -453,6 +457,43 @@ def _run_cascade_day(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
             return res
     return None
 
+
+def _run_cascade_day_gap(d_str, exec_arr, mtf_zones, ltf_zones,
+                         sl_buf, cap_pts, sl_hist, lot,
+                         sector_zones_day, mtf_min, n_sectors) -> Optional[dict]:
+    """
+    Gap-open mode: HTF zone is unreachable (price gapped past it).
+    Run 3-tier intraday cascade: MTF zone → LTF overlap → Exec entry.
+    MTF zone acts as the anchor (its zone_low = structural SL reference,
+    its 'sl' field = T1 = where intraday sellers are trapped above).
+    This fires ONLY when spot gap > GAP_PCT threshold for the day.
+    """
+    for mtf_z in mtf_zones:
+        kind = mtf_z.get("kind", "BEAR")
+        if kind != "BEAR":
+            continue
+        ml, mh   = _eff_zone(mtf_z)
+        t1        = float(mtf_z.get("sl", 0))
+        if t1 <= mh:        # T1 must be above zone — same validity check as normal
+            continue
+        zone_key  = f"GAP_{ml:.1f}-{mh:.1f}"
+        if zone_key in sl_hist:
+            if (date.fromisoformat(d_str) - date.fromisoformat(sl_hist[zone_key])).days <= 1:
+                continue
+        if not _sector_confirms(sector_zones_day, mtf_min, kind, n_sectors):
+            continue
+        ltf_m = next((z for z in ltf_zones if z.get("kind") == kind and _zones_overlap(mtf_z, z)), None)
+        if not ltf_m:
+            continue
+        # anchor zone for structural SL = MTF zone (replaces HTF role)
+        res = _find_exec_entry(exec_arr, ltf_m, mtf_z, sl_buf, cap_pts, lot)
+        if res:
+            res.update({"date": d_str, "zone_key": zone_key, "mode": "gap"})
+            if res["exit_reason"] == "SL":
+                sl_hist[zone_key] = d_str
+            return res
+    return None
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 def _summarize(trades, params) -> dict:
@@ -474,8 +515,10 @@ def _summarize(trades, params) -> dict:
         "exits_t1"     : sum(1 for t in trades if t.get("exit_reason") == "T1"),
         "exits_cap"    : sum(1 for t in trades if t.get("exit_reason") == "CAP"),
         "exits_eod"    : sum(1 for t in trades if t.get("exit_reason") == "EOD"),
-        # avg actual SL distance from entry to structural zone_low (useful reality check)
         "avg_sl_dist"  : round(sum(t.get("sl_dist", 0) for t in trades) / len(trades), 1) if trades else 0.0,
+        # gap-mode breakdown: how many trades came from gap-day intraday vs normal HTF cascade
+        "gap_trades"   : sum(1 for t in trades if t.get("mode") == "gap"),
+        "normal_trades": sum(1 for t in trades if t.get("mode") != "gap"),
     }
     s.update(params)
     return s
@@ -714,7 +757,7 @@ if __name__ == "__main__":
                 if len(df_day) < 30:
                     continue
                 combined = pd.concat([df_lb, df_day], ignore_index=True)
-                for tf in HTF_GRID:
+                for tf in set(HTF_GRID + MTF_GRID):   # include MTF for gap-day sector check
                     bars  = _resample(combined, tf)
                     zones = _get_zones(bars)
                     sector_zones[(sec, tf, d_str)] = zones
@@ -722,26 +765,49 @@ if __name__ == "__main__":
     print(f"[{SYMBOL}] Precompute done — {len(all_days)} days "
           f"({spot_days} spot-proxy, {opt_days} real-option)", flush=True)
 
+    # ── Pre-compute daily gap % for each trading day ────────────────────────────
+    # gap_pct[d] = abs(today_open - prev_close) / prev_close * 100 (spot index)
+    gap_pct_map: Dict[str, float] = {}
+    sorted_days = sorted(all_days)
+    for i, d_str in enumerate(sorted_days):
+        if i == 0:
+            gap_pct_map[d_str] = 0.0
+            continue
+        prev_d   = sorted_days[i - 1]
+        prev_row = daily_map.get(prev_d, {})
+        curr_row = daily_map.get(d_str, {})
+        try:
+            prev_close = float(prev_row.get("close", 0) or 0)
+            curr_open  = float(curr_row.get("open",  0) or 0)
+            gap_pct_map[d_str] = abs(curr_open - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+        except Exception:
+            gap_pct_map[d_str] = 0.0
+
+    gap_days   = sum(1 for g in gap_pct_map.values() if g > 0.3)  # rough count at 0.3% default
+    print(f"[{SYMBOL}] Gap stats: {gap_days}/{len(all_days)} days gap>0.3%  "
+          f"(avg={sum(gap_pct_map.values())/len(gap_pct_map):.2f}%)", flush=True)
+
     # ── Combos ─────────────────────────────────────────────────────────────────
-    # sl_buf = small buffer below htf zone_low (structural SL).
-    # Actual SL distance = entry - (zone_low - sl_buf) — varies per trade geometry.
+    # gap_thr: if spot gap% > this, skip HTF → run MTF→LTF→Exec (intraday 3-tier).
+    # On gap days the HTF zone from prior day is unreachable intraday.
     combos = [
-        (htf, mtf, ltf, exc, sl_buf, cap, nsec)
-        for htf    in HTF_GRID
-        for mtf    in MTF_GRID    if mtf  < htf
-        for ltf    in LTF_GRID    if ltf  < mtf
-        for exc    in EXEC_GRID   if exc  <= ltf
-        for sl_buf in SL_BUF_GRID
-        for cap    in CAP_GRID
-        for nsec   in [0, 1, 2]
+        (htf, mtf, ltf, exc, sl_buf, cap, nsec, gap_thr)
+        for htf     in HTF_GRID
+        for mtf     in MTF_GRID     if mtf  < htf
+        for ltf     in LTF_GRID     if ltf  < mtf
+        for exc     in EXEC_GRID    if exc  <= ltf
+        for sl_buf  in SL_BUF_GRID
+        for cap     in CAP_GRID
+        for nsec    in [0, 1, 2]
+        for gap_thr in GAP_PCT_GRID
     ]
     total = len(combos)
-    print(f"[{SYMBOL}] {total} combos  (structural SL = zone_low - buf) ...", flush=True)
+    print(f"[{SYMBOL}] {total} combos  (structural SL + gap-mode cascade) ...", flush=True)
 
     results = []
     t0 = time.time()
 
-    for idx, (htf_min, mtf_min, ltf_min, exec_min, sl_buf, cap_pts, n_sec) in enumerate(combos):
+    for idx, (htf_min, mtf_min, ltf_min, exec_min, sl_buf, cap_pts, n_sec, gap_thr) in enumerate(combos):
         all_trades = []
         sl_hist: Dict[str, str] = {}
 
@@ -749,30 +815,41 @@ if __name__ == "__main__":
             sector_zones_day: Dict[tuple, list] = {}
             for sec in sector_list:
                 sector_zones_day[(sec, htf_min)] = sector_zones.get((sec, htf_min, d_str), [])
+                sector_zones_day[(sec, mtf_min)] = sector_zones.get((sec, mtf_min, d_str), [])
 
             htf_z  = zones_cache.get((htf_min, d_str), [])
             mtf_z  = zones_cache.get((mtf_min, d_str), [])
             ltf_z  = zones_cache.get((ltf_min, d_str), [])
             ex_arr = exec_cache.get((exec_min, d_str))
-            if not htf_z or ex_arr is None:
+            if ex_arr is None:
                 continue
 
-            # Spot-proxy: P&L = spot_move × ATM_delta × lot.
-            # Real option bars: P&L = premium_move × lot.
             is_opt_day = day_mode.get(d_str) == "option"
-            sim_lot = float(LOT) if is_opt_day else ATM_DELTA * LOT
-            # Cap stays in chart's native units (spot pts on proxy, premium pts on option bars).
-            sim_cap = float(cap_pts) if cap_pts > 0 else 0
+            sim_lot    = float(LOT) if is_opt_day else ATM_DELTA * LOT
+            sim_cap    = float(cap_pts) if cap_pts > 0 else 0
+            day_gap    = gap_pct_map.get(d_str, 0.0)
 
-            res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
-                                   sl_buf, sim_cap, sl_hist, sim_lot,
-                                   sector_zones_day, htf_min, n_sec)
+            if day_gap > gap_thr:
+                # GAP DAY: HTF zone unreachable → 3-tier intraday MTF→LTF→Exec
+                if not mtf_z:
+                    continue
+                res = _run_cascade_day_gap(d_str, ex_arr, mtf_z, ltf_z,
+                                           sl_buf, sim_cap, sl_hist, sim_lot,
+                                           sector_zones_day, mtf_min, n_sec)
+            else:
+                # NORMAL DAY: full 4-tier HTF→MTF→LTF→Exec
+                if not htf_z:
+                    continue
+                res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
+                                       sl_buf, sim_cap, sl_hist, sim_lot,
+                                       sector_zones_day, htf_min, n_sec)
             if res:
                 all_trades.append(res)
 
         params = {"htf_min": htf_min, "mtf_min": mtf_min, "ltf_min": ltf_min,
                   "exec_min": exec_min, "sl_buf": sl_buf, "cap_pts": cap_pts,
-                  "sector_confirm": n_sec, "symbol": SYMBOL, "lot": LOT}
+                  "sector_confirm": n_sec, "gap_thr_pct": gap_thr,
+                  "symbol": SYMBOL, "lot": LOT}
         results.append(_summarize(all_trades, params))
 
         if (idx + 1) % 50 == 0:
@@ -784,22 +861,23 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
     pd.DataFrame(results).to_csv(OUT_CSV, index=False)
 
-    W = 145
+    W = 165
     pri = SECTORS.get(SYMBOL, ['?'])[0] if SECTORS.get(SYMBOL) else '?'
     print(f"\n{'='*W}")
     print(f"  {SYMBOL} Cascade — Top 30  ({START_DATE} to {END_DATE})")
-    print(f"  Structural SL = htf_zone_low - SLbuf  |  Sector: 0=none  1=primary({pri})  2=both")
+    print(f"  SL=zone_low-buf  |  Gap>thr→MTF-LTF-Exec  |  Sec: 0=none 1={pri} 2=both")
     print(f"{'='*W}")
     print(f"{'Rank':>4}  {'HTF':>5}  {'MTF':>5}  {'LTF':>4}  {'Exc':>4}  "
-          f"{'SLbuf':>6}  {'Cap':>4}  {'Sec':>3}  "
-          f"{'#':>4}  {'Win%':>5}  {'PF':>7}  {'Net INR':>10}  "
+          f"{'SLbuf':>6}  {'Cap':>4}  {'Sec':>3}  {'GapThr':>7}  "
+          f"{'#':>4}  {'Nrm':>4}  {'Gap':>4}  {'Win%':>5}  {'PF':>7}  {'Net INR':>10}  "
           f"{'AvgW':>8}  {'AvgL':>8}  {'AvgSLd':>7}  {'SLs':>4}  {'T1s':>4}  {'EOD':>4}")
     print(f"{'-'*W}")
     for rank, r in enumerate(results[:30], 1):
         print(f"{rank:>4}  {r['htf_min']:>4}m  {r['mtf_min']:>4}m  {r['ltf_min']:>3}m  "
               f"{r['exec_min']:>3}m  {r['sl_buf']:>6.0f}  {r['cap_pts']:>4.0f}  "
-              f"{r['sector_confirm']:>3}  "
-              f"{r['total']:>4}  {r['win_rate_pct']:>4.0f}%  {r['profit_factor']:>7.3f}  "
+              f"{r['sector_confirm']:>3}  {r.get('gap_thr_pct',0):>6.1f}%  "
+              f"{r['total']:>4}  {r.get('normal_trades',0):>4}  {r.get('gap_trades',0):>4}  "
+              f"{r['win_rate_pct']:>4.0f}%  {r['profit_factor']:>7.3f}  "
               f"{r['net_pnl_inr']:>10.2f}  {r['avg_win_inr']:>8.2f}  {r['avg_loss_inr']:>8.2f}  "
               f"{r.get('avg_sl_dist', 0):>7.1f}  "
               f"{r['exits_sl']:>4}  {r['exits_t1']:>4}  {r['exits_eod']:>4}")
