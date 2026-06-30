@@ -119,7 +119,16 @@ CAP_GRID     = [0, 200, 500]        # profit cap (0 = hold to T1 or EOD)
 # day is unreachable intraday.  Skip HTF entirely → run MTF→LTF→Exec (3-tier intraday).
 # GAP_PCT_GRID = threshold % of spot.  e.g. 0.3 → 75 NIFTY pts / 155 BANKNIFTY pts.
 # "both" = run BOTH modes on same day (HTF if zone exists AND gap-mode independently).
-GAP_PCT_GRID = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0]   # fine-grained gap threshold sweep
+# 0.0 = special sentinel: ALWAYS run MTF-LTF-Exec regardless of gap (no HTF ever).
+# 99.0 = special sentinel: NEVER gap mode (always HTF 4-tier, same as original).
+# 0.8/1.0 = confirmed optimal for BANKNIFTY from 10k-combo sweep.
+GAP_PCT_GRID = [0.0, 0.8, 1.0, 99.0]   # 0.0=always-MTF  99.0=never-gap(pure-HTF)
+
+# DTE filter for monthly-expiry indices (BANKNIFTY).
+# 0 = no filter (trade all days).  N = only trade when DTE <= N (last N calendar days before expiry).
+# e.g. DTE_FILTER=15 → skip first 2 weeks of monthly cycle when theta is low.
+# Weekly-expiry (NIFTY): DTE resets every week so filter has different semantics.
+DTE_FILTER_GRID = [0, 10, 15, 20]      # 0=all days  10=last 2 weeks  15=last 3 weeks  20=skip week1
 ZONE_CUTOFF  = "15:14"              # strip last 15-min stub from zone bars
 
 STRIKES_OFFSET = [-2, -1, 0, 1, 2]   # x STEP from ATM
@@ -786,31 +795,43 @@ if __name__ == "__main__":
         except Exception:
             gap_pct_map[d_str] = 0.0
 
-    gap_days   = sum(1 for g in gap_pct_map.values() if g > 0.3)  # rough count at 0.3% default
+    gap_days = sum(1 for g in gap_pct_map.values() if g > 0.3)
     print(f"[{SYMBOL}] Gap stats: {gap_days}/{len(all_days)} days gap>0.3%  "
           f"(avg={sum(gap_pct_map.values())/len(gap_pct_map):.2f}%)", flush=True)
+
+    # ── Pre-compute DTE for each trading day ────────────────────────────────────
+    # DTE = calendar days from trading day to monthly expiry.
+    # Used to filter out early-month low-theta days for monthly-expiry indices.
+    dte_map: Dict[str, int] = {}
+    for d_str in all_days:
+        exp = _get_expiry_for_day(d_str)
+        dte_map[d_str] = (exp - date.fromisoformat(d_str)).days
+    dte_vals = list(dte_map.values())
+    print(f"[{SYMBOL}] DTE range: min={min(dte_vals)}  max={max(dte_vals)}  "
+          f"avg={sum(dte_vals)/len(dte_vals):.1f}", flush=True)
 
     # ── Combos ─────────────────────────────────────────────────────────────────
     # gap_thr: if spot gap% > this, skip HTF → run MTF→LTF→Exec (intraday 3-tier).
     # On gap days the HTF zone from prior day is unreachable intraday.
     combos = [
-        (htf, mtf, ltf, exc, sl_buf, cap, nsec, gap_thr)
+        (htf, mtf, ltf, exc, sl_buf, cap, nsec, gap_thr, dte_flt)
         for htf     in HTF_GRID
-        for mtf     in MTF_GRID     if mtf  < htf
-        for ltf     in LTF_GRID     if ltf  < mtf
-        for exc     in EXEC_GRID    if exc  <= ltf
+        for mtf     in MTF_GRID      if mtf  < htf
+        for ltf     in LTF_GRID      if ltf  < mtf
+        for exc     in EXEC_GRID     if exc  <= ltf
         for sl_buf  in SL_BUF_GRID
         for cap     in CAP_GRID
         for nsec    in [0, 1, 2]
         for gap_thr in GAP_PCT_GRID
+        for dte_flt in DTE_FILTER_GRID
     ]
     total = len(combos)
-    print(f"[{SYMBOL}] {total} combos  (structural SL + gap-mode cascade) ...", flush=True)
+    print(f"[{SYMBOL}] {total} combos  (gap-mode + DTE filter sweep) ...", flush=True)
 
     results = []
     t0 = time.time()
 
-    for idx, (htf_min, mtf_min, ltf_min, exec_min, sl_buf, cap_pts, n_sec, gap_thr) in enumerate(combos):
+    for idx, (htf_min, mtf_min, ltf_min, exec_min, sl_buf, cap_pts, n_sec, gap_thr, dte_flt) in enumerate(combos):
         all_trades = []
         sl_hist: Dict[str, str] = {}
 
@@ -831,8 +852,15 @@ if __name__ == "__main__":
             sim_lot    = float(LOT) if is_opt_day else ATM_DELTA * LOT
             sim_cap    = float(cap_pts) if cap_pts > 0 else 0
             day_gap    = gap_pct_map.get(d_str, 0.0)
+            day_dte    = dte_map.get(d_str, 99)
 
-            if day_gap > gap_thr:
+            # DTE filter: skip this day if DTE > filter (0=no filter).
+            if dte_flt > 0 and day_dte > dte_flt:
+                continue
+
+            # gap_thr=0.0 → always MTF intraday (never HTF).
+            # gap_thr=99.0 → never gap mode (always HTF 4-tier).
+            if gap_thr == 0.0 or (gap_thr < 99.0 and day_gap > gap_thr):
                 # GAP DAY: HTF zone unreachable → 3-tier intraday MTF→LTF→Exec
                 if not mtf_z:
                     continue
@@ -852,6 +880,7 @@ if __name__ == "__main__":
         params = {"htf_min": htf_min, "mtf_min": mtf_min, "ltf_min": ltf_min,
                   "exec_min": exec_min, "sl_buf": sl_buf, "cap_pts": cap_pts,
                   "sector_confirm": n_sec, "gap_thr_pct": gap_thr,
+                  "dte_filter": dte_flt,
                   "symbol": SYMBOL, "lot": LOT}
         results.append(_summarize(all_trades, params))
 
@@ -864,7 +893,7 @@ if __name__ == "__main__":
     os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
     pd.DataFrame(results).to_csv(OUT_CSV, index=False)
 
-    W = 180
+    W = 195
     pri = SECTORS.get(SYMBOL, ['?'])[0] if SECTORS.get(SYMBOL) else '?'
     print(f"\n{'='*W}")
     print(f"  {SYMBOL} Cascade — Top 30  ({START_DATE} to {END_DATE})")
@@ -872,7 +901,7 @@ if __name__ == "__main__":
     print(f"  NrmWR=normal-day win% | GapWR=gap-day win%")
     print(f"{'='*W}")
     print(f"{'Rank':>4}  {'HTF':>5}  {'MTF':>5}  {'LTF':>4}  {'Exc':>4}  "
-          f"{'SLbuf':>6}  {'Cap':>4}  {'Sec':>3}  {'GapThr':>7}  "
+          f"{'SLbuf':>6}  {'Cap':>4}  {'Sec':>3}  {'GapThr':>7}  {'DteFlt':>7}  "
           f"{'#':>4}  {'Nrm':>4}  {'NrmWR':>6}  {'Gap':>4}  {'GapWR':>6}  "
           f"{'PF':>7}  {'Net INR':>10}  "
           f"{'AvgW':>8}  {'AvgL':>8}  {'AvgSLd':>7}  {'SLs':>4}  {'T1s':>4}  {'EOD':>4}")
@@ -880,11 +909,13 @@ if __name__ == "__main__":
     for rank, r in enumerate(results[:30], 1):
         nrm   = r.get("normal_trades", 0)
         gap   = r.get("gap_trades", 0)
-        nrmwr = f"{r.get('nrm_wins',0)/nrm*100:.0f}%" if nrm > 0 else " — "
-        gapwr = f"{r.get('gap_wins',0)/gap*100:.0f}%" if gap > 0 else " — "
+        nrmwr = f"{r.get('nrm_wins',0)/nrm*100:.0f}%" if nrm > 0 else "  -  "
+        gapwr = f"{r.get('gap_wins',0)/gap*100:.0f}%" if gap > 0 else "  -  "
+        dte_f = r.get("dte_filter", 0)
+        dte_s = f"{dte_f:>5}d" if dte_f > 0 else "   all"
         print(f"{rank:>4}  {r['htf_min']:>4}m  {r['mtf_min']:>4}m  {r['ltf_min']:>3}m  "
               f"{r['exec_min']:>3}m  {r['sl_buf']:>6.0f}  {r['cap_pts']:>4.0f}  "
-              f"{r['sector_confirm']:>3}  {r.get('gap_thr_pct',0):>6.1f}%  "
+              f"{r['sector_confirm']:>3}  {r.get('gap_thr_pct',0):>6.1f}%  {dte_s:>7}  "
               f"{r['total']:>4}  {nrm:>4}  {nrmwr:>6}  {gap:>4}  {gapwr:>6}  "
               f"{r['profit_factor']:>7.3f}  "
               f"{r['net_pnl_inr']:>10.2f}  {r['avg_win_inr']:>8.2f}  {r['avg_loss_inr']:>8.2f}  "
