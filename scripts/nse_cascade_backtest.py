@@ -105,12 +105,15 @@ LOT  = LOT_SIZES.get(SYMBOL, 25)
 STEP = STRIKE_STEPS.get(SYMBOL, 50)
 
 # Optimization grids
+# SL_GRID / CAP_GRID = OPTION PREMIUM points (e.g. 20 = ₹20 move in ATM option).
+# Internally converted to spot points: spot_sl = option_pts / ATM_delta (0.5) → ×2.
+# So SL=20 → 40 spot pts, SL=100 → 200 spot pts (reasonable BANKNIFTY SL).
 HTF_GRID  = [60, 120, 180, 240]
 MTF_GRID  = [15, 30]
 LTF_GRID  = [3, 5]
 EXEC_GRID = [1, 3]
-SL_GRID   = [5, 10, 20, 30]
-CAP_GRID  = [0, 30, 50, 100]
+SL_GRID   = [20, 50, 100, 200]    # option premium points
+CAP_GRID  = [0, 100, 200, 500]    # option premium points (0 = trailing only)
 
 STRIKES_OFFSET = [-2, -1, 0, 1, 2]   # x STEP from ATM
 
@@ -614,11 +617,14 @@ if __name__ == "__main__":
             if not htf_z or ex_arr is None:
                 continue
 
-            # SL/cap stay in SPOT units for simulation; ATM_delta applied only to size
-            # so PnL = spot_move × ATM_delta × lot_size (ATM option ≈ delta 0.5)
-            eff_lot = ATM_DELTA * LOT
+            # sl_buf / cap_pts are in option premium points.
+            # Convert → spot points (÷ ATM_delta) for simulation on spot bars.
+            # P&L = spot_move × ATM_delta × lot → eff_lot = ATM_DELTA * LOT.
+            sl_spot  = sl_buf  / ATM_DELTA
+            cap_spot = cap_pts / ATM_DELTA if cap_pts > 0 else 0
+            eff_lot  = ATM_DELTA * LOT
             res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
-                                   sl_buf, cap_pts, sl_hist, eff_lot,
+                                   sl_spot, cap_spot, sl_hist, eff_lot,
                                    sector_zones_day, htf_min, n_sec)
             if res:
                 all_trades.append(res)
