@@ -42,8 +42,8 @@ from strategies.trap_scanner import scanner
 SYMBOL   = sys.argv[1].upper() if len(sys.argv) > 1 else "NIFTY"
 OPT_SIDE = sys.argv[2].upper() if len(sys.argv) > 2 else "BOTH"
 
-START_DATE = date(2026, 7,  1)
-END_DATE   = date.today()
+START_DATE = date(2026, 6,  1)
+END_DATE   = date(2026, 6, 30)
 LOOKBACK   = 5
 
 DB_PATH   = os.path.join(_ROOT, "data", "clients.db")
@@ -455,8 +455,8 @@ def _summarize(trades, params) -> dict:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"=== {SYMBOL} Cascade Backtest — Option Premium + Sector Confirmation ===", flush=True)
-    print(f"    Period: {START_DATE} -> {END_DATE}  |  Side: {OPT_SIDE}  |  Lot: {LOT}", flush=True)
+    print(f"=== {SYMBOL} Cascade Backtest (SPOT proxy) — Sector Confirmation ===", flush=True)
+    print(f"    Period: {START_DATE} -> {END_DATE}  |  Lot: {LOT}  |  ATM delta: 0.5", flush=True)
 
     token = _get_upstox_token()
     if not token:
@@ -464,7 +464,7 @@ if __name__ == "__main__":
         sys.exit(1)
     print("[OK] Upstox token loaded", flush=True)
 
-    # Daily index bars for ATM computation
+    # Use daily index bars only to determine valid trading days
     fetch_fr = START_DATE - timedelta(days=LOOKBACK + 5)
     print(f"[{SYMBOL}] Fetching daily index bars ...", flush=True)
     daily_df = _fetch_index_daily(SYMBOL, token, fetch_fr, END_DATE)
@@ -472,59 +472,36 @@ if __name__ == "__main__":
         print("[ERROR] Could not fetch daily index data. Check token.", flush=True)
         sys.exit(1)
     daily_df["date"] = daily_df["date"].astype(str)
-    daily_map = {r["date"]: r for _, r in daily_df.iterrows()}
-    print(f"[{SYMBOL}] {len(daily_df)} daily bars", flush=True)
+    trading_day_set = set(daily_df["date"].tolist())
+    print(f"[{SYMBOL}] {len(trading_day_set)} trading days in calendar", flush=True)
 
-    # Build list of trading days
+    # Build list of trading days in our window
     all_days = []
     d = START_DATE
     while d <= END_DATE:
-        if d.isoformat() in daily_map:
+        if d.isoformat() in trading_day_set:
             all_days.append(d.isoformat())
         d += timedelta(days=1)
-    print(f"[{SYMBOL}] {len(all_days)} trading days", flush=True)
+    print(f"[{SYMBOL}] {len(all_days)} trading days in window", flush=True)
 
-    # Helpers
-    def _get_expiry_date(d_str) -> Optional[date]:
-        """Return monthly expiry date for the given trading day."""
-        d = date.fromisoformat(d_str)
-        exp = _get_monthly_expiry(SYMBOL, d.year, d.month)
-        if d > exp:   # after this month's expiry → use next month
-            nm = d.month + 1 if d.month < 12 else 1
-            ny = d.year if d.month < 12 else d.year + 1
-            exp = _get_monthly_expiry(SYMBOL, ny, nm)
-        return exp
-
-    def _get_atm(d_str) -> int:
-        prev_d = (date.fromisoformat(d_str) - timedelta(days=1)).isoformat()
-        for _ in range(7):
-            if prev_d in daily_map:
-                close = float(daily_map[prev_d]["close"])
-                return int(round(close / STEP) * STEP)
-            prev_d = (date.fromisoformat(prev_d) - timedelta(days=1)).isoformat()
-        return 0
-
-    opt_sides = ["CE", "PE"] if OPT_SIDE == "BOTH" else [OPT_SIDE]
-
-    # ── Discover monthly expiries needed for our period ─────────────────────────
-    expiry_dates_needed: set = set()
-    for d_str in all_days:
-        exp = _get_expiry_date(d_str)
-        if exp:
-            expiry_dates_needed.add(exp)
-    print(f"[{SYMBOL}] Monthly expiries in period: {sorted(expiry_dates_needed)}", flush=True)
-
-    # ── Get real instrument keys from Upstox option/contract API ───────────────
-    contracts: Dict[date, Dict[Tuple[int, str], str]] = {}
-    for exp_date in sorted(expiry_dates_needed):
-        c = _get_option_contracts(SYMBOL, exp_date)
-        contracts[exp_date] = c
-        print(f"  {exp_date}: {len(c)} contracts loaded", flush=True)
+    # ── NOTE: Using SPOT 1m bars as zone-detection proxy ──────────────────────
+    # Historical option bars for expired contracts are unavailable without a
+    # dedicated data vendor. SPOT chart produces the same trap pattern (just scaled).
+    # P&L simulation: spot_move × ATM_delta(0.5) × lot_size.
+    # Replace df_spot with real option 1m bars once July data accumulates.
+    print(f"[{SYMBOL}] Downloading SPOT 1m bars (zone-detection proxy) ...", flush=True)
+    fetch_fr2 = START_DATE - timedelta(days=LOOKBACK + 1)
+    df_spot = _fetch_index_1m(SYMBOL, token, fetch_fr2, END_DATE)
+    if df_spot.empty:
+        print("[ERROR] No spot 1m data", flush=True)
+        sys.exit(1)
+    if df_spot["datetime"].dt.tz is not None:
+        df_spot["datetime"] = df_spot["datetime"].dt.tz_localize(None)
+    print(f"  {SYMBOL} spot: {len(df_spot)} bars", flush=True)
 
     # ── Download sector index 1m bars ──────────────────────────────────────────
     sector_list = SECTORS.get(SYMBOL, [])
     sector_df: Dict[str, pd.DataFrame] = {}
-    fetch_fr2 = START_DATE - timedelta(days=LOOKBACK + 1)
     if sector_list:
         print(f"[{SYMBOL}] Downloading sector indices: {sector_list} ...", flush=True)
         for sec in sector_list:
@@ -537,77 +514,41 @@ if __name__ == "__main__":
                 sector_df[sec] = df_sec
                 print(f"  {sec}: {len(df_sec)} bars", flush=True)
 
-    # ── Download option 1m bars ────────────────────────────────────────────────
-    # Build set of (exp_date, strike, ot) we need based on daily ATM
-    fetch_set: set = set()
-    for d_str in all_days:
-        exp_date = _get_expiry_date(d_str)
-        if not exp_date or exp_date not in contracts:
-            continue
-        atm = _get_atm(d_str)
-        if not atm:
-            continue
-        day_contracts = contracts[exp_date]
-        for offset in STRIKES_OFFSET:
-            strike = atm + offset * STEP
-            for ot in opt_sides:
-                if (strike, ot) in day_contracts:
-                    fetch_set.add((exp_date, strike, ot))
-
-    print(f"[{SYMBOL}] Downloading {len(fetch_set)} option series ...", flush=True)
-    option_bars: Dict[tuple, pd.DataFrame] = {}
-    for i, (exp_date, strike, ot) in enumerate(sorted(fetch_set)):
-        ikey  = contracts[exp_date][(strike, ot)]
-        label = f"{SYMBOL}{exp_date.strftime('%d%b%y').upper()}{strike}{ot}"
-        df    = _fetch_option_1m(ikey, label, token, fetch_fr2, END_DATE)
-        option_bars[(exp_date, strike, ot)] = df
-        status = f"{len(df)} bars" if not df.empty else "NO DATA"
-        print(f"  [{i+1}/{len(fetch_set)}] {label} — {status}", flush=True)
-
-    # ── Precompute zones ────────────────────────────────────────────────────────
-    print(f"\n[{SYMBOL}] Precomputing option zones ...", flush=True)
+    # ── Precompute SPOT zones + exec arrays per (tf, day) ──────────────────────
+    print(f"\n[{SYMBOL}] Precomputing spot zones ...", flush=True)
     all_tfs = sorted(set(HTF_GRID) | set(MTF_GRID) | set(LTF_GRID))
+    ATM_DELTA = 0.50   # ATM option delta ≈ 0.5 for P&L scaling
 
-    zones_cache: Dict[tuple, list] = {}
-    exec_cache:  Dict[tuple, Optional[dict]] = {}
+    zones_cache: Dict[tuple, list] = {}   # (tf, d_str) -> zones
+    exec_cache:  Dict[tuple, Optional[dict]] = {}   # (exc_min, d_str) -> arrays
 
-    for (exp_date, strike, ot), df_full in option_bars.items():
-        if df_full.empty:
+    for d_str in all_days:
+        d_s  = pd.Timestamp(f"{d_str}T09:15:00")
+        d_e  = pd.Timestamp(f"{d_str}T15:30:00")
+        lb_s = d_s - pd.Timedelta(days=LOOKBACK)
+        df_day = df_spot[(df_spot["datetime"] >= d_s) & (df_spot["datetime"] <= d_e)].copy()
+        df_lb  = df_spot[(df_spot["datetime"] >= lb_s) & (df_spot["datetime"] < d_s)].copy()
+        if len(df_day) < 30:
             continue
-        if df_full["datetime"].dt.tz is not None:
-            df_full = df_full.copy()
-            df_full["datetime"] = df_full["datetime"].dt.tz_localize(None)
-        for d_str in all_days:
-            # Only use this option series on days when it's the active expiry
-            if _get_expiry_date(d_str) != exp_date:
+        combined = pd.concat([df_lb, df_day], ignore_index=True)
+        for tf in all_tfs:
+            bars  = _resample(combined, tf)
+            zones = _get_zones(bars)
+            if not zones:
+                zones = _get_zones(_resample(df_day, tf))
+            zones_cache[(tf, d_str)] = zones
+        for exc in EXEC_GRID:
+            df_ex = _resample(df_day, exc)
+            if df_ex.empty:
+                exec_cache[(exc, d_str)] = None
                 continue
-            d_s  = pd.Timestamp(f"{d_str}T09:15:00")
-            d_e  = pd.Timestamp(f"{d_str}T15:30:00")
-            lb_s = d_s - pd.Timedelta(days=LOOKBACK)
-            df_day = df_full[(df_full["datetime"] >= d_s) & (df_full["datetime"] <= d_e)].copy()
-            df_lb  = df_full[(df_full["datetime"] >= lb_s) & (df_full["datetime"] < d_s)].copy()
-            if len(df_day) < 30:
-                continue
-            combined = pd.concat([df_lb, df_day], ignore_index=True)
-            for tf in all_tfs:
-                bars  = _resample(combined, tf)
-                zones = _get_zones(bars)
-                if not zones:
-                    zones = _get_zones(_resample(df_day, tf))
-                zones_cache[(exp_date, strike, ot, tf, d_str)] = zones
-            for exc in EXEC_GRID:
-                df_ex = _resample(df_day, exc)
-                if df_ex.empty:
-                    exec_cache[(exp_date, strike, ot, exc, d_str)] = None
-                    continue
-                exec_cache[(exp_date, strike, ot, exc, d_str)] = {
-                    "high":  df_ex["high"].to_numpy(dtype=np.float64),
-                    "low":   df_ex["low"].to_numpy(dtype=np.float64),
-                    "close": df_ex["close"].to_numpy(dtype=np.float64),
-                }
+            exec_cache[(exc, d_str)] = {
+                "high":  df_ex["high"].to_numpy(dtype=np.float64),
+                "low":   df_ex["low"].to_numpy(dtype=np.float64),
+                "close": df_ex["close"].to_numpy(dtype=np.float64),
+            }
 
     # ── Precompute sector zones ─────────────────────────────────────────────────
-    # sector_zones[(sec, tf, d_str)] = list of zones
     sector_zones: Dict[tuple, list] = {}
     if sector_df:
         print(f"[{SYMBOL}] Precomputing sector confirmation zones ...", flush=True)
@@ -628,7 +569,7 @@ if __name__ == "__main__":
                         zones = _get_zones(_resample(df_day, tf))
                     sector_zones[(sec, tf, d_str)] = zones
 
-    print(f"[{SYMBOL}] Precompute done", flush=True)
+    print(f"[{SYMBOL}] Precompute done — {len(all_days)} days", flush=True)
 
     # ── Combos ─────────────────────────────────────────────────────────────────
     combos = [
@@ -639,10 +580,10 @@ if __name__ == "__main__":
         for exc  in EXEC_GRID  if exc  <= ltf
         for sl   in SL_GRID
         for cap  in CAP_GRID
-        for nsec in [0, 1, 2]    # 0=no filter, 1=primary, 2=primary+secondary
+        for nsec in [0, 1, 2]
     ]
     total = len(combos)
-    print(f"[{SYMBOL}] {total} combos (including 3 sector-confirmation modes) ...", flush=True)
+    print(f"[{SYMBOL}] {total} combos ...", flush=True)
 
     results = []
     t0 = time.time()
@@ -652,42 +593,26 @@ if __name__ == "__main__":
         sl_hist: Dict[str, str] = {}
 
         for d_str in all_days:
-            exp_date = _get_expiry_date(d_str)
-            if not exp_date or exp_date not in contracts:
-                continue
-            atm = _get_atm(d_str)
-            if not atm:
-                continue
-
             # Build sector_zones_day for this day + htf
             sector_zones_day: Dict[tuple, list] = {}
             for sec in sector_list:
                 sector_zones_day[(sec, htf_min)] = sector_zones.get((sec, htf_min, d_str), [])
 
-            traded = False
-            for offset in STRIKES_OFFSET:
-                if traded:
-                    break
-                strike = atm + offset * STEP
-                for ot in opt_sides:
-                    key = (exp_date, strike, ot)
-                    if key not in option_bars or option_bars[key].empty:
-                        continue
-                    htf_z  = zones_cache.get((exp_date, strike, ot, htf_min, d_str), [])
-                    mtf_z  = zones_cache.get((exp_date, strike, ot, mtf_min, d_str), [])
-                    ltf_z  = zones_cache.get((exp_date, strike, ot, ltf_min, d_str), [])
-                    ex_arr = exec_cache.get((exp_date, strike, ot, exec_min, d_str))
-                    if not htf_z or ex_arr is None:
-                        continue
-                    res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
-                                           sl_buf, cap_pts, sl_hist, LOT,
-                                           sector_zones_day, htf_min, n_sec)
-                    if res:
-                        res["strike"] = strike
-                        res["opt"]    = ot
-                        all_trades.append(res)
-                        traded = True
-                        break
+            htf_z  = zones_cache.get((htf_min, d_str), [])
+            mtf_z  = zones_cache.get((mtf_min, d_str), [])
+            ltf_z  = zones_cache.get((ltf_min, d_str), [])
+            ex_arr = exec_cache.get((exec_min, d_str))
+            if not htf_z or ex_arr is None:
+                continue
+
+            # Scale SL/cap from spot points → option premium points (× ATM_delta)
+            sl_opt  = sl_buf  * ATM_DELTA
+            cap_opt = cap_pts * ATM_DELTA if cap_pts > 0 else 0
+            res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
+                                   sl_opt, cap_opt, sl_hist, LOT,
+                                   sector_zones_day, htf_min, n_sec)
+            if res:
+                all_trades.append(res)
 
         params = {"htf_min": htf_min, "mtf_min": mtf_min, "ltf_min": ltf_min,
                   "exec_min": exec_min, "sl_buf": sl_buf, "cap_pts": cap_pts,
