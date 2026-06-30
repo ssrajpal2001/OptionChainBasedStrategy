@@ -24,7 +24,8 @@ class EntryMixin:
     async def _on_entry_signal(self, leg: str, opt_type: str,
                                 entry: dict, htf_zone: dict,
                                 qty_override: Optional[int] = None,
-                                stage: Optional[str] = None) -> None:
+                                stage: Optional[str] = None,
+                                mtf_zone: Optional[dict] = None) -> None:
         if self._no_margin_today:
             self._log.debug("Entry blocked — no margin today (add funds)")
             return
@@ -147,14 +148,25 @@ class EntryMixin:
         else:
             tracking_leg = leg   # CE1 or PE1 — scan strike option bars
             sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # option zone_low (option ₹)
-            t1_price     = round(htf_zone.get("sl", 0), 2)             # HTF ref bar HIGH (bears' SL)
+            # T1 = MTF (15m) zone sl = sellers' stop on 15m chart (reachable intraday).
+            # T2 = HTF (180m) zone sl = sellers' stop on 180m chart (runner target).
+            # If no MTF zone passed (cascade/sweep paths), T1 = HTF sl (legacy behavior).
+            htf_sl   = round(htf_zone.get("sl", 0), 2)
+            mtf_sl   = round(mtf_zone.get("sl", 0), 2) if mtf_zone else 0.0
+            if mtf_sl > 0 and htf_sl > 0 and mtf_sl < htf_sl:
+                t1_price = mtf_sl   # 15m ref bar HIGH (first, closer target)
+                t2_price = htf_sl   # 180m ref bar HIGH (runner target)
+            else:
+                t1_price = htf_sl   # fallback: no distinct MTF level
+                t2_price = 0.0
             t1_price_fut = None
 
         self._log.info(
             "ENTRY %s scan_strike=%d order_strike=%d%s spot=%.2f atm=%d "
-            "ep=%.2f sl=%.2f t1=%.2f qty=%d tracking=%s exec_key=%s",
+            "ep=%.2f sl=%.2f t1=%.2f t2=%.2f qty=%d tracking=%s exec_key=%s",
             self._und, scan_strike, strike, opt_type, spot, atm,
-            ep, sl_price, t1_price, total_qty, tracking_leg, exec_key,
+            ep, sl_price, t1_price, t2_price if self._htf_source != "futures" else 0.0,
+            total_qty, tracking_leg, exec_key,
         )
 
         if self._rebalancer is not None:
@@ -297,12 +309,14 @@ class EntryMixin:
             # Trap-based trail state: bears trapped above entry → squeezed → pullback → confirmed
             # Each entry: {zone_trigger, zone_high, state: WATCHING|SQUEEZED|PULLED_BACK|CONFIRMED}
             "trail_traps":    [],
-            "t1_price":       t1_price,      # futures ₹ for futures-mode; option ₹ for option-mode
+            "t1_price":       t1_price,      # MTF (15m) ref bar HIGH — first partial exit
+            "t2_price":       t2_price if self._htf_source != "futures" else 0.0,  # HTF (180m) sl — runner exit
             "t1_price_fut":   t1_price_fut,  # unused (kept for backward compat with persisted state)
             "total_qty":      total_qty,
-            "t1_qty":         t1_qty,
+            "t1_qty":         t1_qty,        # half qty (lot_size × lot_mul // 2)
             "remaining_qty":  total_qty,
             "t1_hit":         False,
+            "t2_hit":         False,
             "entry_ts":       now.isoformat(),
             "signal_source":  f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
             "order_id_entry": order_id,

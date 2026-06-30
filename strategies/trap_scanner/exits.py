@@ -109,6 +109,20 @@ class ExitMixin:
                 self._record_closed_trade(pos, exit_price=ltp, exit_reason="T1", qty_override=pos["t1_qty"])
                 self._persist_position()
 
+            # T2: runner exit — close remaining qty at HTF (180m) target
+            if pos["t1_hit"] and not pos.get("t2_hit") and pos.get("t2_price", 0) > 0:
+                if ltp >= pos["t2_price"]:
+                    pos["t2_hit"] = True
+                    remaining = pos["remaining_qty"]
+                    self._log.info("T2 HIT ltp=%.2f t2=%.2f qty=%d → closing all",
+                                   ltp, pos["t2_price"], remaining)
+                    await self._place_exit(remaining, pos["t2_price"], "T2")
+                    self._record_closed_trade(pos, exit_price=ltp, exit_reason="T2",
+                                              qty_override=remaining)
+                    self._position = None
+                    self._clear_persisted_position()
+                    return
+
             # Advance 5m trail SL using OPTION bar lows (only after T1)
             if pos["t1_hit"] and ts is not None:
                 self._update_trail_sl(pos, ts)

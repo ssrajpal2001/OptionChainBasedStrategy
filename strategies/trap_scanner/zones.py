@@ -619,7 +619,7 @@ class ZonesMixin:
                     continue
                 self._zone_ltf_status[uid] = "ltf_signal"
                 asyncio.get_event_loop().create_task(
-                    self._on_entry_signal(leg_key, opt_type, best, zone)
+                    self._on_entry_signal(leg_key, opt_type, best, zone, mtf_zone=mtf)
                 )
                 return
 
