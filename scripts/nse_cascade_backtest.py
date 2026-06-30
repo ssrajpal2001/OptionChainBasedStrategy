@@ -129,6 +129,16 @@ GAP_PCT_GRID = [0.0, 0.8, 1.0, 99.0]   # 0.0=always-MTF  99.0=never-gap(pure-HTF
 # e.g. DTE_FILTER=15 → skip first 2 weeks of monthly cycle when theta is low.
 # Weekly-expiry (NIFTY): DTE resets every week so filter has different semantics.
 DTE_FILTER_GRID = [0, 10, 15, 20]      # 0=all days  10=last 2 weeks  15=last 3 weeks  20=skip week1
+
+# ── Exit-sweep grids (run separately after main sweep, with frozen optimal params) ──
+# T1_SRC: "htf" = single exit at HTF sl (baseline); "mtf" = partial at MTF sl + runner to HTF sl
+# TSL_TYPE: "none" = no trail (exit only at T2/SL/EOD); "bar_low" = trail below each exec bar low
+# TSL_BUF: pts below bar low for bar_low TSL (only used when TSL_TYPE="bar_low")
+# Combos: 2 × (1 + 3) = 8 exit variants per frozen-param base
+T1_SRC_GRID   = ["htf", "mtf"]
+TSL_TYPE_GRID = ["none", "bar_low"]
+TSL_BUF_GRID  = [5, 10, 20]   # bar_low TSL buffer (pts below exec bar low)
+
 ZONE_CUTOFF  = "15:14"              # strip last 15-min stub from zone bars
 
 STRIKES_OFFSET = [-2, -1, 0, 1, 2]   # x STEP from ATM
@@ -356,38 +366,123 @@ def _zones_overlap(parent: dict, child: dict, tol: float = 0.15) -> bool:
 
 def _simulate_numpy(H, L, C, entry, struct_sl, t1, _unused_buf, cap_pts, size) -> dict:
     """
-    Fixed structural SL at struct_sl (= htf_zone_low - buffer).  No trailing.
-    The live engine does 5m-candle-low trailing which cannot be cleanly replicated
-    in backtest — fixed structural SL is the honest conservative equivalent.
-    Exits: SL if bar low <= struct_sl | T1 if bar high >= t1 | CAP | EOD at close.
+    Single-target simulation (baseline).
+    Exits: SL | T1 (full exit) | CAP | EOD.
     """
     for i in range(len(H)):
         h, l, c = float(H[i]), float(L[i]), float(C[i])
         if l <= struct_sl:
-            return {"pnl": round((struct_sl - entry) * size, 2), "exit_reason": "SL"}
+            return {"pnl": round((struct_sl - entry) * size, 2), "exit_reason": "SL",
+                    "t1_hit": False, "t2_hit": False}
         if h >= t1:
-            return {"pnl": round((t1 - entry) * size, 2), "exit_reason": "T1"}
+            return {"pnl": round((t1 - entry) * size, 2), "exit_reason": "T1",
+                    "t1_hit": True, "t2_hit": False}
         if cap_pts > 0 and (c - entry) >= cap_pts:
-            return {"pnl": round((c - entry) * size, 2), "exit_reason": "CAP"}
+            return {"pnl": round((c - entry) * size, 2), "exit_reason": "CAP",
+                    "t1_hit": False, "t2_hit": False}
     ep = float(C[-1]) if len(C) > 0 else entry
-    return {"pnl": round((ep - entry) * size, 2), "exit_reason": "EOD"}
+    return {"pnl": round((ep - entry) * size, 2), "exit_reason": "EOD",
+            "t1_hit": False, "t2_hit": False}
 
-def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot) -> Optional[dict]:
+
+def _simulate_two_target(H, L, C, entry, struct_sl, t1_price, t2_price,
+                          tsl_type, tsl_buf, cap_pts, full_size) -> dict:
     """
-    Structural SL = htf_zone_low - sl_buf.
-    The HTF zone's bottom is the trap invalidation level — if price closes below
-    zone_low the bear trap is dead regardless of how far entry was from it.
-    sl_buf is just a small padding (5-30 pts), NOT a fixed stop distance from entry.
-    T1 = htf_zone["sl"] (the bears' stop level = trap target).
+    Two-target simulation with optional TSL after T1.
+
+    T1 (MTF sl): sell half qty → SL moves to entry (CTC).
+    TSL: after T1, trail_sl steps up by bar lows.
+    T2 (HTF sl): sell remaining qty → trade closed.
+    If T2=0: runner held until TSL or EOD.
+
+    tsl_type: "none" = no trail (just CTC floor), "bar_low" = trail below each bar low.
+    tsl_buf : pts below bar low to set new trail (only for "bar_low").
+    """
+    half    = full_size // 2
+    runner  = full_size - half
+    t1_hit  = False
+    trail_sl = struct_sl
+    realized = 0.0
+
+    for i in range(len(H)):
+        h, l, c = float(H[i]), float(L[i]), float(C[i])
+
+        # SL / trail-SL check (always first)
+        if l <= trail_sl:
+            if not t1_hit:
+                loss = round((struct_sl - entry) * full_size, 2)
+                return {"pnl": loss, "exit_reason": "SL", "t1_hit": False, "t2_hit": False}
+            else:
+                runner_pnl = round((trail_sl - entry) * runner, 2)
+                return {"pnl": round(realized + runner_pnl, 2),
+                        "exit_reason": "TRAIL_SL", "t1_hit": True, "t2_hit": False}
+
+        # T1 check
+        if not t1_hit and t1_price > 0 and h >= t1_price:
+            t1_hit    = True
+            realized  = round((t1_price - entry) * half, 2)
+            trail_sl  = entry   # CTC: SL moves to entry after T1
+
+        # After T1: TSL update and T2 check
+        if t1_hit:
+            if tsl_type == "bar_low":
+                new_trail = l - tsl_buf
+                if new_trail > trail_sl:
+                    trail_sl = new_trail
+
+            if t2_price > 0 and h >= t2_price:
+                runner_pnl = round((t2_price - entry) * runner, 2)
+                return {"pnl": round(realized + runner_pnl, 2),
+                        "exit_reason": "T2", "t1_hit": True, "t2_hit": True}
+
+        # CAP: full position before T1 only
+        if cap_pts > 0 and not t1_hit and (c - entry) >= cap_pts:
+            return {"pnl": round((c - entry) * full_size, 2), "exit_reason": "CAP",
+                    "t1_hit": False, "t2_hit": False}
+
+    # EOD
+    ep = float(C[-1]) if len(H) > 0 else entry
+    if t1_hit:
+        runner_pnl = round((ep - entry) * runner, 2)
+        return {"pnl": round(realized + runner_pnl, 2),
+                "exit_reason": "EOD", "t1_hit": True, "t2_hit": False}
+    return {"pnl": round((ep - entry) * full_size, 2),
+            "exit_reason": "EOD", "t1_hit": False, "t2_hit": False}
+
+def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot,
+                     mtf_zone=None, t1_src="htf",
+                     tsl_type="none", tsl_buf=10) -> Optional[dict]:
+    """
+    Structural SL = htf_zone_low - sl_buf (zone bottom = trap invalidation level).
+
+    t1_src="htf" : T1 = htf_zone["sl"] (baseline — single full exit at HTF target).
+    t1_src="mtf" : T1 = mtf_zone["sl"] (15m target, partial exit) + T2 = htf_zone["sl"]
+                   (180m runner target). Calls _simulate_two_target.
+    tsl_type     : "none" | "bar_low" — TSL applied to runner after T1.
+    tsl_buf      : pts below bar low for bar_low TSL.
     """
     ltf_l, ltf_h = _eff_zone(ltf_zone)
     htf_l, _     = _eff_zone(htf_zone)
-    buf  = max((ltf_h - ltf_l) * 0.15, 1.0)
-    t1   = float(htf_zone.get("sl", 0))
-    # Structural SL is fixed at zone bottom regardless of where exec candle is
+    buf       = max((ltf_h - ltf_l) * 0.15, 1.0)
+    htf_sl    = float(htf_zone.get("sl", 0))
     struct_sl = htf_l - sl_buf
-    if t1 <= 0 or struct_sl <= 0:
+
+    # Determine T1 and T2
+    if t1_src == "mtf" and mtf_zone is not None:
+        mtf_sl = float(mtf_zone.get("sl", 0))
+        if mtf_sl > 0 and htf_sl > mtf_sl:
+            t1_price = mtf_sl
+            t2_price = htf_sl
+        else:
+            t1_price = htf_sl   # no distinct MTF level → fall back
+            t2_price = 0.0
+    else:
+        t1_price = htf_sl
+        t2_price = 0.0
+
+    if t1_price <= 0 or struct_sl <= 0:
         return None
+
     H, L, C = exec_arr["high"], exec_arr["low"], exec_arr["close"]
     n = len(H)
     if n < 2:
@@ -397,19 +492,25 @@ def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot) -> Opti
     idxs    = idxs[idxs < n - 1]
     for i in idxs:
         trig = float(H[i])
-        # Skip if T1 already below entry or SL already above entry
-        if t1 <= trig or struct_sl >= trig:
+        if t1_price <= trig or struct_sl >= trig:
             continue
         hit = np.where(H[i+1:] >= trig)[0]
         if not len(hit):
             continue
-        j   = hit[0]
-        res = _simulate_numpy(H[i+1:][j:], L[i+1:][j:], C[i+1:][j:],
-                              trig, struct_sl, t1, sl_buf, cap_pts, lot)
+        j = hit[0]
+        Hs = H[i+1:][j:]; Ls = L[i+1:][j:]; Cs = C[i+1:][j:]
+
+        if t1_src == "mtf" and t2_price > 0:
+            res = _simulate_two_target(Hs, Ls, Cs, trig, struct_sl,
+                                       t1_price, t2_price, tsl_type, tsl_buf, cap_pts, lot)
+        else:
+            res = _simulate_numpy(Hs, Ls, Cs, trig, struct_sl,
+                                  t1_price, sl_buf, cap_pts, lot)
         res["entry_price"] = round(trig, 2)
         res["sl_level"]    = round(struct_sl, 2)
-        res["t1"]          = round(t1, 2)
-        res["sl_dist"]     = round(trig - struct_sl, 2)   # actual SL distance in chart units
+        res["t1"]          = round(t1_price, 2)
+        res["t2"]          = round(t2_price, 2)
+        res["sl_dist"]     = round(trig - struct_sl, 2)
         return res
     return None
 
@@ -436,7 +537,8 @@ def _sector_confirms(sector_zones_day: Dict[str, list], htf_min: int,
 
 def _run_cascade_day(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
                      sl_buf, cap_pts, sl_hist, lot,
-                     sector_zones_day, htf_min, n_sectors) -> Optional[dict]:
+                     sector_zones_day, htf_min, n_sectors,
+                     t1_src="htf", tsl_type="none", tsl_buf=10) -> Optional[dict]:
     for htf_z in htf_zones:
         kind = htf_z.get("kind", "BEAR")
         if kind != "BEAR":   # option chart: only BEAR trap -> BUY
@@ -458,7 +560,9 @@ def _run_cascade_day(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
         ltf_m = next((z for z in ltf_zones if z.get("kind") == kind and _zones_overlap(mtf_m, z)), None)
         if not ltf_m:
             continue
-        res = _find_exec_entry(exec_arr, ltf_m, htf_z, sl_buf, cap_pts, lot)
+        res = _find_exec_entry(exec_arr, ltf_m, htf_z, sl_buf, cap_pts, lot,
+                               mtf_zone=mtf_m, t1_src=t1_src,
+                               tsl_type=tsl_type, tsl_buf=tsl_buf)
         if res:
             res.update({"date": d_str, "zone_key": zone_key})
             if res["exit_reason"] == "SL":
@@ -469,7 +573,8 @@ def _run_cascade_day(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
 
 def _run_cascade_day_gap(d_str, exec_arr, mtf_zones, ltf_zones,
                          sl_buf, cap_pts, sl_hist, lot,
-                         sector_zones_day, mtf_min, n_sectors) -> Optional[dict]:
+                         sector_zones_day, mtf_min, n_sectors,
+                         t1_src="htf", tsl_type="none", tsl_buf=10) -> Optional[dict]:
     """
     Gap-open mode: HTF zone is unreachable (price gapped past it).
     Run 3-tier intraday cascade: MTF zone → LTF overlap → Exec entry.
@@ -494,8 +599,10 @@ def _run_cascade_day_gap(d_str, exec_arr, mtf_zones, ltf_zones,
         ltf_m = next((z for z in ltf_zones if z.get("kind") == kind and _zones_overlap(mtf_z, z)), None)
         if not ltf_m:
             continue
-        # anchor zone for structural SL = MTF zone (replaces HTF role)
-        res = _find_exec_entry(exec_arr, ltf_m, mtf_z, sl_buf, cap_pts, lot)
+        # gap mode: MTF is the anchor (no higher HTF); T1_src="htf" uses MTF sl as T1
+        res = _find_exec_entry(exec_arr, ltf_m, mtf_z, sl_buf, cap_pts, lot,
+                               mtf_zone=None, t1_src="htf",
+                               tsl_type=tsl_type, tsl_buf=tsl_buf)
         if res:
             res.update({"date": d_str, "zone_key": zone_key, "mode": "gap"})
             if res["exit_reason"] == "SL":
@@ -522,8 +629,12 @@ def _summarize(trades, params) -> dict:
         "avg_loss_inr" : round(gl/len(losses), 2) if losses else 0.0,
         "exits_sl"     : sum(1 for t in trades if t.get("exit_reason") == "SL"),
         "exits_t1"     : sum(1 for t in trades if t.get("exit_reason") == "T1"),
+        "exits_t2"     : sum(1 for t in trades if t.get("exit_reason") == "T2"),
+        "exits_trail"  : sum(1 for t in trades if t.get("exit_reason") == "TRAIL_SL"),
         "exits_cap"    : sum(1 for t in trades if t.get("exit_reason") == "CAP"),
         "exits_eod"    : sum(1 for t in trades if t.get("exit_reason") == "EOD"),
+        "t1_hit_pct"   : round(sum(1 for t in trades if t.get("t1_hit")) / len(trades) * 100, 1) if trades else 0.0,
+        "t2_hit_pct"   : round(sum(1 for t in trades if t.get("t2_hit")) / len(trades) * 100, 1) if trades else 0.0,
         "avg_sl_dist"  : round(sum(t.get("sl_dist", 0) for t in trades) / len(trades), 1) if trades else 0.0,
         # gap-mode breakdown: how many trades came from gap-day intraday vs normal HTF cascade
         "gap_trades"   : sum(1 for t in trades if t.get("mode") == "gap"),
@@ -923,3 +1034,111 @@ if __name__ == "__main__":
               f"{r['exits_sl']:>4}  {r['exits_t1']:>4}  {r['exits_eod']:>4}")
 
     print(f"\n[{SYMBOL}] Done in {time.time()-t0:.1f}s  |  CSV: {OUT_CSV}")
+
+    # ── Exit sweep — frozen optimal params, vary T1_SRC / TSL_TYPE / TSL_BUF ──────
+    # Uses the top-ranked params from the main sweep or known-best per index.
+    # Purpose: find the best partial-exit + TSL combo without re-running 18k combos.
+    print(f"\n{'='*140}")
+    print(f"  {SYMBOL} EXIT SWEEP — T1_SRC × TSL_TYPE × TSL_BUF  (frozen base params)")
+    print(f"{'='*140}")
+
+    # Frozen base params — use top result from this sweep (or override manually)
+    if results:
+        best = results[0]
+        fx_htf  = int(best["htf_min"]);  fx_mtf  = int(best["mtf_min"])
+        fx_ltf  = int(best["ltf_min"]);  fx_exc  = int(best["exec_min"])
+        fx_sl   = float(best["sl_buf"]); fx_cap  = float(best["cap_pts"])
+        fx_nsec = int(best["sector_confirm"]); fx_gap = float(best["gap_thr_pct"])
+        fx_dte  = int(best["dte_filter"])
+    else:
+        fx_htf=180; fx_mtf=15; fx_ltf=3; fx_exc=3
+        fx_sl=30.0; fx_cap=200.0; fx_nsec=1; fx_gap=0.8; fx_dte=0
+    print(f"  Base: HTF={fx_htf}m MTF={fx_mtf}m LTF={fx_ltf}m Exec={fx_exc}m "
+          f"SLbuf={fx_sl:.0f} Cap={fx_cap:.0f} Sec={fx_nsec} Gap={fx_gap:.1f}% DTE={fx_dte}",
+          flush=True)
+
+    exit_combos = []
+    for t1s in T1_SRC_GRID:
+        for ttype in TSL_TYPE_GRID:
+            if ttype == "none":
+                exit_combos.append((t1s, ttype, 0))
+            else:
+                for tbuf in TSL_BUF_GRID:
+                    exit_combos.append((t1s, ttype, tbuf))
+
+    exit_results = []
+    t1_start = time.time()
+    for t1_src, tsl_type, tsl_buf in exit_combos:
+        all_trades = []
+        sl_hist: Dict[str, str] = {}
+
+        for d_str in all_days:
+            sector_zones_day: Dict[tuple, list] = {}
+            for sec in sector_list:
+                sector_zones_day[(sec, fx_htf)] = sector_zones.get((sec, fx_htf, d_str), [])
+                sector_zones_day[(sec, fx_mtf)] = sector_zones.get((sec, fx_mtf, d_str), [])
+
+            htf_z  = zones_cache.get((fx_htf, d_str), [])
+            mtf_z  = zones_cache.get((fx_mtf, d_str), [])
+            ltf_z  = zones_cache.get((fx_ltf, d_str), [])
+            ex_arr = exec_cache.get((fx_exc, d_str))
+            if ex_arr is None:
+                continue
+
+            is_opt_day = day_mode.get(d_str) == "option"
+            sim_lot    = float(LOT) if is_opt_day else ATM_DELTA * LOT
+            sim_cap    = float(fx_cap) if fx_cap > 0 else 0
+            day_gap    = gap_pct_map.get(d_str, 0.0)
+            day_dte    = dte_map.get(d_str, 99)
+
+            if fx_dte > 0 and day_dte > fx_dte:
+                continue
+
+            if fx_gap == 0.0 or (fx_gap < 99.0 and day_gap > fx_gap):
+                if not mtf_z:
+                    continue
+                res = _run_cascade_day_gap(d_str, ex_arr, mtf_z, ltf_z,
+                                           fx_sl, sim_cap, sl_hist, sim_lot,
+                                           sector_zones_day, fx_mtf, fx_nsec,
+                                           t1_src="htf", tsl_type=tsl_type, tsl_buf=tsl_buf)
+            else:
+                if not htf_z:
+                    continue
+                res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
+                                       fx_sl, sim_cap, sl_hist, sim_lot,
+                                       sector_zones_day, fx_htf, fx_nsec,
+                                       t1_src=t1_src, tsl_type=tsl_type, tsl_buf=tsl_buf)
+            if res:
+                all_trades.append(res)
+
+        params = {"htf_min": fx_htf, "mtf_min": fx_mtf, "ltf_min": fx_ltf,
+                  "exec_min": fx_exc, "sl_buf": fx_sl, "cap_pts": fx_cap,
+                  "sector_confirm": fx_nsec, "gap_thr_pct": fx_gap,
+                  "dte_filter": fx_dte, "t1_src": t1_src,
+                  "tsl_type": tsl_type, "tsl_buf": tsl_buf,
+                  "symbol": SYMBOL, "lot": LOT}
+        exit_results.append(_summarize(all_trades, params))
+
+    exit_results.sort(key=lambda r: r["profit_factor"] if r["total"] >= 3 else -1, reverse=True)
+    OUT_EXIT_CSV = OUT_CSV.replace(".csv", "_exit_sweep.csv")
+    pd.DataFrame(exit_results).to_csv(OUT_EXIT_CSV, index=False)
+
+    EW = 170
+    print(f"\n{'='*EW}")
+    print(f"  {SYMBOL} Exit Sweep — All {len(exit_combos)} combos  ({START_DATE} to {END_DATE})")
+    print(f"{'='*EW}")
+    print(f"{'Rank':>4}  {'T1Src':>6}  {'TSLType':>8}  {'TSLBuf':>7}  "
+          f"{'#':>4}  {'WR%':>6}  {'PF':>7}  {'Net INR':>10}  "
+          f"{'AvgW':>8}  {'AvgL':>8}  {'T1Hit%':>7}  {'T2Hit%':>7}  "
+          f"{'SLs':>4}  {'T2s':>4}  {'Trail':>5}  {'EOD':>4}")
+    print(f"{'-'*EW}")
+    for rank, r in enumerate(exit_results, 1):
+        print(f"{rank:>4}  {r.get('t1_src','htf'):>6}  {r.get('tsl_type','none'):>8}  "
+              f"{r.get('tsl_buf',0):>7}  "
+              f"{r['total']:>4}  {r['win_rate_pct']:>5.1f}%  {r['profit_factor']:>7.3f}  "
+              f"{r['net_pnl_inr']:>10.2f}  {r['avg_win_inr']:>8.2f}  {r['avg_loss_inr']:>8.2f}  "
+              f"{r.get('t1_hit_pct',0):>6.1f}%  {r.get('t2_hit_pct',0):>6.1f}%  "
+              f"{r['exits_sl']:>4}  {r.get('exits_t2',0):>4}  "
+              f"{r.get('exits_trail',0):>5}  {r['exits_eod']:>4}")
+
+    print(f"\n[{SYMBOL}] Exit sweep done in {time.time()-t1_start:.1f}s  |  CSV: {OUT_EXIT_CSV}")
