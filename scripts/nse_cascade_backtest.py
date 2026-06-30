@@ -614,11 +614,11 @@ if __name__ == "__main__":
             if not htf_z or ex_arr is None:
                 continue
 
-            # Scale SL/cap from spot points → option premium points (× ATM_delta)
-            sl_opt  = sl_buf  * ATM_DELTA
-            cap_opt = cap_pts * ATM_DELTA if cap_pts > 0 else 0
+            # SL/cap stay in SPOT units for simulation; ATM_delta applied only to size
+            # so PnL = spot_move × ATM_delta × lot_size (ATM option ≈ delta 0.5)
+            eff_lot = ATM_DELTA * LOT
             res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
-                                   sl_opt, cap_opt, sl_hist, LOT,
+                                   sl_buf, cap_pts, sl_hist, eff_lot,
                                    sector_zones_day, htf_min, n_sec)
             if res:
                 all_trades.append(res)
