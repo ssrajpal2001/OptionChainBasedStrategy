@@ -443,6 +443,14 @@ async def _run_live(
     # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
     # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
     _mcx_feeder = None  # Upstox1 handles MCX options (Upstox2 lacks MCX options data plan)
+    # Wire DeltaFeeder to BTC/ETH trap scanner books — crypto data comes from Delta, not Upstox.
+    # DeltaFeeder is the market-data half of the Delta integration (public WS, no client auth needed).
+    if delta_chain and trap_scanner_manager and hasattr(trap_scanner_manager, "books"):
+        for _book in trap_scanner_manager.books:
+            if getattr(_book, "_und", None) in ("BTC", "ETH"):
+                _book.set_mcx_feeder(delta_chain._feeder)
+                logger.info("Wired DeltaFeeder to %s trap scanner book (client=%s).",
+                            _book._und, getattr(_book, "_cid", "?"))
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 

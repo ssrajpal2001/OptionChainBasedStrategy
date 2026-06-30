@@ -222,6 +222,73 @@ class DataMixin:
             self._log.warning("_fetch_intraday_bars(%s) error: %s", instrument_key, exc)
             return []
 
+    # ── Delta Exchange REST data (BTC/ETH — no Upstox for crypto) ───────────────
+
+    async def _fetch_delta_1m_bars(self, und: str, lookback_days: int = 3) -> List[dict]:
+        """Fetch 1m BTCUSD/ETHUSD perpetual bars from Delta REST (public endpoint, no auth)."""
+        import aiohttp
+        from datetime import timezone, timedelta
+        DELTA_BASE = "https://api.india.delta.exchange"
+        symbol = "BTCUSD" if und.upper() == "BTC" else "ETHUSD"
+        now_utc = __import__("datetime").datetime.now(timezone.utc)
+        end_ts   = int(now_utc.timestamp())
+        start_ts = end_ts - lookback_days * 86400
+        all_bars: List[dict] = []
+        current_end = end_ts
+        try:
+            async with aiohttp.ClientSession() as sess:
+                for _ in range(20):  # safety cap on pages
+                    params = {"symbol": symbol, "resolution": "1m",
+                              "start": start_ts, "end": current_end}
+                    async with sess.get(
+                        DELTA_BASE + "/v2/history/candles",
+                        params=params, timeout=aiohttp.ClientTimeout(total=20)
+                    ) as r:
+                        if r.status != 200:
+                            self._log.warning("_fetch_delta_1m_bars HTTP %d", r.status)
+                            break
+                        result = (await r.json()).get("result", [])
+                        if not result:
+                            break
+                        all_bars.extend(result)
+                        oldest = min(c["time"] for c in result)
+                        if oldest <= start_ts or len(result) < 100:
+                            break
+                        current_end = oldest - 1
+        except Exception as exc:
+            self._log.warning("_fetch_delta_1m_bars(%s): %s", und, exc)
+            return []
+        if not all_bars:
+            return []
+        from datetime import timezone as _tz
+        import pytz
+        IST = pytz.timezone("Asia/Kolkata")
+        bars = []
+        for c in sorted(all_bars, key=lambda x: x["time"]):
+            dt = __import__("datetime").datetime.fromtimestamp(c["time"], tz=_tz.utc).astimezone(IST)
+            bars.append({
+                "datetime": dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                "open": float(c.get("open", 0)),
+                "high": float(c.get("high", 0)),
+                "low":  float(c.get("low",  0)),
+                "close": float(c.get("close", 0)),
+                "volume": int(float(c.get("volume", 0))),
+            })
+        self._log.info("_fetch_delta_1m_bars(%s): %d bars (lookback=%dd)", und, len(bars), lookback_days)
+        return bars
+
+    async def _fetch_delta_prev_close_and_today_open(self, und: str) -> Tuple[float, float]:
+        """Return (prev_close, today_open) for BTC/ETH from Delta 1m bars (no auth)."""
+        bars = await self._fetch_delta_1m_bars(und, lookback_days=3)
+        if not bars:
+            return 0.0, 0.0
+        today_str = date.today().isoformat()
+        prev_bars  = [b for b in bars if b["datetime"][:10] < today_str]
+        today_bars = [b for b in bars if b["datetime"][:10] == today_str]
+        prev_close = float(prev_bars[-1]["close"]) if prev_bars else 0.0
+        today_open = float(today_bars[0]["open"])  if today_bars else (prev_close or 0.0)
+        return prev_close, today_open
+
     def _build_fyers_symbol(self, strike: int, opt_type: str) -> str:
         """Build Fyers symbol for an option strike using current expiry."""
         try:

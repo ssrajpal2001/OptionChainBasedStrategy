@@ -114,6 +114,11 @@ class DeltaChainManager:
         rollover = DeltaRolloverWorker(self._on_rollover)
         asyncio.create_task(rollover.run(), name="delta_rollover")
         logger.info("DeltaChainManager: started for %s.", self._unds)
+        # Subscribe perpetual futures (BTCUSD/ETHUSD) for live IndexTick → trap scanner
+        perp_symbols = [f"{u}USD" for u in self._unds]
+        if perp_symbols:
+            await self._feeder.subscribe_tokens(perp_symbols)
+            logger.info("DeltaChainManager: subscribed perpetuals %s for IndexTick.", perp_symbols)
         # initial discovery + subscribe
         for und in self._unds:
             await self._reconcile(und, force=True)

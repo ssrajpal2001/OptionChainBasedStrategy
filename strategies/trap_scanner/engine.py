@@ -225,16 +225,23 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         while self._running:
             try:
                 now = datetime.now(IST)
-                sq_h, sq_m = map(int, self._sq_off_str.split(":"))
                 is_mcx = self._und in ("CRUDEOIL",)
-                market_open = time(9, 5) if is_mcx else time(9, 16)
+                is_crypto = self._und in ("BTC", "ETH")
+                # crypto = 24/7; no market_open gate; init can run at any hour
+                market_open = time(0, 0) if is_crypto else (time(9, 5) if is_mcx else time(9, 16))
+                # sq_off_str=None means 24/7 (crypto) — never force-exit on EOD
+                _eod_due = False
+                if self._sq_off_str:
+                    sq_h, sq_m = map(int, self._sq_off_str.split(":"))
+                    _eod_due = now.time() >= time(sq_h, sq_m)
 
-                if now.time() >= time(sq_h, sq_m) and self._initialized:
+                if _eod_due and self._initialized:
                     await self._eod_square_off()
                     self._reset_day_state()
                 elif not self._initialized and now.time() >= market_open:
                     # Never re-init after sq_off time — prevents infinite EOD→init→EOD loop
-                    if now.time() >= time(sq_h, sq_m):
+                    # (24/7 crypto: _eod_due is always False so this guard is never hit)
+                    if _eod_due:
                         await asyncio.sleep(60)
                         continue
                     if not self._day_init_done:
@@ -262,17 +269,26 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 # Futures-mode (CrudeOil/BTC/ETH): get prev_close + today_open from the SAME
                 # active contract's 1m bars. Daily-candle API can return an expired contract's
                 # close (e.g. June close when July contract is active) → false 5.9% gap.
-                try:
-                    from data_layer.instrument_registry import REGISTRY as _REG
-                    fk_early = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
-                except Exception:
-                    fk_early = ""
-                if not fk_early:
-                    self._log.warning(
-                        "Futures-mode %s: no futures key in REGISTRY; will retry in 120s", self._und
-                    )
-                    return False
-                C_fut, today_open_fut = await self._fetch_prev_close_and_today_open_from_1m(fk_early)
+                if self._exchange == "DELTA":
+                    # BTC/ETH: use Delta REST (Upstox has no crypto) — public endpoint, no auth
+                    C_fut, today_open_fut = await self._fetch_delta_prev_close_and_today_open(self._und)
+                    if C_fut <= 0:
+                        self._log.warning(
+                            "Delta %s: no prev-day close from REST; will retry in 120s", self._und
+                        )
+                        return False
+                else:
+                    try:
+                        from data_layer.instrument_registry import REGISTRY as _REG
+                        fk_early = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
+                    except Exception:
+                        fk_early = ""
+                    if not fk_early:
+                        self._log.warning(
+                            "Futures-mode %s: no futures key in REGISTRY; will retry in 120s", self._und
+                        )
+                        return False
+                    C_fut, today_open_fut = await self._fetch_prev_close_and_today_open_from_1m(fk_early)
                 if C_fut <= 0:
                     self._log.warning(
                         "Futures-mode %s: no prev-day close from 1m bars; will retry in 120s", self._und
@@ -372,32 +388,53 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 return False
 
             if self._htf_source == "futures":
-                # Use REGISTRY for the near-month futures key (correct for MCX CrudeOil)
-                try:
-                    from data_layer.instrument_registry import REGISTRY as _REG
-                    fk = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
-                except Exception:
-                    fk = ""
-                self._fut_key = fk or _SPOT_KEYS.get(self._und, "")
-                # Guard: skip re-fetch if bars already seeded (retry path or live ticks already added)
-                if not self._bars_fut:
-                    self._bars_fut = await self._fetch_1m_history(self._fut_key)
-                # Also seed option bars (needed for LTF scan)
-                self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
-                self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
-                self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
-                self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
-                if not self._bars_ce1:
-                    self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
-                if not self._bars_ce2:
-                    self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
-                if not self._bars_pe1:
-                    self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
-                if not self._bars_pe2:
-                    self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                if self._exchange == "DELTA":
+                    # BTC/ETH: historical bars from Delta REST — no Upstox instrument key exists
+                    self._fut_key = "BTCUSD" if self._und == "BTC" else "ETHUSD"
+                    if not self._bars_fut:
+                        self._bars_fut = await self._fetch_delta_1m_bars(self._und, lookback_days=3)
+                else:
+                    # Use REGISTRY for the near-month futures key (correct for MCX CrudeOil)
+                    try:
+                        from data_layer.instrument_registry import REGISTRY as _REG
+                        fk = _REG.historical_instrument_key(self._und) if _REG.is_loaded(self._und) else ""
+                    except Exception:
+                        fk = ""
+                    self._fut_key = fk or _SPOT_KEYS.get(self._und, "")
+                    # Guard: skip re-fetch if bars already seeded (retry path or live ticks already added)
+                    if not self._bars_fut:
+                        self._bars_fut = await self._fetch_1m_history(self._fut_key)
+                # Also seed option bars (needed for LTF scan on entry)
+                if self._exchange == "DELTA":
+                    # BTC/ETH: option keys use Delta symbol format; historical bars from Delta
+                    from data_layer.universal_option_mapper import UniversalOptionMapper as _M
+                    _exp = self._expiry_date
+                    self._ce1_key = _M.to_delta_symbol(__import__("data_layer.symbol_translator", fromlist=["InternalSymbol"]).InternalSymbol(self._und, float(self._ce1_strike), "CE", _exp)) if _exp else ""
+                    self._ce2_key = _M.to_delta_symbol(__import__("data_layer.symbol_translator", fromlist=["InternalSymbol"]).InternalSymbol(self._und, float(self._ce2_strike), "CE", _exp)) if _exp else ""
+                    self._pe1_key = _M.to_delta_symbol(__import__("data_layer.symbol_translator", fromlist=["InternalSymbol"]).InternalSymbol(self._und, float(self._pe1_strike), "PE", _exp)) if _exp else ""
+                    self._pe2_key = _M.to_delta_symbol(__import__("data_layer.symbol_translator", fromlist=["InternalSymbol"]).InternalSymbol(self._und, float(self._pe2_strike), "PE", _exp)) if _exp else ""
+                    # Delta option historical bars not yet implemented → seed empty; live ticks fill them
+                    self._log.info(
+                        "Delta option keys — CE1=%s CE2=%s PE1=%s PE2=%s",
+                        self._ce1_key, self._ce2_key, self._pe1_key, self._pe2_key,
+                    )
+                else:
+                    self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
+                    self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
+                    self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
+                    self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
+                    if not self._bars_ce1:
+                        self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
+                    if not self._bars_ce2:
+                        self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
+                    if not self._bars_pe1:
+                        self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
+                    if not self._bars_pe2:
+                        self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
                 # Merge today's intraday bars (historical API ends at prev day).
                 # Upstox primary, Fyers fallback; cached per key for 5 minutes so a
                 # reconnect-storm re-init does not hammer the REST API.
+                # DELTA exchange: intraday already included in _fetch_delta_1m_bars above — skip.
                 merge_map = [
                     ("_bars_fut", self._fut_key, None, None),
                     ("_bars_ce1", self._ce1_key, self._ce1_strike, "CE"),
@@ -406,7 +443,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     ("_bars_pe2", self._pe2_key, self._pe2_strike, "PE"),
                 ]
                 for attr, key, strike, otype in merge_map:
-                    if not key:
+                    if not key or self._exchange == "DELTA":
                         continue
                     intra = await self._fetch_intraday_bars_with_fallback(key, strike, otype)
                     if intra:

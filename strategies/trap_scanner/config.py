@@ -32,11 +32,13 @@ _INDEX_CFG: Dict[str, dict] = {
                    "sl_buf": 100.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": None, "exchange": "MCX",
                    "htf_source": "futures", "htf_min_override": 30},
+    # BTC/ETH are 24/7 — no daily EOD squareoff and no entry cutoff.
+    # sq_off=None → lifecycle loop skips EOD; cutoff=None → entries.py skips cutoff gate.
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
-                   "sl_buf": 50.0, "cutoff": "23:00", "sq_off": "23:15",
+                   "sl_buf": 50.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures"},
     "ETH":        {"step": 100, "lot": 1,  "gap_near": 200, "gap_far": 400,
-                   "sl_buf": 5.0, "cutoff": "23:00", "sq_off": "23:15",
+                   "sl_buf": 5.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures"},
 }
 
@@ -76,8 +78,8 @@ class ConfigMixin:
         self._sl_buf     = float(_adm.get("sl_buffer",  _def["sl_buf"]))
         self._gap_near   = int(_adm.get("gap_itm_near", _def["gap_near"]))
         self._gap_far    = int(_adm.get("gap_itm_far",  _def["gap_far"]))
-        self._cutoff_str = _adm.get("entry_cutoff",     _def["cutoff"])
-        self._sq_off_str = _adm.get("sq_off_time",      _def["sq_off"])
+        self._cutoff_str = _adm.get("entry_cutoff",     _def["cutoff"])  # None = no cutoff (crypto 24/7)
+        self._sq_off_str = _adm.get("sq_off_time",      _def["sq_off"])  # None = no EOD squareoff
         self._entry_win    = _adm.get("entry_window",    _def["window"])
         # Profit floor: lock ₹N once total P&L (T1+remainder) hits it.
         # If P&L drops back below floor → exit immediately at that tick. 0 = disabled.

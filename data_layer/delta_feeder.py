@@ -149,7 +149,17 @@ class DeltaFeeder(BaseFeeder):
             return
         self._last_tick_ts = time.monotonic()
         sym = str(d.get("symbol", "")).upper()
-        if not sym or sym[0] not in ("C", "P"):
+        if not sym:
+            return
+        # Perpetual futures (e.g. BTCUSD) — emit IndexTick directly; no option parse needed.
+        if sym[0] not in ("C", "P"):
+            spot = float(d.get("spot_price") or d.get("close") or d.get("mark_price") or 0.0)
+            if spot > 0 and sym.endswith("USD"):
+                und = sym.replace("USD", "")  # BTCUSD → BTC, ETHUSD → ETH
+                await self._publish_index(IndexTick(
+                    symbol=und, ltp=spot, open=spot, high=spot, low=spot,
+                    close=spot, volume=0, timestamp=datetime.now(IST),
+                ))
             return
         try:
             internal = UniversalOptionMapper.parse_delta_symbol(sym)

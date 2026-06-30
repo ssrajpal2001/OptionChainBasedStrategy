@@ -43,10 +43,11 @@ class EntryMixin:
             return
         now = datetime.now(IST)
 
-        # Cutoff gate
-        ch, cm = map(int, self._cutoff_str.split(":"))
-        if now.time() >= time(ch, cm):
-            return
+        # Cutoff gate — skip for 24/7 crypto (cutoff_str=None)
+        if self._cutoff_str:
+            ch, cm = map(int, self._cutoff_str.split(":"))
+            if now.time() >= time(ch, cm):
+                return
 
         # Entry window gate (e.g. CrudeOil W2: 18:45–19:15)
         if self._entry_win:
@@ -326,10 +327,11 @@ class EntryMixin:
                            reason, self._cid, self._bid)
             return False
         now = datetime.now(IST)
-        ch, cm = map(int, self._cutoff_str.split(":"))
-        if now.time() >= time(ch, cm):
-            self._log.info("Scale-in %s blocked — after cutoff", reason)
-            return False
+        if self._cutoff_str:
+            ch, cm = map(int, self._cutoff_str.split(":"))
+            if now.time() >= time(ch, cm):
+                self._log.info("Scale-in %s blocked — after cutoff", reason)
+                return False
 
         strike = pos["strike"]
         opt_type = pos["side"]
