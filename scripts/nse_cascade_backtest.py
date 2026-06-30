@@ -108,12 +108,16 @@ STEP = STRIKE_STEPS.get(SYMBOL, 50)
 # SL_GRID / CAP_GRID = OPTION PREMIUM points (e.g. 20 = ₹20 move in ATM option).
 # Internally converted to spot points: spot_sl = option_pts / ATM_delta (0.5) → ×2.
 # So SL=20 → 40 spot pts, SL=100 → 200 spot pts (reasonable BANKNIFTY SL).
-HTF_GRID  = [60, 120, 180, 240]
+# NSE session = 375 min (9:15-15:30). Only 75m divides it perfectly (5 candles).
+# 60/120/180/240 all leave a 15m stub at day-end → distorts zone detection.
+# Zone detection bars are capped at 15:14 (ZONE_CUTOFF) to exclude any partial candle.
+HTF_GRID  = [75, 120, 150, 180]   # 75m = session-aligned; 120/150/180 also tested
 MTF_GRID  = [15, 30]
 LTF_GRID  = [3, 5]
 EXEC_GRID = [1, 3]
 SL_GRID   = [20, 50, 100, 200]    # option premium points
 CAP_GRID  = [0, 100, 200, 500]    # option premium points (0 = trailing only)
+ZONE_CUTOFF = "15:14"             # strip last 15-min stub from zone bars
 
 STRIKES_OFFSET = [-2, -1, 0, 1, 2]   # x STEP from ATM
 
@@ -653,15 +657,17 @@ if __name__ == "__main__":
             df_day_src = df_src[(df_src["datetime"] >= d_s2)] if "datetime" in df_src else df_src
             df_lb_src  = df_src[(df_src["datetime"] < d_s2)]  if "datetime" in df_src else pd.DataFrame()
 
-        combined = df_src   # already has lookback if spot; just today if option
+        # Zone detection: cap at ZONE_CUTOFF (15:14) to exclude any partial candle stub.
+        # Exec simulation: uses full session (9:15-15:30) — we want to catch late entries too.
+        d_zone_e = pd.Timestamp(f"{d_str}T{ZONE_CUTOFF}:00")
+        zone_src = df_src[df_src["datetime"] <= d_zone_e] if "datetime" in df_src else df_src
+
         for tf in all_tfs:
-            bars  = _resample(combined, tf)
+            bars  = _resample(zone_src, tf)
             zones = _get_zones(bars)
-            if not zones and day_mode.get(d_str) == "option":
-                zones = _get_zones(_resample(df_src, tf))
             zones_cache[(tf, d_str)] = zones
 
-        # Exec arrays — always from today's session only
+        # Exec arrays — full session (no cutoff; entries can fire until 15:30)
         if day_mode.get(d_str) == "option":
             df_exec_src = df_src
         else:
@@ -688,10 +694,10 @@ if __name__ == "__main__":
         print(f"[{SYMBOL}] Precomputing sector confirmation zones ...", flush=True)
         for sec, df_sec in sector_df.items():
             for d_str in all_days:
-                d_s  = pd.Timestamp(f"{d_str}T09:15:00")
-                d_e  = pd.Timestamp(f"{d_str}T15:30:00")
-                lb_s = d_s - pd.Timedelta(days=LOOKBACK)
-                df_day = df_sec[(df_sec["datetime"] >= d_s) & (df_sec["datetime"] <= d_e)].copy()
+                d_s    = pd.Timestamp(f"{d_str}T09:15:00")
+                d_ze   = pd.Timestamp(f"{d_str}T{ZONE_CUTOFF}:00")
+                lb_s   = d_s - pd.Timedelta(days=LOOKBACK)
+                df_day = df_sec[(df_sec["datetime"] >= d_s) & (df_sec["datetime"] <= d_ze)].copy()
                 df_lb  = df_sec[(df_sec["datetime"] >= lb_s) & (df_sec["datetime"] < d_s)].copy()
                 if len(df_day) < 30:
                     continue
@@ -699,8 +705,6 @@ if __name__ == "__main__":
                 for tf in HTF_GRID:
                     bars  = _resample(combined, tf)
                     zones = _get_zones(bars)
-                    if not zones:
-                        zones = _get_zones(_resample(df_day, tf))
                     sector_zones[(sec, tf, d_str)] = zones
 
     print(f"[{SYMBOL}] Precompute done — {len(all_days)} days "
