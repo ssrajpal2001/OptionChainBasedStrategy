@@ -451,7 +451,8 @@ def _simulate_two_target(H, L, C, entry, struct_sl, t1_price, t2_price,
 
 def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot,
                      mtf_zone=None, t1_src="htf",
-                     tsl_type="none", tsl_buf=10) -> Optional[dict]:
+                     tsl_type="none", tsl_buf=10,
+                     max_loss_rs=0) -> Optional[dict]:
     """
     Structural SL = htf_zone_low - sl_buf (zone bottom = trap invalidation level).
 
@@ -460,6 +461,8 @@ def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot,
                    (180m runner target). Calls _simulate_two_target.
     tsl_type     : "none" | "bar_low" — TSL applied to runner after T1.
     tsl_buf      : pts below bar low for bar_low TSL.
+    max_loss_rs  : if > 0, skip entry when (entry - SL) * lot > max_loss_rs (risk filter).
+                   0 = disabled (original behaviour).
     """
     ltf_l, ltf_h = _eff_zone(ltf_zone)
     htf_l, _     = _eff_zone(htf_zone)
@@ -494,6 +497,16 @@ def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot,
         trig = float(H[i])
         if t1_price <= trig or struct_sl >= trig:
             continue
+
+        # ── RISK FILTER ──────────────────────────────────────────────────────
+        # Skip this entry trigger if the worst-case loss exceeds the threshold.
+        # (entry - SL) = SL distance; × lot = max rupee loss for this trade.
+        if max_loss_rs > 0:
+            sl_dist_trig = trig - struct_sl
+            if sl_dist_trig * lot > max_loss_rs:
+                continue   # too wide — skip, keep scanning next bar in zone
+        # ─────────────────────────────────────────────────────────────────────
+
         hit = np.where(H[i+1:] >= trig)[0]
         if not len(hit):
             continue
@@ -511,6 +524,7 @@ def _find_exec_entry(exec_arr, ltf_zone, htf_zone, sl_buf, cap_pts, lot,
         res["t1"]          = round(t1_price, 2)
         res["t2"]          = round(t2_price, 2)
         res["sl_dist"]     = round(trig - struct_sl, 2)
+        res["max_loss_rs"] = round(sl_dist_trig * lot if max_loss_rs > 0 else (trig - struct_sl) * lot, 0)
         return res
     return None
 
@@ -538,7 +552,8 @@ def _sector_confirms(sector_zones_day: Dict[str, list], htf_min: int,
 def _run_cascade_day(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
                      sl_buf, cap_pts, sl_hist, lot,
                      sector_zones_day, htf_min, n_sectors,
-                     t1_src="htf", tsl_type="none", tsl_buf=10) -> Optional[dict]:
+                     t1_src="htf", tsl_type="none", tsl_buf=10,
+                     max_loss_rs=0) -> Optional[dict]:
     for htf_z in htf_zones:
         kind = htf_z.get("kind", "BEAR")
         if kind != "BEAR":   # option chart: only BEAR trap -> BUY
@@ -562,7 +577,8 @@ def _run_cascade_day(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
             continue
         res = _find_exec_entry(exec_arr, ltf_m, htf_z, sl_buf, cap_pts, lot,
                                mtf_zone=mtf_m, t1_src=t1_src,
-                               tsl_type=tsl_type, tsl_buf=tsl_buf)
+                               tsl_type=tsl_type, tsl_buf=tsl_buf,
+                               max_loss_rs=max_loss_rs)
         if res:
             res.update({"date": d_str, "zone_key": zone_key})
             if res["exit_reason"] == "SL":
@@ -574,7 +590,8 @@ def _run_cascade_day(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
 def _run_cascade_day_gap(d_str, exec_arr, mtf_zones, ltf_zones,
                          sl_buf, cap_pts, sl_hist, lot,
                          sector_zones_day, mtf_min, n_sectors,
-                         t1_src="htf", tsl_type="none", tsl_buf=10) -> Optional[dict]:
+                         t1_src="htf", tsl_type="none", tsl_buf=10,
+                         max_loss_rs=0) -> Optional[dict]:
     """
     Gap-open mode: HTF zone is unreachable (price gapped past it).
     Run 3-tier intraday cascade: MTF zone → LTF overlap → Exec entry.
@@ -602,7 +619,8 @@ def _run_cascade_day_gap(d_str, exec_arr, mtf_zones, ltf_zones,
         # gap mode: MTF is the anchor (no higher HTF); T1_src="htf" uses MTF sl as T1
         res = _find_exec_entry(exec_arr, ltf_m, mtf_z, sl_buf, cap_pts, lot,
                                mtf_zone=None, t1_src="htf",
-                               tsl_type=tsl_type, tsl_buf=tsl_buf)
+                               tsl_type=tsl_type, tsl_buf=tsl_buf,
+                               max_loss_rs=max_loss_rs)
         if res:
             res.update({"date": d_str, "zone_key": zone_key, "mode": "gap"})
             if res["exit_reason"] == "SL":
@@ -1396,3 +1414,154 @@ if __name__ == "__main__":
             tsl_type=exit_results[0].get("tsl_type","bar_low") if exit_results else "bar_low",
             tsl_buf=exit_results[0].get("tsl_buf",10) if exit_results else 10,
         )
+
+    # ── Risk-Filter sweep (frozen best cascade params, vary max_loss_rs) ─────
+    # Adds a risk gate ON TOP of the existing 4-tier cascade:
+    # skip entry when (LTF zone_high re-test − SL) × lot > max_loss_rs.
+    # Best cascade params frozen from main sweep results above.
+    MAX_LOSS_SWEEP = [500, 750, 1000, 1500, 2000, 2500, 3000, 0]  # 0 = no filter (baseline)
+
+    print(f"\n{'='*130}")
+    print(f"  {SYMBOL} RISK-FILTER SWEEP — 4-tier cascade + max rupee loss cap per trade")
+    print(f"  Base: HTF={fx_htf}m MTF={fx_mtf}m LTF={fx_ltf}m Exec={fx_exc}m "
+          f"SLbuf={fx_sl:.0f} Cap={fx_cap:.0f} Sec={fx_nsec} Gap={fx_gap:.1f}% DTE={fx_dte}")
+    print(f"  Logic: full cascade unchanged; entry SKIPPED if (entry-SL)*lot > max_loss_rs")
+    print(f"{'='*130}\n")
+
+    best_t1   = exit_results[0].get("t1_src",  "mtf")  if exit_results else "mtf"
+    best_tsl  = exit_results[0].get("tsl_type","none") if exit_results else "none"
+    best_tbuf = exit_results[0].get("tsl_buf",  0)     if exit_results else 0
+
+    rf_results = []
+    for ml in MAX_LOSS_SWEEP:
+        rf_trades = []
+        rf_hist: Dict[str, str] = {}
+        for d_str in all_days:
+            sec_day: Dict[tuple, list] = {}
+            for sec in sector_list:
+                sec_day[(sec, fx_htf)] = sector_zones.get((sec, fx_htf, d_str), [])
+                sec_day[(sec, fx_mtf)] = sector_zones.get((sec, fx_mtf, d_str), [])
+
+            htf_z  = zones_cache.get((fx_htf, d_str), [])
+            mtf_z  = zones_cache.get((fx_mtf, d_str), [])
+            ltf_z  = zones_cache.get((fx_ltf, d_str), [])
+            ex_arr = exec_cache.get((fx_exc, d_str))
+            if ex_arr is None:
+                continue
+
+            is_opt = day_mode.get(d_str) == "option"
+            sim_lot = float(LOT) if is_opt else ATM_DELTA * LOT
+            sim_cap = float(fx_cap) if fx_cap > 0 else 0
+            day_gap = gap_pct_map.get(d_str, 0.0)
+            day_dte = dte_map.get(d_str, 99)
+
+            if fx_dte > 0 and day_dte > fx_dte:
+                continue
+
+            if fx_gap == 0.0 or (fx_gap < 99.0 and day_gap > fx_gap):
+                if not mtf_z:
+                    continue
+                res = _run_cascade_day_gap(d_str, ex_arr, mtf_z, ltf_z,
+                                           fx_sl, sim_cap, rf_hist, sim_lot,
+                                           sec_day, fx_mtf, fx_nsec,
+                                           t1_src="htf", tsl_type=best_tsl, tsl_buf=best_tbuf,
+                                           max_loss_rs=float(ml))
+            else:
+                if not htf_z:
+                    continue
+                res = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
+                                       fx_sl, sim_cap, rf_hist, sim_lot,
+                                       sec_day, fx_htf, fx_nsec,
+                                       t1_src=best_t1, tsl_type=best_tsl, tsl_buf=best_tbuf,
+                                       max_loss_rs=float(ml))
+            if res:
+                rf_trades.append(res)
+
+        rf_params = {
+            "max_loss_rs": ml if ml > 0 else "NO_FILTER",
+            "htf_min": fx_htf, "mtf_min": fx_mtf, "ltf_min": fx_ltf,
+            "exec_min": fx_exc, "sl_buf": fx_sl, "cap_pts": fx_cap,
+            "sector_confirm": fx_nsec, "gap_thr_pct": fx_gap, "dte_filter": fx_dte,
+            "t1_src": best_t1, "tsl_type": best_tsl, "tsl_buf": best_tbuf,
+            "symbol": SYMBOL, "lot": LOT,
+        }
+        s = _summarize(rf_trades, rf_params)
+        s["max_loss_rs"] = ml if ml > 0 else "NO_FILTER"
+        s["skipped_pct"] = 0.0  # filled below
+        rf_results.append((ml, s, rf_trades))
+
+    # Compute skipped% relative to no-filter baseline
+    base_trades = next((t for ml, s, t in rf_results if ml == 0), [])
+    base_n = len(base_trades)
+
+    print(f"  {'max_loss_rs':>12}  {'trades':>7}  {'skipped%':>9}  {'wr%':>6}  "
+          f"{'PF':>7}  {'net_inr':>10}  {'avgW':>8}  {'avgL':>8}  "
+          f"{'SLs':>5}  {'T1s':>5}  {'avg_sl_dist':>12}")
+    print(f"  {'─'*110}")
+
+    for ml, s, trades in rf_results:
+        skipped = round((1 - len(trades) / base_n) * 100, 1) if base_n > 0 else 0.0
+        ml_lbl = f"NO_FILTER" if ml == 0 else f"Rs{ml:,}"
+        print(
+            f"  {ml_lbl:>12}  {s['total']:>7}  {skipped:>8.1f}%  {s['win_rate_pct']:>6.1f}  "
+            f"{s['profit_factor']:>7.3f}  {s['net_pnl_inr']:>10,.0f}  "
+            f"{s['avg_win_inr']:>8,.0f}  {s['avg_loss_inr']:>8,.0f}  "
+            f"{s['exits_sl']:>5}  {s['exits_t1']:>5}  {s.get('avg_sl_dist',0):>12.1f}"
+        )
+
+    # Day-by-day comparison: NO_FILTER vs best risk-filtered combo
+    rf_sums = [(ml, s) for ml, s, _ in rf_results if ml > 0]
+    if rf_sums:
+        best_rf_ml, best_rf_s = max(rf_sums, key=lambda x: x[1]["profit_factor"])
+        _, base_s, base_td  = next((x for x in rf_results if x[0] == 0), (0, {}, []))
+        _, best_rf_s2, best_rf_td = next((x for x in rf_results if x[0] == best_rf_ml), (0, {}, []))
+
+        print(f"\n{'─'*130}")
+        print(f"  DAY-BY-DAY: NO_FILTER vs BEST RISK FILTER (max_loss=Rs{best_rf_ml:,})")
+        print(f"  {'DATE':<12} {'BASE PNL':>10} {'BASE EXIT':>10} "
+              f"{'FILT PNL':>10} {'FILT EXIT':>10}  {'DIFF':>8}  NOTE")
+        print(f"  {'─'*90}")
+
+        base_by_d = {t["date"]: t for t in base_td}
+        filt_by_d = {t["date"]: t for t in best_rf_td}
+        all_td    = sorted(set(list(base_by_d) + list(filt_by_d)))
+        skipped_wins = skipped_losses = kept_same = 0
+
+        for d in all_td:
+            tb = base_by_d.get(d)
+            tf = filt_by_d.get(d)
+            pb = tb["pnl"] if tb else None
+            pf = tf["pnl"] if tf else None
+            eb = tb.get("exit_reason", "—") if tb else "—"
+            ef = tf.get("exit_reason", "—") if tf else "—"
+            diff = round(pf - pb, 0) if pb is not None and pf is not None else "—"
+
+            if tb and not tf:
+                note = "SKIPPED-WIN" if pb > 0 else "SKIPPED-LOSS"
+                if pb > 0: skipped_wins += 1
+                else:      skipped_losses += 1
+            elif tb and tf:
+                note = "same"; kept_same += 1
+            else:
+                note = "—"
+
+            sl_d = f"{tb.get('sl_dist',0):.0f}pts" if tb else "—"
+            print(f"  {d:<12} {str(round(pb,0) if pb is not None else '—'):>10} "
+                  f"{eb:>10} {str(round(pf,0) if pf is not None else 'SKIP'):>10} "
+                  f"{ef:>10}  {str(diff):>8}  {note}  [SLdist={sl_d}]")
+
+        print(f"\n  Skipped wins: {skipped_wins}  |  Skipped losses: {skipped_losses}  "
+              f"|  Kept same: {kept_same}")
+        net_diff = round(best_rf_s2["net_pnl_inr"] - base_s.get("net_pnl_inr", 0), 0)
+        pf_diff  = round(best_rf_s2["profit_factor"] - base_s.get("profit_factor", 0), 3)
+        wr_diff  = round(best_rf_s2["win_rate_pct"]  - base_s.get("win_rate_pct",  0), 1)
+        print(f"  Net P&L diff: Rs{net_diff:+,.0f}  |  PF diff: {pf_diff:+.3f}  "
+              f"|  WR diff: {wr_diff:+.1f}%")
+        if skipped_losses > skipped_wins:
+            print(f"\n  VERDICT: RISK FILTER IS USEFUL — removes more losers ({skipped_losses}) "
+                  f"than winners ({skipped_wins}). PF improves by {pf_diff:+.3f}.")
+        elif skipped_wins > skipped_losses:
+            print(f"\n  VERDICT: RISK FILTER HURTS — removes more winners ({skipped_wins}) "
+                  f"than losers ({skipped_losses}). Do NOT apply.")
+        else:
+            print(f"\n  VERDICT: NEUTRAL — equal winners/losers skipped. Marginal benefit.")
