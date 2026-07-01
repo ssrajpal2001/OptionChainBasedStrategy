@@ -4882,8 +4882,8 @@ function amoTest() {
                         </div>
                         <!-- LTF Status -->
                         <div>
-                          <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':ct.zone&&ct.zone.ltf_status==='waiting_15m'?'color:var(--t-amber);font-weight:600':'color:var(--t-muted)'"
-                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?(bk.ltf_min||5)+'M TRAP READY!':ct.zone.ltf_status==='waiting_15m'?'Waiting '+(bk.cascade_min||15)+'m zone':'Monitoring'):'—'"></span>
+                          <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':ct.zone&&ct.zone.ltf_status==='waiting_15m'?'color:var(--t-amber);font-weight:600':(ct.zone&&(ct.zone.ltf_status==='price_above_zone'||ct.zone.ltf_status==='price_below_zone'))?'color:var(--t-dim)':'color:var(--t-muted)'"
+                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?(bk.ltf_min||5)+'M TRAP READY!':ct.zone.ltf_status==='waiting_15m'?'Waiting '+(bk.cascade_min||15)+'m zone':ct.zone.ltf_status==='price_above_zone'?'LTP above zone':ct.zone.ltf_status==='price_below_zone'?'LTP below zone':'Monitoring'):'—'"></span>
                           <div x-show="ct.zone&&(ct.zone.ltf_status==='watching'||ct.zone.ltf_status==='waiting_15m')" style="color:var(--t-dim);margin-top:2px"
                                x-text="ct.zone&&ct.zone.ltf_status==='waiting_15m'?((bk.cascade_min||15)+'m closed zone needed (MTF gate)'):(bk.ltf_min||5)+'-min trap needed inside zone'"></div>
                         </div>
@@ -4903,8 +4903,8 @@ function amoTest() {
                         </div>
                         <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
                         <div>
-                          <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':ct.zone&&ct.zone.ltf_status==='waiting_15m'?'color:var(--t-amber);font-weight:600':'color:var(--t-muted)'"
-                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':ct.zone.ltf_status==='waiting_15m'?'Waiting '+(bk.cascade_min||15)+'m zone':'Monitoring'):'—'"></span>
+                          <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':ct.zone&&ct.zone.ltf_status==='waiting_15m'?'color:var(--t-amber);font-weight:600':(ct.zone&&(ct.zone.ltf_status==='price_above_zone'||ct.zone.ltf_status==='price_below_zone'))?'color:var(--t-dim)':'color:var(--t-muted)'"
+                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':ct.zone.ltf_status==='waiting_15m'?'Waiting '+(bk.cascade_min||15)+'m zone':ct.zone.ltf_status==='price_above_zone'?'LTP above zone':ct.zone.ltf_status==='price_below_zone'?'LTP below zone':'Monitoring'):'—'"></span>
                         </div>
                       </div>
                     </template>

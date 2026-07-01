@@ -543,6 +543,10 @@ class ZonesMixin:
             z_low  = zone["zone_low"]
             z_high = zone["zone_high"]
             if current_price > 0 and (current_price < z_low or current_price > z_high):
+                # Update status so UI shows meaningful state instead of stale "watching"
+                new_status = "price_above_zone" if current_price > z_high else "price_below_zone"
+                if self._zone_ltf_status.get(uid) != new_status:
+                    self._zone_ltf_status[uid] = new_status
                 continue
 
             # MTF intermediate gate — applies to BOTH normal and cascade paths.
