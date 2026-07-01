@@ -651,6 +651,12 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     if not self._position and self._ltp_in_any_htf_zone(bkey):
                         self._on_candle_close(label, ts)
                     # Push real-time LTP to UI via TRAP_TICK (bypasses 2s heartbeat poll).
+                    if not hasattr(self, "_tt_pub_count"):
+                        self._tt_pub_count = 0
+                    self._tt_pub_count += 1
+                    if self._tt_pub_count <= 5 or self._tt_pub_count % 200 == 0:
+                        self._log.info("TRAP_TICK #%d: %s ltp=%.1f bid=%s",
+                                       self._tt_pub_count, bkey, ltp, self._bid)
                     self._bus.publish(Topic.TRAP_TICK, {
                         "cid": self._cid, "bid": self._bid, "und": self._und,
                         "leg": bkey, "ltp": ltp,

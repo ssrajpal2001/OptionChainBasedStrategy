@@ -1202,6 +1202,13 @@ document.addEventListener('alpine:init', () => {
         // Real-time per-tick LTP — write to flat top-level cache so Alpine
         // proxy definitely fires (nested splice/assign on trapScannerBooks is unreliable).
         const key = msg.bid + '_' + msg.und + '_' + msg.leg;
+        if (!window._ttDbg) { window._ttDbg = 0; }
+        window._ttDbg++;
+        if (window._ttDbg <= 5 || window._ttDbg % 50 === 0) {
+          console.log('[trap_tick #' + window._ttDbg + '] key=' + key + ' ltp=' + msg.ltp
+            + ' books=' + this.trapScannerBooks.length
+            + ' cacheKeys=' + Object.keys(this.trapLtpCache).length);
+        }
         this.trapLtpCache[key] = msg.ltp;
       }
     },
