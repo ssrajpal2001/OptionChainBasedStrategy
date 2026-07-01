@@ -33,13 +33,13 @@ Fetch NIFTY D1 bars (last 30 days) from Upstox historical REST API.
 Run `scanner.scan_htf()` on the daily bars to find TRAPPED zones.
 
 **Bias rule:**
-- NIFTY last close is within **0.8%** of a **bearish zone** high/low → bias = **BULLISH** (look for CE buys on stocks)
-- NIFTY last close is within **0.8%** of a **bullish zone** high/low → bias = **BEARISH** (look for PE buys on stocks)
-- No clear bias (no zone within 0.8%) → **skip scan entirely** — no alert day
-
-The 0.8% proximity threshold is a config constant (adjustable).
+- NIFTY last close is near a **bearish zone** → bias = **BULLISH** (bears will get trapped → market up → look for CE buys on stocks)
+- NIFTY last close is near a **bullish zone** → bias = **BEARISH** (bulls will get trapped → market down → look for PE buys on stocks)
+- If NIFTY is near BOTH a bearish and bullish zone → pick the **closer** one
+- NIFTY always has a zone — there is no "skip day". Every session has a directional bias.
 
 NIFTY doesn't need to be inside the zone — approaching it is enough to set the bias.
+The proximity threshold is a config constant, optimized via `--optimize` mode.
 
 ### Step 2: Load FnO Stock List
 
@@ -139,14 +139,51 @@ This is the correct approach for stocks: option premiums for individual FnO stoc
 All in `scripts/fno_stock_scanner.py` (top of file, easy to tune):
 
 ```python
-NIFTY_BIAS_PROXIMITY_PCT = 0.8    # NIFTY must be within 0.8% of zone
-STOCK_ZONE_PROXIMITY_PCT = 1.0    # Stock must be within 1% of zone
+NIFTY_BIAS_PROXIMITY_PCT = 1.5    # Starting value — tune via optimize mode
+STOCK_ZONE_PROXIMITY_PCT = 2.0    # Starting value — tune via optimize mode
 SL_BUFFER_PCT            = 0.2    # SL = zone boundary ± 0.2%
 D1_LOOKBACK_DAYS         = 30     # Days of daily bars for zone scan
 PARALLEL_WORKERS         = 10     # Concurrent stocks scanned at once
 FNO_LIST_PATH            = "data/fno_stocks.csv"
 SCAN_OUTPUT_DIR          = "data/"
 ```
+
+---
+
+## Threshold Optimization Mode
+
+The scanner has two run modes:
+
+**Mode 1 — Live** (`python scripts/fno_stock_scanner.py`)
+Runs nightly, produces `data/fno_scan_YYYY-MM-DD.json` for the morning dashboard.
+
+**Mode 2 — Optimize** (`python scripts/fno_stock_scanner.py --optimize`)
+Backtests threshold combinations over the last 6 months of D1 data.
+
+### Optimize Logic
+For each trading day in the backtest window:
+1. Apply NIFTY bias rule at end-of-day using threshold X%
+2. Find qualifying stocks within threshold Y%
+3. Check **next day's actual move**: did the stock move in the predicted direction?
+4. Record: correct prediction vs false signal
+
+### Sweep Range
+- NIFTY proximity: 0.5% → 3.0% in 0.25% steps
+- Stock proximity: 0.5% → 3.0% in 0.25% steps
+- Total combos: ~144
+
+### Output Table
+```
+NIFTY%  STOCK%   Avg Stocks/Day   Direction Accuracy   False Rate
+──────────────────────────────────────────────────────────────────
+  0.8%    1.0%         4.2              61%               39%
+  1.5%    2.0%         8.7              74%               26%   ← best
+  2.0%    2.5%        14.1              68%               32%
+  3.0%    3.0%        22.3              55%               45%
+```
+
+Best combo = highest directional accuracy at 4–10 avg qualifying stocks/day.
+Update config constants with winning values, then switch to Mode 1 (live).
 
 ---
 
