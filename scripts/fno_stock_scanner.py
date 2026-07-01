@@ -197,13 +197,43 @@ def scan_nifty_bias(token: str, proximity_pct: float = NIFTY_BIAS_PROXIMITY_PCT)
 
 # ── Per-stock scan ────────────────────────────────────────────────────────────
 
+def _merge_cluster(best: dict, zones: list, cluster_pct: float = 3.0) -> tuple[float, float, dict]:
+    """
+    Merge all TRAPPED zones within cluster_pct% of `best` into one block.
+    Returns (cluster_high, cluster_low, representative_zone).
+    The representative zone keeps the best SL (highest for BEAR, lowest for BULL).
+    """
+    ref_low  = best["zone_low"]
+    ref_high = best["zone_high"]
+    cluster  = [
+        z for z in zones
+        if z.get("status") == "TRAPPED"
+        and (abs(z["zone_low"]  - ref_low)  / max(ref_low,  1) * 100 <= cluster_pct
+          or abs(z["zone_high"] - ref_high) / max(ref_high, 1) * 100 <= cluster_pct)
+    ]
+    if not cluster:
+        cluster = [best]
+    zh = max(z["zone_high"] for z in cluster)
+    zl = min(z["zone_low"]  for z in cluster)
+    # Representative: zone whose sl (target) is most aggressive
+    if best.get("kind") == "BEAR":
+        rep = max(cluster, key=lambda z: z.get("sl", 0))   # highest sl = biggest T1
+    else:
+        rep = min(cluster, key=lambda z: z.get("sl", float("inf")))
+    rep = dict(rep)
+    rep["zone_high"] = zh
+    rep["zone_low"]  = zl
+    return zh, zl, rep
+
+
 def _build_result(symbol: str, lot_size: int, strike_step: int,
                    last_close: float, direction: str, best: dict,
                    all_zones: list, stock_prox_pct: float, min_rr: float) -> Optional[dict]:
     """Build a result dict for one zone+direction. Returns None if doesn't qualify."""
-    zh, zl = best["zone_high"], best["zone_low"]
+    # Merge nearby zones into a cluster for accurate zone boundaries
+    zh, zl, best = _merge_cluster(best, all_zones)
 
-    # Age filter
+    # Age filter (use the most recent trapped_on in the cluster)
     age = _zone_age_days(best.get("trapped_on", ""))
     if age > MAX_ZONE_AGE_DAYS:
         return None
