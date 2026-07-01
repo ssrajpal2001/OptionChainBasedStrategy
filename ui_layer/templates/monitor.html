@@ -747,6 +747,7 @@ document.addEventListener('alpine:init', () => {
     trapScannerCfg: { htf_minutes: 75, ltf_minutes: 5, gap_threshold_pct: 1.0, per_index: {} },
     trapScannerSaveMsg: '', trapScannerSaveOk: null,
     trapScannerBooks: [],
+    trapLtpCache: {},   // key: bid+"_"+und+"_"+leg → real-time LTP (tick-by-tick via WS)
     indexConfigLoading: false,
     indexConfigSaving:  false,
     indexConfigMsg:     '',
@@ -1198,18 +1199,10 @@ document.addEventListener('alpine:init', () => {
           this.loadClientPositions();
         }
       } else if (msg.type === 'trap_tick') {
-        // Real-time per-tick LTP update from trap scanner (bypasses 5s poll).
-        // Splice to force Alpine proxy to detect the mutation (direct ct.ltp= is not reactive
-        // once the object is found via .find() outside the proxy chain).
-        const bkIdx = this.trapScannerBooks.findIndex(b => b.binding_id === msg.bid && b.underlying === msg.und);
-        if (bkIdx < 0) return;
-        const bk = this.trapScannerBooks[bkIdx];
-        if (!bk || !bk.contracts) return;
-        const ctIdx = bk.contracts.findIndex(c => c.leg === msg.leg);
-        if (ctIdx < 0) return;
-        // Replace the contract object (new ref) so Alpine proxy detects the change
-        const updated = { ...bk.contracts[ctIdx], ltp: msg.ltp };
-        bk.contracts.splice(ctIdx, 1, updated);
+        // Real-time per-tick LTP — write to flat top-level cache so Alpine
+        // proxy definitely fires (nested splice/assign on trapScannerBooks is unreliable).
+        const key = msg.bid + '_' + msg.und + '_' + msg.leg;
+        this.trapLtpCache[key] = msg.ltp;
       }
     },
 
@@ -2553,6 +2546,13 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Refresh trap scanner books (called every 5s for live client card updates).
+    // Returns the real-time LTP for a contract leg, falling back to snapshot value.
+    // trapLtpCache is updated tick-by-tick via WS trap_tick events.
+    ctLtp(bk, leg, ct) {
+      const v = this.trapLtpCache[bk.binding_id + '_' + bk.underlying + '_' + leg];
+      return v != null ? v : (ct ? ct.ltp : null);
+    },
+
     async loadTrapScannerBooks() {
       try {
         const rc = await this._fetch('/api/client/trap_scanner/status');
@@ -4863,7 +4863,7 @@ function amoTest() {
                         <!-- STRIKE -->
                         <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
                         <!-- LTP — highlight bright, shows option premium -->
-                        <span style="color:var(--t-yellow);font-weight:700" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                        <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
                         <!-- Zone block — matches reference format -->
                         <div x-show="ct.zone">
                           <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
@@ -4907,7 +4907,7 @@ function amoTest() {
                       <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
                         <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
                         <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
-                        <span style="color:var(--t-yellow);font-weight:700" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                        <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
                         <div x-show="ct.zone">
                           <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
                           <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
@@ -7256,7 +7256,7 @@ function amoTest() {
                               <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
                                 <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
                                 <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
-                                <span style="color:var(--t-yellow);font-weight:700" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                                <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
                                 <div x-show="ct.zone">
                                   <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
                                   <div :style="ct.zone?.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'"
@@ -7283,7 +7283,7 @@ function amoTest() {
                               <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
                                 <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
                                 <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
-                                <span style="color:var(--t-yellow);font-weight:700" x-text="ct.ltp!=null?ct.ltp.toFixed(1):'—'"></span>
+                                <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
                                 <div x-show="ct.zone">
                                   <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
                                   <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
