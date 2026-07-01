@@ -136,10 +136,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._htf_atr_val: float = 0.0
 
         # Cascade mode: no 75-min zone TRAPPED → use 15-min → 5-min
-        # Per-leg for htf_source="option" (CE and PE evaluated independently)
-        self._intraday_mode = False      # legacy / futures / spot
-        self._intraday_mode_ce = False   # option-source CE leg
-        self._intraday_mode_pe = False   # option-source PE leg
+        # Per-leg for htf_source="option" (each of 4 legs evaluated independently)
+        self._intraday_mode = False       # legacy / futures / spot
+        self._intraday_mode_ce = False    # option-source CE side (CE1 OR CE2)
+        self._intraday_mode_pe = False    # option-source PE side (PE1 OR PE2)
+        self._intraday_mode_ce1 = False   # CE1 independent flag
+        self._intraday_mode_ce2 = False   # CE2 independent flag
+        self._intraday_mode_pe1 = False   # PE1 independent flag
+        self._intraday_mode_pe2 = False   # PE2 independent flag
 
         # Position
         self._position: Optional[Dict] = None
@@ -814,8 +818,9 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
     def _reset_day_state(self) -> None:
         self._initialized      = False
         self._intraday_mode    = False
-        self._intraday_mode_ce = False
-        self._intraday_mode_pe = False
+        self._intraday_mode_ce = False;  self._intraday_mode_pe = False
+        self._intraday_mode_ce1 = False; self._intraday_mode_ce2 = False
+        self._intraday_mode_pe1 = False; self._intraday_mode_pe2 = False
         self._sweep_watch      = None
         self._day_init_done = False
         self._bars_spot = []; self._bars_fut = []
@@ -1170,6 +1175,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             "intraday_mode":    self._intraday_mode,
             "cascade_ce":       self._intraday_mode_ce,
             "cascade_pe":       self._intraday_mode_pe,
+            "cascade_ce1":      self._intraday_mode_ce1,
+            "cascade_ce2":      self._intraday_mode_ce2,
+            "cascade_pe1":      self._intraday_mode_pe1,
+            "cascade_pe2":      self._intraday_mode_pe2,
             "gap_fired":        self._gap_fired,
             "gap_direction":    self._gap_direction,
             "spot_ltp":         ltp,
@@ -1193,6 +1202,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             "nearest_pe_zone":     _nearest_fut_zone("PE") if self._htf_source == "futures" else None,
             "contracts":        contracts,
             "htf_min":        self._htf_min,
+            "cascade_min":    self._cascade_min,
             "ltf_min":        self._ltf_min,
             "bars_spot":      len(self._bars_spot),
             "bars_ce1":       len(self._bars_ce1),

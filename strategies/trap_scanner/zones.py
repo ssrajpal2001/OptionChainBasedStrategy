@@ -97,8 +97,10 @@ class ZonesMixin:
         threshold = 2.0 * self._htf_atr_val if self._htf_atr_val > 0 else None
 
         if self._htf_source == "option":
-            ltp_ce = self._ltp_cache.get("CE1") or self._ltp_cache.get("CE2") or 0.0
-            ltp_pe = self._ltp_cache.get("PE1") or self._ltp_cache.get("PE2") or 0.0
+            ltp_ce1 = self._ltp_cache.get("CE1") or 0.0
+            ltp_ce2 = self._ltp_cache.get("CE2") or 0.0
+            ltp_pe1 = self._ltp_cache.get("PE1") or 0.0
+            ltp_pe2 = self._ltp_cache.get("PE2") or 0.0
 
             def _regime_ok(zone: dict, ltp: float) -> bool:
                 """Drop zones from a different premium regime (theta-decayed or expired)."""
@@ -108,36 +110,37 @@ class ZonesMixin:
                 zl = zone.get("zone_low", 0.0)
                 return zh > ltp * 0.3 and zl < ltp * 3.0
 
-            # --- CE leg ---
-            bear_trapped = [e for e in self._htf_bear_zones if e["status"] == "TRAPPED"]
-            bear_trapped = [z for z in bear_trapped if _regime_ok(z, ltp_ce)]
-            if not bear_trapped or not ltp_ce or threshold is None:
-                new_ce = True
-                reason_ce = "No bear zones" if not bear_trapped else "No CE LTP/ATR"
-            else:
-                dist_ce = min(abs(ltp_ce - z.get("zone_trigger", ltp_ce)) for z in bear_trapped)
-                new_ce = dist_ce > threshold
-                reason_ce = f"dist={dist_ce:.1f} {'>' if new_ce else '<='} {threshold:.1f}"
-            if new_ce != self._intraday_mode_ce:
-                self._intraday_mode_ce = new_ce
-                self._log.info("CE cascade=%s (%s) ltp_ce=%.1f", new_ce, reason_ce, ltp_ce)
+            def _check_leg(leg_key: str, zones: list, ltp: float) -> tuple:
+                """Return (cascade:bool, reason:str) for one leg."""
+                trapped = [e for e in zones if e["status"] == "TRAPPED"]
+                trapped = [z for z in trapped if _regime_ok(z, ltp)]
+                if not trapped or not ltp or threshold is None:
+                    reason = "No zones" if not trapped else "No LTP/ATR"
+                    return True, reason
+                dist = min(abs(ltp - z.get("zone_trigger", ltp)) for z in trapped)
+                cascade = dist > threshold
+                return cascade, f"dist={dist:.1f} {'>' if cascade else '<='} {threshold:.1f}"
 
-            # --- PE leg ---
-            bull_trapped = [e for e in self._htf_bull_zones if e["status"] == "TRAPPED"]
-            bull_trapped = [z for z in bull_trapped if _regime_ok(z, ltp_pe)]
-            if not bull_trapped or not ltp_pe or threshold is None:
-                new_pe = True
-                reason_pe = "No bull zones" if not bull_trapped else "No PE LTP/ATR"
-            else:
-                dist_pe = min(abs(ltp_pe - z.get("zone_trigger", ltp_pe)) for z in bull_trapped)
-                new_pe = dist_pe > threshold
-                reason_pe = f"dist={dist_pe:.1f} {'>' if new_pe else '<='} {threshold:.1f}"
-            if new_pe != self._intraday_mode_pe:
-                self._intraday_mode_pe = new_pe
-                self._log.info("PE cascade=%s (%s) ltp_pe=%.1f", new_pe, reason_pe, ltp_pe)
+            # --- 4 legs independently ---
+            new_ce1, r_ce1 = _check_leg("CE1", self._htf_bear_zones,   ltp_ce1)
+            new_ce2, r_ce2 = _check_leg("CE2", self._htf_bear_zones_2, ltp_ce2)
+            new_pe1, r_pe1 = _check_leg("PE1", self._htf_bull_zones,   ltp_pe1)
+            new_pe2, r_pe2 = _check_leg("PE2", self._htf_bull_zones_2, ltp_pe2)
 
-            # Legacy single flag = True if either leg is cascading
-            self._intraday_mode = self._intraday_mode_ce or self._intraday_mode_pe
+            for attr, new_val, reason, ltp, key in [
+                ("_intraday_mode_ce1", new_ce1, r_ce1, ltp_ce1, "CE1"),
+                ("_intraday_mode_ce2", new_ce2, r_ce2, ltp_ce2, "CE2"),
+                ("_intraday_mode_pe1", new_pe1, r_pe1, ltp_pe1, "PE1"),
+                ("_intraday_mode_pe2", new_pe2, r_pe2, ltp_pe2, "PE2"),
+            ]:
+                if getattr(self, attr) != new_val:
+                    setattr(self, attr, new_val)
+                    self._log.info("%s cascade=%s (%s) ltp=%.1f", key, new_val, reason, ltp)
+
+            # Side-level flags (OR of their two legs) — used for badge and cascade dispatch
+            self._intraday_mode_ce = self._intraday_mode_ce1 or self._intraday_mode_ce2
+            self._intraday_mode_pe = self._intraday_mode_pe1 or self._intraday_mode_pe2
+            self._intraday_mode    = self._intraday_mode_ce  or self._intraday_mode_pe
             return
 
         # --- futures / spot: single shared flag ---
@@ -908,39 +911,41 @@ class ZonesMixin:
             zones_15m = [e for e in self._htf_fut_zones if e["status"] == "TRAPPED"]
             self._run_ltf_on("FUT", self._bars_fut, zones_15m, "CE", require_closed=False)
         elif self._htf_source == "option":
-            # Per-leg: only scan the leg(s) that are in cascade mode
-            bear_15: list = []
-            bull_15: list = []
+            # Per-leg: each of CE1/CE2/PE1/PE2 scans its OWN bars for MTF zones.
+            # cascade_ce/cascade_pe = side-level flags (True if either leg on that side cascades).
+            def _scan_cascade_leg(bars: list, leg_key: str) -> list:
+                today_b = _complete_today(bars)
+                self._log.info("%s cascade scan: today_bars=%d", leg_key, len(today_b))
+                if len(today_b) < 4:
+                    return []
+                df = _bars_to_df(today_b)
+                htf = _resample_htf(df, self._cascade_min)
+                if len(htf) < 2:
+                    return []
+                _, entries = scanner.scan_htf(htf)
+                trapped = [e for e in entries if e["status"] == "TRAPPED"]
+                self._log.info("%s cascade: %d/%d TRAPPED from %d %dm candles",
+                               leg_key, len(trapped), len(entries), len(htf), self._cascade_min)
+                return sorted(trapped, key=lambda z: z.get("zone_high", 0), reverse=True)
+
             if cascade_ce:
-                today_ce = _complete_today(self._bars_ce1)
-                self._log.info("CE cascade scan: today_bars=%d", len(today_ce))
-                if len(today_ce) >= 4:
-                    df_ce = _bars_to_df(today_ce)
-                    htf_ce = _resample_htf(df_ce, self._cascade_min)
-                    if len(htf_ce) >= 2:
-                        _, be = scanner.scan_htf(htf_ce)
-                        bear_15 = [e for e in be if e["status"] == "TRAPPED"]
-                        self._log.info("CE cascade: %d/%d zones TRAPPED from %d 15m candles",
-                                       len(bear_15), len(be), len(htf_ce))
+                if self._intraday_mode_ce1:
+                    bear_15_ce1 = _scan_cascade_leg(self._bars_ce1, "CE1")
+                    if bear_15_ce1:
+                        self._run_ltf_on("CE1", self._bars_ce1, bear_15_ce1, "CE", require_closed=False)
+                if self._intraday_mode_ce2:
+                    bear_15_ce2 = _scan_cascade_leg(self._bars_ce2, "CE2")
+                    if bear_15_ce2:
+                        self._run_ltf_on("CE2", self._bars_ce2, bear_15_ce2, "CE", require_closed=False)
             if cascade_pe:
-                today_pe = _complete_today(self._bars_pe1)
-                self._log.info("PE cascade scan: today_bars=%d", len(today_pe))
-                if len(today_pe) >= 4:
-                    df_pe = _bars_to_df(today_pe)
-                    htf_pe = _resample_htf(df_pe, self._cascade_min)
-                    if len(htf_pe) >= 2:
-                        _, bu = scanner.scan_htf(htf_pe)
-                        bull_15 = [e for e in bu if e["status"] == "TRAPPED"]
-                        self._log.info("PE cascade: %d/%d zones TRAPPED from %d 15m candles",
-                                       len(bull_15), len(bu), len(htf_pe))
-            if bear_15:
-                bear_15 = sorted(bear_15, key=lambda z: z.get("zone_high", 0), reverse=True)
-                self._run_ltf_on("CE1", self._bars_ce1, bear_15, "CE", require_closed=False)
-                self._run_ltf_on("CE2", self._bars_ce2, bear_15, "CE", require_closed=False)
-            if bull_15:
-                bull_15 = sorted(bull_15, key=lambda z: z.get("zone_high", 0), reverse=True)
-                self._run_ltf_on("PE1", self._bars_pe1, bull_15, "PE", require_closed=False)
-                self._run_ltf_on("PE2", self._bars_pe2, bull_15, "PE", require_closed=False)
+                if self._intraday_mode_pe1:
+                    bull_15_pe1 = _scan_cascade_leg(self._bars_pe1, "PE1")
+                    if bull_15_pe1:
+                        self._run_ltf_on("PE1", self._bars_pe1, bull_15_pe1, "PE", require_closed=False)
+                if self._intraday_mode_pe2:
+                    bull_15_pe2 = _scan_cascade_leg(self._bars_pe2, "PE2")
+                    if bull_15_pe2:
+                        self._run_ltf_on("PE2", self._bars_pe2, bull_15_pe2, "PE", require_closed=False)
         else:  # "spot" cascade: spot 15-min for direction, option 15-min for entry zones
             today_spot = _complete_today(self._bars_spot)
             if len(today_spot) < 4:
