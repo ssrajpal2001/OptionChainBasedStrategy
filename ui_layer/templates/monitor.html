@@ -4911,13 +4911,19 @@ function amoTest() {
                   </template>
                 </div>
               </template>
-              <!-- Option zones (CE/PE) — TRAPPED/NEAR always visible; FAR collapsed -->
+              <!-- Option zones (CE/PE) — collapsed by default, expand to see all -->
               <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
-                <div class="mt-2" x-data="{ farOpen: false }">
+                <div class="mt-2" x-data="{ farOpen: false, zonesOpen: false }">
+                  <!-- Collapsible header for entire zone table -->
+                  <button @click="zonesOpen=!zonesOpen" class="font-mono text-xs py-0.5 px-2 rounded mb-1" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer;width:100%">
+                    <span x-text="zonesOpen ? '▲ Hide zone table' : '▼ Zone table ('+bk.zones.filter(z=>z.opt_type!==\'FUT\').length+' zones, '+bk.zones.filter(z=>z.opt_type!==\'FUT\'&&z.status===\'TRAPPED\').length+' TRAPPED)'"></span>
+                  </button>
+                  <template x-if="zonesOpen">
+                  <div>
                   <div class="grid text-center mb-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
                     <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                   </div>
-                  <!-- TRAPPED / NEAR / IN TRADE zones always shown -->
+                  <!-- TRAPPED / NEAR / IN TRADE zones -->
                   <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT' && (z.status==='TRAPPED'||z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'))" :key="z.uid">
                     <div class="grid text-center py-0.5"
                          :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
@@ -4955,6 +4961,8 @@ function amoTest() {
                       </template>
                     </div>
                   </template>
+                  </div>
+                  </template><!-- end zonesOpen -->
                 </div>
               </template>
               <!-- FUT zones (futures bias — collapsible, hidden by default) -->
