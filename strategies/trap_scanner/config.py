@@ -11,9 +11,9 @@ _INDEX_CFG: Dict[str, dict] = {
     # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
     # Cascade backtest optimised 2026-07-01 (Apr-Jun 2026, 18,432 combos, spot-proxy):
     # NIFTY:     HTF=150m / LTF=5m  / SLbuf=10  / Sec=2(BN+NIFTYIT) → PF=11.4, 77% WR
-    # BANKNIFTY: HTF=180m / LTF=3m  / SLbuf=30  / Sec=1(NIFTY)      → PF=5.60, 87% WR (normal)
-    #            GapThr=0.8% / DteFlt=all (whole month).
-    #            gap_skip_dte=10: gap-fired suppressed when DTE<=10 (GapWR=0% near expiry).
+    # BANKNIFTY: HTF=180m / MTF=30m / LTF=3m  / SLbuf=30  / Sec=1(NIFTY) → PF=6.28, 78% WR (normal)
+    #            GapThr=0.8% / DteFlt=10d (skip ALL trades when DTE<=10).
+    #            gap_skip_dte=10: gap-fired also suppressed when DTE<=10 (GapWR=0% near expiry).
     # htf_source="option": zone detection + SL on OPTION premium chart.
     # sl_buf = pts below zone_low (option-premium units, ATM delta ~0.5).
     # NIFTY MTF not yet backtest-optimised — keeping 15m default until sweep completes.
@@ -21,13 +21,14 @@ _INDEX_CFG: Dict[str, dict] = {
                    "sl_buf": 10.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
                    "htf_min_override": 150, "ltf_min_override": 5},
-    # BANKNIFTY 4-tier cascade: HTF=180m → MTF=15m → LTF=3m → Exec=3m
+    # BANKNIFTY 4-tier cascade: HTF=180m → MTF=30m → LTF=3m → Exec=3m
     # Confirmed optimal from nse_cascade_backtest.py 18k-combo sweep (Apr-Jun 2026).
+    # dte_min_filter=10: skip ALL entries (normal + gap) when DTE<=10 (near-expiry noise).
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
                    "sl_buf": 30.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
-                   "htf_min_override": 180, "mtf_min_override": 15, "ltf_min_override": 3,
-                   "gap_skip_dte": 10, "gap_thresh_default": 0.8},
+                   "htf_min_override": 180, "mtf_min_override": 30, "ltf_min_override": 3,
+                   "gap_skip_dte": 10, "gap_thresh_default": 0.8, "dte_min_filter": 10},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
@@ -135,7 +136,7 @@ class ConfigMixin:
             self._htf_min = int(ts_admin_cfg.get("htf_minutes", 75))
         # MTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 15m
         # MTF is the intermediate cascade gate between HTF zone and LTF entry trigger.
-        # BANKNIFTY: 15m (confirmed optimal, nse_cascade_backtest 18k-combo sweep).
+        # BANKNIFTY: 30m (confirmed optimal, nse_cascade_backtest 18k-combo sweep 2026-07-01).
         _mtf_code = _def.get("mtf_min_override")
         _mtf_adm  = _adm.get("mtf_minutes")
         if _mtf_adm:
@@ -156,6 +157,10 @@ class ConfigMixin:
         # Gap-skip near expiry: suppress gap-fired mode when DTE <= this value (0 = never skip).
         # Backtest: BANKNIFTY GapWR=0% when DTE<=10 → skip MTF intraday cascade near expiry.
         self._gap_skip_dte = int(_def.get("gap_skip_dte", 0))
+        # DTE minimum filter: block ALL new entries (normal + gap) when DTE <= this value.
+        # BANKNIFTY DTE=10 filter: near-expiry option zones are noisy → skip the last 10 DTE days.
+        # 0 = disabled (NIFTY, crypto etc. trade all DTEs).
+        self._dte_min = int(_adm.get("dte_min_filter", _def.get("dte_min_filter", 0)))
         # Zone entry buffer: LTP within this many pts of zone_high counts as "inside zone"
         # for the _run_ltf_on price gate. Prevents missing entries when LTP briefly exceeds
         # zone_high by a small amount before the scan runs. Default 5 pts (option premium units).

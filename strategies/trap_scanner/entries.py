@@ -50,6 +50,16 @@ class EntryMixin:
             if now.time() >= time(ch, cm):
                 return
 
+        # DTE minimum filter: block new entries when too close to expiry (near-expiry noise).
+        # BANKNIFTY: backtest shows GapWR=0% and elevated false-SLs when DTE<=10.
+        if self._dte_min > 0 and self._expiry_date is not None:
+            from datetime import date as _date
+            _dte = (self._expiry_date - _date.today()).days
+            if _dte <= self._dte_min:
+                self._log.debug("Entry blocked — DTE=%d <= min_filter=%d (%s %s)",
+                                _dte, self._dte_min, leg, opt_type)
+                return
+
         # Entry window gate (e.g. CrudeOil W2: 18:45–19:15)
         if self._entry_win:
             wh, wm = self._entry_win[0]; eh, em = self._entry_win[1]

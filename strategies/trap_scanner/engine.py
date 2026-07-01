@@ -212,7 +212,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             f"|  Entry cutoff: {cut}  |  Square-off: {sq}",
             f"|  Lots: {self._lot_mul} x {self._lot_size} = {self._lot_mul * self._lot_size} qty",
             f"|  Profit floor: {self._profit_floor:,.0f}  |  No-target-TSL: {self._no_target_tsl}  |  Scale-in: {self._scale_in_enabled}",
-            f"|  Gap-skip DTE <= {self._gap_skip_dte} (0=off)  |  Expiry mode: {self._expiry_mode}",
+            f"|  Gap-skip DTE <= {self._gap_skip_dte} (0=off)  |  DTE min filter <= {self._dte_min} (0=off)  |  Expiry mode: {self._expiry_mode}",
             f"|  Per-index admin keys present: {sorted(adm.keys()) or 'none (all defaults from code)'}",
             f"+{border}",
         ]
