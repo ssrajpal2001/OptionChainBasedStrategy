@@ -756,6 +756,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Stock scanner ──────────────────────────────────────────────── */
     stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], ce_stocks: [], pe_stocks: [], use_nifty_bias: false, loaded: false, error: '' },
     stockScanBiasToggle: false,
+    fnoAlerts: [],          // active un-notified intraday alerts
 
     /* ── Risk command center ─────────────────────────────────────────── */
     riskSummary: { total_capital: 0, total_net_mtm: 0, total_open_lots: 0, avg_slippage_pts: 0, client_count: 0, clients: [], risk_manager_active: false, ts: '' },
@@ -1014,6 +1015,7 @@ document.addEventListener('alpine:init', () => {
     _hydrateAdminOnLogin() {
       this.loadFeederStatus(true);   // sync toggle from DB only on login
       this.loadStockScan();
+      this.loadFnoAlerts();
       this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
@@ -1215,6 +1217,12 @@ document.addEventListener('alpine:init', () => {
             + ' cacheKeys=' + Object.keys(this.trapLtpCache).length);
         }
         this.trapLtpCache[key] = msg.ltp;
+      } else if (msg.type === 'fno_alert') {
+        const a = msg.alert;
+        if (!this.fnoAlerts.find(x => x.uid === a.uid)) {
+          this.fnoAlerts.unshift(a);
+          this._playAlertSound();
+        }
       }
     },
 
@@ -1501,6 +1509,26 @@ document.addEventListener('alpine:init', () => {
         if (d && d.ok) { await this.loadStockScan(); }
         else { this.stockScan.error = (d && d.error) || 'Scan failed'; }
       } catch(e) { this.stockScan.error = String(e); }
+    },
+
+    async loadFnoAlerts() {
+      const r = await this._fetch('/api/scanner/alerts');
+      if (!r) return;
+      const d = await r.json();
+      if (d.ok) this.fnoAlerts = d.alerts || [];
+    },
+
+    async notifyAlert(uid) {
+      this.fnoAlerts = this.fnoAlerts.filter(a => a.uid !== uid);
+      await this._fetch('/api/scanner/alerts/' + encodeURIComponent(uid) + '/notified',
+                        { method: 'POST' });
+    },
+
+    _playAlertSound() {
+      try {
+        const audio = new Audio('/static/alert.wav');
+        audio.play().catch(() => {});
+      } catch(e) {}
     },
 
     /* ── Feeder status ───────────────────────────────────────────────────── */
@@ -5705,6 +5733,47 @@ function amoTest() {
          class="font-mono text-xs" style="color:var(--t-muted)">
       No qualifying stocks — no fresh zones (≤15 days) approaching from the correct side with R:R ≥ 1.5
     </div>
+
+    <!-- ── FnO Intraday Alerts ─────────────────────────────────────── -->
+    <template x-if="fnoAlerts.length > 0">
+      <div class="mb-6">
+        <h3 class="text-yellow-400 font-bold text-sm mb-2">⚡ INTRADAY SIGNALS</h3>
+        <template x-for="a in fnoAlerts" :key="a.uid">
+          <div class="border rounded-lg p-4 mb-3"
+               :class="a.direction==='CE' ? 'border-green-600 bg-green-950' : 'border-red-600 bg-red-950'">
+            <div class="flex justify-between items-center mb-2">
+              <span class="font-bold text-white text-base" x-text="a.symbol"></span>
+              <span class="text-xs font-bold px-2 py-0.5 rounded"
+                    :class="a.direction==='CE' ? 'bg-green-700 text-green-100' : 'bg-red-700 text-red-100'"
+                    x-text="'▲ BUY ' + a.direction + ' SIGNAL'"></span>
+              <span class="text-yellow-300 font-bold text-sm" x-text="'R:R ' + a.rr_ratio.toFixed(1) + '×'"></span>
+            </div>
+            <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-300">
+              <div>D1 Zone</div>
+              <div x-text="'₹' + a.d1_zone_low.toFixed(0) + ' – ' + a.d1_zone_high.toFixed(0) + ' (' + a.d1_zone_date + ')'"></div>
+              <div>Spot Now</div>
+              <div x-text="'₹' + a.spot_price.toFixed(1)"></div>
+              <div>Strike</div>
+              <div x-text="a.strike + ' ' + a.direction + ' (lot ' + a.lot_size + ')'"></div>
+              <div>SL (spot)</div>
+              <div x-text="'₹' + a.sl.toFixed(0) + '  risk ₹' + a.risk_pts.toFixed(0) + '/share'"></div>
+              <div>Target T1</div>
+              <div x-text="'₹' + a.t1.toFixed(0) + '  reward ₹' + a.reward_pts.toFixed(0) + '/share'"></div>
+              <div>MTF 15m</div>
+              <div x-text="'Trapped at ₹' + a.mtf_trap_price.toFixed(1) + ' ✓'" class="text-green-400"></div>
+              <div>LTF 5m</div>
+              <div x-text="'Trapped at ₹' + a.ltf_trap_price.toFixed(1) + ' ✓'" class="text-green-400"></div>
+            </div>
+            <div class="mt-3 text-right">
+              <button @click="notifyAlert(a.uid)"
+                      class="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-200">
+                Notified ✓
+              </button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </template>
 
     <!-- CE section -->
     <template x-if="stockScan.ce_stocks && stockScan.ce_stocks.length > 0">

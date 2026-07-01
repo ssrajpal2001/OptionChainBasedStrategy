@@ -51,6 +51,30 @@ logger = logging.getLogger(__name__)
 from broker_auth.headless_auth import _ist_eod
 
 
+def _ensure_alert_wav() -> None:
+    """Generate ui_layer/static/alert.wav (440 Hz beep, 0.4s) if missing."""
+    import wave, struct, math
+    path = os.path.join(os.path.dirname(__file__), "static", "alert.wav")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        return
+    sample_rate = 44100
+    duration    = 0.4
+    freq        = 440.0
+    n_samples   = int(sample_rate * duration)
+    with wave.open(path, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        for i in range(n_samples):
+            val = int(32767 * 0.5 * math.sin(2 * math.pi * freq * i / sample_rate))
+            wf.writeframes(struct.pack("<h", val))
+    logger.info("Generated alert.wav at %s", path)
+
+
+_ensure_alert_wav()
+
+
 def _base_url(request) -> str:
     """Return the public base URL, respecting X-Forwarded-Proto from nginx."""
     scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -681,6 +705,10 @@ class DashboardServer:
             version="2.0.0",
             docs_url="/api/docs",
         )
+        from fastapi.staticfiles import StaticFiles
+        _static_dir = os.path.join(os.path.dirname(__file__), "static")
+        os.makedirs(_static_dir, exist_ok=True)
+        app.mount("/static", StaticFiles(directory=_static_dir), name="static")
         _srv   = self
         bridge = self._ws_bridge
 
