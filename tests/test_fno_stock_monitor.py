@@ -33,3 +33,15 @@ def test_fno_stock_alert_fields():
 
 def test_topic_constant():
     assert Topic.FNO_STOCK_ALERT == "fno_stock_alert"
+
+def test_register_extra_spot_keys_stored():
+    """GlobalFeeder stores extra spot key mapping without error."""
+    from unittest.mock import MagicMock
+    from data_layer.global_feeder import GlobalFeeder
+    bus = MagicMock()
+    cfg = MagicMock()
+    cfg.mode = "demo"
+    gf = GlobalFeeder(bus, cfg)
+    # Should not raise even if no underlying feeder active
+    gf.register_extra_spot_keys({"NSE_EQ|INE066A01021": "EICHERMOT"})
+    assert gf._extra_spot_keys == {"NSE_EQ|INE066A01021": "EICHERMOT"}

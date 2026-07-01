@@ -238,6 +238,7 @@ class UpstoxFeeder(BaseFeeder):
         self._streamer = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._subscribed_keys: List[str] = []   # all currently subscribed instrument keys
+        self._extra_spot_keys: Dict[str, str] = {}  # NSE_EQ|<ISIN> → "EICHERMOT"
         try:
             import upstox_client  # noqa: F401
             self._sdk_available = True
@@ -365,6 +366,10 @@ class UpstoxFeeder(BaseFeeder):
     def _is_upstox_key(token: str) -> bool:
         """Upstox instrument_keys contain a pipe (e.g. NSE_FO|...). Fyers symbols don't."""
         return "|" in token
+
+    def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
+        """Register NSE_EQ instrument keys → ticker names so stock ticks flow as INDEX_TICK."""
+        self._extra_spot_keys.update(mapping)
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
@@ -555,7 +560,11 @@ class UpstoxFeeder(BaseFeeder):
                 continue
 
             # ── Index tick ──────────────────────────────────────────────────
-            internal_name = _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key) or _mcx_upstox_fut_to_internal(inst_key)
+            internal_name = (
+                _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key)
+                or _mcx_upstox_fut_to_internal(inst_key)
+                or self._extra_spot_keys.get(inst_key)
+            )
             if internal_name:
                 # Diagnostic: log the raw index value per key (throttled) so a mis-valued
                 # SENSEX/BSE index (wrong strikes) is immediately visible.
@@ -1154,6 +1163,7 @@ class GlobalFeeder:
         self._dual_feeder: Optional[DualFeeder] = None
         self._active_provider: str = "mock"
         self._cached_tokens: List[str] = []  # option tokens to re-apply on every reconnect
+        self._extra_spot_keys: Dict[str, str] = {}   # inst_key → ticker for FnoStockMonitor
 
     async def start(self) -> None:
         """Create feeder, connect, and launch the run + heartbeat tasks."""
@@ -1207,6 +1217,19 @@ class GlobalFeeder:
             except asyncio.CancelledError:
                 pass
         logger.info("GlobalFeeder: Stopped.")
+
+    def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
+        """Register NSE_EQ instrument keys → ticker names so FnoStockMonitor spot ticks flow as INDEX_TICK."""
+        self._extra_spot_keys.update(mapping)
+        # Pass through to the active underlying feeder if it supports it
+        if self._dual_feeder is not None:
+            for f in self._dual_feeder._feeders.values():
+                if hasattr(f, "register_extra_spot_keys"):
+                    f.register_extra_spot_keys(mapping)
+        elif self._feeder is not None:
+            if hasattr(self._feeder, "register_extra_spot_keys"):
+                self._feeder.register_extra_spot_keys(mapping)
+        logger.info("GlobalFeeder: registered %d extra spot keys", len(mapping))
 
     async def subscribe_tokens(self, tokens: list) -> None:
         """Proxy to active feeder — DualFeeder takes priority over initial feeder."""
