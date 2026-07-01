@@ -389,9 +389,6 @@ try:
         min_rr:          float = 1.5
         use_nifty_bias:  bool  = False
 
-    class _AlertNotifiedSchema(_PydanticBase):
-        uid: str
-
 except ImportError:
     _HAS_FASTAPI = False
 

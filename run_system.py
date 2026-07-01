@@ -520,7 +520,8 @@ async def _run_live(
         from strategies.fno_stock_monitor import FnoStockMonitor
         fno_monitor = FnoStockMonitor(bus, cfg, client_db)
         fno_monitor.warm_start()
-        fno_monitor.set_feeder(feeder)
+        if feeder:
+            fno_monitor.set_feeder(feeder)
         if dashboard is not None:
             dashboard.set_fno_monitor(fno_monitor)
         tasks_pre = [asyncio.create_task(fno_monitor.start(), name="fno_stock_monitor")]
