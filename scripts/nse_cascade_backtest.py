@@ -713,6 +713,246 @@ def _get_atm_close(d_str: str, daily_map: dict) -> int:
     return 0
 
 
+# ── Variant B: HTF-trigger then follow-through ───────────────────────────────
+
+def _htf_zone_triggered(htf_zone: dict, exec_arr: dict) -> bool:
+    """
+    True if any exec-bar close reaches the HTF zone_trigger proxy
+    (zone_low + 30% of zone range).  In live this fires on a tick;
+    in backtest we use 1-min close (conservative).
+    """
+    z_low, z_high = _eff_zone(htf_zone)
+    trigger = z_low + 0.3 * max(z_high - z_low, 1.0)
+    return bool(np.any(exec_arr["close"] >= trigger))
+
+
+def _find_exec_entry_mtf_sl(exec_arr, ltf_zone, htf_zone, mtf_zone,
+                             sl_buf, cap_pts, lot,
+                             tsl_type="none", tsl_buf=10) -> Optional[dict]:
+    """Entry with SL = MTF zone_low (tighter than HTF zone_low - buf)."""
+    ltf_l, ltf_h = _eff_zone(ltf_zone)
+    mtf_l, _     = _eff_zone(mtf_zone)
+    buf       = max((ltf_h - ltf_l) * 0.15, 1.0)
+    htf_sl    = float(htf_zone.get("sl", 0))
+    mtf_sl_t1 = float(mtf_zone.get("sl", 0))
+    struct_sl = mtf_l   # SL = MTF zone_low
+
+    if htf_sl > mtf_sl_t1 > 0:
+        t1_price = mtf_sl_t1
+        t2_price = htf_sl
+    else:
+        t1_price = htf_sl
+        t2_price = 0.0
+
+    if t1_price <= 0 or struct_sl <= 0:
+        return None
+
+    H, L, C = exec_arr["high"], exec_arr["low"], exec_arr["close"]
+    n = len(H)
+    if n < 2:
+        return None
+    in_zone = (C >= ltf_l - buf) & (C <= ltf_h + buf)
+    idxs    = np.where(in_zone)[0]
+    idxs    = idxs[idxs < n - 1]
+    for i in idxs:
+        trig = float(H[i])
+        if t1_price <= trig or struct_sl >= trig:
+            continue
+        hit = np.where(H[i+1:] >= trig)[0]
+        if not len(hit):
+            continue
+        j = hit[0]
+        Hs = H[i+1:][j:]; Ls = L[i+1:][j:]; Cs = C[i+1:][j:]
+        if t2_price > 0:
+            res = _simulate_two_target(Hs, Ls, Cs, trig, struct_sl,
+                                       t1_price, t2_price, tsl_type, tsl_buf, cap_pts, lot)
+        else:
+            res = _simulate_numpy(Hs, Ls, Cs, trig, struct_sl,
+                                  t1_price, sl_buf, cap_pts, lot)
+        res.update({"entry_price": round(trig, 2), "sl_level": round(struct_sl, 2),
+                    "t1": round(t1_price, 2), "t2": round(t2_price, 2),
+                    "sl_dist": round(trig - struct_sl, 2)})
+        return res
+    return None
+
+
+def _run_cascade_day_variant_b(d_str, exec_arr, htf_zones, mtf_zones, ltf_zones,
+                                sl_buf, cap_pts, sl_hist, lot,
+                                sector_zones_day, htf_min, n_sectors,
+                                t1_src="mtf", tsl_type="none", tsl_buf=10) -> Optional[dict]:
+    """
+    Variant B: HTF TRAPPED + TRIGGERED → MTF anywhere ABOVE htf zone_low → LTF → Entry.
+    SL = MTF zone_low (tighter).  t1_src/tsl params same as normal run.
+    """
+    for htf_z in htf_zones:
+        kind = htf_z.get("kind", "BEAR")
+        if kind != "BEAR":
+            continue
+        hl, hh   = _eff_zone(htf_z)
+        zone_key = f"B_{hl:.1f}-{hh:.1f}"
+        t1       = float(htf_z.get("sl", 0))
+        if t1 <= hh:
+            continue
+        if zone_key in sl_hist:
+            if (date.fromisoformat(d_str) - date.fromisoformat(sl_hist[zone_key])).days <= 1:
+                continue
+        if not _sector_confirms(sector_zones_day, htf_min, kind, n_sectors):
+            continue
+        # HTF must have been triggered today
+        if not _htf_zone_triggered(htf_z, exec_arr):
+            continue
+        # MTF: any BEAR zone with zone_low >= htf zone_low (above the scene)
+        for mtf_z in mtf_zones:
+            if mtf_z.get("kind") != kind:
+                continue
+            ml, mh = _eff_zone(mtf_z)
+            if ml < hl:   # must be above htf zone_low
+                continue
+            if float(mtf_z.get("sl", 0)) <= mh:
+                continue
+            ltf_m = next((z for z in ltf_zones
+                          if z.get("kind") == kind and _zones_overlap(mtf_z, z)), None)
+            if not ltf_m:
+                continue
+            res = _find_exec_entry_mtf_sl(exec_arr, ltf_m, htf_z, mtf_z,
+                                          sl_buf, cap_pts, lot,
+                                          tsl_type=tsl_type, tsl_buf=tsl_buf)
+            if res:
+                res.update({"date": d_str, "zone_key": zone_key, "mode": "B"})
+                if res["exit_reason"] == "SL":
+                    sl_hist[zone_key] = d_str
+                return res
+    return None
+
+
+def _run_compare_b(all_days, zones_cache, exec_cache, day_mode,
+                   gap_pct_map, dte_map, sector_zones, sector_list,
+                   ATM_DELTA, fx_htf, fx_mtf, fx_ltf, fx_exc,
+                   fx_sl, fx_cap, fx_nsec, fx_gap, fx_dte,
+                   t1_src, tsl_type, tsl_buf):
+    """Run Variant A (current) vs Variant B side by side and print comparison."""
+    print(f"\n{'='*120}")
+    print(f"  VARIANT A vs B COMPARISON  —  {SYMBOL}")
+    print(f"  HTF={fx_htf}m  MTF={fx_mtf}m  LTF={fx_ltf}m  Exec={fx_exc}m  "
+          f"SLbuf={fx_sl:.0f}  Cap={fx_cap:.0f}  Gap={fx_gap:.1f}%  DTE={fx_dte}  "
+          f"T1={t1_src}  TSL={tsl_type}/{tsl_buf}")
+    print(f"  A: LTP inside HTF zone bounds → MTF overlaps HTF → SL=HTF zone_low-buf")
+    print(f"  B: HTF TRIGGERED → MTF anywhere above HTF zone_low → SL=MTF zone_low")
+    print(f"{'='*120}\n")
+
+    trades_a: list = []; trades_b: list = []
+    sl_hist_a: Dict[str, str] = {}; sl_hist_b: Dict[str, str] = {}
+
+    for d_str in all_days:
+        sec_day: Dict[tuple, list] = {}
+        for sec in sector_list:
+            sec_day[(sec, fx_htf)] = sector_zones.get((sec, fx_htf, d_str), [])
+            sec_day[(sec, fx_mtf)] = sector_zones.get((sec, fx_mtf, d_str), [])
+
+        htf_z  = zones_cache.get((fx_htf, d_str), [])
+        mtf_z  = zones_cache.get((fx_mtf, d_str), [])
+        ltf_z  = zones_cache.get((fx_ltf, d_str), [])
+        ex_arr = exec_cache.get((fx_exc, d_str))
+        if ex_arr is None:
+            continue
+
+        is_opt = day_mode.get(d_str) == "option"
+        lot    = float(LOT) if is_opt else ATM_DELTA * LOT
+        cap    = fx_cap
+        dgap   = gap_pct_map.get(d_str, 0.0)
+        ddte   = dte_map.get(d_str, 99)
+        if fx_dte > 0 and ddte > fx_dte:
+            continue
+
+        use_gap = fx_gap < 99.0 and dgap > fx_gap
+
+        # Variant A
+        if use_gap:
+            ra = _run_cascade_day_gap(d_str, ex_arr, mtf_z, ltf_z,
+                                      fx_sl, cap, sl_hist_a, lot,
+                                      sec_day, fx_mtf, fx_nsec,
+                                      t1_src=t1_src, tsl_type=tsl_type, tsl_buf=tsl_buf)
+        elif htf_z:
+            ra = _run_cascade_day(d_str, ex_arr, htf_z, mtf_z, ltf_z,
+                                  fx_sl, cap, sl_hist_a, lot,
+                                  sec_day, fx_htf, fx_nsec,
+                                  t1_src=t1_src, tsl_type=tsl_type, tsl_buf=tsl_buf)
+        else:
+            ra = None
+        if ra:
+            trades_a.append(ra)
+
+        # Variant B
+        if use_gap:
+            rb = _run_cascade_day_gap(d_str, ex_arr, mtf_z, ltf_z,
+                                      fx_sl, cap, sl_hist_b, lot,
+                                      sec_day, fx_mtf, fx_nsec,
+                                      t1_src=t1_src, tsl_type=tsl_type, tsl_buf=tsl_buf)
+        elif htf_z:
+            rb = _run_cascade_day_variant_b(d_str, ex_arr, htf_z, mtf_z, ltf_z,
+                                            fx_sl, cap, sl_hist_b, lot,
+                                            sec_day, fx_htf, fx_nsec,
+                                            t1_src=t1_src, tsl_type=tsl_type, tsl_buf=tsl_buf)
+        else:
+            rb = None
+        if rb:
+            trades_b.append(rb)
+
+    params = {"htf_min": fx_htf, "mtf_min": fx_mtf, "ltf_min": fx_ltf,
+              "exec_min": fx_exc, "sl_buf": fx_sl, "cap_pts": fx_cap,
+              "sector_confirm": fx_nsec, "gap_thr_pct": fx_gap,
+              "dte_filter": fx_dte, "t1_src": t1_src,
+              "tsl_type": tsl_type, "tsl_buf": tsl_buf, "symbol": SYMBOL, "lot": LOT}
+    sa = _summarize(trades_a, params)
+    sb = _summarize(trades_b, params)
+
+    W = 50
+    print(f"{'─'*115}")
+    print(f"  {'METRIC':<28} {'VARIANT A (strict)':>{W}} {'VARIANT B (follow)':>{W}}")
+    print(f"{'─'*115}")
+    for k in ["total","wins","losses","win_rate_pct","profit_factor",
+              "net_pnl_inr","avg_win_inr","avg_loss_inr",
+              "exits_sl","exits_t1","exits_t2","exits_trail","exits_cap","exits_eod",
+              "t1_hit_pct","t2_hit_pct"]:
+        print(f"  {k:<28} {str(sa.get(k,'—')):>{W}} {str(sb.get(k,'—')):>{W}}")
+    print(f"{'─'*115}")
+
+    a_by_d = {t["date"]: t for t in trades_a}
+    b_by_d = {t["date"]: t for t in trades_b}
+    all_td = sorted(set(list(a_by_d) + list(b_by_d)))
+    only_a = only_b = b_better = b_worse = 0
+    print(f"\n  {'DATE':<12} {'A PNL':>10} {'A EXIT':>10} {'B PNL':>10} {'B EXIT':>10}  {'DIFF':>8}  NOTE")
+    print(f"  {'─'*90}")
+    for d in all_td:
+        ta = a_by_d.get(d); tb = b_by_d.get(d)
+        pa = ta["pnl"] if ta else None; pb = tb["pnl"] if tb else None
+        ea = ta.get("exit_reason","—") if ta else "—"
+        eb = tb.get("exit_reason","—") if tb else "—"
+        diff = round(pb - pa, 1) if pa is not None and pb is not None else "—"
+        note = ""
+        if ta and not tb:  note = "A only"; only_a += 1
+        elif tb and not ta: note = "B extra"; only_b += 1
+        elif diff != "—":
+            if diff > 0:   note = "B BETTER"; b_better += 1
+            elif diff < 0: note = "B WORSE";  b_worse  += 1
+            else:          note = "same"
+        print(f"  {d:<12} {str(round(pa,1) if pa is not None else '—'):>10} "
+              f"{ea:>10} {str(round(pb,1) if pb is not None else '—'):>10} "
+              f"{eb:>10}  {str(diff):>8}  {note}")
+
+    net_diff = round(sb["net_pnl_inr"] - sa["net_pnl_inr"], 0)
+    wr_diff  = round(sb["win_rate_pct"] - sa["win_rate_pct"], 1)
+    pf_diff  = round(sb["profit_factor"] - sa["profit_factor"], 3)
+    print(f"\n  A-only:{only_a}  B-extra:{only_b}  B-better:{b_better}  B-worse:{b_worse}")
+    print(f"  Net B advantage: ₹{net_diff:+.0f}  WR diff: {wr_diff:+.1f}%  PF diff: {pf_diff:+.3f}")
+    if sb["profit_factor"] > sa["profit_factor"] and wr_diff >= -5:
+        print(f"\n  VERDICT: ✓ Variant B is BETTER — higher PF, acceptable WR. Recommend merging.")
+    elif wr_diff < -10:
+        print(f"\n  VERDICT: ✗ Variant B WR drops {-wr_diff:.0f}%. Extra trades reduce quality.")
+    else:
+        print(f"\n  VERDICT: ~ Mixed. Review day-by-day above before deciding.")
+
+
 if __name__ == "__main__":
     print(f"=== {SYMBOL} Cascade Backtest (hybrid: spot proxy + real July options) ===", flush=True)
     print(f"    Period: {START_DATE} -> {END_DATE}  |  Lot: {LOT}  |  ATM delta: 0.5 (spot proxy)", flush=True)
@@ -1142,3 +1382,17 @@ if __name__ == "__main__":
               f"{r.get('exits_trail',0):>5}  {r['exits_eod']:>4}")
 
     print(f"\n[{SYMBOL}] Exit sweep done in {time.time()-t1_start:.1f}s  |  CSV: {OUT_EXIT_CSV}")
+
+    # ── Variant B comparison (run with --compare-b flag) ─────────────────────
+    if "--compare-b" in sys.argv:
+        _run_compare_b(
+            all_days, zones_cache, exec_cache, day_mode,
+            gap_pct_map, dte_map, sector_zones, sector_list,
+            ATM_DELTA,
+            fx_htf=fx_htf, fx_mtf=fx_mtf, fx_ltf=fx_ltf, fx_exc=fx_exc,
+            fx_sl=fx_sl, fx_cap=fx_cap, fx_nsec=fx_nsec,
+            fx_gap=fx_gap, fx_dte=fx_dte,
+            t1_src=exit_results[0].get("t1_src","mtf") if exit_results else "mtf",
+            tsl_type=exit_results[0].get("tsl_type","bar_low") if exit_results else "bar_low",
+            tsl_buf=exit_results[0].get("tsl_buf",10) if exit_results else 10,
+        )
