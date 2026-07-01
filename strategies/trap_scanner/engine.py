@@ -1015,29 +1015,31 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         bull_trapped = sum(1 for e in self._htf_bull_zones if e["status"] == "TRAPPED")
         fut_trapped  = sum(1 for e in self._htf_fut_zones  if e["status"] == "TRAPPED")
 
-        def _best_zone_summary(zone_list: list) -> Optional[dict]:
+        def _best_zone_summary(zone_list: list, ltp_override: float = 0.0) -> Optional[dict]:
             """
             Pick zone closest to LTP:
               1. LTP inside zone (zone_low <= LTP <= zone_high) -> best match
               2. Nearest zone_high above LTP
               3. Nearest zone_high below LTP (fallback)
             Skips dead zones where LTP < zone_low.
+            ltp_override: pass per-leg LTP so CE zones use CE LTP and PE zones use PE LTP.
             """
+            zltp = ltp_override if ltp_override > 0 else zone_ltp
             trapped = [z for z in zone_list if z["status"] == "TRAPPED"]
-            if zone_ltp > 0:
-                trapped = [z for z in trapped if zone_ltp >= z.get("zone_low", 0)]
+            if zltp > 0:
+                trapped = [z for z in trapped if zltp >= z.get("zone_low", 0)]
             if not trapped:
                 return None
 
-            if zone_ltp > 0:
+            if zltp > 0:
                 inside = [z for z in trapped
-                          if z.get("zone_low", 0) <= zone_ltp <= z.get("zone_high", 0)]
+                          if z.get("zone_low", 0) <= zltp <= z.get("zone_high", 0)]
                 if inside:
                     z = max(inside, key=lambda zz: zz.get("zone_high", 0))
                 else:
-                    above = [z for z in trapped if z.get("zone_high", 0) > zone_ltp]
+                    above = [z for z in trapped if z.get("zone_high", 0) > zltp]
                     if above:
-                        z = min(above, key=lambda zz: zz.get("zone_high", 0) - zone_ltp)
+                        z = min(above, key=lambda zz: zz.get("zone_high", 0) - zltp)
                     else:
                         z = max(trapped, key=lambda zz: zz.get("zone_high", 0))
             else:
@@ -1045,7 +1047,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
             uid = _zone_uid(z)
             trig = round(z.get("zone_trigger", z.get("entry", 0)), 2)
-            dist = round(abs(zone_ltp - trig), 1) if zone_ltp else None
+            dist = round(abs(zltp - trig), 1) if zltp else None
             return {
                 "zone_high":    round(z.get("zone_high", 0), 2),
                 "zone_low":     round(z.get("zone_low", 0), 2),
@@ -1116,26 +1118,31 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
         # Per-contract LTP and status for UI (mirrors NiftyTrapScanner dashboard table)
         # futures-mode: zone column shows nearest FUT zone (not empty option-bar zone)
+        ltp_ce1 = self._ltp_cache.get("CE1") or 0.0
+        ltp_ce2 = self._ltp_cache.get("CE2") or 0.0
+        ltp_pe1 = self._ltp_cache.get("PE1") or 0.0
+        ltp_pe2 = self._ltp_cache.get("PE2") or 0.0
+
         if self._htf_source == "futures":
             ce_zone = _nearest_fut_zone("CE")
             pe_zone = _nearest_fut_zone("PE")
         elif self._htf_source == "spot":
             # Show option-level zones; show if either HTF 75-min OR cascade found direction
-            ce_zone = _best_zone_summary(self._opt_bear_zones) if self._opt_bear_zones else None
-            pe_zone = _best_zone_summary(self._opt_bull_zones) if self._opt_bull_zones else None
+            ce_zone = _best_zone_summary(self._opt_bear_zones, ltp_ce1) if self._opt_bear_zones else None
+            pe_zone = _best_zone_summary(self._opt_bull_zones, ltp_pe1) if self._opt_bull_zones else None
         else:
-            ce_zone = _best_zone_summary(self._htf_bear_zones)
-            pe_zone = _best_zone_summary(self._htf_bull_zones)
+            ce_zone = _best_zone_summary(self._htf_bear_zones, ltp_ce1)
+            pe_zone = _best_zone_summary(self._htf_bull_zones, ltp_pe1)
 
         contracts = {
             "CE1": {"strike": self._ce1_strike, "ltp": self._ltp_cache.get("CE1"),
                     "bars": len(self._bars_ce1), "zone": ce_zone},
             "CE2": {"strike": self._ce2_strike, "ltp": self._ltp_cache.get("CE2"),
-                    "bars": len(self._bars_ce2), "zone": _best_zone_summary(self._htf_bear_zones_2)},
+                    "bars": len(self._bars_ce2), "zone": _best_zone_summary(self._htf_bear_zones_2, ltp_ce2)},
             "PE1": {"strike": self._pe1_strike, "ltp": self._ltp_cache.get("PE1"),
                     "bars": len(self._bars_pe1), "zone": pe_zone},
             "PE2": {"strike": self._pe2_strike, "ltp": self._ltp_cache.get("PE2"),
-                    "bars": len(self._bars_pe2), "zone": _best_zone_summary(self._htf_bull_zones_2)},
+                    "bars": len(self._bars_pe2), "zone": _best_zone_summary(self._htf_bull_zones_2, ltp_pe2)},
         }
 
         # FUT zones: sort by distance from spot and return nearest 10 (not all 90)
