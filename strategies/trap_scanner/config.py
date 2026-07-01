@@ -16,14 +16,17 @@ _INDEX_CFG: Dict[str, dict] = {
     #            gap_skip_dte=10: gap-fired suppressed when DTE<=10 (GapWR=0% near expiry).
     # htf_source="option": zone detection + SL on OPTION premium chart.
     # sl_buf = pts below zone_low (option-premium units, ATM delta ~0.5).
+    # NIFTY MTF not yet backtest-optimised — keeping 15m default until sweep completes.
     "NIFTY":      {"step": 50,  "lot": 65,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 10.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
                    "htf_min_override": 150, "ltf_min_override": 5},
+    # BANKNIFTY 4-tier cascade: HTF=180m → MTF=15m → LTF=3m → Exec=3m
+    # Confirmed optimal from nse_cascade_backtest.py 18k-combo sweep (Apr-Jun 2026).
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
                    "sl_buf": 30.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
-                   "htf_min_override": 180, "ltf_min_override": 3,
+                   "htf_min_override": 180, "mtf_min_override": 15, "ltf_min_override": 3,
                    "gap_skip_dte": 10, "gap_thresh_default": 0.8},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
@@ -130,6 +133,17 @@ class ConfigMixin:
             self._htf_min = int(_htf_code)
         else:                                               # global admin fallback
             self._htf_min = int(ts_admin_cfg.get("htf_minutes", 75))
+        # MTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 15m
+        # MTF is the intermediate cascade gate between HTF zone and LTF entry trigger.
+        # BANKNIFTY: 15m (confirmed optimal, nse_cascade_backtest 18k-combo sweep).
+        _mtf_code = _def.get("mtf_min_override")
+        _mtf_adm  = _adm.get("mtf_minutes")
+        if _mtf_adm:
+            self._cascade_min = int(_mtf_adm)
+        elif _mtf_code:
+            self._cascade_min = int(_mtf_code)
+        else:
+            self._cascade_min = int(ts_admin_cfg.get("mtf_minutes", 15))
         # LTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 5m
         _ltf_code = _def.get("ltf_min_override")
         _ltf_adm  = _adm.get("ltf_minutes")

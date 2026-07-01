@@ -7218,7 +7218,7 @@ function amoTest() {
                       <!-- Status header -->
                       <div class="flex flex-wrap gap-2 text-xs font-mono mb-2">
                         <span :style="(bk&&bk.initialized)?'color:var(--t-green)':'color:var(--t-yellow)'"
-                              x-text="bk?(bk.initialized?(bk.intraday_mode?'INTRADAY CASCADE':'HTF READY'):'WARMING'):'Not started'"></span>
+                              x-text="bk?(bk.initialized?(bk.intraday_mode?(bk.cascade_ce&&bk.cascade_pe?'INTRADAY CASCADE':(bk.cascade_ce?'CE CASCADE':'PE CASCADE')):'HTF READY'):'WARMING'):'Not started'"></span>
                         <span x-show="bk&&bk.gap_fired" style="color:var(--t-red)">GAP</span>
                         <span style="color:var(--t-muted)" x-show="bk&&bk.spot_ltp" x-text="'Spot '+bk.spot_ltp"></span>
                         <span style="color:var(--t-muted)" x-show="bk&&bk.htf_atr>0" x-text="'ATR '+bk.htf_atr"></span>

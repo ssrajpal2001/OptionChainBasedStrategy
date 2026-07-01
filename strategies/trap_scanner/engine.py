@@ -68,7 +68,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._expiry_mode = str(expiry_mode or "current").strip()
 
         self._load_index_config(self._und, ts_admin_cfg)
-        self._cascade_min = 15   # intermediate TF for intraday cascade
+        # _cascade_min is set by _load_index_config from mtf_min_override / admin / default 15m
 
         self._running = False
         self._tasks: List[asyncio.Task] = []
