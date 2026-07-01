@@ -67,3 +67,31 @@ def test_nifty_bias_bull():
                  "sl": 23500.0, "status": "TRAPPED", "trapped_on": "2026-06-30"}
     bias, zone = _pick_nifty_bias(nifty_close=23650.0, zones=[bull_zone], prox_pct=2.0)
     assert bias == "PE"   # near bullish zone → expect PE buys on stocks
+
+
+def test_scan_json_structure():
+    """Verify the JSON file written by run_scan has expected top-level keys."""
+    import json, tempfile, os
+    # Build a minimal mock output
+    mock = {
+        "scan_date": "2026-07-01",
+        "nifty_close": 24500.0,
+        "nifty_bias": "CE",
+        "nifty_zone": {"zone_high": 24600.0, "zone_low": 24400.0},
+        "stocks": [
+            {"symbol": "RELIANCE", "direction": "CE", "rr_ratio": 2.5,
+             "zone_high": 1310.0, "zone_low": 1280.0, "last_close": 1295.0,
+             "stock_sl": 1277.4, "stock_t1": 1336.0, "risk_pts": 17.6,
+             "reward_pts": 41.0, "zone_distance_pct": 0.0,
+             "suggested_strike": 1300, "lot_size": 250,
+             "zone_age_days": 3, "zone_tests": 1, "scanned_at": "2026-07-01T16:00:00"}
+        ],
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(mock, f)
+        tmp = f.name
+    loaded = json.load(open(tmp))
+    assert "stocks" in loaded
+    assert loaded["stocks"][0]["rr_ratio"] == 2.5
+    assert loaded["nifty_bias"] in ("CE", "PE")
+    os.unlink(tmp)

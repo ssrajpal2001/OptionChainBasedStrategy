@@ -383,6 +383,11 @@ try:
         gap_dir_filter:  bool  = True        # True = on gap day trade only with gap direction
         require_gap:     bool  = True        # False = cascade on ALL days (no gap filter)
 
+    class _ScannerRunSchema(_PydanticBase):
+        nifty_prox_pct: float = 1.5
+        stock_prox_pct: float = 2.0
+        min_rr:         float = 1.5
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -4907,6 +4912,47 @@ class DashboardServer:
                     timeout=900.0,   # 15 min — one fetch, 5 width passes
                 )
                 return result
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        # ── FnO Stock Scanner ────────────────────────────────────────────────
+        @app.get("/api/scanner/fno", tags=["Scanner"])
+        async def get_fno_scan():
+            """Return today's FnO stock scan result (or most recent available)."""
+            import glob as _glob
+            import json as _json
+            scan_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+            pattern  = os.path.join(scan_dir, "fno_scan_*.json")
+            files    = sorted(_glob.glob(pattern), reverse=True)
+            if not files:
+                return {"ok": False, "error": "No scan file found — run the nightly scanner first"}
+            try:
+                with open(files[0]) as f:
+                    data = _json.load(f)
+                return {"ok": True, **data}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        @app.post("/api/scanner/run", tags=["Scanner"])
+        async def run_fno_scan(params: _ScannerRunSchema):
+            """Admin: trigger a fresh FnO scan synchronously (takes ~2-3 min)."""
+            try:
+                import sys as _sys
+                _scripts = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts")
+                if _scripts not in _sys.path:
+                    _sys.path.insert(0, _scripts)
+                from fno_stock_scanner import run_scan as _run_scan, _get_token as _tok
+                token = _tok()
+                if not token:
+                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
+                results = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _run_scan, token,
+                        params.nifty_prox_pct, params.stock_prox_pct, params.min_rr,
+                    ),
+                    timeout=900.0,
+                )
+                return {"ok": True, "count": len(results), "stocks": results}
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
