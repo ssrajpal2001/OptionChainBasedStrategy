@@ -1199,12 +1199,17 @@ document.addEventListener('alpine:init', () => {
         }
       } else if (msg.type === 'trap_tick') {
         // Real-time per-tick LTP update from trap scanner (bypasses 5s poll).
-        // Update the matching book's contract LTP directly so the UI shows live data.
-        const bk = this.trapScannerBooks.find(b => b.binding_id === msg.bid && b.underlying === msg.und);
-        if (bk && bk.contracts) {
-          const ct = bk.contracts.find(c => c.leg === msg.leg);
-          if (ct) ct.ltp = msg.ltp;
-        }
+        // Splice to force Alpine proxy to detect the mutation (direct ct.ltp= is not reactive
+        // once the object is found via .find() outside the proxy chain).
+        const bkIdx = this.trapScannerBooks.findIndex(b => b.binding_id === msg.bid && b.underlying === msg.und);
+        if (bkIdx < 0) return;
+        const bk = this.trapScannerBooks[bkIdx];
+        if (!bk || !bk.contracts) return;
+        const ctIdx = bk.contracts.findIndex(c => c.leg === msg.leg);
+        if (ctIdx < 0) return;
+        // Replace the contract object (new ref) so Alpine proxy detects the change
+        const updated = { ...bk.contracts[ctIdx], ltp: msg.ltp };
+        bk.contracts.splice(ctIdx, 1, updated);
       }
     },
 
