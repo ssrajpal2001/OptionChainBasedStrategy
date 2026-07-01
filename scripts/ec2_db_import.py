@@ -109,7 +109,13 @@ def import_db(export_file: str):
     cur = conn.cursor()
 
     _ensure_schema(cur)
+
+    # Wipe tables where stale rows would cause auth failures on restart.
+    # INSERT OR REPLACE only replaces matching PKs — rows NOT in the export survive otherwise.
+    for tbl in ("broker_bindings", "system_feeder_creds", "system_settings", "btc_live_config"):
+        cur.execute(f"DELETE FROM {tbl}")
     conn.commit()
+    print("[cleanup] Wiped broker_bindings, system_feeder_creds, system_settings, btc_live_config before import.")
 
     tables = data.get("tables", {})
     for table, rows in tables.items():

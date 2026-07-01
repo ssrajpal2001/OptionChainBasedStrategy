@@ -192,6 +192,30 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    def _log_settings_banner(self) -> None:
+        W = 72
+        border = "═" * W
+        adm = self._admin_cfg.get("per_index", {}).get(self._und, {})
+        source_label = {"option": "OPTION-premium", "futures": "FUTURES", "spot": "SPOT"}.get(self._htf_source, self._htf_source)
+        sq = self._sq_off_str or "none (24/7)"
+        cut = self._cutoff_str or "none (24/7)"
+        lines = [
+            f"╔{border}",
+            f"║ ACTIVE TRAP-SCANNER SETTINGS — {self._und} ({self._cid}/{self._bid})",
+            f"╠{border}",
+            f"║  HTF: {self._htf_min}m  |  LTF: {self._ltf_min}m  |  source: {source_label}",
+            f"║  SL buf: {self._sl_buf} pts below zone_low  |  Gap thresh: {self._gap_thresh}%",
+            f"║  Entry cutoff: {cut}  |  Square-off: {sq}",
+            f"║  Lots: {self._lot_mul} × {self._lot_size} = {self._lot_mul * self._lot_size} qty",
+            f"║  Profit floor: ₹{self._profit_floor:,.0f}  |  No-target-TSL: {self._no_target_tsl}  |  Scale-in: {self._scale_in_enabled}",
+            f"║  Gap-skip DTE ≤ {self._gap_skip_dte} (0=off)  |  Expiry mode: {self._expiry_mode}",
+            f"║  Per-index admin keys present: {sorted(adm.keys()) or 'none (all defaults from code)'}",
+            f"╚{border}",
+        ]
+        for line in lines:
+            self._log.info(line)
+            logger.info("TS[%s/%s/%s] %s", self._cid, self._bid, self._und, line)
+
     def start(self) -> None:
         loop = asyncio.get_event_loop()
         self._running = True
@@ -201,6 +225,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             loop.create_task(self._idx_tick_loop(),  name=f"ts_idx_{self._und}_{self._cid}"),
         ]
         logger.info("TrapScannerEngine[%s/%s/%s]: started.", self._cid, self._bid, self._und)
+        self._log_settings_banner()
 
     async def stop_async(self) -> None:
         self._running = False
