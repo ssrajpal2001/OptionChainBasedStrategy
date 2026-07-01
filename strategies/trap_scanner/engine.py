@@ -194,23 +194,23 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
     def _log_settings_banner(self) -> None:
         W = 72
-        border = "═" * W
+        border = "-" * W
         adm = self._admin_cfg.get("per_index", {}).get(self._und, {})
         source_label = {"option": "OPTION-premium", "futures": "FUTURES", "spot": "SPOT"}.get(self._htf_source, self._htf_source)
         sq = self._sq_off_str or "none (24/7)"
         cut = self._cutoff_str or "none (24/7)"
         lines = [
-            f"╔{border}",
-            f"║ ACTIVE TRAP-SCANNER SETTINGS — {self._und} ({self._cid}/{self._bid})",
-            f"╠{border}",
-            f"║  HTF: {self._htf_min}m  |  LTF: {self._ltf_min}m  |  source: {source_label}",
-            f"║  SL buf: {self._sl_buf} pts below zone_low  |  Gap thresh: {self._gap_thresh}%",
-            f"║  Entry cutoff: {cut}  |  Square-off: {sq}",
-            f"║  Lots: {self._lot_mul} × {self._lot_size} = {self._lot_mul * self._lot_size} qty",
-            f"║  Profit floor: ₹{self._profit_floor:,.0f}  |  No-target-TSL: {self._no_target_tsl}  |  Scale-in: {self._scale_in_enabled}",
-            f"║  Gap-skip DTE ≤ {self._gap_skip_dte} (0=off)  |  Expiry mode: {self._expiry_mode}",
-            f"║  Per-index admin keys present: {sorted(adm.keys()) or 'none (all defaults from code)'}",
-            f"╚{border}",
+            f"+{border}",
+            f"| ACTIVE TRAP-SCANNER SETTINGS -- {self._und} ({self._cid}/{self._bid})",
+            f"|{border}",
+            f"|  HTF: {self._htf_min}m  |  LTF: {self._ltf_min}m  |  source: {source_label}",
+            f"|  SL buf: {self._sl_buf} pts below zone_low  |  Gap thresh: {self._gap_thresh}%",
+            f"|  Entry cutoff: {cut}  |  Square-off: {sq}",
+            f"|  Lots: {self._lot_mul} x {self._lot_size} = {self._lot_mul * self._lot_size} qty",
+            f"|  Profit floor: {self._profit_floor:,.0f}  |  No-target-TSL: {self._no_target_tsl}  |  Scale-in: {self._scale_in_enabled}",
+            f"|  Gap-skip DTE <= {self._gap_skip_dte} (0=off)  |  Expiry mode: {self._expiry_mode}",
+            f"|  Per-index admin keys present: {sorted(adm.keys()) or 'none (all defaults from code)'}",
+            f"+{border}",
         ]
         for line in lines:
             self._log.info(line)
@@ -635,7 +635,12 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     }[bkey]
                     if not active:
                         continue
+                    prev_ltp = self._ltp_cache.get(bkey, 0)
                     self._ltp_cache[bkey] = ltp   # track live option LTP per leg
+                    # Re-evaluate cascade once the first real LTP arrives for a leg that was
+                    # 0 at day-init (option ticks arrive after startup HTF scan runs).
+                    if prev_ltp == 0 and ltp > 0 and self._intraday_mode and self._htf_atr_val > 0:
+                        self._check_zone_reachability()
                     closed = self._update_bucket(bkey, ltp, ts)
                     if closed:
                         bars_list.append(closed)

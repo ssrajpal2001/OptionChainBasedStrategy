@@ -532,16 +532,23 @@ async def _run_live(
     async def _memory_watchdog() -> None:
         """Log RSS every 30 min and force a GC cycle. Logs a WARNING if RSS > 2.5 GB
         so we know well before the 4 GB t3.medium limit is approached."""
-        import resource
+        try:
+            import resource
+            _have_resource = True
+        except ImportError:
+            _have_resource = False   # Windows — resource module not available
         while True:
             await asyncio.sleep(1800)   # 30 minutes
             gc.collect()
-            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
             bus_stats = {t: len(qs) for t, qs in bus._subs.items() if qs}
-            logger.info("MEMORY rss=%.0f MB | eventbus_queues=%s", rss_mb, bus_stats)
-            if rss_mb > 2500:
-                logger.warning("MEMORY HIGH: %.0f MB RSS — approaching 4 GB limit. "
-                               "Consider restarting after market hours.", rss_mb)
+            if _have_resource:
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                logger.info("MEMORY rss=%.0f MB | eventbus_queues=%s", rss_mb, bus_stats)
+                if rss_mb > 2500:
+                    logger.warning("MEMORY HIGH: %.0f MB RSS — approaching 4 GB limit. "
+                                   "Consider restarting after market hours.", rss_mb)
+            else:
+                logger.info("MEMORY gc done | eventbus_queues=%s", bus_stats)
 
     tasks += [
         asyncio.create_task(router.run(),               name="router"),
