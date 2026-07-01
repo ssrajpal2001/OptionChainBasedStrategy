@@ -24,7 +24,7 @@ _INDEX_CFG: Dict[str, dict] = {
                    "sl_buf": 30.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
                    "htf_min_override": 180, "ltf_min_override": 3,
-                   "gap_skip_dte": 10},
+                   "gap_skip_dte": 10, "gap_thresh_default": 0.8},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
@@ -115,9 +115,11 @@ class ConfigMixin:
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
         self._admin_cfg   = ts_admin_cfg
-        # Gap threshold: per-index admin override → global admin → hardcoded 0.5%
+        # Gap threshold priority:
+        #   per-index admin UI  →  hardcoded per-index default (e.g. BN=0.8%)  →  global admin  →  0.5%
+        _gap_code = _def.get("gap_thresh_default")
         self._gap_thresh = float(
-            _adm.get("gap_threshold_pct") or ts_admin_cfg.get("gap_threshold_pct", 0.5)
+            _adm.get("gap_threshold_pct") or _gap_code or ts_admin_cfg.get("gap_threshold_pct", 0.5)
         )
         # HTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 75m
         _htf_code = _def.get("htf_min_override")
