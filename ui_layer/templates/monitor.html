@@ -1675,8 +1675,9 @@ document.addEventListener('alpine:init', () => {
     },
     async selectAdminIndex(idx) {
       this.adminSelectedIndex = idx;
-      if (!this.indexConfig[idx]) await this.loadIndexConfig(idx);
-      else this._ensureIndexConfig(idx);
+      // Always fetch from API — _ensureIndexConfig may have pre-populated with defaults,
+      // masking saved config (e.g. curl POST followed by index switch showed stale defaults).
+      await this.loadIndexConfig(idx);
     },
     async loadIndexConfig(idx) {
       this.indexConfigLoading = true;
