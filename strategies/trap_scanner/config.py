@@ -156,3 +156,7 @@ class ConfigMixin:
         # Gap-skip near expiry: suppress gap-fired mode when DTE <= this value (0 = never skip).
         # Backtest: BANKNIFTY GapWR=0% when DTE<=10 → skip MTF intraday cascade near expiry.
         self._gap_skip_dte = int(_def.get("gap_skip_dte", 0))
+        # Zone entry buffer: LTP within this many pts of zone_high counts as "inside zone"
+        # for the _run_ltf_on price gate. Prevents missing entries when LTP briefly exceeds
+        # zone_high by a small amount before the scan runs. Default 5 pts (option premium units).
+        self._zone_entry_buf = float(_adm.get("zone_entry_buffer", ts_admin_cfg.get("zone_entry_buffer", 5.0)))

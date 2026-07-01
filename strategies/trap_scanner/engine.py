@@ -645,6 +645,11 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # 0 at day-init (option ticks arrive after startup HTF scan runs).
                     if prev_ltp == 0 and ltp > 0 and self._intraday_mode and self._htf_atr_val > 0:
                         self._check_zone_reachability()
+                    # TICK-LEVEL zone scan: run immediately on every tick when LTP is inside
+                    # an HTF zone (do not wait for 1-min candle close). This catches trigger
+                    # crossings that fall between two 1-min boundaries (e.g. 0.9 pts away miss).
+                    if not self._position and self._ltp_in_any_htf_zone(bkey):
+                        self._on_candle_close(label, ts)
                     closed = self._update_bucket(bkey, ltp, ts)
                     if closed:
                         bars_list.append(closed)

@@ -340,9 +340,10 @@ class ZonesMixin:
             all_zones = [z for z in self._htf_fut_zones if z["status"] == "TRAPPED"]
         else:
             all_zones = []
-        # Include a 2% buffer above zone_high: price may be in "waiting_retest" state
-        # (trapped above zone_high, coming back). Keep the 1-min gate alive until retest.
-        return any(z["zone_low"] <= ltp <= z["zone_high"] * 1.02 for z in all_zones)
+        # Include zone_entry_buf above zone_high: price may be slightly above zone_high
+        # due to tick-boundary gaps. Keep tick scan alive so the entry isn't missed.
+        buf = getattr(self, "_zone_entry_buf", 5.0)
+        return any(z["zone_low"] <= ltp <= z["zone_high"] + buf for z in all_zones)
 
     def _on_candle_close(self, leg: str, ts: datetime) -> None:
         # Futures-mode TSL: on every FUT candle close while in position,
@@ -538,13 +539,15 @@ class ZonesMixin:
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"
 
-            # Gate: price must be anywhere inside [zone_low, zone_high] — full zone valid.
-            # No 1/3 restriction: LTF traps (existing or new) anywhere in the zone are entry candidates.
+            # Gate: price must be inside [zone_low, zone_high + entry_buf].
+            # entry_buf prevents missing entries when LTP briefly exceeds zone_high by
+            # a few pts before the scan runs (tick-boundary gap). Default 5 pts.
             z_low  = zone["zone_low"]
             z_high = zone["zone_high"]
-            if current_price > 0 and (current_price < z_low or current_price > z_high):
+            entry_buf = getattr(self, "_zone_entry_buf", 5.0)
+            if current_price > 0 and (current_price < z_low or current_price > z_high + entry_buf):
                 # Update status so UI shows meaningful state instead of stale "watching"
-                new_status = "price_above_zone" if current_price > z_high else "price_below_zone"
+                new_status = "price_above_zone" if current_price > z_high + entry_buf else "price_below_zone"
                 if self._zone_ltf_status.get(uid) != new_status:
                     self._zone_ltf_status[uid] = new_status
                 continue
