@@ -197,30 +197,30 @@ def scan_nifty_bias(token: str, proximity_pct: float = NIFTY_BIAS_PROXIMITY_PCT)
 
 # ── Per-stock scan ────────────────────────────────────────────────────────────
 
-def _merge_cluster(best: dict, zones: list, cluster_pct: float = 3.0) -> tuple[float, float, dict]:
+def _merge_cluster(best: dict, zones: list) -> tuple:
     """
-    Merge all TRAPPED zones within cluster_pct% of `best` into one block.
-    Returns (cluster_high, cluster_low, representative_zone).
-    The representative zone keeps the best SL (highest for BEAR, lowest for BULL).
+    Merge TRAPPED zones that OVERLAP with `best` into one cluster block.
+    Overlap = zone boundaries intersect (zone_low of one <= zone_high of other).
+    Only merges same-kind zones (BEAR with BEAR, BULL with BULL).
+    Avoids the % threshold problem where 3% on ₹3000 = 90 pts and collapses R:R.
     """
-    ref_low  = best["zone_low"]
-    ref_high = best["zone_high"]
-    cluster  = [
-        z for z in zones
-        if z.get("status") == "TRAPPED"
-        and (abs(z["zone_low"]  - ref_low)  / max(ref_low,  1) * 100 <= cluster_pct
-          or abs(z["zone_high"] - ref_high) / max(ref_high, 1) * 100 <= cluster_pct)
-    ]
+    kind = best.get("kind")
+
+    def _overlaps(z: dict) -> bool:
+        return (z.get("kind") == kind
+                and z.get("status") == "TRAPPED"
+                and z["zone_low"]  <= best["zone_high"]
+                and best["zone_low"] <= z["zone_high"])
+
+    cluster = [z for z in zones if _overlaps(z)]
     if not cluster:
         cluster = [best]
+
     zh = max(z["zone_high"] for z in cluster)
     zl = min(z["zone_low"]  for z in cluster)
-    # Representative: zone whose sl (target) is most aggressive
-    if best.get("kind") == "BEAR":
-        rep = max(cluster, key=lambda z: z.get("sl", 0))   # highest sl = biggest T1
-    else:
-        rep = min(cluster, key=lambda z: z.get("sl", float("inf")))
-    rep = dict(rep)
+
+    # Use the most recently trapped zone as representative (freshest SL/target)
+    rep = dict(sorted(cluster, key=lambda z: z.get("trapped_on") or "")[-1])
     rep["zone_high"] = zh
     rep["zone_low"]  = zl
     return zh, zl, rep
@@ -246,9 +246,13 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
     if direction == "CE":
         sl = round(zl * (1 - SL_BUFFER_PCT / 100), 2)
         t1 = round(best.get("sl", zh * 1.05), 2)
+        if t1 <= last_close:   # zone already played out — T1 already reached
+            return None
     else:
         sl = round(zh * (1 + SL_BUFFER_PCT / 100), 2)
         t1 = round(best.get("sl", zl * 0.95), 2)
+        if t1 >= last_close:   # zone already played out — T1 already reached
+            return None
 
     rr = _compute_rr(entry=last_close, sl=sl, t1=t1, direction=direction)
     if rr["rr_ratio"] < min_rr:
@@ -318,7 +322,7 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
         # Pick nearest zone to last_close
         best = min(zones, key=lambda z: abs(last_close - (z["zone_high"] + z["zone_low"]) / 2))
         r = _build_result(symbol, lot_size, strike_step, last_close,
-                          direction, best, all_zones, stock_prox_pct, min_rr)
+                          direction, best, zones, stock_prox_pct, min_rr)
         if r:
             results.append(r)
     return results
