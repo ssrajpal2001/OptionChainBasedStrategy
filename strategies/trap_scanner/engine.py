@@ -650,6 +650,11 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # crossings that fall between two 1-min boundaries (e.g. 0.9 pts away miss).
                     if not self._position and self._ltp_in_any_htf_zone(bkey):
                         self._on_candle_close(label, ts)
+                    # Push real-time LTP to UI via TRAP_TICK (bypasses 2s heartbeat poll).
+                    self._bus.publish(Topic.TRAP_TICK, {
+                        "cid": self._cid, "bid": self._bid, "und": self._und,
+                        "leg": bkey, "ltp": ltp,
+                    })
                     closed = self._update_bucket(bkey, ltp, ts)
                     if closed:
                         bars_list.append(closed)

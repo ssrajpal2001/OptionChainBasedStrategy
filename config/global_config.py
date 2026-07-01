@@ -197,6 +197,7 @@ class Topic:
     SYSTEM_EVENT     = "system_event"
     EXIT_AUDIT       = "exit_audit"    # per-tick exit-criteria validation stream (granular UI)
     POSITION_UPDATE  = "position_update"  # strategy book position snapshot (entry/exit/roll)
+    TRAP_TICK        = "trap_tick"     # trap scanner per-tick telemetry (real-time LTP + zone status)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

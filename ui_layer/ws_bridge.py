@@ -68,13 +68,14 @@ class WsBridge:
         self._stats_providers: Dict[str, Callable[[], Any]] = {}
 
         # Subscribe once — queues are drained by independent sub-loops
-        self._tick_q   = bus.subscribe(Topic.INDEX_TICK)
-        self._snap_q   = bus.subscribe(Topic.MATRIX_SNAPSHOT)
-        self._fill_q   = bus.subscribe(Topic.ORDER_FILL)
-        self._sys_q    = bus.subscribe(Topic.SYSTEM_EVENT)
-        self._option_q = bus.subscribe(Topic.OPTION_TICK)
-        self._audit_q  = bus.subscribe(Topic.EXIT_AUDIT)
-        self._pos_q    = bus.subscribe(Topic.POSITION_UPDATE)
+        self._tick_q      = bus.subscribe(Topic.INDEX_TICK)
+        self._snap_q      = bus.subscribe(Topic.MATRIX_SNAPSHOT)
+        self._fill_q      = bus.subscribe(Topic.ORDER_FILL)
+        self._sys_q       = bus.subscribe(Topic.SYSTEM_EVENT)
+        self._option_q    = bus.subscribe(Topic.OPTION_TICK)
+        self._audit_q     = bus.subscribe(Topic.EXIT_AUDIT)
+        self._pos_q       = bus.subscribe(Topic.POSITION_UPDATE)
+        self._trap_tick_q = bus.subscribe(Topic.TRAP_TICK)
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
@@ -162,6 +163,7 @@ class WsBridge:
                 self._option_loop(),
                 self._exit_audit_loop(),
                 self._position_update_loop(),
+                self._trap_tick_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -437,6 +439,19 @@ class WsBridge:
                     await self.broadcast(ev)
             except Exception as exc:
                 logger.debug("WsBridge._position_update_loop: %s", exc)
+
+    async def _trap_tick_loop(self) -> None:
+        """Forward trap scanner per-tick LTP updates to the UI in real time (no 2s poll delay)."""
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(self._trap_tick_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                if isinstance(ev, dict):
+                    await self.broadcast({"type": "trap_tick", **ev})
+            except Exception as exc:
+                logger.debug("WsBridge._trap_tick_loop: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
         """Broadcast worker stats and client summaries every HEARTBEAT_INTERVAL seconds."""

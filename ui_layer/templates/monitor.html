@@ -1197,6 +1197,14 @@ document.addEventListener('alpine:init', () => {
         if (this.screen === 'client' && (this.clientMenu === 'positions' || this.clientMenu === 'dashboard')) {
           this.loadClientPositions();
         }
+      } else if (msg.type === 'trap_tick') {
+        // Real-time per-tick LTP update from trap scanner (bypasses 5s poll).
+        // Update the matching book's contract LTP directly so the UI shows live data.
+        const bk = this.trapScannerBooks.find(b => b.binding_id === msg.bid && b.underlying === msg.und);
+        if (bk && bk.contracts) {
+          const ct = bk.contracts.find(c => c.leg === msg.leg);
+          if (ct) ct.ltp = msg.ltp;
+        }
       }
     },
 
