@@ -657,7 +657,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     if self._tt_pub_count <= 5 or self._tt_pub_count % 200 == 0:
                         self._log.info("TRAP_TICK #%d: %s ltp=%.1f bid=%s",
                                        self._tt_pub_count, bkey, ltp, self._bid)
-                    self._bus.publish(Topic.TRAP_TICK, {
+                    await self._bus.publish(Topic.TRAP_TICK, {
                         "cid": self._cid, "bid": self._bid, "und": self._und,
                         "leg": bkey, "ltp": ltp,
                     })
