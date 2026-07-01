@@ -78,6 +78,8 @@ class SellStraddleConfig:
     guardrail_roc_target: float
     guardrail_roc_stoploss: float
 
+    itm_pair_gate_enabled: bool
+
 
 def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
     """Load and validate the sell_straddle section for ``underlying``."""
@@ -166,6 +168,8 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
     guardrail_roc_target = float(_roc_g.get("target", -20.0))
     guardrail_roc_stoploss = float(_roc_g.get("stoploss", 10.0))
 
+    itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", False))
+
     return SellStraddleConfig(
         entry_start=entry_start,
         entry_cutoff=entry_cutoff,
@@ -206,6 +210,7 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
         guardrail_roc_length=guardrail_roc_length,
         guardrail_roc_target=guardrail_roc_target,
         guardrail_roc_stoploss=guardrail_roc_stoploss,
+        itm_pair_gate_enabled=itm_pair_gate_enabled,
     )
 
 
@@ -264,6 +269,7 @@ class ConfigMixin:
         self._guardrail_roc_length = cfg.guardrail_roc_length
         self._guardrail_roc_target = cfg.guardrail_roc_target
         self._guardrail_roc_stoploss = cfg.guardrail_roc_stoploss
+        self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
 
     def reconfigure(self) -> None:
         self._load_thresholds()

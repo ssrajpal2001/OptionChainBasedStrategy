@@ -376,6 +376,10 @@ class ExitMixin:
                 await self._close_position("exit_rules")
                 return
 
+        # 11. ITM PAIR GATE (armed-watching phase: cumulative was ≤0 at rollover time)
+        if getattr(self, "_itm_gate_armed", False):
+            await self._check_itm_pair_gate(now)
+
     # ── Close / leg helpers ───────────────────────────────────────────────────
 
     def discard_position_after_squareoff(self, reason: str) -> None:
@@ -465,7 +469,8 @@ class ExitMixin:
 
         self._position = None
         self._persist()
-        self._apply_sl_cooldown()
+        if reason != "itm_pair_gate_profit":
+            self._apply_sl_cooldown()
 
     async def _close_leg(self, side: str, reason: str, now: datetime) -> float:
         """Close ONE leg (publish EXIT legs=[side]); book that leg's P&L into the session total."""

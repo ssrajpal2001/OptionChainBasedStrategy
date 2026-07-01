@@ -1601,6 +1601,7 @@ document.addEventListener('alpine:init', () => {
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
         guardrail_pnl: { enabled: false, target_pts: 0, stoploss_pts: 0 },
+        itm_pair_gate_enabled: false,
         ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
@@ -1655,6 +1656,7 @@ document.addEventListener('alpine:init', () => {
       if (ss.ratio_exit.max_entry_ratio === undefined) ss.ratio_exit.max_entry_ratio = 0;
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
+      if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = false;
       // Migrate legacy tf-multiplier → direct minutes (× 5) if the new field is absent.
       if (ss.sl_cooldown_minutes === undefined)
         ss.sl_cooldown_minutes = (ss.sl_cooldown_tf_multiplier !== undefined ? ss.sl_cooldown_tf_multiplier * 5 : 5);
@@ -2648,6 +2650,7 @@ document.addEventListener('alpine:init', () => {
       if (s === 'exit_rules') return 'Exit rules hit';
       if (s === 'guardrail_pnl_sl') return 'PnL guardrail SL';
       if (s.startsWith('guardrail_roc')) return 'ROC guardrail';
+      if (s === 'itm_pair_gate_profit') return 'ITM pair gate → re-entry';
       return s;
     },
 
@@ -4257,6 +4260,22 @@ function amoTest() {
                            x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.stoploss_pts">
                   </div>
                 </div>
+              </div>
+
+              <!-- ITM Pair Gate -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ITM PAIR GATE
+                    <span style="color:var(--t-muted);font-weight:400"> — close + re-enter when both legs go ITM with cumulative profit</span>
+                  </span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.itm_pair_gate_enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs"
+                          x-text="indexConfig[adminSelectedIndex].sell_straddle.itm_pair_gate_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.itm_pair_gate_enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <p class="font-mono text-xs" style="color:var(--t-muted)">After any rollover: if CE &amp; PE are both ITM and cumulative P&amp;L &gt; 0 → close both, re-enter fresh. If cumulative ≤ 0 → watch each eval cycle until profit arrives, then close + re-enter.</p>
               </div>
 
               <!-- Ratio Exit -->

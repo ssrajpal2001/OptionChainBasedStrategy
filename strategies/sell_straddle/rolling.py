@@ -94,6 +94,7 @@ class RollingMixin:
             except Exception:
                 pass
         self._persist()
+        await self._check_itm_pair_gate(now)
 
     async def _single_side_roll_to(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Partial roll: close one side and open a pre-selected candidate strike on that side."""
@@ -166,6 +167,66 @@ class RollingMixin:
         if pos.tsl_high_lock_rs > 0 and profit_rs < pos.tsl_high_lock_rs:
             return True
         return False
+
+    def _both_itm(self) -> bool:
+        """Return True if BOTH open legs are ITM relative to current spot."""
+        pos = self._position
+        if not pos or pos.status != "open":
+            return False
+        spot = self._spot
+        if not spot:
+            return False
+        ce_itm = float(pos.ce_leg.strike) < spot   # CE ITM = strike below spot
+        pe_itm = float(pos.pe_leg.strike) > spot   # PE ITM = strike above spot
+        return ce_itm and pe_itm
+
+    def _cumulative_pnl_pts(self) -> float:
+        """Today's booked P&L (all closed legs) + current running P&L in option pts."""
+        running = self._position.unrealized_pnl if self._position else 0.0
+        return self._session_realized_pnl_pts + running
+
+    async def _check_itm_pair_gate(self, now: datetime) -> None:
+        """
+        Called after every rollover completes.
+        If both legs are ITM AND cumulative P&L > 0 → close both and re-enter via re-entry.
+        If both legs are ITM AND cumulative P&L <= 0 → arm the watching flag; the eval
+        loop (_check_exits) will call this every cycle until profit arrives or a normal
+        exit fires first.
+        Does nothing if the toggle is OFF or the pair is not both ITM.
+        """
+        if not getattr(self, "_itm_pair_gate_enabled", False):
+            return
+        if not self._both_itm():
+            self._itm_gate_armed = False
+            return
+
+        pos = self._position
+        if not pos or pos.status != "open":
+            self._itm_gate_armed = False
+            return
+
+        cumulative = self._cumulative_pnl_pts()
+        ce_s = int(pos.ce_leg.strike)
+        pe_s = int(pos.pe_leg.strike)
+
+        if cumulative > 0:
+            logger.info(
+                "SellStraddle[%s]: ITM-PAIR GATE — both legs ITM (CE%d/PE%d) spot=%.0f "
+                "cumulative=%.2f pts > 0 → closing both and restarting.",
+                self._underlying, ce_s, pe_s, self._spot, cumulative,
+            )
+            self._itm_gate_armed = False
+            await self._close_position("itm_pair_gate_profit")
+            # No cooldown — restart immediately via re-entry (not beginning).
+            self._beginning_failed = True   # force re-entry path on next entry attempt
+        else:
+            if not getattr(self, "_itm_gate_armed", False):
+                self._itm_gate_armed = True
+                logger.info(
+                    "SellStraddle[%s]: ITM-PAIR GATE ARMED — both legs ITM (CE%d/PE%d) spot=%.0f "
+                    "cumulative=%.2f pts ≤ 0. Watching for profit before closing.",
+                    self._underlying, ce_s, pe_s, self._spot, cumulative,
+                )
 
     def _apply_sl_cooldown(self) -> None:
         """Block re-entry for the configured number of MINUTES after a full exit."""

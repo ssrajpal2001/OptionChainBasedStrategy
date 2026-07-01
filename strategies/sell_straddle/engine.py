@@ -84,6 +84,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._strike_prem: Dict[Tuple[int, str], dict] = {}
         self._prev_atp_closed: Dict[Tuple[int, str], float] = {}
         self._beginning_failed: bool = False
+        self._itm_gate_armed: bool = False
         self._ltp_target: float = 0.0
 
         self._guardrail_pnl_enabled: bool = False
