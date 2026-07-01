@@ -4787,7 +4787,16 @@ class DashboardServer:
             existing.update(filtered)
             await _srv._client_db.set_setting("trap_scanner", json.dumps(existing))
             logger.info("TrapScanner admin settings saved: %s", filtered)
-            return {"ok": True, "message": "Trap scanner settings saved."}
+            # Hot-reload into all running books immediately (no restart needed)
+            mgr = getattr(_srv, "_trap_scanner_manager", None)
+            reloaded = 0
+            if mgr is not None and hasattr(mgr, "reload_admin_config"):
+                await asyncio.to_thread(mgr.reload_admin_config)
+                reloaded = len(mgr.books)
+            msg = f"Trap scanner settings saved."
+            if reloaded:
+                msg += f" Applied to {reloaded} running book(s) immediately."
+            return {"ok": True, "message": msg}
 
         @app.get("/api/admin/trap_scanner/status", tags=["Admin"])
         async def api_trap_scanner_status(_: dict = Depends(_require_admin)):

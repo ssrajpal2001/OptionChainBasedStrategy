@@ -1719,11 +1719,32 @@ document.addEventListener('alpine:init', () => {
       } catch (e) {}
     },
 
+    // Returns the per-index admin slot for the currently selected index,
+    // auto-creating it so x-model can write directly into the reactive object.
+    _tsIdx() {
+      if (!this.trapScannerCfg.per_index) this.trapScannerCfg.per_index = {};
+      if (!this.trapScannerCfg.per_index[this.adminSelectedIndex])
+        this.trapScannerCfg.per_index[this.adminSelectedIndex] = {};
+      return this.trapScannerCfg.per_index[this.adminSelectedIndex];
+    },
+
     async saveTrapScannerCfg() {
       this.trapScannerSaveMsg = 'Saving…'; this.trapScannerSaveOk = null;
       try {
+        // Strip empty-string fields from per_index before saving so they don't
+        // shadow hardcoded defaults (e.g. blank HTF means "use code default").
+        const payload = JSON.parse(JSON.stringify(this.trapScannerCfg));
+        if (payload.per_index) {
+          for (const idx of Object.keys(payload.per_index)) {
+            const obj = payload.per_index[idx];
+            for (const k of Object.keys(obj)) {
+              if (obj[k] === '' || obj[k] === null) delete obj[k];
+            }
+            if (Object.keys(obj).length === 0) delete payload.per_index[idx];
+          }
+        }
         const r = await this._fetch('/api/admin/trap_scanner/settings', {
-          method: 'POST', json: this.trapScannerCfg
+          method: 'POST', json: payload
         });
         if (!r) throw new Error('No response');
         const d = await r.json();
@@ -4652,55 +4673,82 @@ function amoTest() {
         <div class="rounded border p-3" style="border-color:var(--t-border)">
           <div class="font-display text-xs font-bold tracking-widest mb-2" style="color:var(--t-muted)">
             PER-INDEX OVERRIDE — <span x-text="adminSelectedIndex"></span>
-            <span class="ml-2 text-xs font-normal" style="color:var(--t-muted)">(blank = use global defaults)</span>
+            <span class="ml-2 text-xs font-normal" style="color:var(--t-muted)">(blank = use hardcoded defaults for this index)</span>
           </div>
           <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+            <!-- HTF / LTF per-index override — takes priority over both global AND hardcoded _INDEX_CFG -->
             <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Entry Cutoff (IST, HH:MM)</span>
-              <input type="text" class="t-input" placeholder="13:45"
-                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].entry_cutoff||'')">
+              <span style="color:var(--t-yellow);font-weight:700">HTF Minutes (overrides code default)</span>
+              <input type="number" min="15" max="480" class="t-input" placeholder="e.g. 180"
+                     x-model.number="_tsIdx().htf_minutes">
+              <span style="color:var(--t-dim);font-size:10px">NIFTY default=150 · BANKNIFTY default=180 · blank=use code default</span>
             </label>
             <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Square Off (IST, HH:MM)</span>
-              <input type="text" class="t-input" placeholder="14:00"
-                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].sq_off_time||'')">
+              <span style="color:var(--t-yellow);font-weight:700">LTF Minutes (overrides code default)</span>
+              <input type="number" min="1" max="30" class="t-input" placeholder="e.g. 3"
+                     x-model.number="_tsIdx().ltf_minutes">
+              <span style="color:var(--t-dim);font-size:10px">NIFTY default=5 · BANKNIFTY default=3 · blank=use code default</span>
             </label>
             <label class="flex flex-col gap-1">
               <span style="color:var(--t-muted)">SL Buffer (pts below zone_low)</span>
-              <input type="number" step="0.5" class="t-input" placeholder="2.0"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].sl_buffer||2.0)">
+              <input type="number" step="0.5" class="t-input" placeholder="e.g. 30"
+                     x-model.number="_tsIdx().sl_buffer">
             </label>
             <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Gap ITM Near (pts, no-zone pivot)</span>
-              <input type="number" class="t-input" placeholder="200"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].gap_itm_near||0)">
+              <span style="color:var(--t-muted)">Entry Cutoff (IST, HH:MM)</span>
+              <input type="text" class="t-input" placeholder="15:10"
+                     x-model="_tsIdx().entry_cutoff">
             </label>
             <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Gap ITM Far (pts, fallback)</span>
+              <span style="color:var(--t-muted)">Square Off (IST, HH:MM)</span>
+              <input type="text" class="t-input" placeholder="15:20"
+                     x-model="_tsIdx().sq_off_time">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Gap Threshold % (this index only)</span>
+              <input type="number" min="0.1" max="5" step="0.1" class="t-input" placeholder="e.g. 0.8"
+                     x-model.number="_tsIdx().gap_threshold_pct">
+            </label>
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Gap ITM Near (pts)</span>
               <input type="number" class="t-input" placeholder="400"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].gap_itm_far||0)">
+                     x-model.number="_tsIdx().gap_itm_near">
             </label>
-            <label class="flex flex-col gap-1 col-span-2">
-              <span style="color:var(--t-muted)">Entry Window (CrudeOil W2 only — leave blank for other indices)</span>
-              <input type="text" class="t-input" placeholder='e.g. "18:45-19:15"'
-                     x-model="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].entry_window_str||'')">
+            <label class="flex flex-col gap-1">
+              <span style="color:var(--t-muted)">Gap ITM Far (pts)</span>
+              <input type="number" class="t-input" placeholder="800"
+                     x-model.number="_tsIdx().gap_itm_far">
             </label>
             <label class="flex flex-col gap-1 col-span-2">
               <span style="color:var(--t-yellow);font-weight:700">Profit Floor ₹ (0 = off)</span>
               <input type="number" min="0" step="1000" class="t-input" placeholder="0"
-                     x-model.number="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].profit_floor??0)">
-              <span style="color:var(--t-dim);font-size:10px">Lock ₹N total once hit · exit at that tick if P&L drops back below · 12000 = ₹12K floor</span>
+                     x-model.number="_tsIdx().profit_floor">
+              <span style="color:var(--t-dim);font-size:10px">Lock ₹N total once hit · exit at that tick if P&L drops back below</span>
+            </label>
+            <label class="flex flex-col gap-1 col-span-2">
+              <span style="color:var(--t-muted)">Entry Window (CrudeOil only — blank for equity indices)</span>
+              <input type="text" class="t-input" placeholder='e.g. 18:45-19:15'
+                     x-model="_tsIdx().entry_window_str">
             </label>
             <label class="flex flex-col gap-1 col-span-2">
               <span style="color:var(--t-yellow);font-weight:700">No Target / No TSL</span>
               <div class="flex items-center gap-2 mt-1">
                 <input type="checkbox" class="accent-[var(--t-yellow)]"
-                       :checked="(trapScannerCfg.per_index||{})[adminSelectedIndex]&&(trapScannerCfg.per_index[adminSelectedIndex].no_target_tsl??false)"
-                       @change="if(!trapScannerCfg.per_index) trapScannerCfg.per_index={}; if(!trapScannerCfg.per_index[adminSelectedIndex]) trapScannerCfg.per_index[adminSelectedIndex]={}; trapScannerCfg.per_index[adminSelectedIndex].no_target_tsl=$event.target.checked">
+                       :checked="_tsIdx().no_target_tsl||false"
+                       @change="_tsIdx().no_target_tsl=$event.target.checked">
                 <span style="color:var(--t-dim);font-size:10px">Skip T1 half-exit + TSL · Exit only: SL · Opp-side signal · Floor · EOD</span>
               </div>
             </label>
-            <!-- Expiry selection moved to client deployment card -->
+            <label class="flex flex-col gap-1 col-span-2">
+              <span style="color:var(--t-yellow);font-weight:700">Scale-in Mode</span>
+              <div class="flex items-center gap-2 mt-1">
+                <input type="checkbox" class="accent-[var(--t-yellow)]"
+                       :checked="_tsIdx().scale_in_enabled||false"
+                       @change="_tsIdx().scale_in_enabled=$event.target.checked">
+                <span style="color:var(--t-dim);font-size:10px">1 lot probe → 3 lot add → rest on 1m breach</span>
+              </div>
+            </label>
+            <!-- Expiry selection is per-client deployment card, not global admin -->
           </div>
         </div>
 

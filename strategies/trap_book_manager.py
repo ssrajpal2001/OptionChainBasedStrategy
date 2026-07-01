@@ -139,5 +139,15 @@ class TrapBookManager(StrategyBookManager):
             logger.info("TrapBookManager: expiry_mode applied for %s/%s/%s → %s",
                         client_id, binding_id, underlying, expiry_mode)
 
+    def reload_admin_config(self) -> None:
+        """Hot-reload trap_scanner admin settings from DB into all running books.
+        Called after POST /api/admin/trap_scanner/settings so changes apply immediately
+        without restarting the bot or re-deploying books."""
+        ts_cfg = self._ts_admin_cfg()
+        for eng in self.books:
+            eng._load_index_config(eng._und, ts_cfg)
+            eng._log_settings_banner()
+        logger.info("TrapBookManager: admin config reloaded into %d running books.", len(self.books))
+
     def telemetry_all(self) -> list:
         return [e.telemetry_snapshot() for e in self.books]

@@ -114,14 +114,29 @@ class ConfigMixin:
         self._scale_in_enabled = bool(_adm.get("scale_in_enabled", False))
         self._exchange   = _def["exchange"]
         self._htf_source = _def["htf_source"]   # "spot" or "futures"
-        self._gap_thresh  = float(ts_admin_cfg.get("gap_threshold_pct", 0.5))
         self._admin_cfg   = ts_admin_cfg
-        # HTF: per-index override (CrudeOil=30m, BTC/ETH=4h) else admin config (default 75m)
-        _htf_override     = _def.get("htf_min_override")
-        self._htf_min     = _htf_override if _htf_override else int(ts_admin_cfg.get("htf_minutes", 75))
-        # LTF: per-index override (BTC/ETH=30m) else admin config (default 5m)
-        _ltf_override     = _def.get("ltf_min_override")
-        self._ltf_min     = _ltf_override if _ltf_override else int(ts_admin_cfg.get("ltf_minutes", 5))
+        # Gap threshold: per-index admin override → global admin → hardcoded 0.5%
+        self._gap_thresh = float(
+            _adm.get("gap_threshold_pct") or ts_admin_cfg.get("gap_threshold_pct", 0.5)
+        )
+        # HTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 75m
+        _htf_code = _def.get("htf_min_override")
+        _htf_adm  = _adm.get("htf_minutes")
+        if _htf_adm:                                        # admin per-index always wins
+            self._htf_min = int(_htf_adm)
+        elif _htf_code:                                     # hardcoded per-index (CrudeOil/BTC)
+            self._htf_min = int(_htf_code)
+        else:                                               # global admin fallback
+            self._htf_min = int(ts_admin_cfg.get("htf_minutes", 75))
+        # LTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 5m
+        _ltf_code = _def.get("ltf_min_override")
+        _ltf_adm  = _adm.get("ltf_minutes")
+        if _ltf_adm:
+            self._ltf_min = int(_ltf_adm)
+        elif _ltf_code:
+            self._ltf_min = int(_ltf_code)
+        else:
+            self._ltf_min = int(ts_admin_cfg.get("ltf_minutes", 5))
         # Gap-skip near expiry: suppress gap-fired mode when DTE <= this value (0 = never skip).
         # Backtest: BANKNIFTY GapWR=0% when DTE<=10 → skip MTF intraday cascade near expiry.
         self._gap_skip_dte = int(_def.get("gap_skip_dte", 0))
