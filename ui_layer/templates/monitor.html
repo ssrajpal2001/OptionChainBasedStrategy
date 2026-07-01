@@ -1012,6 +1012,7 @@ document.addEventListener('alpine:init', () => {
     /* Hydrate all admin panels — called right after login or session restore */
     _hydrateAdminOnLogin() {
       this.loadFeederStatus(true);   // sync toggle from DB only on login
+      this.loadStockScan();
       this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
@@ -5756,7 +5757,7 @@ function amoTest() {
           <!-- Footer meta -->
           <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border);color:var(--t-muted)">
             <span x-text="'Age: ' + (s.zone_age_days||0) + 'd  |  Tests: ' + (s.zone_tests||0)"></span>
-            <span style="color:var(--t-green);font-size:0.65rem">NIFTY &#x2713;</span>
+            <span x-text="'NIFTY: ' + (s.nifty_bias || '—')"></span>
           </div>
         </div>
       </template>
