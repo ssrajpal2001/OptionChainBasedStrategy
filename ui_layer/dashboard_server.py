@@ -4989,7 +4989,7 @@ class DashboardServer:
             return {"ok": True}
 
         @app.post("/api/scanner/run", tags=["Scanner"])
-        async def run_fno_scan(params: _ScannerRunSchema):
+        async def run_fno_scan(params: _ScannerRunSchema, _: dict = Depends(_require_admin)):
             """Admin: trigger a fresh FnO scan synchronously (takes ~2-3 min)."""
             try:
                 import sys as _sys

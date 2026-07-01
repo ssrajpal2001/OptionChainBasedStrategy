@@ -518,7 +518,7 @@ async def _run_live(
     # FnO Stock Monitor — intraday alert engine driven off the nightly scan file
     try:
         from strategies.fno_stock_monitor import FnoStockMonitor
-        fno_monitor = FnoStockMonitor(bus, cfg, client_db)
+        fno_monitor = FnoStockMonitor(bus, cfg, _shared_client_db)
         fno_monitor.warm_start()
         if feeder:
             fno_monitor.set_feeder(feeder)
