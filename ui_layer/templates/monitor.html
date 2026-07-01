@@ -1478,10 +1478,12 @@ document.addEventListener('alpine:init', () => {
     async loadStockScan() {
       try {
         const r = await this._fetch('/api/scanner/fno');
-        if (r && r.ok) {
-          this.stockScan = { ...r, loaded: true, error: '' };
+        if (!r) return;
+        const d = await r.json();
+        if (d && d.ok) {
+          this.stockScan = { ...d, loaded: true, error: '' };
         } else {
-          this.stockScan = { ...this.stockScan, loaded: true, error: (r && r.error) || 'Scan file not found' };
+          this.stockScan = { ...this.stockScan, loaded: true, error: (d && d.error) || 'Scan file not found' };
         }
       } catch(e) {
         this.stockScan = { ...this.stockScan, loaded: true, error: String(e) };
@@ -1494,8 +1496,9 @@ document.addEventListener('alpine:init', () => {
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({ nifty_prox_pct: 1.5, stock_prox_pct: 2.0, min_rr: 1.5 })
         });
-        if (r && r.ok) { await this.loadStockScan(); }
-        else { this.stockScan.error = (r && r.error) || 'Scan failed'; }
+        const d = r ? await r.json() : null;
+        if (d && d.ok) { await this.loadStockScan(); }
+        else { this.stockScan.error = (d && d.error) || 'Scan failed'; }
       } catch(e) { this.stockScan.error = String(e); }
     },
 
