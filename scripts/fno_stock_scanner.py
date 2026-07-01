@@ -27,7 +27,7 @@ NIFTY_BIAS_PROXIMITY_PCT = 1.5   # tune via --optimize
 STOCK_ZONE_PROXIMITY_PCT = 2.0   # tune via --optimize
 SL_BUFFER_PCT            = 0.2
 MIN_RR                   = 1.5
-D1_LOOKBACK_DAYS         = 60
+D1_LOOKBACK_DAYS         = 365
 PARALLEL_WORKERS         = 10
 
 DB_PATH       = os.path.join(_ROOT, "data", "clients.db")
@@ -309,7 +309,7 @@ def run_optimize(token: str) -> None:
     from itertools import product as _product
 
     end_dt   = date.today() - timedelta(days=1)
-    start_dt = end_dt - timedelta(days=180)
+    start_dt = end_dt - timedelta(days=365)
 
     print("Fetching NIFTY D1 bars for optimize window...")
     nifty_df = _fetch_daily(NIFTY_KEY, token, days=200)
