@@ -384,9 +384,10 @@ try:
         require_gap:     bool  = True        # False = cascade on ALL days (no gap filter)
 
     class _ScannerRunSchema(_PydanticBase):
-        nifty_prox_pct: float = 1.5
-        stock_prox_pct: float = 2.0
-        min_rr:         float = 1.5
+        nifty_prox_pct:  float = 1.5
+        stock_prox_pct:  float = 2.0
+        min_rr:          float = 1.5
+        use_nifty_bias:  bool  = False
 
 except ImportError:
     _HAS_FASTAPI = False
@@ -4945,14 +4946,15 @@ class DashboardServer:
                 token = _tok()
                 if not token:
                     return {"ok": False, "error": "No Upstox token — connect feeder first"}
-                results = await asyncio.wait_for(
+                output = await asyncio.wait_for(
                     asyncio.to_thread(
                         _run_scan, token,
                         params.nifty_prox_pct, params.stock_prox_pct, params.min_rr,
+                        params.use_nifty_bias,
                     ),
                     timeout=900.0,
                 )
-                return {"ok": True, "count": len(results), "stocks": results}
+                return {"ok": True, **output}
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 

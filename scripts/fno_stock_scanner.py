@@ -28,6 +28,8 @@ STOCK_ZONE_PROXIMITY_PCT = 2.0   # tune via --optimize
 SL_BUFFER_PCT            = 0.2
 MIN_RR                   = 1.5
 D1_LOOKBACK_DAYS         = 365
+MAX_ZONE_AGE_DAYS        = 15    # ignore zones older than this
+TOP_N_PER_DIRECTION      = 5     # max CE results + max PE results
 PARALLEL_WORKERS         = 10
 
 DB_PATH       = os.path.join(_ROOT, "data", "clients.db")
@@ -114,6 +116,41 @@ def _zone_age_days(trapped_on: str) -> int:
     except Exception:
         return 0
 
+def _zone_date_str(trapped_on: str) -> str:
+    """Return human date string e.g. 'Jun 25'."""
+    if not trapped_on:
+        return ""
+    try:
+        d = date.fromisoformat(str(trapped_on)[:10])
+        return d.strftime("%b %d").lstrip("0")
+    except Exception:
+        return ""
+
+def _approaching(last_close: float, zone_low: float, zone_high: float,
+                 direction: str, prox_pct: float) -> bool:
+    """
+    True only when price is approaching from the CORRECT side.
+    CE (bear zone, bears trapped, price should go UP):
+        price is BELOW zone_low (approaching upward) or just inside zone.
+    PE (bull zone, bulls trapped, price should go DOWN):
+        price is ABOVE zone_high (approaching downward) or just inside zone.
+    Also accepts price already inside the zone (already entered).
+    """
+    if zone_low <= last_close <= zone_high:
+        return True                          # already inside — valid
+    if direction == "CE":
+        # price must be below zone, approaching from below
+        if last_close >= zone_low:
+            return False                     # price is above zone — wrong side
+        pct = (zone_low - last_close) / zone_low * 100
+        return pct <= prox_pct
+    else:  # PE
+        # price must be above zone, approaching from above
+        if last_close <= zone_high:
+            return False                     # price is below zone — wrong side
+        pct = (last_close - zone_high) / zone_high * 100
+        return pct <= prox_pct
+
 def _pick_nifty_bias(nifty_close: float, zones: list, prox_pct: float) -> tuple:
     """
     Pick the nearest TRAPPED zone to nifty_close.
@@ -159,51 +196,34 @@ def scan_nifty_bias(token: str, proximity_pct: float = NIFTY_BIAS_PROXIMITY_PCT)
 
 # ── Per-stock scan ────────────────────────────────────────────────────────────
 
-def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
-               token: str, bias: str,
-               stock_prox_pct: float = STOCK_ZONE_PROXIMITY_PCT,
-               min_rr: float = MIN_RR) -> Optional[dict]:
-    """
-    Scan one stock's D1 bars. Returns result dict if it qualifies, else None.
-    bias="CE" → look for BEAR (bearish) TRAPPED zones (bears squeezed → stock up → buy CE)
-    bias="PE" → look for BULL (bullish) TRAPPED zones (bulls squeezed → stock down → buy PE)
-    """
-    df = _fetch_daily(upstox_key, token)
-    if df.empty or len(df) < 5:
-        return None
-    last_close = float(df.iloc[-1]["close"])
-
-    _, all_zones = scanner.scan_htf_spot(df)
-
-    # Filter: only zones matching bias direction
-    if bias == "CE":
-        zones = [z for z in all_zones if z.get("kind") == "BEAR" and z.get("status") == "TRAPPED"]
-    else:
-        zones = [z for z in all_zones if z.get("kind") == "BULL" and z.get("status") == "TRAPPED"]
-
-    if not zones:
-        return None
-
-    # Pick nearest zone to last_close
-    best = min(zones, key=lambda z: abs(last_close - (z["zone_high"] + z["zone_low"]) / 2))
+def _build_result(symbol: str, lot_size: int, strike_step: int,
+                   last_close: float, direction: str, best: dict,
+                   all_zones: list, stock_prox_pct: float, min_rr: float) -> Optional[dict]:
+    """Build a result dict for one zone+direction. Returns None if doesn't qualify."""
     zh, zl = best["zone_high"], best["zone_low"]
 
-    if not _in_proximity(last_close, zl, zh, stock_prox_pct):
+    # Age filter
+    age = _zone_age_days(best.get("trapped_on", ""))
+    if age > MAX_ZONE_AGE_DAYS:
+        return None
+
+    # Directional proximity — price must be approaching from the correct side
+    if not _approaching(last_close, zl, zh, direction, stock_prox_pct):
         return None
 
     # SL and T1
-    if bias == "CE":
+    if direction == "CE":
         sl = round(zl * (1 - SL_BUFFER_PCT / 100), 2)
-        t1 = round(best.get("sl", zh * 1.05), 2)   # trapped sellers' SL = ref bar HIGH = our T1
+        t1 = round(best.get("sl", zh * 1.05), 2)
     else:
         sl = round(zh * (1 + SL_BUFFER_PCT / 100), 2)
         t1 = round(best.get("sl", zl * 0.95), 2)
 
-    rr = _compute_rr(entry=last_close, sl=sl, t1=t1, direction=bias)
+    rr = _compute_rr(entry=last_close, sl=sl, t1=t1, direction=direction)
     if rr["rr_ratio"] < min_rr:
         return None
 
-    # Zone proximity %
+    # Zone distance %
     if zl <= last_close <= zh:
         zone_dist_pct = 0.0
     elif last_close > zh:
@@ -211,57 +231,97 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
     else:
         zone_dist_pct = round((zl - last_close) / zl * 100, 2)
 
-    # Count tests (number of times zone went TRAPPED+CLOSED cycle before)
     zone_tests = sum(
         1 for z in all_zones
         if abs(z.get("zone_low", 0) - zl) < strike_step and z.get("status") == "CLOSED"
     )
 
-    # Suggested strike: ATM ± 1 step
     atm = round(last_close / strike_step) * strike_step
-    suggested_strike = (atm - strike_step) if bias == "CE" else (atm + strike_step)
+    suggested_strike = (atm - strike_step) if direction == "CE" else (atm + strike_step)
 
+    trapped_on = best.get("trapped_on", "")
     return {
-        "symbol":           symbol,
-        "direction":        bias,
-        "zone_high":        round(zh, 2),
-        "zone_low":         round(zl, 2),
-        "last_close":       round(last_close, 2),
+        "symbol":            symbol,
+        "direction":         direction,
+        "zone_high":         round(zh, 2),
+        "zone_low":          round(zl, 2),
+        "last_close":        round(last_close, 2),
         "zone_distance_pct": zone_dist_pct,
-        "stock_sl":         sl,
-        "stock_t1":         t1,
-        "risk_pts":         rr["risk_pts"],
-        "reward_pts":       rr["reward_pts"],
-        "rr_ratio":         rr["rr_ratio"],
-        "suggested_strike": suggested_strike,
-        "lot_size":         lot_size,
-        "zone_age_days":    _zone_age_days(best.get("trapped_on", "")),
-        "zone_tests":       zone_tests,
-        "scanned_at":       datetime.now().isoformat(timespec="seconds"),
+        "stock_sl":          sl,
+        "stock_t1":          t1,
+        "risk_pts":          rr["risk_pts"],
+        "reward_pts":        rr["reward_pts"],
+        "rr_ratio":          rr["rr_ratio"],
+        "suggested_strike":  suggested_strike,
+        "lot_size":          lot_size,
+        "zone_age_days":     age,
+        "zone_date":         _zone_date_str(trapped_on),
+        "zone_tests":        zone_tests,
+        "nifty_bias":        "",   # filled by run_scan
+        "scanned_at":        datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
+               token: str, bias: Optional[str] = None,
+               stock_prox_pct: float = STOCK_ZONE_PROXIMITY_PCT,
+               min_rr: float = MIN_RR) -> list:
+    """
+    Scan one stock's D1 bars.
+    If bias is given (CE/PE), returns only matching direction (list of 0-1 items).
+    If bias is None, returns best CE result + best PE result (list of 0-2 items).
+    """
+    df = _fetch_daily(upstox_key, token)
+    if df.empty or len(df) < 5:
+        return []
+    last_close = float(df.iloc[-1]["close"])
+    _, all_zones = scanner.scan_htf_spot(df)
+
+    directions = [bias] if bias else ["CE", "PE"]
+    results = []
+    for direction in directions:
+        kind = "BEAR" if direction == "CE" else "BULL"
+        zones = [z for z in all_zones if z.get("kind") == kind and z.get("status") == "TRAPPED"]
+        if not zones:
+            continue
+        # Pick nearest zone to last_close
+        best = min(zones, key=lambda z: abs(last_close - (z["zone_high"] + z["zone_low"]) / 2))
+        r = _build_result(symbol, lot_size, strike_step, last_close,
+                          direction, best, all_zones, stock_prox_pct, min_rr)
+        if r:
+            results.append(r)
+    return results
 
 # ── Full scan run ─────────────────────────────────────────────────────────────
 
 def run_scan(token: str,
              nifty_prox_pct: float = NIFTY_BIAS_PROXIMITY_PCT,
              stock_prox_pct: float = STOCK_ZONE_PROXIMITY_PCT,
-             min_rr: float = MIN_RR) -> list:
-    """Run full nightly scan. Returns list of qualifying stocks sorted by R:R desc."""
+             min_rr: float = MIN_RR,
+             use_nifty_bias: bool = False) -> dict:
+    """
+    Run full nightly scan.
+    use_nifty_bias=False (default): scan CE+PE independently, top 5 each.
+    use_nifty_bias=True: filter stocks to NIFTY bias direction only.
+    Returns output dict (also saved to JSON).
+    """
     bias_result = scan_nifty_bias(token, nifty_prox_pct)
-    bias        = bias_result["bias"]
+    nifty_bias  = bias_result["bias"]
     nifty_close = bias_result["nifty_close"]
     nifty_zone  = bias_result["zone"]
-    print(f"NIFTY close={nifty_close:.0f}  bias={bias}  "
-          f"zone={nifty_zone.get('zone_low', 0):.0f}–{nifty_zone.get('zone_high', 0):.0f}")
+    print(f"NIFTY close={nifty_close:.0f}  bias={nifty_bias}  "
+          f"zone={nifty_zone.get('zone_low', 0):.0f}–{nifty_zone.get('zone_high', 0):.0f}  "
+          f"bias_filter={'ON' if use_nifty_bias else 'OFF'}")
 
     stocks_df = pd.read_csv(FNO_LIST_PATH)
-    results   = []
+    all_results: list[dict] = []
 
     def _scan_one(row):
+        b = nifty_bias if use_nifty_bias else None
         return scan_stock(
             symbol=row["symbol"], upstox_key=row["upstox_key"],
             lot_size=int(row["lot_size"]), strike_step=int(row["strike_step"]),
-            token=token, bias=bias,
+            token=token, bias=b,
             stock_prox_pct=stock_prox_pct, min_rr=min_rr,
         )
 
@@ -271,30 +331,39 @@ def run_scan(token: str,
         for i, fut in enumerate(as_completed(futures), 1):
             sym = futures[fut]
             try:
-                res = fut.result()
-                if res:
-                    results.append(res)
-                    print(f"  [{i}/{len(futures)}] {sym} ✓  R:R={res['rr_ratio']}")
+                res_list = fut.result()
+                if res_list:
+                    for r in res_list:
+                        r["nifty_bias"] = nifty_bias
+                    all_results.extend(res_list)
+                    tags = " ".join(f"{r['direction']} R:R={r['rr_ratio']}" for r in res_list)
+                    print(f"  [{i}/{len(futures)}] {sym} ✓  {tags}")
                 else:
                     print(f"  [{i}/{len(futures)}] {sym} —")
             except Exception as exc:
                 print(f"  [{i}/{len(futures)}] {sym} ERROR: {exc}")
 
-    results.sort(key=lambda x: x["rr_ratio"], reverse=True)
+    # Split into CE and PE, top N each by R:R
+    ce = sorted([r for r in all_results if r["direction"] == "CE"],
+                key=lambda x: x["rr_ratio"], reverse=True)[:TOP_N_PER_DIRECTION]
+    pe = sorted([r for r in all_results if r["direction"] == "PE"],
+                key=lambda x: x["rr_ratio"], reverse=True)[:TOP_N_PER_DIRECTION]
 
-    # Add NIFTY context to output
     output = {
-        "scan_date":   date.today().isoformat(),
-        "nifty_close": nifty_close,
-        "nifty_bias":  bias,
-        "nifty_zone":  nifty_zone,
-        "stocks":      results,
+        "scan_date":      date.today().isoformat(),
+        "nifty_close":    nifty_close,
+        "nifty_bias":     nifty_bias,
+        "nifty_zone":     nifty_zone,
+        "use_nifty_bias": use_nifty_bias,
+        "ce_stocks":      ce,
+        "pe_stocks":      pe,
+        "stocks":         ce + pe,   # backwards compat for UI
     }
     out_path = os.path.join(SCAN_DIR, f"fno_scan_{date.today()}.json")
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
-    print(f"\n✓ {len(results)} stocks qualify → {out_path}")
-    return results
+    print(f"\n✓ CE:{len(ce)}  PE:{len(pe)} → {out_path}")
+    return output
 
 # ── Optimize mode ─────────────────────────────────────────────────────────────
 

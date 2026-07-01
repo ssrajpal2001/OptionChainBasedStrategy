@@ -754,7 +754,8 @@ document.addEventListener('alpine:init', () => {
     indexConfigOk:      null,
 
     /* ── Stock scanner ──────────────────────────────────────────────── */
-    stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], loaded: false, error: '' },
+    stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], ce_stocks: [], pe_stocks: [], use_nifty_bias: false, loaded: false, error: '' },
+    stockScanBiasToggle: false,
 
     /* ── Risk command center ─────────────────────────────────────────── */
     riskSummary: { total_capital: 0, total_net_mtm: 0, total_open_lots: 0, avg_slippage_pts: 0, client_count: 0, clients: [], risk_manager_active: false, ts: '' },
@@ -1494,7 +1495,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await this._fetch('/api/scanner/run', { method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ nifty_prox_pct: 1.5, stock_prox_pct: 2.0, min_rr: 1.5 })
+          body: JSON.stringify({ nifty_prox_pct: 1.5, stock_prox_pct: 2.0, min_rr: 1.5, use_nifty_bias: this.stockScanBiasToggle })
         });
         const d = r ? await r.json() : null;
         if (d && d.ok) { await this.loadStockScan(); }
@@ -5662,25 +5663,34 @@ function amoTest() {
   <div x-show="adminTab === 'stocks'" class="flex flex-col gap-3 p-3">
 
     <!-- Header bar -->
-    <div class="flex items-center justify-between">
+    <div class="flex flex-wrap items-center gap-3 justify-between">
       <div class="font-mono text-sm font-bold" style="color:var(--t-fg)">
         FnO STOCK SCANNER
         <span class="ml-2 font-normal text-xs" style="color:var(--t-muted)"
               x-text="stockScan.scan_date ? 'Scan: ' + stockScan.scan_date : 'No scan yet'"></span>
       </div>
-      <div class="flex items-center gap-3">
-        <!-- NIFTY bias badge -->
-        <span x-show="stockScan.nifty_bias" class="font-mono text-xs px-2 py-0.5 rounded font-bold"
-              :style="stockScan.nifty_bias==='CE'
-                ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)'
-                : 'background:rgba(var(--t-red-rgb),0.12);color:var(--t-red);border:1px solid rgba(var(--t-red-rgb),0.3)'"
+      <div class="flex items-center gap-3 flex-wrap">
+        <!-- NIFTY bias info -->
+        <span x-show="stockScan.nifty_bias" class="font-mono text-xs px-2 py-0.5 rounded"
+              style="color:var(--t-muted);border:1px solid var(--t-border)"
               x-text="'NIFTY ' + (stockScan.nifty_close||0).toFixed(0) + ' → ' + stockScan.nifty_bias + ' BIAS'">
         </span>
+        <!-- NIFTY bias toggle -->
+        <label class="flex items-center gap-1.5 font-mono text-xs cursor-pointer" style="color:var(--t-muted)">
+          <input type="checkbox" x-model="stockScanBiasToggle" class="w-3 h-3">
+          NIFTY filter
+        </label>
+        <!-- Refresh button -->
+        <button @click="loadStockScan()"
+                class="font-mono text-xs px-2 py-1 rounded"
+                style="border:1px solid var(--t-border);color:var(--t-muted)">
+          &#x21BB;
+        </button>
         <!-- Run scan button -->
         <button @click="runStockScan()"
-                class="font-mono text-xs px-3 py-1 rounded"
+                class="font-mono text-xs px-3 py-1 rounded font-bold"
                 style="background:rgba(var(--t-accent-rgb),0.15);color:var(--t-accent);border:1px solid rgba(var(--t-accent-rgb),0.3)">
-          &#x21BB; RUN SCAN
+          &#x25B6; RUN SCAN
         </button>
       </div>
     </div>
@@ -5691,80 +5701,101 @@ function amoTest() {
          x-text="stockScan.error"></div>
 
     <!-- No results -->
-    <div x-show="stockScan.loaded && !stockScan.error && stockScan.stocks && stockScan.stocks.length === 0"
+    <div x-show="stockScan.loaded && !stockScan.error && (!stockScan.stocks || stockScan.stocks.length === 0)"
          class="font-mono text-xs" style="color:var(--t-muted)">
-      No qualifying stocks today &mdash; either no zones align with NIFTY bias or R:R &lt; 1.5
+      No qualifying stocks — no fresh zones (≤15 days) approaching from the correct side with R:R ≥ 1.5
     </div>
 
-    <!-- Stock cards grid -->
-    <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))">
-      <template x-for="s in (stockScan.stocks || [])" :key="s.symbol">
-        <div class="rounded border p-3 font-mono text-xs flex flex-col gap-2"
-             style="background:var(--t-surface);border-color:var(--t-border)">
-
-          <!-- Card header -->
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
-              <span class="text-xs px-1.5 py-0.5 rounded font-bold"
-                    :style="s.direction==='CE'
-                      ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.12)'
-                      : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.12)'"
-                    x-text="'&#x25B2; BUY ' + s.direction"></span>
+    <!-- CE section -->
+    <template x-if="stockScan.ce_stocks && stockScan.ce_stocks.length > 0">
+      <div class="flex flex-col gap-2">
+        <div class="font-mono text-xs font-bold px-1" style="color:var(--t-green)">▲ BUY CE — Bear zones (bears trapped → stock up)</div>
+        <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(300px, 1fr))">
+          <template x-for="s in stockScan.ce_stocks" :key="s.symbol + '_CE'">
+            <div class="rounded border p-3 font-mono text-xs flex flex-col gap-1.5"
+                 style="background:var(--t-surface);border-color:rgba(var(--t-green-rgb),0.2)">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
+                  <span class="text-xs" style="color:var(--t-green)">▲ CE</span>
+                </div>
+                <span class="text-xs px-2 py-0.5 rounded font-bold"
+                      :style="s.rr_ratio >= 2.5
+                        ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.3)'
+                        : 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.3)'"
+                      x-text="'R:R ' + (s.rr_ratio||0).toFixed(1) + '\xd7'"></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>D1 Zone</span>
+                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.zone_low||0).toFixed(0) + ' – ' + (s.zone_high||0).toFixed(0) + '  (' + (s.zone_date||'?') + ')'"></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>Last Close</span>
+                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.last_close||0).toFixed(0) + '  (' + (s.zone_distance_pct||0).toFixed(1) + '% below zone)'"></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>SL / T1</span>
+                <span><span style="color:var(--t-red)" x-text="'&#x20B9;' + (s.stock_sl||0).toFixed(0)"></span><span style="color:var(--t-muted)"> / </span><span style="color:var(--t-green)" x-text="'&#x20B9;' + (s.stock_t1||0).toFixed(0)"></span></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>Strike</span>
+                <span style="color:var(--t-fg)" x-text="(s.suggested_strike||'—') + ' CE  (lot ' + (s.lot_size||'?') + ')'"></span>
+              </div>
+              <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border);color:var(--t-muted)">
+                <span x-text="'Formed ' + (s.zone_date||'?') + '  |  Tests: ' + (s.zone_tests||0)"></span>
+                <span x-text="'risk &#x20B9;' + (s.risk_pts||0).toFixed(0) + ' / reward &#x20B9;' + (s.reward_pts||0).toFixed(0)"></span>
+              </div>
             </div>
-            <!-- R:R badge -->
-            <span class="text-xs px-2 py-0.5 rounded font-bold"
-                  :style="s.rr_ratio >= 2.5
-                    ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.3)'
-                    : s.rr_ratio >= 1.5
-                    ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.3)'
-                    : 'color:var(--t-muted);border:1px solid var(--t-border)'"
-                  x-text="'R:R ' + (s.rr_ratio||0).toFixed(1) + '\xd7'"></span>
-          </div>
-
-          <!-- Zone row -->
-          <div class="flex justify-between" style="color:var(--t-muted)">
-            <span>D1 Zone</span>
-            <span style="color:var(--t-fg)"
-                  x-text="'&#x20B9;' + (s.zone_low||0).toFixed(0) + ' – &#x20B9;' + (s.zone_high||0).toFixed(0)"></span>
-          </div>
-
-          <!-- Last close row -->
-          <div class="flex justify-between" style="color:var(--t-muted)">
-            <span>Last Close</span>
-            <span style="color:var(--t-fg)"
-                  x-text="'&#x20B9;' + (s.last_close||0).toFixed(0) + ((s.zone_distance_pct||0) === 0 ? ' (inside zone)' : ' (' + (s.zone_distance_pct||0).toFixed(1) + '% from zone)')"></span>
-          </div>
-
-          <!-- SL row -->
-          <div class="flex justify-between" style="color:var(--t-muted)">
-            <span>Stock SL</span>
-            <span style="color:var(--t-red)"
-                  x-text="'&#x20B9;' + (s.stock_sl||0).toFixed(0) + '  (risk &#x20B9;' + (s.risk_pts||0).toFixed(0) + ')'"></span>
-          </div>
-
-          <!-- T1 row -->
-          <div class="flex justify-between" style="color:var(--t-muted)">
-            <span>Target T1</span>
-            <span style="color:var(--t-green)"
-                  x-text="'&#x20B9;' + (s.stock_t1||0).toFixed(0) + '  (reward &#x20B9;' + (s.reward_pts||0).toFixed(0) + ')'"></span>
-          </div>
-
-          <!-- Strike row -->
-          <div class="flex justify-between" style="color:var(--t-muted)">
-            <span>Strike</span>
-            <span style="color:var(--t-fg)"
-                  x-text="(s.suggested_strike||'—') + ' ' + (s.direction||'') + '  (lot ' + (s.lot_size||'?') + ')'"></span>
-          </div>
-
-          <!-- Footer meta -->
-          <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border);color:var(--t-muted)">
-            <span x-text="'Age: ' + (s.zone_age_days||0) + 'd  |  Tests: ' + (s.zone_tests||0)"></span>
-            <span x-text="'NIFTY: ' + (s.nifty_bias || '—')"></span>
-          </div>
+          </template>
         </div>
-      </template>
-    </div>
+      </div>
+    </template>
+
+    <!-- PE section -->
+    <template x-if="stockScan.pe_stocks && stockScan.pe_stocks.length > 0">
+      <div class="flex flex-col gap-2">
+        <div class="font-mono text-xs font-bold px-1" style="color:var(--t-red)">▼ BUY PE — Bull zones (bulls trapped → stock down)</div>
+        <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(300px, 1fr))">
+          <template x-for="s in stockScan.pe_stocks" :key="s.symbol + '_PE'">
+            <div class="rounded border p-3 font-mono text-xs flex flex-col gap-1.5"
+                 style="background:var(--t-surface);border-color:rgba(var(--t-red-rgb),0.2)">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
+                  <span class="text-xs" style="color:var(--t-red)">▼ PE</span>
+                </div>
+                <span class="text-xs px-2 py-0.5 rounded font-bold"
+                      :style="s.rr_ratio >= 2.5
+                        ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.3)'
+                        : 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.3)'"
+                      x-text="'R:R ' + (s.rr_ratio||0).toFixed(1) + '\xd7'"></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>D1 Zone</span>
+                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.zone_low||0).toFixed(0) + ' – ' + (s.zone_high||0).toFixed(0) + '  (' + (s.zone_date||'?') + ')'"></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>Last Close</span>
+                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.last_close||0).toFixed(0) + '  (' + (s.zone_distance_pct||0).toFixed(1) + '% above zone)'"></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>SL / T1</span>
+                <span><span style="color:var(--t-red)" x-text="'&#x20B9;' + (s.stock_sl||0).toFixed(0)"></span><span style="color:var(--t-muted)"> / </span><span style="color:var(--t-green)" x-text="'&#x20B9;' + (s.stock_t1||0).toFixed(0)"></span></span>
+              </div>
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>Strike</span>
+                <span style="color:var(--t-fg)" x-text="(s.suggested_strike||'—') + ' PE  (lot ' + (s.lot_size||'?') + ')'"></span>
+              </div>
+              <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border);color:var(--t-muted)">
+                <span x-text="'Formed ' + (s.zone_date||'?') + '  |  Tests: ' + (s.zone_tests||0)"></span>
+                <span x-text="'risk &#x20B9;' + (s.risk_pts||0).toFixed(0) + ' / reward &#x20B9;' + (s.reward_pts||0).toFixed(0)"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
   </div><!-- end stocks tab -->
 
   <!-- ════════════════════ CLIENT PROFILES TAB ══════════════════════════════ -->
