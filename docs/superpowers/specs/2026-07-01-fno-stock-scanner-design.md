@@ -66,11 +66,18 @@ For each stock:
 | `zone_low` | D1 zone lower boundary (stock price) |
 | `last_close` | Stock's last closing price |
 | `zone_distance_pct` | How far last_close is from zone edge (%) |
-| `stock_sl` | SL level = zone_low − small buffer (CE) or zone_high + buffer (PE) |
+| `stock_sl` | SL level = zone_low − buffer (CE) or zone_high + buffer (PE) |
+| `stock_t1` | Target = zone's ref bar HIGH (where trapped sellers' SL sits) |
+| `risk_pts` | Entry → SL distance in stock price points |
+| `reward_pts` | Entry → T1 distance in stock price points |
+| `rr_ratio` | `reward_pts / risk_pts` (e.g. 2.4 means 2.4× reward for each unit of risk) |
 | `suggested_strike` | ATM ± 1 step in the right direction |
 | `zone_age_days` | How many days since zone first formed |
 | `zone_tests` | How many times price has tested the zone |
 | `nifty_bias` | "Near bearish zone" or "Near bullish zone" |
+
+**Minimum R:R filter:** Only stocks with `rr_ratio >= 1.5` pass to the shortlist.
+Cards sorted by `rr_ratio` descending (best reward/risk at top) within the same zone proximity band.
 
 ### Step 4: Sort and Save
 
@@ -97,15 +104,19 @@ New **"Stocks" tab** in `monitor.html`. Loads once on open, refreshes on tab cli
 **Card format per stock:**
 
 ```
-RELIANCE          ▲ BUY CE          [NEAR ZONE]
-────────────────────────────────────────────────────
+RELIANCE          ▲ BUY CE          [NEAR ZONE]   R:R 2.4×
+────────────────────────────────────────────────────────────
 D1 Zone    :  ₹1,280 – ₹1,310
 Last Close :  ₹1,295   (inside zone, 2.3% from low)
-Stock SL   :  ₹1,278   (zone low − 0.2% buffer)
+Stock SL   :  ₹1,278   (risk: ₹17/share)
+Target T1  :  ₹1,336   (reward: ₹41/share)
 Strike     :  1300 CE  (ATM − 1 step)
 Zone Age   :  3 days   |   Tests: 2
 NIFTY Bias :  Near bearish zone ✓
 ```
+
+Cards sorted by **R:R ratio descending** (best setup at top).
+Minimum R:R to appear on dashboard: **1.5× configurable**.
 
 Cards sorted: closest-to-zone first (highest conviction at top).
 
