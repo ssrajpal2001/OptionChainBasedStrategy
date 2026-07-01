@@ -24,7 +24,7 @@ from strategies.trap_scanner import scanner
 
 # ── Config ────────────────────────────────────────────────────────────────────
 NIFTY_BIAS_PROXIMITY_PCT = 1.5   # tune via --optimize
-STOCK_ZONE_PROXIMITY_PCT = 2.0   # tune via --optimize
+STOCK_ZONE_PROXIMITY_PCT = 3.0   # tune via --optimize
 SL_BUFFER_PCT            = 0.2
 MIN_RR                   = 1.5
 D1_LOOKBACK_DAYS         = 365
@@ -130,25 +130,26 @@ def _approaching(last_close: float, zone_low: float, zone_high: float,
                  direction: str, prox_pct: float) -> bool:
     """
     True only when price is approaching from the CORRECT side.
-    CE (bear zone, bears trapped, price should go UP):
-        price is BELOW zone_low (approaching upward) or just inside zone.
-    PE (bull zone, bulls trapped, price should go DOWN):
-        price is ABOVE zone_high (approaching downward) or just inside zone.
-    Also accepts price already inside the zone (already entered).
+    CE (bear zone = support, bears got trapped, price will go UP):
+        Price is ABOVE zone or inside it (approaching support from above).
+        Invalid if price already broke BELOW zone_low.
+    PE (bull zone = resistance, bulls got trapped, price will go DOWN):
+        Price is BELOW zone or inside it (approaching resistance from below).
+        Invalid if price already broke ABOVE zone_high.
     """
     if zone_low <= last_close <= zone_high:
-        return True                          # already inside — valid
+        return True                          # inside zone — always valid
     if direction == "CE":
-        # price must be below zone, approaching from below
-        if last_close >= zone_low:
-            return False                     # price is above zone — wrong side
-        pct = (zone_low - last_close) / zone_low * 100
+        # Support zone. Price must be above zone (not broken below)
+        if last_close < zone_low:
+            return False                     # broke below support — invalid
+        pct = (last_close - zone_high) / zone_high * 100
         return pct <= prox_pct
     else:  # PE
-        # price must be above zone, approaching from above
-        if last_close <= zone_high:
-            return False                     # price is below zone — wrong side
-        pct = (last_close - zone_high) / zone_high * 100
+        # Resistance zone. Price must be below zone (not broken above)
+        if last_close > zone_high:
+            return False                     # broke above resistance — invalid
+        pct = (zone_low - last_close) / zone_low * 100
         return pct <= prox_pct
 
 def _pick_nifty_bias(nifty_close: float, zones: list, prox_pct: float) -> tuple:
