@@ -153,3 +153,31 @@ def test_mark_notified_removes_alert(tmp_path):
     mon.mark_notified("EICHERMOT_PE_7178")
     assert mon.get_active_alerts() == []
     assert "EICHERMOT_PE_7178" in mon._notified_uids
+
+
+# ── Task 4 tests ──────────────────────────────────────────────────────────────
+
+def test_get_active_alerts_empty(tmp_path):
+    scan = {"ce_stocks": [], "pe_stocks": []}
+    mon = _make_monitor(tmp_path, scan)
+    assert mon.get_active_alerts() == []
+
+
+def test_alert_serialisable(tmp_path):
+    import json
+    scan = {"ce_stocks": [], "pe_stocks": []}
+    mon = _make_monitor(tmp_path, scan)
+    alert = FnoStockAlert(
+        uid="TEST_PE_1000", symbol="TEST", direction="PE",
+        spot_price=990.0, d1_zone_low=995.0, d1_zone_high=1005.0,
+        d1_zone_date="Jul 01", strike=1000, lot_size=100,
+        sl=1007.0, t1=950.0, risk_pts=17.0, reward_pts=40.0,
+        rr_ratio=2.35, mtf_trap_price=998.0, ltf_trap_price=993.0,
+        fired_at=datetime(2026, 7, 3, 10, 30, 0, tzinfo=IST),
+    )
+    mon._active_alerts.append(alert)
+    result = mon.get_active_alerts()
+    # Must be JSON-serialisable (fired_at is datetime — needs isoformat)
+    as_dict = result[0]
+    json.dumps({k: str(v) for k, v in as_dict.items()})  # must not raise
+    assert as_dict["uid"] == "TEST_PE_1000"

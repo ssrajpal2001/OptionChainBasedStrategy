@@ -76,6 +76,7 @@ class WsBridge:
         self._audit_q     = bus.subscribe(Topic.EXIT_AUDIT)
         self._pos_q       = bus.subscribe(Topic.POSITION_UPDATE)
         self._trap_tick_q = bus.subscribe(Topic.TRAP_TICK)
+        self._fno_alert_q = bus.subscribe(Topic.FNO_STOCK_ALERT)
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
@@ -164,6 +165,7 @@ class WsBridge:
                 self._exit_audit_loop(),
                 self._position_update_loop(),
                 self._trap_tick_loop(),
+                self._fno_alert_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -452,6 +454,23 @@ class WsBridge:
                     await self.broadcast({"type": "trap_tick", **ev})
             except Exception as exc:
                 logger.debug("WsBridge._trap_tick_loop: %s", exc)
+
+    async def _fno_alert_loop(self) -> None:
+        """Forward FnO stock monitor alerts to the UI in real time."""
+        while self._running:
+            try:
+                payload = await asyncio.wait_for(self._fno_alert_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                if isinstance(payload, dict):
+                    # Convert datetime to isoformat for JSON serialisation
+                    if isinstance(payload.get("fired_at"), datetime):
+                        payload = dict(payload)
+                        payload["fired_at"] = payload["fired_at"].isoformat()
+                    await self.broadcast({"type": "fno_alert", "alert": payload})
+            except Exception as exc:
+                logger.debug("WsBridge._fno_alert_loop: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
         """Broadcast worker stats and client summaries every HEARTBEAT_INTERVAL seconds."""

@@ -515,12 +515,25 @@ async def _run_live(
     # deployment and keeps reconciling (auto-start on deploy). Started as a task below.
     # TrapScanner: same per-binding pattern via trap_scanner_manager (task below).
 
+    # FnO Stock Monitor — intraday alert engine driven off the nightly scan file
+    try:
+        from strategies.fno_stock_monitor import FnoStockMonitor
+        fno_monitor = FnoStockMonitor(bus, cfg, client_db)
+        fno_monitor.warm_start()
+        fno_monitor.set_feeder(feeder)
+        if dashboard is not None:
+            dashboard.set_fno_monitor(fno_monitor)
+        tasks_pre = [asyncio.create_task(fno_monitor.start(), name="fno_stock_monitor")]
+    except ImportError as _exc:
+        logger.warning("FnoStockMonitor not available: %s", _exc)
+        tasks_pre = []
+
     # Admin console runs as a detached background task — its completion or any
     # internal stream error must NOT trigger the engine shutdown.  Only the
     # engine primitives below participate in the FIRST_COMPLETED barrier.
     admin_task = asyncio.create_task(admin.run(), name="admin_console")
 
-    tasks = [
+    tasks = tasks_pre + [
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
         asyncio.create_task(option_matrix.run(),        name="option_matrix"),
     ]

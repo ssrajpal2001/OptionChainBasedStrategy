@@ -389,6 +389,9 @@ try:
         min_rr:          float = 1.5
         use_nifty_bias:  bool  = False
 
+    class _AlertNotifiedSchema(_PydanticBase):
+        uid: str
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -627,6 +630,7 @@ class DashboardServer:
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
         self._trap_scanner_manager = trap_scanner_manager
+        self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -661,6 +665,10 @@ class DashboardServer:
     @property
     def ws_bridge(self) -> WsBridge:
         return self._ws_bridge
+
+    def set_fno_monitor(self, monitor) -> None:
+        """Attach a live FnoStockMonitor so alert endpoints can query it."""
+        self._fno_monitor = monitor
 
     # ── FastAPI application ───────────────────────────────────────────────────
 
@@ -4933,6 +4941,27 @@ class DashboardServer:
                 return {"ok": True, **data}
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
+
+        @app.get("/api/scanner/alerts", tags=["Scanner"])
+        async def get_fno_alerts(token_data: dict = Depends(verify_token)):
+            """Return active FnO stock monitor alerts (fired but not yet notified)."""
+            monitor = _srv._fno_monitor
+            if not monitor:
+                return {"ok": True, "alerts": []}
+            alerts = monitor.get_active_alerts()
+            from datetime import datetime as _dt
+            for a in alerts:
+                if isinstance(a.get("fired_at"), _dt):
+                    a["fired_at"] = a["fired_at"].isoformat()
+            return {"ok": True, "alerts": alerts}
+
+        @app.post("/api/scanner/alerts/{uid}/notified", tags=["Scanner"])
+        async def mark_alert_notified(uid: str, token_data: dict = Depends(verify_token)):
+            """Mark a specific alert as notified (removes it from active list)."""
+            monitor = _srv._fno_monitor
+            if monitor:
+                monitor.mark_notified(uid)
+            return {"ok": True}
 
         @app.post("/api/scanner/run", tags=["Scanner"])
         async def run_fno_scan(params: _ScannerRunSchema):
