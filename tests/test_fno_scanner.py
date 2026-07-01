@@ -92,6 +92,44 @@ def test_scan_json_structure():
         tmp = f.name
     loaded = json.load(open(tmp))
     assert "stocks" in loaded
-    assert loaded["stocks"][0]["rr_ratio"] == 2.5
+    s = loaded["stocks"][0]
+    # Top-level keys
     assert loaded["nifty_bias"] in ("CE", "PE")
+    assert "nifty_zone" in loaded
+    # Per-stock fields consumed by the UI cards
+    for field in ("rr_ratio", "zone_low", "zone_high", "stock_sl", "stock_t1",
+                  "risk_pts", "reward_pts", "suggested_strike",
+                  "zone_age_days", "zone_tests", "last_close"):
+        assert field in s, f"Missing field: {field}"
+    assert s["rr_ratio"] == 2.5
+    assert s["suggested_strike"] == 1300
+    os.unlink(tmp)
+
+
+def test_scan_json_stock_nifty_bias_field():
+    """Each stock entry should carry a nifty_bias field for display in the UI card."""
+    import json, tempfile, os
+    mock = {
+        "scan_date": "2026-07-01",
+        "nifty_close": 24500.0,
+        "nifty_bias": "CE",
+        "nifty_zone": {},
+        "stocks": [
+            {"symbol": "INFY", "direction": "CE", "rr_ratio": 1.8,
+             "zone_high": 1850.0, "zone_low": 1820.0, "last_close": 1830.0,
+             "stock_sl": 1815.0, "stock_t1": 1880.0, "risk_pts": 15.0,
+             "reward_pts": 50.0, "zone_distance_pct": 0.5,
+             "suggested_strike": 1840, "lot_size": 300,
+             "zone_age_days": 5, "zone_tests": 2,
+             "nifty_bias": "CE",
+             "scanned_at": "2026-07-01T16:00:00"}
+        ],
+    }
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(mock, f)
+        tmp = f.name
+    loaded = json.load(open(tmp))
+    s = loaded["stocks"][0]
+    assert "nifty_bias" in s
+    assert s["nifty_bias"] in ("CE", "PE")
     os.unlink(tmp)

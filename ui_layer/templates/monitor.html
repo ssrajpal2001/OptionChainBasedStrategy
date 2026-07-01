@@ -753,6 +753,9 @@ document.addEventListener('alpine:init', () => {
     indexConfigMsg:     '',
     indexConfigOk:      null,
 
+    /* ── Stock scanner ──────────────────────────────────────────────── */
+    stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], loaded: false, error: '' },
+
     /* ── Risk command center ─────────────────────────────────────────── */
     riskSummary: { total_capital: 0, total_net_mtm: 0, total_open_lots: 0, avg_slippage_pts: 0, client_count: 0, clients: [], risk_manager_active: false, ts: '' },
     killAllStep: 0,          // 0=idle 1=confirm-pending 2=executing
@@ -1468,6 +1471,31 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch('/api/admin/audit_log');
         if (r && r.ok) { const d = await r.json(); this.auditLines = d.lines || []; }
       } catch {} finally { this.auditLoading = false; }
+    },
+
+    /* ── Stock scanner ──────────────────────────────────────────────────── */
+    async loadStockScan() {
+      try {
+        const r = await this._fetch('/api/scanner/fno');
+        if (r && r.ok) {
+          this.stockScan = { ...r, loaded: true, error: '' };
+        } else {
+          this.stockScan = { ...this.stockScan, loaded: true, error: (r && r.error) || 'Scan file not found' };
+        }
+      } catch(e) {
+        this.stockScan = { ...this.stockScan, loaded: true, error: String(e) };
+      }
+    },
+    async runStockScan() {
+      this.stockScan.error = '';
+      try {
+        const r = await this._fetch('/api/scanner/run', { method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ nifty_prox_pct: 1.5, stock_prox_pct: 2.0, min_rr: 1.5 })
+        });
+        if (r && r.ok) { await this.loadStockScan(); }
+        else { this.stockScan.error = (r && r.error) || 'Scan failed'; }
+      } catch(e) { this.stockScan.error = String(e); }
     },
 
     /* ── Feeder status ───────────────────────────────────────────────────── */
@@ -3206,6 +3234,8 @@ function amoTest() {
             @click="adminTab='feeder'">&#x26A1; DATA FEEDER</button>
     <button class="admin-tab" :class="{active: adminTab==='trap'}"
             @click="adminTab='trap'">&#x1F3AF; TRAP ENGINE</button>
+    <button class="admin-tab" :class="{active: adminTab==='stocks'}"
+            @click="adminTab='stocks'; loadStockScan()">&#x1F4C8; STOCKS</button>
     <button class="admin-tab" :class="{active: adminTab==='clients'}"
             @click="adminTab='clients'; loadClientProfiles(); loadRiskSummary()">&#x1F465; CLIENT PROFILES</button>
   </div>
@@ -5621,6 +5651,117 @@ function amoTest() {
   </div>
 
   </div><!-- end trap tab -->
+
+  <!-- ════════════════════════════════════════════
+       STOCKS TAB — FnO Stock Scanner Morning Alerts
+  ════════════════════════════════════════════════ -->
+  <div x-show="adminTab === 'stocks'" class="flex flex-col gap-3 p-3">
+
+    <!-- Header bar -->
+    <div class="flex items-center justify-between">
+      <div class="font-mono text-sm font-bold" style="color:var(--t-fg)">
+        FnO STOCK SCANNER
+        <span class="ml-2 font-normal text-xs" style="color:var(--t-muted)"
+              x-text="stockScan.scan_date ? 'Scan: ' + stockScan.scan_date : 'No scan yet'"></span>
+      </div>
+      <div class="flex items-center gap-3">
+        <!-- NIFTY bias badge -->
+        <span x-show="stockScan.nifty_bias" class="font-mono text-xs px-2 py-0.5 rounded font-bold"
+              :style="stockScan.nifty_bias==='CE'
+                ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)'
+                : 'background:rgba(var(--t-red-rgb),0.12);color:var(--t-red);border:1px solid rgba(var(--t-red-rgb),0.3)'"
+              x-text="'NIFTY ' + (stockScan.nifty_close||0).toFixed(0) + ' → ' + stockScan.nifty_bias + ' BIAS'">
+        </span>
+        <!-- Run scan button -->
+        <button @click="runStockScan()"
+                class="font-mono text-xs px-3 py-1 rounded"
+                style="background:rgba(var(--t-accent-rgb),0.15);color:var(--t-accent);border:1px solid rgba(var(--t-accent-rgb),0.3)">
+          &#x21BB; RUN SCAN
+        </button>
+      </div>
+    </div>
+
+    <!-- Error -->
+    <div x-show="stockScan.error" class="font-mono text-xs px-3 py-2 rounded"
+         style="background:rgba(var(--t-red-rgb),0.1);color:var(--t-red)"
+         x-text="stockScan.error"></div>
+
+    <!-- No results -->
+    <div x-show="stockScan.loaded && !stockScan.error && stockScan.stocks && stockScan.stocks.length === 0"
+         class="font-mono text-xs" style="color:var(--t-muted)">
+      No qualifying stocks today &mdash; either no zones align with NIFTY bias or R:R &lt; 1.5
+    </div>
+
+    <!-- Stock cards grid -->
+    <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))">
+      <template x-for="s in (stockScan.stocks || [])" :key="s.symbol">
+        <div class="rounded border p-3 font-mono text-xs flex flex-col gap-2"
+             style="background:var(--t-surface);border-color:var(--t-border)">
+
+          <!-- Card header -->
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
+              <span class="text-xs px-1.5 py-0.5 rounded font-bold"
+                    :style="s.direction==='CE'
+                      ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.12)'
+                      : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.12)'"
+                    x-text="'&#x25B2; BUY ' + s.direction"></span>
+            </div>
+            <!-- R:R badge -->
+            <span class="text-xs px-2 py-0.5 rounded font-bold"
+                  :style="s.rr_ratio >= 2.5
+                    ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.3)'
+                    : s.rr_ratio >= 1.5
+                    ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.3)'
+                    : 'color:var(--t-muted);border:1px solid var(--t-border)'"
+                  x-text="'R:R ' + (s.rr_ratio||0).toFixed(1) + '\xd7'"></span>
+          </div>
+
+          <!-- Zone row -->
+          <div class="flex justify-between" style="color:var(--t-muted)">
+            <span>D1 Zone</span>
+            <span style="color:var(--t-fg)"
+                  x-text="'&#x20B9;' + (s.zone_low||0).toFixed(0) + ' – &#x20B9;' + (s.zone_high||0).toFixed(0)"></span>
+          </div>
+
+          <!-- Last close row -->
+          <div class="flex justify-between" style="color:var(--t-muted)">
+            <span>Last Close</span>
+            <span style="color:var(--t-fg)"
+                  x-text="'&#x20B9;' + (s.last_close||0).toFixed(0) + ((s.zone_distance_pct||0) === 0 ? ' (inside zone)' : ' (' + (s.zone_distance_pct||0).toFixed(1) + '% from zone)')"></span>
+          </div>
+
+          <!-- SL row -->
+          <div class="flex justify-between" style="color:var(--t-muted)">
+            <span>Stock SL</span>
+            <span style="color:var(--t-red)"
+                  x-text="'&#x20B9;' + (s.stock_sl||0).toFixed(0) + '  (risk &#x20B9;' + (s.risk_pts||0).toFixed(0) + ')'"></span>
+          </div>
+
+          <!-- T1 row -->
+          <div class="flex justify-between" style="color:var(--t-muted)">
+            <span>Target T1</span>
+            <span style="color:var(--t-green)"
+                  x-text="'&#x20B9;' + (s.stock_t1||0).toFixed(0) + '  (reward &#x20B9;' + (s.reward_pts||0).toFixed(0) + ')'"></span>
+          </div>
+
+          <!-- Strike row -->
+          <div class="flex justify-between" style="color:var(--t-muted)">
+            <span>Strike</span>
+            <span style="color:var(--t-fg)"
+                  x-text="(s.suggested_strike||'—') + ' ' + (s.direction||'') + '  (lot ' + (s.lot_size||'?') + ')'"></span>
+          </div>
+
+          <!-- Footer meta -->
+          <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border);color:var(--t-muted)">
+            <span x-text="'Age: ' + (s.zone_age_days||0) + 'd  |  Tests: ' + (s.zone_tests||0)"></span>
+            <span style="color:var(--t-green);font-size:0.65rem">NIFTY &#x2713;</span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div><!-- end stocks tab -->
 
   <!-- ════════════════════ CLIENT PROFILES TAB ══════════════════════════════ -->
   <div x-show="adminTab === 'clients'" class="flex flex-col gap-3 flex-1">
