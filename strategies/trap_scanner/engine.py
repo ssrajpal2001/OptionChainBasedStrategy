@@ -574,6 +574,58 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             self._run_htf_scan()
             self._htf_atr_val = self._compute_htf_atr()
             self._check_zone_reachability()
+
+            # Q2: per-leg intraday strike correction.
+            # When one side has no HTF zone at startup (intraday_mode), switch that side's
+            # detection strikes from S1/S2 pivots to ATM±gap_near/far (like gap mode).
+            # ATM strikes have more volume → more reliable intraday 15m zones in cascade.
+            if self._htf_source == "option" and not self._gap_fired:
+                atm_at_open = _round_strike(self._spot_open, self._step)
+                reran_htf = False
+                if self._intraday_mode_ce:
+                    new_ce1 = atm_at_open - self._gap_near
+                    new_ce2 = atm_at_open - self._gap_far
+                    self._log.info(
+                        "Q2 CE intraday → switching CE1=%d→%d CE2=%d→%d (ATM±offsets)",
+                        self._ce1_strike, new_ce1, self._ce2_strike, new_ce2,
+                    )
+                    self._ce1_strike = new_ce1;  self._ce2_strike = new_ce2
+                    self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
+                    self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
+                    self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
+                    self._bars_ce2 = await self._fetch_1m_history(self._ce2_key)
+                    for attr, key, strike, otype in [
+                        ("_bars_ce1", self._ce1_key, self._ce1_strike, "CE"),
+                        ("_bars_ce2", self._ce2_key, self._ce2_strike, "CE"),
+                    ]:
+                        intra = await self._fetch_intraday_bars_with_fallback(key, strike, otype)
+                        if intra:
+                            setattr(self, attr, self._merge_bars(getattr(self, attr), intra))
+                    reran_htf = True
+                if self._intraday_mode_pe:
+                    new_pe1 = atm_at_open + self._gap_near
+                    new_pe2 = atm_at_open + self._gap_far
+                    self._log.info(
+                        "Q2 PE intraday → switching PE1=%d→%d PE2=%d→%d (ATM±offsets)",
+                        self._pe1_strike, new_pe1, self._pe2_strike, new_pe2,
+                    )
+                    self._pe1_strike = new_pe1;  self._pe2_strike = new_pe2
+                    self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
+                    self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
+                    self._bars_pe1 = await self._fetch_1m_history(self._pe1_key)
+                    self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
+                    for attr, key, strike, otype in [
+                        ("_bars_pe1", self._pe1_key, self._pe1_strike, "PE"),
+                        ("_bars_pe2", self._pe2_key, self._pe2_strike, "PE"),
+                    ]:
+                        intra = await self._fetch_intraday_bars_with_fallback(key, strike, otype)
+                        if intra:
+                            setattr(self, attr, self._merge_bars(getattr(self, attr), intra))
+                    reran_htf = True
+                if reran_htf:
+                    self._run_htf_scan()
+                    self._check_zone_reachability()
+
             # Point 11: restore today's position if restarted mid-day; discard yesterday's.
             self._load_persisted_position()
             self._log.info(

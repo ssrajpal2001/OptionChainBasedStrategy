@@ -69,10 +69,9 @@ class EntryMixin:
         uid = _zone_uid(htf_zone)
         if uid in self._notified_uids:
             return
-        # For probe entries, delay uid consumption until the full position is built.
-        # This allows stage-2 and stage-3 scale-in adds on the same HTF zone.
-        if not is_probe:
-            self._notified_uids.add(uid)
+        # Do NOT consume uid yet — only add to _notified_uids after a confirmed fill.
+        # Consuming before placement means a broker rejection silently kills the zone
+        # and the second zone (CE2/PE2) never gets a chance.
         self._zone_ltf_status[uid] = "entered"
 
         # Scan strike (S1 CE / R1 PE) is naturally ITM relative to futures LTP
@@ -282,12 +281,16 @@ class EntryMixin:
             if fill is None or fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
                 self._log.error(
                     "Entry aborted — all 3 strikes (1-ITM/ATM/1-OTM) rejected for %s%s. "
-                    "Add funds to trade CrudeOil options.",
+                    "Zone uid NOT consumed — next zone can still fire.",
                     strike, opt_type
                 )
-                self._no_margin_today = True   # flag to skip further entries today
+                # Do NOT set _no_margin_today here — a generic rejection may be a transient
+                # broker/connectivity issue. Only margin-blocked at specific margin-error codes.
                 return
 
+            # Confirmed fill — NOW consume the zone uid so same zone never fires again.
+            if not is_probe:
+                self._notified_uids.add(uid)
             avg = fill.avg_price
 
         except Exception as exc:
