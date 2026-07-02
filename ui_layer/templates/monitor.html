@@ -756,6 +756,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Stock scanner ──────────────────────────────────────────────── */
     stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], ce_stocks: [], pe_stocks: [], use_nifty_bias: false, loaded: false, error: '' },
     stockScanBiasToggle: false,
+    stockScanRunning: false,
     fnoAlerts: [],          // active un-notified intraday alerts
     fnoStocks: [],          // live LTP + MTF/LTF state per watched stock (3s update)
 
@@ -1502,6 +1503,8 @@ document.addEventListener('alpine:init', () => {
       }
     },
     async runStockScan() {
+      if (this.stockScanRunning) return;
+      this.stockScanRunning = true;
       this.stockScan.error = '';
       try {
         const r = await this._fetch('/api/scanner/run', { method: 'POST',
@@ -1512,6 +1515,7 @@ document.addEventListener('alpine:init', () => {
         if (d && d.ok) { await this.loadStockScan(); }
         else { this.stockScan.error = (d && d.error) || 'Scan failed'; }
       } catch(e) { this.stockScan.error = String(e); }
+      finally { this.stockScanRunning = false; }
     },
 
     async loadFnoAlerts() {
@@ -5712,16 +5716,17 @@ function amoTest() {
           NIFTY filter
         </label>
         <!-- Refresh button -->
-        <button @click="loadStockScan()"
+        <button @click="loadStockScan()" :disabled="stockScanRunning"
                 class="font-mono text-xs px-2 py-1 rounded"
                 style="border:1px solid var(--t-border);color:var(--t-muted)">
           &#x21BB;
         </button>
         <!-- Run scan button -->
-        <button @click="runStockScan()"
+        <button @click="runStockScan()" :disabled="stockScanRunning"
                 class="font-mono text-xs px-3 py-1 rounded font-bold"
-                style="background:rgba(var(--t-accent-rgb),0.15);color:var(--t-accent);border:1px solid rgba(var(--t-accent-rgb),0.3)">
-          &#x25B6; RUN SCAN
+                :style="stockScanRunning ? 'opacity:0.5;cursor:not-allowed;background:rgba(var(--t-accent-rgb),0.15);color:var(--t-accent);border:1px solid rgba(var(--t-accent-rgb),0.3)' : 'background:rgba(var(--t-accent-rgb),0.15);color:var(--t-accent);border:1px solid rgba(var(--t-accent-rgb),0.3)'">
+          <span x-show="!stockScanRunning">&#x25B6; RUN SCAN</span>
+          <span x-show="stockScanRunning">&#x23F3; SCANNING… (2-3 min)</span>
         </button>
       </div>
     </div>
