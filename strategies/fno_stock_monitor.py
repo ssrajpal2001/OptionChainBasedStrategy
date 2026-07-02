@@ -98,14 +98,29 @@ class FnoStockMonitor:
         if not os.path.exists(path):
             logger.info("FnoStockMonitor: no scan file for %s — idle", today)
             return
+        # Build instrument_key lookup from fno_stocks.csv as fallback.
+        csv_keys: dict = {}
+        csv_path = os.path.join(self._scan_dir, "fno_stocks.csv")
+        if os.path.exists(csv_path):
+            try:
+                import csv as _csv
+                with open(csv_path) as cf:
+                    for row in _csv.reader(cf):
+                        if len(row) >= 2:
+                            csv_keys[row[0].strip()] = row[1].strip()
+            except Exception:
+                pass
         with open(path) as f:
             data = json.load(f)
         for entry in (data.get("ce_stocks") or []) + (data.get("pe_stocks") or []):
             sym = entry.get("symbol")
-            if sym:
-                self._watched[sym] = entry
-                self._bars_5m[sym]  = []
-                self._bars_15m[sym] = []
+            if not sym:
+                continue
+            if not entry.get("instrument_key") and sym in csv_keys:
+                entry["instrument_key"] = csv_keys[sym]
+            self._watched[sym] = entry
+            self._bars_5m[sym]  = []
+            self._bars_15m[sym] = []
         logger.info("FnoStockMonitor: watching %d stocks: %s",
                     len(self._watched), list(self._watched))
 
