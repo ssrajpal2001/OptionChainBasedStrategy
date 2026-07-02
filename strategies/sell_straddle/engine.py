@@ -449,6 +449,10 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     self._clog.info("IDX_TICKS: %d index ticks/60s spot=%.2f | %s",
                                     _idx_count, self._spot, _state)
                     _idx_count = 0
+                    # Republish position state every heartbeat so late-connecting browsers
+                    # see the open position without waiting for the next entry/exit event.
+                    if self._position and self._position.status == "open":
+                        self.notify_position_update(self._position.to_dict(), force=True)
                 try:
                     if self._position and self._position.status == "open":
                         await self._check_exits()
