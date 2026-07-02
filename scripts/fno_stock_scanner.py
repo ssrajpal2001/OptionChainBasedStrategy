@@ -277,6 +277,11 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
     if age > MAX_ZONE_AGE_DAYS:
         return None
 
+    # Minimum zone width filter — reject noise zones narrower than 0.3% of price
+    min_width = last_close * 0.003
+    if zh - zl < min_width:
+        return None
+
     # Directional proximity — price must be approaching from the correct side
     if not _approaching(last_close, zl, zh, direction, stock_prox_pct):
         return None
