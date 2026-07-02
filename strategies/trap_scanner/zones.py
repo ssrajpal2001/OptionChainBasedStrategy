@@ -459,14 +459,15 @@ class ZonesMixin:
             bear_zones = [e for e in self._opt_bear_zones if e["status"] == "TRAPPED"] if spot_has_bear else []
             bull_zones = [e for e in self._opt_bull_zones if e["status"] == "TRAPPED"] if spot_has_bull else []
         else:
-            ltp_ce = self._ltp_cache.get("CE1") or self._ltp_cache.get("CE2") or 0.0
-            ltp_pe = self._ltp_cache.get("PE1") or self._ltp_cache.get("PE2") or 0.0
-            def _alive_ce(z): return ltp_ce <= 0 or ltp_ce >= z.get("zone_low", 0)
-            def _alive_pe(z): return ltp_pe <= 0 or ltp_pe >= z.get("zone_low", 0)
-            bear_zones   = [e for e in self._htf_bear_zones   if e["status"] == "TRAPPED" and _alive_ce(e)]
-            bear_zones_2 = [e for e in self._htf_bear_zones_2 if e["status"] == "TRAPPED" and _alive_ce(e)]
-            bull_zones   = [e for e in self._htf_bull_zones   if e["status"] == "TRAPPED" and _alive_pe(e)]
-            bull_zones_2 = [e for e in self._htf_bull_zones_2 if e["status"] == "TRAPPED" and _alive_pe(e)]
+            ltp_ce1 = self._ltp_cache.get("CE1") or 0.0
+            ltp_ce2 = self._ltp_cache.get("CE2") or ltp_ce1
+            ltp_pe1 = self._ltp_cache.get("PE1") or 0.0
+            ltp_pe2 = self._ltp_cache.get("PE2") or ltp_pe1
+            def _alive(ltp, z): return ltp <= 0 or ltp >= z.get("zone_low", 0)
+            bear_zones   = [e for e in self._htf_bear_zones   if e["status"] == "TRAPPED" and _alive(ltp_ce1, e)]
+            bear_zones_2 = [e for e in self._htf_bear_zones_2 if e["status"] == "TRAPPED" and _alive(ltp_ce2, e)]
+            bull_zones   = [e for e in self._htf_bull_zones   if e["status"] == "TRAPPED" and _alive(ltp_pe1, e)]
+            bull_zones_2 = [e for e in self._htf_bull_zones_2 if e["status"] == "TRAPPED" and _alive(ltp_pe2, e)]
 
         _rc = self._htf_source not in ("option", "spot")
 
