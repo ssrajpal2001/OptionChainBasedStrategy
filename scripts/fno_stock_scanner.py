@@ -361,8 +361,11 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
         zones = [z for z in all_zones if z.get("kind") == kind and z.get("status") == "TRAPPED"]
         if not zones:
             continue
-        # Pick nearest zone to last_close
-        best = min(zones, key=lambda z: abs(last_close - (z["zone_high"] + z["zone_low"]) / 2))
+        # Pick most recent zone by trapped_on date (today → backwards)
+        zones_sorted = sorted(zones,
+                              key=lambda z: str(z.get("trapped_on") or z.get("ref_ts") or ""),
+                              reverse=True)
+        best = zones_sorted[0]
         r = _build_result(symbol, lot_size, strike_step, last_close,
                           direction, best, zones, stock_prox_pct, min_rr)
         if not r:
