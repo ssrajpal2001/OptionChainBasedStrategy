@@ -551,6 +551,48 @@ def run_optimize(token: str) -> None:
     for np_pct, sp_pct, avg, acc, n in results[:20]:
         print(f"{np_pct:>8.2f}  {sp_pct:>8.2f}  {avg:>10.1f}  {acc:>11.1f}%  {n:>8}")
 
+# ── Debug mode ────────────────────────────────────────────────────────────────
+
+def debug_stock(symbol: str, token: str) -> None:
+    """Print all detected zones for a single stock. Use --debug SYMBOL."""
+    stocks_df = pd.read_csv(FNO_LIST_PATH)
+    row = stocks_df[stocks_df["symbol"].str.upper() == symbol.upper()]
+    if row.empty:
+        print(f"[ERROR] {symbol} not found in {FNO_LIST_PATH}")
+        return
+    row = row.iloc[0]
+    df = _fetch_daily(row["upstox_key"], token)
+    if df.empty:
+        print(f"[ERROR] Could not fetch bars for {symbol}")
+        return
+    last_close = float(df.iloc[-1]["close"])
+    today_high = float(df.iloc[-1]["high"])
+    today_low  = float(df.iloc[-1]["low"])
+    print(f"\n{symbol}  last_close={last_close}  today_low={today_low}  today_high={today_high}")
+    print(f"Total bars: {len(df)}  ({df.iloc[0]['datetime']} → {df.iloc[-1]['datetime']})")
+
+    _, all_zones = scanner.scan_htf_spot(df)
+    bear = [z for z in all_zones if z["kind"] == "BEAR"]
+    bull = [z for z in all_zones if z["kind"] == "BULL"]
+    print(f"\nBEAR zones ({len(bear)} total, {sum(1 for z in bear if z['status']=='TRAPPED')} TRAPPED):")
+    for z in sorted(bear, key=lambda z: str(z.get("trapped_on") or ""), reverse=True)[:10]:
+        app = _approaching(last_close, z["zone_low"], z["zone_high"], "CE", STOCK_ZONE_PROXIMITY_PCT)
+        td_filter = today_low <= z["zone_high"]
+        print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}–{z['zone_high']:.1f}  "
+              f"sl={z['sl']:.1f}  trapped={z.get('trapped_on','')}  "
+              f"approaching={app}  today_low_in_zone={td_filter}")
+    print(f"\nBULL zones ({len(bull)} total, {sum(1 for z in bull if z['status']=='TRAPPED')} TRAPPED):")
+    for z in sorted(bull, key=lambda z: str(z.get("trapped_on") or ""), reverse=True)[:10]:
+        app = _approaching(last_close, z["zone_low"], z["zone_high"], "PE", STOCK_ZONE_PROXIMITY_PCT)
+        td_filter = today_high >= z["zone_low"]
+        print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}–{z['zone_high']:.1f}  "
+              f"sl={z['sl']:.1f}  trapped={z.get('trapped_on','')}  "
+              f"approaching={app}  today_high_in_zone={td_filter}")
+
+    print(f"\n→ Would appear as CE: {bool([z for z in bear if z['status']=='TRAPPED' and _approaching(last_close, z['zone_low'], z['zone_high'], 'CE', STOCK_ZONE_PROXIMITY_PCT) and today_low > z['zone_high']])}")
+    print(f"→ Would appear as PE: {bool([z for z in bull if z['status']=='TRAPPED' and _approaching(last_close, z['zone_low'], z['zone_high'], 'PE', STOCK_ZONE_PROXIMITY_PCT) and today_high < z['zone_low']])}")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -560,5 +602,12 @@ if __name__ == "__main__":
         sys.exit(1)
     if "--optimize" in sys.argv:
         run_optimize(token)
+    elif "--debug" in sys.argv:
+        idx = sys.argv.index("--debug")
+        sym = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else ""
+        if not sym:
+            print("[ERROR] Usage: python scripts/fno_stock_scanner.py --debug SYMBOL")
+        else:
+            debug_stock(sym, token)
     else:
         run_scan(token)
