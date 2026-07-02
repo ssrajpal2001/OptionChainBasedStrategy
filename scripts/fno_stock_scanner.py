@@ -56,8 +56,34 @@ def _get_token() -> str:
 def _hdr(token: str) -> dict:
     return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
+def _fetch_intraday_as_d1(instrument_key: str, token: str) -> Optional[dict]:
+    """Fetch today's intraday 1m bars and collapse to a single D1 OHLCV row."""
+    enc = _quote(instrument_key, safe="")
+    url = f"{UPSTOX_BASE}/historical-candle/intraday/{enc}/1minute"
+    try:
+        r = requests.get(url, headers=_hdr(token), timeout=15)
+        time.sleep(0.1)
+        if r.status_code != 200:
+            return None
+        candles = r.json().get("data", {}).get("candles", [])
+        if not candles:
+            return None
+        opens  = [float(c[1]) for c in candles]
+        highs  = [float(c[2]) for c in candles]
+        lows   = [float(c[3]) for c in candles]
+        closes = [float(c[4]) for c in candles]
+        return {
+            "datetime": date.today().isoformat(),
+            "open":  opens[0],
+            "high":  max(highs),
+            "low":   min(lows),
+            "close": closes[-1],
+        }
+    except Exception:
+        return None
+
 def _fetch_daily(instrument_key: str, token: str, days: int = D1_LOOKBACK_DAYS) -> pd.DataFrame:
-    """Fetch daily OHLCV bars for any Upstox instrument key."""
+    """Fetch daily OHLCV bars. Appends today's bar from intraday API if D1 API lags."""
     to_dt = date.today()
     fr_dt = to_dt - timedelta(days=days)
     enc   = _quote(instrument_key, safe="")
@@ -73,7 +99,14 @@ def _fetch_daily(instrument_key: str, token: str, days: int = D1_LOOKBACK_DAYS) 
              "low": float(c[3]), "close": float(c[4])}
             for c in reversed(candles)
         ]
-        return pd.DataFrame(rows) if rows else pd.DataFrame()
+        df = pd.DataFrame(rows) if rows else pd.DataFrame()
+        # If the latest D1 bar is not today (API lag), patch with intraday data
+        today_str = to_dt.isoformat()
+        if not df.empty and df.iloc[-1]["datetime"] < today_str:
+            today_bar = _fetch_intraday_as_d1(instrument_key, token)
+            if today_bar:
+                df = pd.concat([df, pd.DataFrame([today_bar])], ignore_index=True)
+        return df
     except Exception:
         return pd.DataFrame()
 
