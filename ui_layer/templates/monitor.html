@@ -757,6 +757,7 @@ document.addEventListener('alpine:init', () => {
     stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], ce_stocks: [], pe_stocks: [], use_nifty_bias: false, loaded: false, error: '' },
     stockScanBiasToggle: false,
     fnoAlerts: [],          // active un-notified intraday alerts
+    fnoStocks: [],          // live LTP + MTF/LTF state per watched stock (3s update)
 
     /* ── Risk command center ─────────────────────────────────────────── */
     riskSummary: { total_capital: 0, total_net_mtm: 0, total_open_lots: 0, avg_slippage_pts: 0, client_count: 0, clients: [], risk_manager_active: false, ts: '' },
@@ -1223,6 +1224,8 @@ document.addEventListener('alpine:init', () => {
           this.fnoAlerts.unshift(a);
           this._playAlertSound();
         }
+      } else if (msg.type === 'fno_status') {
+        this.fnoStocks = msg.stocks || [];
       }
     },
 
@@ -5776,6 +5779,54 @@ function amoTest() {
     </template>
 
     <!-- CE section -->
+    <!-- Live intraday monitor status (updates every 3s via WebSocket) -->
+    <template x-if="fnoStocks.length > 0">
+      <div class="flex flex-col gap-2">
+        <div class="font-mono text-xs font-bold px-1" style="color:var(--t-amber)">⚡ LIVE MONITOR — Intraday MTF/LTF Cascade</div>
+        <div class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))">
+          <template x-for="s in fnoStocks" :key="s.symbol">
+            <div class="rounded border p-3 font-mono text-xs flex flex-col gap-1.5"
+                 :style="s.mtf_state === 'TRAPPED ✓'
+                   ? 'background:var(--t-surface);border-color:rgba(var(--t-amber-rgb),0.5)'
+                   : 'background:var(--t-surface);border-color:var(--t-border)'">
+              <!-- Header -->
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
+                  <span class="text-xs font-bold"
+                        :style="s.direction==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                        x-text="'▲ BUY ' + s.direction"></span>
+                </div>
+                <span class="font-bold text-sm" style="color:var(--t-fg)"
+                      x-text="s.ltp > 0 ? '₹' + s.ltp.toFixed(2) : '—'"></span>
+              </div>
+              <!-- MTF / LTF state -->
+              <div class="flex gap-2">
+                <span class="px-2 py-0.5 rounded text-xs font-bold"
+                      :style="s.mtf_state === 'TRAPPED ✓'
+                        ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.15);border:1px solid rgba(var(--t-amber-rgb),0.4)'
+                        : 'color:var(--t-muted);background:rgba(128,128,128,0.1);border:1px solid var(--t-border)'"
+                      x-text="'MTF 15m: ' + s.mtf_state"></span>
+                <span class="px-2 py-0.5 rounded text-xs font-bold"
+                      :style="s.ltf_state === 'ARMED'
+                        ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.4)'
+                        : 'color:var(--t-muted);background:rgba(128,128,128,0.1);border:1px solid var(--t-border)'"
+                      x-text="'LTF 5m: ' + s.ltf_state"></span>
+              </div>
+              <!-- SL / T1 / candle counts -->
+              <div class="flex justify-between" style="color:var(--t-muted)">
+                <span>SL <span style="color:var(--t-red)" x-text="'₹' + (s.sl||0).toFixed(0)"></span>
+                  &nbsp;/&nbsp;T1 <span style="color:var(--t-green)" x-text="'₹' + (s.t1||0).toFixed(0)"></span>
+                  &nbsp;R:R <span style="color:var(--t-fg)" x-text="(s.rr_ratio||0).toFixed(1) + '×'"></span>
+                </span>
+                <span x-text="'5m:' + s.bars_5m + ' 15m:' + s.bars_15m + ' bars'"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
     <template x-if="stockScan.ce_stocks && stockScan.ce_stocks.length > 0">
       <div class="flex flex-col gap-2">
         <div class="font-mono text-xs font-bold px-1" style="color:var(--t-green)">▲ BUY CE — Bear zones (bears trapped → stock up)</div>

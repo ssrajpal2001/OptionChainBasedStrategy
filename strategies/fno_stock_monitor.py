@@ -149,6 +149,7 @@ class FnoStockMonitor:
         q = self._bus.subscribe(Topic.INDEX_TICK)
         self._tasks.append(asyncio.create_task(self._tick_loop(q)))
         self._tasks.append(asyncio.create_task(self._eod_clear_loop()))
+        self._tasks.append(asyncio.create_task(self._status_broadcast_loop()))
         logger.info("FnoStockMonitor: started — watching %d stocks", len(self._watched))
         # Keep coroutine alive; real work happens in sub-tasks.
         while self._running:
@@ -162,6 +163,33 @@ class FnoStockMonitor:
 
     def get_active_alerts(self) -> List[dict]:
         return [dataclasses.asdict(a) for a in self._active_alerts]
+
+    def get_status(self) -> List[dict]:
+        """Return live status for each watched stock — for dashboard display."""
+        out = []
+        for sym, entry in self._watched.items():
+            bkey5  = f"5m_{sym}"
+            bkey15 = f"15m_{sym}"
+            cur5   = self._buckets.get(bkey5, {})
+            cur15  = self._buckets.get(bkey15, {})
+            ltp = cur5.get("close") or cur15.get("close") or 0.0
+            mtf_state = "TRAPPED ✓" if sym in self._ltf_armed else "WATCH"
+            ltf_state = "ARMED" if sym in self._ltf_armed else "—"
+            out.append({
+                "symbol":    sym,
+                "direction": entry["direction"],
+                "ltp":       round(ltp, 2),
+                "sl":        entry["sl"],
+                "t1":        entry["t1"],
+                "zone_high": entry["zone_high"],
+                "zone_low":  entry["zone_low"],
+                "rr_ratio":  entry["rr_ratio"],
+                "mtf_state": mtf_state,
+                "ltf_state": ltf_state,
+                "bars_5m":   len(self._bars_5m.get(sym, [])),
+                "bars_15m":  len(self._bars_15m.get(sym, [])),
+            })
+        return out
 
     def mark_notified(self, uid: str) -> None:
         self._notified_uids.add(uid)
@@ -195,6 +223,17 @@ class FnoStockMonitor:
                 self._active_alerts.clear()
                 logger.info("FnoStockMonitor: EOD cleared alerts")
                 break
+
+    async def _status_broadcast_loop(self) -> None:
+        """Publish fno_stock_status to EventBus every 3s for dashboard live update."""
+        while self._running:
+            await asyncio.sleep(3)
+            try:
+                status = self.get_status()
+                if status:
+                    await self._bus.publish(Topic.FNO_STOCK_STATUS, status)
+            except Exception:
+                pass
 
     # ── Tick processing ───────────────────────────────────────────────────────
 

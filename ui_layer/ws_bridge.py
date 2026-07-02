@@ -76,7 +76,8 @@ class WsBridge:
         self._audit_q     = bus.subscribe(Topic.EXIT_AUDIT)
         self._pos_q       = bus.subscribe(Topic.POSITION_UPDATE)
         self._trap_tick_q = bus.subscribe(Topic.TRAP_TICK)
-        self._fno_alert_q = bus.subscribe(Topic.FNO_STOCK_ALERT)
+        self._fno_alert_q  = bus.subscribe(Topic.FNO_STOCK_ALERT)
+        self._fno_status_q = bus.subscribe(Topic.FNO_STOCK_STATUS)
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
@@ -166,6 +167,7 @@ class WsBridge:
                 self._position_update_loop(),
                 self._trap_tick_loop(),
                 self._fno_alert_loop(),
+                self._fno_status_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -471,6 +473,18 @@ class WsBridge:
                     await self.broadcast({"type": "fno_alert", "alert": payload})
             except Exception as exc:
                 logger.debug("WsBridge._fno_alert_loop: %s", exc)
+
+    async def _fno_status_loop(self) -> None:
+        """Forward live stock LTP + MTF/LTF status to dashboard every 3s."""
+        while self._running:
+            try:
+                status = await asyncio.wait_for(self._fno_status_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                await self.broadcast({"type": "fno_status", "stocks": status})
+            except Exception as exc:
+                logger.debug("WsBridge._fno_status_loop: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
         """Broadcast worker stats and client summaries every HEARTBEAT_INTERVAL seconds."""
