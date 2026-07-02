@@ -366,20 +366,26 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
         zones = [z for z in all_zones if z.get("kind") == kind and z.get("status") == "TRAPPED"]
         if not zones:
             continue
-        # Pick most recent zone by trapped_on date (today → backwards)
+        # Try ALL trapped zones (most-recent first), return best R:R that qualifies
         zones_sorted = sorted(zones,
                               key=lambda z: str(z.get("trapped_on") or z.get("ref_ts") or ""),
                               reverse=True)
-        best = zones_sorted[0]
-        r = _build_result(symbol, lot_size, strike_step, last_close,
-                          direction, best, zones, stock_prox_pct, min_rr)
+        best_r = None
+        for candidate in zones_sorted:
+            r = _build_result(symbol, lot_size, strike_step, last_close,
+                              direction, candidate, zones, stock_prox_pct, min_rr)
+            if not r:
+                continue
+            zh, zl = r["zone_high"], r["zone_low"]
+            # Skip if today's intraday price already entered the zone
+            if direction == "CE" and today_low <= zh:
+                continue
+            if direction == "PE" and today_high >= zl:
+                continue
+            if best_r is None or r["rr_ratio"] > best_r["rr_ratio"]:
+                best_r = r
+        r = best_r
         if not r:
-            continue
-        zh, zl = r["zone_high"], r["zone_low"]
-        # Skip if today's intraday price already entered the zone — entry was today, not tomorrow
-        if direction == "CE" and today_low <= zh:   # low dipped into/below zone high
-            continue
-        if direction == "PE" and today_high >= zl:  # high spiked into/above zone low
             continue
         results.append(r)
     return results
