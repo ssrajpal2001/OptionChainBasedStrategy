@@ -104,9 +104,21 @@ class StrikeRebalancer:
         """Allow the full ATM±chain_depth subscription for this underlying.
         Called by sell_straddle / iron_condor books when they are active.
         Without this call the rebalancer only subscribes pinned strikes (trap scanner legs)
-        and NOT the full ATM window — saves WS slots for inactive indices."""
-        if underlying in self._state:
-            self._state[underlying].chain_enabled = True
+        and NOT the full ATM window — saves WS slots for inactive indices.
+
+        If the initial subscription has already fired (market opened before this call),
+        we schedule an immediate ATM chain subscription so a late-spawning book still
+        gets its option ticks without waiting for the next ATM drift rebalance.
+        """
+        if underlying not in self._state:
+            return
+        st = self._state[underlying]
+        st.chain_enabled = True
+        # If initial_subscribe already ran (open_atm is set), the ATM chain was skipped
+        # because chain_enabled was False at that time.  Schedule a catch-up subscribe now.
+        if st.open_atm is not None and st.current_atm is not None:
+            step = self._cfg.exchange.strike_steps.get(underlying, 50.0)
+            asyncio.ensure_future(self._catchup_chain_subscribe(underlying, st.current_atm, step, st))
 
     def pin_strike(self, underlying: str, strike: float) -> None:
         """
@@ -321,6 +333,32 @@ class StrikeRebalancer:
             "StrikeRebalancer: [%s] Initial subscription %d strikes (window=%d + pinned=%d).",
             underlying, len(state.active_strikes), len(window), len(state.pinned_strikes),
         )
+
+    async def _catchup_chain_subscribe(
+        self,
+        underlying: str,
+        atm: float,
+        step: float,
+        state: _UnderlyingState,
+    ) -> None:
+        """Subscribe ATM±chain_depth window for an index whose enable_chain() was called AFTER
+        the initial_subscribe already fired.  Only adds strikes not already subscribed."""
+        depth = self._cfg.chain_depth
+        window = set(_strike_window(atm, step, depth))
+        to_sub = window - state.active_strikes
+        if not to_sub:
+            return
+        tokens = self._strikes_to_tokens(underlying, list(to_sub))
+        if tokens and self._feeder is not None:
+            try:
+                await self._feeder.subscribe_tokens(tokens)
+                state.active_strikes |= to_sub
+                logger.info(
+                    "StrikeRebalancer: [%s] catch-up subscribed %d ATM chain strikes (ATM=%.0f).",
+                    underlying, len(to_sub), atm,
+                )
+            except Exception as exc:
+                logger.warning("StrikeRebalancer: [%s] catch-up subscribe error: %s", underlying, exc)
 
     async def _rebalance(
         self,
