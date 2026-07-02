@@ -30,11 +30,11 @@ from strategies.trap_scanner import scanner
 
 # ── Config ────────────────────────────────────────────────────────────────────
 NIFTY_BIAS_PROXIMITY_PCT = 1.5   # tune via --optimize
-STOCK_ZONE_PROXIMITY_PCT = 3.0   # tune via --optimize
+STOCK_ZONE_PROXIMITY_PCT = 5.0   # tune via --optimize
 SL_BUFFER_PCT            = 0.2
 MIN_RR                   = 1.5
 D1_LOOKBACK_DAYS         = 365
-MAX_ZONE_AGE_DAYS        = 15    # ignore zones older than this
+MAX_ZONE_AGE_DAYS        = 30    # ignore zones older than this
 TOP_N_PER_DIRECTION      = 5     # max CE results + max PE results
 PARALLEL_WORKERS         = 10
 
@@ -594,8 +594,18 @@ def debug_stock(symbol: str, token: str) -> None:
               f"sl={z['sl']:.1f}  trapped={z.get('trapped_on','')}  "
               f"approaching={app}  today_high_in_zone={td_filter}")
 
-    print(f"\n→ Would appear as CE: {bool([z for z in bear if z['status']=='TRAPPED' and _approaching(last_close, z['zone_low'], z['zone_high'], 'CE', STOCK_ZONE_PROXIMITY_PCT) and today_low > z['zone_high']])}")
-    print(f"→ Would appear as PE: {bool([z for z in bull if z['status']=='TRAPPED' and _approaching(last_close, z['zone_low'], z['zone_high'], 'PE', STOCK_ZONE_PROXIMITY_PCT) and today_high < z['zone_low']])}")
+    # Run actual scan logic to show real verdict (includes width filter, R:R, T1 check)
+    lot_size   = int(row["lot_size"])
+    strike_step = int(row["strike_step"])
+    print(f"\n── Full scan verdict (prox={STOCK_ZONE_PROXIMITY_PCT}%, min_rr={MIN_RR}, max_age={MAX_ZONE_AGE_DAYS}d) ──")
+    results = scan_stock(symbol, row["upstox_key"], lot_size, strike_step, token,
+                         stock_prox_pct=STOCK_ZONE_PROXIMITY_PCT, min_rr=MIN_RR)
+    if results:
+        for r in results:
+            print(f"  ✓ {r['direction']} zone={r['zone_low']}–{r['zone_high']}  "
+                  f"sl={r['stock_sl']}  t1={r['stock_t1']}  R:R={r['rr_ratio']}  age={r['zone_age_days']}d")
+    else:
+        print("  — no qualifying setup today")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
