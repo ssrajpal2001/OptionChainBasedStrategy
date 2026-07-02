@@ -8,8 +8,14 @@ Usage:
 from __future__ import annotations
 
 import os, sys, json, sqlite3, time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time as dtime
 from typing import Optional
+import pytz
+_IST = pytz.timezone("Asia/Kolkata")
+def _market_closed() -> bool:
+    """True if NSE market has closed for today (after 15:30 IST)."""
+    now = datetime.now(_IST)
+    return now.time() >= dtime(15, 30) and now.weekday() < 5
 from urllib.parse import quote as _quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -100,9 +106,9 @@ def _fetch_daily(instrument_key: str, token: str, days: int = D1_LOOKBACK_DAYS) 
             for c in reversed(candles)
         ]
         df = pd.DataFrame(rows) if rows else pd.DataFrame()
-        # If the latest D1 bar is not today (API lag), patch with intraday data
+        # If market has closed today and D1 API still shows yesterday, patch from intraday
         today_str = to_dt.isoformat()
-        if not df.empty and df.iloc[-1]["datetime"] < today_str:
+        if _market_closed() and not df.empty and df.iloc[-1]["datetime"] < today_str:
             today_bar = _fetch_intraday_as_d1(instrument_key, token)
             if today_bar:
                 df = pd.concat([df, pd.DataFrame([today_bar])], ignore_index=True)
