@@ -141,13 +141,18 @@ class FnoStockMonitor:
 
     async def start(self) -> None:
         if not self._watched:
-            logger.info("FnoStockMonitor: no stocks to watch — not starting")
-            return
+            logger.info("FnoStockMonitor: no stocks to watch — idle")
+            # Stay alive so run_system task-monitor doesn't trigger shutdown.
+            while True:
+                await asyncio.sleep(3600)
         self._running = True
         q = self._bus.subscribe(Topic.INDEX_TICK)
         self._tasks.append(asyncio.create_task(self._tick_loop(q)))
         self._tasks.append(asyncio.create_task(self._eod_clear_loop()))
-        logger.info("FnoStockMonitor: started")
+        logger.info("FnoStockMonitor: started — watching %d stocks", len(self._watched))
+        # Keep coroutine alive; real work happens in sub-tasks.
+        while self._running:
+            await asyncio.sleep(60)
 
     async def stop(self) -> None:
         self._running = False
