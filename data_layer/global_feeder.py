@@ -1221,15 +1221,20 @@ class GlobalFeeder:
     def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
         """Register NSE_EQ instrument keys → ticker names so FnoStockMonitor spot ticks flow as INDEX_TICK."""
         self._extra_spot_keys.update(mapping)
-        # Pass through to the active underlying feeder if it supports it
+        self._reapply_extra_spot_keys()
+        logger.info("GlobalFeeder: registered %d extra spot keys", len(mapping))
+
+    def _reapply_extra_spot_keys(self) -> None:
+        """Push _extra_spot_keys to the currently-active feeder(s). Called after OAuth reconnect."""
+        if not self._extra_spot_keys:
+            return
         if self._dual_feeder is not None:
             for f in self._dual_feeder._feeders.values():
                 if hasattr(f, "register_extra_spot_keys"):
-                    f.register_extra_spot_keys(mapping)
+                    f.register_extra_spot_keys(self._extra_spot_keys)
         elif self._feeder is not None:
             if hasattr(self._feeder, "register_extra_spot_keys"):
-                self._feeder.register_extra_spot_keys(mapping)
-        logger.info("GlobalFeeder: registered %d extra spot keys", len(mapping))
+                self._feeder.register_extra_spot_keys(self._extra_spot_keys)
 
     async def subscribe_tokens(self, tokens: list) -> None:
         """Proxy to active feeder — DualFeeder takes priority over initial feeder."""
@@ -1316,6 +1321,7 @@ class GlobalFeeder:
             SystemEvent(SysEvent.FEEDER_RESTORED, "dual_active_active"),
         )
         logger.info("GlobalFeeder: DualFeeder (active-active) started.")
+        self._reapply_extra_spot_keys()
         await self._reapply_cached_tokens()
 
     async def start_single(self, provider: str, creds: Dict[str, str]) -> None:
@@ -1335,6 +1341,7 @@ class GlobalFeeder:
             SystemEvent(SysEvent.FEEDER_RESTORED, f"single_{provider}"),
         )
         logger.info("GlobalFeeder: single-provider '%s' feeder started.", provider)
+        self._reapply_extra_spot_keys()
         await self._reapply_cached_tokens()
 
     @property
