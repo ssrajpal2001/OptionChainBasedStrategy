@@ -344,11 +344,14 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
     Scan one stock's D1 bars.
     If bias is given (CE/PE), returns only matching direction (list of 0-1 items).
     If bias is None, returns best CE result + best PE result (list of 0-2 items).
+    Skips zones already touched intraday today (entry was today, not tomorrow).
     """
     df = _fetch_daily(upstox_key, token)
     if df.empty or len(df) < 5:
         return []
     last_close = float(df.iloc[-1]["close"])
+    today_high = float(df.iloc[-1]["high"])
+    today_low  = float(df.iloc[-1]["low"])
     _, all_zones = scanner.scan_htf_spot(df)
 
     directions = [bias] if bias else ["CE", "PE"]
@@ -362,8 +365,15 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
         best = min(zones, key=lambda z: abs(last_close - (z["zone_high"] + z["zone_low"]) / 2))
         r = _build_result(symbol, lot_size, strike_step, last_close,
                           direction, best, zones, stock_prox_pct, min_rr)
-        if r:
-            results.append(r)
+        if not r:
+            continue
+        zh, zl = r["zone_high"], r["zone_low"]
+        # Skip if today's intraday price already entered the zone — entry was today, not tomorrow
+        if direction == "CE" and today_low <= zh:   # low dipped into/below zone high
+            continue
+        if direction == "PE" and today_high >= zl:  # high spiked into/above zone low
+            continue
+        results.append(r)
     return results
 
 # ── Full scan run ─────────────────────────────────────────────────────────────
