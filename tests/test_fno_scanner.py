@@ -164,20 +164,6 @@ def test_classify_today_touch_ce_broken():
     assert r["broken_today"] is True
 
 
-def test_clean_old_zone_skips_stale_trap():
-    from fno_stock_scanner import _clean_old_zone
-    old_trap = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-10", "ref_ts": "2026-06-05"}
-    new_closed = {"kind": "BEAR", "status": "CLOSED", "closed_on": "2026-06-20"}
-    assert _clean_old_zone(old_trap, [old_trap, new_closed], "CE") is False
-
-
-def test_clean_old_zone_keeps_fresh_trap():
-    from fno_stock_scanner import _clean_old_zone
-    fresh_trap = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-25", "ref_ts": "2026-06-20"}
-    old_closed = {"kind": "BEAR", "status": "CLOSED", "closed_on": "2026-06-15"}
-    assert _clean_old_zone(fresh_trap, [fresh_trap, old_closed], "CE") is True
-
-
 def test_build_result_uses_zone_entry_for_rr():
     from fno_stock_scanner import _build_result
     best = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-17",

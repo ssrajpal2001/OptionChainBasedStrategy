@@ -319,28 +319,6 @@ def _merge_cluster(best: dict, zones: list) -> tuple:
     return zh, zl, rep
 
 
-def _clean_old_zone(best: dict, all_zones: list, direction: str) -> bool:
-    """
-    'Clean old zones first' rule for daily traps.
-    A TRAPPED zone is stale if a more recent CLOSED zone of the same kind exists
-    AND that CLOSED zone resolved AFTER this TRAPPED zone fired.
-    Returns True if the zone is still fresh/valid, False if invalidated.
-    """
-    if best.get("status") != "TRAPPED":
-        return True
-    best_ts = str(best.get("trapped_on") or best.get("ref_ts") or "")
-    if not best_ts:
-        return True
-    kind = "BEAR" if direction == "CE" else "BULL"
-    closed = [
-        z for z in all_zones
-        if z.get("kind") == kind
-        and z.get("status") == "CLOSED"
-        and str(z.get("closed_on") or "") > best_ts
-    ]
-    return not closed
-
-
 def _build_result(symbol: str, lot_size: int, strike_step: int,
                   last_close: float, today_high: float, today_low: float,
                   direction: str, best: dict,
@@ -361,10 +339,6 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
 
     # Directional proximity — price must be approaching from the correct side
     if not _approaching(last_close, zl, zh, direction, stock_prox_pct):
-        return None
-
-    # Clean-old-zones: skip stale traps that were resolved by a more recent closed zone
-    if not _clean_old_zone(best, all_zones, direction):
         return None
 
     # Classify today's interaction with the zone
