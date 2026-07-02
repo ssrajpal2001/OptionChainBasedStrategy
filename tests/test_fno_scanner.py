@@ -133,3 +133,62 @@ def test_scan_json_stock_nifty_bias_field():
     assert "nifty_bias" in s
     assert s["nifty_bias"] in ("CE", "PE")
     os.unlink(tmp)
+
+
+def test_classify_today_touch_ce_untouched():
+    from fno_stock_scanner import _classify_today_touch
+    r = _classify_today_touch(last_close=1290.5, today_high=1299.4, today_low=1278.1,
+                              zl=1255.0, zh=1265.6, direction="CE")
+    assert r["touch_status"] == "UNTOUCHED"
+    assert r["tested_today"] is False
+    assert r["bounced_today"] is False
+    assert r["broken_today"] is False
+
+
+def test_classify_today_touch_ce_bounced():
+    from fno_stock_scanner import _classify_today_touch
+    # Price dipped into zone but closed above zone_high
+    r = _classify_today_touch(last_close=1290.0, today_high=1295.0, today_low=1260.0,
+                              zl=1255.0, zh=1265.6, direction="CE")
+    assert r["touch_status"] == "BOUNCED"
+    assert r["tested_today"] is True
+    assert r["bounced_today"] is True
+    assert r["broken_today"] is False
+
+
+def test_classify_today_touch_ce_broken():
+    from fno_stock_scanner import _classify_today_touch
+    r = _classify_today_touch(last_close=1240.0, today_high=1260.0, today_low=1230.0,
+                              zl=1255.0, zh=1265.6, direction="CE")
+    assert r["touch_status"] == "BROKEN"
+    assert r["broken_today"] is True
+
+
+def test_clean_old_zone_skips_stale_trap():
+    from fno_stock_scanner import _clean_old_zone
+    old_trap = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-10", "ref_ts": "2026-06-05"}
+    new_closed = {"kind": "BEAR", "status": "CLOSED", "closed_on": "2026-06-20"}
+    assert _clean_old_zone(old_trap, [old_trap, new_closed], "CE") is False
+
+
+def test_clean_old_zone_keeps_fresh_trap():
+    from fno_stock_scanner import _clean_old_zone
+    fresh_trap = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-25", "ref_ts": "2026-06-20"}
+    old_closed = {"kind": "BEAR", "status": "CLOSED", "closed_on": "2026-06-15"}
+    assert _clean_old_zone(fresh_trap, [fresh_trap, old_closed], "CE") is True
+
+
+def test_build_result_uses_zone_entry_for_rr():
+    from fno_stock_scanner import _build_result
+    best = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-17",
+            "ref_ts": "2026-06-16", "sl": 1348.0,
+            "zone_high": 1265.6, "zone_low": 1255.0}
+    r = _build_result(symbol="VOLTAS", lot_size=1000, strike_step=5,
+                      last_close=1290.5, today_high=1299.4, today_low=1278.1,
+                      direction="CE", best=best,
+                      all_zones=[best], stock_prox_pct=5.0, min_rr=1.5)
+    assert r is not None
+    assert r["entry_plan_price"] == 1265.6
+    # R:R should be based on zone entry, not last_close
+    assert r["rr_ratio"] > 3.0
+    assert r["touch_status"] == "UNTOUCHED"

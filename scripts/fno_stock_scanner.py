@@ -165,6 +165,60 @@ def _zone_date_str(trapped_on: str) -> str:
     except Exception:
         return ""
 
+def _classify_today_touch(last_close: float, today_high: float, today_low: float,
+                          zl: float, zh: float, direction: str) -> dict:
+    """
+    Classify how today's session interacted with the zone.
+
+    For tomorrow's option trade we care whether the zone is:
+      - untouched        : price stayed above (CE) / below (PE) — classic pending retest
+      - tested+bounced   : price entered the zone today but closed favourably — strong confirmation
+      - inside           : today's close is inside the zone — active, watch first 15 min
+      - broken           : price broke through the wrong side and closed there — invalidated
+
+    Returns dict with keys: tested_today, bounced_today, broken_today, inside_today,
+                            today_wick_pct, touch_status.
+    """
+    if direction == "CE":
+        tested   = today_low <= zh
+        inside   = zl <= last_close <= zh
+        broken   = last_close < zl
+        bounced  = tested and not broken and last_close >= zh
+        # How deep did today's low wick into the zone? (0% = touched top, 100% = touched bottom)
+        if zh > zl and today_low <= zh:
+            today_wick_pct = min(100.0, max(0.0, round((zh - today_low) / (zh - zl) * 100, 1)))
+        else:
+            today_wick_pct = 0.0
+    else:  # PE
+        tested   = today_high >= zl
+        inside   = zl <= last_close <= zh
+        broken   = last_close > zh
+        bounced  = tested and not broken and last_close <= zl
+        if zh > zl and today_high >= zl:
+            today_wick_pct = min(100.0, max(0.0, round((today_high - zl) / (zh - zl) * 100, 1)))
+        else:
+            today_wick_pct = 0.0
+
+    if broken:
+        touch_status = "BROKEN"
+    elif bounced:
+        touch_status = "BOUNCED"
+    elif inside:
+        touch_status = "INSIDE"
+    elif tested:
+        touch_status = "TESTED"
+    else:
+        touch_status = "UNTOUCHED"
+
+    return {
+        "tested_today": tested,
+        "bounced_today": bounced,
+        "broken_today": broken,
+        "inside_today": inside,
+        "today_wick_pct": today_wick_pct,
+        "touch_status": touch_status,
+    }
+
 def _approaching(last_close: float, zone_low: float, zone_high: float,
                  direction: str, prox_pct: float) -> bool:
     """
@@ -265,9 +319,32 @@ def _merge_cluster(best: dict, zones: list) -> tuple:
     return zh, zl, rep
 
 
+def _clean_old_zone(best: dict, all_zones: list, direction: str) -> bool:
+    """
+    'Clean old zones first' rule for daily traps.
+    A TRAPPED zone is stale if a more recent CLOSED zone of the same kind exists
+    AND that CLOSED zone resolved AFTER this TRAPPED zone fired.
+    Returns True if the zone is still fresh/valid, False if invalidated.
+    """
+    if best.get("status") != "TRAPPED":
+        return True
+    best_ts = str(best.get("trapped_on") or best.get("ref_ts") or "")
+    if not best_ts:
+        return True
+    kind = "BEAR" if direction == "CE" else "BULL"
+    closed = [
+        z for z in all_zones
+        if z.get("kind") == kind
+        and z.get("status") == "CLOSED"
+        and str(z.get("closed_on") or "") > best_ts
+    ]
+    return not closed
+
+
 def _build_result(symbol: str, lot_size: int, strike_step: int,
-                   last_close: float, direction: str, best: dict,
-                   all_zones: list, stock_prox_pct: float, min_rr: float) -> Optional[dict]:
+                  last_close: float, today_high: float, today_low: float,
+                  direction: str, best: dict,
+                  all_zones: list, stock_prox_pct: float, min_rr: float) -> Optional[dict]:
     """Build a result dict for one zone+direction. Returns None if doesn't qualify."""
     # Merge nearby zones into a cluster for accurate zone boundaries
     zh, zl, best = _merge_cluster(best, all_zones)
@@ -286,29 +363,45 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
     if not _approaching(last_close, zl, zh, direction, stock_prox_pct):
         return None
 
+    # Clean-old-zones: skip stale traps that were resolved by a more recent closed zone
+    if not _clean_old_zone(best, all_zones, direction):
+        return None
+
+    # Classify today's interaction with the zone
+    touch = _classify_today_touch(last_close, today_high, today_low, zl, zh, direction)
+    if touch["broken_today"]:
+        return None
+
     # SL and T1
     if direction == "CE":
         sl = round(zl * (1 - SL_BUFFER_PCT / 100), 2)
         t1 = round(best.get("sl", zh * 1.05), 2)
-        if t1 <= last_close:   # zone already played out — T1 already reached
+        # Target already reached if today's close is above T1
+        if last_close >= t1:
             return None
+        # Realistic tomorrow entry = retest of zone_high (sellers' entry level)
+        plan_entry = zh
     else:
         sl = round(zh * (1 + SL_BUFFER_PCT / 100), 2)
         t1 = round(best.get("sl", zl * 0.95), 2)
-        if t1 >= last_close:   # zone already played out — T1 already reached
+        if last_close <= t1:
             return None
+        plan_entry = zl
 
-    rr = _compute_rr(entry=last_close, sl=sl, t1=t1, direction=direction)
+    rr = _compute_rr(entry=plan_entry, sl=sl, t1=t1, direction=direction)
     if rr["rr_ratio"] < min_rr:
         return None
 
-    # Zone distance %
+    # Zone distance % (from last_close)
     if zl <= last_close <= zh:
         zone_dist_pct = 0.0
     elif last_close > zh:
         zone_dist_pct = round((last_close - zh) / zh * 100, 2)
     else:
         zone_dist_pct = round((zl - last_close) / zl * 100, 2)
+
+    # Distance from plan entry to last close
+    plan_entry_dist_pct = round(abs(last_close - plan_entry) / plan_entry * 100, 2) if plan_entry else 0.0
 
     zone_tests = sum(
         1 for z in all_zones
@@ -319,26 +412,71 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
     suggested_strike = (atm - strike_step) if direction == "CE" else (atm + strike_step)
 
     trapped_on = best.get("trapped_on", "")
+
+    # Forward-looking plan text
+    if touch["bounced_today"]:
+        plan = "Zone tested & bounced today. Enter on a 5m/15m pullback to zone."
+    elif touch["inside_today"]:
+        plan = "Price inside zone at close. Watch first 15 min for hold/reversal."
+    elif zone_dist_pct == 0.0:
+        plan = "Price at zone. Enter on confirmed reversal candle."
+    else:
+        plan = f"Wait for price to retest {plan_entry:.1f}–{zl:.1f} zone."
+
     return {
-        "symbol":            symbol,
-        "direction":         direction,
-        "zone_high":         round(zh, 2),
-        "zone_low":          round(zl, 2),
-        "last_close":        round(last_close, 2),
-        "zone_distance_pct": zone_dist_pct,
-        "stock_sl":          sl,
-        "stock_t1":          t1,
-        "risk_pts":          rr["risk_pts"],
-        "reward_pts":        rr["reward_pts"],
-        "rr_ratio":          rr["rr_ratio"],
-        "suggested_strike":  suggested_strike,
-        "lot_size":          lot_size,
-        "zone_age_days":     age,
-        "zone_date":         _zone_date_str(trapped_on),
-        "zone_tests":        zone_tests,
-        "nifty_bias":        "",   # filled by run_scan
-        "scanned_at":        datetime.now().isoformat(timespec="seconds"),
+        "symbol":               symbol,
+        "direction":            direction,
+        "zone_high":            round(zh, 2),
+        "zone_low":             round(zl, 2),
+        "last_close":           round(last_close, 2),
+        "entry_plan_price":     round(plan_entry, 2),
+        "zone_distance_pct":    zone_dist_pct,
+        "plan_entry_dist_pct":  plan_entry_dist_pct,
+        "stock_sl":             sl,
+        "stock_t1":             t1,
+        "risk_pts":             rr["risk_pts"],
+        "reward_pts":           rr["reward_pts"],
+        "rr_ratio":             rr["rr_ratio"],
+        "suggested_strike":     suggested_strike,
+        "lot_size":             lot_size,
+        "zone_age_days":        age,
+        "zone_date":            _zone_date_str(trapped_on),
+        "zone_tests":           zone_tests,
+        "touch_status":         touch["touch_status"],
+        "tested_today":         touch["tested_today"],
+        "bounced_today":        touch["bounced_today"],
+        "inside_today":         touch["inside_today"],
+        "today_wick_pct":       touch["today_wick_pct"],
+        "tomorrow_plan":        plan,
+        "nifty_bias":           "",   # filled by run_scan
+        "scanned_at":           datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def _score_zone(r: dict) -> float:
+    """
+    Score a qualifying zone for tomorrow's trade.
+    Prefer:
+      1. Tested-and-bounced today (strong confirmation)
+      2. Freshness (younger age)
+      3. Higher R:R
+      4. Closer to zone (smaller plan_entry_dist_pct)
+    Returns a higher-is-better score.
+    """
+    score = 0.0
+    if r.get("bounced_today"):
+        score += 200.0
+    elif r.get("inside_today"):
+        score += 80.0
+    elif r.get("tested_today"):
+        score += 40.0
+    # Freshness: 0-day = +30, 30-day = +0
+    score += max(0.0, 30.0 - r.get("zone_age_days", 0))
+    # R:R
+    score += r.get("rr_ratio", 0.0) * 20.0
+    # Proximity to entry: closer is better, cap benefit
+    score += max(0.0, 10.0 - r.get("plan_entry_dist_pct", 0.0))
+    return score
 
 
 def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
@@ -349,7 +487,12 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
     Scan one stock's D1 bars.
     If bias is given (CE/PE), returns only matching direction (list of 0-1 items).
     If bias is None, returns best CE result + best PE result (list of 0-2 items).
-    Skips zones already touched intraday today (entry was today, not tomorrow).
+
+    Forward-looking logic for tomorrow's option trade:
+      - Uses zone-boundary entry for realistic R:R
+      - Classifies today's interaction (bounced/inside/broken/untouched)
+      - Skips only broken zones; tested-and-bounced zones are preferred
+      - Applies clean-old-zones filter
     """
     df = _fetch_daily(upstox_key, token)
     if df.empty or len(df) < 5:
@@ -366,28 +509,21 @@ def scan_stock(symbol: str, upstox_key: str, lot_size: int, strike_step: int,
         zones = [z for z in all_zones if z.get("kind") == kind and z.get("status") == "TRAPPED"]
         if not zones:
             continue
-        # Try ALL trapped zones (most-recent first), return best R:R that qualifies
-        zones_sorted = sorted(zones,
-                              key=lambda z: str(z.get("trapped_on") or z.get("ref_ts") or ""),
-                              reverse=True)
-        best_r = None
-        for candidate in zones_sorted:
+        # Evaluate all trapped zones; score and pick the best for tomorrow
+        candidates = []
+        for candidate in zones:
             r = _build_result(symbol, lot_size, strike_step, last_close,
-                              direction, candidate, zones, stock_prox_pct, min_rr)
+                              today_high, today_low,
+                              direction, candidate, all_zones, stock_prox_pct, min_rr)
             if not r:
                 continue
-            zh, zl = r["zone_high"], r["zone_low"]
-            # Skip if today's intraday price already entered the zone
-            if direction == "CE" and today_low <= zh:
-                continue
-            if direction == "PE" and today_high >= zl:
-                continue
-            if best_r is None or r["rr_ratio"] > best_r["rr_ratio"]:
-                best_r = r
-        r = best_r
-        if not r:
+            r["_score"] = _score_zone(r)
+            candidates.append(r)
+        if not candidates:
             continue
-        results.append(r)
+        best_r = max(candidates, key=lambda x: x["_score"])
+        del best_r["_score"]
+        results.append(best_r)
     return results
 
 # ── Full scan run ─────────────────────────────────────────────────────────────
@@ -588,17 +724,21 @@ def debug_stock(symbol: str, token: str) -> None:
     print(f"\nBEAR zones ({len(bear)} total, {sum(1 for z in bear if z['status']=='TRAPPED')} TRAPPED):")
     for z in sorted(bear, key=lambda z: str(z.get("trapped_on") or ""), reverse=True)[:10]:
         app = _approaching(last_close, z["zone_low"], z["zone_high"], "CE", STOCK_ZONE_PROXIMITY_PCT)
-        td_filter = today_low <= z["zone_high"]
+        touch = _classify_today_touch(last_close, today_high, today_low,
+                                      z["zone_low"], z["zone_high"], "CE")
         print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}–{z['zone_high']:.1f}  "
               f"sl={z['sl']:.1f}  trapped={z.get('trapped_on','')}  "
-              f"approaching={app}  today_low_in_zone={td_filter}")
+              f"approaching={app}  touch={touch['touch_status']:8} "
+              f"wick={touch['today_wick_pct']:.0f}%")
     print(f"\nBULL zones ({len(bull)} total, {sum(1 for z in bull if z['status']=='TRAPPED')} TRAPPED):")
     for z in sorted(bull, key=lambda z: str(z.get("trapped_on") or ""), reverse=True)[:10]:
         app = _approaching(last_close, z["zone_low"], z["zone_high"], "PE", STOCK_ZONE_PROXIMITY_PCT)
-        td_filter = today_high >= z["zone_low"]
+        touch = _classify_today_touch(last_close, today_high, today_low,
+                                      z["zone_low"], z["zone_high"], "PE")
         print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}–{z['zone_high']:.1f}  "
               f"sl={z['sl']:.1f}  trapped={z.get('trapped_on','')}  "
-              f"approaching={app}  today_high_in_zone={td_filter}")
+              f"approaching={app}  touch={touch['touch_status']:8} "
+              f"wick={touch['today_wick_pct']:.0f}%")
 
     # Run actual scan logic to show real verdict (includes width filter, R:R, T1 check)
     lot_size   = int(row["lot_size"])
@@ -609,7 +749,9 @@ def debug_stock(symbol: str, token: str) -> None:
     if results:
         for r in results:
             print(f"  ✓ {r['direction']} zone={r['zone_low']}–{r['zone_high']}  "
-                  f"sl={r['stock_sl']}  t1={r['stock_t1']}  R:R={r['rr_ratio']}  age={r['zone_age_days']}d")
+                  f"entry_plan={r['entry_plan_price']}  sl={r['stock_sl']}  t1={r['stock_t1']}  "
+                  f"R:R={r['rr_ratio']}  age={r['zone_age_days']}d  touch={r['touch_status']}")
+            print(f"    → {r['tomorrow_plan']}")
     else:
         print("  — no qualifying setup today")
 
