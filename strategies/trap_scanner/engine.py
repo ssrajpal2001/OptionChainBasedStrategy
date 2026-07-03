@@ -398,9 +398,17 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 self._expiry_str = "PERP"; self._expiry_date = None
                 self._log.info("DELTA perpetual mode: no CE/PE strikes; trading BTCUSD/ETHUSD directly")
             else:
-                # Futures-mode underlyings (CrudeOil): ATM ± fixed ITM offsets for option strikes.
+                # Futures-mode (CrudeOil/GOLDM): no CE/PE strikes at startup.
+                # Options are subscribed lazily in _arm_futures_leg when a zone fires.
+                if self._htf_source == "futures":
+                    self._ce1_strike = 0; self._ce2_strike = 0
+                    self._pe1_strike = 0; self._pe2_strike = 0
+                    self._ce1_key = ""; self._ce2_key = ""
+                    self._pe1_key = ""; self._pe2_key = ""
+                    self._log.info("Futures mode: CE/PE strikes deferred to zone-arm time")
+
                 # Option-mode (NSE/BSE): pivot-based S1/S2/R1/R2 strike selection.
-                use_atm_offsets = self._htf_source == "futures" or self._gap_fired
+                use_atm_offsets = self._htf_source != "futures" and self._gap_fired
 
                 if use_atm_offsets:
                     direction = self._gap_direction if self._gap_fired else ("UP" if today_open >= C else "DOWN")
@@ -458,7 +466,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     if not self._bars_fut:
                         self._bars_fut = await self._fetch_1m_history(self._fut_key)
                 # Also seed option bars (needed for LTF scan on entry)
-                if self._exchange == "DELTA":
+                # Futures mode (MCX): CE/PE bars deferred to zone-arm time — skip seeding
+                if self._htf_source == "futures" and self._exchange != "DELTA":
+                    pass  # lazy: options subscribed in _arm_futures_leg
+                elif self._exchange == "DELTA":
                     # BTC/ETH: option keys use Delta symbol format; historical bars from Delta
                     from data_layer.universal_option_mapper import UniversalOptionMapper as _M
                     _exp = self._expiry_date
