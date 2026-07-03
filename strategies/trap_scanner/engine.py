@@ -1301,6 +1301,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             result.append({
                 "uid":          uid,
                 "opt_type":     opt_type,
+                "kind":         z.get("kind", ""),
                 "zone_low":     round(z.get("zone_low",  0), 2),
                 "zone_high":    round(z.get("zone_high", 0), 2),
                 "zone_trigger": trigger,
