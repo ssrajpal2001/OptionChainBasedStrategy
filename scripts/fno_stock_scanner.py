@@ -29,12 +29,14 @@ if _ROOT not in sys.path:
 from strategies.trap_scanner import scanner
 
 # ── Config ────────────────────────────────────────────────────────────────────
-NIFTY_BIAS_PROXIMITY_PCT = 1.5   # tune via --optimize
-STOCK_ZONE_PROXIMITY_PCT = 5.0   # tune via --optimize
+# ── Optimized via fno_optimize.py grid search (360 combos, Option B) ─────────
+# Result: 61% win rate, ~33 signals/day × 200 FnO stocks
+NIFTY_BIAS_PROXIMITY_PCT = 1.5
+STOCK_ZONE_PROXIMITY_PCT = 3.0   # tighter proximity = higher entry quality (was 5.0)
 SL_BUFFER_PCT            = 0.2
 MIN_RR                   = 1.5
 D1_LOOKBACK_DAYS         = 365
-MAX_ZONE_AGE_DAYS        = 30    # ignore zones older than this
+MAX_ZONE_AGE_DAYS        = 10    # fresh traps only — stale zones lose squeeze power (was 30)
 TOP_N_PER_DIRECTION      = 5     # max CE results + max PE results
 PARALLEL_WORKERS         = 10
 
@@ -332,8 +334,8 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
     if age > MAX_ZONE_AGE_DAYS:
         return None
 
-    # Minimum zone width filter — reject noise zones narrower than 0.3% of price
-    min_width = last_close * 0.003
+    # Minimum zone width filter — reject noise zones narrower than 0.5% of price
+    min_width = last_close * 0.005
     if zh - zl < min_width:
         return None
 
