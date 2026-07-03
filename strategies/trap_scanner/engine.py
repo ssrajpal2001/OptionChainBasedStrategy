@@ -896,12 +896,12 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         if self._fut_armed_zone:
             z = self._fut_armed_zone
             side = self._fut_armed_side
-            # Disarm if price moves clearly outside the zone
-            if side == "CE" and spot < z.get("zone_low", 0) - max(self._htf_atr_val * 0.1, self._step):
-                self._log.info("ZONE DISARMED [CE]: spot=%.1f left zone_low=%.1f", spot, z["zone_low"])
+            # Disarm if price exits the zone boundary
+            if side == "CE" and spot < z.get("zone_low", 0):
+                self._log.info("ZONE DISARMED [CE]: spot=%.1f < zone_low=%.1f", spot, z["zone_low"])
                 self._disarm_futures_leg()
-            elif side == "PE" and spot > z.get("zone_high", 0) + max(self._htf_atr_val * 0.1, self._step):
-                self._log.info("ZONE DISARMED [PE]: spot=%.1f left zone_high=%.1f", spot, z["zone_high"])
+            elif side == "PE" and spot > z.get("zone_high", 0):
+                self._log.info("ZONE DISARMED [PE]: spot=%.1f > zone_high=%.1f", spot, z["zone_high"])
                 self._disarm_futures_leg()
             return
 
