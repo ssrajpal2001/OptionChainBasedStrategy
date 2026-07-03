@@ -1228,13 +1228,7 @@ document.addEventListener('alpine:init', () => {
       } else if (msg.type === 'fno_status') {
         this.fnoStocks = msg.stocks || [];
       } else if (msg.type === 'trap_scanner_update') {
-        const books = msg.books || [];
-        books.forEach(nb => {
-          const idx = this.trapScannerBooks.findIndex(b =>
-            b.client_id === nb.client_id && b.binding_id === nb.binding_id && b.underlying === nb.underlying);
-          if (idx >= 0) this.trapScannerBooks.splice(idx, 1, nb);
-          else this.trapScannerBooks.push(nb);
-        });
+        this.trapScannerBooks = msg.books || [];
       }
     },
 
