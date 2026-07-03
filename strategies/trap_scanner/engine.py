@@ -1010,16 +1010,25 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         side = self._htf_zone_side
         htf_ref_ts = self._htf_zone_ref_ts
 
+        def _to_ts(v):
+            try:
+                return pd.Timestamp(v)
+            except Exception:
+                return None
+
+        htf_ts_pd = _to_ts(htf_ref_ts)
+
         kind_filter = "BEAR" if side == "CE" else "BULL"
         for z in zones:
             if z.get("status") != "TRAPPED":
                 continue
             if z.get("kind", "BEAR") != kind_filter:
                 continue
-            # Only zones formed AFTER the HTF trap (ref_ts >= htf_zone.ref_ts)
-            z_ts = z.get("ref_ts")
-            if htf_ref_ts and z_ts and str(z_ts) < str(htf_ref_ts):
-                continue
+            # Only zones formed at or after the HTF trap ref_ts
+            if htf_ts_pd is not None:
+                z_ts_pd = _to_ts(z.get("ref_ts"))
+                if z_ts_pd is not None and z_ts_pd < htf_ts_pd:
+                    continue
             if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
                 self._log.info(
                     "MTF ZONE CONFIRMED [%s]: zone=%.1f..%.1f ref_ts=%s spot=%.1f → arming 1m",
