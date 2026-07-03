@@ -34,12 +34,14 @@ STOCKS = [
     ("TATAMOTORS",  "NSE_EQ|INE155L01010"),
 ]
 
-PROX_PCT     = 5.0   # % proximity to zone boundary
+# ── Optimized params (grid search across 360 combos — see fno_optimize.py) ──
+# Option B: 61% win rate, ~33 signals/day × 200 stocks
+PROX_PCT     = 3.0   # % proximity to zone boundary (tight = better entry quality)
 MIN_RR       = 1.5   # minimum reward:risk
 SL_BUF_PCT   = 0.2   # SL buffer beyond zone edge
-MAX_AGE_DAYS = 30    # max zone age (days)
+MAX_AGE_DAYS = 10    # max days since trap fired (fresh traps >> stale ones)
 MAX_FWD      = 15    # max forward bars to simulate
-MIN_ZONE_PCT = 0.5   # minimum zone width as % of stock price (filters choppy narrow zones)
+MIN_ZONE_PCT = 0.5   # minimum zone width as % of stock price
 
 
 # ── Token ─────────────────────────────────────────────────────────────────────
@@ -138,7 +140,8 @@ def main():
     if not token:
         print("ERROR: No Upstox token in DB"); return
     print(f"Token loaded: {token[:20]}...\n")
-    print(f"Filter: zone width >= {MIN_ZONE_PCT}% of stock price (removes narrow choppy zones)\n")
+    print(f"Optimized params: zone>={MIN_ZONE_PCT}%  RR>={MIN_RR}x  age<={MAX_AGE_DAYS}d  prox<={PROX_PCT}%")
+    print(f"(Grid-searched across 360 combos — best quality/quantity balance)\n")
 
     all_trades   = []
     all_waiting  = []
@@ -321,7 +324,10 @@ def main():
     print(f"  Total signals : {len(all_trades)}  ({skipped_dma} zones too narrow/skipped, was 78 without)")
     print(f"  WIN={len(wins)}  LOSS={len(losses)}  NO-ENTRY={len(no_e)}")
     if closed:
-        print(f"  Win rate      : {len(wins)/closed*100:.0f}%  ({len(wins)}/{closed})  [was 51% at 0.3% min-width]")
+        wr = len(wins)/closed*100
+    print(f"  Win rate      : {wr:.0f}%  ({len(wins)}W/{closed} closed)  [optimizer target: 61%]")
+    sig_per_day_200 = round((len(all_trades)) / 25 * (200 / 9), 1)
+    print(f"  Signals/day × 200 stocks ≈ {sig_per_day_200}  [optimizer target: 33]")
 
     print(f"\n  ALL ACTIVE WAITING ZONES — 20DMA ALIGNED (nearest first)")
     print(f"  {'Stock':<12} {'Dir':<4} {'Zone':<20} {'Entry':>8} {'SL':>8} {'T1':>8} {'R:R':>5} {'W%':>5} {'Dist%':>6}  Trap Date   Action")
@@ -334,7 +340,8 @@ def main():
     print(f"\n  Interpretation:")
     print(f"  CE zone = bears trapped below → price expected UP  → buy CE option")
     print(f"  PE zone = bulls trapped above → price expected DOWN → buy PE option")
-    print(f"  W% = zone width as % of price. Filter: only zones >= {MIN_ZONE_PCT}% wide (removes choppy noise)")
+    print(f"  W%  = zone width as % of price  |  Prox = how close price was to zone on signal day")
+    print(f"  Params: zone>={MIN_ZONE_PCT}%  RR>={MIN_RR}x  age<={MAX_AGE_DAYS}d  prox<={PROX_PCT}%  (optimized)")
 
 
 if __name__ == "__main__":
