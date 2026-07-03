@@ -2206,6 +2206,12 @@ class DashboardServer:
             def _is_running(dep: dict) -> bool:
                 return int(dep.get("is_running", 0) or 0) == 1
 
+            def _find(strategies, underlying):
+                for s in strategies or []:
+                    if getattr(s, "_underlying", None) == underlying:
+                        return s
+                return None
+
             def _has_open_position(dep: dict) -> bool:
                 """A stopped deployment may still have a live open position that must be visible."""
                 if _is_running(dep):
