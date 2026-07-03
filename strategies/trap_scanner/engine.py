@@ -1467,7 +1467,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
         # Futures mode (CrudeOil/BTC): no CE/PE option contracts to show
         if self._htf_source == "futures":
-            contracts = {}
+            contracts = None
         else:
             contracts = {
                 "CE1": {"strike": self._ce1_strike, "ltp": self._ltp_cache.get("CE1"),
