@@ -752,7 +752,8 @@ class DashboardServer:
                     "<p>Expected at: " + _MONITOR_HTML + "</p>",
                     status_code=503,
                 )
-            return FileResponse(_MONITOR_HTML, media_type="text/html")
+            return FileResponse(_MONITOR_HTML, media_type="text/html",
+                                headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
         @app.get("/backtest", include_in_schema=False)
         async def backtest_ui():
