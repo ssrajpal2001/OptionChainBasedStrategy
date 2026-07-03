@@ -899,15 +899,15 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # When triggered, _place_exit closes the 1-ITM option via exec_key.
                     if self._position and self._position.get("leg") == "FUT":
                         await self._check_tick_exit(fut_ltp, tick.timestamp)
-                    # Futures cascade (MCX only — not Delta crypto):
+                    # Futures cascade (MCX + DELTA/BTC — all htf_source=="futures"):
                     # Stage 1: HTF zone entry check
-                    if self._exchange != "DELTA" and not self._position:
+                    if self._htf_source == "futures" and not self._position:
                         await self._check_futures_zone_arm(fut_ltp)
                     # Stage 2: MTF zone check (while inside HTF zone, not yet MTF-armed)
-                    if self._exchange != "DELTA" and self._htf_zone_armed and not self._position:
+                    if self._htf_source == "futures" and self._htf_zone_armed and not self._position:
                         await self._check_mtf_zone(fut_ltp)
                     # Stage 3: 1m candle break entry check (after MTF confirmed)
-                    if self._exchange != "DELTA" and self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
+                    if self._htf_source == "futures" and self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
                         await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
         except asyncio.CancelledError:
             pass
@@ -1038,28 +1038,41 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 return
 
     async def _arm_futures_leg(self, zone: dict, side: str) -> None:
-        """Arm a futures zone: compute 1-ITM option strike and subscribe it."""
-        from strategies.trap_scanner.config import _round_strike
-        spot = self._spot_cache or 0.0
-        atm = _round_strike(spot, self._step)
-        if side == "CE":
-            strike = atm - self._step   # 1-ITM CE
-            opt_type = "CE"
-            self._ce1_strike = strike
-            self._ce1_key = self._build_upstox_key(strike, opt_type)
-            option_key = self._ce1_key
-        else:
-            strike = atm + self._step   # 1-ITM PE
-            opt_type = "PE"
-            self._pe1_strike = strike
-            self._pe1_key = self._build_upstox_key(strike, opt_type)
-            option_key = self._pe1_key
-
+        """Arm a futures zone for 1m candle break entry.
+        MCX: resolves 1-ITM option strike + subscribes it.
+        DELTA/BTC: pure perpetual — no option subscription needed.
+        """
         self._fut_armed_zone = zone
         self._fut_armed_side = side
         self._fut_armed_candle_ready = False
         self._fut_armed_candle_high = 0.0
         self._fut_armed_candle_low = 0.0
+
+        if self._exchange == "DELTA":
+            # BTC/ETH: trade perpetual directly — no option to subscribe
+            perp_side = "LONG" if side == "CE" else "SHORT"
+            self._log.info(
+                "MTF ARMED [%s/%s]: zone=%.1f..%.1f → perpetual %s — waiting 1m candle",
+                side, perp_side, zone.get("zone_low", 0), zone.get("zone_high", 0), perp_side,
+            )
+            return
+
+        # MCX: compute 1-ITM option strike + subscribe
+        from strategies.trap_scanner.config import _round_strike
+        spot = self._spot_cache or 0.0
+        atm = _round_strike(spot, self._step)
+        if side == "CE":
+            strike = atm - self._step
+            opt_type = "CE"
+            self._ce1_strike = strike
+            self._ce1_key = self._build_upstox_key(strike, opt_type)
+            option_key = self._ce1_key
+        else:
+            strike = atm + self._step
+            opt_type = "PE"
+            self._pe1_strike = strike
+            self._pe1_key = self._build_upstox_key(strike, opt_type)
+            option_key = self._pe1_key
 
         feeder = (self._mcx_feeder if self._mcx_feeder is not None
                   else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
@@ -1071,7 +1084,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 self._log.warning("_arm_futures_leg: subscribe %s failed: %s", option_key, exc)
 
         self._log.info(
-            "ZONE ARMED [%s]: zone=%.1f..%.1f spot=%.1f → %s%d (%s)",
+            "MTF ARMED [%s]: zone=%.1f..%.1f spot=%.1f → %s%d (%s) — waiting 1m candle",
             side, zone.get("zone_low", 0), zone.get("zone_high", 0),
             spot, opt_type, strike, option_key,
         )
