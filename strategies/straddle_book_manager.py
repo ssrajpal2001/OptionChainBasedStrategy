@@ -73,3 +73,10 @@ class StraddleBookManager(StrategyBookManager):
 
     def _log_respawned(self, key, lots):
         logger.info("StraddleBookManager: re-spawned %s/%s/%s lots→%d", *key, lots)
+
+    def _log_reconcile(self, wanted, current):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "StraddleBookManager reconcile: wanted=%s current=%s",
+                list(wanted.keys()), list(current),
+            )

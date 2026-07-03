@@ -107,6 +107,8 @@ class StrategyBookManager:
 
     def _reconcile(self) -> None:
         wanted = self._wanted()
+        if hasattr(self, "_log_reconcile"):
+            self._log_reconcile(wanted, self._books)
 
         # Spawn books for newly-wanted keys.
         for key in set(wanted) - set(self._books):

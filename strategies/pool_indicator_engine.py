@@ -4,6 +4,7 @@ on demand — independent of the active position. Pure + unit-testable; the stra
 ticks/bars and (later) seeds prev-day history."""
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from typing import Dict, Optional, Tuple
@@ -11,6 +12,8 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from matrix_engine.indicators import rsi as _rsi
+
+_log = logging.getLogger(__name__)
 
 Key = Tuple[int, str]
 
@@ -60,6 +63,10 @@ class PoolIndicatorEngine:
             md = self._mins.setdefault(k, deque(maxlen=self._maxlen))
             m = minute if minute is not None else ((md[-1] + 1) if md else 0)
             md.append(int(m))
+            if _log.isEnabledFor(logging.DEBUG):
+                _log.debug("POOL-BAR %s%s ltp=%.2f atp=%.2f bars=%d",
+                           k[0], k[1], ltp, atp,
+                           len(self._closes.get(k, [])))
 
     def seed_strike(self, strike: int, side: str, closes: list, atps: list) -> None:
         """Prefill the rolling series from historical bars (oldest-first) so RSI/ROC are valid

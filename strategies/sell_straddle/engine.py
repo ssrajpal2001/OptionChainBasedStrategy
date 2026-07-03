@@ -651,6 +651,20 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
 
         self._pool_engine.commit_bar(minute=ev.timestamp.hour * 60 + ev.timestamp.minute)
 
+        if logger.isEnabledFor(logging.DEBUG) and self._position:
+            _pos = self._position
+            _pi = self._pool_engine.pair_indicators(
+                int(_pos.ce_leg.strike), int(_pos.pe_leg.strike))
+            if _pi:
+                logger.debug(
+                    "CANDLE[%s] t=%s | VWAP=%.2f SLOPE=%.4f RSI=%.1f ROC=%.2f "
+                    "close=%.2f | CE=%.2f PE=%.2f pnl=%.2f",
+                    self._underlying, ev.timestamp.strftime("%H:%M"),
+                    _pi.get("vwap", 0), _pi.get("slope", 0), _pi.get("rsi", 0),
+                    _pi.get("roc", 0), _pi.get("close", 0),
+                    _pos.ce_leg.ltp, _pos.pe_leg.ltp, _pos.unrealized_pnl,
+                )
+
         self._recompute_indicators()
 
         self._append_chart_point(ev.timestamp)

@@ -142,7 +142,38 @@ class ExitMixin:
 
         await self._publish_exit_audit(pos, pnl, now)
 
+        # ── Per-tick DEBUG trace (only emitted when log level is DEBUG) ──────
         import time as _t
+        if logger.isEnabledFor(logging.DEBUG):
+            _dbg_credit = self._initial_net_credit or pos.net_credit or 0.0
+            _dbg_day_pct = (
+                (self._session_realized_pnl_pts + pnl) / _dbg_credit * 100.0
+                if _dbg_credit > 0 else 0.0
+            )
+            _dbg_ce = float(getattr(pos.ce_leg, "ltp", 0) or 0)
+            _dbg_pe = float(getattr(pos.pe_leg, "ltp", 0) or 0)
+            _dbg_ratio = (
+                max(_dbg_ce, _dbg_pe) / min(_dbg_ce, _dbg_pe)
+                if _dbg_ce > 0 and _dbg_pe > 0 else 0.0
+            )
+            _dbg_tsl_pnl = pnl
+            if self._tsl_basis == "theta":
+                _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+                if _etv > 0:
+                    _dbg_tsl_pnl = _etv - pos.current_time_value(self._spot)
+            _dbg_tsl_rs = self._pnl_rs(_dbg_tsl_pnl)
+            _dbg_tsl_lock = getattr(pos, "tsl_high_lock_rs", 0.0)
+            logger.debug(
+                "TICK-EXIT[%s] pnl=%.2f day%%=%.1f(T%.0f/SL%.0f) "
+                "CE=%.2f PE=%.2f ratio=%.2fx "
+                "tsl_rs=%.2f lock=%.2f peak_pct=%.1f spot=%.2f",
+                self._underlying, pnl, _dbg_day_pct,
+                self._day_profit_target_pct, self._day_loss_sl_pct,
+                _dbg_ce, _dbg_pe, _dbg_ratio,
+                _dbg_tsl_rs, _dbg_tsl_lock, getattr(pos, "tsl_high_lock_rs", 0.0),
+                getattr(self, "_spot", 0.0),
+            )
+
         if _t.monotonic() - getattr(self, "_last_exit_log", 0.0) > 60.0:
             self._last_exit_log = _t.monotonic()
             _active = "".join([
