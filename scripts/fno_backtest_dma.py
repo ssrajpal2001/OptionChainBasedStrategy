@@ -39,7 +39,7 @@ MIN_RR       = 1.5   # minimum reward:risk
 SL_BUF_PCT   = 0.2   # SL buffer beyond zone edge
 MAX_AGE_DAYS = 30    # max zone age (days)
 MAX_FWD      = 15    # max forward bars to simulate
-DMA          = 20    # trend filter: 20-day moving average
+MIN_ZONE_PCT = 0.5   # minimum zone width as % of stock price (filters choppy narrow zones)
 
 
 # ── Token ─────────────────────────────────────────────────────────────────────
@@ -138,11 +138,11 @@ def main():
     if not token:
         print("ERROR: No Upstox token in DB"); return
     print(f"Token loaded: {token[:20]}...\n")
-    print(f"Filter: CE only when price > 20DMA (uptrend) | PE only when price < 20DMA (downtrend)\n")
+    print(f"Filter: zone width >= {MIN_ZONE_PCT}% of stock price (removes narrow choppy zones)\n")
 
-    all_trades  = []
-    all_waiting = []
-    skipped_dma = 0
+    all_trades   = []
+    all_waiting  = []
+    skipped_dma  = 0  # zones filtered out (too narrow)
 
     for sym, key in STOCKS:
         print(f"\n{'='*72}")
@@ -150,10 +150,9 @@ def main():
         print(f"{'='*72}")
 
         df = fetch_bars(key, token, days=90)
-        if df.empty or len(df) < DMA + 5:
+        if df.empty or len(df) < 12:
             print(f"  Not enough bars"); continue
 
-        df["dma20"] = df["close"].rolling(DMA).mean()
         print(f"  {len(df)} D1 bars  ({df.iloc[0]['datetime']} → {df.iloc[-1]['datetime']})")
 
         sim_start    = max(DMA, len(df) - 25)
@@ -166,21 +165,10 @@ def main():
             today_bar = df.iloc[i]
             scan_date = today_bar["datetime"]
             close     = today_bar["close"]
-            dma_val   = today_bar["dma20"]
-            if pd.isna(dma_val):
-                continue
-            above_dma = (close > dma_val)
-            below_dma = (close < dma_val)
 
             _, all_zones = scanner.scan_htf_spot(scan_bars)
 
             for direction in ["CE", "PE"]:
-                # ── 20 DMA TREND FILTER ───────────────────────────────
-                if direction == "CE" and not above_dma:
-                    skipped_dma += 1; continue
-                if direction == "PE" and not below_dma:
-                    skipped_dma += 1; continue
-                # ─────────────────────────────────────────────────────
 
                 kind    = "BEAR" if direction == "CE" else "BULL"
                 trapped = [z for z in all_zones
@@ -204,8 +192,8 @@ def main():
                         continue
                     if age > MAX_AGE_DAYS:
                         continue
-                    if (zh - zl) / close < 0.003:
-                        continue
+                    if (zh - zl) / close * 100 < MIN_ZONE_PCT:
+                        skipped_dma += 1; continue
                     if not approaching(close, zl, zh, direction):
                         continue
 
@@ -239,7 +227,7 @@ def main():
                         "exit_dt":    exit_dt,
                         "entry_dt":   entry_dt,
                         "close_sig":  round(close, 2),
-                        "dma":        round(dma_val, 2),
+                        "zone_width_pct": round((zh - zl) / close * 100, 2),
                     }
                     stock_trades.append(rec)
                     all_trades.append(rec)
@@ -248,13 +236,10 @@ def main():
         # ── Active waiting zones (DMA-filtered) ───────────────────────
         last_bar   = df.iloc[-1]
         last_close = float(last_bar["close"])
-        last_dma   = float(last_bar["dma20"]) if not pd.isna(last_bar["dma20"]) else 0
         last_date  = last_bar["datetime"]
         _, all_zones_now = scanner.scan_htf_spot(df)
 
         for direction in ["CE", "PE"]:
-            if direction == "CE" and last_close <= last_dma: continue
-            if direction == "PE" and last_close >= last_dma: continue
             kind    = "BEAR" if direction == "CE" else "BULL"
             trapped = [z for z in all_zones_now
                        if z.get("kind") == kind and z.get("status") == "TRAPPED"]
@@ -268,7 +253,7 @@ def main():
                 except Exception:
                     continue
                 if age > MAX_AGE_DAYS: continue
-                if (zh - zl) / last_close < 0.003: continue
+                if (zh - zl) / last_close * 100 < MIN_ZONE_PCT: continue
 
                 if direction == "CE":
                     if last_close < zl: continue
@@ -293,7 +278,7 @@ def main():
                     "rr":        rr,
                     "dist_pct":  dist_pct,
                     "current":   round(last_close, 2),
-                    "dma":       round(last_dma, 2),
+                    "width_pct": round((zh - zl) / last_close * 100, 2),
                 }
                 stock_waiting.append(w)
                 all_waiting.append(w)
@@ -306,7 +291,7 @@ def main():
             losses = [t for t in stock_trades if t["outcome"] == "LOSS"]
             no_e   = [t for t in stock_trades if t["outcome"] == "NO-ENTRY"]
             print(f"\n  TRADES (W={len(wins)} L={len(losses)} NO-ENTRY={len(no_e)})  [20DMA filter ON]")
-            hdr = f"  {'#':<3} {'Dir':<4} {'Ref':<10} {'Trap':<10} {'Entry Dt':<10} {'Entry':>8} {'SL':>8} {'T1':>8} {'R:R':>5} {'20DMA':>8} {'Result':<10} {'Exit Dt':<10} {'P&L':>8}"
+            hdr = f"  {'#':<3} {'Dir':<4} {'Ref':<10} {'Trap':<10} {'Entry Dt':<10} {'Entry':>8} {'SL':>8} {'T1':>8} {'R:R':>5} {'W%':>5} {'Result':<10} {'Exit Dt':<10} {'P&L':>8}"
             print(hdr)
             print(f"  {'-'*len(hdr)}")
             for n, t in enumerate(stock_trades, 1):
@@ -314,17 +299,16 @@ def main():
                 pnl_str = f"{pnl:+.2f}" if t["outcome"] in ("WIN", "LOSS") else "-"
                 edt     = t["entry_dt"] or "no-touch"
                 res     = {"WIN": "WIN ✓", "LOSS": "LOSS ✗", "NO-ENTRY": "NO-ENTRY", "OPEN": "OPEN ~"}.get(t["outcome"], t["outcome"])
-                arrow   = "↑" if t["direction"] == "CE" else "↓"
-                print(f"  {n:<3} {t['direction']:<4} {t['ref_date']:<10} {t['trap_date']:<10} {edt:<10} {t['entry']:>8.2f} {t['sl']:>8.2f} {t['t1']:>8.2f} {t['rr']:>5.1f}x {t['dma']:>7.2f}{arrow} {res:<10} {t['exit_dt'] or '-':<10} {pnl_str:>8}")
+                print(f"  {n:<3} {t['direction']:<4} {t['ref_date']:<10} {t['trap_date']:<10} {edt:<10} {t['entry']:>8.2f} {t['sl']:>8.2f} {t['t1']:>8.2f} {t['rr']:>5.1f}x {t['zone_width_pct']:>4.1f}% {res:<10} {t['exit_dt'] or '-':<10} {pnl_str:>8}")
 
         if stock_waiting:
-            print(f"\n  WAITING ZONES (20DMA aligned — price not there yet)")
-            print(f"  {'Dir':<4} {'Zone':<18} {'Entry':>8} {'SL':>8} {'T1':>8} {'R:R':>5} {'Dist%':>6} {'20DMA':>9}  Action")
-            print(f"  {'-'*92}")
+            print(f"\n  WAITING ZONES (width >= {MIN_ZONE_PCT}%, price not there yet)")
+            print(f"  {'Dir':<4} {'Zone':<18} {'Entry':>8} {'SL':>8} {'T1':>8} {'R:R':>5} {'W%':>5} {'Dist%':>6}  Action")
+            print(f"  {'-'*88}")
             for w in sorted(stock_waiting, key=lambda x: x["dist_pct"]):
                 zone_str = f"{w['zone_low']:.1f}-{w['zone_high']:.1f}"
-                action   = "Rally→sell PE" if w["direction"] == "PE" else "Pullback→buy CE"
-                print(f"  {w['direction']:<4} {zone_str:<18} {w['entry']:>8.2f} {w['sl']:>8.2f} {w['t1']:>8.2f} {w['rr']:>5.1f}x {w['dist_pct']:>5.1f}% {w['dma']:>9.2f}  {action}")
+                action   = "Rally→PE" if w["direction"] == "PE" else "Pullback→CE"
+                print(f"  {w['direction']:<4} {zone_str:<18} {w['entry']:>8.2f} {w['sl']:>8.2f} {w['t1']:>8.2f} {w['rr']:>5.1f}x {w['width_pct']:>4.1f}% {w['dist_pct']:>5.1f}%  {action}")
 
     # ── Grand summary ─────────────────────────────────────────────────────────
     wins   = [t for t in all_trades if t["outcome"] == "WIN"]
@@ -333,24 +317,24 @@ def main():
     closed = len(wins) + len(losses)
 
     print(f"\n{'='*72}")
-    print(f"  GRAND SUMMARY — 20DMA filter applied")
-    print(f"  Total signals : {len(all_trades)}  ({skipped_dma} skipped by DMA filter, was 78 without)")
+    print(f"  GRAND SUMMARY — min zone width {MIN_ZONE_PCT}% filter")
+    print(f"  Total signals : {len(all_trades)}  ({skipped_dma} zones too narrow/skipped, was 78 without)")
     print(f"  WIN={len(wins)}  LOSS={len(losses)}  NO-ENTRY={len(no_e)}")
     if closed:
-        print(f"  Win rate      : {len(wins)/closed*100:.0f}%  ({len(wins)}/{closed})  [was 51% without filter]")
+        print(f"  Win rate      : {len(wins)/closed*100:.0f}%  ({len(wins)}/{closed})  [was 51% at 0.3% min-width]")
 
     print(f"\n  ALL ACTIVE WAITING ZONES — 20DMA ALIGNED (nearest first)")
-    print(f"  {'Stock':<12} {'Dir':<4} {'Zone':<20} {'Entry':>8} {'SL':>8} {'T1':>8} {'R:R':>5} {'Dist%':>6} {'20DMA':>9}  Trap Date   Action")
-    print(f"  {'-'*110}")
+    print(f"  {'Stock':<12} {'Dir':<4} {'Zone':<20} {'Entry':>8} {'SL':>8} {'T1':>8} {'R:R':>5} {'W%':>5} {'Dist%':>6}  Trap Date   Action")
+    print(f"  {'-'*106}")
     for w in sorted(all_waiting, key=lambda x: x["dist_pct"]):
         zone_str = f"{w['zone_low']:.1f}-{w['zone_high']:.1f}"
         action   = "Rally→PE" if w["direction"] == "PE" else "Pullback→CE"
-        print(f"  {w['sym']:<12} {w['direction']:<4} {zone_str:<20} {w['entry']:>8.2f} {w['sl']:>8.2f} {w['t1']:>8.2f} {w['rr']:>5.1f}x {w['dist_pct']:>5.1f}% {w['dma']:>9.2f}  {w['trap_date']}  {action}")
+        print(f"  {w['sym']:<12} {w['direction']:<4} {zone_str:<20} {w['entry']:>8.2f} {w['sl']:>8.2f} {w['t1']:>8.2f} {w['rr']:>5.1f}x {w['width_pct']:>4.1f}% {w['dist_pct']:>5.1f}%  {w['trap_date']}  {action}")
 
     print(f"\n  Interpretation:")
     print(f"  CE zone = bears trapped below → price expected UP  → buy CE option")
     print(f"  PE zone = bulls trapped above → price expected DOWN → buy PE option")
-    print(f"  20DMA filter: CE only in uptrend (close>DMA), PE only in downtrend (close<DMA)")
+    print(f"  W% = zone width as % of price. Filter: only zones >= {MIN_ZONE_PCT}% wide (removes choppy noise)")
 
 
 if __name__ == "__main__":
