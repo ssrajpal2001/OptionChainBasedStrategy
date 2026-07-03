@@ -2197,7 +2197,11 @@ class DashboardServer:
             """
             cid = user.get("client_id", "")
             try:
-                deployments = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+                _all_deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+                # Only show position cards for deployments that are currently running (is_running=1).
+                # Stopped deployments (is_running=0) have no live book — looking them up produces
+                # log spam and "No open position" noise for cards the user intentionally stopped.
+                deployments = [d for d in _all_deps if int(d.get("is_running", 0) or 0) == 1]
             except Exception:
                 deployments = []
 
