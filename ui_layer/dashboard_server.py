@@ -2441,7 +2441,7 @@ class DashboardServer:
                                 # Exit eval cache — built every 3s by _check_exits
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
                 except Exception as exc:
-                    logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
+                    logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
                 by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
                                           "booked": booked, "tracking": tracking,
                                           "straddle": straddle_info,
@@ -5160,6 +5160,9 @@ class DashboardServer:
             b = self._straddle_manager.find(client_id, binding_id, underlying)
             if b is not None:
                 return b
+            logger.info("_find_ss_book miss: cid=%s bid=%s und=%s books=%s",
+                        client_id, binding_id, underlying,
+                        list(self._straddle_manager._books.keys()))
         u = str(underlying).upper()
         for s in self._sell_straddles:
             if getattr(s, "_underlying", None) == u and (
