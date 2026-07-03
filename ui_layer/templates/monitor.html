@@ -1229,6 +1229,12 @@ document.addEventListener('alpine:init', () => {
         this.fnoStocks = msg.stocks || [];
       } else if (msg.type === 'trap_scanner_update') {
         this.trapScannerBooks = msg.books || [];
+        (msg.books || []).forEach(b => {
+          if (b.htf_source === 'futures') {
+            const k = b.underlying + '_' + b.client_id;
+            if (this.futZonesOpen[k] === undefined) this.futZonesOpen[k] = true;
+          }
+        });
       }
     },
 
