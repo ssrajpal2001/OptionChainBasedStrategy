@@ -150,15 +150,19 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._entry_in_progress = False  # guard against concurrent entry tasks on same zone
         self._sweep_watch: Optional[Dict] = None   # liquidity sweep re-entry after SL
 
-        # Futures-mode tick-based zone arm state
-        # When spot enters an HTF FUT zone on a tick, the leg is "armed".
-        # Entry fires when the next 1m FUT candle closes and the subsequent tick
-        # breaks that candle's HIGH (CE) or LOW (PE).
-        self._fut_armed_zone: Optional[Dict] = None   # TRAPPED zone price just entered
+        # Futures-mode 3-tier cascade: HTF zone → MTF zone → 1m candle break → entry
+        # Stage 1: spot enters HTF TRAPPED zone → record zone + its ref_ts
+        self._htf_zone_armed: bool           = False  # spot is inside an HTF zone
+        self._htf_zone: Optional[Dict]       = None   # the HTF zone dict
+        self._htf_zone_side: Optional[str]   = None   # "CE" or "PE"
+        self._htf_zone_ref_ts                = None   # HTF zone ref_ts (trap-formed time)
+        # Stage 2: while inside HTF zone, a 3-min zone forms AFTER htf ref_ts → arm
+        self._fut_armed_zone: Optional[Dict] = None   # MTF-confirmed zone
         self._fut_armed_side: Optional[str]  = None   # "CE" or "PE"
-        self._fut_armed_candle_high: float   = 0.0    # last 1m close HIGH when armed
-        self._fut_armed_candle_low:  float   = 0.0    # last 1m close LOW when armed
-        self._fut_armed_candle_ready: bool   = False  # True after first 1m close post-arm
+        # Stage 3: after MTF confirmed, wait for 1m candle close then H/L break
+        self._fut_armed_candle_high: float   = 0.0
+        self._fut_armed_candle_low:  float   = 0.0
+        self._fut_armed_candle_ready: bool   = False
 
         self._broker: Optional[Any] = None
         self._rebalancer: Optional[Any] = None   # set via set_rebalancer()
@@ -895,10 +899,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # When triggered, _place_exit closes the 1-ITM option via exec_key.
                     if self._position and self._position.get("leg") == "FUT":
                         await self._check_tick_exit(fut_ltp, tick.timestamp)
-                    # Tick-based zone arm detection (MCX futures only — not Delta crypto)
+                    # Futures cascade (MCX only — not Delta crypto):
+                    # Stage 1: HTF zone entry check
                     if self._exchange != "DELTA" and not self._position:
                         await self._check_futures_zone_arm(fut_ltp)
-                    # 1m candle break entry check
+                    # Stage 2: MTF zone check (while inside HTF zone, not yet MTF-armed)
+                    if self._exchange != "DELTA" and self._htf_zone_armed and not self._position:
+                        await self._check_mtf_zone(fut_ltp)
+                    # Stage 3: 1m candle break entry check (after MTF confirmed)
                     if self._exchange != "DELTA" and self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
                         await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
         except asyncio.CancelledError:
@@ -907,48 +915,118 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
     # ── Futures-mode zone arm (lazy option subscription + 1m break entry) ─────
 
     async def _check_futures_zone_arm(self, spot: float) -> None:
-        """On every futures tick: check if spot entered a TRAPPED HTF zone.
-        If already armed, check if price left the zone (disarm).
+        """Stage-1: check if spot entered a TRAPPED HTF zone.
+        Sets _htf_zone_armed; MTF check happens separately on same tick.
+        If already in a zone, check for disarm (price left boundary).
         """
-        if self._fut_armed_zone:
-            z = self._fut_armed_zone
-            side = self._fut_armed_side
-            # Disarm if price exits the zone boundary
-            if side == "CE" and spot < z.get("zone_low", 0):
-                self._log.info("ZONE DISARMED [CE]: spot=%.1f < zone_low=%.1f", spot, z["zone_low"])
-                self._disarm_futures_leg()
-            elif side == "PE" and spot > z.get("zone_high", 0):
-                self._log.info("ZONE DISARMED [PE]: spot=%.1f > zone_high=%.1f", spot, z["zone_high"])
-                self._disarm_futures_leg()
-            return
-
         def _uid(z: dict) -> str:
             return f"{z.get('zone_low',0):.1f}_{z.get('zone_high',0):.1f}_{z.get('kind','BEAR')}"
 
-        armed = False
-        # Check BEAR zones first (CE trade)
+        if self._htf_zone_armed:
+            z = self._htf_zone
+            side = self._htf_zone_side
+            # Disarm entire cascade if price exits HTF zone boundary
+            if side == "CE" and spot < z.get("zone_low", 0):
+                self._log.info("HTF ZONE EXITED [CE]: spot=%.1f < zone_low=%.1f — disarming", spot, z["zone_low"])
+                self._disarm_futures_leg()
+            elif side == "PE" and spot > z.get("zone_high", 0):
+                self._log.info("HTF ZONE EXITED [PE]: spot=%.1f > zone_high=%.1f — disarming", spot, z["zone_high"])
+                self._disarm_futures_leg()
+            return
+
+        # Not yet in an HTF zone — scan for entry
         for z in self._htf_fut_zones:
             if z.get("status") != "TRAPPED" or z.get("kind", "BEAR") != "BEAR":
                 continue
             if _uid(z) in self._notified_uids:
                 continue
             if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
-                await self._arm_futures_leg(z, "CE")
-                armed = True
-                break
+                self._htf_zone_armed = True
+                self._htf_zone = z
+                self._htf_zone_side = "CE"
+                self._htf_zone_ref_ts = z.get("ref_ts")
+                self._log.info(
+                    "HTF ZONE ENTERED [CE]: zone=%.1f..%.1f ref_ts=%s spot=%.1f — watching MTF",
+                    z.get("zone_low", 0), z.get("zone_high", 0), self._htf_zone_ref_ts, spot,
+                )
+                return
 
-        if armed:
-            return
-
-        # Check BULL zones (PE trade)
         for z in self._htf_fut_zones:
             if z.get("status") != "TRAPPED" or z.get("kind", "BEAR") != "BULL":
                 continue
             if _uid(z) in self._notified_uids:
                 continue
             if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
-                await self._arm_futures_leg(z, "PE")
-                break
+                self._htf_zone_armed = True
+                self._htf_zone = z
+                self._htf_zone_side = "PE"
+                self._htf_zone_ref_ts = z.get("ref_ts")
+                self._log.info(
+                    "HTF ZONE ENTERED [PE]: zone=%.1f..%.1f ref_ts=%s spot=%.1f — watching MTF",
+                    z.get("zone_low", 0), z.get("zone_high", 0), self._htf_zone_ref_ts, spot,
+                )
+                return
+
+    async def _check_mtf_zone(self, spot: float) -> None:
+        """Stage-2: while inside HTF zone, check if a 3-min TRAPPED zone formed
+        AFTER the HTF zone's ref_ts and spot is currently inside it.
+        If found, proceed to stage-3 (arm for 1m candle break).
+        """
+        if self._fut_armed_zone:
+            # Already MTF-confirmed — check MTF zone disarm
+            z = self._fut_armed_zone
+            side = self._fut_armed_side
+            if side == "CE" and spot < z.get("zone_low", 0):
+                self._log.info("MTF ZONE EXITED [CE]: spot=%.1f — disarming", spot)
+                self._disarm_futures_leg()
+            elif side == "PE" and spot > z.get("zone_high", 0):
+                self._log.info("MTF ZONE EXITED [PE]: spot=%.1f — disarming", spot)
+                self._disarm_futures_leg()
+            return
+
+        if not self._bars_fut or len(self._bars_fut) < 3:
+            return
+
+        from strategies.trap_scanner.scanner import scan_htf
+        import pandas as pd
+
+        mtf_min = self._cascade_min or 3
+        try:
+            df = pd.DataFrame(self._bars_fut)
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            df = df.set_index("datetime").sort_index()
+            # Resample to MTF
+            mtf_df = df[["open","high","low","close","volume"]].resample(f"{mtf_min}min").agg({
+                "open": "first", "high": "max", "low": "min",
+                "close": "last", "volume": "sum",
+            }).dropna(subset=["close"]).reset_index()
+            if len(mtf_df) < 3:
+                return
+        except Exception as exc:
+            self._log.debug("_check_mtf_zone resample error: %s", exc)
+            return
+
+        zones = scan_htf(mtf_df)
+        side = self._htf_zone_side
+        htf_ref_ts = self._htf_zone_ref_ts
+
+        kind_filter = "BEAR" if side == "CE" else "BULL"
+        for z in zones:
+            if z.get("status") != "TRAPPED":
+                continue
+            if z.get("kind", "BEAR") != kind_filter:
+                continue
+            # Only zones formed AFTER the HTF trap (ref_ts >= htf_zone.ref_ts)
+            z_ts = z.get("ref_ts")
+            if htf_ref_ts and z_ts and str(z_ts) < str(htf_ref_ts):
+                continue
+            if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
+                self._log.info(
+                    "MTF ZONE CONFIRMED [%s]: zone=%.1f..%.1f ref_ts=%s spot=%.1f → arming 1m",
+                    side, z.get("zone_low", 0), z.get("zone_high", 0), z_ts, spot,
+                )
+                await self._arm_futures_leg(z, side)
+                return
 
     async def _arm_futures_leg(self, zone: dict, side: str) -> None:
         """Arm a futures zone: compute 1-ITM option strike and subscribe it."""
@@ -990,6 +1068,11 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         )
 
     def _disarm_futures_leg(self) -> None:
+        """Reset the entire 3-stage cascade."""
+        self._htf_zone_armed = False
+        self._htf_zone = None
+        self._htf_zone_side = None
+        self._htf_zone_ref_ts = None
         self._fut_armed_zone = None
         self._fut_armed_side = None
         self._fut_armed_candle_ready = False
