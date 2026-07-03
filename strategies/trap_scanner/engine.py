@@ -989,7 +989,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             )
             zone = self._fut_armed_zone
             self._disarm_futures_leg()
-            await self._on_entry_signal("CE1", "CE", {"price": spot, "ts": ts}, zone)
+            await self._on_entry_signal("CE1", "CE", zone, zone)
         elif side == "PE" and self._fut_armed_candle_low > 0 and spot < self._fut_armed_candle_low:
             self._log.info(
                 "ENTRY SIGNAL [PE]: spot=%.1f < 1m_L=%.1f — firing",
@@ -997,7 +997,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             )
             zone = self._fut_armed_zone
             self._disarm_futures_leg()
-            await self._on_entry_signal("PE1", "PE", {"price": spot, "ts": ts}, zone)
+            await self._on_entry_signal("PE1", "PE", zone, zone)
 
     # ── Trade gating ──────────────────────────────────────────────────────────
 
