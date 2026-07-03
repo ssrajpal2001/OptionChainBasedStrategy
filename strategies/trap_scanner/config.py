@@ -23,12 +23,15 @@ _INDEX_CFG: Dict[str, dict] = {
                    "htf_min_override": 150, "ltf_min_override": 5},
     # BANKNIFTY 4-tier cascade: HTF=180m → MTF=30m → LTF=3m → Exec=3m
     # Confirmed optimal from nse_cascade_backtest.py 18k-combo sweep (Apr-Jun 2026).
-    # dte_min_filter=10: skip ALL entries (normal + gap) when DTE<=10 (near-expiry noise).
+    # dte_min_filter DISABLED (0): BANKNIFTY trades the monthly expiry. A 10-day
+    # filter blocks the entire final week of the month and produced zero trades.
+    # Keep gap-skip at 10 days so gap-fired mode is still suppressed near expiry,
+    # but normal HTF/LTF cascade entries are allowed all month.
     "BANKNIFTY":  {"step": 100, "lot": 30,  "gap_near": 400, "gap_far": 800,
                    "sl_buf": 30.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
                    "htf_min_override": 180, "mtf_min_override": 30, "ltf_min_override": 3,
-                   "gap_skip_dte": 10, "gap_thresh_default": 0.8, "dte_min_filter": 10},
+                   "gap_skip_dte": 10, "gap_thresh_default": 0.8, "dte_min_filter": 0},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
@@ -71,6 +74,54 @@ _SPOT_KEYS: Dict[str, str] = {
     "CRUDEOIL":   "MCX_FO|499095",   # CRUDEOIL near-month futures (dynamic in production)
 }
 
+# Known index underlyings — anything else is treated as an individual stock.
+_KNOWN_INDICES = set(_INDEX_CFG.keys())
+
+
+def _load_fno_stocks_csv() -> Dict[str, dict]:
+    """Load per-stock lot size / strike step / Upstox key from data/fno_stocks.csv."""
+    _cache: Dict[str, dict] = {}
+    try:
+        import csv
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                            "data", "fno_stocks.csv")
+        with open(path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                sym = str(row.get("symbol", "")).strip().upper()
+                if sym:
+                    _cache[sym] = {
+                        "upstox_key": str(row.get("upstox_key", "")).strip(),
+                        "lot_size": int(row.get("lot_size", 0) or 0),
+                        "strike_step": int(row.get("strike_step", 0) or 0),
+                    }
+    except Exception:
+        pass
+    return _cache
+
+
+_FNO_STOCKS = _load_fno_stocks_csv()
+
+
+def is_stock(underlying: str) -> bool:
+    return str(underlying).upper() not in _KNOWN_INDICES
+
+
+def stock_spot_key(underlying: str) -> str:
+    """Return Upstox spot key for a stock, or '' if unknown."""
+    info = _FNO_STOCKS.get(str(underlying).upper())
+    return info["upstox_key"] if info else ""
+
+
+def stock_lot_size(underlying: str) -> int:
+    info = _FNO_STOCKS.get(str(underlying).upper())
+    return info["lot_size"] if info else 0
+
+
+def stock_strike_step(underlying: str) -> int:
+    info = _FNO_STOCKS.get(str(underlying).upper())
+    return info["strike_step"] if info else 0
+
 
 def _pivot_levels(H: float, L: float, C: float) -> Dict[str, float]:
     P = (H + L + C) / 3
@@ -89,8 +140,21 @@ class ConfigMixin:
     """Load per-index defaults overlaid with admin per-index overrides."""
 
     def _load_index_config(self, und: str, ts_admin_cfg: dict) -> None:
+        _is_stock = is_stock(und)
         _def = _INDEX_CFG.get(und, _INDEX_CFG["NIFTY"])
         _adm = ts_admin_cfg.get("per_index", {}).get(und, {})
+
+        # Stock defaults: read lot size / strike step from data/fno_stocks.csv.
+        # Admin per-index override still wins if the user has configured this stock.
+        if _is_stock:
+            _stock_lot = stock_lot_size(und)
+            _stock_step = stock_strike_step(und)
+            if _stock_step > 0:
+                _def = dict(_def)
+                _def["step"] = _stock_step
+            if _stock_lot > 0 and "lot_size" not in _adm:
+                _def = dict(_def)
+                _def["lot"] = _stock_lot
 
         self._step       = int(_def["step"])
         self._lot_size   = int(_adm.get("lot_size",     _def["lot"]))
