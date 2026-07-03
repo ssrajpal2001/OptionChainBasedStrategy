@@ -36,6 +36,24 @@ class EntryMixin:
         if self._position and is_probe:
             self._log.debug("Probe entry skipped — position already exists")
             return
+        # Guard: prevent concurrent entry tasks from all firing while the first
+        # awaits a fill. Without this, every option tick while in an HTF zone
+        # creates a new task via create_task, all seeing self._position=None,
+        # causing dozens of BUY orders before the first fill sets _position.
+        if not is_probe and self._entry_in_progress:
+            return
+        if not is_probe:
+            self._entry_in_progress = True
+        try:
+            await self._on_entry_signal_inner(leg, opt_type, entry, htf_zone,
+                                              qty_override, stage, mtf_zone, is_probe)
+        finally:
+            if not is_probe:
+                self._entry_in_progress = False
+
+    async def _on_entry_signal_inner(self, leg: str, opt_type: str,
+                                     entry: dict, htf_zone: dict,
+                                     qty_override, stage, mtf_zone, is_probe) -> None:
         # Terminal + Trade gate: never fire if THIS binding's broker terminal is
         # disconnected or the Trade toggle is OFF (fixes trade firing with terminal/trade OFF).
         if not self._can_trade():
@@ -56,8 +74,8 @@ class EntryMixin:
             from datetime import date as _date
             _dte = (self._expiry_date - _date.today()).days
             if _dte <= self._dte_min:
-                self._log.debug("Entry blocked — DTE=%d <= min_filter=%d (%s %s)",
-                                _dte, self._dte_min, leg, opt_type)
+                self._log.info("Entry blocked — DTE=%d <= min_filter=%d (%s %s)",
+                               _dte, self._dte_min, leg, opt_type)
                 return
 
         # Entry window gate (e.g. CrudeOil W2: 18:45–19:15)
@@ -279,23 +297,24 @@ class EntryMixin:
                 )
 
             if fill is None or fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
-                self._log.error(
-                    "Entry aborted — all 3 strikes (1-ITM/ATM/1-OTM) rejected for %s%s. "
-                    "Zone uid NOT consumed — next zone can still fire.",
-                    strike, opt_type
+                sim_ltp = self._ltp_cache.get(opt_leg_key, 0) or ep
+                self._log.warning(
+                    "Entry order rejected for %s%s — recording PAPER position at ltp=%.2f",
+                    strike, opt_type, sim_ltp,
                 )
-                # Do NOT set _no_margin_today here — a generic rejection may be a transient
-                # broker/connectivity issue. Only margin-blocked at specific margin-error codes.
-                return
-
-            # Confirmed fill — NOW consume the zone uid so same zone never fires again.
-            if not is_probe:
-                self._notified_uids.add(uid)
-            avg = fill.avg_price
+                avg = sim_ltp
+                order_id = order_id or "PAPER"
+            else:
+                # Confirmed fill — NOW consume the zone uid so same zone never fires again.
+                if not is_probe:
+                    self._notified_uids.add(uid)
+                avg = fill.avg_price
 
         except Exception as exc:
-            self._log.error("Entry order failed: %s", exc)
-            return
+            self._log.error("Entry order failed: %s — recording PAPER position", exc)
+            sim_ltp = self._ltp_cache.get("CE1" if opt_type == "CE" else "PE1", 0) or ep
+            avg = sim_ltp
+            order_id = "PAPER"
 
         # scan_key = the key used for SL/T1 monitoring ticks.
         # futures-mode: tracking_leg="FUT" → futures key (SL/T1 in futures ₹).

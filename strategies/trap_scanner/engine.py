@@ -683,12 +683,18 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                             and abs(float(tick.strike or 0) - (strike or 0)) < 0.1
                             and str(tick.underlying or "").upper() == self._und)
 
+                # For futures mode: FUT contract tick updates spot cache directly
+                if self._htf_source == "futures" and self._fut_key and sym == self._fut_key:
+                    self._spot_cache = ltp
+
                 is_ce1 = _match(self._ce1_key, self._ce1_strike, "CE")
                 is_ce2 = _match(self._ce2_key, self._ce2_strike, "CE") and not is_ce1
                 is_pe1 = _match(self._pe1_key, self._pe1_strike, "PE")
                 is_pe2 = _match(self._pe2_key, self._pe2_strike, "PE") and not is_pe1
-                # FUT bars built from INDEX_TICK in _idx_tick_loop — never route option ticks to FUT
-                is_fut = False
+                # FUT bars: for futures mode route FUT contract ticks directly (much faster than INDEX_TICK)
+                is_fut = (self._htf_source == "futures"
+                          and bool(self._fut_key)
+                          and tick.symbol == self._fut_key)
 
                 for bkey, bars_list, label in [
                     ("CE1", self._bars_ce1, "CE1"),
