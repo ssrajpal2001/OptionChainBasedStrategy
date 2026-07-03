@@ -1464,16 +1464,20 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             ce_zone = _best_zone_summary(self._htf_bear_zones, ltp_ce1)
             pe_zone = _best_zone_summary(self._htf_bull_zones, ltp_pe1)
 
-        contracts = {
-            "CE1": {"strike": self._ce1_strike, "ltp": self._ltp_cache.get("CE1"),
-                    "bars": len(self._bars_ce1), "zone": ce_zone},
-            "CE2": {"strike": self._ce2_strike, "ltp": self._ltp_cache.get("CE2"),
-                    "bars": len(self._bars_ce2), "zone": _best_zone_summary(self._htf_bear_zones_2, ltp_ce2)},
-            "PE1": {"strike": self._pe1_strike, "ltp": self._ltp_cache.get("PE1"),
-                    "bars": len(self._bars_pe1), "zone": pe_zone},
-            "PE2": {"strike": self._pe2_strike, "ltp": self._ltp_cache.get("PE2"),
-                    "bars": len(self._bars_pe2), "zone": _best_zone_summary(self._htf_bull_zones_2, ltp_pe2)},
-        }
+        # Futures mode (CrudeOil/BTC): no CE/PE option contracts to show
+        if self._htf_source == "futures":
+            contracts = {}
+        else:
+            contracts = {
+                "CE1": {"strike": self._ce1_strike, "ltp": self._ltp_cache.get("CE1"),
+                        "bars": len(self._bars_ce1), "zone": ce_zone},
+                "CE2": {"strike": self._ce2_strike, "ltp": self._ltp_cache.get("CE2"),
+                        "bars": len(self._bars_ce2), "zone": _best_zone_summary(self._htf_bear_zones_2, ltp_ce2)},
+                "PE1": {"strike": self._pe1_strike, "ltp": self._ltp_cache.get("PE1"),
+                        "bars": len(self._bars_pe1), "zone": pe_zone},
+                "PE2": {"strike": self._pe2_strike, "ltp": self._ltp_cache.get("PE2"),
+                        "bars": len(self._bars_pe2), "zone": _best_zone_summary(self._htf_bull_zones_2, ltp_pe2)},
+            }
 
         # FUT zones: sort by distance from spot and return nearest 10 (not all 90)
         def _sorted_fut_zones(max_n: int = 10) -> list:

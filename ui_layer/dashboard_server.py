@@ -5198,7 +5198,7 @@ class DashboardServer:
                         client_id, binding_id, underlying,
                         list(self._straddle_manager._books.keys()))
         else:
-            logger.warning("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
+            logger.debug("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
         u = str(underlying).upper()
         for s in self._sell_straddles:
             if getattr(s, "_underlying", None) == u and (
