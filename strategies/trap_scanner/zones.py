@@ -353,7 +353,7 @@ class ZonesMixin:
             return
         # Futures-mode armed: capture the 1m FUT candle H/L so the next tick
         # can check for a break above (CE) or below (PE) to fire entry.
-        if (self._htf_source == "futures" and leg == "FUT"
+        if (self._htf_source == "futures" and self._exchange != "DELTA" and leg == "FUT"
                 and self._fut_armed_zone is not None and not self._position
                 and self._bars_fut):
             last = self._bars_fut[-1]

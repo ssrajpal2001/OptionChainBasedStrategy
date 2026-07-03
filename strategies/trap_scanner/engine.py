@@ -878,11 +878,11 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # When triggered, _place_exit closes the 1-ITM option via exec_key.
                     if self._position and self._position.get("leg") == "FUT":
                         await self._check_tick_exit(fut_ltp, tick.timestamp)
-                    # Tick-based zone arm detection (futures mode, no position)
-                    if not self._position:
+                    # Tick-based zone arm detection (MCX futures only — not Delta crypto)
+                    if self._exchange != "DELTA" and not self._position:
                         await self._check_futures_zone_arm(fut_ltp)
                     # 1m candle break entry check
-                    if self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
+                    if self._exchange != "DELTA" and self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
                         await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
         except asyncio.CancelledError:
             pass
