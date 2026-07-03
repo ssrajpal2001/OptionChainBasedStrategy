@@ -7411,7 +7411,7 @@ function amoTest() {
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
-                              x-text="dep.lot_multiplier+'L · SQ '+dep.squareoff_time"></span>
+                              x-text="dep.lot_multiplier+'L'+(dep.strategy_name==='trap_scanner'&&(trapBookFor(b.binding_id,dep.underlying)||{}).htf_source==='futures'?'':' · SQ '+(dep.squareoff_time||'—'))"></span>
                       </div>
                     </div>
                     <div class="text-right">
@@ -7576,6 +7576,40 @@ function amoTest() {
                         <span x-show="bk&&bk.pe1_strike" x-text="'PE='+bk.pe1_strike" style="color:var(--t-red)"></span>
                         <span x-show="bk&&bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
                       </div>
+                      <!-- WATCH — nearest bull/bear zone for futures mode -->
+                      <template x-if="bk&&bk.htf_source==='futures'&&(bk.nearest_ce_zone||bk.nearest_pe_zone)">
+                        <div class="mt-2 rounded p-2" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2)">
+                          <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-yellow)">WATCH — WHERE MARKET NEEDS TO GO</div>
+                          <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
+                            <template x-if="bk.nearest_ce_zone">
+                              <div class="text-xs font-mono">
+                                <span style="color:var(--t-green);font-weight:700">BEAR TRAP</span>
+                                <span style="color:var(--t-muted)"> → FUT reaches </span>
+                                <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
+                                <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
+                                <span x-show="bk.nearest_ce_zone.dist_pts!=null"
+                                      :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
+                                      x-text="' '+bk.nearest_ce_zone.dist_pts+'pts '+(bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
+                                <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                                      x-text="' → '+(bk.nearest_ce_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
+                              </div>
+                            </template>
+                            <template x-if="bk.nearest_pe_zone">
+                              <div class="text-xs font-mono">
+                                <span style="color:var(--t-red);font-weight:700">BULL TRAP</span>
+                                <span style="color:var(--t-muted)"> → FUT reaches </span>
+                                <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
+                                <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
+                                <span x-show="bk.nearest_pe_zone.dist_pts!=null"
+                                      :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
+                                      x-text="' '+bk.nearest_pe_zone.dist_pts+'pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
+                                <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
+                                      x-text="' → '+(bk.nearest_pe_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
                       <!-- Contracts table (CE1/CE2/PE1/PE2 LTP + zone — mirrors NiftyTrapScanner) -->
                       <template x-if="bk&&bk.contracts">
                         <div class="mt-2 text-xs font-mono">
@@ -7692,13 +7726,13 @@ function amoTest() {
                           </button>
                           <template x-if="futZonesOpen[bk.underlying+'_'+bk.client_id]">
                             <div class="mt-1">
-                              <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
-                                <span>FUT</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
+                              <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:4rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
+                                <span>DIR</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
                               </div>
                               <template x-for="z in bk.zones.filter(z=>z.opt_type==='FUT')" :key="z.uid">
                                 <div class="grid text-center py-0.5 text-xs font-mono"
-                                     :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
-                                  <span style="color:var(--t-yellow)" x-text="z.opt_type"></span>
+                                     :style="'grid-template-columns:4rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
+                                  <span :style="z.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'" x-text="z.kind||z.opt_type"></span>
                                   <span x-text="z.zone_low"></span>
                                   <span x-text="z.zone_high"></span>
                                   <span x-text="z.zone_trigger"></span>
