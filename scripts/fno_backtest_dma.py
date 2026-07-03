@@ -155,7 +155,7 @@ def main():
 
         print(f"  {len(df)} D1 bars  ({df.iloc[0]['datetime']} → {df.iloc[-1]['datetime']})")
 
-        sim_start    = max(DMA, len(df) - 25)
+        sim_start    = max(10, len(df) - 25)
         seen_zones   = set()
         stock_trades = []
         stock_waiting = []
