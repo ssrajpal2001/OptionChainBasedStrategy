@@ -1007,7 +1007,7 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadStrategyTelemetry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
-      setInterval(() => { this.loadTrapScannerBooks(); }, 5000);
+      // trap scanner books pushed via WebSocket (trap_scanner_update) — no polling needed
       // Background P&L refresh for positions tab. Trade events (entry/exit/roll) are
       // pushed instantly via WebSocket, so this poll only needs to catch P&L drift.
       setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 2000);
@@ -1227,6 +1227,14 @@ document.addEventListener('alpine:init', () => {
         }
       } else if (msg.type === 'fno_status') {
         this.fnoStocks = msg.stocks || [];
+      } else if (msg.type === 'trap_scanner_update') {
+        const books = msg.books || [];
+        books.forEach(nb => {
+          const idx = this.trapScannerBooks.findIndex(b =>
+            b.client_id === nb.client_id && b.binding_id === nb.binding_id && b.underlying === nb.underlying);
+          if (idx >= 0) this.trapScannerBooks.splice(idx, 1, nb);
+          else this.trapScannerBooks.push(nb);
+        });
       }
     },
 

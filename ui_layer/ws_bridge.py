@@ -78,6 +78,7 @@ class WsBridge:
         self._trap_tick_q = bus.subscribe(Topic.TRAP_TICK)
         self._fno_alert_q  = bus.subscribe(Topic.FNO_STOCK_ALERT)
         self._fno_status_q = bus.subscribe(Topic.FNO_STOCK_STATUS)
+        self._trap_scanner_mgr = None   # set by dashboard_server after WsBridge init
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
@@ -168,6 +169,7 @@ class WsBridge:
                 self._trap_tick_loop(),
                 self._fno_alert_loop(),
                 self._fno_status_loop(),
+                self._trap_scanner_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -499,6 +501,23 @@ class WsBridge:
                     await self.broadcast({"type": "stats", "name": name, "data": data})
                 except Exception as exc:
                     logger.debug("WsBridge.heartbeat[%s]: %s", name, exc)
+
+    async def _trap_scanner_loop(self) -> None:
+        """Push trap scanner telemetry to all connected browsers every 2 seconds."""
+        while self._running:
+            try:
+                await asyncio.sleep(2.0)
+            except asyncio.CancelledError:
+                return
+            mgr = self._trap_scanner_mgr
+            if mgr is None:
+                continue
+            try:
+                books = mgr.telemetry_all()
+                if books:
+                    await self.broadcast({"type": "trap_scanner_update", "books": books})
+            except Exception as exc:
+                logger.debug("WsBridge._trap_scanner_loop: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

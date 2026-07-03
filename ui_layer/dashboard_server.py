@@ -653,6 +653,7 @@ class DashboardServer:
         self._trap_scanner_manager = trap_scanner_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
+        self._ws_bridge._trap_scanner_mgr = trap_scanner_manager
         self._uvicorn_server = None
 
         from data_layer.client_db import ClientDB
