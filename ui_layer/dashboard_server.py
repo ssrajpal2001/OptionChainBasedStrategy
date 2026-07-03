@@ -2198,12 +2198,36 @@ class DashboardServer:
             cid = user.get("client_id", "")
             try:
                 _all_deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
-                # Only show position cards for deployments that are currently running (is_running=1).
-                # Stopped deployments (is_running=0) have no live book — looking them up produces
-                # log spam and "No open position" noise for cards the user intentionally stopped.
-                deployments = [d for d in _all_deps if int(d.get("is_running", 0) or 0) == 1]
             except Exception:
-                deployments = []
+                _all_deps = []
+
+            def _is_running(dep: dict) -> bool:
+                return int(dep.get("is_running", 0) or 0) == 1
+
+            def _has_open_position(dep: dict) -> bool:
+                """A stopped deployment may still have a live open position that must be visible."""
+                if _is_running(dep):
+                    return False
+                sname = dep.get("strategy_name", "")
+                underlying = dep.get("underlying") or dep.get("assigned_instrument") or ""
+                bid = dep.get("binding_id", "")
+                if sname == "sell_straddle":
+                    strat = _srv._find_ss_book(cid, bid, underlying)
+                    pos = getattr(strat, "_position", None) if strat else None
+                    return pos is not None and getattr(pos, "status", "") == "open"
+                if sname == "iron_condor":
+                    strat = _find(getattr(_srv, "_iron_condors", []), underlying)
+                    pos = getattr(strat, "_position", None) if strat else None
+                    return pos is not None and getattr(pos, "status", "") == "open"
+                if sname == "trap_scanner":
+                    strat = _srv._find_trap_book(cid, bid, underlying)
+                    pos = getattr(strat, "_position", None) if strat else None
+                    return pos is not None
+                return False
+
+            # Show running deployments (live cards) OR stopped deployments that still
+            # hold an open position (so the user can monitor/close it).
+            deployments = [d for d in _all_deps if _is_running(d) or _has_open_position(d)]
 
             def _ic_legs(pos, product="NRML"):
                 out = []
@@ -5045,36 +5069,42 @@ class DashboardServer:
                 )
                 return
 
-        await self._client_db.initialise()
-
-        config = uvicorn.Config(
-            app=self._app,
-            host=host,
-            port=port,
-            log_level="warning",
-            loop="none",
-            lifespan="off",
-        )
-        self._uvicorn_server = uvicorn.Server(config)
-        self._uvicorn_server.install_signal_handlers = lambda: None
-
-        logger.info("Dashboard: http://%s:%d  (WebSocket: ws://%s:%d/ws)", host, port, host, port)
-
-        # Kick off background boot-time feeder auto-connect after a short settle delay
-        boot_task = asyncio.create_task(
-            self._boot_feeder_auto_connect(), name="boot_feeder_auto_connect"
-        )
+        logger.info("Dashboard: initializing server on %s:%d ...", host, port)
 
         try:
-            await asyncio.gather(
-                self._uvicorn_server.serve(),
-                self._ws_bridge.run(),
+            await self._client_db.initialise()
+
+            config = uvicorn.Config(
+                app=self._app,
+                host=host,
+                port=port,
+                log_level="warning",
+                loop="none",
+                lifespan="off",
             )
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if not boot_task.done():
-                boot_task.cancel()
+            self._uvicorn_server = uvicorn.Server(config)
+            self._uvicorn_server.install_signal_handlers = lambda: None
+
+            logger.info("Dashboard: http://%s:%d  (WebSocket: ws://%s:%d/ws)", host, port, host, port)
+
+            # Kick off background boot-time feeder auto-connect after a short settle delay
+            boot_task = asyncio.create_task(
+                self._boot_feeder_auto_connect(), name="boot_feeder_auto_connect"
+            )
+
+            try:
+                await asyncio.gather(
+                    self._uvicorn_server.serve(),
+                    self._ws_bridge.run(),
+                )
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if not boot_task.done():
+                    boot_task.cancel()
+
+        except Exception:
+            logger.exception("Dashboard: failed to start on %s:%d", host, port)
 
     async def _boot_feeder_auto_connect(self) -> None:
         """
@@ -5164,7 +5194,7 @@ class DashboardServer:
             b = self._straddle_manager.find(client_id, binding_id, underlying)
             if b is not None:
                 return b
-            logger.info("_find_ss_book miss: cid=%s bid=%s und=%s books=%s",
+            logger.debug("_find_ss_book miss: cid=%s bid=%s und=%s books=%s",
                         client_id, binding_id, underlying,
                         list(self._straddle_manager._books.keys()))
         else:
@@ -5176,6 +5206,17 @@ class DashboardServer:
                 (s._client_id == client_id and s._binding_id == binding_id)
             ):
                 return s
+        return None
+
+    def _find_trap_book(self, client_id: str, binding_id: str, underlying: str):
+        """Locate the per-binding trap-scanner book for this deployment."""
+        if self._trap_scanner_manager is not None:
+            b = self._trap_scanner_manager.find(client_id, binding_id, underlying)
+            if b is not None:
+                return b
+            logger.info("_find_trap_book miss: cid=%s bid=%s und=%s books=%s",
+                        client_id, binding_id, underlying,
+                        list(self._trap_scanner_manager._books.keys()))
         return None
 
     def stop(self) -> None:
