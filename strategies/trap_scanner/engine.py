@@ -23,7 +23,7 @@ from strategies.core.base_book import AbstractStrategyBook
 from strategies.core.gate import can_trade
 from strategies.core.position_update import PositionUpdateMixin
 from strategies.trap_scanner import scanner
-from strategies.trap_scanner.config import ConfigMixin, _pivot_levels, _round_strike, _SPOT_KEYS
+from strategies.trap_scanner.config import ConfigMixin, _pivot_levels, _round_strike, _SPOT_KEYS, is_stock, stock_spot_key
 from strategies.trap_scanner.data import DataMixin
 from strategies.trap_scanner.zones import ZonesMixin, _bars_to_df, _resample_htf, _zone_uid
 from strategies.trap_scanner.entries import EntryMixin
@@ -147,7 +147,18 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
 
         # Position
         self._position: Optional[Dict] = None
+        self._entry_in_progress = False  # guard against concurrent entry tasks on same zone
         self._sweep_watch: Optional[Dict] = None   # liquidity sweep re-entry after SL
+
+        # Futures-mode tick-based zone arm state
+        # When spot enters an HTF FUT zone on a tick, the leg is "armed".
+        # Entry fires when the next 1m FUT candle closes and the subsequent tick
+        # breaks that candle's HIGH (CE) or LOW (PE).
+        self._fut_armed_zone: Optional[Dict] = None   # TRAPPED zone price just entered
+        self._fut_armed_side: Optional[str]  = None   # "CE" or "PE"
+        self._fut_armed_candle_high: float   = 0.0    # last 1m close HIGH when armed
+        self._fut_armed_candle_low:  float   = 0.0    # last 1m close LOW when armed
+        self._fut_armed_candle_ready: bool   = False  # True after first 1m close post-arm
 
         self._broker: Optional[Any] = None
         self._rebalancer: Optional[Any] = None   # set via set_rebalancer()
@@ -501,6 +512,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             elif self._htf_source == "spot":
                 # Legacy: SPOT bars for HTF, option bars for LTF
                 spot_key = _SPOT_KEYS.get(self._und, "")
+                if not spot_key and is_stock(self._und):
+                    spot_key = stock_spot_key(self._und)
                 self._ce1_key = self._build_upstox_key(self._ce1_strike, "CE")
                 self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
                 self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
@@ -819,9 +832,12 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                             self._ce1_key, self._pe1_key,
                         )
                     _last_resub = now
-                    # DELTA perpetuals: only re-subscribe the perpetual key — no option keys
-                    if self._exchange == "DELTA":
-                        keys = [k for k in [self._fut_key] if k]
+                    # DELTA perpetuals and futures mode: only re-subscribe fut + armed option key
+                    if self._exchange == "DELTA" or self._htf_source == "futures":
+                        armed_key = (self._ce1_key if self._fut_armed_side == "CE"
+                                     else self._pe1_key if self._fut_armed_side == "PE"
+                                     else None)
+                        keys = [k for k in [self._fut_key, armed_key] if k]
                     else:
                         keys = [k for k in [self._fut_key,
                                             self._ce1_key, self._ce2_key,
@@ -862,8 +878,126 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # When triggered, _place_exit closes the 1-ITM option via exec_key.
                     if self._position and self._position.get("leg") == "FUT":
                         await self._check_tick_exit(fut_ltp, tick.timestamp)
+                    # Tick-based zone arm detection (futures mode, no position)
+                    if not self._position:
+                        await self._check_futures_zone_arm(fut_ltp)
+                    # 1m candle break entry check
+                    if self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
+                        await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
         except asyncio.CancelledError:
             pass
+
+    # ── Futures-mode zone arm (lazy option subscription + 1m break entry) ─────
+
+    async def _check_futures_zone_arm(self, spot: float) -> None:
+        """On every futures tick: check if spot entered a TRAPPED HTF zone.
+        If already armed, check if price left the zone (disarm).
+        """
+        if self._fut_armed_zone:
+            z = self._fut_armed_zone
+            side = self._fut_armed_side
+            # Disarm if price moves clearly outside the zone
+            if side == "CE" and spot < z.get("zone_low", 0) - max(self._htf_atr_val * 0.1, self._step):
+                self._log.info("ZONE DISARMED [CE]: spot=%.1f left zone_low=%.1f", spot, z["zone_low"])
+                self._disarm_futures_leg()
+            elif side == "PE" and spot > z.get("zone_high", 0) + max(self._htf_atr_val * 0.1, self._step):
+                self._log.info("ZONE DISARMED [PE]: spot=%.1f left zone_high=%.1f", spot, z["zone_high"])
+                self._disarm_futures_leg()
+            return
+
+        def _uid(z: dict) -> str:
+            return f"{z.get('zone_low',0):.1f}_{z.get('zone_high',0):.1f}_{z.get('kind','BEAR')}"
+
+        armed = False
+        # Check BEAR zones first (CE trade)
+        for z in self._htf_fut_zones:
+            if z.get("status") != "TRAPPED" or z.get("kind", "BEAR") != "BEAR":
+                continue
+            if _uid(z) in self._notified_uids:
+                continue
+            if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
+                await self._arm_futures_leg(z, "CE")
+                armed = True
+                break
+
+        if armed:
+            return
+
+        # Check BULL zones (PE trade)
+        for z in self._htf_fut_zones:
+            if z.get("status") != "TRAPPED" or z.get("kind", "BEAR") != "BULL":
+                continue
+            if _uid(z) in self._notified_uids:
+                continue
+            if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
+                await self._arm_futures_leg(z, "PE")
+                break
+
+    async def _arm_futures_leg(self, zone: dict, side: str) -> None:
+        """Arm a futures zone: compute 1-ITM option strike and subscribe it."""
+        from strategies.trap_scanner.config import _round_strike
+        spot = self._spot_cache or 0.0
+        atm = _round_strike(spot, self._step)
+        if side == "CE":
+            strike = atm - self._step   # 1-ITM CE
+            opt_type = "CE"
+            self._ce1_strike = strike
+            self._ce1_key = self._build_upstox_key(strike, opt_type)
+            option_key = self._ce1_key
+        else:
+            strike = atm + self._step   # 1-ITM PE
+            opt_type = "PE"
+            self._pe1_strike = strike
+            self._pe1_key = self._build_upstox_key(strike, opt_type)
+            option_key = self._pe1_key
+
+        self._fut_armed_zone = zone
+        self._fut_armed_side = side
+        self._fut_armed_candle_ready = False
+        self._fut_armed_candle_high = 0.0
+        self._fut_armed_candle_low = 0.0
+
+        feeder = (self._mcx_feeder if self._mcx_feeder is not None
+                  else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
+        if feeder and option_key:
+            try:
+                if hasattr(feeder, "subscribe_tokens"):
+                    await feeder.subscribe_tokens([option_key])
+            except Exception as exc:
+                self._log.warning("_arm_futures_leg: subscribe %s failed: %s", option_key, exc)
+
+        self._log.info(
+            "ZONE ARMED [%s]: zone=%.1f..%.1f spot=%.1f → %s%d (%s)",
+            side, zone.get("zone_low", 0), zone.get("zone_high", 0),
+            spot, opt_type, strike, option_key,
+        )
+
+    def _disarm_futures_leg(self) -> None:
+        self._fut_armed_zone = None
+        self._fut_armed_side = None
+        self._fut_armed_candle_ready = False
+        self._fut_armed_candle_high = 0.0
+        self._fut_armed_candle_low = 0.0
+
+    async def _check_futures_arm_entry(self, spot: float, ts) -> None:
+        """After the first 1m candle close post-arm: fire entry if next tick breaks H/L."""
+        side = self._fut_armed_side
+        if side == "CE" and self._fut_armed_candle_high > 0 and spot > self._fut_armed_candle_high:
+            self._log.info(
+                "ENTRY SIGNAL [CE]: spot=%.1f > 1m_H=%.1f — firing",
+                spot, self._fut_armed_candle_high,
+            )
+            zone = self._fut_armed_zone
+            self._disarm_futures_leg()
+            await self._on_entry_signal("CE1", "CE", {"price": spot, "ts": ts}, zone)
+        elif side == "PE" and self._fut_armed_candle_low > 0 and spot < self._fut_armed_candle_low:
+            self._log.info(
+                "ENTRY SIGNAL [PE]: spot=%.1f < 1m_L=%.1f — firing",
+                spot, self._fut_armed_candle_low,
+            )
+            zone = self._fut_armed_zone
+            self._disarm_futures_leg()
+            await self._on_entry_signal("PE1", "PE", {"price": spot, "ts": ts}, zone)
 
     # ── Trade gating ──────────────────────────────────────────────────────────
 
@@ -908,6 +1042,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._ce1_key = None; self._ce2_key = None
         self._pe1_key = None; self._pe2_key = None
         self._expiry_str = None; self._expiry_date = None
+        self._disarm_futures_leg()
         self._clear_persisted_position()
 
     def reset_session(self) -> None:

@@ -351,6 +351,19 @@ class ZonesMixin:
         if self._position and self._htf_source == "futures" and leg == "FUT":
             self._update_futures_tsl(ts)
             return
+        # Futures-mode armed: capture the 1m FUT candle H/L so the next tick
+        # can check for a break above (CE) or below (PE) to fire entry.
+        if (self._htf_source == "futures" and leg == "FUT"
+                and self._fut_armed_zone is not None and not self._position
+                and self._bars_fut):
+            last = self._bars_fut[-1]
+            self._fut_armed_candle_high = float(last["high"])
+            self._fut_armed_candle_low  = float(last["low"])
+            self._fut_armed_candle_ready = True
+            self._log.debug(
+                "ARMED candle captured: H=%.1f L=%.1f — waiting for break",
+                self._fut_armed_candle_high, self._fut_armed_candle_low,
+            )
         if self._position:
             # Scale-in watcher: if we have a probe/add position, check for next stage.
             # Only for option/spot mode (position leg is CE1/CE2/PE1/PE2), not futures-mode.

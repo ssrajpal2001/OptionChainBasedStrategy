@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 _INTRADAY_CACHE: Dict[Tuple[str, date], Tuple[List[dict], float]] = {}
 _INTRADAY_CACHE_TTL_SECONDS = 300.0
 
-from strategies.trap_scanner.config import _SPOT_KEYS
+from strategies.trap_scanner.config import _SPOT_KEYS, is_stock, stock_spot_key
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,8 @@ class DataMixin:
                 self._log.warning("_fetch_prev_day_ohlc: no Upstox token")
                 return None
             spot_key = _SPOT_KEYS.get(self._und)
+            if not spot_key and is_stock(self._und):
+                spot_key = stock_spot_key(self._und)
             if not spot_key and self._htf_source == "futures":
                 # Futures-mode (CrudeOil, BTC, ETH): use REGISTRY futures key for daily OHLC
                 try:
@@ -130,6 +132,8 @@ class DataMixin:
             if not token:
                 return 0.0
             spot_key = _SPOT_KEYS.get(self._und)
+            if not spot_key and is_stock(self._und):
+                spot_key = stock_spot_key(self._und)
             if not spot_key and self._htf_source == "futures":
                 # Futures-mode (CrudeOil, BTC, ETH): use REGISTRY futures key
                 try:
@@ -658,10 +662,14 @@ class DataMixin:
         # pin_strike alone only prevents UNsubscription; it does NOT subscribe a key that
         # was never in the ATM window.  Deep-ITM / OTM legs used by TrapScanner are often
         # outside the ±N-strike window, so they never receive ticks without this call.
-        # For futures-mode (CrudeOil) also subscribe the futures key so INDEX_TICK arrives.
-        keys = [k for k in [self._fut_key,
-                             self._ce1_key, self._ce2_key,
-                             self._pe1_key, self._pe2_key] if k]
+        # For futures-mode (CrudeOil) only subscribe the futures key — option legs are
+        # subscribed lazily when price actually enters an HTF zone (see _arm_futures_leg).
+        if self._htf_source == "futures":
+            keys = [k for k in [self._fut_key] if k]
+        else:
+            keys = [k for k in [self._fut_key,
+                                 self._ce1_key, self._ce2_key,
+                                 self._pe1_key, self._pe2_key] if k]
         if keys:
             feeder = (self._mcx_feeder if self._mcx_feeder is not None
                       else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
