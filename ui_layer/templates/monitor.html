@@ -4913,12 +4913,6 @@ function amoTest() {
                 <span x-show="bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
                 <span x-show="bk.expiry" style="color:var(--t-dim)" x-text="'exp='+bk.expiry"></span>
               </div>
-              <!-- DEBUG: show raw values -->
-              <template x-if="bk.htf_source==='futures'">
-                <div class="text-xs font-mono" style="color:orange">
-                  DBG: ce=<span x-text="JSON.stringify(bk.nearest_ce_zone)"></span> pe=<span x-text="JSON.stringify(bk.nearest_pe_zone)"></span>
-                </div>
-              </template>
               <!-- Nearest zone info (futures-mode: most important line — where to watch) -->
               <template x-if="bk.htf_source==='futures' && (bk.nearest_ce_zone||bk.nearest_pe_zone)">
                 <div class="mt-2 rounded p-2" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2)">

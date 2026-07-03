@@ -2311,12 +2311,6 @@ class DashboardServer:
                                 "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl})
                 return out
 
-            def _find(strategies, underlying):
-                for s in strategies or []:
-                    if getattr(s, "_underlying", None) == underlying:
-                        return s
-                return None
-
             by_broker: dict = {}
             for dep in deployments:
                 bid = dep.get("binding_id", "")
