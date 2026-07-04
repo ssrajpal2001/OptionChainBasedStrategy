@@ -394,8 +394,19 @@ async def _run_live(
     except Exception:
         _active_crypto = set()
     _crypto_all = list({u for u in (list(_active_crypto) + _crypto_idx_base) if cfg.exchange.is_crypto(u)} or {"BTC"})
-    delta_chain = DeltaChainManager(bus, cfg, _crypto_all)
-    logger.info("Delta crypto feed for %s (active: %s, monitored: %s).", _crypto_all, _active_crypto, _crypto_idx_base)
+    # Option chain (ATM strikes) only for underlyings with active sell_straddle deployment
+    try:
+        _conn2 = _sq3.connect(os.path.join("data", "clients.db"))
+        _ss_rows = _conn2.execute(
+            "SELECT underlying FROM strategy_deployments WHERE is_running=1 AND strategy_name='sell_straddle'"
+        ).fetchall()
+        _conn2.close()
+        _option_chain_unds = [r[0] for r in _ss_rows if cfg.exchange.is_crypto(r[0])]
+    except Exception:
+        _option_chain_unds = []
+    delta_chain = DeltaChainManager(bus, cfg, _crypto_all, option_chain_unds=_option_chain_unds)
+    logger.info("Delta crypto feed for %s (active: %s, option_chain: %s).",
+                _crypto_all, _active_crypto, _option_chain_unds)
     straddle_bridge = StraddleExecutionBridge(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),

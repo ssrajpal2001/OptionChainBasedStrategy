@@ -31,10 +31,17 @@ PROD_BASE = "https://api.india.delta.exchange"
 
 class DeltaChainManager:
     def __init__(self, bus, cfg, underlyings: List[str], window: int = 6,
-                 reconcile_sec: float = 20.0) -> None:
+                 reconcile_sec: float = 20.0,
+                 option_chain_unds: List[str] | None = None) -> None:
         self._bus = bus
         self._cfg = cfg
         self._unds = [u.upper() for u in underlyings if str(u).upper() in ("BTC", "ETH")]
+        # Option chain (ATM±N strikes) only for underlyings with active sell_straddle deployment.
+        # Trap scanner on futures needs perpetual spot only — no option strikes.
+        self._option_chain_unds: set = (
+            {u.upper() for u in option_chain_unds} if option_chain_unds is not None
+            else set(self._unds)   # legacy: if not specified, subscribe all (old behaviour)
+        )
         self._window = window
         self._reconcile_sec = reconcile_sec
         self._feeder = DeltaFeeder(bus, cfg)
@@ -177,6 +184,9 @@ class DeltaChainManager:
                 continue
 
     async def _reconcile(self, und: str, force: bool = False) -> None:
+        # Skip option chain subscription if this underlying has no active sell_straddle deployment
+        if und not in self._option_chain_unds:
+            return
         if force or und not in self._chain:
             strikes, spot = await asyncio.to_thread(self._fetch_chain_sync, und)
             if strikes:
