@@ -979,14 +979,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         if self._htf_zone_armed:
             z = self._htf_zone
             side = self._htf_zone_side
-            # Disarm entire cascade if price exits HTF zone on the failure side.
-            # SELL (BEAR zone): price recovering above zone_high = setup failed (sellers trapped no more)
-            # BUY  (BULL zone): price dropping below zone_low  = setup failed (buyers trapped no more)
-            if side == "CE" and spot > z.get("zone_high", 0):
-                self._log.info("HTF ZONE EXITED [CE/SELL]: spot=%.1f > zone_high=%.1f — disarming", spot, z["zone_high"])
-                self._disarm_futures_leg()
-            elif side == "PE" and spot < z.get("zone_low", 0):
-                self._log.info("HTF ZONE EXITED [PE/BUY]: spot=%.1f < zone_low=%.1f — disarming", spot, z["zone_low"])
+            # Price-based disarm removed. HTF zone stays armed until MTF exhaustion.
+            # (MTF scan will disarm when all sub-zones inside the HTF zone are CLOSED.)
             return
 
         # Not yet in an HTF zone — scan for entry
@@ -1122,16 +1116,31 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         htf_ts_pd = _to_ts(htf_ref_ts)
 
         kind_filter = "BEAR" if side == "CE" else "BULL"
+
+        # Collect valid MTF zones for this HTF: same kind, formed at/after HTF ref_ts
+        valid_mtf = []
         for z in all_zones:
-            if z.get("status") != "TRAPPED":
-                continue
             if z.get("kind", "BEAR") != kind_filter:
                 continue
-            # Only zones formed at or after the HTF trap ref_ts
             if htf_ts_pd is not None:
                 z_ts_pd = _to_ts(z.get("ref_ts"))
                 if z_ts_pd is not None and z_ts_pd < htf_ts_pd:
                     continue
+            valid_mtf.append(z)
+
+        # If HTF zone is armed but ALL MTF sub-zones are now CLOSED → HTF exhausted, disarm
+        trapped_mtf = [z for z in valid_mtf if z.get("status") == "TRAPPED"]
+        if not trapped_mtf and self._htf_zone_armed and not self._fut_armed_zone:
+            self._log.info(
+                "HTF EXHAUSTED [%s]: all MTF sub-zones CLOSED — disarming zone=%.1f..%.1f",
+                side,
+                self._htf_zone.get("zone_low", 0) if self._htf_zone else 0,
+                self._htf_zone.get("zone_high", 0) if self._htf_zone else 0,
+            )
+            self._disarm_futures_leg()
+            return
+
+        for z in trapped_mtf:
             if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
                 self._log.info(
                     "MTF ZONE CONFIRMED [%s]: zone=%.1f..%.1f ref_ts=%s spot=%.1f -> arming 1m",
