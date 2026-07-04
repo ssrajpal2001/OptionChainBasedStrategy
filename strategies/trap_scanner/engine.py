@@ -991,6 +991,36 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         # Not yet in an HTF zone — scan for entry
         if not self._htf_fut_zones:
             return
+
+        # Tick-level status advance: don't wait for 5m candle close to confirm TRAPPED/CLOSED.
+        # BULL zone: TRAPPED when spot ticks below sl (prev_low); CLOSED when spot >= entry (zone_low).
+        # BEAR zone: TRAPPED when spot ticks above sl (prev_high); CLOSED when spot <= entry (zone_high).
+        for _z in self._htf_fut_zones:
+            _st = _z.get("status")
+            if _st == "CLOSED":
+                continue
+            _kind = _z.get("kind", "BEAR")
+            _sl   = _z.get("sl", 0.0)
+            if _st == "ACTIVE":
+                if _kind == "BULL" and spot < _sl:
+                    _z["status"] = "TRAPPED"
+                    self._log.info(
+                        "ZONE TRAPPED(tick) BULL [%.1f–%.1f] sl=%.1f spot=%.1f",
+                        _z.get("zone_low", 0), _z.get("zone_high", 0), _sl, spot,
+                    )
+                elif _kind == "BEAR" and spot > _sl:
+                    _z["status"] = "TRAPPED"
+                    self._log.info(
+                        "ZONE TRAPPED(tick) BEAR [%.1f–%.1f] sl=%.1f spot=%.1f",
+                        _z.get("zone_low", 0), _z.get("zone_high", 0), _sl, spot,
+                    )
+            elif _st == "TRAPPED":
+                _entry = _z.get("entry", 0.0)
+                if _kind == "BULL" and spot >= _entry:
+                    _z["status"] = "CLOSED"
+                elif _kind == "BEAR" and spot <= _entry:
+                    _z["status"] = "CLOSED"
+
         _now_dbg = _time_mod.monotonic()
         if not hasattr(self, "_last_arm_dbg_t"):
             self._last_arm_dbg_t = 0.0
