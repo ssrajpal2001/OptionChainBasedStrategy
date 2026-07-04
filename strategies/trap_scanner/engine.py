@@ -1648,9 +1648,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                         "bars": len(self._bars_pe2), "zone": _best_zone_summary(self._htf_bull_zones_2, ltp_pe2)},
             }
 
-        # FUT zones: sort by distance from spot and return nearest 10 (not all 90)
+        # FUT zones: show only TRAPPED and ACTIVE (not CLOSED — those can never arm)
         def _sorted_fut_zones(max_n: int = 10) -> list:
-            raw = self._zone_info_list(self._htf_fut_zones, "FUT")
+            live = [z for z in self._htf_fut_zones if z.get("status") in ("TRAPPED", "ACTIVE")]
+            raw = self._zone_info_list(live, "FUT")
             if ltp:
                 raw.sort(key=lambda z: abs((z.get("zone_trigger") or 0) - ltp))
             return raw[:max_n]
