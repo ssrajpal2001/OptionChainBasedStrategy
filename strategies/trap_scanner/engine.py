@@ -996,12 +996,17 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             self._last_arm_dbg_t = 0.0
         if _now_dbg - self._last_arm_dbg_t >= 10.0:
             self._last_arm_dbg_t = _now_dbg
-            _trapped = [(z.get("kind","?"), round(z.get("zone_low",0),1), round(z.get("zone_high",0),1),
-                         z.get("status","?")) for z in self._htf_fut_zones if z.get("status")=="TRAPPED"]
-            _inside  = [(k,zl,zh,st) for k,zl,zh,st in _trapped if zl <= spot <= zh]
+            _all_near = sorted(
+                [(z.get("kind","?"), round(z.get("zone_low",0),1), round(z.get("zone_high",0),1),
+                  z.get("status","?")) for z in self._htf_fut_zones
+                 if abs(spot - z.get("zone_trigger", z.get("zone_high",0))) < 200],
+                key=lambda t: abs(spot - (t[1]+t[2])/2)
+            )[:5]
+            _trapped = [t for t in _all_near if t[3] == "TRAPPED"]
+            _inside  = [t for t in _trapped if t[1] <= spot <= t[2]]
             self._log.info(
-                "zone_arm_dbg: spot=%.2f total_zones=%d trapped=%d inside_zone=%s",
-                spot, len(self._htf_fut_zones), len(_trapped), _inside or "NONE",
+                "zone_arm_dbg: spot=%.2f total_zones=%d near5=%s trapped_near=%d inside=%s",
+                spot, len(self._htf_fut_zones), _all_near, len(_trapped), _inside or "NONE",
             )
         for z in self._htf_fut_zones:
             if z.get("status") != "TRAPPED" or z.get("kind", "BEAR") != "BEAR":
