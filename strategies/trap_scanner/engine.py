@@ -149,6 +149,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._position: Optional[Dict] = None
         self._entry_in_progress = False  # guard against concurrent entry tasks on same zone
         self._sweep_watch: Optional[Dict] = None   # liquidity sweep re-entry after SL
+        self._sl_order_id: Optional[str] = None   # exchange-held stop order (DELTA only)
 
         # Futures-mode 3-tier cascade: HTF zone → MTF zone → 1m candle break → entry
         # Stage 1: spot enters HTF TRAPPED zone → record zone + its ref_ts
@@ -1146,6 +1147,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._intraday_mode_ce1 = False; self._intraday_mode_ce2 = False
         self._intraday_mode_pe1 = False; self._intraday_mode_pe2 = False
         self._sweep_watch      = None
+        self._sl_order_id      = None
         self._day_init_done = False
         self._bars_spot = []; self._bars_fut = []
         self._bars_ce1  = []; self._bars_ce2 = []

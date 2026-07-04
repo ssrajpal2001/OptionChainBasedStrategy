@@ -41,7 +41,7 @@ TESTNET_BASE = "https://cdn-ind.testnet.deltaex.org"
 _ORDER_TYPE = {
     OrderType.MARKET: "market_order",
     OrderType.LIMIT:  "limit_order",
-    OrderType.SL_M:   "market_order",
+    OrderType.SL_M:   "stop_order",   # stop-market: trigger fires a market order
     OrderType.SL_L:   "limit_order",
 }
 _STATUS = {
@@ -197,6 +197,9 @@ class DeltaBroker(BaseBroker):
         }
         if req.order_type in (OrderType.LIMIT, OrderType.SL_L) and req.price > 0:
             body["limit_price"] = str(req.price)
+        if req.order_type == OrderType.SL_M and req.trigger_price > 0:
+            body["stop_price"] = str(req.trigger_price)
+            body["reduce_only"] = "true"   # SL orders must only reduce (never add to) the position
         # IOC = fill what's available NOW, kill the remainder — never leaves a resting maker that
         # could fill late (the root of the asymmetric/naked-leg risk on a thin Delta book).
         _tif = str(getattr(req, "time_in_force", "") or "").lower()

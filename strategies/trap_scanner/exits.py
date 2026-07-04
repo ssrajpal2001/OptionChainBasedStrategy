@@ -297,6 +297,67 @@ class ExitMixin:
 
         if changed:
             self._persist_position()
+            # Move exchange SL order to the new trail level (async — schedule as task)
+            import asyncio as _aio
+            _aio.ensure_future(self._update_exchange_sl(pos["trail_sl"]))
+
+    # ── Exchange SL order (DELTA only) ───────────────────────────────────────
+
+    async def _place_exchange_sl(self, sl_price: float) -> None:
+        """Place a stop-market order at Delta for the current position's SL price.
+
+        Only runs for DELTA exchange; silently skips for all others.
+        Stores the order-id in self._sl_order_id so it can be cancelled/updated.
+        """
+        if self._exchange != "DELTA" or not self._position:
+            return
+        pos = self._position
+        broker = await self._ensure_broker()
+        if not broker:
+            return
+        broker_sym = self._build_broker_symbol(pos["strike"], pos["side"])
+        from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
+        perp_side = pos.get("perp_side")
+        # SL for a long (perp_side="buy") is a SELL stop; for short it's a BUY stop
+        sl_side = OrderSide.SELL if perp_side == "buy" else OrderSide.BUY
+        req = OrderRequest(
+            broker_symbol=broker_sym,
+            exchange=self._exchange,
+            side=sl_side,
+            qty=pos["remaining_qty"],
+            order_type=OrderType.SL_M,
+            trigger_price=sl_price,
+            tag=f"TRAP_SL_{self._und}",
+            client_id=self._cid,
+        )
+        try:
+            oid = await broker.place_order(req)
+            self._sl_order_id = oid
+            self._log.info("Exchange SL placed @ %.2f order=%s", sl_price, oid)
+        except Exception as exc:
+            self._log.warning("Exchange SL place failed @ %.2f: %s", sl_price, exc)
+
+    async def _cancel_exchange_sl(self) -> None:
+        """Cancel any live exchange SL order. Called on all exit paths."""
+        oid = getattr(self, "_sl_order_id", None)
+        if not oid:
+            return
+        self._sl_order_id = None
+        broker = await self._ensure_broker()
+        if not broker:
+            return
+        try:
+            await broker.cancel_order(oid)
+            self._log.info("Exchange SL cancelled order=%s", oid)
+        except Exception as exc:
+            self._log.warning("Exchange SL cancel failed order=%s: %s", oid, exc)
+
+    async def _update_exchange_sl(self, new_sl: float) -> None:
+        """Cancel the old SL order and place a new one at new_sl (trail moved)."""
+        if self._exchange != "DELTA":
+            return
+        await self._cancel_exchange_sl()
+        await self._place_exchange_sl(new_sl)
 
     async def _place_exit(self, qty: int, price: float, reason: str) -> Optional[str]:
         if qty <= 0 or not self._position:
@@ -326,6 +387,9 @@ class ExitMixin:
             tag=f"TRAP_EXIT_{reason}",
             client_id=self._cid,
         )
+        # Always cancel the exchange SL order before placing a close order — avoids
+        # both orders executing simultaneously and overshooting the position.
+        await self._cancel_exchange_sl()
         try:
             oid = await broker.place_order(req)
             self._log.info("EXIT %s qty=%d order=%s", reason, qty, oid)
@@ -422,6 +486,8 @@ class ExitMixin:
                 )
                 pos["trail_sl"] = new_sl
                 self._persist_position()
+                import asyncio as _aio
+                _aio.ensure_future(self._update_exchange_sl(new_sl))
         else:
             # PE: new bull traps BELOW entry spot
             below = [e for e in trapped if e.get("zone_low", 0) < spot_at_entry]
@@ -438,3 +504,5 @@ class ExitMixin:
                 )
                 pos["trail_sl"] = new_sl
                 self._persist_position()
+                import asyncio as _aio
+                _aio.ensure_future(self._update_exchange_sl(new_sl))

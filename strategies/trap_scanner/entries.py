@@ -370,6 +370,9 @@ class EntryMixin:
             "ENTRY PLACED scan=%d exec=%d%s spot=%.2f fill=%.2f sl=%.2f t1=%.2f order=%s",
             scan_strike, strike, opt_type, spot, avg, sl_price, t1_price, order_id,
         )
+        # Place an exchange-held stop order at the initial SL price (DELTA only).
+        # This protects the position even if the monitoring process goes down.
+        asyncio.ensure_future(self._place_exchange_sl(sl_price))
 
     async def _add_to_position(self, qty: int, reason: str, entry: dict) -> bool:
         """Add `qty` lots to an existing scaled-in position and recompute average entry.
