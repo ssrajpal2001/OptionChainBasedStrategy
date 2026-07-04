@@ -4929,41 +4929,96 @@ function amoTest() {
                 <span x-show="bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
                 <span x-show="bk.expiry" style="color:var(--t-dim)" x-text="'exp='+bk.expiry"></span>
               </div>
-              <!-- Nearest zone info (futures-mode: most important line — where to watch) -->
-              <template x-if="bk.htf_source==='futures' && (bk.nearest_ce_zone||bk.nearest_pe_zone)">
+              <!-- CASCADE PIPELINE — stage-aware zone drill-down for futures-mode -->
+              <template x-if="bk.htf_source==='futures'">
                 <div class="mt-2 rounded p-2" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2)">
-                  <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-yellow)">WATCH — WHERE MARKET NEEDS TO GO</div>
-                  <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
-                    <!-- CE side: bear trap zone -->
-                    <template x-if="bk.nearest_ce_zone">
-                      <div class="text-xs font-mono">
-                        <span style="color:var(--t-green);font-weight:700">CE ENTRY</span>
-                        <span style="color:var(--t-muted)"> when FUT reaches </span>
-                        <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
-                        <span style="color:var(--t-muted)"> zone </span>
-                        <span style="color:var(--t-dim)" x-text="'['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
-                        <span x-show="bk.nearest_ce_zone.dist_pts!=null"
-                              :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
-                              x-text="' ('+bk.nearest_ce_zone.dist_pts+' pts '+( bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')+')'"></span>
-                        <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                              x-text="' → '+(bk.nearest_ce_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
-                      </div>
-                    </template>
-                    <!-- PE side: bull trap zone -->
-                    <template x-if="bk.nearest_pe_zone">
-                      <div class="text-xs font-mono">
-                        <span style="color:var(--t-red);font-weight:700">PE ENTRY</span>
-                        <span style="color:var(--t-muted)"> when FUT reaches </span>
-                        <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
-                        <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
-                        <span x-show="bk.nearest_pe_zone.dist_pts!=null"
-                              :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
-                              x-text="' ('+bk.nearest_pe_zone.dist_pts+' pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')+')'"></span>
-                        <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                              x-text="' → '+(bk.nearest_pe_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
-                      </div>
-                    </template>
+                  <!-- Header + stage badge -->
+                  <div class="font-mono text-xs font-bold mb-2 flex items-center gap-2" style="color:var(--t-yellow)">
+                    <span>CASCADE PIPELINE</span>
+                    <span class="rounded px-1"
+                          :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
+                          x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
                   </div>
+                  <!-- Stage 0: scanning — show nearest zones -->
+                  <template x-if="(bk.cascade_stage||0)===0">
+                    <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
+                      <template x-if="bk.nearest_ce_zone">
+                        <div class="text-xs font-mono">
+                          <span style="color:var(--t-red);font-weight:700">BEAR TRAP</span>
+                          <span style="color:var(--t-muted)"> → FUT </span>
+                          <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
+                          <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
+                          <span x-show="bk.nearest_ce_zone.dist_pts!=null"
+                                :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
+                                x-text="' '+bk.nearest_ce_zone.dist_pts+'pts '+(bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
+                        </div>
+                      </template>
+                      <template x-if="bk.nearest_pe_zone">
+                        <div class="text-xs font-mono">
+                          <span style="color:var(--t-green);font-weight:700">BULL TRAP</span>
+                          <span style="color:var(--t-muted)"> → FUT </span>
+                          <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
+                          <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
+                          <span x-show="bk.nearest_pe_zone.dist_pts!=null"
+                                :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
+                                x-text="' '+bk.nearest_pe_zone.dist_pts+'pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <!-- Stage 1: HTF armed, scanning MTF -->
+                  <template x-if="(bk.cascade_stage||0)===1">
+                    <div class="text-xs font-mono" style="line-height:1.8">
+                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 — INSIDE HTF ZONE</span>
+                        <template x-if="bk.htf_zone_data">
+                          <span style="color:var(--t-bright)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+'] '+(bk.htf_zone_side==='CE'?'BEAR':'BULL')+' trap'"></span>
+                        </template>
+                      </div>
+                      <div style="color:var(--t-yellow)">⟳ S2 — Scanning <span x-text="(bk.cascade_min||3)+'m'"></span> zones inside HTF zone…</div>
+                      <div style="color:var(--t-dim)">  S3 — 1m candle break (pending)</div>
+                    </div>
+                  </template>
+                  <!-- Stage 2: MTF confirmed, waiting for 1m candle -->
+                  <template x-if="(bk.cascade_stage||0)===2">
+                    <div class="text-xs font-mono" style="line-height:1.8">
+                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 — HTF ZONE</span>
+                        <template x-if="bk.htf_zone_data">
+                          <span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span>
+                        </template>
+                      </div>
+                      <div><span style="color:var(--t-cyan);font-weight:700">✓ S2 — MTF ZONE CONFIRMED</span>
+                        <template x-if="bk.mtf_zone_data">
+                          <span style="color:var(--t-bright)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span>
+                        </template>
+                      </div>
+                      <div style="color:var(--t-yellow)">⟳ S3 — Waiting for 1m candle close to arm entry…</div>
+                    </div>
+                  </template>
+                  <!-- Stage 3: LTF candle armed — entry pending on break -->
+                  <template x-if="(bk.cascade_stage||0)===3">
+                    <div class="text-xs font-mono" style="line-height:1.8">
+                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
+                        <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
+                        <span style="color:var(--t-green);font-weight:700"> · ✓ S2 MTF</span>
+                        <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
+                      </div>
+                      <div style="background:rgba(255,152,0,0.15);border:1px solid #ff9800;border-radius:4px;padding:4px 8px;margin-top:4px">
+                        <div style="color:#ff9800;font-weight:700">⚡ S3 — ENTRY PENDING</div>
+                        <template x-if="bk.htf_zone_side==='CE'">
+                          <div>LONG when FUT &gt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_high||'—'"></span>
+                            <span x-show="bk.spot_ltp&&bk.ltf_candle_high" style="color:var(--t-dim)"
+                                  x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_high||0)).toFixed(0)+' pts away)'"></span>
+                          </div>
+                        </template>
+                        <template x-if="bk.htf_zone_side==='PE'">
+                          <div>LONG when FUT &lt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_low||'—'"></span>
+                            <span x-show="bk.spot_ltp&&bk.ltf_candle_low" style="color:var(--t-dim)"
+                                  x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_low||0)).toFixed(0)+' pts away)'"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
                 </div>
               </template>
               <!-- Contracts table: per-leg zone + LTF status (matches NiftyTrapScanner reference) -->
@@ -7592,38 +7647,95 @@ function amoTest() {
                         <span x-show="bk&&bk.pe1_strike" x-text="'PE='+bk.pe1_strike" style="color:var(--t-red)"></span>
                         <span x-show="bk&&bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
                       </div>
-                      <!-- WATCH — nearest bull/bear zone for futures mode -->
-                      <template x-if="bk&&bk.htf_source==='futures'&&(bk.nearest_ce_zone||bk.nearest_pe_zone)">
+                      <!-- CASCADE PIPELINE — stage-aware zone drill-down for futures-mode -->
+                      <template x-if="bk&&bk.htf_source==='futures'">
                         <div class="mt-2 rounded p-2" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2)">
-                          <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-yellow)">WATCH — WHERE MARKET NEEDS TO GO</div>
-                          <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
-                            <template x-if="bk.nearest_ce_zone">
-                              <div class="text-xs font-mono">
-                                <span style="color:var(--t-green);font-weight:700">BEAR TRAP</span>
-                                <span style="color:var(--t-muted)"> → FUT reaches </span>
-                                <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
-                                <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
-                                <span x-show="bk.nearest_ce_zone.dist_pts!=null"
-                                      :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
-                                      x-text="' '+bk.nearest_ce_zone.dist_pts+'pts '+(bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
-                                <span :style="bk.nearest_ce_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_ce_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                                      x-text="' → '+(bk.nearest_ce_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_ce_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
-                              </div>
-                            </template>
-                            <template x-if="bk.nearest_pe_zone">
-                              <div class="text-xs font-mono">
-                                <span style="color:var(--t-red);font-weight:700">BULL TRAP</span>
-                                <span style="color:var(--t-muted)"> → FUT reaches </span>
-                                <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
-                                <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
-                                <span x-show="bk.nearest_pe_zone.dist_pts!=null"
-                                      :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-red)'"
-                                      x-text="' '+bk.nearest_pe_zone.dist_pts+'pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
-                                <span :style="bk.nearest_pe_zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':bk.nearest_pe_zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':'color:var(--t-dim)'"
-                                      x-text="' → '+(bk.nearest_pe_zone.ltf_status==='ltf_signal'?'5M TRAP READY!':bk.nearest_pe_zone.ltf_status==='entered'?'IN TRADE':'ARMED')"></span>
-                              </div>
-                            </template>
+                          <div class="font-mono text-xs font-bold mb-2 flex items-center gap-2" style="color:var(--t-yellow)">
+                            <span>CASCADE PIPELINE</span>
+                            <span class="rounded px-1"
+                                  :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
+                                  x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
                           </div>
+                          <!-- Stage 0: scanning -->
+                          <template x-if="(bk.cascade_stage||0)===0">
+                            <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
+                              <template x-if="bk.nearest_ce_zone">
+                                <div class="text-xs font-mono">
+                                  <span style="color:var(--t-red);font-weight:700">BEAR TRAP</span>
+                                  <span style="color:var(--t-muted)"> → FUT </span>
+                                  <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
+                                  <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
+                                  <span x-show="bk.nearest_ce_zone.dist_pts!=null"
+                                        :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
+                                        x-text="' '+bk.nearest_ce_zone.dist_pts+'pts '+(bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
+                                </div>
+                              </template>
+                              <template x-if="bk.nearest_pe_zone">
+                                <div class="text-xs font-mono">
+                                  <span style="color:var(--t-green);font-weight:700">BULL TRAP</span>
+                                  <span style="color:var(--t-muted)"> → FUT </span>
+                                  <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
+                                  <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
+                                  <span x-show="bk.nearest_pe_zone.dist_pts!=null"
+                                        :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
+                                        x-text="' '+bk.nearest_pe_zone.dist_pts+'pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
+                                </div>
+                              </template>
+                            </div>
+                          </template>
+                          <!-- Stage 1: HTF armed, scanning MTF -->
+                          <template x-if="(bk.cascade_stage||0)===1">
+                            <div class="text-xs font-mono" style="line-height:1.8">
+                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 — INSIDE HTF ZONE</span>
+                                <template x-if="bk.htf_zone_data">
+                                  <span style="color:var(--t-bright)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+'] '+(bk.htf_zone_side==='CE'?'BEAR':'BULL')+' trap'"></span>
+                                </template>
+                              </div>
+                              <div style="color:var(--t-yellow)">⟳ S2 — Scanning <span x-text="(bk.cascade_min||3)+'m'"></span> zones inside HTF zone…</div>
+                              <div style="color:var(--t-dim)">  S3 — 1m candle break (pending)</div>
+                            </div>
+                          </template>
+                          <!-- Stage 2: MTF confirmed, waiting for 1m candle -->
+                          <template x-if="(bk.cascade_stage||0)===2">
+                            <div class="text-xs font-mono" style="line-height:1.8">
+                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 — HTF ZONE</span>
+                                <template x-if="bk.htf_zone_data">
+                                  <span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span>
+                                </template>
+                              </div>
+                              <div><span style="color:var(--t-cyan);font-weight:700">✓ S2 — MTF ZONE CONFIRMED</span>
+                                <template x-if="bk.mtf_zone_data">
+                                  <span style="color:var(--t-bright)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span>
+                                </template>
+                              </div>
+                              <div style="color:var(--t-yellow)">⟳ S3 — Waiting for 1m candle close to arm entry…</div>
+                            </div>
+                          </template>
+                          <!-- Stage 3: LTF candle armed — entry pending -->
+                          <template x-if="(bk.cascade_stage||0)===3">
+                            <div class="text-xs font-mono" style="line-height:1.8">
+                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
+                                <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
+                                <span style="color:var(--t-green);font-weight:700"> · ✓ S2 MTF</span>
+                                <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
+                              </div>
+                              <div style="background:rgba(255,152,0,0.15);border:1px solid #ff9800;border-radius:4px;padding:4px 8px;margin-top:4px">
+                                <div style="color:#ff9800;font-weight:700">⚡ S3 — ENTRY PENDING</div>
+                                <template x-if="bk.htf_zone_side==='CE'">
+                                  <div>LONG when FUT &gt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_high||'—'"></span>
+                                    <span x-show="bk.spot_ltp&&bk.ltf_candle_high" style="color:var(--t-dim)"
+                                          x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_high||0)).toFixed(0)+' pts away)'"></span>
+                                  </div>
+                                </template>
+                                <template x-if="bk.htf_zone_side==='PE'">
+                                  <div>LONG when FUT &lt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_low||'—'"></span>
+                                    <span x-show="bk.spot_ltp&&bk.ltf_candle_low" style="color:var(--t-dim)"
+                                          x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_low||0)).toFixed(0)+' pts away)'"></span>
+                                  </div>
+                                </template>
+                              </div>
+                            </div>
+                          </template>
                         </div>
                       </template>
                       <!-- Contracts table (CE1/CE2/PE1/PE2 LTP + zone — mirrors NiftyTrapScanner) -->

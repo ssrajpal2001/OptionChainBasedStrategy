@@ -735,36 +735,39 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # TICK-LEVEL zone scan: run immediately on every tick when LTP is inside
                     # an HTF zone (do not wait for 1-min candle close). This catches trigger
                     # crossings that fall between two 1-min boundaries (e.g. 0.9 pts away miss).
-                    if not self._position and self._ltp_in_any_htf_zone(bkey):
+                    _zone_scan_ran = not self._position and self._ltp_in_any_htf_zone(bkey)
+                    if _zone_scan_ran:
                         self._on_candle_close(label, ts)
-                    # Push real-time LTP to UI via TRAP_TICK (bypasses 2s heartbeat poll).
-                    if not hasattr(self, "_tt_pub_count"):
-                        self._tt_pub_count = 0
-                    self._tt_pub_count += 1
-                    if self._tt_pub_count <= 5 or self._tt_pub_count % 200 == 0:
-                        self._log.info("TRAP_TICK #%d: %s ltp=%.1f bid=%s",
-                                       self._tt_pub_count, bkey, ltp, self._bid)
                     await self._bus.publish(Topic.TRAP_TICK, {
                         "cid": self._cid, "bid": self._bid, "und": self._und,
                         "leg": bkey, "ltp": ltp,
                     })
                     closed = self._update_bucket(bkey, ltp, ts)
+                    _candle_closed = False
                     if closed:
                         bars_list.append(closed)
                         if len(bars_list) > 2000:
                             del bars_list[:-2000]
                         self._on_candle_close(label, ts)
+                        _candle_closed = True
+                    # Push full state snapshot immediately when zone scan or candle-close ran
+                    if _zone_scan_ran or _candle_closed:
+                        await self._publish_state()
 
                 # SL/T1/trail monitoring uses SCAN-STRIKE option LTP (not 1-ITM exec key).
                 # Zone SL levels (zone_high/low) are derived from scan-strike price action,
                 # so the scan-strike feed is the correct reference for all exit checks.
                 # exec_key is used ONLY for order placement — never for price monitoring.
+                _pos_before = self._position
                 if self._position:
                     ps = self._position.get("leg", "")
                     if ((is_ce1 and ps == "CE1") or (is_ce2 and ps == "CE2") or
                             (is_pe1 and ps == "PE1") or (is_pe2 and ps == "PE2") or
                             (is_fut and ps == "FUT")):
                         await self._check_tick_exit(ltp, ts)
+                # Publish state if position was closed (exit happened)
+                if _pos_before and not self._position:
+                    await self._publish_state()
 
                     # Futures-mode T1 is in option domain — check option ltp here.
                     # SL stays in futures domain (_idx_tick_loop). Only T1 uses option ltp.
@@ -878,6 +881,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                             except Exception:
                                 pass
                 # SPOT bars: legacy htf_source="spot" path
+                _idx_state_changed = False
                 if self._htf_source == "spot":
                     closed = self._update_bucket("SPOT", tick.ltp, tick.timestamp)
                     if closed:
@@ -885,6 +889,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                         if len(self._bars_spot) > 2000:
                             del self._bars_spot[:-2000]
                         self._on_candle_close("SPOT", tick.timestamp)
+                        _idx_state_changed = True
                 # FUT bars: futures-mode (CrudeOil/BTC/ETH) — underlying LTP arrives as INDEX_TICK
                 elif self._htf_source == "futures":
                     fut_ltp = float(tick.ltp)
@@ -895,12 +900,17 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                         if len(self._bars_fut) > 2000:
                             del self._bars_fut[:-2000]
                         self._on_candle_close("FUT", tick.timestamp)
+                        _idx_state_changed = True
                     # Futures-mode: SL/T1/trail all checked against futures LTP.
                     # Signal, SL level, and T1 level all in futures ₹ → consistent.
                     # When triggered, _place_exit closes the 1-ITM option via exec_key.
+                    _pos_before_idx = self._position
                     if self._position and self._position.get("leg") == "FUT":
                         await self._check_tick_exit(fut_ltp, tick.timestamp)
+                    if _pos_before_idx and not self._position:
+                        _idx_state_changed = True
                     # Futures cascade (MCX + DELTA/BTC — all htf_source=="futures"):
+                    _cascade_before = (self._htf_zone_armed, self._fut_armed_zone, bool(self._position))
                     # Stage 1: HTF zone entry check
                     if self._htf_source == "futures" and not self._position:
                         await self._check_futures_zone_arm(fut_ltp)
@@ -910,6 +920,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # Stage 3: 1m candle break entry check (after MTF confirmed)
                     if self._htf_source == "futures" and self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
                         await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
+                    if (self._htf_zone_armed, self._fut_armed_zone, bool(self._position)) != _cascade_before:
+                        _idx_state_changed = True
+                if _idx_state_changed:
+                    await self._publish_state()
         except asyncio.CancelledError:
             pass
 
@@ -1334,6 +1348,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             return obj.tolist()
         return obj
 
+    async def _publish_state(self) -> None:
+        """Publish a full telemetry snapshot to TRAP_STATE immediately on every meaningful change."""
+        try:
+            snap = self.telemetry_snapshot()
+            await self._bus.publish(Topic.TRAP_STATE, snap)
+        except Exception:
+            pass
+
     def telemetry_snapshot(self) -> dict:
         pos = self._position
         ltp = self._spot_cache or 0.0
@@ -1536,6 +1558,31 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             "htf_min":        self._htf_min,
             "cascade_min":    self._cascade_min,
             "ltf_min":        self._ltf_min,
+            # Cascade pipeline state (futures-mode: BTC/CrudeOil)
+            "cascade_stage":  (
+                3 if self._fut_armed_candle_ready
+                else 2 if self._fut_armed_zone is not None
+                else 1 if self._htf_zone_armed
+                else 0
+            ),
+            "htf_zone_armed":       self._htf_zone_armed,
+            "htf_zone_side":        self._htf_zone_side,
+            "htf_zone_data": {
+                "zone_low":     round(self._htf_zone.get("zone_low",  0), 2),
+                "zone_high":    round(self._htf_zone.get("zone_high", 0), 2),
+                "zone_trigger": round(self._htf_zone.get("zone_trigger", self._htf_zone.get("entry", 0)), 2),
+                "kind":         self._htf_zone.get("kind", ""),
+            } if self._htf_zone else None,
+            "mtf_zone_armed":       self._fut_armed_zone is not None,
+            "mtf_zone_data": {
+                "zone_low":     round(self._fut_armed_zone.get("zone_low",  0), 2),
+                "zone_high":    round(self._fut_armed_zone.get("zone_high", 0), 2),
+                "zone_trigger": round(self._fut_armed_zone.get("zone_trigger", self._fut_armed_zone.get("entry", 0)), 2),
+                "kind":         self._fut_armed_zone.get("kind", ""),
+            } if self._fut_armed_zone else None,
+            "ltf_candle_ready":     self._fut_armed_candle_ready,
+            "ltf_candle_high":      round(self._fut_armed_candle_high, 2) if self._fut_armed_candle_high else None,
+            "ltf_candle_low":       round(self._fut_armed_candle_low,  2) if self._fut_armed_candle_low  else None,
             "bars_spot":      len(self._bars_spot),
             "bars_ce1":       len(self._bars_ce1),
             "bars_pe1":       len(self._bars_pe1),

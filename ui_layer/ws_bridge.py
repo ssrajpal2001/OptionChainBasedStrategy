@@ -75,7 +75,8 @@ class WsBridge:
         self._option_q    = bus.subscribe(Topic.OPTION_TICK)
         self._audit_q     = bus.subscribe(Topic.EXIT_AUDIT)
         self._pos_q       = bus.subscribe(Topic.POSITION_UPDATE)
-        self._trap_tick_q = bus.subscribe(Topic.TRAP_TICK)
+        self._trap_tick_q  = bus.subscribe(Topic.TRAP_TICK)
+        self._trap_state_q = bus.subscribe(Topic.TRAP_STATE)
         self._fno_alert_q  = bus.subscribe(Topic.FNO_STOCK_ALERT)
         self._fno_status_q = bus.subscribe(Topic.FNO_STOCK_STATUS)
         self._trap_scanner_mgr = None   # set by dashboard_server after WsBridge init
@@ -167,6 +168,7 @@ class WsBridge:
                 self._exit_audit_loop(),
                 self._position_update_loop(),
                 self._trap_tick_loop(),
+                self._trap_state_loop(),
                 self._fno_alert_loop(),
                 self._fno_status_loop(),
                 self._trap_scanner_loop(),
@@ -502,11 +504,26 @@ class WsBridge:
                 except Exception as exc:
                     logger.debug("WsBridge.heartbeat[%s]: %s", name, exc)
 
-    async def _trap_scanner_loop(self) -> None:
-        """Push trap scanner telemetry to all connected browsers every 2 seconds."""
+    async def _trap_state_loop(self) -> None:
+        """Forward trap scanner state snapshots to the UI immediately on every state change."""
         while self._running:
             try:
-                await asyncio.sleep(2.0)
+                snap = await asyncio.wait_for(self._trap_state_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                return
+            try:
+                if isinstance(snap, dict):
+                    await self.broadcast({"type": "trap_scanner_update", "books": [snap]})
+            except Exception as exc:
+                logger.debug("WsBridge._trap_state_loop: %s", exc)
+
+    async def _trap_scanner_loop(self) -> None:
+        """Fallback: push trap scanner full telemetry every 30 seconds (covers cold-start / missed events)."""
+        while self._running:
+            try:
+                await asyncio.sleep(30.0)
             except asyncio.CancelledError:
                 return
             mgr = self._trap_scanner_mgr

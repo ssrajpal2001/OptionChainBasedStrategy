@@ -198,6 +198,7 @@ class Topic:
     EXIT_AUDIT       = "exit_audit"    # per-tick exit-criteria validation stream (granular UI)
     POSITION_UPDATE  = "position_update"  # strategy book position snapshot (entry/exit/roll)
     TRAP_TICK        = "trap_tick"     # trap scanner per-tick telemetry (real-time LTP + zone status)
+    TRAP_STATE       = "trap_state"   # trap scanner state snapshot — published on every meaningful change
     FNO_STOCK_ALERT  = "fno_stock_alert"   # Stage-2 intraday stock monitor alert
     FNO_STOCK_STATUS = "fno_stock_status"  # live LTP + MTF/LTF state per stock (3s broadcast)
 
