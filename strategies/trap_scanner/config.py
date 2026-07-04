@@ -193,7 +193,7 @@ class ConfigMixin:
         # HTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 75m
         _htf_code = _def.get("htf_min_override")
         _htf_adm  = _adm.get("htf_minutes")
-        if _htf_adm:                                        # admin per-index always wins
+        if _htf_adm and int(_htf_adm) > 0:                 # admin per-index always wins
             self._htf_min = int(_htf_adm)
         elif _htf_code:                                     # hardcoded per-index (CrudeOil/BTC)
             self._htf_min = int(_htf_code)
@@ -204,7 +204,7 @@ class ConfigMixin:
         # BANKNIFTY: 30m (confirmed optimal, nse_cascade_backtest 18k-combo sweep 2026-07-01).
         _mtf_code = _def.get("mtf_min_override")
         _mtf_adm  = _adm.get("mtf_minutes")
-        if _mtf_adm:
+        if _mtf_adm and int(_mtf_adm) > 0:
             self._cascade_min = int(_mtf_adm)
         elif _mtf_code:
             self._cascade_min = int(_mtf_code)
@@ -213,7 +213,7 @@ class ConfigMixin:
         # LTF priority: per-index admin → hardcoded _INDEX_CFG override → global admin → 5m
         _ltf_code = _def.get("ltf_min_override")
         _ltf_adm  = _adm.get("ltf_minutes")
-        if _ltf_adm:
+        if _ltf_adm and int(_ltf_adm) > 0:
             self._ltf_min = int(_ltf_adm)
         elif _ltf_code:
             self._ltf_min = int(_ltf_code)
