@@ -960,8 +960,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                             await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
                         if (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position)) != _cascade_before:
                             _idx_state_changed = True
-                    if _idx_state_changed:
-                        await self._publish_state()
+                    await self._publish_state()
                 except Exception as exc:
                     self._log.error("_idx_tick_loop: tick error — continuing: %s", exc, exc_info=True)
         except asyncio.CancelledError:
