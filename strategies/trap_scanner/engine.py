@@ -989,6 +989,20 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             return
 
         # Not yet in an HTF zone — scan for entry
+        if not self._htf_fut_zones:
+            return
+        _now_dbg = _time_mod.monotonic()
+        if not hasattr(self, "_last_arm_dbg_t"):
+            self._last_arm_dbg_t = 0.0
+        if _now_dbg - self._last_arm_dbg_t >= 10.0:
+            self._last_arm_dbg_t = _now_dbg
+            _trapped = [(z.get("kind","?"), round(z.get("zone_low",0),1), round(z.get("zone_high",0),1),
+                         z.get("status","?")) for z in self._htf_fut_zones if z.get("status")=="TRAPPED"]
+            _inside  = [(k,zl,zh,st) for k,zl,zh,st in _trapped if zl <= spot <= zh]
+            self._log.info(
+                "zone_arm_dbg: spot=%.2f total_zones=%d trapped=%d inside_zone=%s",
+                spot, len(self._htf_fut_zones), len(_trapped), _inside or "NONE",
+            )
         for z in self._htf_fut_zones:
             if z.get("status") != "TRAPPED" or z.get("kind", "BEAR") != "BEAR":
                 continue
