@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import time as _time_mod
 from datetime import datetime, date, time, timedelta
 from typing import Any, Dict, List, Optional, Set
 
@@ -150,6 +151,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._entry_in_progress = False  # guard against concurrent entry tasks on same zone
         self._sweep_watch: Optional[Dict] = None   # liquidity sweep re-entry after SL
         self._sl_order_id: Optional[str] = None   # exchange-held stop order (DELTA only)
+
+        # Throttle timestamps for expensive per-tick cascade checks
+        self._last_mtf_check_t: float  = 0.0   # _time_mod.monotonic(); _check_mtf_zone throttled 1/sec
+        self._last_ob_check_t:  float  = 0.0   # _time_mod.monotonic(); _check_ob_gate throttled 1/sec
 
         # Futures-mode 3-tier cascade: HTF zone → MTF zone → 1m candle break → entry
         # Stage 1: spot enters HTF TRAPPED zone → record zone + its ref_ts
@@ -935,12 +940,17 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # Stage 1: HTF zone entry check
                     if self._htf_source == "futures" and not self._position:
                         await self._check_futures_zone_arm(fut_ltp)
-                    # Stage 2: MTF zone check (while inside HTF zone, not yet MTF-armed)
-                    if self._htf_source == "futures" and self._htf_zone_armed and not self._position:
+                    # Stage 2: MTF zone check — throttled to once/sec (pandas resample is expensive)
+                    _now_t = _time_mod.monotonic()
+                    if (self._htf_source == "futures" and self._htf_zone_armed and not self._position
+                            and _now_t - self._last_mtf_check_t >= 1.0):
+                        self._last_mtf_check_t = _now_t
                         await self._check_mtf_zone(fut_ltp)
-                    # Stage 2.5: OB gate (if enabled, wait for CHoCH alignment + price in OB)
+                    # Stage 2.5: OB gate — throttled to once/sec (active_order_blocks zigzag is expensive)
                     if (self._htf_source == "futures" and self._fut_armed_zone is not None
-                            and not self._ob_gate_armed and not self._position):
+                            and not self._ob_gate_armed and not self._position
+                            and _now_t - self._last_ob_check_t >= 1.0):
+                        self._last_ob_check_t = _now_t
                         await self._check_ob_gate(fut_ltp)
                     # Stage 3: 1m candle break entry check (after MTF confirmed + OB gate cleared)
                     _ob_clear = (not self._ob_gate_enabled) or self._ob_gate_armed
