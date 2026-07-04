@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from strategies.trap_scanner.scanner import scan_htf_spot
 
-CACHE_FILE    = os.path.join(ROOT, "data", "btc_1m_18m_cache.parquet")
+CACHE_FILE    = os.path.join(ROOT, "data", "btc_1m_cache.parquet")   # shared with btc_cascade_backtest
 BASE_OUT      = os.path.join(ROOT, "data", "btc_baseline_results.csv")
 OB_OUT        = os.path.join(ROOT, "data", "btc_ob_results.csv")
 CMP_OUT       = os.path.join(ROOT, "data", "btc_comparison.txt")
@@ -36,9 +36,65 @@ CAP_GRID  = [0, 500, 1000, 2000]          # 0 = no profit cap (hold until SL)
 ZZ_GRID     = [5, 9, 13, 21]
 OB_ATR_GRID = [0.5, 1.0, 1.5]
 
+# ── Fetch / load 1m BTC bars from Delta Exchange ──────────────────────────────
+import requests
+
+DELTA_BASE = "https://api.india.delta.exchange"
+SYMBOL     = "BTCUSD"
+DAYS_BACK  = 510   # ~17 months
+
+def _fetch_btc_1m() -> pd.DataFrame:
+    end_d   = date.today()
+    start_d = end_d - timedelta(days=DAYS_BACK + LOOKBACK + 2)
+    if os.path.exists(CACHE_FILE):
+        try:
+            cached = pd.read_parquet(CACHE_FILE)
+            c_min  = pd.to_datetime(cached["time"].min(), unit="s").date()
+            c_max  = pd.to_datetime(cached["time"].max(), unit="s").date()
+            if c_min <= start_d and c_max >= end_d - timedelta(days=1):
+                print(f"  Cache hit: {c_min} -> {c_max} ({len(cached):,} bars)", flush=True)
+                if cached["datetime"].dt.tz is None:
+                    cached["datetime"] = cached["datetime"].dt.tz_localize("UTC")
+                return cached
+            print(f"  Cache stale ({c_min}->{c_max}), re-fetching ...", flush=True)
+        except Exception as e:
+            print(f"  Cache read error ({e}), re-fetching ...", flush=True)
+    start_ts = int(datetime(start_d.year, start_d.month, start_d.day, 0, 0, 0, tzinfo=timezone.utc).timestamp())
+    end_ts   = int(datetime(end_d.year, end_d.month, end_d.day, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+    all_c: list = []
+    current_end = end_ts
+    page = 0
+    print(f"  Fetching {start_d} -> {end_d} from Delta ...", flush=True)
+    while current_end > start_ts:
+        r = requests.get(DELTA_BASE + "/v2/history/candles",
+                         params={"symbol": SYMBOL, "resolution": "1m",
+                                 "start": start_ts, "end": current_end}, timeout=30)
+        r.raise_for_status()
+        candles = r.json().get("result", [])
+        if not candles:
+            break
+        all_c.extend(candles)
+        oldest = min(c["time"] for c in candles)
+        if oldest <= start_ts:
+            break
+        current_end = oldest - 60
+        page += 1
+        if page % 20 == 0:
+            print(f"  ... {len(all_c):,} bars fetched", flush=True)
+        time.sleep(0.2)
+    df = pd.DataFrame(all_c)
+    df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df = df.drop_duplicates("time").sort_values("time").reset_index(drop=True)
+    df = df[(df["time"] >= start_ts) & (df["time"] <= end_ts)].reset_index(drop=True)
+    print(f"  Fetched {len(df):,} bars", flush=True)
+    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+    df.to_parquet(CACHE_FILE, index=False)
+    return df
+
+
 # ── Load cache ────────────────────────────────────────────────────────────────
 print("Loading 1m cache ...", flush=True)
-df_all = pd.read_parquet(CACHE_FILE)
+df_all = _fetch_btc_1m()
 if df_all["datetime"].dt.tz is None:
     df_all["datetime"] = df_all["datetime"].dt.tz_localize("UTC")
 df_all = df_all.sort_values("datetime").reset_index(drop=True)
