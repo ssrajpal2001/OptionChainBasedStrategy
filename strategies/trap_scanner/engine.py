@@ -323,7 +323,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 # close (e.g. June close when July contract is active) → false 5.9% gap.
                 if self._exchange == "DELTA":
                     # BTC/ETH: use Delta REST (Upstox has no crypto) — public endpoint, no auth
-                    C_fut, today_open_fut = await self._fetch_delta_prev_close_and_today_open(self._und)
+                    try:
+                        C_fut, today_open_fut = await asyncio.wait_for(
+                            self._fetch_delta_prev_close_and_today_open(self._und),
+                            timeout=90.0
+                        )
+                    except asyncio.TimeoutError:
+                        self._log.warning("_fetch_delta_prev_close_and_today_open timeout (90s) — using zeros")
+                        C_fut, today_open_fut = 0.0, 0.0
                     if C_fut <= 0:
                         self._log.warning(
                             "Delta %s: no prev-day close from REST; will retry in 120s", self._und
@@ -465,7 +472,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     # BTC/ETH: historical bars from Delta REST — no Upstox instrument key exists
                     self._fut_key = "BTCUSD" if self._und == "BTC" else "ETHUSD"
                     if not self._bars_fut:
-                        self._bars_fut = await self._fetch_delta_1m_bars(self._und, lookback_days=3)
+                        try:
+                            self._bars_fut = await asyncio.wait_for(
+                                self._fetch_delta_1m_bars(self._und, lookback_days=3),
+                                timeout=90.0
+                            )
+                        except asyncio.TimeoutError:
+                            self._log.warning("_fetch_delta_1m_bars timeout (90s) — proceeding with empty bars; will populate from live ticks")
+                            self._bars_fut = []
                 else:
                     # Use REGISTRY for the near-month futures key (correct for MCX CrudeOil)
                     try:
