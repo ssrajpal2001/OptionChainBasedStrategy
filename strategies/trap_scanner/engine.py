@@ -979,13 +979,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         if self._htf_zone_armed:
             z = self._htf_zone
             side = self._htf_zone_side
-            # Disarm entire cascade if price exits HTF zone boundary
-            if side == "CE" and spot < z.get("zone_low", 0):
-                self._log.info("HTF ZONE EXITED [CE]: spot=%.1f < zone_low=%.1f — disarming", spot, z["zone_low"])
+            # Disarm entire cascade if price exits HTF zone on the failure side.
+            # SELL (BEAR zone): price recovering above zone_high = setup failed (sellers trapped no more)
+            # BUY  (BULL zone): price dropping below zone_low  = setup failed (buyers trapped no more)
+            if side == "CE" and spot > z.get("zone_high", 0):
+                self._log.info("HTF ZONE EXITED [CE/SELL]: spot=%.1f > zone_high=%.1f — disarming", spot, z["zone_high"])
                 self._disarm_futures_leg()
             elif side == "PE" and spot < z.get("zone_low", 0):
-                self._log.info("HTF ZONE EXITED [PE]: spot=%.1f < zone_low=%.1f — disarming", spot, z["zone_low"])
-                self._disarm_futures_leg()
+                self._log.info("HTF ZONE EXITED [PE/BUY]: spot=%.1f < zone_low=%.1f — disarming", spot, z["zone_low"])
             return
 
         # Not yet in an HTF zone — scan for entry
