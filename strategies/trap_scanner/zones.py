@@ -20,7 +20,11 @@ def _bars_to_df(bars: List[dict]) -> pd.DataFrame:
     if not bars:
         return pd.DataFrame()
     df = pd.DataFrame(bars)
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_localize(None)
+    # Strip timezone offset (e.g. +05:30) before parsing — live bars from Delta WS include it
+    # but seeded bars from REST don't. pd.to_datetime with utc=True fails on old pandas builds.
+    if df["datetime"].dtype == object:
+        df["datetime"] = df["datetime"].str.replace(r'[+-]\d{2}:\d{2}$', '', regex=True)
+    df["datetime"] = pd.to_datetime(df["datetime"])
     return df
 
 
