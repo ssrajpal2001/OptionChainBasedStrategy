@@ -20,7 +20,7 @@ def _bars_to_df(bars: List[dict]) -> pd.DataFrame:
     if not bars:
         return pd.DataFrame()
     df = pd.DataFrame(bars)
-    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_localize(None)
     return df
 
 
