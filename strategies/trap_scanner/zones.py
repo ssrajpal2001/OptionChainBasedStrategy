@@ -604,6 +604,40 @@ class ZonesMixin:
                 mtf.get("sl", 0), str(mtf.get("closed_on", ""))[:16],
             )
 
+            # Stage 2.5: OB + CHoCH gate on OPTION bars.
+            # CE (bear-trap zone) → need CHoCH UP + price in bullish OB on option chart.
+            # PE (bull-trap zone) → need CHoCH DOWN + price in bearish OB on option chart.
+            if getattr(self, "_ob_gate_enabled", False):
+                min_bars = max(getattr(self, "_zigzag_len", 9) * 3 + 14, 30)
+                if len(today_bars) >= min_bars:
+                    try:
+                        zz = getattr(self, "_zigzag_len", 9)
+                        bull_obs, bear_obs = scanner.active_order_blocks(df, zigzag_len=zz)
+                        signals   = scanner.detect_choch_bos(df, zigzag_len=zz)
+                        choch_dir = scanner.last_choch_direction(signals)
+                        ob_clear  = False
+                        if opt_type == "CE" and choch_dir == "UP":
+                            ob_clear = bool(scanner.price_in_order_block(current_price, bull_obs))
+                        elif opt_type == "PE" and choch_dir == "DOWN":
+                            ob_clear = bool(scanner.price_in_order_block(current_price, bear_obs))
+                        if ob_clear:
+                            self._log.info(
+                                "_run_ltf_on [%s] uid=%s: OB gate CLEARED CHoCH=%s ltp=%.2f",
+                                leg_key, uid, choch_dir, current_price,
+                            )
+                        else:
+                            new_status = "waiting_ob_choch"
+                            if self._zone_ltf_status.get(uid) != new_status:
+                                self._zone_ltf_status[uid] = new_status
+                                self._log.info(
+                                    "_run_ltf_on [%s] uid=%s: OB gate WAITING "
+                                    "(CHoCH=%s ltp=%.2f)",
+                                    leg_key, uid, choch_dir, current_price,
+                                )
+                            continue
+                    except Exception as _ob_exc:
+                        self._log.debug("_run_ltf_on OB gate error: %s", _ob_exc)
+
             # Scale-in probe: enter 1 lot immediately on 15m zone_high touch.
             # The full position is built later via _maybe_scale_in on lower-TF confirmation.
             if self._scale_in_enabled and not self._position:

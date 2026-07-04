@@ -20,7 +20,8 @@ _INDEX_CFG: Dict[str, dict] = {
     "NIFTY":      {"step": 50,  "lot": 65,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 10.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
-                   "htf_min_override": 150, "ltf_min_override": 5},
+                   "htf_min_override": 150, "ltf_min_override": 5,
+                   "use_ob_gate": True, "zigzag_len": 9},
     # BANKNIFTY 4-tier cascade: HTF=180m → MTF=30m → LTF=3m → Exec=3m
     # Confirmed optimal from nse_cascade_backtest.py 18k-combo sweep (Apr-Jun 2026).
     # dte_min_filter DISABLED (0): BANKNIFTY trades the monthly expiry. A 10-day
@@ -31,24 +32,28 @@ _INDEX_CFG: Dict[str, dict] = {
                    "sl_buf": 30.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
                    "htf_min_override": 180, "mtf_min_override": 30, "ltf_min_override": 3,
-                   "gap_skip_dte": 10, "gap_thresh_default": 0.8, "dte_min_filter": 0},
+                   "gap_skip_dte": 10, "gap_thresh_default": 0.8, "dte_min_filter": 0,
+                   "use_ob_gate": True, "zigzag_len": 9},
     "FINNIFTY":   {"step": 50,  "lot": 40,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 2.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "SENSEX":     {"step": 100, "lot": 20,  "gap_near": 300, "gap_far": 600,
                    "sl_buf": 2.0, "cutoff": "15:20", "sq_off": "15:25",
-                   "window": None, "exchange": "BFO", "htf_source": "option"},
+                   "window": None, "exchange": "BFO", "htf_source": "option",
+                   "use_ob_gate": True, "zigzag_len": 9},
     "MIDCPNIFTY": {"step": 25,  "lot": 75,  "gap_near": 100, "gap_far": 200,
                    "sl_buf": 1.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option"},
     "CRUDEOIL":   {"step": 100, "lot": 100, "gap_near": 200, "gap_far": 500,
                    "sl_buf": 20.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": [[14, 30], [22, 45]], "exchange": "MCX",
-                   "htf_source": "futures", "htf_min_override": 30},
+                   "htf_source": "futures", "htf_min_override": 30,
+                   "use_ob_gate": True, "zigzag_len": 9},
     "GOLDM":      {"step": 100, "lot": 100, "gap_near": 500, "gap_far": 1000,
                    "sl_buf": 100.0, "cutoff": "22:45", "sq_off": "23:00",
                    "window": None, "exchange": "MCX",
-                   "htf_source": "futures", "htf_min_override": 30},
+                   "htf_source": "futures", "htf_min_override": 30,
+                   "use_ob_gate": True, "zigzag_len": 9},
     # BTC/ETH are 24/7 — no daily EOD squareoff and no entry cutoff.
     # sq_off=None → lifecycle loop skips EOD; cutoff=None → entries.py skips cutoff gate.
     # htf_min_override=120 (2h), ltf_min_override=5m — 90-day cascade backtest best:
@@ -62,7 +67,8 @@ _INDEX_CFG: Dict[str, dict] = {
     "ETH":        {"step": 100, "lot": 1,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 5.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures",
-                   "htf_min_override": 240, "ltf_min_override": 30},
+                   "htf_min_override": 240, "ltf_min_override": 30,
+                   "use_ob_gate": True, "zigzag_len": 9},
 }
 
 # Upstox REST instrument keys for spot / futures data
