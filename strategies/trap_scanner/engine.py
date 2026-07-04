@@ -983,8 +983,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             if side == "CE" and spot < z.get("zone_low", 0):
                 self._log.info("HTF ZONE EXITED [CE]: spot=%.1f < zone_low=%.1f — disarming", spot, z["zone_low"])
                 self._disarm_futures_leg()
-            elif side == "PE" and spot > z.get("zone_high", 0):
-                self._log.info("HTF ZONE EXITED [PE]: spot=%.1f > zone_high=%.1f — disarming", spot, z["zone_high"])
+            elif side == "PE" and spot < z.get("zone_low", 0):
+                self._log.info("HTF ZONE EXITED [PE]: spot=%.1f < zone_low=%.1f — disarming", spot, z["zone_low"])
                 self._disarm_futures_leg()
             return
 
