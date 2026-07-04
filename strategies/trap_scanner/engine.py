@@ -1039,7 +1039,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         if not self._bars_fut or len(self._bars_fut) < 3:
             return
 
-        from strategies.trap_scanner.scanner import scan_htf
+        from strategies.trap_scanner.scanner import scan_htf_spot
         import pandas as pd
 
         mtf_min = self._cascade_min or 3
@@ -1058,7 +1058,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             self._log.debug("_check_mtf_zone resample error: %s", exc)
             return
 
-        zones = scan_htf(mtf_df)
+        # scan_htf_spot returns (events_df, entries_list) with kind=BEAR/BULL on each entry
+        _, all_zones = scan_htf_spot(mtf_df)
         side = self._htf_zone_side
         htf_ref_ts = self._htf_zone_ref_ts
 
@@ -1071,7 +1072,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         htf_ts_pd = _to_ts(htf_ref_ts)
 
         kind_filter = "BEAR" if side == "CE" else "BULL"
-        for z in zones:
+        for z in all_zones:
             if z.get("status") != "TRAPPED":
                 continue
             if z.get("kind", "BEAR") != kind_filter:
@@ -1083,7 +1084,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     continue
             if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
                 self._log.info(
-                    "MTF ZONE CONFIRMED [%s]: zone=%.1f..%.1f ref_ts=%s spot=%.1f → arming 1m",
+                    "MTF ZONE CONFIRMED [%s]: zone=%.1f..%.1f ref_ts=%s spot=%.1f -> arming 1m",
                     side, z.get("zone_low", 0), z.get("zone_high", 0), z_ts, spot,
                 )
                 await self._arm_futures_leg(z, side)
