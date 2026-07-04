@@ -4973,8 +4973,26 @@ function amoTest() {
                         <template x-if="bk.htf_zone_data">
                           <span style="color:var(--t-bright)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+'] '+(bk.htf_zone_side==='CE'?'BEAR':'BULL')+' trap'"></span>
                         </template>
+                        <template x-if="bk.htf_zone_data&&bk.htf_zone_data.ref_ts">
+                          <span style="color:var(--t-muted)" x-text="' formed@'+bk.htf_zone_data.ref_ts.slice(11,16)"></span>
+                        </template>
                       </div>
-                      <div style="color:var(--t-yellow)">⟳ S2 — Scanning <span x-text="(bk.cascade_min||3)+'m'"></span> zones inside HTF zone…</div>
+                      <div style="color:var(--t-yellow)">⟳ S2 — Need <span x-text="(bk.cascade_min||3)+'m'"></span> <span x-text="bk.htf_zone_side==='CE'?'BEAR':'BULL'"></span> zone formed after <span x-text="bk.htf_zone_data?bk.htf_zone_data.ref_ts.slice(11,16):'?'"></span>, spot inside it</div>
+                      <!-- OB zones preview if OB gate is enabled -->
+                      <template x-if="bk.ob_gate_enabled">
+                        <div style="color:var(--t-dim);margin-top:2px">
+                          <span>OB gate ON · CHoCH: </span>
+                          <span :style="bk.choch_direction?(bk.choch_direction==='UP'?'color:var(--t-green)':'color:var(--t-red)'):'color:var(--t-dim)'" x-text="bk.choch_direction||'—'"></span>
+                          <span> · need </span>
+                          <span style="color:var(--t-bright)" x-text="bk.htf_zone_side==='CE'?'UP+bullOB':'DOWN+bearOB'"></span>
+                          <template x-if="bk.htf_zone_side==='CE'&&bk.ob_bull_zones&&bk.ob_bull_zones.length">
+                            <span style="color:var(--t-green)" x-text="' bull OBs: '+bk.ob_bull_zones.map(o=>o.zone_low+'–'+o.zone_high).join(', ')"></span>
+                          </template>
+                          <template x-if="bk.htf_zone_side==='PE'&&bk.ob_bear_zones&&bk.ob_bear_zones.length">
+                            <span style="color:var(--t-red)" x-text="' bear OBs: '+bk.ob_bear_zones.map(o=>o.zone_low+'–'+o.zone_high).join(', ')"></span>
+                          </template>
+                        </div>
+                      </template>
                       <div style="color:var(--t-dim)">  S3 — 1m candle break (pending)</div>
                     </div>
                   </template>
