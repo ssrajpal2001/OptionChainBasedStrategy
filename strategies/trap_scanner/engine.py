@@ -818,149 +818,152 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     continue
                 if str(tick.symbol).upper() != self._und:
                     continue
-                raw_ltp = float(tick.ltp)
-                # Sanity guard: BSE SENSEX WebSocket intermittently mis-decodes to ~80000
-                # (3-4% above real value). _spot_open is set during warm_start from a
-                # URL-encoded REST call and is a reliable anchor. Before warm_start
-                # completes (_initialized=False, _spot_open=0) we skip _spot_cache
-                # entirely so pre-init bad ticks can't contaminate the distance check.
-                if not self._initialized:
-                    continue
-                # Guard against broker mis-decode spikes (e.g. BSE 80025 vs real 73840).
-                # Use LAST GOOD TICK as rolling reference (not day-open) so legitimate
-                # intraday moves of any size are accepted; only sudden per-tick jumps
-                # are rejected. MCX crude/gold can gap 5%+ at session open so 8% cap.
-                _ref = self._spot_cache if self._spot_cache > 0 else self._spot_open
-                _guard = 0.08 if self._cfg.exchange.is_mcx(self._und) else 0.04
-                if _ref > 0 and abs(raw_ltp - _ref) / _ref > _guard:
-                    # If ALSO far from day-open (REST, reliable) -> hard-reject, no unstick.
-                    # Catches Upstox BSE SENSEX ~80000 garbage while real market is ~76700.
-                    if self._spot_open > 0 and abs(raw_ltp - self._spot_open) / self._spot_open > _guard:
+                try:
+                    raw_ltp = float(tick.ltp)
+                    # Sanity guard: BSE SENSEX WebSocket intermittently mis-decodes to ~80000
+                    # (3-4% above real value). _spot_open is set during warm_start from a
+                    # URL-encoded REST call and is a reliable anchor. Before warm_start
+                    # completes (_initialized=False, _spot_open=0) we skip _spot_cache
+                    # entirely so pre-init bad ticks can't contaminate the distance check.
+                    if not self._initialized:
+                        continue
+                    # Guard against broker mis-decode spikes (e.g. BSE 80025 vs real 73840).
+                    # Use LAST GOOD TICK as rolling reference (not day-open) so legitimate
+                    # intraday moves of any size are accepted; only sudden per-tick jumps
+                    # are rejected. MCX crude/gold can gap 5%+ at session open so 8% cap.
+                    _ref = self._spot_cache if self._spot_cache > 0 else self._spot_open
+                    _guard = 0.08 if self._cfg.exchange.is_mcx(self._und) else 0.04
+                    if _ref > 0 and abs(raw_ltp - _ref) / _ref > _guard:
+                        # If ALSO far from day-open (REST, reliable) -> hard-reject, no unstick.
+                        # Catches Upstox BSE SENSEX ~80000 garbage while real market is ~76700.
+                        if self._spot_open > 0 and abs(raw_ltp - self._spot_open) / self._spot_open > _guard:
+                            self._spot_bad_cnt += 1
+                            if self._spot_bad_cnt % 60 == 1:
+                                self._log.warning(
+                                    "SPOT mis-decode rejected: ltp=%.2f is %.1f%% from "
+                                    "day_open=%.2f (cnt=%d)",
+                                    raw_ltp,
+                                    abs(raw_ltp - self._spot_open) / self._spot_open * 100,
+                                    self._spot_open, self._spot_bad_cnt,
+                                )
+                            continue
+                        # Far from rolling ref but plausible vs day-open: genuine move.
+                        # Accept after 5 consecutive (not a one-off spike).
                         self._spot_bad_cnt += 1
-                        if self._spot_bad_cnt % 60 == 1:
+                        if self._spot_bad_cnt < 5:
                             self._log.warning(
-                                "SPOT mis-decode rejected: ltp=%.2f is %.1f%% from "
-                                "day_open=%.2f (cnt=%d)",
-                                raw_ltp,
-                                abs(raw_ltp - self._spot_open) / self._spot_open * 100,
-                                self._spot_open, self._spot_bad_cnt,
+                                "SPOT tick rejected: ltp=%.2f deviates >%.1f%% from last=%.2f "
+                                "(consecutive=%d)",
+                                raw_ltp, _guard * 100, _ref, self._spot_bad_cnt,
                             )
-                        continue
-                    # Far from rolling ref but plausible vs day-open: genuine move.
-                    # Accept after 5 consecutive (not a one-off spike).
-                    self._spot_bad_cnt += 1
-                    if self._spot_bad_cnt < 5:
-                        self._log.warning(
-                            "SPOT tick rejected: ltp=%.2f deviates >%.1f%% from last=%.2f "
-                            "(consecutive=%d)",
-                            raw_ltp, _guard * 100, _ref, self._spot_bad_cnt,
-                        )
-                        continue
-                    self._log.info(
-                        "SPOT filter unstick: accepting ltp=%.2f after %d consecutive rejects "
-                        "(old_ref=%.2f day_open=%.2f)",
-                        raw_ltp, self._spot_bad_cnt, _ref, self._spot_open,
-                    )
-                self._spot_bad_cnt = 0
-                self._spot_cache = raw_ltp
-                # Re-subscribe tracked option keys every 60s — survives feeder reconnect
-                now = datetime.now(IST)
-                if (now - _last_resub).total_seconds() >= 60:
-                    if self._exchange == "DELTA":
+                            continue
                         self._log.info(
-                            "heartbeat: %s=%.2f pos=%s [perp_side=%s]",
-                            self._fut_key, raw_ltp,
-                            self._position["side"] if self._position else "none",
-                            (self._position or {}).get("perp_side", "—"),
+                            "SPOT filter unstick: accepting ltp=%.2f after %d consecutive rejects "
+                            "(old_ref=%.2f day_open=%.2f)",
+                            raw_ltp, self._spot_bad_cnt, _ref, self._spot_open,
                         )
-                    else:
-                        ce1_ltp = self._ltp_cache.get("CE1", 0)
-                        pe1_ltp = self._ltp_cache.get("PE1", 0)
-                        self._log.info(
-                            "heartbeat: spot=%.2f CE1=%.1f PE1=%.1f pos=%s [keys: ce1=%s pe1=%s]",
-                            raw_ltp, ce1_ltp, pe1_ltp,
-                            self._position["side"] if self._position else "none",
-                            self._ce1_key, self._pe1_key,
-                        )
-                    _last_resub = now
-                    # DELTA perpetuals and futures mode: only re-subscribe fut + armed option key
-                    if self._exchange == "DELTA" or self._htf_source == "futures":
-                        armed_key = (self._ce1_key if self._fut_armed_side == "CE"
-                                     else self._pe1_key if self._fut_armed_side == "PE"
-                                     else None)
-                        keys = [k for k in [self._fut_key, armed_key] if k]
-                    else:
-                        keys = [k for k in [self._fut_key,
-                                            self._ce1_key, self._ce2_key,
-                                            self._pe1_key, self._pe2_key] if k]
-                    if keys:
-                        feeder = (self._mcx_feeder if self._mcx_feeder is not None
-                                  else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
-                        if feeder:
-                            try:
-                                # resubscribe_tokens always sends the WS subscribe command
-                                # even for already-subscribed keys — recovers from silent drops
-                                if hasattr(feeder, "resubscribe_tokens"):
-                                    await feeder.resubscribe_tokens(keys)
-                                elif hasattr(feeder, "subscribe_tokens"):
-                                    await feeder.subscribe_tokens(keys)
-                            except Exception:
-                                pass
-                # SPOT bars: legacy htf_source="spot" path
-                _idx_state_changed = False
-                if self._htf_source == "spot":
-                    closed = self._update_bucket("SPOT", tick.ltp, tick.timestamp)
-                    if closed:
-                        self._bars_spot.append(closed)
-                        if len(self._bars_spot) > 2000:
-                            del self._bars_spot[:-2000]
-                        self._on_candle_close("SPOT", tick.timestamp)
-                        _idx_state_changed = True
-                # FUT bars: futures-mode (CrudeOil/BTC/ETH) — underlying LTP arrives as INDEX_TICK
-                elif self._htf_source == "futures":
-                    fut_ltp = float(tick.ltp)
-                    self._ltp_cache["FUT"] = fut_ltp
-                    closed = self._update_bucket("FUT", tick.ltp, tick.timestamp)
-                    if closed:
-                        self._bars_fut.append(closed)
-                        if len(self._bars_fut) > 2000:
-                            del self._bars_fut[:-2000]
-                        self._on_candle_close("FUT", tick.timestamp)
-                        _idx_state_changed = True
-                    # Futures-mode: SL/T1/trail all checked against futures LTP.
-                    # Signal, SL level, and T1 level all in futures ₹ → consistent.
-                    # When triggered, _place_exit closes the 1-ITM option via exec_key.
-                    _pos_before_idx = self._position
-                    if self._position and self._position.get("leg") == "FUT":
-                        await self._check_tick_exit(fut_ltp, tick.timestamp)
-                    if _pos_before_idx and not self._position:
-                        _idx_state_changed = True
-                    # Futures cascade (MCX + DELTA/BTC — all htf_source=="futures"):
-                    _cascade_before = (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position))
-                    # Stage 1: HTF zone entry check
-                    if self._htf_source == "futures" and not self._position:
-                        await self._check_futures_zone_arm(fut_ltp)
-                    # Stage 2: MTF zone check — throttled to once/sec (pandas resample is expensive)
-                    _now_t = _time_mod.monotonic()
-                    if (self._htf_source == "futures" and self._htf_zone_armed and not self._position
-                            and _now_t - self._last_mtf_check_t >= 1.0):
-                        self._last_mtf_check_t = _now_t
-                        await self._check_mtf_zone(fut_ltp)
-                    # Stage 2.5: OB gate — throttled to once/sec (active_order_blocks zigzag is expensive)
-                    if (self._htf_source == "futures" and self._fut_armed_zone is not None
-                            and not self._ob_gate_armed and not self._position
-                            and _now_t - self._last_ob_check_t >= 1.0):
-                        self._last_ob_check_t = _now_t
-                        await self._check_ob_gate(fut_ltp)
-                    # Stage 3: 1m candle break entry check (after MTF confirmed + OB gate cleared)
-                    _ob_clear = (not self._ob_gate_enabled) or self._ob_gate_armed
-                    if (self._htf_source == "futures" and self._fut_armed_zone is not None
-                            and _ob_clear and self._fut_armed_candle_ready and not self._position):
-                        await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
-                    if (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position)) != _cascade_before:
-                        _idx_state_changed = True
-                if _idx_state_changed:
-                    await self._publish_state()
+                    self._spot_bad_cnt = 0
+                    self._spot_cache = raw_ltp
+                    # Re-subscribe tracked option keys every 60s ��� survives feeder reconnect
+                    now = datetime.now(IST)
+                    if (now - _last_resub).total_seconds() >= 60:
+                        if self._exchange == "DELTA":
+                            self._log.info(
+                                "heartbeat: %s=%.2f pos=%s [perp_side=%s]",
+                                self._fut_key, raw_ltp,
+                                self._position["side"] if self._position else "none",
+                                (self._position or {}).get("perp_side", "—"),
+                            )
+                        else:
+                            ce1_ltp = self._ltp_cache.get("CE1", 0)
+                            pe1_ltp = self._ltp_cache.get("PE1", 0)
+                            self._log.info(
+                                "heartbeat: spot=%.2f CE1=%.1f PE1=%.1f pos=%s [keys: ce1=%s pe1=%s]",
+                                raw_ltp, ce1_ltp, pe1_ltp,
+                                self._position["side"] if self._position else "none",
+                                self._ce1_key, self._pe1_key,
+                            )
+                        _last_resub = now
+                        # DELTA perpetuals and futures mode: only re-subscribe fut + armed option key
+                        if self._exchange == "DELTA" or self._htf_source == "futures":
+                            armed_key = (self._ce1_key if self._fut_armed_side == "CE"
+                                         else self._pe1_key if self._fut_armed_side == "PE"
+                                         else None)
+                            keys = [k for k in [self._fut_key, armed_key] if k]
+                        else:
+                            keys = [k for k in [self._fut_key,
+                                                self._ce1_key, self._ce2_key,
+                                                self._pe1_key, self._pe2_key] if k]
+                        if keys:
+                            feeder = (self._mcx_feeder if self._mcx_feeder is not None
+                                      else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
+                            if feeder:
+                                try:
+                                    # resubscribe_tokens always sends the WS subscribe command
+                                    # even for already-subscribed keys — recovers from silent drops
+                                    if hasattr(feeder, "resubscribe_tokens"):
+                                        await feeder.resubscribe_tokens(keys)
+                                    elif hasattr(feeder, "subscribe_tokens"):
+                                        await feeder.subscribe_tokens(keys)
+                                except Exception:
+                                    pass
+                    # SPOT bars: legacy htf_source="spot" path
+                    _idx_state_changed = False
+                    if self._htf_source == "spot":
+                        closed = self._update_bucket("SPOT", tick.ltp, tick.timestamp)
+                        if closed:
+                            self._bars_spot.append(closed)
+                            if len(self._bars_spot) > 2000:
+                                del self._bars_spot[:-2000]
+                            self._on_candle_close("SPOT", tick.timestamp)
+                            _idx_state_changed = True
+                    # FUT bars: futures-mode (CrudeOil/BTC/ETH) — underlying LTP arrives as INDEX_TICK
+                    elif self._htf_source == "futures":
+                        fut_ltp = float(tick.ltp)
+                        self._ltp_cache["FUT"] = fut_ltp
+                        closed = self._update_bucket("FUT", tick.ltp, tick.timestamp)
+                        if closed:
+                            self._bars_fut.append(closed)
+                            if len(self._bars_fut) > 2000:
+                                del self._bars_fut[:-2000]
+                            self._on_candle_close("FUT", tick.timestamp)
+                            _idx_state_changed = True
+                        # Futures-mode: SL/T1/trail all checked against futures LTP.
+                        # Signal, SL level, and T1 level all in futures ₹ → consistent.
+                        # When triggered, _place_exit closes the 1-ITM option via exec_key.
+                        _pos_before_idx = self._position
+                        if self._position and self._position.get("leg") == "FUT":
+                            await self._check_tick_exit(fut_ltp, tick.timestamp)
+                        if _pos_before_idx and not self._position:
+                            _idx_state_changed = True
+                        # Futures cascade (MCX + DELTA/BTC — all htf_source=="futures"):
+                        _cascade_before = (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position))
+                        # Stage 1: HTF zone entry check
+                        if self._htf_source == "futures" and not self._position:
+                            await self._check_futures_zone_arm(fut_ltp)
+                        # Stage 2: MTF zone check — throttled to once/sec (pandas resample is expensive)
+                        _now_t = _time_mod.monotonic()
+                        if (self._htf_source == "futures" and self._htf_zone_armed and not self._position
+                                and _now_t - self._last_mtf_check_t >= 1.0):
+                            self._last_mtf_check_t = _now_t
+                            await self._check_mtf_zone(fut_ltp)
+                        # Stage 2.5: OB gate — throttled to once/sec (active_order_blocks zigzag is expensive)
+                        if (self._htf_source == "futures" and self._fut_armed_zone is not None
+                                and not self._ob_gate_armed and not self._position
+                                and _now_t - self._last_ob_check_t >= 1.0):
+                            self._last_ob_check_t = _now_t
+                            await self._check_ob_gate(fut_ltp)
+                        # Stage 3: 1m candle break entry check (after MTF confirmed + OB gate cleared)
+                        _ob_clear = (not self._ob_gate_enabled) or self._ob_gate_armed
+                        if (self._htf_source == "futures" and self._fut_armed_zone is not None
+                                and _ob_clear and self._fut_armed_candle_ready and not self._position):
+                            await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
+                        if (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position)) != _cascade_before:
+                            _idx_state_changed = True
+                    if _idx_state_changed:
+                        await self._publish_state()
+                except Exception as exc:
+                    self._log.error("_idx_tick_loop: tick error — continuing: %s", exc, exc_info=True)
         except asyncio.CancelledError:
             pass
 
@@ -1085,7 +1088,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             if z.get("zone_low", 0) <= spot <= z.get("zone_high", 0):
                 self._log.info(
                     "MTF ZONE CONFIRMED [%s]: zone=%.1f..%.1f ref_ts=%s spot=%.1f -> arming 1m",
-                    side, z.get("zone_low", 0), z.get("zone_high", 0), z_ts, spot,
+                    side, z.get("zone_low", 0), z.get("zone_high", 0), z.get("ref_ts", ""), spot,
                 )
                 await self._arm_futures_leg(z, side)
                 return

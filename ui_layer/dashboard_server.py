@@ -2224,7 +2224,8 @@ class DashboardServer:
                     pos = getattr(strat, "_position", None) if strat else None
                     return pos is not None and getattr(pos, "status", "") == "open"
                 if sname == "iron_condor":
-                    strat = _find(getattr(_srv, "_iron_condors", []), underlying)
+                    _ics = getattr(_srv, "_iron_condors", []) or []
+                    strat = next((s for s in _ics if getattr(s, "_underlying", None) == underlying), None)
                     pos = getattr(strat, "_position", None) if strat else None
                     return pos is not None and getattr(pos, "status", "") == "open"
                 if sname == "trap_scanner":
