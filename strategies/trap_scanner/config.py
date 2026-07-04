@@ -57,7 +57,7 @@ _INDEX_CFG: Dict[str, dict] = {
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
                    "sl_buf": 50.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures",
-                   "htf_min_override": 120, "ltf_min_override": 5,
+                   "htf_min_override": 5, "mtf_min_override": 3, "ltf_min_override": 1,
                    "use_ob_gate": True, "zigzag_len": 9, "ob_atr_mult": 1.0},
     "ETH":        {"step": 100, "lot": 1,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 5.0, "cutoff": None, "sq_off": None,
