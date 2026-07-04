@@ -383,10 +383,19 @@ async def _run_live(
     # of monitored_indices (Upstox/Fyers). A client can deploy BTC even if --index BTC is absent.
     from data_layer.delta_chain_manager import DeltaChainManager
     _crypto_idx_base = list({u for u in cfg.monitored_indices if cfg.exchange.is_crypto(u)})
-    _crypto_all = list({u for u in (cfg.exchange.crypto_underlyings or ("BTC", "ETH"))})
-    # Always run for BTC + ETH so a deploy works even without --index BTC in pm2 args
+    # Only start DeltaChainManager for crypto underlyings with active (is_running=1) deployments
+    # or in monitored_indices — avoids subscribing ETH strikes when only BTC is deployed.
+    try:
+        import sqlite3 as _sq3
+        _conn = _sq3.connect(os.path.join("data", "clients.db"))
+        _rows = _conn.execute("SELECT underlying FROM strategy_deployments WHERE is_running=1").fetchall()
+        _conn.close()
+        _active_crypto = {r[0] for r in _rows if cfg.exchange.is_crypto(r[0])}
+    except Exception:
+        _active_crypto = set()
+    _crypto_all = list({u for u in (list(_active_crypto) + _crypto_idx_base) if cfg.exchange.is_crypto(u)} or {"BTC"})
     delta_chain = DeltaChainManager(bus, cfg, _crypto_all)
-    logger.info("Delta crypto feed always-on for %s (monitored: %s).", _crypto_all, _crypto_idx_base)
+    logger.info("Delta crypto feed for %s (active: %s, monitored: %s).", _crypto_all, _active_crypto, _crypto_idx_base)
     straddle_bridge = StraddleExecutionBridge(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
