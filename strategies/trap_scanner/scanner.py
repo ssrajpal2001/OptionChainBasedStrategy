@@ -498,36 +498,35 @@ def trade_summary(df_trades: pd.DataFrame) -> dict:
 def detect_order_blocks(
     df: pd.DataFrame,
     zigzag_len: int = 9,
-    atr_period: int = 14,
+    atr_period: int = 14,  # kept for API compat, no longer used
     max_obs: int = 5,
 ) -> tuple[list[dict], list[dict]]:
     """
     Detect bullish and bearish Order Blocks from OHLCV bars.
 
-    An Order Block is the origin candle of a structural break:
-    - Bearish OB: the highest-high candle in the swing BEFORE a CHoCH/BoS DOWN
-      (marks where institutions sold — price often returns here for re-entry)
-    - Bullish OB: the lowest-low candle in the swing BEFORE a CHoCH/BoS UP
+    Pure price action — OB zone = actual origin candle high/low, no ATR padding.
+
+    - Bearish OB: highest-high candle in the swing BEFORE a CHoCH/BoS DOWN
+      zone = [candle_low, candle_high]  (the full candle body+wick)
+    - Bullish OB: lowest-low candle in the swing BEFORE a CHoCH/BoS UP
+      zone = [candle_low, candle_high]
 
     Returns:
         (bullish_obs, bearish_obs) — each a list of dicts:
             zone_low, zone_high, ref_ts, broken, kind
     """
-    if df is None or len(df) < zigzag_len * 2 + atr_period:
+    if df is None or len(df) < zigzag_len * 2 + 1:
         return [], []
 
     df = df.reset_index(drop=True)
-    highs = df["high"].values
-    lows  = df["low"].values
+    highs  = df["high"].values
+    lows   = df["low"].values
     closes = df["close"].values
     n = len(df)
 
-    # ATR (Wilder) — used only to set OB zone height
-    atr = _compute_atr(df, atr_period)
-
-    # ZigZag swing detection (mirrors Pine: high[zigzagLen] >= ta.highest(high, zigzagLen))
-    swing_highs: list[int] = []  # bar indices of confirmed swing highs
-    swing_lows:  list[int] = []  # bar indices of confirmed swing lows
+    # ZigZag swing detection
+    swing_highs: list[int] = []
+    swing_lows:  list[int] = []
 
     for i in range(zigzag_len, n - zigzag_len):
         window_h = highs[i - zigzag_len: i + zigzag_len + 1]
@@ -537,12 +536,10 @@ def detect_order_blocks(
         if lows[i] <= min(window_l):
             swing_lows.append(i)
 
-    # Market structure: detect CHoCH/BoS and find the origin candle (OB)
     bearish_obs: list[dict] = []
     bullish_obs:  list[dict] = []
 
-    # Bearish structure break: close crosses below most recent swing low
-    # → bearish OB = highest-high candle in the swing BEFORE this break
+    # Bearish OB: close breaks below last swing low → origin candle = highest-high in prior swing
     processed_breaks: set[int] = set()
     for i in range(1, n):
         if not swing_lows:
@@ -551,18 +548,15 @@ def detect_order_blocks(
         if i <= last_low_idx or i in processed_breaks:
             continue
         if closes[i] < lows[last_low_idx]:  # CHoCH/BoS down
-            # Find highest-high candle between last swing high and breakdown bar
             seg_start = swing_highs[-1] if swing_highs else 0
             seg_end   = i
             if seg_end > seg_start:
                 seg_highs = highs[seg_start:seg_end]
-                ob_offset = int(seg_highs.argmax())
-                ob_idx    = seg_start + ob_offset
-                ob_atr    = atr[ob_idx] if ob_idx < len(atr) else atr[-1]
+                ob_idx    = seg_start + int(seg_highs.argmax())
                 bearish_obs.append({
                     "kind":      "BEAR",
                     "zone_high": float(highs[ob_idx]),
-                    "zone_low":  float(highs[ob_idx] - ob_atr),
+                    "zone_low":  float(lows[ob_idx]),
                     "ref_ts":    df["datetime"].iloc[ob_idx] if "datetime" in df.columns else ob_idx,
                     "broken":    False,
                 })
@@ -570,6 +564,7 @@ def detect_order_blocks(
                 if len(bearish_obs) >= max_obs:
                     bearish_obs.pop(0)
 
+    # Bullish OB: close breaks above last swing high → origin candle = lowest-low in prior swing
     processed_breaks.clear()
     for i in range(1, n):
         if not swing_highs:
@@ -582,13 +577,11 @@ def detect_order_blocks(
             seg_end   = i
             if seg_end > seg_start:
                 seg_lows  = lows[seg_start:seg_end]
-                ob_offset = int(seg_lows.argmin())
-                ob_idx    = seg_start + ob_offset
-                ob_atr    = atr[ob_idx] if ob_idx < len(atr) else atr[-1]
+                ob_idx    = seg_start + int(seg_lows.argmin())
                 bullish_obs.append({
                     "kind":      "BULL",
                     "zone_low":  float(lows[ob_idx]),
-                    "zone_high": float(lows[ob_idx] + ob_atr),
+                    "zone_high": float(highs[ob_idx]),
                     "ref_ts":    df["datetime"].iloc[ob_idx] if "datetime" in df.columns else ob_idx,
                     "broken":    False,
                 })

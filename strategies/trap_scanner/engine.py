@@ -1148,7 +1148,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             df = pd.DataFrame(self._bars_fut[-500:])
             df["datetime"] = pd.to_datetime(df["datetime"])
             bull_obs, bear_obs = scanner.active_order_blocks(
-                df, zigzag_len=self._zigzag_len, atr_period=14
+                df, zigzag_len=self._zigzag_len
             )
             signals = scanner.detect_choch_bos(df, zigzag_len=self._zigzag_len)
             choch_dir = scanner.last_choch_direction(signals)
