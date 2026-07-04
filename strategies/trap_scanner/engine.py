@@ -1028,7 +1028,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             self._last_arm_dbg_t = _now_dbg
             _all_near = sorted(
                 [(z.get("kind","?"), round(z.get("zone_low",0),1), round(z.get("zone_high",0),1),
-                  z.get("status","?")) for z in self._htf_fut_zones
+                  z.get("status","?"), round(z.get("sl",0),1)) for z in self._htf_fut_zones
                  if abs(spot - z.get("zone_trigger", z.get("zone_high",0))) < 200],
                 key=lambda t: abs(spot - (t[1]+t[2])/2)
             )[:5]
