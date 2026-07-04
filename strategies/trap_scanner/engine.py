@@ -1014,12 +1014,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                         "ZONE TRAPPED(tick) BEAR [%.1f–%.1f] sl=%.1f spot=%.1f",
                         _z.get("zone_low", 0), _z.get("zone_high", 0), _sl, spot,
                     )
-            elif _st == "TRAPPED":
-                _entry = _z.get("entry", 0.0)
-                if _kind == "BULL" and spot >= _entry:
-                    _z["status"] = "CLOSED"
-                elif _kind == "BEAR" and spot <= _entry:
-                    _z["status"] = "CLOSED"
+            # Note: TRAPPED→CLOSED is intentionally NOT done here.
+            # Closing on a tick fires at the exact moment spot enters the zone, so the
+            # arm check (which runs after) sees CLOSED and skips it. Let the 5m candle
+            # rescan handle CLOSED — it has the scanner's "not same bar" guard.
 
         _now_dbg = _time_mod.monotonic()
         if not hasattr(self, "_last_arm_dbg_t"):
