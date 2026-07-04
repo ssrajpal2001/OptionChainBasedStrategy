@@ -1169,6 +1169,12 @@ document.addEventListener('alpine:init', () => {
     _handle(msg) {
       if (msg.type === 'tick') {
         this.spots = { ...this.spots, [msg.sym]: { ltp: msg.ltp, atm: msg.atm, ts: msg.ts } };
+        // Pipe spot tick directly into trap scanner books — no 2s delay
+        for (let i = 0; i < this.trapScannerBooks.length; i++) {
+          if (this.trapScannerBooks[i].underlying === msg.sym) {
+            this.trapScannerBooks[i] = { ...this.trapScannerBooks[i], spot_ltp: msg.ltp };
+          }
+        }
       } else if (msg.type === 'snapshot') {
         this.snapshots = { ...this.snapshots, [msg.sym]: msg };
       } else if (msg.type === 'fill') {
@@ -1211,14 +1217,24 @@ document.addEventListener('alpine:init', () => {
         // Real-time per-tick LTP — write to flat top-level cache so Alpine
         // proxy definitely fires (nested splice/assign on trapScannerBooks is unreliable).
         const key = msg.bid + '_' + msg.und + '_' + msg.leg;
-        if (!window._ttDbg) { window._ttDbg = 0; }
-        window._ttDbg++;
-        if (window._ttDbg <= 5 || window._ttDbg % 50 === 0) {
-          console.log('[trap_tick #' + window._ttDbg + '] key=' + key + ' ltp=' + msg.ltp
-            + ' books=' + this.trapScannerBooks.length
-            + ' cacheKeys=' + Object.keys(this.trapLtpCache).length);
-        }
         this.trapLtpCache[key] = msg.ltp;
+        // Also update position opt_ltp in the book for real-time P&L (no 2s delay)
+        for (let i = 0; i < this.trapScannerBooks.length; i++) {
+          const bk = this.trapScannerBooks[i];
+          if (bk.binding_id === msg.bid && bk.underlying === msg.und && bk.position) {
+            const pos = bk.position;
+            // leg matches the position's exec_key via the cached leg name
+            const legMatches = (bk.htf_source === 'futures' && msg.leg === 'FUT')
+              || (pos.side === 'CE' && msg.leg === 'CE1')
+              || (pos.side === 'PE' && msg.leg === 'PE1');
+            if (legMatches) {
+              this.trapScannerBooks[i] = {
+                ...bk,
+                position: { ...pos, opt_ltp: msg.ltp }
+              };
+            }
+          }
+        }
       } else if (msg.type === 'fno_alert') {
         const a = msg.alert;
         if (!this.fnoAlerts.find(x => x.uid === a.uid)) {
