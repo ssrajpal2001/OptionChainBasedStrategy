@@ -4973,6 +4973,9 @@ function amoTest() {
                         <template x-if="bk.htf_zone_data">
                           <span style="color:var(--t-bright)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+'] '+(bk.htf_zone_side==='CE'?'BEAR':'BULL')+' trap'"></span>
                         </template>
+                        <template x-if="bk.spot_ltp&&bk.htf_zone_data">
+                          <span style="color:var(--t-cyan)" x-text="' spot='+bk.spot_ltp.toFixed(1)+' ('+(bk.spot_ltp-bk.htf_zone_data.zone_low).toFixed(0)+'pts from low)'"></span>
+                        </template>
                         <template x-if="bk.htf_zone_data&&bk.htf_zone_data.ref_ts">
                           <span style="color:var(--t-muted)" x-text="' formed@'+bk.htf_zone_data.ref_ts.slice(11,16)"></span>
                         </template>
