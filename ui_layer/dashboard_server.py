@@ -5216,7 +5216,7 @@ class DashboardServer:
             b = self._trap_scanner_manager.find(client_id, binding_id, underlying)
             if b is not None:
                 return b
-            logger.info("_find_trap_book miss: cid=%s bid=%s und=%s books=%s",
+            logger.debug("_find_trap_book miss: cid=%s bid=%s und=%s books=%s",
                         client_id, binding_id, underlying,
                         list(self._trap_scanner_manager._books.keys()))
         return None
