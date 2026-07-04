@@ -1069,15 +1069,17 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         If found, proceed to stage-3 (arm for 1m candle break).
         """
         if self._fut_armed_zone:
-            # Already MTF-confirmed — check MTF zone disarm
+            # MTF already armed — check if price invalidated it (failure direction only)
+            # CE/SELL: invalidated if price recovers above zone_high (bears failed)
+            # PE/BUY:  invalidated if price drops below zone_low (bulls failed)
             z = self._fut_armed_zone
             side = self._fut_armed_side
-            if side == "CE" and spot < z.get("zone_low", 0):
-                self._log.info("MTF ZONE EXITED [CE]: spot=%.1f — disarming", spot)
-                self._disarm_futures_leg()
-            elif side == "PE" and spot > z.get("zone_high", 0):
-                self._log.info("MTF ZONE EXITED [PE]: spot=%.1f — disarming", spot)
-                self._disarm_futures_leg()
+            if side == "CE" and spot > z.get("zone_high", 0):
+                self._log.info("MTF ZONE EXITED [CE/SELL]: spot=%.1f > zone_high=%.1f — reset MTF, keep HTF", spot, z["zone_high"])
+                self._reset_mtf_leg()
+            elif side == "PE" and spot < z.get("zone_low", 0):
+                self._log.info("MTF ZONE EXITED [PE/BUY]: spot=%.1f < zone_low=%.1f — reset MTF, keep HTF", spot, z["zone_low"])
+                self._reset_mtf_leg()
             return
 
         if not self._bars_fut or len(self._bars_fut) < 3:
@@ -1201,12 +1203,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             spot, opt_type, strike, option_key,
         )
 
-    def _disarm_futures_leg(self) -> None:
-        """Reset the entire 3-stage cascade including OB gate."""
-        self._htf_zone_armed = False
-        self._htf_zone = None
-        self._htf_zone_side = None
-        self._htf_zone_ref_ts = None
+    def _reset_mtf_leg(self) -> None:
+        """Reset MTF/LTF/OB state only — keeps HTF zone armed for next MTF opportunity."""
         self._fut_armed_zone = None
         self._fut_armed_side = None
         self._fut_armed_candle_ready = False
@@ -1216,6 +1214,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._active_bull_obs = []
         self._active_bear_obs = []
         self._choch_direction = None
+
+    def _disarm_futures_leg(self) -> None:
+        """Full cascade reset — clears HTF zone too. Use only on HTF exhaustion or EOD."""
+        self._reset_mtf_leg()
+        self._htf_zone_armed = False
+        self._htf_zone = None
+        self._htf_zone_side = None
+        self._htf_zone_ref_ts = None
 
     async def _check_ob_gate(self, spot: float) -> None:
         """Stage 2.5: after MTF confirmed, wait for CHoCH alignment + price inside an Order Block.
@@ -1277,7 +1283,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 spot, self._fut_armed_candle_high,
             )
             zone = self._fut_armed_zone
-            self._disarm_futures_leg()
+            self._reset_mtf_leg()   # keep HTF armed — more MTF zones may follow
             await self._on_entry_signal("CE1", "CE", zone, zone)
         elif side == "PE" and self._fut_armed_candle_low > 0 and spot < self._fut_armed_candle_low:
             self._log.info(
@@ -1285,7 +1291,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 spot, self._fut_armed_candle_low,
             )
             zone = self._fut_armed_zone
-            self._disarm_futures_leg()
+            self._reset_mtf_leg()   # keep HTF armed — more MTF zones may follow
             await self._on_entry_signal("PE1", "PE", zone, zone)
 
     # ── Trade gating ──────────────────────────────────────────────────────────
