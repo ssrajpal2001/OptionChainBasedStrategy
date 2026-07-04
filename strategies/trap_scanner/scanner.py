@@ -489,3 +489,246 @@ def trade_summary(df_trades: pd.DataFrame) -> dict:
         "avg_win":  round(df_trades[df_trades["P&L (Rs)"] > 0]["P&L (Rs)"].mean(), 2) if wins else 0,
         "avg_loss": round(df_trades[df_trades["P&L (Rs)"] <= 0]["P&L (Rs)"].mean(), 2) if losses else 0,
     }
+
+
+# ── Price Action Toolkit: Order Blocks + CHoCH/BoS ───────────────────────────
+# Pure OHLCV math — no external indicators beyond ATR (itself OHLCV-only).
+# Ported from UAlgo "Price Action Toolkit Lite" Pine Script.
+
+def detect_order_blocks(
+    df: pd.DataFrame,
+    zigzag_len: int = 9,
+    atr_period: int = 14,
+    max_obs: int = 5,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Detect bullish and bearish Order Blocks from OHLCV bars.
+
+    An Order Block is the origin candle of a structural break:
+    - Bearish OB: the highest-high candle in the swing BEFORE a CHoCH/BoS DOWN
+      (marks where institutions sold — price often returns here for re-entry)
+    - Bullish OB: the lowest-low candle in the swing BEFORE a CHoCH/BoS UP
+
+    Returns:
+        (bullish_obs, bearish_obs) — each a list of dicts:
+            zone_low, zone_high, ref_ts, broken, kind
+    """
+    if df is None or len(df) < zigzag_len * 2 + atr_period:
+        return [], []
+
+    df = df.reset_index(drop=True)
+    highs = df["high"].values
+    lows  = df["low"].values
+    closes = df["close"].values
+    n = len(df)
+
+    # ATR (Wilder) — used only to set OB zone height
+    atr = _compute_atr(df, atr_period)
+
+    # ZigZag swing detection (mirrors Pine: high[zigzagLen] >= ta.highest(high, zigzagLen))
+    swing_highs: list[int] = []  # bar indices of confirmed swing highs
+    swing_lows:  list[int] = []  # bar indices of confirmed swing lows
+
+    for i in range(zigzag_len, n - zigzag_len):
+        window_h = highs[i - zigzag_len: i + zigzag_len + 1]
+        window_l = lows [i - zigzag_len: i + zigzag_len + 1]
+        if highs[i] >= max(window_h):
+            swing_highs.append(i)
+        if lows[i] <= min(window_l):
+            swing_lows.append(i)
+
+    # Market structure: detect CHoCH/BoS and find the origin candle (OB)
+    bearish_obs: list[dict] = []
+    bullish_obs:  list[dict] = []
+
+    # Bearish structure break: close crosses below most recent swing low
+    # → bearish OB = highest-high candle in the swing BEFORE this break
+    processed_breaks: set[int] = set()
+    for i in range(1, n):
+        if not swing_lows:
+            break
+        last_low_idx = swing_lows[-1]
+        if i <= last_low_idx or i in processed_breaks:
+            continue
+        if closes[i] < lows[last_low_idx]:  # CHoCH/BoS down
+            # Find highest-high candle between last swing high and breakdown bar
+            seg_start = swing_highs[-1] if swing_highs else 0
+            seg_end   = i
+            if seg_end > seg_start:
+                seg_highs = highs[seg_start:seg_end]
+                ob_offset = int(seg_highs.argmax())
+                ob_idx    = seg_start + ob_offset
+                ob_atr    = atr[ob_idx] if ob_idx < len(atr) else atr[-1]
+                bearish_obs.append({
+                    "kind":      "BEAR",
+                    "zone_high": float(highs[ob_idx]),
+                    "zone_low":  float(highs[ob_idx] - ob_atr),
+                    "ref_ts":    df["datetime"].iloc[ob_idx] if "datetime" in df.columns else ob_idx,
+                    "broken":    False,
+                })
+                processed_breaks.add(i)
+                if len(bearish_obs) >= max_obs:
+                    bearish_obs.pop(0)
+
+    processed_breaks.clear()
+    for i in range(1, n):
+        if not swing_highs:
+            break
+        last_high_idx = swing_highs[-1]
+        if i <= last_high_idx or i in processed_breaks:
+            continue
+        if closes[i] > highs[last_high_idx]:  # CHoCH/BoS up
+            seg_start = swing_lows[-1] if swing_lows else 0
+            seg_end   = i
+            if seg_end > seg_start:
+                seg_lows  = lows[seg_start:seg_end]
+                ob_offset = int(seg_lows.argmin())
+                ob_idx    = seg_start + ob_offset
+                ob_atr    = atr[ob_idx] if ob_idx < len(atr) else atr[-1]
+                bullish_obs.append({
+                    "kind":      "BULL",
+                    "zone_low":  float(lows[ob_idx]),
+                    "zone_high": float(lows[ob_idx] + ob_atr),
+                    "ref_ts":    df["datetime"].iloc[ob_idx] if "datetime" in df.columns else ob_idx,
+                    "broken":    False,
+                })
+                processed_breaks.add(i)
+                if len(bullish_obs) >= max_obs:
+                    bullish_obs.pop(0)
+
+    # Mark OBs as broken if price has since closed through them
+    last_close = float(closes[-1])
+    for ob in bearish_obs:
+        if last_close > ob["zone_high"]:
+            ob["broken"] = True
+    for ob in bullish_obs:
+        if last_close < ob["zone_low"]:
+            ob["broken"] = True
+
+    return bullish_obs, bearish_obs
+
+
+def detect_choch_bos(
+    df: pd.DataFrame,
+    zigzag_len: int = 9,
+) -> list[dict]:
+    """
+    Detect Change of Character (CHoCH) and Break of Structure (BoS) signals.
+
+    - CHoCH: first structural break against the prior trend (reversal signal)
+    - BoS:   continuation of current trend (trend-following signal)
+
+    Returns list of dicts: {kind:'CHoCH'|'BoS', direction:'UP'|'DOWN',
+                             bar_idx, price, ts}
+    """
+    if df is None or len(df) < zigzag_len * 3:
+        return []
+
+    df = df.reset_index(drop=True)
+    highs  = df["high"].values
+    lows   = df["low"].values
+    closes = df["close"].values
+    n = len(df)
+
+    swing_highs: list[tuple[int, float]] = []
+    swing_lows:  list[tuple[int, float]] = []
+    for i in range(zigzag_len, n - zigzag_len):
+        window_h = highs[i - zigzag_len: i + zigzag_len + 1]
+        window_l = lows [i - zigzag_len: i + zigzag_len + 1]
+        if highs[i] >= max(window_h):
+            swing_highs.append((i, float(highs[i])))
+        if lows[i] <= min(window_l):
+            swing_lows.append((i, float(lows[i])))
+
+    signals: list[dict] = []
+    last_state: Optional[str] = None   # 'up' or 'down'
+    draw_up   = False
+    draw_down = False
+
+    # Mirror Pine: on close below last swing low → CHoCH (if prev state was 'up') else BoS
+    processed: set[int] = set()
+    for i in range(1, n):
+        if swing_lows and not draw_down:
+            last_low_idx, last_low_val = swing_lows[-1]
+            if closes[i] < last_low_val and i not in processed:
+                kind = "CHoCH" if (last_state is None or last_state == "up") else "BoS"
+                ts   = df["datetime"].iloc[i] if "datetime" in df.columns else i
+                signals.append({"kind": kind, "direction": "DOWN",
+                                 "bar_idx": i, "price": last_low_val, "ts": ts})
+                draw_down  = True
+                last_state = "down"
+                processed.add(i)
+
+        if swing_highs and not draw_up:
+            last_high_idx, last_high_val = swing_highs[-1]
+            if closes[i] > last_high_val and i not in processed:
+                kind = "CHoCH" if (last_state is None or last_state == "down") else "BoS"
+                ts   = df["datetime"].iloc[i] if "datetime" in df.columns else i
+                signals.append({"kind": kind, "direction": "UP",
+                                 "bar_idx": i, "price": last_high_val, "ts": ts})
+                draw_up    = True
+                last_state = "up"
+                processed.add(i)
+
+        # Reset draw flags when new swing forms (mirrors Pine's drawUp/drawDown reset)
+        if swing_highs and i >= swing_highs[-1][0] + zigzag_len:
+            draw_up = False
+        if swing_lows and i >= swing_lows[-1][0] + zigzag_len:
+            draw_down = False
+
+    return signals
+
+
+def _compute_atr(df: pd.DataFrame, period: int = 14) -> list[float]:
+    """Wilder ATR — pure OHLCV, no external libraries required."""
+    highs  = df["high"].values
+    lows   = df["low"].values
+    closes = df["close"].values
+    n = len(df)
+    trs = []
+    for i in range(n):
+        if i == 0:
+            trs.append(float(highs[i] - lows[i]))
+        else:
+            trs.append(max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i]  - closes[i - 1]),
+            ))
+    atr = [0.0] * n
+    if n >= period:
+        atr[period - 1] = sum(trs[:period]) / period
+        for i in range(period, n):
+            atr[i] = (atr[i - 1] * (period - 1) + trs[i]) / period
+    return atr
+
+
+def active_order_blocks(
+    df: pd.DataFrame,
+    zigzag_len: int = 9,
+    atr_period: int = 14,
+    max_obs: int = 3,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Return only unbroken (active) Order Blocks from detect_order_blocks.
+    Convenience wrapper for use in the cascade entry gate.
+    """
+    bull, bear = detect_order_blocks(df, zigzag_len, atr_period, max_obs)
+    return [o for o in bull if not o["broken"]], [o for o in bear if not o["broken"]]
+
+
+def price_in_order_block(price: float, obs: list[dict]) -> Optional[dict]:
+    """Return the first active OB that contains `price`, or None."""
+    for ob in obs:
+        if ob["zone_low"] <= price <= ob["zone_high"]:
+            return ob
+    return None
+
+
+def last_choch_direction(signals: list[dict]) -> Optional[str]:
+    """
+    Return direction of the most recent CHoCH signal ('UP' or 'DOWN'), or None.
+    Used to gate entries: only take trades aligned with last structural reversal.
+    """
+    chochs = [s for s in signals if s["kind"] == "CHoCH"]
+    return chochs[-1]["direction"] if chochs else None

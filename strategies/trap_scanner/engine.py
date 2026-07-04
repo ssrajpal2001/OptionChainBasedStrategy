@@ -165,6 +165,12 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._fut_armed_candle_low:  float   = 0.0
         self._fut_armed_candle_ready: bool   = False
 
+        # Order Block + CHoCH gate state (Stage 2.5 — between MTF confirm and 1m candle arm)
+        self._ob_gate_armed: bool         = False
+        self._active_bull_obs: List[dict] = []
+        self._active_bear_obs: List[dict] = []
+        self._choch_direction: Optional[str] = None
+
         self._broker: Optional[Any] = None
         self._rebalancer: Optional[Any] = None   # set via set_rebalancer()
         self._mcx_feeder: Optional[Any] = None   # dedicated Upstox2 feeder for MCX
@@ -910,17 +916,23 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     if _pos_before_idx and not self._position:
                         _idx_state_changed = True
                     # Futures cascade (MCX + DELTA/BTC — all htf_source=="futures"):
-                    _cascade_before = (self._htf_zone_armed, self._fut_armed_zone, bool(self._position))
+                    _cascade_before = (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position))
                     # Stage 1: HTF zone entry check
                     if self._htf_source == "futures" and not self._position:
                         await self._check_futures_zone_arm(fut_ltp)
                     # Stage 2: MTF zone check (while inside HTF zone, not yet MTF-armed)
                     if self._htf_source == "futures" and self._htf_zone_armed and not self._position:
                         await self._check_mtf_zone(fut_ltp)
-                    # Stage 3: 1m candle break entry check (after MTF confirmed)
-                    if self._htf_source == "futures" and self._fut_armed_zone and self._fut_armed_candle_ready and not self._position:
+                    # Stage 2.5: OB gate (if enabled, wait for CHoCH alignment + price in OB)
+                    if (self._htf_source == "futures" and self._fut_armed_zone is not None
+                            and not self._ob_gate_armed and not self._position):
+                        await self._check_ob_gate(fut_ltp)
+                    # Stage 3: 1m candle break entry check (after MTF confirmed + OB gate cleared)
+                    _ob_clear = (not self._ob_gate_enabled) or self._ob_gate_armed
+                    if (self._htf_source == "futures" and self._fut_armed_zone is not None
+                            and _ob_clear and self._fut_armed_candle_ready and not self._position):
                         await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
-                    if (self._htf_zone_armed, self._fut_armed_zone, bool(self._position)) != _cascade_before:
+                    if (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position)) != _cascade_before:
                         _idx_state_changed = True
                 if _idx_state_changed:
                     await self._publish_state()
@@ -1105,7 +1117,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         )
 
     def _disarm_futures_leg(self) -> None:
-        """Reset the entire 3-stage cascade."""
+        """Reset the entire 3-stage cascade including OB gate."""
         self._htf_zone_armed = False
         self._htf_zone = None
         self._htf_zone_side = None
@@ -1115,6 +1127,61 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._fut_armed_candle_ready = False
         self._fut_armed_candle_high = 0.0
         self._fut_armed_candle_low = 0.0
+        self._ob_gate_armed = False
+        self._active_bull_obs = []
+        self._active_bear_obs = []
+        self._choch_direction = None
+
+    async def _check_ob_gate(self, spot: float) -> None:
+        """Stage 2.5: after MTF confirmed, wait for CHoCH alignment + price inside an Order Block.
+        Sets _ob_gate_armed when conditions met. Called per-tick while MTF armed and OB gate not yet clear.
+        If gate already armed or gate is disabled, returns immediately.
+        """
+        if self._ob_gate_armed or not self._ob_gate_enabled:
+            return
+
+        if len(self._bars_fut) < max(self._zigzag_len * 3 + 14, 30):
+            return
+
+        try:
+            df = pd.DataFrame(self._bars_fut[-500:])
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            bull_obs, bear_obs = scanner.active_order_blocks(
+                df, zigzag_len=self._zigzag_len, atr_period=14
+            )
+            signals = scanner.detect_choch_bos(df, zigzag_len=self._zigzag_len)
+            choch_dir = scanner.last_choch_direction(signals)
+        except Exception as exc:
+            self._log.debug("_check_ob_gate: OB computation error: %s", exc)
+            return
+
+        self._active_bull_obs = bull_obs
+        self._active_bear_obs = bear_obs
+        self._choch_direction = choch_dir
+
+        side = self._fut_armed_side
+        if side == "CE":
+            # BEAR trap → expect reversal UP → need CHoCH UP + price in bullish OB
+            if choch_dir != "UP":
+                return
+            ob = scanner.price_in_order_block(spot, bull_obs)
+            if ob:
+                self._ob_gate_armed = True
+                self._log.info(
+                    "OB GATE ARMED [CE]: spot=%.1f in bullish OB [%.1f..%.1f] CHoCH=UP",
+                    spot, ob["zone_low"], ob["zone_high"],
+                )
+        elif side == "PE":
+            # BULL trap → expect reversal DOWN → need CHoCH DOWN + price in bearish OB
+            if choch_dir != "DOWN":
+                return
+            ob = scanner.price_in_order_block(spot, bear_obs)
+            if ob:
+                self._ob_gate_armed = True
+                self._log.info(
+                    "OB GATE ARMED [PE]: spot=%.1f in bearish OB [%.1f..%.1f] CHoCH=DOWN",
+                    spot, ob["zone_low"], ob["zone_high"],
+                )
 
     async def _check_futures_arm_entry(self, spot: float, ts) -> None:
         """After the first 1m candle close post-arm: fire entry if next tick breaks H/L."""
@@ -1559,8 +1626,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             "cascade_min":    self._cascade_min,
             "ltf_min":        self._ltf_min,
             # Cascade pipeline state (futures-mode: BTC/CrudeOil)
+            # Stages: 0=Scanning, 1=HTF Armed, 2=MTF Confirmed, 2.5=OB Gate Pending, 3=Entry Pending
             "cascade_stage":  (
                 3 if self._fut_armed_candle_ready
+                else 25 if (self._fut_armed_zone is not None and self._ob_gate_enabled and not self._ob_gate_armed)
                 else 2 if self._fut_armed_zone is not None
                 else 1 if self._htf_zone_armed
                 else 0
@@ -1583,6 +1652,13 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             "ltf_candle_ready":     self._fut_armed_candle_ready,
             "ltf_candle_high":      round(self._fut_armed_candle_high, 2) if self._fut_armed_candle_high else None,
             "ltf_candle_low":       round(self._fut_armed_candle_low,  2) if self._fut_armed_candle_low  else None,
+            "ob_gate_enabled":      self._ob_gate_enabled,
+            "ob_gate_armed":        self._ob_gate_armed,
+            "choch_direction":      self._choch_direction,
+            "ob_bull_zones":        [{"zone_low": round(o["zone_low"], 2), "zone_high": round(o["zone_high"], 2)}
+                                     for o in (self._active_bull_obs or [])],
+            "ob_bear_zones":        [{"zone_low": round(o["zone_low"], 2), "zone_high": round(o["zone_high"], 2)}
+                                     for o in (self._active_bear_obs or [])],
             "bars_spot":      len(self._bars_spot),
             "bars_ce1":       len(self._bars_ce1),
             "bars_pe1":       len(self._bars_pe1),

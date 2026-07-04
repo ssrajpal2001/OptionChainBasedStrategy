@@ -4936,8 +4936,8 @@ function amoTest() {
                   <div class="font-mono text-xs font-bold mb-2 flex items-center gap-2" style="color:var(--t-yellow)">
                     <span>CASCADE PIPELINE</span>
                     <span class="rounded px-1"
-                          :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
-                          x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
+                          :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===25?'background:#9c27b0;color:#fff;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
+                          x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===25?'◈ OB GATE':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
                   </div>
                   <!-- Stage 0: scanning — show nearest zones -->
                   <template x-if="(bk.cascade_stage||0)===0">
@@ -4978,7 +4978,7 @@ function amoTest() {
                       <div style="color:var(--t-dim)">  S3 — 1m candle break (pending)</div>
                     </div>
                   </template>
-                  <!-- Stage 2: MTF confirmed, waiting for 1m candle -->
+                  <!-- Stage 2: MTF confirmed, OB gate enabled → show OB zones; no gate → show candle wait -->
                   <template x-if="(bk.cascade_stage||0)===2">
                     <div class="text-xs font-mono" style="line-height:1.8">
                       <div><span style="color:var(--t-green);font-weight:700">✓ S1 — HTF ZONE</span>
@@ -4992,6 +4992,40 @@ function amoTest() {
                         </template>
                       </div>
                       <div style="color:var(--t-yellow)">⟳ S3 — Waiting for 1m candle close to arm entry…</div>
+                    </div>
+                  </template>
+                  <!-- Stage 25: OB gate pending — show OB zones + CHoCH status -->
+                  <template x-if="(bk.cascade_stage||0)===25">
+                    <div class="text-xs font-mono" style="line-height:1.8">
+                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
+                        <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
+                        <span style="color:var(--t-cyan);font-weight:700"> · ✓ S2 MTF</span>
+                        <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
+                      </div>
+                      <div style="background:rgba(156,39,176,0.12);border:1px solid #9c27b0;border-radius:4px;padding:4px 8px;margin-top:4px">
+                        <div style="color:#ce93d8;font-weight:700">◈ OB GATE — waiting for price to enter Order Block</div>
+                        <div style="margin-top:2px">
+                          <span style="color:var(--t-muted)">CHoCH: </span>
+                          <span :style="bk.choch_direction?(bk.choch_direction==='UP'?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'):'color:var(--t-dim)'"
+                                x-text="bk.choch_direction||'—'"></span>
+                          <span style="color:var(--t-dim)"> · Need: </span>
+                          <span style="color:var(--t-bright)" x-text="bk.htf_zone_side==='CE'?'UP (bullish OB)':'DOWN (bearish OB)'"></span>
+                        </div>
+                        <template x-if="bk.htf_zone_side==='CE'&&bk.ob_bull_zones&&bk.ob_bull_zones.length">
+                          <div style="margin-top:3px;color:var(--t-green)">Bullish OBs:
+                            <template x-for="ob in bk.ob_bull_zones" :key="ob.zone_low">
+                              <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
+                            </template>
+                          </div>
+                        </template>
+                        <template x-if="bk.htf_zone_side==='PE'&&bk.ob_bear_zones&&bk.ob_bear_zones.length">
+                          <div style="margin-top:3px;color:var(--t-red)">Bearish OBs:
+                            <template x-for="ob in bk.ob_bear_zones" :key="ob.zone_low">
+                              <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
                     </div>
                   </template>
                   <!-- Stage 3: LTF candle armed — entry pending on break -->
@@ -7653,8 +7687,8 @@ function amoTest() {
                           <div class="font-mono text-xs font-bold mb-2 flex items-center gap-2" style="color:var(--t-yellow)">
                             <span>CASCADE PIPELINE</span>
                             <span class="rounded px-1"
-                                  :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
-                                  x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
+                                  :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===25?'background:#9c27b0;color:#fff;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
+                                  x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===25?'◈ OB GATE':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
                           </div>
                           <!-- Stage 0: scanning -->
                           <template x-if="(bk.cascade_stage||0)===0">
@@ -7709,6 +7743,40 @@ function amoTest() {
                                 </template>
                               </div>
                               <div style="color:var(--t-yellow)">⟳ S3 — Waiting for 1m candle close to arm entry…</div>
+                            </div>
+                          </template>
+                          <!-- Stage 25: OB gate pending — show OB zones + CHoCH status -->
+                          <template x-if="(bk.cascade_stage||0)===25">
+                            <div class="text-xs font-mono" style="line-height:1.8">
+                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
+                                <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
+                                <span style="color:var(--t-cyan);font-weight:700"> · ✓ S2 MTF</span>
+                                <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
+                              </div>
+                              <div style="background:rgba(156,39,176,0.12);border:1px solid #9c27b0;border-radius:4px;padding:4px 8px;margin-top:4px">
+                                <div style="color:#ce93d8;font-weight:700">◈ OB GATE — waiting for price to enter Order Block</div>
+                                <div style="margin-top:2px">
+                                  <span style="color:var(--t-muted)">CHoCH: </span>
+                                  <span :style="bk.choch_direction?(bk.choch_direction==='UP'?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'):'color:var(--t-dim)'"
+                                        x-text="bk.choch_direction||'—'"></span>
+                                  <span style="color:var(--t-dim)"> · Need: </span>
+                                  <span style="color:var(--t-bright)" x-text="bk.htf_zone_side==='CE'?'UP (bullish OB)':'DOWN (bearish OB)'"></span>
+                                </div>
+                                <template x-if="bk.htf_zone_side==='CE'&&bk.ob_bull_zones&&bk.ob_bull_zones.length">
+                                  <div style="margin-top:3px;color:var(--t-green)">Bullish OBs:
+                                    <template x-for="ob in bk.ob_bull_zones" :key="ob.zone_low">
+                                      <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
+                                    </template>
+                                  </div>
+                                </template>
+                                <template x-if="bk.htf_zone_side==='PE'&&bk.ob_bear_zones&&bk.ob_bear_zones.length">
+                                  <div style="margin-top:3px;color:var(--t-red)">Bearish OBs:
+                                    <template x-for="ob in bk.ob_bear_zones" :key="ob.zone_low">
+                                      <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
+                                    </template>
+                                  </div>
+                                </template>
+                              </div>
                             </div>
                           </template>
                           <!-- Stage 3: LTF candle armed — entry pending -->

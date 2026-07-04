@@ -57,7 +57,8 @@ _INDEX_CFG: Dict[str, dict] = {
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
                    "sl_buf": 50.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures",
-                   "htf_min_override": 120, "ltf_min_override": 5},
+                   "htf_min_override": 120, "ltf_min_override": 5,
+                   "use_ob_gate": True, "zigzag_len": 9, "ob_atr_mult": 1.0},
     "ETH":        {"step": 100, "lot": 1,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 5.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures",
@@ -229,3 +230,9 @@ class ConfigMixin:
         # for the _run_ltf_on price gate. Prevents missing entries when LTP briefly exceeds
         # zone_high by a small amount before the scan runs. Default 5 pts (option premium units).
         self._zone_entry_buf = float(_adm.get("zone_entry_buffer", ts_admin_cfg.get("zone_entry_buffer", 5.0)))
+        # Order Block + CHoCH gate: confirm price is in an aligned OB + last CHoCH matches side
+        # before arming the 1m candle break (Stage 3 of futures cascade).
+        # use_ob_gate: per-index hardcoded default; admin can override per-binding.
+        self._ob_gate_enabled = bool(_adm.get("use_ob_gate", _def.get("use_ob_gate", False)))
+        self._zigzag_len      = int(_adm.get("zigzag_len",  _def.get("zigzag_len",  9)))
+        self._ob_atr_mult     = float(_adm.get("ob_atr_mult", _def.get("ob_atr_mult", 1.0)))
