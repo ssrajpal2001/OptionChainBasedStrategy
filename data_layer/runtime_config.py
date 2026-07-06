@@ -33,8 +33,8 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "strategy_c
 # ── Per-index sell_straddle defaults ─────────────────────────────────────────
 _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "entry_start":           "09:20",
-    "entry_end":             "15:15",
-    "squareoff_time":        "15:15",
+    "entry_end":             "15:20",
+    "squareoff_time":        "15:20",
     "entry_workflow_mode":   "hybrid",       # hybrid | beginning_only | reentry_only
     # Pre-entry LTP filter: BOTH CE and PE must individually be >= ltp_target.
     # 0 = disabled. sell_v3 default is 50.0; set to 0 until admin configures per index.
@@ -97,7 +97,7 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
 _IC_BASE_DEFAULT: Dict[str, Any] = {
     "enabled":                  True,
     "start_time":               "09:16",
-    "squareoff_time":           "15:15",
+    "squareoff_time":           "15:20",
     "entry_day":                "daily",     # daily | monday | monday,thursday
     "product_type":             "MIS",
     "lot_size":                 65,
@@ -153,7 +153,7 @@ _DEFAULTS: Dict[str, Any] = {
     "rms": {
         "max_drawdown_pct":       5.0,
         "order_throttle_per_sec": 5,
-        "squareoff_time":         "15:15",
+        "squareoff_time":         "15:20",
         "distance_filter_pct":    5.0,
     },
     "indicators": {
@@ -167,7 +167,7 @@ _DEFAULTS: Dict[str, Any] = {
     },
     # Legacy flat section — use indices[idx][iron_condor] for per-index config
     "iron_condor": {
-        "enabled": True, "start_time": "09:16", "squareoff_time": "15:15",
+        "enabled": True, "start_time": "09:16", "squareoff_time": "15:20",
         "entry_day": "daily", "product_type": "MIS", "lot_size": 65, "strike_step": 50,
         "max_adjustments_per_side": 3, "roll_step_pts": 5,
         "profit_target_inr": 5000.0, "stoploss_inr": 2000.0,
@@ -175,8 +175,8 @@ _DEFAULTS: Dict[str, Any] = {
     },
     "sell_straddle": {
         "entry_start":              "09:20",
-        "entry_end":                "15:15",
-        "squareoff_time":           "15:15",
+        "entry_end":                "15:20",
+        "squareoff_time":           "15:20",
         # Per-TRADE exit thresholds (% of credit collected on this trade)
         "profit_pct":               30.0,   # exit this trade when it reaches 30% of its credit
         "sl_pct":                   200.0,  # hard SL: exit when loss = 2× credit

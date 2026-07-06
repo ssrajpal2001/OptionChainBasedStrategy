@@ -16,12 +16,13 @@ Key = Tuple[int, str]
 
 
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
-                       spot, step, offset, ltp_target, rule_pass, max_itm_steps=None):
+                       spot, step, offset, ltp_target, rule_pass, max_itm_steps=None,
+                       theta_target: float = 0.0):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
-    `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target,
-    with premium STRICTLY <= the kept leg's premium (never roll into a leg richer than the leg we
-    keep), and passing rule_pass(ce_strike, pe_strike). Among the eligible (<= kept_ltp) strikes it
-    picks the one CLOSEST to kept_ltp (most balanced from below).
+    `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target
+    and >= theta_target, with premium STRICTLY <= the kept leg's premium (never roll into a leg
+    richer than the leg we keep), and passing rule_pass(ce_strike, pe_strike). Among the eligible
+    (<= kept_ltp) strikes it picks the one CLOSEST to kept_ltp (most balanced from below).
     `max_itm_steps` (optional): cap how deep ITM the re-sold leg may be (in strike steps) so the
     roll stays near ATM (a real straddle) instead of selling a deep-ITM strike.
     Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
@@ -38,7 +39,7 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
             if itm_pts > max_itm_steps * step:
                 continue
         ltp = float(v.get("ltp", 0.0) or 0.0)
-        if ltp < ltp_target:
+        if not leg_passes_dual_floor(roll_side, strike, ltp, spot, ltp_target, theta_target):
             continue
         if kept_ltp and ltp > float(kept_ltp):
             continue   # strict: partner must NOT be richer than the kept (losing) leg
@@ -67,6 +68,27 @@ def leg_entry_value(side: str, strike: float, ltp: float, spot: float, basis: st
     if str(basis).lower() == "theta":
         return max(0.0, strip_intrinsic(float(ltp), side, float(strike), float(spot)))
     return float(ltp)
+
+
+def leg_passes_dual_floor(
+    side: str,
+    strike: float,
+    ltp: float,
+    spot: float,
+    ltp_target: float,
+    theta_target: float,
+) -> bool:
+    """
+    Enforce BOTH the raw-LTP floor and the time-value (theta) floor.
+    A target <= 0 means that particular floor is disabled.
+    """
+    if ltp_target > 0 and float(ltp) < float(ltp_target):
+        return False
+    if theta_target > 0:
+        tv = strip_intrinsic(float(ltp), side, float(strike), float(spot))
+        if tv < float(theta_target):
+            return False
+    return True
 
 
 def pair_indicators(
@@ -136,9 +158,6 @@ def select_balanced_pair(
     ce_corr = strip_intrinsic(ce_ltp, "CE", atm, spot)
     pe_corr = strip_intrinsic(pe_ltp, "PE", atm, spot)
 
-    _basis = str(entry_basis).lower()
-    _floor = float(theta_target) if _basis == "theta" else float(ltp_target)
-
     if ce_corr < pe_corr:
         anchor_side, anchor_strike, anchor_ltp, partner_side = "CE", atm, ce_ltp, "PE"
     else:
@@ -148,14 +167,17 @@ def select_balanced_pair(
         trace.append(
             f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
             f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} "
-            f"(basis={_basis} need {_basis}>={_floor:.0f}); partner={partner_side} "
-            f"wants {_basis}>={_floor:.0f} and ltp<{anchor_ltp:.2f}"
+            f"(need ltp>={ltp_target:.0f} theta>={theta_target:.0f}); partner={partner_side} "
+            f"wants same floor and ltp<{anchor_ltp:.2f}"
         )
 
-    anchor_val = leg_entry_value(anchor_side, anchor_strike, anchor_ltp, spot, _basis)
-    if anchor_val < _floor:
+    if not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target):
         if trace is not None:
-            trace.append(f"REJECT anchor {_basis} {anchor_val:.2f} < target {_floor:.0f}")
+            _tv = strip_intrinsic(anchor_ltp, anchor_side, anchor_strike, spot)
+            trace.append(
+                f"REJECT anchor {anchor_side}{anchor_strike} ltp={anchor_ltp:.2f} "
+                f"tv={_tv:.2f} fails dual floor (ltp>={ltp_target:.0f}, theta>={theta_target:.0f})"
+            )
         return None
 
     best = None  # (ltp, strike)
@@ -165,13 +187,13 @@ def select_balanced_pair(
         if not leg:
             continue
         ltp = leg.get("ltp", 0.0)
-        # Floor on the chosen metric (ltp or time value); balance on LTP (< anchor_ltp).
-        val = leg_entry_value(partner_side, s, ltp, spot, _basis)
-        _ok = (val >= _floor) and (ltp < anchor_ltp)
+        _ok_floor = leg_passes_dual_floor(partner_side, s, ltp, spot, ltp_target, theta_target)
+        _ok = _ok_floor and (ltp < anchor_ltp)
         if trace is not None:
+            _tv = strip_intrinsic(ltp, partner_side, s, spot) if ltp > 0 else 0.0
             trace.append(
-                f"  cand {partner_side}{s} ltp={ltp:.2f} {_basis}={val:.2f} "
-                f"{'OK' if _ok else 'skip(out-of-band)'}"
+                f"  cand {partner_side}{s} ltp={ltp:.2f} tv={_tv:.2f} "
+                f"{'OK' if _ok else 'skip(' + ('floor' if not _ok_floor else 'balance') + ')'}"
             )
         if _ok:
             if best is None or ltp > best[0]:
@@ -193,14 +215,16 @@ def select_balanced_pair(
     return result
 
 
-def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval):
+def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
+                         theta_target: float = 0.0):
     """Diagnose why the re-entry pool produced no trade, so the log can distinguish
     'no balanced pair exists' from 'a pair exists but the gate blocked it'.
 
     rule_eval: callable(ce_strike, pe_strike) -> (passed: bool, reason: str)
     Returns: {"kind": "no_pair"} | {"kind": "blocked"|"passed", ce, pe, ce_ltp, pe_ltp, reason}
     """
-    pair = select_balanced_pair(strike_prem, spot, step, offset, ltp_target)
+    pair = select_balanced_pair(strike_prem, spot, step, offset, ltp_target,
+                                theta_target=theta_target)
     if not pair:
         return {"kind": "no_pair"}
     ce, pe, ce_ltp, pe_ltp = pair
@@ -239,14 +263,12 @@ def scan_pool(
     ce_corr = strip_intrinsic(ce_atm.get("ltp", 0.0), "CE", atm, spot)
     pe_corr = strip_intrinsic(pe_atm.get("ltp", 0.0), "PE", atm, spot)
     ce_bias_stronger = ce_corr > pe_corr
-    _basis = str(entry_basis).lower()
-    _floor = float(theta_target) if _basis == "theta" else float(ltp_target)
 
     if trace is not None:
         trace.append(
             f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
             f"bias={'CE' if ce_bias_stronger else 'PE'}-stronger "
-            f"(weaker side must have lower ltp)"
+            f"(weaker side must have lower ltp); dual floor ltp>={ltp_target:.0f} theta>={theta_target:.0f}"
         )
 
     skipped = 0
@@ -266,11 +288,22 @@ def scan_pool(
             pe_ltp = pe.get("ltp", 0.0)
             if pe_ltp <= 0:
                 continue
-            # Floor each leg on the chosen metric (raw LTP, or time value when basis=theta).
-            ce_val = leg_entry_value("CE", s_ce, ce_ltp, spot, _basis)
-            pe_val = leg_entry_value("PE", s_pe, pe_ltp, spot, _basis)
-            if ce_val < _floor or pe_val < _floor:
+            # Dual floor: both raw LTP and time value must meet their targets.
+            if not leg_passes_dual_floor("CE", s_ce, ce_ltp, spot, ltp_target, theta_target):
                 skipped += 1
+                if trace is not None:
+                    _tv = strip_intrinsic(ce_ltp, "CE", s_ce, spot) if ce_ltp > 0 else 0.0
+                    trace.append(
+                        f"  skip CE{s_ce} ltp={ce_ltp:.2f} tv={_tv:.2f} fails dual floor"
+                    )
+                continue
+            if not leg_passes_dual_floor("PE", s_pe, pe_ltp, spot, ltp_target, theta_target):
+                skipped += 1
+                if trace is not None:
+                    _tv = strip_intrinsic(pe_ltp, "PE", s_pe, spot) if pe_ltp > 0 else 0.0
+                    trace.append(
+                        f"  skip PE{s_pe} ltp={pe_ltp:.2f} tv={_tv:.2f} fails dual floor"
+                    )
                 continue
             if ce_bias_stronger:
                 if ce_ltp >= pe_ltp:
@@ -318,12 +351,13 @@ def find_rollover_partner(
     max_entry_ratio: float,
     rule_eval,                      # callable(ce_strike:int, pe_strike:int) -> (passed:bool, reason:str)
     max_itm_steps: Optional[int] = None,
+    theta_target: float = 0.0,
 ) -> Optional[Tuple[int, float]]:
     """
     Rollover partner selection (check-first):
       - Keep the RUNNING / bleeding leg fixed.
-      - Scan `roll_side` strikes in ATM ± offset, >= ltp_target ONLY (no theta), and
-        not deeper ITM than `max_itm_steps`.
+      - Scan `roll_side` strikes in ATM ± offset, >= ltp_target AND >= theta_target,
+        and not deeper ITM than `max_itm_steps`.
       - For each candidate, build the combined pair and apply the re-entry rules.
       - Enforce CE/PE ratio <= max_entry_ratio.
       - Return the candidate with the LOWEST ratio (most balanced) or None.
@@ -341,7 +375,7 @@ def find_rollover_partner(
             if itm_pts > max_itm_steps * step:
                 continue
         ltp = float(v.get("ltp", 0.0) or 0.0)
-        if ltp < ltp_target:
+        if not leg_passes_dual_floor(roll_side, strike, ltp, spot, ltp_target, theta_target):
             continue
         ce_s, pe_s = (int(strike), int(kept_strike)) if roll_side == "CE" else (int(kept_strike), int(strike))
         ce_ltp, pe_ltp = (ltp, kept_ltp) if roll_side == "CE" else (kept_ltp, ltp)

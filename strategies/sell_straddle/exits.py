@@ -11,6 +11,10 @@ from typing import TYPE_CHECKING
 
 from config.global_config import IST, Topic
 from strategies.core.rule_evaluator import eval_rules as _eval_rules
+from strategies.sell_straddle.audit import (
+    audit_exit_eval,
+    audit_exit_exec,
+)
 from strategies.sell_straddle.dataclasses import format_exit_eval
 
 if TYPE_CHECKING:
@@ -36,7 +40,11 @@ class ExitMixin:
             token = (creds or {}).get("access_token", "")
             if not token:
                 return
-            exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
+            pos = self._position
+            if pos and pos.expiry_date:
+                exp = pos.expiry_date
+            else:
+                exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
             _need = self._pool_engine._rsi_len * max(_max_tf, 1) + 5
             for stk, side in ((ce_strike, "CE"), (pe_strike, "PE")):
                 ikey = REGISTRY.get_broker_symbol(self._underlying, exp, int(stk), side, "upstox")
@@ -229,6 +237,27 @@ class ExitMixin:
                 await self._close_position("guardrail_pnl_sl")
                 return
 
+        # 2b. PER-TRADE HARD TARGET / STOP-LOSS (% of this trade's net credit)
+        if pos.net_credit > 0:
+            if getattr(self, "_per_trade_sl_pct", 0.0) > 0:
+                _per_trade_sl_pts = -self._per_trade_sl_pct / 100.0 * pos.net_credit
+                if pnl <= _per_trade_sl_pts:
+                    logger.info(
+                        "SellStraddle[%s]: PER-TRADE SL — pnl=%.2fpts <= %.2fpts (%.1f%% of credit=%.2f)",
+                        self._underlying, pnl, _per_trade_sl_pts, self._per_trade_sl_pct, pos.net_credit,
+                    )
+                    await self._close_position("per_trade_sl")
+                    return
+            if getattr(self, "_per_trade_profit_pct", 0.0) > 0:
+                _per_trade_tgt_pts = self._per_trade_profit_pct / 100.0 * pos.net_credit
+                if pnl >= _per_trade_tgt_pts:
+                    logger.info(
+                        "SellStraddle[%s]: PER-TRADE TARGET — pnl=%.2fpts >= %.2fpts (%.1f%% of credit=%.2f)",
+                        self._underlying, pnl, _per_trade_tgt_pts, self._per_trade_profit_pct, pos.net_credit,
+                    )
+                    await self._close_position("per_trade_target")
+                    return
+
         # 3. DAY-LEVEL % GUARDRAILS
         if self._initial_net_credit > 0:
             if self._day_exit_basis == "theta" and self._initial_entry_time_value > 0:
@@ -406,6 +435,19 @@ class ExitMixin:
                 logger.info("SellStraddle[%s]: EXIT_RULES triggered — %s", self._underlying, _reason)
                 await self._close_position("exit_rules")
                 return
+            # Persist the exit-evaluation audit once per max-TF bucket (throttled by bucket).
+            audit_exit_eval(
+                client_id=getattr(self, "_client_id", "") or "",
+                binding_id=getattr(self, "_binding_id", "") or "",
+                underlying=self._underlying,
+                ts=now,
+                pnl=pnl,
+                credit=self._initial_net_credit or pos.net_credit or 0.0,
+                criteria=[{"name": n, "detail": d, "hit": bool(h)} for n, d, h in _crit],
+                ind_by_tf=_exit_dump or {},
+                fired=_passed,
+                fired_reason=_reason if _passed else "",
+            )
 
         # 11. ITM PAIR GATE (armed-watching phase: cumulative was ≤0 at rollover time)
         if getattr(self, "_itm_gate_armed", False):
@@ -432,76 +474,99 @@ class ExitMixin:
         self._persist()
 
     async def _close_position(self, reason: str) -> None:
-        if not self._position:
+        if not self._position or getattr(self, "_close_in_progress", False):
             return
-        from execution_bridge.straddle_bridge import StraddleOrderEvent
-        pos = self._position
-        pos.realized_pnl = pos.unrealized_pnl
-        pos.close_reason = reason
-        pos.close_time = datetime.now(IST)
-        pos.ce_leg.close_time = pos.close_time
-        pos.pe_leg.close_time = pos.close_time
-        pos.status = "closed"
+        self._close_in_progress = True
+        try:
+            from execution_bridge.straddle_bridge import StraddleOrderEvent
+            pos = self._position
+            # Take the position out of the book immediately so concurrent exit checks
+            # cannot emit duplicate EXIT orders while this one is in flight.
+            self._position = None
+            pos.realized_pnl = pos.unrealized_pnl
+            pos.close_reason = reason
+            pos.close_time = datetime.now(IST)
+            pos.ce_leg.close_time = pos.close_time
+            pos.pe_leg.close_time = pos.close_time
+            pos.status = "closed"
 
-        _cid = getattr(self, "_client_id", "") or "-"
-        _bid = getattr(self, "_binding_id", "") or "-"
-        logger.info(
-            "SellStraddle[%s|%s|%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) "
-            "CE %.2f→%.2f PE %.2f→%.2f",
-            self._underlying, _cid, _bid, reason,
-            self._ccy_symbol, self._pnl_rs(pos.realized_pnl), pos.realized_pnl,
-            pos.ce_leg.entry_price, pos.ce_leg.ltp,
-            pos.pe_leg.entry_price, pos.pe_leg.ltp,
-        )
-        self._clog.info(
-            "CLOSED — reason=%s pnl=%.2fpts CE %.2f→%.2f PE %.2f→%.2f",
-            reason, pos.realized_pnl,
-            pos.ce_leg.entry_price, pos.ce_leg.ltp,
-            pos.pe_leg.entry_price, pos.pe_leg.ltp,
-        )
+            _cid = getattr(self, "_client_id", "") or "-"
+            _bid = getattr(self, "_binding_id", "") or "-"
+            logger.info(
+                "SellStraddle[%s|%s|%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) "
+                "CE %.2f→%.2f PE %.2f→%.2f",
+                self._underlying, _cid, _bid, reason,
+                self._ccy_symbol, self._pnl_rs(pos.realized_pnl), pos.realized_pnl,
+                pos.ce_leg.entry_price, pos.ce_leg.ltp,
+                pos.pe_leg.entry_price, pos.pe_leg.ltp,
+            )
+            self._clog.info(
+                "CLOSED — reason=%s pnl=%.2fpts CE %.2f→%.2f PE %.2f→%.2f",
+                reason, pos.realized_pnl,
+                pos.ce_leg.entry_price, pos.ce_leg.ltp,
+                pos.pe_leg.entry_price, pos.pe_leg.ltp,
+            )
 
-        self._event_counter += 1
-        order_ev = StraddleOrderEvent(
-            action="EXIT",
-            underlying=self._underlying,
-            atm=pos.atm_at_entry,
-            ce_strike=pos.ce_leg.strike,
-            pe_strike=pos.pe_leg.strike,
-            ce_ltp=pos.ce_leg.ltp,
-            pe_ltp=pos.pe_leg.ltp,
-            lot_multiplier=self._lot_multiplier,
-            lot_size=self._lot_size,
-            spot=self._spot,
-            close_reason=reason,
-            realized_pnl=pos.realized_pnl,
-            ce_entry=pos.ce_leg.entry_price,
-            pe_entry=pos.pe_leg.entry_price,
-            event_id=f"{self._underlying}_EXIT_{self._event_counter}",
-            leg_open_times={
-                "CE": pos.ce_leg.open_time.isoformat() if pos.ce_leg.open_time else None,
-                "PE": pos.pe_leg.open_time.isoformat() if pos.pe_leg.open_time else None,
-            },
-            leg_open_reasons={
-                "CE": pos.ce_leg.open_reason,
-                "PE": pos.pe_leg.open_reason,
-            },
-        )
-        await self._emit_order(order_ev)
+            self._event_counter += 1
+            order_ev = StraddleOrderEvent(
+                action="EXIT",
+                underlying=self._underlying,
+                atm=pos.atm_at_entry,
+                ce_strike=pos.ce_leg.strike,
+                pe_strike=pos.pe_leg.strike,
+                ce_ltp=pos.ce_leg.ltp,
+                pe_ltp=pos.pe_leg.ltp,
+                lot_multiplier=self._lot_multiplier,
+                lot_size=self._lot_size,
+                spot=self._spot,
+                close_reason=reason,
+                realized_pnl=pos.realized_pnl,
+                ce_entry=pos.ce_leg.entry_price,
+                pe_entry=pos.pe_leg.entry_price,
+                event_id=f"{self._underlying}_EXIT_{self._event_counter}",
+                leg_open_times={
+                    "CE": pos.ce_leg.open_time.isoformat() if pos.ce_leg.open_time else None,
+                    "PE": pos.pe_leg.open_time.isoformat() if pos.pe_leg.open_time else None,
+                },
+                leg_open_reasons={
+                    "CE": pos.ce_leg.open_reason,
+                    "PE": pos.pe_leg.open_reason,
+                },
+                expiry=pos.expiry_date,
+                close_time=pos.close_time,
+            )
+            await self._emit_order(order_ev)
 
-        self._session_realized_pnl_pts += pos.realized_pnl
-        logger.info(
-            "SellStraddle[%s]: Session P&L — trade=%.2fpts cumulative=%.2fpts "
-            "(day=%.1f%% of initial credit=%.2f)",
-            self._underlying, pos.realized_pnl, self._session_realized_pnl_pts,
-            (self._session_realized_pnl_pts / self._initial_net_credit * 100)
-            if self._initial_net_credit > 0 else 0.0,
-            self._initial_net_credit,
-        )
+            self._session_realized_pnl_pts += pos.realized_pnl
+            logger.info(
+                "SellStraddle[%s]: Session P&L — trade=%.2fpts cumulative=%.2fpts "
+                "(day=%.1f%% of initial credit=%.2f)",
+                self._underlying, pos.realized_pnl, self._session_realized_pnl_pts,
+                (self._session_realized_pnl_pts / self._initial_net_credit * 100)
+                if self._initial_net_credit > 0 else 0.0,
+                self._initial_net_credit,
+            )
 
-        self._position = None
-        self._persist()
-        if reason != "itm_pair_gate_profit":
-            self._apply_sl_cooldown()
+            self._persist()
+            await self._unsubscribe_entry_expiry_tokens()
+            # Cooldown is for organic SL events; forced liquidation / deployment removal
+            # should not penalise future entries (and kill-switch means no future entries).
+            if reason not in ("itm_pair_gate_profit", "kill_switch", "deployment_stop", "system_shutdown"):
+                self._apply_sl_cooldown()
+            audit_exit_exec(
+                client_id=_cid,
+                binding_id=_bid,
+                underlying=self._underlying,
+                ts=pos.close_time or datetime.now(IST),
+                reason=reason,
+                realized_pnl=float(pos.realized_pnl or 0.0),
+                ce_entry=float(pos.ce_leg.entry_price or 0.0),
+                pe_entry=float(pos.pe_leg.entry_price or 0.0),
+                ce_exit=float(pos.ce_leg.ltp or 0.0),
+                pe_exit=float(pos.pe_leg.ltp or 0.0),
+            )
+        finally:
+            self._close_in_progress = False
 
     async def _close_leg(self, side: str, reason: str, now: datetime) -> float:
         """Close ONE leg (publish EXIT legs=[side]); book that leg's P&L into the session total."""
@@ -530,6 +595,7 @@ class ExitMixin:
             legs=[side],
             leg_open_times={side: leg.open_time.isoformat() if leg.open_time else None},
             leg_open_reasons={side: leg.open_reason},
+            expiry=pos.expiry_date,
         )
         await self._emit_order(order_ev)
         self._session_realized_pnl_pts += leg_pnl
@@ -566,6 +632,7 @@ class ExitMixin:
             spot=self._spot, indicators=dict(self._ind),
             event_id=f"{self._underlying}_OPENLEG_{side}_{self._event_counter}",
             legs=[side],
+            expiry=pos.expiry_date,
         )
         await self._emit_order(order_ev)
         _cid = getattr(self, "_client_id", "") or "-"

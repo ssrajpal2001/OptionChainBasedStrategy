@@ -454,6 +454,7 @@ async def _run_live(
 
     # ── Data-layer operational modules ────────────────────────────────────────
     rebalancer     = StrikeRebalancer(bus, cfg, feeder)
+    feeder.set_rebalancer(rebalancer)
     # Give each manager the rebalancer so new books can pin their strikes / subscribe chains.
     for manager in managers.values():
         if hasattr(manager, "set_rebalancer"):
@@ -527,6 +528,14 @@ async def _run_live(
         raise SystemExit(1)
     await feeder.start()
 
+    # Live tick/bars recorder — captures raw INDEX_TICK + OPTION_TICK to Parquet
+    # for post-market replay, backtest, and optimisation.
+    tick_recorder = None
+    try:
+        from data_layer.tick_recorder import TickRecorder
+        tick_recorder = TickRecorder(bus, cfg.storage)
+    except Exception as exc:
+        logger.warning("TickRecorder could not be instantiated: %s", exc)
 
     if "iron_condor" in _enabled_strats:
         for _ic in _iron_condors:
@@ -558,6 +567,8 @@ async def _run_live(
         asyncio.create_task(candle_cache.run(),         name="candle_cache"),
         asyncio.create_task(option_matrix.run(),        name="option_matrix"),
     ]
+    if tick_recorder is not None:
+        tasks.append(asyncio.create_task(tick_recorder.run(), name="tick_recorder"))
     for name, manager in managers.items():
         if STRATEGY_REGISTRY[name].get("per_binding"):
             tasks.append(asyncio.create_task(manager.run(), name=f"{name}_books"))
@@ -627,6 +638,11 @@ async def _run_live(
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task
     await feeder.stop()
+    if tick_recorder is not None:
+        try:
+            await tick_recorder.stop()
+        except Exception as exc:
+            logger.warning("TickRecorder stop failed: %s", exc)
 
     # Cancel both the engine tasks and the detached admin task
     for t in list(pending) + [admin_task]:

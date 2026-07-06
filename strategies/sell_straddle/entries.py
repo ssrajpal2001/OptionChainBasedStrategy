@@ -14,6 +14,10 @@ from typing import List
 from config.global_config import IST, Topic
 from data_layer.runtime_config import RuntimeConfig
 from strategies.core.rule_evaluator import eval_rules as _eval_rules
+from strategies.sell_straddle.audit import (
+    audit_entry_eval,
+    audit_entry_exec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +245,7 @@ class EntryMixin:
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
-        _eff_target = self._theta_target if self._entry_basis == "theta" else ltp_target
+        theta_target = self._theta_target
 
         if (self._position is None or self._position.status != "open"):
             _audit_clients = self._granular_audit_clients()
@@ -251,7 +255,7 @@ class EntryMixin:
                     _crit_h = [
                         {"name": "Status", "detail": f"no open position — {concept} scan", "hit": False},
                         {"name": "Spot/ATM", "detail": f"{self._spot:.2f} / {int(_atm)}", "hit": False},
-                        {"name": "Target/Offset", "detail": f"{self._entry_basis}≥{_eff_target:.0f}, ±{offset}", "hit": False},
+                        {"name": "Target/Offset", "detail": f"ltp≥{ltp_target:.0f} theta≥{theta_target:.0f}, ±{offset}", "hit": False},
                     ]
                     for _cid, _bid in _audit_clients:
                         await self._bus.publish(Topic.EXIT_AUDIT, {
@@ -285,19 +289,20 @@ class EntryMixin:
         if not sel:
             if use_beginning_sel:
                 self._clog.info(
-                    "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (target=%.2f[%s] offset=%d)",
-                    self._underlying, rule_key, self._spot, _eff_target, self._entry_basis, offset,
+                    "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair (ltp≥%.0f theta≥%.0f offset=%d)",
+                    self._underlying, rule_key, self._spot, ltp_target, theta_target, offset,
                 )
             else:
                 from strategies.sell_straddle.selection import reentry_block_reason
                 diag = reentry_block_reason(
                     self._strike_prem, self._spot, step, offset, ltp_target,
                     rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
+                    theta_target=self._theta_target,
                 )
                 if diag["kind"] == "no_pair":
                     self._clog.info(
-                        "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair exists (target=%.2f[%s] offset=%d)",
-                        self._underlying, rule_key, self._spot, _eff_target, self._entry_basis, offset,
+                        "EVAL %s [%s] NO-PAIR — spot=%.2f no balanced pair exists (ltp≥%.0f theta≥%.0f offset=%d)",
+                        self._underlying, rule_key, self._spot, ltp_target, theta_target, offset,
                         )
                 else:
                     self._clog.info(
@@ -307,7 +312,6 @@ class EntryMixin:
                         diag["pe"], diag["pe_ltp"], diag["ce_ltp"] + diag["pe_ltp"], diag["reason"],
                     )
             return
-
         ce_strike, pe_strike, ce_ltp, pe_ltp = sel
         ind_by_tf = self._ind_by_tf(ce_strike, pe_strike, rules)
         passed, reason = _eval_rules(rules, ind_by_tf)
@@ -316,6 +320,22 @@ class EntryMixin:
             "EVAL %s [%s/%s] sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind_by_tf=%s",
             self._underlying, rule_key, concept, ce_strike, ce_ltp, pe_strike, pe_ltp,
             ce_ltp + pe_ltp, reason, "PASS" if passed else "BLOCK", _dump,
+        )
+        audit_entry_eval(
+            client_id=getattr(self, "_client_id", "") or "",
+            binding_id=getattr(self, "_binding_id", "") or "",
+            underlying=self._underlying,
+            ts=now,
+            rule_key=rule_key,
+            concept=concept,
+            spot=self._spot,
+            ltp_target=ltp_target,
+            theta_target=theta_target,
+            offset=offset,
+            selected_pair=(int(ce_strike), int(pe_strike), float(ce_ltp), float(pe_ltp)) if sel else None,
+            ind_by_tf=_dump,
+            passed=passed,
+            reason=reason,
         )
         if not passed:
             if use_beginning_sel and "N/A" not in reason:
@@ -335,11 +355,16 @@ class EntryMixin:
             "ENTRY attempting — CE%d=%.2f PE%d=%.2f credit=%.2f rules_passed",
             ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
         )
-        await self._open_position(now, ce_strike, pe_strike, ce_ltp, pe_ltp, rule_key, reason)
+        if not self._entry_expiry_date:
+            self._clog.warning("ENTRY abort — no effective entry expiry resolved yet")
+            return
+        await self._open_position(now, ce_strike, pe_strike, ce_ltp, pe_ltp, rule_key, reason,
+                                  expiry_date=self._entry_expiry_date)
 
     async def _open_position(
         self, now: datetime, ce_strike: int, pe_strike: int,
         ce_ltp: float, pe_ltp: float, rule_key: str, reason: str,
+        expiry_date=None,
     ) -> None:
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         from strategies.sell_straddle.dataclasses import StraddleLeg, StraddlePosition
@@ -365,6 +390,7 @@ class EntryMixin:
             session_min_vwap=float("inf"),
             entry_indicators=self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
             lot_size=self._lot_size * self._lot_multiplier,
+            expiry_date=expiry_date,
         )
         self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
         self._persist()
@@ -393,6 +419,20 @@ class EntryMixin:
             ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
             rule_key, reason,
         )
+        audit_entry_exec(
+            client_id=_cid,
+            binding_id=_bid,
+            underlying=self._underlying,
+            ts=now,
+            ce_strike=float(ce_strike),
+            pe_strike=float(pe_strike),
+            ce_ltp=float(ce_ltp),
+            pe_ltp=float(pe_ltp),
+            credit=float(ce_ltp + pe_ltp),
+            expiry_date=expiry_date.isoformat() if expiry_date else None,
+            rule_key=rule_key,
+            reason=reason,
+        )
 
         order_ev = StraddleOrderEvent(
             action="ENTRY",
@@ -407,5 +447,6 @@ class EntryMixin:
             spot=self._spot,
             indicators=dict(self._ind),
             event_id=event_id,
+            expiry=expiry_date,
         )
         await self._emit_order(order_ev)

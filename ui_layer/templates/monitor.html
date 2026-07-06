@@ -645,7 +645,7 @@ document.addEventListener('alpine:init', () => {
     positions: [], posLoading: false, posTs: '',
 
     /* ── RMS ─────────────────────────────────────────────────────────── */
-    rms: { max_drawdown_pct: 5.0, order_throttle_per_sec: 5, squareoff_time: '15:15', distance_filter_pct: 5.0 },
+    rms: { max_drawdown_pct: 5.0, order_throttle_per_sec: 5, squareoff_time: '15:20', distance_filter_pct: 5.0 },
     rmsMsg: '', rmsSaved: false,
     liquidateArmed: false, liquidateCountdown: 5, _liquidateTimer: null,
 
@@ -724,12 +724,12 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Strategy runtime config ─────────────────────────────────────── */
     strategyConfig: {
-      ic_squareoff_time: '15:15', ic_rsi_min: 40, ic_rsi_max: 60, ic_adx_max: 25,
+      ic_squareoff_time: '15:20', ic_rsi_min: 40, ic_rsi_max: 60, ic_adx_max: 25,
       ic_profit_pct: 50, ic_sl_pct: 200,
       ic_nifty_otm: 200, ic_nifty_wing: 200, ic_banknifty_otm: 400, ic_banknifty_wing: 500,
       ic_finnifty_otm: 200, ic_finnifty_wing: 200, ic_sensex_otm: 500, ic_sensex_wing: 500,
       ic_midcp_otm: 150, ic_midcp_wing: 200,
-      ss_entry_start: '09:15', ss_entry_end: '12:00', ss_squareoff_time: '15:15',
+      ss_entry_start: '09:15', ss_entry_end: '12:00', ss_squareoff_time: '15:20',
       ss_max_trades: 1,
       tt_htf_minutes: 75, tt_ltf_minutes: 5, tt_sl_mode: 'dynamic', tt_sl_pct: 2.0,
     },
@@ -827,7 +827,7 @@ document.addEventListener('alpine:init', () => {
     showDeployModal: false,
     deployBindingId: '',           // which broker the modal is open for
     deployExisting:  [],           // active deployments for that broker (loaded on open)
-    deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:15' },
+    deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:20' },
     deployMsg: '', deployOk: null, deployLoading: false,
     deployDeleteLoading: {},       // deploy_id -> bool
     deployDeleteId: '',            // set before calling deleteDeploy to avoid x-for scope issues
@@ -1684,7 +1684,7 @@ document.addEventListener('alpine:init', () => {
     /* ── Per-index strategy config helpers ─────────────────────────────── */
     _ssDefaults() {
       return {
-        entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:15',
+        entry_start: '09:20', entry_end: '12:00', squareoff_time: '15:20',
         entry_workflow_mode: 'hybrid', ltp_target: 0, lot_size: 1,
         entry_basis: 'ltp', theta_target: 0,
         pool_itm_depth: 4, pool_otm_depth: 4, product_type: 'MIS',
@@ -1714,7 +1714,7 @@ document.addEventListener('alpine:init', () => {
       const strikes = { NIFTY:{s:200,w:200}, BANKNIFTY:{s:400,w:500}, FINNIFTY:{s:200,w:200}, SENSEX:{s:500,w:500}, MIDCPNIFTY:{s:150,w:200}, CRUDEOIL:{s:100,w:200}, GOLDM:{s:100,w:200}, BTC:{s:200,w:2000}, ETH:{s:20,w:200} };
       const d = strikes[idx] || {s:200,w:200};
       return {
-        enabled: true, start_time: '09:16', squareoff_time: '15:15',
+        enabled: true, start_time: '09:16', squareoff_time: '15:20',
         entry_day: 'daily', product_type: 'NRML',
         lot_size: 65, strike_step: 50,
         max_adjustments_per_side: 3, roll_step_pts: 5,
@@ -2402,7 +2402,7 @@ document.addEventListener('alpine:init', () => {
         lot_multiplier: b.lot_multiplier || 1,
         max_profit_rs:  0,
         max_sl_rs:      0,
-        squareoff_time: this.strategyConfig.ss_squareoff_time || '15:15',
+        squareoff_time: this.strategyConfig.ss_squareoff_time || '15:20',
       };
       this.deployMsg = ''; this.deployOk = null;
       this.deployDeleteLoading = {};
@@ -3885,6 +3885,7 @@ function amoTest() {
               <div class="font-mono text-xs space-y-0.5">
                 <div class="flex justify-between"><span style="color:var(--t-muted)">ATM</span><span x-text="s.position.atm||'—'"></span></div>
                 <div class="flex justify-between"><span style="color:var(--t-muted)">Legs CE / PE</span><span style="color:var(--t-cyan)" x-text="(s.position.ce_strike||'—')+' / '+(s.position.pe_strike||'—')"></span></div>
+                <div class="flex justify-between"><span style="color:var(--t-muted)">Entry Time</span><span x-text="s.position.open_time ? fmtHMS(s.position.open_time) : '—'"></span></div>
                 <div class="flex justify-between"><span style="color:var(--t-muted)">Booked P&amp;L</span><span :style="`color:${(s.booked_pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="(s.booked_pnl||0).toFixed(1)"></span></div>
                 <div class="flex justify-between"><span style="color:var(--t-muted)">Running P&amp;L</span><span :style="`color:${(s.position.unrealized_pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="(s.position.unrealized_pnl||0).toFixed(1)"></span></div>
                 <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)"><span style="color:var(--t-muted)">Net (Booked+Running)</span><span :style="`color:${((s.booked_pnl||0)+(s.position.unrealized_pnl||0))>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((s.booked_pnl||0)+(s.position.unrealized_pnl||0)).toFixed(1)"></span></div>

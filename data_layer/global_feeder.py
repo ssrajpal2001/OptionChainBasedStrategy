@@ -368,6 +368,11 @@ class UpstoxFeeder(BaseFeeder):
         """Upstox instrument_keys contain a pipe (e.g. NSE_FO|...). Fyers symbols don't."""
         return "|" in token
 
+    def set_rebalancer(self, rebalancer) -> None:
+        """Optional StrikeRebalancer reference so market-close cleanup can avoid
+        unsubscribing strikes that are pinned by an open position."""
+        self._rebalancer = rebalancer
+
     def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
         """Register NSE_EQ instrument keys → ticker names so stock ticks flow as INDEX_TICK."""
         self._extra_spot_keys.update(mapping)
@@ -1195,6 +1200,7 @@ class GlobalFeeder:
         self._active_provider: str = "mock"
         self._cached_tokens: List[str] = []  # option tokens to re-apply on every reconnect
         self._extra_spot_keys: Dict[str, str] = {}   # inst_key → ticker for FnoStockMonitor
+        self._rebalancer = None
 
     async def start(self) -> None:
         """Create feeder, connect, and launch the run + heartbeat tasks."""
@@ -1229,9 +1235,11 @@ class GlobalFeeder:
             raise ConnectionError(f"GlobalFeeder: Failed to connect via '{provider}'.")
 
         self._last_tick_ts = time.monotonic()
+        self._market_close_handled = False
         self._feeder_task = asyncio.create_task(self._run_feeder(), name="global_feeder_run")
         self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="global_feeder_hb")
         self._tick_listener_task = asyncio.create_task(self._tick_listener(), name="global_feeder_tick_listener")
+        self._market_close_task = asyncio.create_task(self._market_close_loop(), name="global_feeder_market_close")
         if self._client_db is not None:
             self._candle_persist_task = asyncio.create_task(
                 self._candle_persist_loop(), name="candle_persist_1m"
@@ -1246,7 +1254,8 @@ class GlobalFeeder:
         if self._feeder:
             self._feeder.stop()
             await self._feeder.disconnect()
-        for task in (self._feeder_task, self._heartbeat_task, self._tick_listener_task):
+        for task in (self._feeder_task, self._heartbeat_task, self._tick_listener_task,
+                     getattr(self, "_market_close_task", None)):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -1472,6 +1481,56 @@ class GlobalFeeder:
                 continue
             except asyncio.CancelledError:
                 break
+
+    @staticmethod
+    def _is_nse_bse_token(token: str) -> bool:
+        """True for NSE/BSE equity/F&O/index tokens (excludes MCX and Delta crypto)."""
+        t = str(token).upper()
+        return t.startswith("NSE_") or t.startswith("BSE_") or t.startswith("NSE|") or t.startswith("BSE|")
+
+    async def _market_close_loop(self) -> None:
+        """Daily at 15:40 IST unsubscribe all NSE/BSE option/index feeds to free WS slots.
+        MCX/crypto evening sessions are left untouched."""
+        from datetime import time as _dtime
+        _close_time = _dtime(15, 40)
+        while self._running:
+            await asyncio.sleep(60.0)
+            if self._market_close_handled:
+                continue
+            now = datetime.now(IST)
+            if now.time() < _close_time:
+                continue
+            pinned: Dict[str, set] = {}
+            if self._rebalancer is not None and hasattr(self._rebalancer, "pinned_strikes"):
+                for und in getattr(self._cfg, "monitored_indices", []):
+                    pinned[und] = set(self._rebalancer.pinned_strikes(und))
+
+            tokens = []
+            for t in self._cached_tokens:
+                if not self._is_nse_bse_token(t):
+                    continue
+                meta = self._get_option_meta(t)
+                if meta:
+                    und, strike, _, _ = meta
+                    if und in pinned and float(strike) in pinned[und]:
+                        continue  # keep pinned open-position feeds alive
+                tokens.append(t)
+            if tokens:
+                try:
+                    await self.unsubscribe_tokens(tokens)
+                    logger.info(
+                        "GlobalFeeder: market-close unsubscribe at %s — dropped %d NSE/BSE tokens "
+                        "(pinned strikes preserved).",
+                        now.strftime("%H:%M:%S"), len(tokens),
+                    )
+                except Exception as exc:
+                    logger.warning("GlobalFeeder: market-close unsubscribe failed: %s", exc)
+            try:
+                await self._bus.publish(Topic.SYSTEM_EVENT,
+                                        SystemEvent(SysEvent.MARKET_CLOSE, "NSE/BSE feeds unsubscribed"))
+            except Exception:
+                pass
+            self._market_close_handled = True
 
     @property
     def active_provider(self) -> str:

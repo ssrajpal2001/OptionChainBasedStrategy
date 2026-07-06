@@ -57,6 +57,7 @@ class RollingMixin:
             max_entry_ratio=self._max_entry_ratio,
             rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
             max_itm_steps=max_itm,
+            theta_target=self._theta_target,
         )
 
         if not partner:
@@ -101,7 +102,12 @@ class RollingMixin:
         other = "PE" if side == "CE" else "CE"
         await self._close_leg(side, f"partial_roll_{reason}", now)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
-        if strike and ltp and ltp >= ltp_target:
+        theta_target = getattr(self, "_theta_target", 0.0)
+        _tv_ok = True
+        if theta_target > 0:
+            from strategies.sell_straddle.selection import strip_intrinsic
+            _tv_ok = strip_intrinsic(ltp, side, strike, self._spot) >= theta_target
+        if strike and ltp and ltp >= ltp_target and _tv_ok:
             await self._open_leg(side, strike, ltp, now, f"partial_roll_{reason}")
             if self._position:
                 self._position.session_min_vwap = float("inf")

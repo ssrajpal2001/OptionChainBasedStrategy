@@ -241,12 +241,12 @@ try:
     class _RmsConfigSchema(_PydanticBase):
         max_drawdown_pct:       float = 5.0
         order_throttle_per_sec: int   = 5
-        squareoff_time:         str   = "15:15"
+        squareoff_time:         str   = "15:20"
         distance_filter_pct:    float = 5.0
 
     class _StrategyConfigSchema(_PydanticBase):
         # Iron Condor (global fallback — per-index config preferred)
-        ic_squareoff_time: str   = "15:15"
+        ic_squareoff_time: str   = "15:20"
         ic_rsi_min:        float = 40.0
         ic_rsi_max:        float = 60.0
         ic_adx_max:        float = 25.0
@@ -265,7 +265,7 @@ try:
         # Sell Straddle (global fallback — per-index config preferred)
         ss_entry_start:    str   = "09:15"
         ss_entry_end:      str   = "12:00"
-        ss_squareoff_time: str   = "15:15"
+        ss_squareoff_time: str   = "15:20"
         ss_max_trades:     int   = 1
 
     class _ChangeAdminPasswordSchema(_PydanticBase):
@@ -369,7 +369,7 @@ try:
         lot_multiplier: float = 1.0
         max_profit_rs:  float = 0.0
         max_sl_rs:      float = 0.0
-        squareoff_time: str   = "15:15"
+        squareoff_time: str   = "15:20"
 
 
     class _TrapHistoricalReplaySchema(_PydanticBase):
@@ -680,7 +680,7 @@ class DashboardServer:
             cfg.rms = {
                 "max_drawdown_pct":       5.0,
                 "order_throttle_per_sec": 5,
-                "squareoff_time":         "15:15",
+                "squareoff_time":         "15:20",
                 "distance_filter_pct":    5.0,
             }
 
@@ -851,7 +851,7 @@ class DashboardServer:
             htf_min         = int(p.get("htf_min", 15))
             mtf_min         = int(p.get("mtf_min", 5))
             eod_time        = str(p.get("eod_time", "14:00"))
-            sq_off_time     = str(p.get("sq_off_time", "15:15"))
+            sq_off_time     = str(p.get("sq_off_time", "15:20"))
             min_zone_range  = float(p.get("min_zone_range", 30))
             max_trades_side = int(p.get("max_trades_side", 2))
             min_reward      = float(p.get("min_reward", 20))
@@ -2303,13 +2303,15 @@ class DashboardServer:
                         except Exception:
                             pass
                     _instr = f"{pos.underlying} {strike} {ot}" + (f" {_exp_lbl}" if _exp_lbl else "")
+                    _ot = leg.open_time.isoformat(timespec="seconds") if getattr(leg, "open_time", None) else None
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
                                 "instrument": _instr,
                                 "type": product, "side": "SELL", "ccy": ccy,
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
                                 "sell_avg": round(ep, 2), "buy_avg": 0.0,
-                                "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl})
+                                "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl,
+                                "entry_time": _ot})
                 return out
 
             by_broker: dict = {}
@@ -2977,7 +2979,7 @@ class DashboardServer:
             cid = user.get("client_id", "")
 
             # Validate squareoff time
-            sq = (body.squareoff_time or "15:15").strip()
+            sq = (body.squareoff_time or "15:20").strip()
             try:
                 h, m = sq.split(":")
                 assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
@@ -3420,7 +3422,7 @@ class DashboardServer:
             ss  = cfg.get("sell_straddle", {})
             ic_idx = ic.get("per_index", {})
             return {
-                "ic_squareoff_time":  ic.get("squareoff_time", "15:15"),
+                "ic_squareoff_time":  ic.get("squareoff_time", "15:20"),
                 "ic_rsi_min":         ic.get("rsi_min",  40.0),
                 "ic_rsi_max":         ic.get("rsi_max",  60.0),
                 "ic_adx_max":         ic.get("adx_max",  25.0),
@@ -3438,7 +3440,7 @@ class DashboardServer:
                 "ic_midcp_wing":      ic_idx.get("MIDCPNIFTY", {}).get("wing_width_pts",200.0),
                 "ss_entry_start":     ss.get("entry_start",    "09:15"),
                 "ss_entry_end":       ss.get("entry_end",      "12:00"),
-                "ss_squareoff_time":  ss.get("squareoff_time", "15:15"),
+                "ss_squareoff_time":  ss.get("squareoff_time", "15:20"),
                 "ss_max_trades":      ss.get("max_trades",      1),
             }
 
@@ -4483,7 +4485,7 @@ class DashboardServer:
             defaults = {
                 "max_drawdown_pct":       5.0,
                 "order_throttle_per_sec": 5,
-                "squareoff_time":         "15:15",
+                "squareoff_time":         "15:20",
                 "distance_filter_pct":    5.0,
             }
             rms = getattr(_srv._cfg, "rms", {})

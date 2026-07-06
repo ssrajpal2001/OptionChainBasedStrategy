@@ -23,7 +23,7 @@ def _parse_time(s: str) -> dtime:
         h, m = s.split(":")
         return dtime(int(h), int(m))
     except Exception:
-        return dtime(15, 15)
+        return dtime(15, 20)
 
 
 @dataclass
@@ -107,8 +107,8 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
         return node if node is not None else default
 
     entry_start = _parse_time(ss.get("entry_start", "09:20"))
-    entry_cutoff = _parse_time(ss.get("entry_end", "15:15"))
-    force_exit = _parse_time(ss.get("squareoff_time", "15:15"))
+    entry_cutoff = _parse_time(ss.get("entry_end", "15:20"))
+    force_exit = _parse_time(ss.get("squareoff_time", "15:20"))
     is_crypto = bool(cfg and cfg.exchange.is_crypto(underlying))
     max_trades = int(ss.get("max_trades", 1))
     sl_cooldown_minutes = float(
@@ -256,6 +256,9 @@ class ConfigMixin:
         self._tsl_step_profit_rs = cfg.tsl_step_profit_rs
         self._tsl_step_lock_rs = cfg.tsl_step_lock_rs
         self._tsl_basis = cfg.tsl_basis
+
+        self._per_trade_profit_pct = cfg.per_trade_profit_pct
+        self._per_trade_sl_pct = cfg.per_trade_sl_pct
 
         self._day_profit_target_pct = cfg.day_profit_target_pct
         self._day_loss_sl_pct = cfg.day_loss_sl_pct

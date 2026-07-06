@@ -106,20 +106,24 @@ class StrategyBookManager:
             return
         logger.warning("%s: KILL_SWITCH received (%s) — liquidating %d book(s).",
                        self.__class__.__name__, scope, len(self._books))
+        # Snapshot the books so a concurrent reconcile mutation does not change
+        # the iteration while we are liquidating.
+        books_snapshot = list(self._books.items())
+        _reason = "kill_switch" if scope == "FIRM_WIDE" else scope
         results = await asyncio.gather(
-            *[self._liquidate_book(book, key) for key, book in self._books.items()],
+            *[self._liquidate_book(book, key, reason=_reason) for key, book in books_snapshot],
             return_exceptions=True,
         )
-        for key, res in zip(self._books.keys(), results):
+        for key, res in zip([k for k, _ in books_snapshot], results):
             if isinstance(res, Exception):
                 logger.error("%s: liquidation failed for %s: %s", self.__class__.__name__, key, res)
         logger.warning("%s: liquidation complete.", self.__class__.__name__)
 
-    async def _liquidate_book(self, book: Any, key: Key) -> None:
-        """Close any open position on ``book`` and stop its tasks."""
+    async def _liquidate_book(self, book: Any, key: Key, reason: str = "kill_switch") -> None:
+        """Close any open position on ``book`` with the given reason and stop its tasks."""
         if hasattr(book, "liquidate"):
             try:
-                await book.liquidate("kill_switch")
+                await book.liquidate(reason)
             except Exception as exc:
                 logger.warning("%s: book.liquidate(%s) failed: %s", self.__class__.__name__, key, exc)
         try:
@@ -181,10 +185,18 @@ class StrategyBookManager:
                 logger.warning("%s: spawn %s failed: %s",
                                self.__class__.__name__, key, exc, exc_info=True)
 
-        # Stop books whose key is no longer wanted.
+        # Stop books whose key is no longer wanted. If a book still has an open
+        # position, liquidate it first so we do not orphan broker legs.
         for key in set(self._books) - set(wanted):
             book = self._books.pop(key)
-            self._stop_book(book)
+            if not self._is_flat(book):
+                logger.warning(
+                    "%s: removing %s with open position — liquidating before stop.",
+                    self.__class__.__name__, key,
+                )
+                asyncio.create_task(self._liquidate_book(book, key, reason="deployment_stop"))
+            else:
+                self._stop_book(book)
             self._log_stopped(key)
 
         # Re-spawn on configuration change only when flat.
@@ -208,6 +220,13 @@ class StrategyBookManager:
 
     def stop(self) -> None:
         self._running = False
+        # Best-effort: if we are on a running loop, schedule emergency liquidation.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self.liquidate_all(scope="sync_stop"))
+        except Exception:
+            pass
         for book in self._books.values():
             try:
                 book.stop()
@@ -215,10 +234,11 @@ class StrategyBookManager:
                 pass
 
     async def stop_async(self) -> None:
-        """Graceful shutdown — awaits each book's task cancellation."""
+        """Graceful shutdown — liquidate open positions, then cancel tasks."""
         self._running = False
-        await asyncio.gather(
-            *[book.stop_async() for book in self._books.values()],
-            return_exceptions=True,
-        )
+        try:
+            await self.liquidate_all(scope="system_shutdown")
+        except Exception as exc:
+            logger.warning("%s: liquidation during shutdown failed: %s", self.__class__.__name__, exc)
+        # liquidate_all already stopped each book; just clear the manager's references.
         self._books.clear()

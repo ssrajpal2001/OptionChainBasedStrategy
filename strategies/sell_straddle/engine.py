@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from datetime import datetime, time as dtime
+from datetime import datetime, date, time as dtime
 from typing import Dict, List, Optional, Tuple
 
 from config.global_config import IST, Topic
@@ -117,9 +117,13 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._pe_ltp_fresh: bool = True
 
         self._tasks: list = []
+        self._close_in_progress: bool = False
         self._sl_cooldown_until: Optional[datetime] = None
         self._event_counter: int = 0
         self._order_emitter = OrderEmitter(self._bus, self._client_id, self._binding_id)
+        self._rebalancer = None  # set via set_rebalancer()
+        self._entry_expiry_date: Optional[date] = None  # effective expiry for new entries
+        self._entry_expiry_tokens: list = []  # window tokens subscribed for _entry_expiry_date
 
         self._prem_closes: deque = deque(maxlen=_BUF)
         self._prem_volumes: deque = deque(maxlen=_BUF)
@@ -148,6 +152,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         if self._client_id and self._binding_id:
             return f"{self._client_id}_{self._binding_id}_{self._underlying}_sell_straddle"
         return f"{self._underlying}_sell_straddle"
+
+    def set_rebalancer(self, rebalancer) -> None:
+        """Inject StrikeRebalancer so the engine can fetch option-chain snapshots and subscribe
+        next-week expiry strikes when the current weekly expiry fails the dual floor."""
+        self._rebalancer = rebalancer
 
     async def _emit_order(self, ev) -> None:
         """Stamp this book's identity on every order so the bridge routes to ONLY this binding."""
@@ -273,12 +282,38 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             if not token or self._spot <= 0:
                 logger.info("SellStraddle[%s]: pool seed skipped (no token/spot).", self._underlying)
                 return
+
             step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
             ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
             itm = int(ss.get("pool_itm_depth", 4))
             otm = int(ss.get("pool_otm_depth", 4))
+
+            self._entry_expiry_date = self._effective_entry_expiry()
+            exp = self._entry_expiry_date
+            if not exp:
+                logger.warning("SellStraddle[%s]: pool seed skipped — no expiry resolved.", self._underlying)
+                return
+
+            today = datetime.now(IST).date()
+            _shift_msg = " (expiry-day shift)" if exp != REGISTRY.get_active_expiry(self._underlying, today) else ""
+            logger.info("SellStraddle[%s]: entry expiry = %s%s.", self._underlying, exp.isoformat(), _shift_msg)
+
+            # On expiry day, subscribe the next-week window immediately and seed strike_prem from snapshot
+            # so the first 09:20 entry attempt has data even before live ticks arrive.
+            if _shift_msg:
+                await self._subscribe_expiry_window(exp)
+                try:
+                    underlying_key = REGISTRY.get_upstox_index_key(self._underlying)
+                    chain = await self._rebalancer.fetch_option_chain(underlying_key, exp)
+                    if chain:
+                        sp = self._build_strike_prem_from_chain(chain)
+                        self._strike_prem.update(sp)
+                        logger.info("SellStraddle[%s]: seeded strike_prem from %s chain rows.",
+                                    self._underlying, len(sp))
+                except Exception as exc:
+                    logger.warning("SellStraddle[%s]: expiry-day chain seed failed: %s", self._underlying, exc)
+
             strikes = pool_strike_set(self._spot, step, itm, otm)
-            exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
             seeded = 0
             seed_pairs: list = [(int(stk), side) for stk in strikes for side in ("CE", "PE")]
             pos = self._position
@@ -295,8 +330,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     closes = [b["close"] for b in bars]
                     self._pool_engine.seed_strike(stk, side, closes, closes)
                     seeded += 1
-            logger.info("SellStraddle[%s]: pool engine seeded %d legs (warm RSI/ROC).",
-                        self._underlying, seeded)
+            logger.info("SellStraddle[%s]: pool engine seeded %d legs (warm RSI/ROC) expiry=%s.",
+                        self._underlying, seeded, exp.isoformat())
         except Exception as exc:
             logger.warning("SellStraddle[%s]: pool seed failed: %s", self._underlying, exc)
 
@@ -333,9 +368,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"║ TIMING: Start:{self._entry_start.strftime('%H:%M')} | EntryEnd:{self._entry_cutoff.strftime('%H:%M')} | "
             f"SquareOff:{self._force_exit.strftime('%H:%M')} | Lot:{self._lot_size} x{self._lot_multiplier}",
             f"║ SELECTION: workflow={workflow} | pool_offset=±{offset} | "
-            f"ENTRY BASIS:{self._entry_basis.upper()} | "
-            f"floor:{(self._theta_target if self._entry_basis=='theta' else self._ltp_target):.0f}"
-            f"({'theta' if self._entry_basis=='theta' else 'ltp'})",
+            f"DUAL FLOOR: ltp≥{self._ltp_target:.0f} theta≥{self._theta_target:.0f}",
+
+
             f"║ BEGINNING ENTRY: {beg}",
             f"║ RE-ENTRY GATES:  {ren}",
             f"║ ROLLOVERS: Decay:{'ON' if decay_on else 'OFF'}({self._ltp_exit_min:.0f}) | "
@@ -364,6 +399,94 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         for line in L:
             logger.info(line)
             self._clog.info(line)
+
+    # ── Expiry-day shift helpers ──────────────────────────────────────────────
+
+    def _effective_entry_expiry(self) -> Optional[date]:
+        """Return the expiry to use for NEW entries.
+        On the current active expiry's date we shift to the next weekly expiry.
+        On all other days we stay on the current active expiry."""
+        from data_layer.instrument_registry import REGISTRY
+        today = datetime.now(IST).date()
+        current = REGISTRY.get_active_expiry(self._underlying, today)
+        if not current:
+            return None
+        if today == current:
+            exps = [e for e in REGISTRY.all_expiries(self._underlying) if e > current]
+            if exps:
+                return exps[0]
+        return current
+
+    def _build_strike_prem_from_chain(self, chain: dict) -> Dict[Tuple[int, str], dict]:
+        """Build a { (strike, side): {'ltp': ..., 'atp': ...} } map from an Upstox option-chain snapshot.
+        ATP is not available in the chain snapshot, so it is seeded with LTP as a placeholder."""
+        out: Dict[Tuple[int, str], dict] = {}
+        if not chain or not isinstance(chain, dict):
+            return out
+        for row in chain.get("data") or []:
+            strike = int(float(row.get("strike_price") or 0))
+            if strike <= 0:
+                continue
+            for side, side_key in (("CE", "call_options"), ("PE", "put_options")):
+                side_data = row.get(side_key) or {}
+                md = side_data.get("market_data") or {}
+                ltp = float(md.get("ltp") or 0)
+                if ltp > 0:
+                    out[(strike, side)] = {"ltp": ltp, "atp": ltp}
+        return out
+
+    async def _subscribe_expiry_window(self, expiry: date) -> None:
+        """Subscribe the ATM ± pool-depth window for the chosen expiry so live ticks arrive."""
+        if not self._rebalancer:
+            return
+        feeder = getattr(self._rebalancer, "_feeder", None)
+        if not feeder:
+            return
+        from data_layer.instrument_registry import REGISTRY
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        itm = int(ss.get("pool_itm_depth", 4))
+        otm = int(ss.get("pool_otm_depth", 4))
+        strikes = pool_strike_set(self._spot, step, itm, otm)
+        tokens = []
+        for stk in strikes:
+            for side in ("CE", "PE"):
+                key = REGISTRY.get_broker_symbol(self._underlying, expiry, int(stk), side, "upstox")
+                if key:
+                    tokens.append(key)
+        if tokens:
+            await feeder.subscribe_tokens(tokens)
+            self._entry_expiry_tokens = tokens
+            logger.info(
+                "SellStraddle[%s]: subscribed %s window (%d tokens) for expiry %s.",
+                self._underlying, self._underlying, len(tokens), expiry.isoformat(),
+            )
+
+    async def _unsubscribe_entry_expiry_tokens(self) -> None:
+        """Clean up tokens that were subscribed solely for the entry-expiry window."""
+        if not getattr(self, "_entry_expiry_tokens", None):
+            return
+        if self._rebalancer:
+            feeder = getattr(self._rebalancer, "_feeder", None)
+            if feeder:
+                try:
+                    await feeder.unsubscribe_tokens(self._entry_expiry_tokens)
+                except Exception:
+                    pass
+        self._entry_expiry_tokens = []
+
+    async def liquidate(self, reason: str = "kill_switch") -> None:
+        """Emergency close of any open position. Used by kill-switch, deployment removal
+        and graceful shutdown so broker positions are not stranded."""
+        if not (self._position and self._position.status == "open"):
+            return
+        _cid = self._client_id or "-"
+        _bid = self._binding_id or "-"
+        logger.warning(
+            "SellStraddle[%s|%s|%s]: LIQUIDATE received (%s) — closing open position.",
+            self._underlying, _cid, _bid, reason,
+        )
+        await self._close_position(reason)
 
     def stop(self) -> None:
         self._running = False
@@ -403,7 +526,17 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
         self._beginning_failed = False
-        logger.info("SellStraddleStrategy[%s]: session reset.", self._underlying)
+        # Recompute effective entry expiry for the new session/day.
+        self._entry_expiry_date = self._effective_entry_expiry()
+        try:
+            import asyncio as _aio
+            loop = _aio.get_running_loop()
+            loop.create_task(self._unsubscribe_entry_expiry_tokens())
+        except RuntimeError:
+            pass
+        logger.info("SellStraddleStrategy[%s]: session reset. entry_expiry=%s",
+                    self._underlying,
+                    self._entry_expiry_date.isoformat() if self._entry_expiry_date else None)
 
     # ── EventBus loops ────────────────────────────────────────────────────────
 
@@ -500,67 +633,90 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     continue
                 if ev.underlying != self._underlying:
                     continue
-                self._on_fill(ev)
+                try:
+                    self._on_fill(ev)
+                except Exception as _exc:
+                    logger.exception(
+                        "SellStraddle[%s]: _on_fill error (recovered, fill loop alive): %s",
+                        self._underlying, _exc,
+                    )
+                    # If the abort path left us without a position but the pending
+                    # flag is still set, clear it so future entries are not blocked.
+                    if self._position is None:
+                        self._order_pending = False
         finally:
             self._bus.unsubscribe(Topic.ORDER_FILL, q)
             self._loop_queues.pop("fill", None)
 
     def _on_fill(self, fill) -> None:
-        if fill.action == "ENTRY":
-            if getattr(fill, "entry_aborted", False):
-                logger.error(
-                    "SellStraddle[%s]: ENTRY ABORTED by bridge (asymmetric fill) — discarding "
-                    "optimistic position; broker leg(s) were flattened. [%s/%s]",
-                    self._underlying, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
-                )
-                self._position = None
-                self._trades_today = max(0, self._trades_today - 1)
+        try:
+            if fill.action == "ENTRY":
+                _routing_failed = getattr(fill, "routing_failed", False)
+                if getattr(fill, "entry_aborted", False) or _routing_failed:
+                    _reason = "routing failed" if _routing_failed else "asymmetric fill"
+                    logger.error(
+                        "SellStraddle[%s]: ENTRY ABORTED (%s) — discarding optimistic position. [%s/%s]",
+                        self._underlying, _reason, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
+                    )
+                    self._position = None
+                    self._trades_today = max(0, self._trades_today - 1)
+                    self._order_pending = False
+                    self._persist()
+                    # Routing failures carry no broker risk; cooldown only for real asymmetric fills.
+                    if not _routing_failed:
+                        self._apply_sl_cooldown()
+                    return
+                if self._position and self._position.status == "open":
+                    _legs = getattr(fill, "legs", ["CE", "PE"])
+                    if "CE" in _legs and fill.ce_fill and fill.ce_fill > 0:
+                        self._position.ce_leg.ltp = fill.ce_fill
+                        self._position.ce_leg.entry_price = fill.ce_fill
+                        if getattr(fill, "ce_symbol", ""):
+                            self._position.ce_leg.symbol = fill.ce_symbol
+                    if "PE" in _legs and fill.pe_fill and fill.pe_fill > 0:
+                        self._position.pe_leg.ltp = fill.pe_fill
+                        self._position.pe_leg.entry_price = fill.pe_fill
+                        if getattr(fill, "pe_symbol", ""):
+                            self._position.pe_leg.symbol = fill.pe_symbol
+                    self._position.net_credit = self._position.ce_leg.entry_price + self._position.pe_leg.entry_price
+                    self._persist()
+                    self.notify_position_update(self._position.to_dict(), force=True)
+                    _ce_disp = self._position.ce_leg.symbol or f"CE{int(self._position.ce_leg.strike)}"
+                    _pe_disp = self._position.pe_leg.symbol or f"PE{int(self._position.pe_leg.strike)}"
+                    logger.info(
+                        "SellStraddle[%s|%s|%s]: ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f legs=%s",
+                        self._underlying, fill.client_id, fill.binding_id,
+                        _ce_disp, self._position.ce_leg.entry_price,
+                        _pe_disp, self._position.pe_leg.entry_price,
+                        self._position.net_credit, _legs,
+                    )
+                    self._clog.info(
+                        "ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f legs=%s",
+                        _ce_disp, self._position.ce_leg.entry_price,
+                        _pe_disp, self._position.pe_leg.entry_price,
+                        self._position.net_credit, _legs,
+                    )
                 self._order_pending = False
-                self._persist()
-                self._apply_sl_cooldown()
-                return
-            if self._position and self._position.status == "open":
-                _legs = getattr(fill, "legs", ["CE", "PE"])
-                if "CE" in _legs and fill.ce_fill and fill.ce_fill > 0:
-                    self._position.ce_leg.ltp = fill.ce_fill
-                    self._position.ce_leg.entry_price = fill.ce_fill
-                    if getattr(fill, "ce_symbol", ""):
-                        self._position.ce_leg.symbol = fill.ce_symbol
-                if "PE" in _legs and fill.pe_fill and fill.pe_fill > 0:
-                    self._position.pe_leg.ltp = fill.pe_fill
-                    self._position.pe_leg.entry_price = fill.pe_fill
-                    if getattr(fill, "pe_symbol", ""):
-                        self._position.pe_leg.symbol = fill.pe_symbol
-                self._position.net_credit = self._position.ce_leg.entry_price + self._position.pe_leg.entry_price
-                self._persist()
-                self.notify_position_update(self._position.to_dict(), force=True)
-                _ce_disp = self._position.ce_leg.symbol or f"CE{int(self._position.ce_leg.strike)}"
-                _pe_disp = self._position.pe_leg.symbol or f"PE{int(self._position.pe_leg.strike)}"
+            elif fill.action == "EXIT":
                 logger.info(
-                    "SellStraddle[%s|%s|%s]: ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f legs=%s",
+                    "SellStraddle[%s|%s|%s]: EXIT confirmed — CE=%.2f PE=%.2f",
                     self._underlying, fill.client_id, fill.binding_id,
-                    _ce_disp, self._position.ce_leg.entry_price,
-                    _pe_disp, self._position.pe_leg.entry_price,
-                    self._position.net_credit, _legs,
+                    fill.ce_fill, fill.pe_fill,
                 )
                 self._clog.info(
-                    "ENTRY confirmed — %s=%.2f %s=%.2f credit=%.2f legs=%s",
-                    _ce_disp, self._position.ce_leg.entry_price,
-                    _pe_disp, self._position.pe_leg.entry_price,
-                    self._position.net_credit, _legs,
+                    "EXIT confirmed — CE=%.2f PE=%.2f",
+                    fill.ce_fill, fill.pe_fill,
                 )
-            self._order_pending = False
-        elif fill.action == "EXIT":
-            logger.info(
-                "SellStraddle[%s|%s|%s]: EXIT confirmed — CE=%.2f PE=%.2f",
-                self._underlying, fill.client_id, fill.binding_id,
-                fill.ce_fill, fill.pe_fill,
+                self._order_pending = False
+        except Exception as _exc:
+            logger.exception(
+                "SellStraddle[%s]: _on_fill error (recovered): %s",
+                self._underlying, _exc,
             )
-            self._clog.info(
-                "EXIT confirmed — CE=%.2f PE=%.2f",
-                fill.ce_fill, fill.pe_fill,
-            )
-            self._order_pending = False
+            # If we no longer have a position but the pending flag is still set,
+            # unblock future entries so a malformed fill cannot deadlock the book.
+            if self._position is None:
+                self._order_pending = False
 
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick
@@ -590,7 +746,13 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     _last_log_ts = now_ts
                 step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
                 atm = round(self._spot / step) * step if self._spot > 0 else 0
-                if tick.ltp > 0:
+
+                # Only populate the internal strike_prem from the effective entry expiry.
+                # This prevents current-expiry ticks from polluting data on expiry day.
+                _entry_exp_ok = (self._entry_expiry_date is None or
+                                 tick.expiry == self._entry_expiry_date)
+
+                if tick.ltp > 0 and _entry_exp_ok:
                     _k = (int(tick.strike), tick.option_type)
                     _a = float(getattr(tick, "atp", 0.0) or 0.0)
                     entry = self._strike_prem.get(_k)
@@ -604,7 +766,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     self._pool_engine.update_tick(
                         int(tick.strike), tick.option_type,
                         ltp=float(tick.ltp), atp=_eng_atp)
-                if atm > 0 and tick.ltp > 0 and abs(tick.strike - atm) < step / 2:
+                if atm > 0 and tick.ltp > 0 and _entry_exp_ok and abs(tick.strike - atm) < step / 2:
                     _atp = float(getattr(tick, "atp", 0.0) or 0.0)
                     if tick.option_type == "CE":
                         self._ce_ltp = tick.ltp
@@ -616,6 +778,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                             self._pe_atp = _atp
                 if self._position and self._position.status == "open":
                     pos = self._position
+                    # Ignore ticks from a different expiry than the position's.
+                    if tick.expiry != pos.expiry_date:
+                        continue
                     _mk = float(getattr(tick, "atp", 0.0) or 0.0)
                     if tick.option_type == "CE" and abs(tick.strike - pos.ce_leg.strike) < 0.01:
                         pos.ce_leg.ltp = tick.ltp

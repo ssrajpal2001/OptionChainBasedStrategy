@@ -7,7 +7,7 @@ strategy/feed dependencies so they can be imported and tested in isolation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, Optional
 
 
@@ -31,6 +31,7 @@ class StraddlePosition:
     entry_spot: float
     ce_leg: StraddleLeg = field(default_factory=lambda: StraddleLeg("CE", 0, 0))
     pe_leg: StraddleLeg = field(default_factory=lambda: StraddleLeg("PE", 0, 0))
+    expiry_date: Optional[date] = None
 
     net_credit: float = 0.0       # CE_entry + PE_entry at open
     tsl_high_lock_rs: float = 0.0  # Highest scalable TSL lock reached in ₹
@@ -74,7 +75,7 @@ class StraddlePosition:
                     "open_reason": l.open_reason}
         return {
             "underlying": self.underlying, "atm_at_entry": self.atm_at_entry,
-            "entry_spot": self.entry_spot,
+            "entry_spot": self.entry_spot, "expiry_date": self.expiry_date.isoformat() if self.expiry_date else None,
             "ce_leg": _leg(self.ce_leg), "pe_leg": _leg(self.pe_leg),
             "net_credit": self.net_credit, "tsl_high_lock_rs": self.tsl_high_lock_rs,
             "peak_profit": self.peak_profit, "trailing_active": self.trailing_active,
@@ -99,6 +100,7 @@ class StraddlePosition:
         return cls(
             underlying=d["underlying"], atm_at_entry=d.get("atm_at_entry", 0.0),
             entry_spot=d.get("entry_spot", 0.0),
+            expiry_date=_dt.fromisoformat(d["expiry_date"]).date() if d.get("expiry_date") else None,
             ce_leg=_leg(d["ce_leg"]), pe_leg=_leg(d["pe_leg"]),
             net_credit=d.get("net_credit", 0.0), tsl_high_lock_rs=d.get("tsl_high_lock_rs", 0.0),
             peak_profit=d.get("peak_profit", 0.0), trailing_active=d.get("trailing_active", False),

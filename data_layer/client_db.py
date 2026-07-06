@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS strategy_deployments (
     lot_multiplier     REAL NOT NULL DEFAULT 1.0,
     max_profit_rs      REAL NOT NULL DEFAULT 0.0,
     max_sl_rs          REAL NOT NULL DEFAULT 0.0,
-    squareoff_time     TEXT NOT NULL DEFAULT '15:15',
+    squareoff_time     TEXT NOT NULL DEFAULT '15:20',
     is_active          INTEGER DEFAULT 1,
     is_running         INTEGER DEFAULT 0,   -- per-strategy Start/Stop toggle (0 = deployed but stopped)
     expiry_mode        TEXT NOT NULL DEFAULT 'current',  -- current|next_week|monthly|<date YYYY-MM-DD>

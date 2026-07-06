@@ -76,6 +76,10 @@ class StraddleOrderEvent:
     legs:           list = field(default_factory=lambda: ["CE", "PE"])  # legs to act on
     leg_open_times: dict = field(default_factory=dict)  # "CE"/"PE" -> ISO open_time (for history)
     leg_open_reasons: dict = field(default_factory=dict)  # "CE"/"PE" -> open reason code (for history)
+    # Chosen expiry for this order. None → bridge resolves the nearest active expiry.
+    expiry:         Optional[date] = None
+    # Strategy decision timestamp for exits. Used so EOD square-off records at the configured time.
+    close_time:     Optional[datetime] = None
     # Per-binding refactor: when a per-(client,binding) book emits an order it stamps its OWN
     # identity here, so the bridge routes to EXACTLY that broker (no mirror-to-all). Empty =
     # legacy per-index engine → bridge keeps the old behaviour (route to all eligible brokers).
@@ -105,6 +109,9 @@ class StraddleFillEvent:
     # True when a LIVE ENTRY filled asymmetrically (one leg only) and the bridge flattened the filled
     # leg and ABORTED — the strategy must discard its optimistic position, never manage a naked leg.
     entry_aborted: bool = False
+    # True when the bridge could not route the order to any eligible broker (terminal off / no running
+    # deployment). The strategy must treat this like an aborted entry and clear its pending flag.
+    routing_failed: bool = False
 
 
 # ── Iron Condor order events ──────────────────────────────────────────────────
@@ -203,7 +210,8 @@ class TradeLogger:
         entry_ce:   float,
         entry_pe:   float,
     ) -> None:
-        ts       = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+        _exit_dt = ev.close_time if getattr(ev, "close_time", None) else datetime.now(IST)
+        ts       = _exit_dt.strftime("%Y-%m-%d %H:%M:%S")
         qty      = ev.lot_size * ev.lot_multiplier
         # P&L from the REAL fills (short: entry − buyback), scoped to the legs ACTUALLY closed in this
         # event. NOT ev.realized_pnl — the strategy set that from its cached signal-time LTP, which on a
@@ -240,7 +248,7 @@ class TradeLogger:
             _sides = set(getattr(ev, "legs", None) or ["CE", "PE"])
             _open_ts = getattr(ev, "leg_open_times", None) or {}
             _open_rs = getattr(ev, "leg_open_reasons", None) or {}
-            _exit_ts = datetime.now(IST).isoformat(timespec="seconds")
+            _exit_ts = _exit_dt.isoformat(timespec="seconds")
             _all = [
                 {"side": "CE", "strike": ev.ce_strike, "entry": entry_ce,
                  "exit": fill.ce_fill, "pnl": (entry_ce - fill.ce_fill) * qty,
@@ -424,12 +432,20 @@ class StraddleExecutionBridge:
                     ev.action, ev.underlying, client.client_id, binding_id, mode,
                 )
 
-                if broker is None or mode == "paper":
-                    # PAPER = PURE LOCAL SIMULATION — never send a real order. On a FUNDED exchange
-                    # (e.g. Delta) a "paper" order can partially fill (the cheap leg) and a later
-                    # paper-close BUY fills too, leaving a real phantom position. Paper must stay
-                    # entirely in-app; use LIVE mode for real order placement.
+                if broker is None:
+                    # No broker instance available — pure local simulation so the strategy can
+                    # still run its books without crashing the bridge.
                     await self._paper_fill(ev, client.client_id, binding_id, broker)
+                elif mode == "paper":
+                    # PAPER = PURE LOCAL SIMULATION — never send a real order. Use this when you
+                    # want to backtest / replay without any broker interaction.
+                    await self._paper_fill(ev, client.client_id, binding_id, broker)
+                elif mode == "paper_route":
+                    # PAPER_ROUTE = send the real order to the broker for connectivity verification,
+                    # but book a LOCAL simulated fill at strategy LTP. Intended for no-fund accounts
+                    # where the broker is expected to REJECT the order; the strategy state stays
+                    # consistent with the simulation.
+                    await self._live_fill(ev, client.client_id, binding_id, broker, paper=True)
                 else:
                     # LIVE: real broker order + real fill, order_id tracked for close-via-order-id.
                     await self._live_fill(ev, client.client_id, binding_id, broker, paper=False)
@@ -441,6 +457,26 @@ class StraddleExecutionBridge:
                 "Ensure Terminal is ON and Engine is ON for at least one broker.",
                 ev.action, ev.underlying,
             )
+            if ev.action == "ENTRY":
+                # Publish an aborted fill so the strategy clears its optimistic position and
+                # pending flag instead of blocking future entries forever.
+                await self._bus.publish(
+                    Topic.ORDER_FILL,
+                    StraddleFillEvent(
+                        action="ENTRY",
+                        underlying=ev.underlying,
+                        atm=ev.atm,
+                        ce_strike=ev.ce_strike,
+                        pe_strike=ev.pe_strike,
+                        ce_fill=0.0,
+                        pe_fill=0.0,
+                        client_id=ev.client_id or "",
+                        binding_id=ev.binding_id or "",
+                        event_id=ev.event_id,
+                        entry_aborted=True,
+                        routing_failed=True,
+                    ),
+                )
 
     def _other_active_broker_for(self, underlying: str, excl_client: str, excl_binding: str) -> bool:
         """True if some OTHER client-broker (not excl_client/excl_binding) is still engine-active
