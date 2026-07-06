@@ -886,6 +886,12 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     _zone_scan_ran = not self._position and self._ltp_in_any_htf_zone(bkey)
                     if _zone_scan_ran:
                         self._on_candle_close(label, ts)
+                        # HTF direct-limit path: if price has moved into a trapped HTF zone
+                        # between 75m boundaries, fire a limit order immediately.
+                        if getattr(self, "_htf_direct_limit_entry", False):
+                            asyncio.get_event_loop().create_task(
+                                self._check_htf_direct_entries()
+                            )
                     await self._bus.publish(Topic.TRAP_TICK, {
                         "cid": self._cid, "bid": self._bid, "und": self._und,
                         "leg": bkey, "ltp": ltp,
