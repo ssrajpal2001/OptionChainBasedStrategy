@@ -113,7 +113,9 @@ class ExitMixin:
             if not pos["t1_hit"] and trigger_price >= pos["t1_price"] and self._htf_source != "futures":
                 pos["t1_hit"] = True
                 pos["remaining_qty"] -= pos["t1_qty"]
-                pos["trail_sl"] = pos.get("spot_at_entry", pos["entry_price"])
+                # Option-mode: trail SL = CTC of the option position (entry_price).
+                # Futures-mode T1 is handled in _check_option_t1 with futures-unit trail.
+                pos["trail_sl"] = pos["entry_price"]
                 pos["t1_realised_pnl"] = (ltp - pos["entry_price"]) * pos["t1_qty"]
                 self._log.info("T1 HIT trigger=%.2f(%s) t1=%.2f qty=%d → trail_sl=%.2f  t1_pnl=%.0f",
                                trigger_price,
