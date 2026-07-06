@@ -17,9 +17,14 @@ import logging
 from typing import Dict
 
 from strategies.core import StrategyBookManager
-from strategies.sell_straddle import SellStraddleStrategy
 
 logger = logging.getLogger(__name__)
+
+# Placeholder for SellStraddleStrategy.  Production code leaves this as None and
+# performs a local import inside _spawn_book() to avoid a circular import with
+# strategies.sell_straddle.__init__.  Unit tests monkeypatch this attribute to
+# inject a fake book class.
+SellStraddleStrategy = None
 
 
 class StraddleBookManager(StrategyBookManager):
@@ -52,12 +57,19 @@ class StraddleBookManager(StrategyBookManager):
         return wanted
 
     def _spawn_book(self, key, lots):
+        # Avoid circular import with strategies.sell_straddle.__init__.py at module
+        # load time.  Tests can monkeypatch SellStraddleStrategy directly.
+        cls = SellStraddleStrategy
+        if cls is None:
+            from strategies.sell_straddle import SellStraddleStrategy as cls
         cid, bid, und = key
-        book = SellStraddleStrategy(
+        book = cls(
             self._bus, self._cfg, underlying=und,
             lot_multiplier=lots, client_id=cid, binding_id=bid,
         )
         book.set_client_db(self._db)
+        if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
+            book.set_rebalancer(self._rebalancer)
         if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
             self._rebalancer.enable_chain(und)
         return book
