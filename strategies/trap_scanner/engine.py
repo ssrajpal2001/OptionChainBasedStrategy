@@ -787,8 +787,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 z_high = zone.get("zone_high", 0.0)
                 if not (z_low > 0 and z_high > 0):
                     continue
-                # Price must be inside zone or slightly above it (tick-boundary buffer)
-                if not (z_low <= ltp <= z_high + entry_buf):
+                # Place the limit order as long as the zone is not broken below.
+                # Price may already be above zone_high (fast move); the limit order
+                # will then wait for a retest of the zone trigger.
+                if ltp < z_low:
                     continue
 
                 sl_price = round(z_low - self._sl_buf, 2)
