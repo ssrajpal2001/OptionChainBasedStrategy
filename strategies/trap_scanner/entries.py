@@ -493,8 +493,8 @@ class EntryMixin:
 
         try:
             self._log.info(
-                "HTF DIRECT [%s] uid=%s: placing LIMIT %d%s @%.2f (1-ITM)",
-                leg, uid, strike, opt_type, entry_price,
+                "HTF DIRECT [%s] uid=%s: placing LIMIT %s @%.2f (1-ITM)",
+                leg, uid, broker_sym, entry_price,
             )
             req = OrderRequest(
                 broker_symbol=broker_sym,
@@ -535,8 +535,9 @@ class EntryMixin:
                 break
             if fl.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
                 self._log.warning(
-                    "HTF DIRECT [%s] uid=%s: order %s %s",
+                    "HTF DIRECT [%s] uid=%s: order %s %s — %s",
                     leg, uid, order_id, fl.status.name,
+                    fl.raw.get("status_message") or fl.raw,
                 )
                 fill = fl
                 break

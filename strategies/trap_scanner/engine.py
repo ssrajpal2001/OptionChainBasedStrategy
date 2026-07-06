@@ -788,10 +788,20 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 z_high = zone.get("zone_high", 0.0)
                 if not (z_low > 0 and z_high > 0):
                     continue
-                # Place the limit order as long as the zone is not broken below.
-                # Price may already be above zone_high (fast move); the limit order
-                # will then wait for a retest of the zone trigger.
-                if ltp < z_low:
+                # Place the limit order only when price is inside the HTF zone
+                # or slightly above it (tick-boundary buffer). If the price has
+                # already blown far past the zone, do not chase with a far-limit
+                # order that the exchange will reject.
+                if not (z_low <= ltp <= z_high + entry_buf):
+                    continue
+
+                # Exchange price-band guard: do not place a buy-limit that is
+                # drastically below current LTP, otherwise it gets rejected.
+                if entry_price < ltp * 0.85:
+                    self._log.info(
+                        "HTF DIRECT [%s] uid=%s: entry %.1f too far below ltp %.1f — skipping",
+                        leg, uid, entry_price, ltp,
+                    )
                     continue
 
                 sl_price = round(z_low - self._sl_buf, 2)
