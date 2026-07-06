@@ -166,7 +166,7 @@ def test_classify_today_touch_ce_broken():
 
 def test_build_result_uses_zone_entry_for_rr():
     from fno_stock_scanner import _build_result
-    best = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-17",
+    best = {"kind": "BEAR", "status": "TRAPPED", "trapped_on": "2026-06-30",
             "ref_ts": "2026-06-16", "sl": 1348.0,
             "zone_high": 1265.6, "zone_low": 1255.0}
     r = _build_result(symbol="VOLTAS", lot_size=1000, strike_step=5,

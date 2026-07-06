@@ -72,6 +72,18 @@ class ExitMixin:
             await self._check_sweep_reentry(ltp)
             return
 
+        # Spot-mode exits are driven by spot price (see _check_spot_exit), not option LTP.
+        if self._htf_source == "spot":
+            return
+
+        # Exit-trigger toggle: check SL/target against NIFTY spot price instead of option LTP.
+        # Fill price and P&L still use option LTP.
+        trigger_price = ltp
+        if getattr(self, "_exit_on_spot", False):
+            spot = getattr(self, "_spot_cache", 0.0)
+            if spot > 0:
+                trigger_price = spot
+
         if self._no_target_tsl:
             # ── No-Target-TSL mode ───────────────────────────────────────────
             # Skip T1 half-exit and TSL entirely.
@@ -96,13 +108,15 @@ class ExitMixin:
         else:
             # ── Standard mode: T1 half-exit + TSL ───────────────────────────
             # T1: 50% at HTF target (option-mode only; futures-mode T1 in _check_option_t1)
-            if not pos["t1_hit"] and ltp >= pos["t1_price"] and self._htf_source != "futures":
+            if not pos["t1_hit"] and trigger_price >= pos["t1_price"] and self._htf_source != "futures":
                 pos["t1_hit"] = True
                 pos["remaining_qty"] -= pos["t1_qty"]
                 pos["trail_sl"] = pos.get("spot_at_entry", pos["entry_price"])
                 pos["t1_realised_pnl"] = (ltp - pos["entry_price"]) * pos["t1_qty"]
-                self._log.info("T1 HIT ltp=%.2f t1=%.2f qty=%d → trail_sl=%.2f  t1_pnl=%.0f",
-                               ltp, pos["t1_price"], pos["t1_qty"], pos["entry_price"],
+                self._log.info("T1 HIT trigger=%.2f(%s) t1=%.2f qty=%d → trail_sl=%.2f  t1_pnl=%.0f",
+                               trigger_price,
+                               "spot" if getattr(self, "_exit_on_spot", False) else "opt",
+                               pos["t1_price"], pos["t1_qty"], pos["entry_price"],
                                pos["t1_realised_pnl"])
                 oid = await self._place_exit(pos["t1_qty"], pos["t1_price"], "T1")
                 pos["order_id_t1"] = oid
@@ -111,11 +125,13 @@ class ExitMixin:
 
             # T2: runner exit — close remaining qty at HTF (180m) target
             if pos["t1_hit"] and not pos.get("t2_hit") and pos.get("t2_price", 0) > 0:
-                if ltp >= pos["t2_price"]:
+                if trigger_price >= pos["t2_price"]:
                     pos["t2_hit"] = True
                     remaining = pos["remaining_qty"]
-                    self._log.info("T2 HIT ltp=%.2f t2=%.2f qty=%d → closing all",
-                                   ltp, pos["t2_price"], remaining)
+                    self._log.info("T2 HIT trigger=%.2f(%s) t2=%.2f qty=%d → closing all",
+                                   trigger_price,
+                                   "spot" if getattr(self, "_exit_on_spot", False) else "opt",
+                                   pos["t2_price"], remaining)
                     await self._place_exit(remaining, pos["t2_price"], "T2")
                     self._record_closed_trade(pos, exit_price=ltp, exit_reason="T2",
                                               qty_override=remaining)
@@ -123,8 +139,9 @@ class ExitMixin:
                     self._clear_persisted_position()
                     return
 
-            # Advance 5m trail SL using OPTION bar lows (only after T1)
-            if pos["t1_hit"] and ts is not None:
+            # Advance 5m trail SL using OPTION bar lows (only after T1).
+            # Skip when exits are checked against spot — trail levels would be option-priced.
+            if pos["t1_hit"] and ts is not None and not getattr(self, "_exit_on_spot", False):
                 self._update_trail_sl(pos, ts)
 
             # Profit floor: locks after T1; exits if P&L drops below floor
@@ -152,11 +169,14 @@ class ExitMixin:
         active_sl = pos["sl_price"] if self._no_target_tsl else (
             pos["trail_sl"] if pos["t1_hit"] else pos["sl_price"])
         is_pe_fut = (self._htf_source == "futures" and pos.get("opt_type") == "PE")
-        sl_hit = (ltp >= active_sl) if is_pe_fut else (ltp <= active_sl)
+        sl_hit = (trigger_price >= active_sl) if is_pe_fut else (trigger_price <= active_sl)
         if sl_hit:
             remaining = pos["remaining_qty"]
             reason = "TRAIL_SL" if pos["t1_hit"] else "SL"
-            self._log.info("%s ltp=%.2f sl=%.2f qty=%d", reason, ltp, active_sl, remaining)
+            self._log.info("%s trigger=%.2f(%s) sl=%.2f qty=%d",
+                           reason, trigger_price,
+                           "spot" if getattr(self, "_exit_on_spot", False) else "opt",
+                           active_sl, remaining)
             await self._place_exit(remaining, active_sl, reason)
             self._record_closed_trade(pos, exit_price=ltp, exit_reason=reason)
             # Liquidity sweep watch: only on plain SL (not trail), not after T1.
@@ -172,6 +192,115 @@ class ExitMixin:
                     "orig_entry": pos["entry_price"],
                 }
                 self._log.info("SL hit — watching for liquidity sweep re-entry above %.2f", active_sl)
+            self._position = None
+            self._clear_persisted_position()
+
+    async def _check_spot_exit(self, spot: float, ts: Optional[datetime] = None) -> None:
+        """
+        Spot-mode exit manager.
+        Triggers are evaluated on the spot chart, but fills are priced at the
+        current option LTP for the held CE1/PE1 leg.
+        T1 = MTF target, T2 = HTF target, SL/trail in spot units.
+        """
+        pos = self._position
+        if not pos or self._htf_source != "spot":
+            return
+
+        opt_ltp = self._ltp_cache.get(pos.get("leg"), 0.0) or 0.0
+        side = pos.get("side", "CE")
+
+        if self._no_target_tsl:
+            # No-Target-TSL mode: skip T1/T2; use profit floor on full position P&L.
+            if self._profit_floor > 0:
+                total_qty = pos.get("total_qty", pos.get("remaining_qty", 0))
+                entry_px = pos.get("entry_price", 0.0)
+                current_pnl = (opt_ltp - entry_px) * total_qty
+                if not pos.get("floor_locked") and current_pnl >= self._profit_floor:
+                    pos["floor_locked"] = True
+                    self._log.info("FLOOR LOCKED ₹%.0f opt_ltp=%.2f pnl=%.0f",
+                                   self._profit_floor, opt_ltp, current_pnl)
+                if pos.get("floor_locked") and current_pnl < self._profit_floor:
+                    self._log.info("FLOOR_SL opt_ltp=%.2f pnl=%.0f < floor=%.0f → exit",
+                                   opt_ltp, current_pnl, self._profit_floor)
+                    remaining = pos["remaining_qty"]
+                    await self._place_exit(remaining, opt_ltp, "FLOOR_SL")
+                    self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="FLOOR_SL")
+                    self._position = None
+                    self._clear_persisted_position()
+                    return
+        else:
+            # T1: partial exit when spot reaches the MTF target.
+            if not pos["t1_hit"] and pos.get("t1_price", 0) > 0:
+                t1_hit = (side == "CE" and spot >= pos["t1_price"]) or (
+                    side == "PE" and spot <= pos["t1_price"]
+                )
+                if t1_hit:
+                    pos["t1_hit"] = True
+                    pos["remaining_qty"] -= pos["t1_qty"]
+                    pos["trail_sl"] = pos.get("spot_at_entry", pos["sl_price"])
+                    pos["t1_realised_pnl"] = (opt_ltp - pos["entry_price"]) * pos["t1_qty"]
+                    self._log.info(
+                        "T1 HIT (spot) spot=%.2f t1=%.2f qty=%d opt_ltp=%.2f → trail_sl=%.2f",
+                        spot, pos["t1_price"], pos["t1_qty"], opt_ltp, pos["trail_sl"]
+                    )
+                    oid = await self._place_exit(pos["t1_qty"], opt_ltp, "T1")
+                    pos["order_id_t1"] = oid
+                    self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="T1",
+                                              qty_override=pos["t1_qty"])
+                    self._persist_position()
+
+            # T2: runner exit when spot reaches the HTF target after T1.
+            if pos["t1_hit"] and not pos.get("t2_hit") and pos.get("t2_price", 0) > 0:
+                t2_hit = (side == "CE" and spot >= pos["t2_price"]) or (
+                    side == "PE" and spot <= pos["t2_price"]
+                )
+                if t2_hit:
+                    pos["t2_hit"] = True
+                    remaining = pos["remaining_qty"]
+                    self._log.info(
+                        "T2 HIT (spot) spot=%.2f t2=%.2f qty=%d opt_ltp=%.2f → closing all",
+                        spot, pos["t2_price"], remaining, opt_ltp
+                    )
+                    await self._place_exit(remaining, opt_ltp, "T2")
+                    self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="T2",
+                                              qty_override=remaining)
+                    self._position = None
+                    self._clear_persisted_position()
+                    return
+
+            # Profit floor: locks after T1; exits if P&L drops below floor.
+            if pos["t1_hit"] and self._profit_floor > 0:
+                t1_pnl = pos.get("t1_realised_pnl", 0.0)
+                rem_qty = pos.get("remaining_qty", 0)
+                entry_px = pos.get("entry_price", 0.0)
+                running_rem = (opt_ltp - entry_px) * rem_qty if rem_qty > 0 else 0.0
+                current_pnl = t1_pnl + running_rem
+                if not pos.get("floor_locked") and current_pnl >= self._profit_floor:
+                    pos["floor_locked"] = True
+                    self._log.info("PROFIT FLOOR LOCKED ₹%.0f (t1=%.0f + rem=%.0f)",
+                                   self._profit_floor, t1_pnl, running_rem)
+                if pos.get("floor_locked") and current_pnl < self._profit_floor:
+                    self._log.info("FLOOR_SL opt_ltp=%.2f pnl=%.0f < floor=%.0f → exit",
+                                   opt_ltp, current_pnl, self._profit_floor)
+                    remaining = pos["remaining_qty"]
+                    await self._place_exit(remaining, opt_ltp, "FLOOR_SL")
+                    self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="FLOOR_SL")
+                    self._position = None
+                    self._clear_persisted_position()
+                    return
+
+        # SL check (active in both modes).
+        active_sl = pos["sl_price"] if self._no_target_tsl else (
+            pos["trail_sl"] if pos["t1_hit"] else pos["sl_price"]
+        )
+        sl_hit = (side == "PE" and spot >= active_sl) or (side == "CE" and spot <= active_sl)
+        if sl_hit:
+            remaining = pos["remaining_qty"]
+            reason = "TRAIL_SL" if pos["t1_hit"] else "SL"
+            self._log.info("%s (spot) spot=%.2f sl=%.2f qty=%d opt_ltp=%.2f",
+                           reason, spot, active_sl, remaining, opt_ltp)
+            await self._place_exit(remaining, opt_ltp, reason)
+            self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason=reason)
             self._position = None
             self._clear_persisted_position()
 

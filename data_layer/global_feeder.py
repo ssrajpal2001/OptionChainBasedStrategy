@@ -48,6 +48,7 @@ class MockFeeder(BaseFeeder):
     _BASE: Dict[str, float] = {
         "NIFTY": 24_500.0, "BANKNIFTY": 52_000.0,
         "FINNIFTY": 23_000.0, "SENSEX": 80_000.0, "MIDCPNIFTY": 12_000.0,
+        "CRUDEOIL": 6_200.0,
     }
 
     def __init__(self, bus: EventBus, cfg: GlobalConfig) -> None:

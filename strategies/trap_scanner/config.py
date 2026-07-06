@@ -9,8 +9,9 @@ from typing import Dict
 _INDEX_CFG: Dict[str, dict] = {
     # htf_source="option": HTF and LTF both scan OPTION premium bars (same units → scan_ltf works)
     # Reference: NiftyTrapScanner phase2/ltf-entry-engine CLAUDE.md Section 2
-    # Cascade backtest optimised 2026-07-01 (Apr-Jun 2026, 18,432 combos, spot-proxy):
-    # NIFTY:     HTF=150m / LTF=5m  / SLbuf=10  / Sec=2(BN+NIFTYIT) → PF=11.4, 77% WR
+    # NIFTY HTF changed to 75m on 2026-07-05 per live-readiness request.
+    # Old cascade backtest (Apr-Jun 2026, 18,432 combos, spot-proxy) used 150m and
+    # reported PF=11.4, 77% WR; 75m is the user-selected setting for current deployment.
     # BANKNIFTY: HTF=180m / MTF=30m / LTF=3m  / SLbuf=30  / Sec=1(NIFTY) → PF=6.28, 78% WR (normal)
     #            GapThr=0.8% / DteFlt=10d (skip ALL trades when DTE<=10).
     #            gap_skip_dte=10: gap-fired also suppressed when DTE<=10 (GapWR=0% near expiry).
@@ -20,8 +21,9 @@ _INDEX_CFG: Dict[str, dict] = {
     "NIFTY":      {"step": 50,  "lot": 65,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 10.0, "cutoff": "15:10", "sq_off": "15:20",
                    "window": None, "exchange": "NFO", "htf_source": "option",
-                   "htf_min_override": 150, "ltf_min_override": 5,
-                   "use_ob_gate": True, "zigzag_len": 9},
+                   "htf_min_override": 75, "ltf_min_override": 5,
+                   "use_ob_gate": False, "zigzag_len": 9,
+                   "exit_on_spot": False},
     # BANKNIFTY 4-tier cascade: HTF=180m → MTF=30m → LTF=3m → Exec=3m
     # Confirmed optimal from nse_cascade_backtest.py 18k-combo sweep (Apr-Jun 2026).
     # dte_min_filter DISABLED (0): BANKNIFTY trades the monthly expiry. A 10-day
@@ -59,10 +61,13 @@ _INDEX_CFG: Dict[str, dict] = {
     # htf_min_override=120 (2h), ltf_min_override=5m — 90-day cascade backtest best:
     #   PF=2.888, 49% WR, trailing-SL only (cap irrelevant — no trade hits T1 or cap).
     #   LONG (bear trap) dominates: +$2.17 vs SHORT +$0.16. SL=$50 sufficient with 4-tier cascade.
+    # BTC: OB-direct mode. HTF=60m zone as container; OB+CHoCH gate fires entry
+    # directly at spot (no MTF/LTF sub-zone hunting). SL=$100, no cap.
+    # Backtest: HTF=60m + OB gate → PF=1.71, 27% WR, 13,533 trades over 16 months.
     "BTC":        {"step": 1000, "lot": 1,  "gap_near": 2000, "gap_far": 4000,
-                   "sl_buf": 50.0, "cutoff": None, "sq_off": None,
+                   "sl_buf": 100.0, "cutoff": None, "sq_off": None,
                    "window": None, "exchange": "DELTA", "htf_source": "futures",
-                   "htf_min_override": 5, "mtf_min_override": 3, "ltf_min_override": 1,
+                   "htf_min_override": 60, "mtf_min_override": 5, "ltf_min_override": 1,
                    "use_ob_gate": True, "zigzag_len": 9, "ob_atr_mult": 1.0},
     "ETH":        {"step": 100, "lot": 1,  "gap_near": 200, "gap_far": 400,
                    "sl_buf": 5.0, "cutoff": None, "sq_off": None,
@@ -242,3 +247,6 @@ class ConfigMixin:
         self._ob_gate_enabled = bool(_adm.get("use_ob_gate", _def.get("use_ob_gate", False)))
         self._zigzag_len      = int(_adm.get("zigzag_len",  _def.get("zigzag_len",  9)))
         self._ob_atr_mult     = float(_adm.get("ob_atr_mult", _def.get("ob_atr_mult", 1.0)))
+        # Exit trigger source toggle: if True, SL/target checks use NIFTY spot price
+        # instead of option LTP. Fill price and P&L still use option LTP.
+        self._exit_on_spot    = bool(_adm.get("exit_on_spot", _def.get("exit_on_spot", False)))

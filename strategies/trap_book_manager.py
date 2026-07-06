@@ -67,9 +67,18 @@ class TrapBookManager(StrategyBookManager):
             if not cid or not bid:
                 continue
             # Crypto (BTC/ETH) is always deployable — has its own Delta feed, not dependent on
-            # monitored_indices / Upstox. Only filter non-crypto by the index whitelist.
-            if self._indices and und not in self._indices and not self._cfg.exchange.is_crypto(und):
+            # monitored_indices / Upstox. Index underlyings are filtered by the whitelist so
+            # we don't spawn books for indices that have no live feed. Stock underlyings
+            # (anything not a known index) are allowed so the FNO stock scanner can deploy
+            # individual stock trap scanners.
+            _KNOWN_INDICES = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY",
+                              "CRUDEOIL", "GOLDM", "BTC", "ETH"}
+            is_known_index = und in _KNOWN_INDICES
+            if is_known_index and self._indices and und not in self._indices:
                 continue
+            if not is_known_index and not self._cfg.exchange.is_crypto(und):
+                # Stock: allow; rely on the deployment record and instrument registry.
+                pass
             try:
                 lots = int(round(float(d.get("lot_multiplier", 2) or 2)))
                 if lots % 2 != 0:

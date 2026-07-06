@@ -208,8 +208,10 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                             self._underlying, _restored_pct, self._day_loss_sl_pct,
                             self._session_realized_pnl_pts, self._initial_net_credit,
                         )
-                logger.info("SellStraddle[%s]: restored session — booked=%.2f pts trades=%d stop_for_day=%s",
-                            self._underlying, self._session_realized_pnl_pts, self._trades_today, self._stop_for_day)
+                logger.info("SellStraddle[%s]: restored session — booked=%.2f pts trades=%d "
+                            "credit=%.2f stop_for_day=%s",
+                            self._underlying, self._session_realized_pnl_pts, self._trades_today,
+                            self._initial_net_credit, self._stop_for_day)
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session restore failed: %s", self._underlying, exc)
 

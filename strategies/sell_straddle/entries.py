@@ -372,8 +372,10 @@ class EntryMixin:
         self._trades_today += 1
         self._beginning_failed = False
         self._order_pending = True
-        if self._initial_net_credit <= 0:
-            self._initial_net_credit = ce_ltp + pe_ltp
+        # Accumulate total premium/credit deployed today so day-level % guardrails
+        # use the correct denominator across multiple trades/re-entries.
+        _trade_credit = ce_ltp + pe_ltp
+        self._initial_net_credit += _trade_credit
         if self._position:
             _new_etv = float(getattr(self._position, "entry_time_value", 0.0) or 0.0) or (ce_ltp + pe_ltp)
             if _new_etv > self._initial_entry_time_value:

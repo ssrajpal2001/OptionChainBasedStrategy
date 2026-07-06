@@ -251,8 +251,8 @@ class ExitMixin:
                     self._session_realized_pnl_pts, pnl, _day_denom,
                     pos.net_credit, pos.current_value,
                 )
-                await self._close_position("day_profit_target")
                 self._stop_for_day = True
+                await self._close_position("day_profit_target")
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (profit target reached).", self._underlying)
                 return
 
@@ -264,8 +264,8 @@ class ExitMixin:
                     self._session_realized_pnl_pts, pnl, _day_denom,
                     pos.net_credit, pos.current_value,
                 )
-                await self._close_position("day_loss_sl")
                 self._stop_for_day = True
+                await self._close_position("day_loss_sl")
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 

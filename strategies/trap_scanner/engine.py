@@ -120,6 +120,11 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._htf_bull_zones_2: List[dict] = [] # seller traps in PE2 premium → buy PE2
         self._htf_fut_zones: List[dict] = []    # futures only
 
+        # Spot HTF zones used purely for live bias in option-mode (NIFTY/SENSEX).
+        # BEAR spot zone → allow CE option entries; BULL spot zone → allow PE entries.
+        self._spot_bear_zones: List[dict] = []
+        self._spot_bull_zones: List[dict] = []
+
         # htf_source="spot": separate option-level zones for LTF entry
         # Spot zones (above) decide direction; these decide the actual option entry level
         self._opt_bear_zones: List[dict] = []   # CE option HTF zones (option premium units)
@@ -235,7 +240,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             f"| ACTIVE TRAP-SCANNER SETTINGS -- {self._und} ({self._cid}/{self._bid})",
             f"|{border}",
             f"|  HTF: {self._htf_min}m  |  MTF: {self._cascade_min}m  |  LTF: {self._ltf_min}m  |  source: {source_label}",
-            f"|  OB gate: {'ON (zigzag='+str(self._zigzag_len)+')' if self._ob_gate_enabled else 'OFF'}  |  Trading mode: {getattr(self._broker, '_trading_mode_raw', None) or 'PAPER (no broker yet)'}",
+            f"|  OB gate: {'ON (zigzag='+str(self._zigzag_len)+')' if self._ob_gate_enabled else 'OFF'}  |  Exit trigger: {'SPOT' if getattr(self, '_exit_on_spot', False) else 'OPTION'}  |  Trading mode: {getattr(self._broker, '_trading_mode_raw', None) or 'PAPER (no broker yet)'}",
             f"|  SL buf: {self._sl_buf} pts below zone_low  |  Gap thresh: {self._gap_thresh}%",
             f"|  Entry cutoff: {cut}  |  Square-off: {sq}",
             f"|  Lots: {self._lot_mul} x {self._lot_size} = {self._lot_mul * self._lot_size} qty",
@@ -276,6 +281,23 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             except Exception:
                 pass
 
+
+    async def liquidate(self, reason: str = "kill_switch") -> None:
+        """Emergency flat: close any open position immediately at market.
+
+        Called by StrategyBookManager on KILL_SWITCH or firm-wide halt.
+        Mirrors _eod_square_off but uses the supplied reason and current LTP.
+        """
+        pos = self._position
+        if pos and pos.get("remaining_qty", 0) > 0:
+            self._log.warning("LIQUIDATE (%s): closing %d units of %s %s",
+                              reason, pos["remaining_qty"], pos.get("leg"), pos.get("strike"))
+            ltp = self._ltp_cache.get(pos.get("leg", ""), 0.0)
+            await self._place_exit(pos["remaining_qty"], 0.0, reason)
+            self._record_closed_trade(pos, exit_price=ltp, exit_reason=reason)
+        self._position = None
+        self._clear_persisted_position()
+        await self._cancel_exchange_sl()
     # ── Lifecycle loop ────────────────────────────────────────────────────────
 
     async def _lifecycle_loop(self) -> None:
@@ -598,6 +620,12 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 self._ce2_key = self._build_upstox_key(self._ce2_strike, "CE")
                 self._pe1_key = self._build_upstox_key(self._pe1_strike, "PE")
                 self._pe2_key = self._build_upstox_key(self._pe2_strike, "PE")
+                # Also fetch spot history for live bias (bear/bull trap sections).
+                spot_key = _SPOT_KEYS.get(self._und, "")
+                if not spot_key and is_stock(self._und):
+                    spot_key = stock_spot_key(self._und)
+                if spot_key and not self._bars_spot:
+                    self._bars_spot = await self._fetch_1m_history(spot_key)
                 if not self._bars_ce1:
                     self._bars_ce1 = await self._fetch_1m_history(self._ce1_key)
                 if not self._bars_ce2:
@@ -608,6 +636,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     self._bars_pe2 = await self._fetch_1m_history(self._pe2_key)
                 # Merge today's intraday bars for LTF cascade; Upstox primary + Fyers fallback.
                 for attr, key, strike, otype in [
+                    ("_bars_spot", spot_key, None, None),
                     ("_bars_ce1", self._ce1_key, self._ce1_strike, "CE"),
                     ("_bars_ce2", self._ce2_key, self._ce2_strike, "CE"),
                     ("_bars_pe1", self._pe1_key, self._pe1_strike, "PE"),
@@ -619,7 +648,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     if intra:
                         setattr(self, attr, self._merge_bars(getattr(self, attr), intra))
                 self._log.info(
-                    "Bars seeded — CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
+                    "Bars seeded — SPOT(%s)=%d CE1(%s)=%d CE2(%s)=%d PE1(%s)=%d PE2(%s)=%d",
+                    spot_key, len(self._bars_spot),
                     self._ce1_key, len(self._bars_ce1),
                     self._ce2_key, len(self._bars_ce2),
                     self._pe1_key, len(self._bars_pe1),
@@ -907,15 +937,26 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                                         await feeder.subscribe_tokens(keys)
                                 except Exception:
                                     pass
-                    # SPOT bars: legacy htf_source="spot" path
+                    # SPOT bars: keep spot history for option-mode bias and spot-mode cascade.
                     _idx_state_changed = False
-                    if self._htf_source == "spot":
+                    fut_ltp: Optional[float] = None
+                    if self._htf_source in ("spot", "option"):
                         closed = self._update_bucket("SPOT", tick.ltp, tick.timestamp)
                         if closed:
                             self._bars_spot.append(closed)
                             if len(self._bars_spot) > 2000:
                                 del self._bars_spot[:-2000]
                             self._on_candle_close("SPOT", tick.timestamp)
+                            _idx_state_changed = True
+                    if self._htf_source == "spot":
+                        fut_ltp = float(tick.ltp)
+                        self._ltp_cache["FUT"] = fut_ltp
+                        closed_fut = self._update_bucket("FUT", tick.ltp, tick.timestamp)
+                        if closed_fut:
+                            self._bars_fut.append(closed_fut)
+                            if len(self._bars_fut) > 2000:
+                                del self._bars_fut[:-2000]
+                            self._on_candle_close("FUT", tick.timestamp)
                             _idx_state_changed = True
                     # FUT bars: futures-mode (CrudeOil/BTC/ETH) — underlying LTP arrives as INDEX_TICK
                     elif self._htf_source == "futures":
@@ -928,35 +969,41 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                                 del self._bars_fut[:-2000]
                             self._on_candle_close("FUT", tick.timestamp)
                             _idx_state_changed = True
-                        # Futures-mode: SL/T1/trail all checked against futures LTP.
-                        # Signal, SL level, and T1 level all in futures ₹ → consistent.
-                        # When triggered, _place_exit closes the 1-ITM option via exec_key.
-                        _pos_before_idx = self._position
-                        if self._position and self._position.get("leg") == "FUT":
+
+                    # Price-domain exit checks:
+                    #   futures-mode → _check_tick_exit with futures LTP (leg=FUT)
+                    #   spot-mode    → _check_spot_exit with spot LTP (leg=CE1/PE1), fill price = option LTP
+                    _pos_before_idx = self._position
+                    if self._position and fut_ltp is not None:
+                        ps = self._position.get("leg", "")
+                        if self._htf_source == "futures" and ps == "FUT":
                             await self._check_tick_exit(fut_ltp, tick.timestamp)
-                        if _pos_before_idx and not self._position:
-                            _idx_state_changed = True
-                        # Futures cascade (MCX + DELTA/BTC — all htf_source=="futures"):
+                        elif self._htf_source == "spot" and ps in ("CE1", "PE1"):
+                            await self._check_spot_exit(fut_ltp, tick.timestamp)
+                    if _pos_before_idx and not self._position:
+                        _idx_state_changed = True
+
+                    # HTF→MTF→OB→1m-break cascade (futures-mode and spot-mode share _bars_fut).
+                    if self._htf_source in ("futures", "spot") and fut_ltp is not None and not self._position:
                         _cascade_before = (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position))
                         # Stage 1: HTF zone entry check
-                        if self._htf_source == "futures" and not self._position:
-                            await self._check_futures_zone_arm(fut_ltp)
+                        await self._check_futures_zone_arm(fut_ltp)
                         # Stage 2: MTF zone check — throttled to once/sec (pandas resample is expensive)
                         _now_t = _time_mod.monotonic()
-                        if (self._htf_source == "futures" and self._htf_zone_armed and not self._position
+                        if (self._htf_zone_armed
                                 and _now_t - self._last_mtf_check_t >= 1.0):
                             self._last_mtf_check_t = _now_t
                             await self._check_mtf_zone(fut_ltp)
                         # Stage 2.5: OB gate — throttled to once/sec (active_order_blocks zigzag is expensive)
-                        if (self._htf_source == "futures" and self._fut_armed_zone is not None
-                                and not self._ob_gate_armed and not self._position
+                        if (self._fut_armed_zone is not None
+                                and not self._ob_gate_armed
                                 and _now_t - self._last_ob_check_t >= 1.0):
                             self._last_ob_check_t = _now_t
                             await self._check_ob_gate(fut_ltp)
                         # Stage 3: 1m candle break entry check (after MTF confirmed + OB gate cleared)
                         _ob_clear = (not self._ob_gate_enabled) or self._ob_gate_armed
-                        if (self._htf_source == "futures" and self._fut_armed_zone is not None
-                                and _ob_clear and self._fut_armed_candle_ready and not self._position):
+                        if (self._fut_armed_zone is not None
+                                and _ob_clear and self._fut_armed_candle_ready):
                             await self._check_futures_arm_entry(fut_ltp, tick.timestamp)
                         if (self._htf_zone_armed, self._fut_armed_zone, self._ob_gate_armed, bool(self._position)) != _cascade_before:
                             _idx_state_changed = True
@@ -1171,22 +1218,44 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             )
             return
 
-        # MCX: compute 1-ITM option strike + subscribe
-        from strategies.trap_scanner.config import _round_strike
-        spot = self._spot_cache or 0.0
-        atm = _round_strike(spot, self._step)
-        if side == "CE":
-            strike = atm - self._step
-            opt_type = "CE"
-            self._ce1_strike = strike
-            self._ce1_key = self._build_upstox_key(strike, opt_type)
-            option_key = self._ce1_key
+        # NSE spot-mode: keep the pre-selected scan strike (CE1/PE1); do NOT switch to 1-ITM.
+        if self._htf_source == "spot":
+            if side == "CE":
+                opt_type = "CE"
+                option_key = self._ce1_key
+                strike = self._ce1_strike
+            else:
+                opt_type = "PE"
+                option_key = self._pe1_key
+                strike = self._pe1_strike
+            self._log.info(
+                "MTF ARMED [%s]: zone=%.1f..%.1f → scan strike %s%d (%s) — waiting 1m candle",
+                side, zone.get("zone_low", 0), zone.get("zone_high", 0),
+                opt_type, strike or 0, option_key,
+            )
         else:
-            strike = atm + self._step
-            opt_type = "PE"
-            self._pe1_strike = strike
-            self._pe1_key = self._build_upstox_key(strike, opt_type)
-            option_key = self._pe1_key
+            # MCX: compute 1-ITM option strike + subscribe
+            from strategies.trap_scanner.config import _round_strike
+            spot = self._spot_cache or 0.0
+            atm = _round_strike(spot, self._step)
+            if side == "CE":
+                strike = atm - self._step
+                opt_type = "CE"
+                self._ce1_strike = strike
+                self._ce1_key = self._build_upstox_key(strike, opt_type)
+                option_key = self._ce1_key
+            else:
+                strike = atm + self._step
+                opt_type = "PE"
+                self._pe1_strike = strike
+                self._pe1_key = self._build_upstox_key(strike, opt_type)
+                option_key = self._pe1_key
+
+            self._log.info(
+                "MTF ARMED [%s]: zone=%.1f..%.1f spot=%.1f → %s%d (%s) — waiting 1m candle",
+                side, zone.get("zone_low", 0), zone.get("zone_high", 0),
+                spot, opt_type, strike, option_key,
+            )
 
         feeder = (self._mcx_feeder if self._mcx_feeder is not None
                   else getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None)
@@ -1196,12 +1265,6 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     await feeder.subscribe_tokens([option_key])
             except Exception as exc:
                 self._log.warning("_arm_futures_leg: subscribe %s failed: %s", option_key, exc)
-
-        self._log.info(
-            "MTF ARMED [%s]: zone=%.1f..%.1f spot=%.1f → %s%d (%s) — waiting 1m candle",
-            side, zone.get("zone_low", 0), zone.get("zone_high", 0),
-            spot, opt_type, strike, option_key,
-        )
 
     def _reset_mtf_leg(self) -> None:
         """Reset MTF/LTF/OB state only — keeps HTF zone armed for next MTF opportunity."""
@@ -1284,7 +1347,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             )
             zone = self._fut_armed_zone
             self._reset_mtf_leg()   # keep HTF armed — more MTF zones may follow
-            await self._on_entry_signal("CE1", "CE", zone, zone)
+            await self._on_entry_signal("CE1", "CE", zone, self._htf_zone, mtf_zone=zone)
         elif side == "PE" and self._fut_armed_candle_low > 0 and spot < self._fut_armed_candle_low:
             self._log.info(
                 "ENTRY SIGNAL [PE]: spot=%.1f < 1m_L=%.1f — firing",
@@ -1292,7 +1355,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             )
             zone = self._fut_armed_zone
             self._reset_mtf_leg()   # keep HTF armed — more MTF zones may follow
-            await self._on_entry_signal("PE1", "PE", zone, zone)
+            await self._on_entry_signal("PE1", "PE", zone, self._htf_zone, mtf_zone=zone)
 
     # ── Trade gating ──────────────────────────────────────────────────────────
 
@@ -1327,6 +1390,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._htf_bear_zones = []; self._htf_bear_zones_2 = []
         self._htf_bull_zones = []; self._htf_bull_zones_2 = []
         self._htf_fut_zones  = []
+        self._spot_bear_zones = []; self._spot_bull_zones = []
         self._buckets        = {}
         self._notified_uids  = set()
         self._zone_ltf_status = {}

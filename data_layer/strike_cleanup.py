@@ -154,10 +154,11 @@ class StrikeCleanup:
                 continue
 
             try:
+                _sym = getattr(fill, "broker_symbol", None)
                 underlying = getattr(fill, "underlying", None) or \
-                             _extract_underlying(fill.broker_symbol)
+                             (_extract_underlying(_sym) if _sym else None)
                 strike = getattr(fill, "strike", None) or \
-                         _extract_strike(fill.broker_symbol)
+                         (_extract_strike(_sym) if _sym else None)
 
                 if not underlying or not strike:
                     continue

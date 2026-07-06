@@ -120,8 +120,23 @@ class EntryMixin:
             strike, exec_key = await self._pick_liquid_strike(
                 primary_strike, primary_key, atm, atm_key, opt_type, max_spread_pct
             )
+        elif self._htf_source == "spot":
+            # NIFTY spot-mode: signal is on the spot chart, execution is on the scan-strike option.
+            # Do NOT buy 1-ITM; keep CE1/PE1 as selected at day-open. Fall back to ATM only if
+            # the scan-strike feed is not yet alive.
+            primary_strike = scan_strike
+            primary_key    = self._build_upstox_key(primary_strike, opt_type)
+            scan_ltp       = self._ltp_cache.get(leg, 0) or 0
+            if scan_ltp > 0:
+                strike, exec_key = primary_strike, primary_key
+            else:
+                strike, exec_key = atm, self._build_upstox_key(atm, opt_type)
+                self._log.info(
+                    "Spot-mode entry: scan strike %d%s has no LTP yet → falling back to ATM %d%s",
+                    primary_strike, opt_type, strike, opt_type,
+                )
         else:
-            # Sensex/Nifty: 1-ITM option is primary; ATM as fallback if spread too wide.
+            # Sensex/Nifty option-mode: 1-ITM option is primary; ATM as fallback if spread too wide.
             # tracked_sym (scan_key) = SCAN STRIKE option key — never changes, even if
             # exec_key falls back to ATM. SL/T1 are always on the scan strike option LTP.
             if opt_type == "CE":
@@ -172,6 +187,23 @@ class EntryMixin:
             opt_bars = self._bars_ce1 if opt_type == "CE" else self._bars_pe1
             t1_price     = self._compute_option_t1(opt_bars)
             t1_price_fut = round(htf_zone.get("sl", 0), 2)  # kept for logging/UI reference
+        elif self._htf_source == "spot":
+            tracking_leg = leg   # CE1 or PE1 — scan-strike option for execution
+            # SL is in SPOT units because the signal/zone is on the spot chart.
+            if opt_type == "CE":
+                sl_price = round(entry["zone_low"] - self._sl_buf, 2)
+            else:
+                sl_price = round(entry["zone_high"] + self._sl_buf, 2)
+            # T1 = MTF target; T2 = HTF runner target.
+            htf_sl = round(htf_zone.get("sl", 0), 2)
+            mtf_sl = round(mtf_zone.get("sl", 0), 2) if mtf_zone else 0.0
+            if mtf_sl > 0 and htf_sl > 0 and mtf_sl < htf_sl:
+                t1_price = mtf_sl
+                t2_price = htf_sl
+            else:
+                t1_price = htf_sl
+                t2_price = 0.0
+            t1_price_fut = None
         else:
             tracking_leg = leg   # CE1 or PE1 — scan strike option bars
             sl_price     = round(entry["zone_low"] - self._sl_buf, 2)  # option zone_low (option ₹)
@@ -258,14 +290,24 @@ class EntryMixin:
         try:
             opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
 
-            # Build 1-ITM, ATM, 1-OTM strikes for futures-mode
-            if self._htf_source == "futures":
+            # Build order candidate(s)
+            if self._htf_source == "spot":
+                # Spot-mode: single MARKET order at the selected scan-strike (or ATM fallback).
+                candidates = [
+                    (strike, self._build_broker_symbol(strike, opt_type), "SCAN"),
+                ]
+            elif self._htf_source == "futures":
                 itm1_strike = strike          # scan strike (naturally ITM)
                 atm_strike  = atm
                 if opt_type == "CE":
                     otm1_strike = atm + self._step   # 1-OTM CE = above ATM
                 else:
                     otm1_strike = atm - self._step   # 1-OTM PE = below ATM
+                candidates = [
+                    (itm1_strike, self._build_broker_symbol(itm1_strike, opt_type), "1-ITM"),
+                    (atm_strike,  self._build_broker_symbol(atm_strike,  opt_type), "ATM"),
+                    (otm1_strike, self._build_broker_symbol(otm1_strike, opt_type), "1-OTM"),
+                ]
             else:
                 itm1_strike = strike
                 atm_strike  = atm
@@ -273,12 +315,11 @@ class EntryMixin:
                     otm1_strike = atm + self._step
                 else:
                     otm1_strike = atm - self._step
-
-            candidates = [
-                (itm1_strike, self._build_broker_symbol(itm1_strike, opt_type), "1-ITM"),
-                (atm_strike,  self._build_broker_symbol(atm_strike,  opt_type), "ATM"),
-                (otm1_strike, self._build_broker_symbol(otm1_strike, opt_type), "1-OTM"),
-            ]
+                candidates = [
+                    (itm1_strike, self._build_broker_symbol(itm1_strike, opt_type), "1-ITM"),
+                    (atm_strike,  self._build_broker_symbol(atm_strike,  opt_type), "ATM"),
+                    (otm1_strike, self._build_broker_symbol(otm1_strike, opt_type), "1-OTM"),
+                ]
 
             order_id = None
             fill = None
@@ -334,7 +375,7 @@ class EntryMixin:
             "exec_key":       exec_key,      # Upstox key for 1-ITM contract
             "scan_key":       scan_key,      # Upstox key for tracking leg (SL monitoring)
             "entry_price":    round(avg, 2),   # option fill premium
-            "fut_entry_ref":  ep if self._htf_source == "futures" else None,
+            "fut_entry_ref":  ep if self._htf_source in ("futures", "spot") else None,
             "sl_price":       sl_price,
             "trail_sl":       sl_price,      # steps up via trap-based trail after T1
             "last_5m_ts":     None,

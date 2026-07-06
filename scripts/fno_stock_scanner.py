@@ -2,8 +2,8 @@
 FnO Stock Trap Scanner — Phase 1 (Alert-only, nightly D1 scan)
 ===============================================================
 Usage:
-  python scripts/fno_stock_scanner.py              # live scan → data/fno_scan_YYYY-MM-DD.json
-  python scripts/fno_stock_scanner.py --optimize   # threshold sweep → prints table
+  python scripts/fno_stock_scanner.py              # live scan -> data/fno_scan_YYYY-MM-DD.json
+  python scripts/fno_stock_scanner.py --optimize   # threshold sweep -> prints table
 """
 from __future__ import annotations
 
@@ -250,8 +250,8 @@ def _approaching(last_close: float, zone_low: float, zone_high: float,
 def _pick_nifty_bias(nifty_close: float, zones: list, prox_pct: float) -> tuple:
     """
     Pick the nearest TRAPPED zone to nifty_close.
-    BEAR zone near → CE bias (bears will be squeezed → market up).
-    BULL zone near → PE bias (bulls will be squeezed → market down).
+    BEAR zone near -> CE bias (bears will be squeezed -> market up).
+    BULL zone near -> PE bias (bulls will be squeezed -> market down).
     Returns (bias: "CE"|"PE", zone: dict).
     """
     candidates = []
@@ -397,7 +397,7 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
     elif zone_dist_pct == 0.0:
         plan = "Price at zone. Enter on confirmed reversal candle."
     else:
-        plan = f"Wait for price to retest {plan_entry:.1f}–{zl:.1f} zone."
+        plan = f"Wait for price to retest {plan_entry:.1f}-{zl:.1f} zone."
 
     return {
         "symbol":               symbol,
@@ -414,6 +414,7 @@ def _build_result(symbol: str, lot_size: int, strike_step: int,
         "reward_pts":           rr["reward_pts"],
         "rr_ratio":             rr["rr_ratio"],
         "suggested_strike":     suggested_strike,
+        "strike_step":          strike_step,
         "lot_size":             lot_size,
         "zone_age_days":        age,
         "zone_date":            _zone_date_str(trapped_on),
@@ -520,7 +521,7 @@ def run_scan(token: str,
     nifty_close = bias_result["nifty_close"]
     nifty_zone  = bias_result["zone"]
     print(f"NIFTY close={nifty_close:.0f}  bias={nifty_bias}  "
-          f"zone={nifty_zone.get('zone_low', 0):.0f}–{nifty_zone.get('zone_high', 0):.0f}  "
+          f"zone={nifty_zone.get('zone_low', 0):.0f}-{nifty_zone.get('zone_high', 0):.0f}  "
           f"bias_filter={'ON' if use_nifty_bias else 'OFF'}")
 
     stocks_df = pd.read_csv(FNO_LIST_PATH)
@@ -547,7 +548,7 @@ def run_scan(token: str,
                         r["nifty_bias"] = nifty_bias
                     all_results.extend(res_list)
                     tags = " ".join(f"{r['direction']} R:R={r['rr_ratio']}" for r in res_list)
-                    print(f"  [{i}/{len(futures)}] {sym} ✓  {tags}")
+                    print(f"  [{i}/{len(futures)}] {sym} OK  {tags}")
                 else:
                     print(f"  [{i}/{len(futures)}] {sym} —")
             except Exception as exc:
@@ -572,7 +573,7 @@ def run_scan(token: str,
     out_path = os.path.join(SCAN_DIR, f"fno_scan_{date.today()}.json")
     with open(out_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
-    print(f"\n✓ CE:{len(ce)}  PE:{len(pe)} → {out_path}")
+    print(f"\nOK CE:{len(ce)}  PE:{len(pe)} -> {out_path}")
     return output
 
 # ── Optimize mode ─────────────────────────────────────────────────────────────
@@ -692,7 +693,7 @@ def debug_stock(symbol: str, token: str) -> None:
     today_high = float(df.iloc[-1]["high"])
     today_low  = float(df.iloc[-1]["low"])
     print(f"\n{symbol}  last_close={last_close}  today_low={today_low}  today_high={today_high}")
-    print(f"Total bars: {len(df)}  ({df.iloc[0]['datetime']} → {df.iloc[-1]['datetime']})")
+    print(f"Total bars: {len(df)}  ({df.iloc[0]['datetime']} -> {df.iloc[-1]['datetime']})")
 
     _, all_zones = scanner.scan_htf_spot(df)
     bear = [z for z in all_zones if z["kind"] == "BEAR"]
@@ -702,7 +703,7 @@ def debug_stock(symbol: str, token: str) -> None:
         app = _approaching(last_close, z["zone_low"], z["zone_high"], "CE", STOCK_ZONE_PROXIMITY_PCT)
         touch = _classify_today_touch(last_close, today_high, today_low,
                                       z["zone_low"], z["zone_high"], "CE")
-        print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}–{z['zone_high']:.1f}  "
+        print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}-{z['zone_high']:.1f}  "
               f"sl={z['sl']:.1f}  trapped={z.get('trapped_on','')}  "
               f"approaching={app}  touch={touch['touch_status']:8} "
               f"wick={touch['today_wick_pct']:.0f}%")
@@ -711,7 +712,7 @@ def debug_stock(symbol: str, token: str) -> None:
         app = _approaching(last_close, z["zone_low"], z["zone_high"], "PE", STOCK_ZONE_PROXIMITY_PCT)
         touch = _classify_today_touch(last_close, today_high, today_low,
                                       z["zone_low"], z["zone_high"], "PE")
-        print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}–{z['zone_high']:.1f}  "
+        print(f"  [{z['status']:8}] zone={z['zone_low']:.1f}-{z['zone_high']:.1f}  "
               f"sl={z['sl']:.1f}  trapped={z.get('trapped_on','')}  "
               f"approaching={app}  touch={touch['touch_status']:8} "
               f"wick={touch['today_wick_pct']:.0f}%")
@@ -724,12 +725,12 @@ def debug_stock(symbol: str, token: str) -> None:
                          stock_prox_pct=STOCK_ZONE_PROXIMITY_PCT, min_rr=MIN_RR)
     if results:
         for r in results:
-            print(f"  ✓ {r['direction']} zone={r['zone_low']}–{r['zone_high']}  "
+            print(f"  OK {r['direction']} zone={r['zone_low']}-{r['zone_high']}  "
                   f"entry_plan={r['entry_plan_price']}  sl={r['stock_sl']}  t1={r['stock_t1']}  "
                   f"R:R={r['rr_ratio']}  age={r['zone_age_days']}d  touch={r['touch_status']}")
-            print(f"    → {r['tomorrow_plan']}")
+            print(f"    -> {r['tomorrow_plan']}")
     else:
-        print("  — no qualifying setup today")
+        print("  - no qualifying setup today")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

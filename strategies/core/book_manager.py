@@ -11,6 +11,8 @@ import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from config.global_config import Topic
+
 logger = logging.getLogger(__name__)
 
 Key = Tuple[str, str, str]  # (client_id, binding_id, underlying)
@@ -43,6 +45,8 @@ class StrategyBookManager:
         self._books: Dict[Key, Any] = {}
         self._rebalancer = None
         self._running = False
+        # Lazy subscribe so unit tests that pass bus=None don't crash.
+        self._kill_switch_q = bus.subscribe(Topic.SYSTEM_EVENT) if bus is not None else None
 
     def set_rebalancer(self, rebalancer) -> None:
         self._rebalancer = rebalancer
@@ -60,15 +64,71 @@ class StrategyBookManager:
     async def run(self) -> None:
         self._running = True
         logger.info("%s: started (indices=%s).", self.__class__.__name__, sorted(self._indices))
+        # Firm-wide kill-switch listener runs in parallel with the reconcile loop.
+        kill_task = None
+        if self._kill_switch_q is not None:
+            kill_task = asyncio.create_task(self._kill_switch_loop(), name=f"{self.__class__.__name__}_kill_switch")
+        try:
+            while self._running:
+                try:
+                    self._reconcile()
+                except Exception as exc:
+                    logger.warning("%s.reconcile error: %s", self.__class__.__name__, exc)
+                try:
+                    await asyncio.sleep(self._reconcile_sec)
+                except asyncio.CancelledError:
+                    break
+        finally:
+            if kill_task is not None:
+                kill_task.cancel()
+                try:
+                    await kill_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _kill_switch_loop(self) -> None:
+        """Listen for firm-wide KILL_SWITCH events and liquidate all books immediately."""
         while self._running:
             try:
-                self._reconcile()
-            except Exception as exc:
-                logger.warning("%s.reconcile error: %s", self.__class__.__name__, exc)
+                ev = await asyncio.wait_for(self._kill_switch_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
             try:
-                await asyncio.sleep(self._reconcile_sec)
-            except asyncio.CancelledError:
-                break
+                if isinstance(ev, dict) and ev.get("event") == "KILL_SWITCH":
+                    await self.liquidate_all(scope=ev.get("scope", "FIRM_WIDE"))
+            except Exception as exc:
+                logger.exception("%s.kill_switch_loop error: %s", self.__class__.__name__, exc)
+
+    async def liquidate_all(self, scope: str = "FIRM_WIDE") -> None:
+        """Emergency liquidation of every managed book. Positions are market-closed
+        and books are stopped. Safe to call multiple times."""
+        if not self._books:
+            return
+        logger.warning("%s: KILL_SWITCH received (%s) — liquidating %d book(s).",
+                       self.__class__.__name__, scope, len(self._books))
+        results = await asyncio.gather(
+            *[self._liquidate_book(book, key) for key, book in self._books.items()],
+            return_exceptions=True,
+        )
+        for key, res in zip(self._books.keys(), results):
+            if isinstance(res, Exception):
+                logger.error("%s: liquidation failed for %s: %s", self.__class__.__name__, key, res)
+        logger.warning("%s: liquidation complete.", self.__class__.__name__)
+
+    async def _liquidate_book(self, book: Any, key: Key) -> None:
+        """Close any open position on ``book`` and stop its tasks."""
+        if hasattr(book, "liquidate"):
+            try:
+                await book.liquidate("kill_switch")
+            except Exception as exc:
+                logger.warning("%s: book.liquidate(%s) failed: %s", self.__class__.__name__, key, exc)
+        try:
+            if hasattr(book, "stop_async"):
+                await book.stop_async()
+            elif hasattr(book, "stop"):
+                book.stop()
+        except Exception as exc:
+            logger.warning("%s: stop book %s failed: %s", self.__class__.__name__, key, exc)
 
     def _wanted(self) -> Dict[Key, Any]:
         """Return {(client_id, binding_id, underlying): value} for books that should exist."""

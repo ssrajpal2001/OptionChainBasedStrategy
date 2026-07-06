@@ -55,6 +55,9 @@ class SellStraddleConfig:
     tsl_step_lock_rs: float
     tsl_basis: str
 
+    per_trade_profit_pct: float
+    per_trade_sl_pct: float
+
     day_profit_target_pct: float
     day_loss_sl_pct: float
     day_exit_basis: str
@@ -140,6 +143,11 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
     now_day = datetime.now(IST).strftime("%A").lower()
     _day = ss.get("per_day", {}).get(now_day, {})
     _day_on = bool(_day.get("enabled", True))
+    # Per-trade hard target / stop-loss (% of net credit received for THIS trade).
+    # These are independent of the day-level guardrails above.
+    per_trade_profit_pct = float(ss.get("profit_pct", 0.0) or 0.0)
+    per_trade_sl_pct = float(ss.get("sl_pct", 0.0) or 0.0)
+
     _pt = float(_day.get("profit_target_pct", 0)) if _day_on else 0.0
     day_profit_target_pct = _pt if _pt > 0 else float(ss.get("profit_target_pct", 0))
     _ls = float(_day.get("loss_sl_pct", 0)) if _day_on else 0.0
@@ -193,6 +201,8 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
         tsl_step_profit_rs=tsl_step_profit_rs,
         tsl_step_lock_rs=tsl_step_lock_rs,
         tsl_basis=tsl_basis,
+        per_trade_profit_pct=per_trade_profit_pct,
+        per_trade_sl_pct=per_trade_sl_pct,
         day_profit_target_pct=day_profit_target_pct,
         day_loss_sl_pct=day_loss_sl_pct,
         day_exit_basis=day_exit_basis,

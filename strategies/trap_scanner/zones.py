@@ -76,7 +76,7 @@ class ZonesMixin:
         if self._htf_source == "futures":
             bars = self._bars_fut
         elif self._htf_source == "spot":
-            bars = self._bars_ce1  # option bars — ATR must match option zone scale
+            bars = self._bars_spot  # spot-chart zones are in spot price units
         else:  # "option": use CE1 bars (representative; same scale as zones)
             bars = self._bars_ce1
         df = _bars_to_df(bars)
@@ -241,6 +241,17 @@ class ZonesMixin:
                     _, bull_entries_2 = scanner.scan_htf(htf_pe2)
                     self._htf_bull_zones_2 = bull_entries_2
 
+            # Spot HTF bias scan (option-mode only): determines whether a live
+            # option trap is a NIFTY bear-trap section (allow CE) or bull-trap
+            # section (allow PE). Spot itself is NOT used for SL/target levels.
+            df_spot = _bars_to_df(self._bars_spot)
+            if not df_spot.empty and len(df_spot) >= 2:
+                htf_spot = _resample_htf(df_spot, minutes)
+                if len(htf_spot) >= 2:
+                    _, spot_entries = scanner.scan_htf_spot(htf_spot)
+                    self._spot_bear_zones = [e for e in spot_entries if e.get("kind") == "BEAR"]
+                    self._spot_bull_zones = [e for e in spot_entries if e.get("kind") == "BULL"]
+
             # Intraday cascade fallback: if no CLOSE HTF zone exists for a leg,
             # scan today's 15-min bars to find intraday seller traps
             INTRADAY_MIN = 15
@@ -299,6 +310,9 @@ class ZonesMixin:
             _, all_entries = scanner.scan_htf_spot(htf)
             self._htf_bear_zones = [e for e in all_entries if e.get("kind") == "BEAR"]
             self._htf_bull_zones = [e for e in all_entries if e.get("kind") == "BULL"]
+            # Also populate the futures-cascade list so the HTF→MTF→1m-break logic
+            # can run on spot prices (NIFTY spot-mode).
+            self._htf_fut_zones = all_entries
 
             # Now scan option bars for option-premium-level zones (used for LTF entry)
             # Direction (CE vs PE) is gated by spot bear/bull zones above
@@ -355,9 +369,10 @@ class ZonesMixin:
         if self._position and self._htf_source == "futures" and leg == "FUT":
             self._update_futures_tsl(ts)
             return
-        # Futures-mode armed: capture the 1m FUT candle H/L so the next tick
+        # Futures-mode / spot-mode armed: capture the 1m FUT candle H/L so the next tick
         # can check for a break above (CE) or below (PE) to fire entry.
-        if (self._htf_source == "futures" and leg == "FUT"
+        # In spot-mode, _bars_fut is fed from the NIFTY INDEX tick so the same cascade runs.
+        if (self._htf_source in ("futures", "spot") and leg == "FUT"
                 and self._fut_armed_zone is not None and not self._position
                 and self._bars_fut):
             last = self._bars_fut[-1]
@@ -423,11 +438,15 @@ class ZonesMixin:
             asyncio.get_event_loop().create_task(
                 self._cascade_scan(ts, cascade_ce=ce_leg, cascade_pe=pe_leg)
             )
-        else:
+        elif self._htf_source == "futures":
             if self._intraday_mode:
                 asyncio.get_event_loop().create_task(self._cascade_scan(ts))
             else:
                 self._ltf_scan_normal(leg, ts)
+        else:
+            # htf_source == "spot": entries are driven by the futures-style
+            # HTF→MTF→1m-break cascade in engine.py; skip the legacy option-bar LTF path.
+            pass
 
     # ── LTF normal scan ───────────────────────────────────────────────────────
 
@@ -638,6 +657,18 @@ class ZonesMixin:
                     except Exception as _ob_exc:
                         self._log.debug("_run_ltf_on OB gate error: %s", _ob_exc)
 
+            # Spot bias gate (option-mode only): an option trap is only taken when
+            # NIFTY spot is currently inside the matching HTF spot zone.
+            if not self._spot_bias_allows(opt_type):
+                new_status = "spot_bias_block"
+                if self._zone_ltf_status.get(uid) != new_status:
+                    self._zone_ltf_status[uid] = new_status
+                    self._log.info(
+                        "_run_ltf_on [%s] uid=%s: spot bias BLOCKED (spot=%.2f)",
+                        leg_key, uid, self._spot_cache or self._spot_open,
+                    )
+                continue
+
             # Scale-in probe: enter 1 lot immediately on 15m zone_high touch.
             # The full position is built later via _maybe_scale_in on lower-TF confirmation.
             if self._scale_in_enabled and not self._position:
@@ -712,6 +743,27 @@ class ZonesMixin:
         if not closed:
             return None
         return max(closed, key=lambda e: str(e.get("closed_on", "")))
+
+    def _spot_bias_allows(self, opt_type: str) -> bool:
+        """
+        Live spot-bias gate for option-mode (NIFTY/SENSEX).
+        BEAR trap section on spot → allow CE option entries.
+        BULL trap section on spot → allow PE option entries.
+        Spot price must be inside an active/trapped HTF spot zone of the matching kind.
+        """
+        if self._htf_source != "option":
+            return True
+        spot = self._spot_cache or self._spot_open
+        if spot <= 0:
+            return False
+        zones = self._spot_bear_zones if opt_type == "CE" else self._spot_bull_zones
+        for z in zones:
+            if z.get("status") in ("ACTIVE", "TRAPPED"):
+                z_low = z.get("zone_low", 0)
+                z_high = z.get("zone_high", 0)
+                if z_low <= spot <= z_high:
+                    return True
+        return False
 
     async def _maybe_scale_in(self, leg_key: str, ts: datetime) -> None:
         """Add to an existing probe position on 5m closed zone (3 lots) and 1m breach (rest)."""
