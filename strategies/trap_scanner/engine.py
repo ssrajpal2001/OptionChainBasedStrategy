@@ -190,6 +190,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         # HTF direct-limit order tracking (optional fast-entry path)
         self._htf_direct_pending: Dict[str, dict] = {}
         self._htf_direct_tasks: Dict[str, asyncio.Task] = {}
+        self._last_htf_direct_tick_check: float = 0.0
 
         self._log = self._make_logger()
 
@@ -894,6 +895,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                             asyncio.get_event_loop().create_task(
                                 self._check_htf_direct_entries()
                             )
+                    # Throttled HTF direct-limit check on every live option tick,
+                    # so orders are placed even when LTP has already moved above the zone.
+                    if (not self._position and getattr(self, "_htf_direct_limit_entry", False)
+                            and _time_mod.monotonic() - self._last_htf_direct_tick_check > 2.0):
+                        self._last_htf_direct_tick_check = _time_mod.monotonic()
+                        asyncio.get_event_loop().create_task(
+                            self._check_htf_direct_entries()
+                        )
                     await self._bus.publish(Topic.TRAP_TICK, {
                         "cid": self._cid, "bid": self._bid, "und": self._und,
                         "leg": bkey, "ltp": ltp,
