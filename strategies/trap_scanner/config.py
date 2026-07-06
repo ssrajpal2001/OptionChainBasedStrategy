@@ -250,3 +250,10 @@ class ConfigMixin:
         # Exit trigger source toggle: if True, SL/target checks use NIFTY spot price
         # instead of option LTP. Fill price and P&L still use option LTP.
         self._exit_on_spot    = bool(_adm.get("exit_on_spot", _def.get("exit_on_spot", False)))
+
+        # HTF direct limit-entry mode: fire a limit order as soon as an HTF zone is
+        # trapped, without waiting for MTF/LTF confirmation. Designed for fast NIFTY
+        # moves where the cascade is too slow.
+        self._htf_direct_limit_entry = bool(_adm.get("htf_direct_limit_entry", _def.get("htf_direct_limit_entry", False)))
+        self._htf_direct_max_sl_pts = float(_adm.get("htf_direct_max_sl_pts", _def.get("htf_direct_max_sl_pts", 30.0)))
+        self._htf_direct_fill_timeout_min = int(_adm.get("htf_direct_fill_timeout_min", _def.get("htf_direct_fill_timeout_min", 30)))

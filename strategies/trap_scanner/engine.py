@@ -187,6 +187,10 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
         self._initialized   = False
         self._day_init_done = False
 
+        # HTF direct-limit order tracking (optional fast-entry path)
+        self._htf_direct_pending: Dict[str, dict] = {}
+        self._htf_direct_tasks: Dict[str, asyncio.Task] = {}
+
         self._log = self._make_logger()
 
     def set_rebalancer(self, rebalancer) -> None:
@@ -659,6 +663,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             self._run_htf_scan()
             self._htf_atr_val = self._compute_htf_atr()
             self._check_zone_reachability()
+            if self._htf_direct_limit_entry:
+                await self._check_htf_direct_entries()
 
             # Q2: per-leg intraday strike correction.
             # When one side has no HTF zone at startup (intraday_mode), switch that side's
@@ -710,6 +716,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 if reran_htf:
                     self._run_htf_scan()
                     self._check_zone_reachability()
+                    if self._htf_direct_limit_entry:
+                        await self._check_htf_direct_entries()
 
             # Point 11: restore today's position if restarted mid-day; discard yesterday's.
             self._load_persisted_position()
@@ -729,6 +737,90 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             self._log.exception("morning_init error: %s", exc)
             return False
 
+    async def _check_htf_direct_entries(self) -> None:
+        """HTF direct-limit entry path.
+
+        When enabled per index, place a LIMIT buy order as soon as a fresh HTF
+        zone is trapped and price is inside/near the zone, without waiting for
+        MTF/LTF confirmation. This catches fast NIFTY moves that the cascade
+        would otherwise miss.
+        """
+        if not getattr(self, "_htf_direct_limit_entry", False):
+            return
+        if self._position:
+            return
+        if not self._can_trade():
+            return
+
+        now = datetime.now(IST)
+        if self._cutoff_str:
+            ch, cm = map(int, self._cutoff_str.split(":"))
+            if now.time() >= time(ch, cm):
+                return
+        if self._dte_min > 0 and self._expiry_date is not None:
+            _dte = (self._expiry_date - date.today()).days
+            if _dte <= self._dte_min:
+                return
+
+        entry_buf = getattr(self, "_zone_entry_buf", 5.0)
+        max_sl_pts = getattr(self, "_htf_direct_max_sl_pts", 30.0)
+        timeout_min = getattr(self, "_htf_direct_fill_timeout_min", 30)
+
+        zone_lists = [
+            ("CE1", "CE", self._htf_bear_zones),
+            ("CE2", "CE", self._htf_bear_zones_2),
+            ("PE1", "PE", self._htf_bull_zones),
+            ("PE2", "PE", self._htf_bull_zones_2),
+        ]
+
+        for leg, opt_type, zones in zone_lists:
+            ltp = self._ltp_cache.get(leg, 0.0)
+            if ltp <= 0:
+                continue
+            for zone in zones:
+                if zone.get("status") != "TRAPPED":
+                    continue
+                uid = _zone_uid(zone)
+                if uid in self._notified_uids or uid in self._htf_direct_pending:
+                    continue
+                z_low = zone.get("zone_low", 0.0)
+                z_high = zone.get("zone_high", 0.0)
+                if not (z_low > 0 and z_high > 0):
+                    continue
+                # Price must be inside zone or slightly above it (tick-boundary buffer)
+                if not (z_low <= ltp <= z_high + entry_buf):
+                    continue
+
+                sl_price = round(z_low - self._sl_buf, 2)
+                raw_entry = round(zone.get("zone_trigger", z_high), 2)
+                if raw_entry - sl_price > max_sl_pts:
+                    entry_price = round(sl_price + max_sl_pts, 2)
+                    self._log.info(
+                        "HTF DIRECT [%s] uid=%s: zone too wide (%.1f pts) → capping entry %.1f → %.1f "
+                        "to keep SL within %.1f pts",
+                        leg, uid, raw_entry - sl_price, raw_entry, entry_price, max_sl_pts,
+                    )
+                else:
+                    entry_price = raw_entry
+
+                qty = self._lot_size * self._lot_mul
+                self._log.info(
+                    "HTF DIRECT [%s] uid=%s: scheduling LIMIT @%.1f sl=%.1f ltp=%.1f qty=%d",
+                    leg, uid, entry_price, sl_price, ltp, qty,
+                )
+                self._htf_direct_pending[uid] = {
+                    "leg": leg,
+                    "opt_type": opt_type,
+                    "entry_price": entry_price,
+                    "sl_price": sl_price,
+                    "placed_at": now.isoformat(),
+                }
+                self._zone_ltf_status[uid] = "direct_limit_pending"
+                asyncio.get_event_loop().create_task(
+                    self._place_htf_direct_limit(
+                        leg, opt_type, zone, entry_price, sl_price, qty, timeout_min,
+                    )
+                )
 
     # ── Tick loops ────────────────────────────────────────────────────────────
 
@@ -1821,6 +1913,11 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             "bars_ce1":       len(self._bars_ce1),
             "bars_pe1":       len(self._bars_pe1),
             "notified_uids":  len(self._notified_uids),
+            "direct_limit_pending": [
+                {"uid": uid, "leg": info.get("leg"), "entry_price": info.get("entry_price"),
+                 "sl_price": info.get("sl_price"), "placed_at": info.get("placed_at")}
+                for uid, info in getattr(self, "_htf_direct_pending", {}).items()
+            ],
             "position": {
                 "leg":           pos["leg"],
                 "signal_leg":    pos.get("signal_leg", pos["leg"]),

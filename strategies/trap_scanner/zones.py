@@ -408,6 +408,11 @@ class ZonesMixin:
                 self._htf_atr_val = self._compute_htf_atr()
                 prev_mode = self._intraday_mode
                 self._check_zone_reachability()
+                if getattr(self, "_htf_direct_limit_entry", False):
+                    try:
+                        asyncio.get_event_loop().create_task(self._check_htf_direct_entries())
+                    except Exception:
+                        pass
                 self._log.info(
                     "HTF scan: bear=%d bull=%d fut=%d ATR=%.2f intraday_mode=%s position=%s",
                     sum(1 for e in self._htf_bear_zones if e["status"] == "TRAPPED"),
@@ -572,6 +577,8 @@ class ZonesMixin:
         for zone in htf_zones:
             uid = _zone_uid(zone)
             if uid in self._notified_uids:
+                continue
+            if uid in getattr(self, "_htf_direct_pending", {}):
                 continue
             if uid not in self._zone_ltf_status:
                 self._zone_ltf_status[uid] = "watching"

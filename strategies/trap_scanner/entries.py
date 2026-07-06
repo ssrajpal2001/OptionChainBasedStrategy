@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, time
+import time as _time_mod
+from datetime import datetime, date, time
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -357,49 +358,61 @@ class EntryMixin:
             avg = sim_ltp
             order_id = "PAPER"
 
-        # scan_key = the key used for SL/T1 monitoring ticks.
-        # futures-mode: tracking_leg="FUT" → futures key (SL/T1 in futures ₹).
-        # option-mode:  tracking_leg=CE1/PE1 → that option's Upstox key.
+        self._build_position_from_fill(
+            leg=leg, opt_type=opt_type, strike=strike, scan_strike=scan_strike,
+            spot=spot, atm=atm, ep=ep, sl_price=sl_price, t1_price=t1_price,
+            t2_price=t2_price, t1_price_fut=t1_price_fut, total_qty=total_qty,
+            tracking_leg=tracking_leg, exec_key=exec_key, avg=avg, order_id=order_id,
+            uid=uid, htf_zone=htf_zone, stage=stage,
+            signal_source=f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
+        )
+
+    def _build_position_from_fill(self, *, leg: str, opt_type: str, strike: int,
+                                  scan_strike: int, spot: float, atm: int,
+                                  ep: float, sl_price: float, t1_price: float,
+                                  t2_price: float, t1_price_fut: Optional[float],
+                                  total_qty: int, tracking_leg: str,
+                                  exec_key: str, avg: float, order_id: str,
+                                  uid: str, htf_zone: dict,
+                                  stage: Optional[str], signal_source: str) -> None:
+        """Create and persist the position dict from a completed entry fill."""
+        t1_qty = total_qty // 2
+        now = datetime.now(IST)
         scan_key = {
             "CE1": self._ce1_key, "CE2": self._ce2_key,
             "PE1": self._pe1_key, "PE2": self._pe2_key,
             "FUT": self._fut_key,
         }.get(tracking_leg, self._fut_key if self._htf_source == "futures" else "")
         self._position = {
-            "leg":            tracking_leg,  # FUT for futures-mode (futures ticks drive SL/T1)
-            "signal_leg":     leg,           # original detection leg (FUT for CrudeOil)
+            "leg":            tracking_leg,
+            "signal_leg":     leg,
             "side":           opt_type,
-            "strike":         strike,        # exec strike (scan strike or ATM fallback)
-            "scan_strike":    scan_strike,   # pivot strike (S1/R1) used for zone detection
+            "strike":         strike,
+            "scan_strike":    scan_strike,
             "spot_at_entry":  round(spot, 2),
-            "exec_key":       exec_key,      # Upstox key for 1-ITM contract
-            "scan_key":       scan_key,      # Upstox key for tracking leg (SL monitoring)
-            "entry_price":    round(avg, 2),   # option fill premium
+            "exec_key":       exec_key,
+            "scan_key":       scan_key,
+            "entry_price":    round(avg, 2),
             "fut_entry_ref":  ep if self._htf_source in ("futures", "spot") else None,
             "sl_price":       sl_price,
-            "trail_sl":       sl_price,      # steps up via trap-based trail after T1
+            "trail_sl":       sl_price,
             "last_5m_ts":     None,
-            # Trap-based trail state: bears trapped above entry → squeezed → pullback → confirmed
-            # Each entry: {zone_trigger, zone_high, state: WATCHING|SQUEEZED|PULLED_BACK|CONFIRMED}
             "trail_traps":    [],
-            "t1_price":       t1_price,      # MTF (15m) ref bar HIGH — first partial exit
-            "t2_price":       t2_price if self._htf_source != "futures" else 0.0,  # HTF (180m) sl — runner exit
-            "t1_price_fut":   t1_price_fut,  # unused (kept for backward compat with persisted state)
+            "t1_price":       t1_price,
+            "t2_price":       t2_price if self._htf_source != "futures" else 0.0,
+            "t1_price_fut":   t1_price_fut,
             "total_qty":      total_qty,
-            "t1_qty":         t1_qty,        # half qty (lot_size × lot_mul // 2)
+            "t1_qty":         t1_qty,
             "remaining_qty":  total_qty,
             "t1_hit":         False,
             "t2_hit":         False,
             "entry_ts":       now.isoformat(),
-            "signal_source":  f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
+            "signal_source":  signal_source,
             "order_id_entry": order_id,
             "order_id_t1":    None,
-            # Perpetual direction (DELTA only): "buy" = long, "sell" = short
-            # Needed by _place_exit to send the closing opposite-side order.
             "perp_side":      ("buy" if opt_type == "CE" else "sell") if self._exchange == "DELTA" else None,
             "htf_zone":       htf_zone,
             "opt_type":       opt_type,
-            # Scale-in bookkeeping
             "scale_stage":    stage or "full",
             "scale_5m_added": False,
             "scale_1m_added": False,
@@ -411,9 +424,169 @@ class EntryMixin:
             "ENTRY PLACED scan=%d exec=%d%s spot=%.2f fill=%.2f sl=%.2f t1=%.2f order=%s",
             scan_strike, strike, opt_type, spot, avg, sl_price, t1_price, order_id,
         )
-        # Place an exchange-held stop order at the initial SL price (DELTA only).
-        # This protects the position even if the monitoring process goes down.
         asyncio.ensure_future(self._place_exchange_sl(sl_price))
+
+    async def _place_htf_direct_limit(self, leg: str, opt_type: str, zone: dict,
+                                      entry_price: float, sl_price: float,
+                                      qty: int, timeout_min: int) -> None:
+        """Place a LIMIT order at HTF zone trigger and manage fill/timeout.
+
+        This is the fast-entry path: no MTF/LTF confirmation. The order is cancelled
+        if it does not fill within ``timeout_min`` minutes or if the zone is broken.
+        """
+        uid = _zone_uid(zone)
+        if uid in self._notified_uids:
+            self._htf_direct_pending.pop(uid, None)
+            return
+
+        # Basic gates (re-checked in case state changed between scheduling and execution)
+        if not self._can_trade():
+            self._log.info("HTF DIRECT [%s] uid=%s: entry blocked — terminal/trade OFF", leg, uid)
+            self._htf_direct_pending.pop(uid, None)
+            return
+        now = datetime.now(IST)
+        if self._cutoff_str:
+            ch, cm = map(int, self._cutoff_str.split(":"))
+            if now.time() >= time(ch, cm):
+                self._log.info("HTF DIRECT [%s] uid=%s: entry blocked — after cutoff", leg, uid)
+                self._htf_direct_pending.pop(uid, None)
+                return
+        if self._dte_min > 0 and self._expiry_date is not None:
+            _dte = (self._expiry_date - date.today()).days
+            if _dte <= self._dte_min:
+                self._log.info("HTF DIRECT [%s] uid=%s: entry blocked — DTE", leg, uid)
+                self._htf_direct_pending.pop(uid, None)
+                return
+
+        if self._htf_source != "option":
+            self._log.info("HTF DIRECT [%s] uid=%s: skipped — only option-mode is supported", leg, uid)
+            self._htf_direct_pending.pop(uid, None)
+            return
+
+        broker = await self._ensure_broker()
+        if not broker:
+            self._log.error("HTF DIRECT [%s] uid=%s: no broker", leg, uid)
+            self._htf_direct_pending.pop(uid, None)
+            return
+
+        spot = self._spot_cache or self._spot_open
+        atm = _round_strike(spot, self._step)
+        scan_strike_map = {
+            "CE1": self._ce1_strike, "CE2": self._ce2_strike,
+            "PE1": self._pe1_strike, "PE2": self._pe2_strike,
+        }
+        scan_strike = scan_strike_map.get(leg) or 0
+
+        # Option-mode strike selection: 1-ITM → ATM → 1-OTM
+        if opt_type == "CE":
+            itm1_strike = atm - self._step
+            otm1_strike = atm + self._step
+        else:
+            itm1_strike = atm + self._step
+            otm1_strike = atm - self._step
+        candidates = [
+            (itm1_strike, self._build_broker_symbol(itm1_strike, opt_type), "1-ITM"),
+            (atm,         self._build_broker_symbol(atm, opt_type),         "ATM"),
+            (otm1_strike, self._build_broker_symbol(otm1_strike, opt_type), "1-OTM"),
+        ]
+
+        from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType, OrderStatus
+        entry_price = round(max(entry_price, 0.05) / 0.05) * 0.05
+        order_id = None
+        fill = None
+        exec_strike = 0
+        exec_key = ""
+
+        for cand_strike, cand_sym, cand_label in candidates:
+            try:
+                self._log.info(
+                    "HTF DIRECT [%s] uid=%s: placing LIMIT %d%s @%.2f (%s)",
+                    leg, uid, cand_strike, opt_type, entry_price, cand_label,
+                )
+                req = OrderRequest(
+                    broker_symbol=cand_sym,
+                    exchange=self._exchange,
+                    side=OrderSide.BUY,
+                    qty=qty,
+                    order_type=OrderType.LIMIT,
+                    price=entry_price,
+                    tag=f"TRAP_HTFDIRECT_{self._und}_{opt_type}",
+                    client_id=self._cid,
+                )
+                order_id = await broker.place_order(req)
+                exec_strike = cand_strike
+                exec_key = self._build_upstox_key(cand_strike, opt_type)
+
+                # Poll until filled, cancelled, rejected, or timeout
+                deadline = _time_mod.monotonic() + timeout_min * 60
+                poll_interval = 5.0
+                while _time_mod.monotonic() < deadline:
+                    await asyncio.sleep(poll_interval)
+                    fl = await broker.get_order_status(order_id)
+                    if not fl:
+                        continue
+                    if fl.status == OrderStatus.COMPLETE and fl.avg_price > 0:
+                        fill = fl
+                        break
+                    if fl.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
+                        self._log.warning(
+                            "HTF DIRECT [%s] uid=%s: order %s %s",
+                            leg, uid, order_id, fl.status.name,
+                        )
+                        fill = fl
+                        break
+                    # Zone invalidation: for a BUY limit, if premium drops below SL,
+                    # the trap idea is broken → cancel remaining order.
+                    ltp = self._ltp_cache.get(leg, 0) or 0
+                    if ltp > 0 and ltp < sl_price:
+                        self._log.info(
+                            "HTF DIRECT [%s] uid=%s: zone broken (ltp=%.2f < sl=%.2f) → cancelling",
+                            leg, uid, ltp, sl_price,
+                        )
+                        await broker.cancel_order(order_id)
+                        fill = fl
+                        break
+
+                if fill and fill.status == OrderStatus.COMPLETE:
+                    break
+
+                # Candidate did not fill — try next strike if still within timeout
+                if _time_mod.monotonic() >= deadline:
+                    self._log.info(
+                        "HTF DIRECT [%s] uid=%s: timeout waiting for %s — cancelling",
+                        leg, uid, cand_label,
+                    )
+                    await broker.cancel_order(order_id)
+                    fill = None
+                    break
+                fill = None
+            except Exception as exc:
+                self._log.error("HTF DIRECT [%s] uid=%s: candidate %s failed: %s",
+                                leg, uid, cand_label, exc)
+                fill = None
+
+        if fill and fill.status == OrderStatus.COMPLETE and fill.avg_price > 0:
+            self._notified_uids.add(uid)
+            self._htf_direct_pending.pop(uid, None)
+            self._zone_ltf_status[uid] = "direct_limit_filled"
+            t1_price = round(zone.get("sl", 0.0), 2)
+            self._build_position_from_fill(
+                leg=leg, opt_type=opt_type, strike=exec_strike,
+                scan_strike=scan_strike, spot=spot, atm=atm,
+                ep=entry_price, sl_price=sl_price, t1_price=t1_price,
+                t2_price=0.0, t1_price_fut=None, total_qty=qty,
+                tracking_leg=leg, exec_key=exec_key, avg=fill.avg_price,
+                order_id=order_id or "PAPER", uid=uid, htf_zone=zone,
+                stage="htf_direct",
+                signal_source=f"HTF DIRECT zone {uid}",
+            )
+            return
+
+        # Did not fill — consume uid so the normal cascade does not chase a stale move
+        self._notified_uids.add(uid)
+        self._htf_direct_pending.pop(uid, None)
+        self._zone_ltf_status[uid] = "direct_limit_cancelled"
+        self._log.info("HTF DIRECT [%s] uid=%s: no fill — uid consumed", leg, uid)
 
     async def _add_to_position(self, qty: int, reason: str, entry: dict) -> bool:
         """Add `qty` lots to an existing scaled-in position and recompute average entry.
