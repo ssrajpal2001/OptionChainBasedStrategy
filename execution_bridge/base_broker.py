@@ -236,6 +236,11 @@ BROKER_REGISTRY: Dict[str, Any] = {
 
 
 def create_broker(binding: BrokerBinding, client_id: str) -> BaseBroker:
+    # Paper bindings must never hit a real exchange. Use the mock broker so
+    # that paper trading stays local and fast, and rejected real orders do
+    # not spam the broker's OMS.
+    if getattr(binding, "trading_mode", "paper").lower() == "paper":
+        return _mock_factory(binding, client_id)
     factory = BROKER_REGISTRY.get(binding.provider.lower())
     if factory is None:
         raise ValueError(

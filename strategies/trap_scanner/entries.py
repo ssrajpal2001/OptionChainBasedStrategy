@@ -267,8 +267,9 @@ class EntryMixin:
                 fl = await broker.get_order_status(oid)
                 if fl.status in (OrderStatus.COMPLETE, OrderStatus.CANCELLED):
                     return fl
-                self._log.info("Entry %s %s: status=%s avg=%.2f — waiting...",
-                               label, oid, fl.status, fl.avg_price or 0)
+                msg = (fl.raw.get("status_message") or "") if fl and fl.raw else ""
+                self._log.info("Entry %s %s: status=%s avg=%.2f msg=%r — waiting...",
+                               label, oid, fl.status, fl.avg_price or 0, msg)
                 await _asyncio.sleep(1)
             return fl
 
@@ -491,8 +492,10 @@ class EntryMixin:
 
         try:
             self._log.info(
-                "HTF DIRECT [%s] uid=%s: placing LIMIT %s @%.2f (1-ITM)",
+                "HTF DIRECT [%s] uid=%s: placing LIMIT %s @%.2f exp=%s strike=%s",
                 leg, uid, broker_sym, entry_price,
+                self._expiry_date.isoformat() if self._expiry_date else "?",
+                strike,
             )
             req = OrderRequest(
                 broker_symbol=broker_sym,

@@ -823,7 +823,8 @@ class ZonesMixin:
                 )
                 best = scanner.select_best_ltf_entry(ltf_entries)
                 if best:
-                    add_qty = self._lot_size * 3
+                    target_total = self._lot_size * self._lot_mul
+                    add_qty = min(self._lot_size * 3, max(0, target_total - pos["total_qty"]))
                     ok = await self._add_to_position(add_qty, "SCALE_5M", best)
                     if ok:
                         pos["scale_stage"] = "added_5m"
