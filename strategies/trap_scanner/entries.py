@@ -477,93 +477,80 @@ class EntryMixin:
         }
         scan_strike = scan_strike_map.get(leg) or 0
 
-        # Option-mode strike selection: 1-ITM → ATM → 1-OTM
+        # Option-mode strike selection: use 1-ITM only for direct limit to avoid
+        # multiple broker calls per zone.
         if opt_type == "CE":
-            itm1_strike = atm - self._step
-            otm1_strike = atm + self._step
+            strike = atm - self._step
         else:
-            itm1_strike = atm + self._step
-            otm1_strike = atm - self._step
-        candidates = [
-            (itm1_strike, self._build_broker_symbol(itm1_strike, opt_type), "1-ITM"),
-            (atm,         self._build_broker_symbol(atm, opt_type),         "ATM"),
-            (otm1_strike, self._build_broker_symbol(otm1_strike, opt_type), "1-OTM"),
-        ]
+            strike = atm + self._step
+        broker_sym = self._build_broker_symbol(strike, opt_type)
+        exec_key = self._build_upstox_key(strike, opt_type)
 
         from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType, OrderStatus
         entry_price = round(max(entry_price, 0.05) / 0.05) * 0.05
         order_id = None
         fill = None
-        exec_strike = 0
-        exec_key = ""
 
-        for cand_strike, cand_sym, cand_label in candidates:
-            try:
+        try:
+            self._log.info(
+                "HTF DIRECT [%s] uid=%s: placing LIMIT %d%s @%.2f (1-ITM)",
+                leg, uid, strike, opt_type, entry_price,
+            )
+            req = OrderRequest(
+                broker_symbol=broker_sym,
+                exchange=self._exchange,
+                side=OrderSide.BUY,
+                qty=qty,
+                order_type=OrderType.LIMIT,
+                price=entry_price,
+                tag=f"TRAP_HTFDIRECT_{self._und}_{opt_type}",
+                client_id=self._cid,
+            )
+            order_id = await broker.place_order(req)
+        except Exception as exc:
+            err = str(exc).lower()
+            if "maximum allowed" in err or "rate" in err or "too many" in err:
+                self._log.warning(
+                    "HTF DIRECT [%s] uid=%s: rate-limited — will retry later (%s)",
+                    leg, uid, exc,
+                )
+                # leave pending so the tick loop retries next cycle
+                return
+            self._log.error("HTF DIRECT [%s] uid=%s: place failed: %s", leg, uid, exc)
+            self._notified_uids.add(uid)
+            self._htf_direct_pending.pop(uid, None)
+            self._zone_ltf_status[uid] = "direct_limit_error"
+            return
+
+        # Poll until filled, cancelled, rejected, timeout, or zone broken
+        deadline = _time_mod.monotonic() + timeout_min * 60
+        poll_interval = 5.0
+        while _time_mod.monotonic() < deadline:
+            await asyncio.sleep(poll_interval)
+            fl = await broker.get_order_status(order_id)
+            if not fl:
+                continue
+            if fl.status == OrderStatus.COMPLETE and fl.avg_price > 0:
+                fill = fl
+                break
+            if fl.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
+                self._log.warning(
+                    "HTF DIRECT [%s] uid=%s: order %s %s",
+                    leg, uid, order_id, fl.status.name,
+                )
+                fill = fl
+                break
+            # Zone invalidation: for a BUY limit, if premium drops below SL,
+            # the trap idea is broken → cancel remaining order.
+            ltp = self._ltp_cache.get(leg, 0) or 0
+            if ltp > 0 and ltp < sl_price:
                 self._log.info(
-                    "HTF DIRECT [%s] uid=%s: placing LIMIT %d%s @%.2f (%s)",
-                    leg, uid, cand_strike, opt_type, entry_price, cand_label,
+                    "HTF DIRECT [%s] uid=%s: zone broken (ltp=%.2f < sl=%.2f) → cancelling",
+                    leg, uid, ltp, sl_price,
                 )
-                req = OrderRequest(
-                    broker_symbol=cand_sym,
-                    exchange=self._exchange,
-                    side=OrderSide.BUY,
-                    qty=qty,
-                    order_type=OrderType.LIMIT,
-                    price=entry_price,
-                    tag=f"TRAP_HTFDIRECT_{self._und}_{opt_type}",
-                    client_id=self._cid,
-                )
-                order_id = await broker.place_order(req)
-                exec_strike = cand_strike
-                exec_key = self._build_upstox_key(cand_strike, opt_type)
-
-                # Poll until filled, cancelled, rejected, or timeout
-                deadline = _time_mod.monotonic() + timeout_min * 60
-                poll_interval = 5.0
-                while _time_mod.monotonic() < deadline:
-                    await asyncio.sleep(poll_interval)
-                    fl = await broker.get_order_status(order_id)
-                    if not fl:
-                        continue
-                    if fl.status == OrderStatus.COMPLETE and fl.avg_price > 0:
-                        fill = fl
-                        break
-                    if fl.status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
-                        self._log.warning(
-                            "HTF DIRECT [%s] uid=%s: order %s %s",
-                            leg, uid, order_id, fl.status.name,
-                        )
-                        fill = fl
-                        break
-                    # Zone invalidation: for a BUY limit, if premium drops below SL,
-                    # the trap idea is broken → cancel remaining order.
-                    ltp = self._ltp_cache.get(leg, 0) or 0
-                    if ltp > 0 and ltp < sl_price:
-                        self._log.info(
-                            "HTF DIRECT [%s] uid=%s: zone broken (ltp=%.2f < sl=%.2f) → cancelling",
-                            leg, uid, ltp, sl_price,
-                        )
-                        await broker.cancel_order(order_id)
-                        fill = fl
-                        break
-
-                if fill and fill.status == OrderStatus.COMPLETE:
-                    break
-
-                # Candidate did not fill — try next strike if still within timeout
-                if _time_mod.monotonic() >= deadline:
-                    self._log.info(
-                        "HTF DIRECT [%s] uid=%s: timeout waiting for %s — cancelling",
-                        leg, uid, cand_label,
-                    )
-                    await broker.cancel_order(order_id)
-                    fill = None
-                    break
-                fill = None
-            except Exception as exc:
-                self._log.error("HTF DIRECT [%s] uid=%s: candidate %s failed: %s",
-                                leg, uid, cand_label, exc)
-                fill = None
+                await broker.cancel_order(order_id)
+                fill = fl
+                break
 
         if fill and fill.status == OrderStatus.COMPLETE and fill.avg_price > 0:
             self._notified_uids.add(uid)
@@ -571,7 +558,7 @@ class EntryMixin:
             self._zone_ltf_status[uid] = "direct_limit_filled"
             t1_price = round(zone.get("sl", 0.0), 2)
             self._build_position_from_fill(
-                leg=leg, opt_type=opt_type, strike=exec_strike,
+                leg=leg, opt_type=opt_type, strike=strike,
                 scan_strike=scan_strike, spot=spot, atm=atm,
                 ep=entry_price, sl_price=sl_price, t1_price=t1_price,
                 t2_price=0.0, t1_price_fut=None, total_qty=qty,
@@ -582,7 +569,13 @@ class EntryMixin:
             )
             return
 
-        # Did not fill — consume uid so the normal cascade does not chase a stale move
+        # Did not fill — cancel if still open, then consume uid so the normal
+        # cascade does not chase a stale move.
+        try:
+            if order_id:
+                await broker.cancel_order(order_id)
+        except Exception:
+            pass
         self._notified_uids.add(uid)
         self._htf_direct_pending.pop(uid, None)
         self._zone_ltf_status[uid] = "direct_limit_cancelled"

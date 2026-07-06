@@ -824,6 +824,8 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                         leg, opt_type, zone, entry_price, sl_price, qty, timeout_min,
                     )
                 )
+                # Only one direct-limit order per cycle to avoid broker rate limits.
+                return
 
     # ── Tick loops ────────────────────────────────────────────────────────────
 
@@ -897,8 +899,9 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                             )
                     # Throttled HTF direct-limit check on every live option tick,
                     # so orders are placed even when LTP has already moved above the zone.
+                    # 5-second throttle avoids broker rate limits.
                     if (not self._position and getattr(self, "_htf_direct_limit_entry", False)
-                            and _time_mod.monotonic() - self._last_htf_direct_tick_check > 2.0):
+                            and _time_mod.monotonic() - self._last_htf_direct_tick_check > 5.0):
                         self._last_htf_direct_tick_check = _time_mod.monotonic()
                         asyncio.get_event_loop().create_task(
                             self._check_htf_direct_entries()
