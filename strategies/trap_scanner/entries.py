@@ -477,12 +477,10 @@ class EntryMixin:
         }
         scan_strike = scan_strike_map.get(leg) or 0
 
-        # Option-mode strike selection: use 1-ITM only for direct limit to avoid
-        # multiple broker calls per zone.
-        if opt_type == "CE":
-            strike = atm - self._step
-        else:
-            strike = atm + self._step
+        # For HTF direct limit, execute on the scan strike that the zone is built
+        # from (CE1/CE2/PE1/PE2). Using a different strike would make the zone's
+        # limit price meaningless.
+        strike = scan_strike
         broker_sym = self._build_broker_symbol(strike, opt_type)
         exec_key = self._build_upstox_key(strike, opt_type)
 
