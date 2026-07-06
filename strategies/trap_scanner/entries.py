@@ -15,6 +15,7 @@ from config.global_config import IST
 from strategies.trap_scanner.config import _round_strike
 from strategies.trap_scanner.zones import _bars_to_df, _resample_htf, _zone_uid
 from strategies.trap_scanner import scanner
+from strategies.trap_scanner.option_chain_selector import OptionChainSelector, SelectedStrike
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ class EntryMixin:
             "FUT": self._ce1_strike if opt_type == "CE" else self._pe1_strike,
         }
         scan_strike = scan_strike_map.get(leg) or 0
+        dynamic_sel = None
 
         spot = self._spot_cache or self._spot_open
         atm  = _round_strike(spot, self._step)
@@ -137,21 +139,28 @@ class EntryMixin:
                     primary_strike, opt_type, strike, opt_type,
                 )
         else:
-            # Sensex/Nifty option-mode: 1-ITM option is primary; ATM as fallback if spread too wide.
-            # tracked_sym (scan_key) = SCAN STRIKE option key — never changes, even if
-            # exec_key falls back to ATM. SL/T1 are always on the scan strike option LTP.
-            if opt_type == "CE":
-                primary_1itm = atm - self._step
-            elif opt_type == "PE":
-                primary_1itm = atm + self._step
+            # Sensex/Nifty option-mode: by default 1-ITM/ATM selection.
+            # If dynamic_premium_entry is enabled, pick the live chain strike with
+            # LTP ≤ target_premium on the triggered side. SL/T1 stay on scan strike.
+            dynamic_sel = await self._maybe_select_dynamic_strike(opt_type)
+            if dynamic_sel is not None:
+                strike = dynamic_sel.strike
+                exec_key = dynamic_sel.instrument_key or self._build_upstox_key(strike, opt_type)
+                dynamic_ltp = dynamic_sel.ltp
             else:
-                primary_1itm = scan_strike
-            primary_key    = self._build_upstox_key(primary_1itm, opt_type)
-            atm_key        = self._build_upstox_key(atm, opt_type)
-            max_spread_pct = float(self._admin_cfg.get("max_spread_pct", 3.0))
-            strike, exec_key = await self._pick_liquid_strike(
-                primary_1itm, primary_key, atm, atm_key, opt_type, max_spread_pct
-            )
+                dynamic_ltp = 0.0
+                if opt_type == "CE":
+                    primary_1itm = atm - self._step
+                elif opt_type == "PE":
+                    primary_1itm = atm + self._step
+                else:
+                    primary_1itm = scan_strike
+                primary_key    = self._build_upstox_key(primary_1itm, opt_type)
+                atm_key        = self._build_upstox_key(atm, opt_type)
+                max_spread_pct = float(self._admin_cfg.get("max_spread_pct", 3.0))
+                strike, exec_key = await self._pick_liquid_strike(
+                    primary_1itm, primary_key, atm, atm_key, opt_type, max_spread_pct
+                )
 
         # Entry reference = zone_high (sellers' entry level = C1.LOW).
         # We entered when premium re-tested this level after TRAPPED.
@@ -223,10 +232,11 @@ class EntryMixin:
 
         self._log.info(
             "ENTRY %s scan_strike=%d order_strike=%d%s spot=%.2f atm=%d "
-            "ep=%.2f sl=%.2f t1=%.2f t2=%.2f qty=%d tracking=%s exec_key=%s",
+            "ep=%.2f sl=%.2f t1=%.2f t2=%.2f qty=%d tracking=%s exec_key=%s dynamic=%s",
             self._und, scan_strike, strike, opt_type, spot, atm,
             ep, sl_price, t1_price, t2_price if self._htf_source != "futures" else 0.0,
             total_qty, tracking_leg, exec_key,
+            "yes" if dynamic_sel is not None else "no",
         )
 
         if self._rebalancer is not None:
@@ -234,6 +244,15 @@ class EntryMixin:
                 self._rebalancer.pin_strike(self._und, float(strike))
             except Exception:
                 pass
+            # Dynamic premium strike may be far from the scan leg and not yet
+            # subscribed; force a direct subscription so its ticks arrive.
+            if dynamic_sel is not None and exec_key:
+                try:
+                    feeder = getattr(self._rebalancer, "_feeder", None)
+                    if feeder and hasattr(feeder, "subscribe_tokens"):
+                        await feeder.subscribe_tokens([exec_key])
+                except Exception:
+                    pass
 
         broker = await self._ensure_broker()
         if not broker:
@@ -293,7 +312,12 @@ class EntryMixin:
             opt_leg_key = "CE1" if opt_type == "CE" else "PE1"
 
             # Build order candidate(s)
-            if self._htf_source == "spot":
+            if dynamic_sel is not None:
+                # Dynamic premium entry: single strike from live option chain.
+                candidates = [
+                    (strike, self._build_broker_symbol(strike, opt_type), "DYNAMIC"),
+                ]
+            elif self._htf_source == "spot":
                 # Spot-mode: single MARKET order at the selected scan-strike (or ATM fallback).
                 candidates = [
                     (strike, self._build_broker_symbol(strike, opt_type), "SCAN"),
@@ -326,12 +350,16 @@ class EntryMixin:
             order_id = None
             fill = None
             for cand_strike, cand_sym, cand_label in candidates:
-                cand_ltp = self._ltp_cache.get(opt_leg_key, 0) or 0
+                if dynamic_sel is not None and cand_label == "DYNAMIC":
+                    cand_ltp = dynamic_sel.ltp
+                else:
+                    cand_ltp = self._ltp_cache.get(opt_leg_key, 0) or 0
                 self._log.info("Entry attempt %s: %d%s ltp=%.2f", cand_label, cand_strike, opt_type, cand_ltp)
                 order_id, fill = await _place_and_fill(cand_sym, cand_ltp, f"{cand_strike}{opt_type}{cand_label}")
                 if fill.status == OrderStatus.COMPLETE and fill.avg_price > 0:
                     strike   = cand_strike
-                    exec_key = self._build_upstox_key(cand_strike, opt_type)
+                    if dynamic_sel is None:
+                        exec_key = self._build_upstox_key(cand_strike, opt_type)
                     self._log.info("Entry FILLED at %s: %d%s avg=%.2f", cand_label, cand_strike, opt_type, fill.avg_price)
                     break
                 self._log.warning(
@@ -340,7 +368,10 @@ class EntryMixin:
                 )
 
             if fill is None or fill.status != OrderStatus.COMPLETE or fill.avg_price <= 0:
-                sim_ltp = self._ltp_cache.get(opt_leg_key, 0) or ep
+                if dynamic_sel is not None:
+                    sim_ltp = dynamic_sel.ltp
+                else:
+                    sim_ltp = self._ltp_cache.get(opt_leg_key, 0) or ep
                 self._log.warning(
                     "Entry order rejected for %s%s — recording PAPER position at ltp=%.2f",
                     strike, opt_type, sim_ltp,
@@ -355,7 +386,10 @@ class EntryMixin:
 
         except Exception as exc:
             self._log.error("Entry order failed: %s — recording PAPER position", exc)
-            sim_ltp = self._ltp_cache.get("CE1" if opt_type == "CE" else "PE1", 0) or ep
+            if dynamic_sel is not None:
+                sim_ltp = dynamic_sel.ltp
+            else:
+                sim_ltp = self._ltp_cache.get("CE1" if opt_type == "CE" else "PE1", 0) or ep
             avg = sim_ltp
             order_id = "PAPER"
 
@@ -366,7 +400,9 @@ class EntryMixin:
             tracking_leg=tracking_leg, exec_key=exec_key, avg=avg, order_id=order_id,
             uid=uid, htf_zone=htf_zone, stage=stage,
             signal_source=f"HTF zone {_zone_uid(htf_zone)} → LTF {leg}",
+            exec_ltp=avg,
         )
+        await self._publish_state()
 
     def _build_position_from_fill(self, *, leg: str, opt_type: str, strike: int,
                                   scan_strike: int, spot: float, atm: int,
@@ -375,7 +411,8 @@ class EntryMixin:
                                   total_qty: int, tracking_leg: str,
                                   exec_key: str, avg: float, order_id: str,
                                   uid: str, htf_zone: dict,
-                                  stage: Optional[str], signal_source: str) -> None:
+                                  stage: Optional[str], signal_source: str,
+                                  exec_ltp: float = 0.0) -> None:
         """Create and persist the position dict from a completed entry fill."""
         t1_qty = total_qty // 2
         now = datetime.now(IST)
@@ -393,6 +430,7 @@ class EntryMixin:
             "spot_at_entry":  round(spot, 2),
             "exec_key":       exec_key,
             "scan_key":       scan_key,
+            "exec_ltp":       round(exec_ltp, 2),
             "entry_price":    round(avg, 2),
             "fut_entry_ref":  ep if self._htf_source in ("futures", "spot") else None,
             "sl_price":       sl_price,
@@ -569,6 +607,7 @@ class EntryMixin:
                 stage="htf_direct",
                 signal_source=f"HTF DIRECT zone {uid}",
             )
+            await self._publish_state()
             return
 
         # Did not fill — cancel if still open, then consume uid so the normal
@@ -656,6 +695,7 @@ class EntryMixin:
                 "order_id": oid,
             })
             self._persist_position()
+            await self._publish_state()
             self._log.info(
                 "SCALE-IN %s: +%d qty @%.2f | new avg=%.2f total=%d remaining=%d",
                 reason, qty, fill_price, new_avg, new_total, pos["remaining_qty"],
@@ -682,3 +722,41 @@ class EntryMixin:
         except Exception as exc:
             self._log.warning("_compute_option_t1 failed: %s", exc)
             return 0.0
+
+    async def _maybe_select_dynamic_strike(
+        self, opt_type: str
+    ) -> Optional[SelectedStrike]:
+        """
+        If dynamic_premium_entry is enabled, fetch the live option chain and pick
+        the strike on the triggered side whose LTP is ≤ target_premium.
+        Returns None when disabled, fetch fails, or no suitable strike exists.
+        """
+        if not getattr(self, "_dynamic_premium_entry", False):
+            return None
+        if self._htf_source != "option":
+            return None
+        if self._exchange not in ("NFO", "BFO"):
+            return None
+        if self._expiry_date is None:
+            return None
+        if self._rebalancer is None:
+            return None
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            selector = OptionChainSelector(REGISTRY, self._rebalancer)
+            selected = await selector.select_strike_by_premium(
+                underlying=self._und,
+                expiry_date=self._expiry_date,
+                opt_type=opt_type,
+                target_premium=self._target_premium,
+                mode=self._premium_pick_mode,
+            )
+            if selected:
+                self._log.info(
+                    "DYNAMIC ENTRY selected for %s %s: strike=%d ltp=%.2f (target≤%.2f)",
+                    self._und, opt_type, selected.strike, selected.ltp, self._target_premium
+                )
+            return selected
+        except Exception as exc:
+            self._log.warning("_maybe_select_dynamic_strike failed: %s", exc)
+            return None

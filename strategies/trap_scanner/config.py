@@ -23,7 +23,11 @@ _INDEX_CFG: Dict[str, dict] = {
                    "window": None, "exchange": "NFO", "htf_source": "option",
                    "htf_min_override": 75, "ltf_min_override": 5,
                    "use_ob_gate": False, "zigzag_len": 9,
-                   "exit_on_spot": False},
+                   "exit_on_spot": False,
+                   "dynamic_premium_entry": False,
+                   "target_premium": 100.0,
+                   "premium_pick_mode": "nearest_below",
+                   "dynamic_entry_fallback": "current"},
     # BANKNIFTY 4-tier cascade: HTF=180m → MTF=30m → LTF=3m → Exec=3m
     # Confirmed optimal from nse_cascade_backtest.py 18k-combo sweep (Apr-Jun 2026).
     # dte_min_filter DISABLED (0): BANKNIFTY trades the monthly expiry. A 10-day
@@ -257,3 +261,10 @@ class ConfigMixin:
         self._htf_direct_limit_entry = bool(_adm.get("htf_direct_limit_entry", _def.get("htf_direct_limit_entry", False)))
         self._htf_direct_max_sl_pts = float(_adm.get("htf_direct_max_sl_pts", _def.get("htf_direct_max_sl_pts", 30.0)))
         self._htf_direct_fill_timeout_min = int(_adm.get("htf_direct_fill_timeout_min", _def.get("htf_direct_fill_timeout_min", 30)))
+
+        # Dynamic premium entry: when a CE/PE signal fires, pick the strike from the
+        # live option chain whose LTP is ≤ target_premium. SL/T1 still use the scan strike.
+        self._dynamic_premium_entry = bool(_adm.get("dynamic_premium_entry", _def.get("dynamic_premium_entry", False)))
+        self._target_premium = float(_adm.get("target_premium", _def.get("target_premium", 100.0)))
+        self._premium_pick_mode = str(_adm.get("premium_pick_mode", _def.get("premium_pick_mode", "nearest_below")))
+        self._dynamic_entry_fallback = str(_adm.get("dynamic_entry_fallback", _def.get("dynamic_entry_fallback", "current")))

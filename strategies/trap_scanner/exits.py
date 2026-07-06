@@ -43,6 +43,7 @@ class ExitMixin:
                 "status": "SWEEP", "closed_on": None, "trapped_on": None,
             }
             await self._on_entry_signal(sw["leg"], sw["opt_type"], synth_entry, zone)
+            await self._publish_state()
         else:
             sw["candles_left"] -= 1
             if sw["candles_left"] <= 0:
@@ -65,6 +66,7 @@ class ExitMixin:
             pos["order_id_t1"] = oid
             self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="T1", qty_override=pos["t1_qty"])
             self._persist_position()
+            await self._publish_state()
 
     async def _check_tick_exit(self, ltp: float, ts: Optional[datetime] = None) -> None:
         pos = self._position
@@ -122,6 +124,7 @@ class ExitMixin:
                 pos["order_id_t1"] = oid
                 self._record_closed_trade(pos, exit_price=ltp, exit_reason="T1", qty_override=pos["t1_qty"])
                 self._persist_position()
+                await self._publish_state()
 
             # T2: runner exit — close remaining qty at HTF (180m) target
             if pos["t1_hit"] and not pos.get("t2_hit") and pos.get("t2_price", 0) > 0:
@@ -137,6 +140,7 @@ class ExitMixin:
                                               qty_override=remaining)
                     self._position = None
                     self._clear_persisted_position()
+                    await self._publish_state()
                     return
 
             # Advance 5m trail SL using OPTION bar lows (only after T1).
@@ -155,6 +159,7 @@ class ExitMixin:
                     pos["floor_locked"] = True
                     self._log.info("PROFIT FLOOR LOCKED ₹%.0f  (t1=%.0f + rem=%.0f)",
                                    self._profit_floor, t1_pnl, running_rem)
+                    await self._publish_state()
                 if pos.get("floor_locked") and current_pnl < self._profit_floor:
                     self._log.info("FLOOR_SL  ltp=%.2f  pnl=%.0f < floor=%.0f → exit",
                                    ltp, current_pnl, self._profit_floor)
@@ -163,6 +168,7 @@ class ExitMixin:
                     self._record_closed_trade(pos, exit_price=ltp, exit_reason="FLOOR_SL")
                     self._position = None
                     self._clear_persisted_position()
+                    await self._publish_state()
                     return
 
         # SL check (active in both modes; no TSL in no_target_tsl mode)
@@ -248,6 +254,7 @@ class ExitMixin:
                     self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="T1",
                                               qty_override=pos["t1_qty"])
                     self._persist_position()
+                    await self._publish_state()
 
             # T2: runner exit when spot reaches the HTF target after T1.
             if pos["t1_hit"] and not pos.get("t2_hit") and pos.get("t2_price", 0) > 0:
@@ -266,6 +273,7 @@ class ExitMixin:
                                               qty_override=remaining)
                     self._position = None
                     self._clear_persisted_position()
+                    await self._publish_state()
                     return
 
             # Profit floor: locks after T1; exits if P&L drops below floor.
@@ -279,6 +287,7 @@ class ExitMixin:
                     pos["floor_locked"] = True
                     self._log.info("PROFIT FLOOR LOCKED ₹%.0f (t1=%.0f + rem=%.0f)",
                                    self._profit_floor, t1_pnl, running_rem)
+                    await self._publish_state()
                 if pos.get("floor_locked") and current_pnl < self._profit_floor:
                     self._log.info("FLOOR_SL opt_ltp=%.2f pnl=%.0f < floor=%.0f → exit",
                                    opt_ltp, current_pnl, self._profit_floor)
@@ -287,6 +296,7 @@ class ExitMixin:
                     self._record_closed_trade(pos, exit_price=opt_ltp, exit_reason="FLOOR_SL")
                     self._position = None
                     self._clear_persisted_position()
+                    await self._publish_state()
                     return
 
         # SL check (active in both modes).

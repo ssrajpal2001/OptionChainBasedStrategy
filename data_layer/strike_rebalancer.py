@@ -36,7 +36,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, date
 from typing import Dict, Optional, Set
 
 from config.global_config import IST, Topic, SysEvent, GlobalConfig
@@ -150,6 +150,13 @@ class StrikeRebalancer:
         """Return a copy of the current pinned set for an underlying."""
         st = self._state.get(underlying)
         return set(st.pinned_strikes) if st else set()
+
+    async def fetch_option_chain(self, underlying_key: str, expiry_date: date) -> Optional[Dict]:
+        """Delegate to the wrapped feeder, if it supports on-demand option-chain fetch."""
+        feeder = getattr(self, "_feeder", None)
+        if feeder and hasattr(feeder, "fetch_option_chain"):
+            return await feeder.fetch_option_chain(underlying_key, expiry_date)
+        return None
 
     def active_strikes(self, underlying: str) -> Set[float]:
         """Return a copy of the full active (subscribed) set for an underlying."""

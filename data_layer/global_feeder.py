@@ -433,6 +433,36 @@ class UpstoxFeeder(BaseFeeder):
         # is enough — the keys won't re-subscribe on reconnect and the extra ticks
         # from already-subscribed NSE strikes are ignored harmlessly.
 
+    async def fetch_option_chain(self, underlying_key: str, expiry_date: date) -> Optional[Dict[str, Any]]:
+        """Fetch Upstox /v2/option/chain for the underlying + expiry. Returns plain dict."""
+        if not self._sdk_available:
+            return None
+        access_token = self._creds.get("access_token", "")
+        if not access_token:
+            logger.warning("UpstoxFeeder: fetch_option_chain skipped — no access_token.")
+            return None
+        try:
+            import upstox_client
+            from upstox_client.api.options_api import OptionsApi
+            cfg_obj = upstox_client.Configuration()
+            cfg_obj.access_token = access_token
+            api_client = upstox_client.ApiClient(cfg_obj)
+            api = OptionsApi(api_client)
+            expiry_str = expiry_date.strftime("%Y-%m-%d")
+            resp = await asyncio.to_thread(api.get_put_call_option_chain, underlying_key, expiry_str)
+            if resp is None:
+                return None
+            data = resp.to_dict()
+            logger.info(
+                "UpstoxFeeder: fetched option chain %s expiry=%s rows=%d",
+                underlying_key, expiry_str,
+                len(data.get("data") or []),
+            )
+            return data
+        except Exception as exc:
+            logger.warning("UpstoxFeeder: fetch_option_chain failed: %s", exc)
+            return None
+
     async def _ws_loop(self) -> None:
         if not self._streamer:
             return
@@ -1290,6 +1320,18 @@ class GlobalFeeder:
                 await feeder.unsubscribe_tokens(tokens)
         elif self._feeder is not None:
             await self._feeder.unsubscribe_tokens(tokens)
+
+    async def fetch_option_chain(self, underlying_key: str, expiry_date: date) -> Optional[Dict[str, Any]]:
+        """Proxy to active feeder(s). Returns the first successful chain snapshot."""
+        if self._dual_feeder is not None:
+            for feeder in self._dual_feeder._feeders.values():
+                if hasattr(feeder, "fetch_option_chain"):
+                    data = await feeder.fetch_option_chain(underlying_key, expiry_date)
+                    if data:
+                        return data
+        elif self._feeder is not None and hasattr(self._feeder, "fetch_option_chain"):
+            return await self._feeder.fetch_option_chain(underlying_key, expiry_date)
+        return None
 
     async def _reapply_cached_tokens(self) -> None:
         """Re-subscribe cached option tokens after a DualFeeder reconnect."""

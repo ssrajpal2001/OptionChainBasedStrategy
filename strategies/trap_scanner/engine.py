@@ -251,6 +251,7 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
             f"|  Lots: {self._lot_mul} x {self._lot_size} = {self._lot_mul * self._lot_size} qty",
             f"|  Profit floor: {self._profit_floor:,.0f}  |  No-target-TSL: {self._no_target_tsl}  |  Scale-in: {self._scale_in_enabled}",
             f"|  Gap-skip DTE <= {self._gap_skip_dte} (0=off)  |  DTE min filter <= {self._dte_min} (0=off)  |  Expiry mode: {self._expiry_mode}",
+            f"|  Dynamic premium entry: {getattr(self, '_dynamic_premium_entry', False)} (target≤{getattr(self, '_target_premium', 0)})  |  Pick mode: {getattr(self, '_premium_pick_mode', 'n/a')}",
             f"|  Per-index admin keys present: {sorted(adm.keys()) or 'none (all defaults from code)'}",
             f"+{border}",
         ]
@@ -932,6 +933,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                     if _zone_scan_ran or _candle_closed:
                         await self._publish_state()
 
+                # Update live LTP of the actually-executed strike (dynamic entry may use
+                # a different strike than the scan leg). Used by telemetry / P&L display only;
+                # SL/T1 remain on the scan strike.
+                if self._position:
+                    pos_exec_key = self._position.get("exec_key", "")
+                    if pos_exec_key and sym == pos_exec_key:
+                        self._position["exec_ltp"] = round(ltp, 2)
+
                 # SL/T1/trail monitoring uses SCAN-STRIKE option LTP (not 1-ITM exec key).
                 # Zone SL levels (zone_high/low) are derived from scan-strike price action,
                 # so the scan-strike feed is the correct reference for all exit checks.
@@ -1059,6 +1068,9 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                                         await feeder.subscribe_tokens(keys)
                                 except Exception:
                                     pass
+                        # Heartbeat publish: push state at least once per minute so the
+                        # dashboard never appears frozen when ticks are quiet/subscriptions drop.
+                        await self._publish_state()
                     # SPOT bars: keep spot history for option-mode bias and spot-mode cascade.
                     _idx_state_changed = False
                     fut_ltp: Optional[float] = None
@@ -1960,11 +1972,14 @@ class TrapScannerEngine(AbstractStrategyBook, PositionUpdateMixin, ConfigMixin, 
                 "signal_source": pos.get("signal_source", ""),
                 "entry_price":   pos["entry_price"],
                 "fut_entry_ref": pos.get("fut_entry_ref"),
-                "opt_ltp":       next(
-                    (self._ltp_cache.get(lb, 0) or 0
-                     for lb in ["CE1","CE2","PE1","PE2"]
-                     if getattr(self, f"_{lb.lower()}_key", "") == pos.get("exec_key","")),
-                    0.0
+                "opt_ltp":       (
+                    pos.get("exec_ltp", 0.0) if pos.get("exec_ltp", 0.0) > 0
+                    else next(
+                        (self._ltp_cache.get(lb, 0) or 0
+                         for lb in ["CE1","CE2","PE1","PE2"]
+                         if getattr(self, f"_{lb.lower()}_key", "") == pos.get("exec_key","")),
+                        0.0
+                    )
                 ),
                 "sl_price":      pos["sl_price"],
                 "trail_sl":      pos["trail_sl"],
