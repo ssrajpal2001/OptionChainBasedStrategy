@@ -1273,6 +1273,16 @@ class GlobalFeeder:
                 pass
         logger.info("GlobalFeeder: Stopped.")
 
+    def set_rebalancer(self, rebalancer) -> None:
+        """Proxy StrikeRebalancer reference to the active underlying feeder."""
+        if self._dual_feeder is not None:
+            for f in self._dual_feeder._feeders.values():
+                if hasattr(f, "set_rebalancer"):
+                    f.set_rebalancer(rebalancer)
+        elif self._feeder is not None:
+            if hasattr(self._feeder, "set_rebalancer"):
+                self._feeder.set_rebalancer(rebalancer)
+
     def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
         """Register NSE_EQ instrument keys → ticker names so FnoStockMonitor spot ticks flow as INDEX_TICK."""
         self._extra_spot_keys.update(mapping)
