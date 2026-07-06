@@ -538,6 +538,18 @@ class DataMixin:
         # DELTA exchange: trade perpetual futures (BTCUSD/ETHUSD), not options
         if self._exchange == "DELTA":
             return "BTCUSD" if self._und == "BTC" else "ETHUSD"
+        # Use the instrument registry to get the correct broker-specific tradingsymbol.
+        # Fallback to the legacy constructed string if registry lookup fails.
+        if strike and self._expiry_date:
+            try:
+                from data_layer.instrument_registry import REGISTRY
+                sym = REGISTRY.get_broker_symbol(
+                    self._und, self._expiry_date, int(strike), opt_type, provider="zerodha"
+                )
+                if sym:
+                    return sym
+            except Exception as exc:
+                self._log.warning("_build_broker_symbol REGISTRY lookup failed: %s", exc)
         exp = self._expiry_str or ""
         return f"{self._und}{exp}{strike}{opt_type}"
 
