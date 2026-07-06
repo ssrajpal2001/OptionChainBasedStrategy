@@ -74,9 +74,9 @@ async def _load_feeder_creds(db_path: str = "data/clients.db") -> tuple[dict, di
     try:
         from data_layer.client_db import ClientDB
         db = ClientDB(db_path)
-        await db.init()
-        upstox_row = await db.get_feeder_creds("upstox")
-        fyers_row  = await db.get_feeder_creds("fyers")
+        await db.initialise()
+        upstox_row = db.get_feeder_creds_sync("upstox")
+        fyers_row  = db.get_feeder_creds_sync("fyers")
 
         upstox_creds: dict = {}
         fyers_creds: dict  = {}
@@ -84,19 +84,15 @@ async def _load_feeder_creds(db_path: str = "data/clients.db") -> tuple[dict, di
         if upstox_row:
             upstox_creds = {
                 "api_key":     upstox_row.get("api_key", ""),
-                "api_secret":  upstox_row.get("api_secret", ""),
-                "user_id":     upstox_row.get("user_id", ""),
-                "password":    upstox_row.get("password", ""),
-                "totp_secret": upstox_row.get("totp_secret", ""),
+                "api_secret":  upstox_row.get("secret", ""),
+                "user_id":     upstox_row.get("client_id", ""),
                 "access_token": upstox_row.get("access_token", ""),
             }
         if fyers_row:
             fyers_creds = {
                 "api_key":     fyers_row.get("api_key", ""),
-                "api_secret":  fyers_row.get("api_secret", ""),
-                "user_id":     fyers_row.get("user_id", ""),
-                "password":    fyers_row.get("password", ""),
-                "totp_secret": fyers_row.get("totp_secret", ""),
+                "api_secret":  fyers_row.get("secret", ""),
+                "user_id":     fyers_row.get("client_id", ""),
                 "access_token": fyers_row.get("access_token", ""),
             }
         return upstox_creds, fyers_creds
@@ -131,7 +127,7 @@ async def _main(args: argparse.Namespace) -> None:
         upstox_creds, fyers_creds = await _load_feeder_creds()
         logger.info(
             "FeedServer: credentials loaded — upstox=%s fyers=%s",
-            bool(upstox_creds.get("api_key")), bool(fyers_creds.get("api_key")),
+            bool(upstox_creds.get("access_token")), bool(fyers_creds.get("access_token")),
         )
         # Start mock feeder first so the system is live immediately
         await feeder.start()

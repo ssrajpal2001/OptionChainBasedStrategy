@@ -352,7 +352,6 @@ async def _run_live(
 
     candle_cache  = CandleCache(bus, cfg)
     option_matrix = OptionMatrixEngine(bus, cfg)
-    feeder        = GlobalFeeder(bus, cfg)
     router        = ExecutionRouter(bus, registry, cfg)
     from data_layer.client_db import ClientDB as _ClientDB
     _shared_client_db = _ClientDB()
@@ -360,6 +359,7 @@ async def _run_live(
     cfg.exchange.load_from_db(_shared_client_db)
     # Share the same DB instance across bridge + dashboard so engine_active state is consistent
     router._client_db = _shared_client_db
+    feeder        = GlobalFeeder(bus, cfg, _shared_client_db)
     # Build all enabled strategy managers from the registry.
     managers: dict = {}
     for name in _enabled_strats:

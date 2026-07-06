@@ -1180,6 +1180,21 @@ class GlobalFeeder:
         except TypeError:
             self._feeder = cls(self._bus)
 
+        # Load feeder credentials from DB for real broker providers.
+        if self._client_db is not None and provider in ("upstox", "fyers", "dhan", "angelone"):
+            try:
+                row = self._client_db.get_feeder_creds_sync(provider) or {}
+                if row.get("access_token"):
+                    if hasattr(self._feeder, "set_credentials"):
+                        self._feeder.set_credentials({
+                            "api_key": row.get("api_key", ""),
+                            "api_secret": row.get("secret", ""),
+                            "user_id": row.get("client_id", ""),
+                            "access_token": row.get("access_token", ""),
+                        })
+            except Exception as exc:
+                logger.warning("GlobalFeeder: could not load %s creds from DB: %s", provider, exc)
+
         if not await self._feeder.connect():
             raise ConnectionError(f"GlobalFeeder: Failed to connect via '{provider}'.")
 
