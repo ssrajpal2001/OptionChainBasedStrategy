@@ -80,6 +80,7 @@ class StraddlePosition:
             "net_credit": self.net_credit, "tsl_high_lock_rs": self.tsl_high_lock_rs,
             "peak_profit": self.peak_profit, "trailing_active": self.trailing_active,
             "open_time": self.open_time.isoformat() if self.open_time else None,
+            "entry_time": self.open_time.isoformat() if self.open_time else None,
             "realized_pnl": self.realized_pnl, "status": self.status,
             "entry_indicators": dict(self.entry_indicators),
             "lot_size": self.lot_size,

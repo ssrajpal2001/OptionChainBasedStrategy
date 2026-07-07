@@ -3885,7 +3885,8 @@ function amoTest() {
               <div class="font-mono text-xs space-y-0.5">
                 <div class="flex justify-between"><span style="color:var(--t-muted)">ATM</span><span x-text="s.position.atm||'—'"></span></div>
                 <div class="flex justify-between"><span style="color:var(--t-muted)">Legs CE / PE</span><span style="color:var(--t-cyan)" x-text="(s.position.ce_strike||'—')+' / '+(s.position.pe_strike||'—')"></span></div>
-                <div class="flex justify-between"><span style="color:var(--t-muted)">Entry Time</span><span x-text="s.position.open_time ? fmtHMS(s.position.open_time) : '—'"></span></div>
+                <div class="flex justify-between"><span style="color:var(--t-muted)">Expiry</span><span x-text="s.position.expiry_date ? histDayLabel(s.position.expiry_date) : '—'"></span></div>
+                <div class="flex justify-between"><span style="color:var(--t-muted)">Entry Time</span><span x-text="fmtHMS(s.position.entry_time || s.position.open_time)"></span></div>
                 <div class="flex justify-between"><span style="color:var(--t-muted)">Booked P&amp;L</span><span :style="`color:${(s.booked_pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="(s.booked_pnl||0).toFixed(1)"></span></div>
                 <div class="flex justify-between"><span style="color:var(--t-muted)">Running P&amp;L</span><span :style="`color:${(s.position.unrealized_pnl||0)>=0?'var(--t-green)':'var(--t-red)'}`" x-text="(s.position.unrealized_pnl||0).toFixed(1)"></span></div>
                 <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)"><span style="color:var(--t-muted)">Net (Booked+Running)</span><span :style="`color:${((s.booked_pnl||0)+(s.position.unrealized_pnl||0))>=0?'var(--t-green)':'var(--t-red)'}`" x-text="((s.booked_pnl||0)+(s.position.unrealized_pnl||0)).toFixed(1)"></span></div>
@@ -7539,6 +7540,12 @@ function amoTest() {
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
                               x-text="dep.lot_multiplier+'L'+(dep.strategy_name==='trap_scanner'&&(trapBookFor(b.binding_id,dep.underlying)||{}).htf_source==='futures'?'':' · SQ '+(dep.squareoff_time||'—'))"></span>
+                      </div>
+                      <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">
+                        Entry <span style="color:var(--t-text)"
+                          x-text="fmtHMS((csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] || {}).entry_time)"></span>
+                        · Expiry <span style="color:var(--t-text)"
+                          x-text="((csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] || {}).expiry_date) ? histDayLabel((csPositions[b.binding_id] && csPositions[b.binding_id][dep.strategy_name] || {}).expiry_date) : '—'"></span>
                       </div>
                     </div>
                     <div class="text-right">

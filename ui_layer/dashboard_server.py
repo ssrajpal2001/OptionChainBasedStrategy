@@ -2252,14 +2252,18 @@ class DashboardServer:
                     qty  = ls * (-1 if side == "sell" else 1)
                     # sell profits when price falls; buy profits when price rises
                     pnl = round((ep - ltp) * abs(qty), 2) if side == "sell" else round((ltp - ep) * abs(qty), 2)
+                    _ot = getattr(leg, "open_time", None)
+                    _ot_iso = _ot.isoformat(timespec="seconds") if _ot else None
+                    _exp_lbl = _fmt_exp(getattr(pos, "expiry", None))
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} {side.upper()}",
-                                "instrument": f"{pos.underlying} {strike} {ot}",
+                                "instrument": f"{pos.underlying} {strike} {ot}" + (f" {_exp_lbl}" if _exp_lbl else ""),
                                 "type": product, "side": side.upper(),
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
                                 "sell_avg": round(ep, 2) if side == "sell" else 0.0,
                                 "buy_avg":  round(ep, 2) if side != "sell" else 0.0,
-                                "ltp": round(ltp, 2), "pnl": pnl, "mtm": pnl})
+                                "ltp": round(ltp, 2), "pnl": pnl, "mtm": pnl,
+                                "entry_time": _ot_iso})
                 return out
 
             def _ccy_cv(underlying):
@@ -2272,6 +2276,16 @@ class DashboardServer:
                 if u == "ETH":
                     return ("$", 0.01)
                 return ("₹", 1.0)
+
+            def _fmt_exp(d):
+                """Format a date/date-like expiry as 09JUL26, or empty if missing/invalid."""
+                if not d:
+                    return ""
+                _mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+                try:
+                    return f"{int(d.day)}{_mons[int(d.month)-1]}{str(d.year)[-2:]}"
+                except Exception:
+                    return ""
 
             def _ss_legs(pos, product="MIS"):
                 out = []
@@ -2302,6 +2316,8 @@ class DashboardServer:
                             _exp_lbl = f"{int(_dd)}{_mons[int(_mm)-1]}{_yy}"
                         except Exception:
                             pass
+                    if not _exp_lbl:
+                        _exp_lbl = _fmt_exp(getattr(pos, "expiry_date", None))
                     _instr = f"{pos.underlying} {strike} {ot}" + (f" {_exp_lbl}" if _exp_lbl else "")
                     _ot = leg.open_time.isoformat(timespec="seconds") if getattr(leg, "open_time", None) else None
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
@@ -2324,6 +2340,7 @@ class DashboardServer:
                 tracking = None
                 straddle_info = None   # sell_straddle: total sold, exit-basis, LTP/Theta triplets
                 booked = 0.0   # session realized P&L (₹) — straddle re-entries/rolls booked today
+                pos = None     # active position for extracting top-level entry time
                 try:
                     if sname == "iron_condor":
                         strat = _find(getattr(_srv, "_iron_condors", []), underlying)
@@ -2475,9 +2492,14 @@ class DashboardServer:
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
                 except Exception as exc:
                     logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
+                _entry_time = (pos.open_time.isoformat(timespec="seconds") if pos and getattr(pos, "open_time", None)
+                               else (legs[0].get("entry_time") if legs else None))
+                _expiry_date = pos.expiry_date.isoformat() if pos and getattr(pos, "expiry_date", None) else None
                 by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
                                           "booked": booked, "tracking": tracking,
                                           "straddle": straddle_info,
+                                          "entry_time": _entry_time,
+                                          "expiry_date": _expiry_date,
                                           "ccy": (legs[0].get("ccy", "₹") if legs else
                                                   ("$" if str(underlying).upper() in ("BTC", "ETH") else "₹"))}
             return {"ok": True, "by_broker": by_broker}
@@ -3370,6 +3392,7 @@ class DashboardServer:
                             "stop_loss":     round(pos.sl_rs, 2),
                             "unrealized_pnl": round(pos.total_pnl_pts * pos.lot_size, 2),
                             "open_time": pos.open_time.isoformat() if pos.open_time else None,
+                            "entry_time": pos.open_time.isoformat() if pos.open_time else None,
                         }
                     out.append({
                         "type":         "iron_condor",
@@ -3388,11 +3411,13 @@ class DashboardServer:
                             "atm":       pos.atm_at_entry,
                             "ce_strike": pos.ce_leg.strike,
                             "pe_strike": pos.pe_leg.strike,
+                            "expiry_date": pos.expiry_date.isoformat() if pos.expiry_date else None,
                             "net_credit":    round(pos.net_credit, 2),
                             "unrealized_pnl": round(pos.unrealized_pnl, 2),
                             "peak_profit":   round(pos.peak_profit, 2),
                             "trailing_active": pos.trailing_active,
                             "open_time": pos.open_time.isoformat() if pos.open_time else None,
+                            "entry_time": pos.open_time.isoformat() if pos.open_time else None,
                         }
                     out.append({
                         "type":         "sell_straddle",
