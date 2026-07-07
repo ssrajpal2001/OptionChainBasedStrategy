@@ -157,45 +157,6 @@ def test_on_fill_exception_does_not_crash_loop_and_clears_pending_when_flat():
     assert ss._order_pending is False
 
 
-# ── Per-trade hard target / stop-loss ──────────────────────────────────────
-
-
-def test_per_trade_sl_triggers_exit():
-    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
-    ss._running = True
-    _disable_eod_squareoff(ss)
-    ss._per_trade_sl_pct = 10.0
-    pos = _open_position(ss, ce_ltp=100.0, pe_ltp=100.0)  # credit = 200
-    emitted = _patch_emit(ss)
-
-    # Combined premium rises 12.5 pts per leg → loss = -25 pts (12.5% of credit)
-    pos.ce_leg.ltp = 112.5
-    pos.pe_leg.ltp = 112.5
-
-    asyncio.run(ss._check_exits())
-
-    assert len(emitted) == 1
-    assert emitted[0].close_reason == "per_trade_sl"
-
-
-def test_per_trade_target_triggers_exit():
-    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
-    ss._running = True
-    _disable_eod_squareoff(ss)
-    ss._per_trade_profit_pct = 20.0
-    pos = _open_position(ss, ce_ltp=100.0, pe_ltp=100.0)  # credit = 200
-    emitted = _patch_emit(ss)
-
-    # Combined premium decays 20 pts per leg → profit = +40 pts (20% of credit)
-    pos.ce_leg.ltp = 80.0
-    pos.pe_leg.ltp = 80.0
-
-    asyncio.run(ss._check_exits())
-
-    assert len(emitted) == 1
-    assert emitted[0].close_reason == "per_trade_target"
-
-
 # ── StrategyBookManager lifecycle safety ───────────────────────────────────
 
 

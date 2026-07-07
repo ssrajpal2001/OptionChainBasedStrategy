@@ -89,10 +89,6 @@ class ExitMixin:
                     pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec)
                 _crit.append(("VWAPrise",
                               f"ON {self._vwap_rise_threshold:.1f}%{' STALE-skip' if _stale else ''}", False))
-            if self._guardrail_pnl_enabled:
-                _crit.append(("PnLguard", f"T{self._guardrail_pnl_target_pts:.0f}/SL{self._guardrail_pnl_sl_pts:.0f}pts", False))
-            if self._guardrail_roc_enabled:
-                _crit.append(("ROCguard", "ON", False))
             _exit_dump = None
             if self._exit_rules:
                 _exit_ind_by_tf = self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules)
@@ -185,13 +181,13 @@ class ExitMixin:
         if _t.monotonic() - getattr(self, "_last_exit_log", 0.0) > 60.0:
             self._last_exit_log = _t.monotonic()
             _active = "".join([
-                " PnLguard" if self._guardrail_pnl_enabled else "",
                 " Decay" if self._ltp_decay_enabled else "",
-                " Ratio" if getattr(self, "_ratio_exit_enabled", False) else "",
+                " Ratio" if getattr(self, "_ratio_threshold", 0.0) > 0 else "",
                 " TSL" if self._tsl_enabled else "",
-                " ROC" if getattr(self, "_guardrail_roc_enabled", getattr(self, "_roc_guardrail_enabled", False)) else "",
+                " TrailSL" if self._trail_sl_enabled else "",
                 " VWAPrise" if self._vwap_rise_enabled else "",
                 " exit_rules" if getattr(self, "_exit_rules", None) else "",
+                " ITMgate" if getattr(self, "_itm_pair_gate_enabled", False) else "",
             ]) or " (none)"
             logger.info(
                 "SellStraddle[%s]: EXIT-CHECK pnl=%.2f pts | Day%% T:%.0f%%/SL:%.0f%% (credit=%.2f) | "
@@ -223,44 +219,25 @@ class ExitMixin:
             else:
                 return
 
-        # 2. MANDATORY GLOBAL GUARDRAILS
-        if self._guardrail_pnl_enabled:
-            _session_pts = self._session_realized_pnl_pts + pnl
-            if self._guardrail_pnl_target_pts > 0 and _session_pts >= self._guardrail_pnl_target_pts:
-                logger.info(
-                    "SellStraddle[%s]: GUARDRAIL_PNL TARGET — session=%.2f pts >= %.2f",
-                    self._underlying, _session_pts, self._guardrail_pnl_target_pts,
-                )
-                await self._close_position("guardrail_pnl_target")
-                self._stop_for_day = True
-                return
-            if self._guardrail_pnl_sl_pts != 0 and _session_pts <= self._guardrail_pnl_sl_pts:
-                logger.info(
-                    "SellStraddle[%s]: GUARDRAIL_PNL SL — session=%.2f pts <= %.2f",
-                    self._underlying, _session_pts, self._guardrail_pnl_sl_pts,
-                )
-                await self._close_position("guardrail_pnl_sl")
-                return
-
-        # 2b. PER-TRADE HARD TARGET / STOP-LOSS (% of this trade's net credit)
-        if pos.net_credit > 0:
-            if getattr(self, "_per_trade_sl_pct", 0.0) > 0:
-                _per_trade_sl_pts = -self._per_trade_sl_pct / 100.0 * pos.net_credit
-                if pnl <= _per_trade_sl_pts:
+        # 2. TRAILING SL (lock-%/floor-%-below-peak)
+        if self._trail_sl_enabled:
+            if self._trail_basis == "theta":
+                _profit_pct = pos.premium_decay_pct()
+            elif pos.net_credit > 0:
+                _profit_pct = pnl / pos.net_credit * 100.0
+            else:
+                _profit_pct = None
+            if _profit_pct is not None:
+                if _profit_pct > pos.trail_peak_pct:
+                    pos.trail_peak_pct = _profit_pct
+                _lock_pts = self._trail_lock_pct * 100.0
+                _floor_pts = self._trail_floor_pct * 100.0
+                if pos.trail_peak_pct >= _lock_pts and _profit_pct <= (pos.trail_peak_pct - _floor_pts):
                     logger.info(
-                        "SellStraddle[%s]: PER-TRADE SL — pnl=%.2fpts <= %.2fpts (%.1f%% of credit=%.2f)",
-                        self._underlying, pnl, _per_trade_sl_pts, self._per_trade_sl_pct, pos.net_credit,
+                        "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → full exit",
+                        self._underlying, self._trail_basis, _profit_pct, pos.trail_peak_pct, _floor_pts,
                     )
-                    await self._close_position("per_trade_sl")
-                    return
-            if getattr(self, "_per_trade_profit_pct", 0.0) > 0:
-                _per_trade_tgt_pts = self._per_trade_profit_pct / 100.0 * pos.net_credit
-                if pnl >= _per_trade_tgt_pts:
-                    logger.info(
-                        "SellStraddle[%s]: PER-TRADE TARGET — pnl=%.2fpts >= %.2fpts (%.1f%% of credit=%.2f)",
-                        self._underlying, pnl, _per_trade_tgt_pts, self._per_trade_profit_pct, pos.net_credit,
-                    )
-                    await self._close_position("per_trade_target")
+                    await self._close_position(f"trailing_sl_{self._trail_basis}")
                     return
 
         # 3. DAY-LEVEL % GUARDRAILS
@@ -303,28 +280,7 @@ class ExitMixin:
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 
-        # 4. TRAILING SL (lock-%/floor-%-below-peak)
-        if self._trail_sl_enabled:
-            if self._trail_basis == "theta":
-                _profit_pct = pos.premium_decay_pct()
-            elif pos.net_credit > 0:
-                _profit_pct = pnl / pos.net_credit * 100.0
-            else:
-                _profit_pct = None
-            if _profit_pct is not None:
-                if _profit_pct > pos.trail_peak_pct:
-                    pos.trail_peak_pct = _profit_pct
-                _lock_pts = self._trail_lock_pct * 100.0
-                _floor_pts = self._trail_floor_pct * 100.0
-                if pos.trail_peak_pct >= _lock_pts and _profit_pct <= (pos.trail_peak_pct - _floor_pts):
-                    logger.info(
-                        "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → full exit",
-                        self._underlying, self._trail_basis, _profit_pct, pos.trail_peak_pct, _floor_pts,
-                    )
-                    await self._close_position(f"trailing_sl_{self._trail_basis}")
-                    return
-
-        # 5. LTP Decay → single-side roll
+        # 4. LTP Decay → single-side roll
         if self._ltp_decay_enabled:
             _min_ltp = min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if 0 < _min_ltp < self._ltp_exit_min and self._position and self._position.status == "open":
@@ -333,7 +289,7 @@ class ExitMixin:
                 await self._single_side_roll(now, "ltp_decay")
                 return
 
-        # 6. Ratio exit → rollover
+        # 5. Ratio exit → rollover
         if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
             ratio = max(pos.ce_leg.ltp, pos.pe_leg.ltp) / min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if ratio >= self._ratio_threshold:
@@ -342,7 +298,7 @@ class ExitMixin:
                 await self._single_side_roll(now, "ratio_exit")
                 return
 
-        # 7. Scalable TSL → single-side roll
+        # 6. Scalable TSL → single-side roll
         if self._tsl_enabled:
             _tsl_pnl = pnl
             if self._tsl_basis == "theta":
@@ -357,60 +313,7 @@ class ExitMixin:
                 await self._single_side_roll(now, "scalable_tsl")
                 return
 
-        # 8. ROC guardrail
-        if self._guardrail_roc_enabled and len(self._prem_closes) >= self._guardrail_roc_length + 1:
-            _rg_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // self._guardrail_roc_tf) * self._guardrail_roc_tf:02d}"
-            if _rg_bucket != self._last_roc_guard_bucket:
-                self._last_roc_guard_bucket = _rg_bucket
-                _closes = list(self._prem_closes)
-                _denom = _closes[-(self._guardrail_roc_length + 1)]
-                if _denom == 0:
-                    _roc_val = None
-                else:
-                    _roc_val = (_closes[-1] - _denom) / _denom * 100
-                if _roc_val is not None and self._guardrail_roc_target < 0 and _roc_val <= self._guardrail_roc_target:
-                    logger.info(
-                        "SellStraddle[%s]: ROC GUARDRAIL TARGET — roc=%.2f <= target=%.2f",
-                        self._underlying, _roc_val, self._guardrail_roc_target,
-                    )
-                    await self._close_position("guardrail_roc_target")
-                    return
-                if _roc_val is not None and self._guardrail_roc_stoploss >= 0 and _roc_val >= self._guardrail_roc_stoploss:
-                    logger.info(
-                        "SellStraddle[%s]: ROC GUARDRAIL SL — roc=%.2f >= sl=%.2f",
-                        self._underlying, _roc_val, self._guardrail_roc_stoploss,
-                    )
-                    await self._close_position("guardrail_roc_sl")
-                    return
-
-        # 9. VWAP Rise SL → smart roll
-        if self._vwap_rise_enabled and self._pool_engine.pair_atp_fresh(
-                int(pos.ce_leg.strike), int(pos.pe_leg.strike), self._vwap_stale_sec):
-            _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
-            curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
-            _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
-            _glitch = (pos.vwap_last_good > 0 and curr_vwap > 0
-                       and curr_vwap < 0.80 * pos.vwap_last_good)
-            if curr_vwap > 0 and not _glitch and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
-                pos.vwap_last_good = curr_vwap
-                if curr_vwap < pos.session_min_vwap:
-                    pos.session_min_vwap = curr_vwap
-                if pos.session_min_vwap < float("inf"):
-                    rise_pct = (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100
-                    if rise_pct >= self._vwap_rise_threshold:
-                        _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
-                        _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
-                        _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
-                        logger.info(
-                            "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → "
-                            "single-side roll (CE pnl=%.2f PE pnl=%.2f)",
-                            self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
-                            _ce_pnl, _pe_pnl,
-                        )
-                        await self._single_side_roll(now, "vwap_rise_roll")
-                        return
-
-        # 10. EXIT-EVAL — dynamic exit_rules
+        # 7. EXIT-EVAL — dynamic exit_rules → single-side roll
         _max_tf = (max((int(r.get("tf", 1)) for r in self._exit_rules), default=1)
                    if self._exit_rules else 5)
         _er_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _max_tf) * _max_tf:02d}"
@@ -438,7 +341,7 @@ class ExitMixin:
 
             if self._exit_rules and _passed:
                 logger.info("SellStraddle[%s]: EXIT_RULES triggered — %s", self._underlying, _reason)
-                await self._close_position("exit_rules")
+                await self._single_side_roll(now, "exit_rules")
                 return
             # Persist the exit-evaluation audit once per max-TF bucket (throttled by bucket).
             audit_exit_eval(
@@ -454,7 +357,34 @@ class ExitMixin:
                 fired_reason=_reason if _passed else "",
             )
 
-        # 11. ITM PAIR GATE (armed-watching phase: cumulative was ≤0 at rollover time)
+        # 8. VWAP Rise SL → smart roll
+        if self._vwap_rise_enabled and self._pool_engine.pair_atp_fresh(
+                int(pos.ce_leg.strike), int(pos.pe_leg.strike), self._vwap_stale_sec):
+            _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+            curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
+            _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
+            _glitch = (pos.vwap_last_good > 0 and curr_vwap > 0
+                       and curr_vwap < 0.80 * pos.vwap_last_good)
+            if curr_vwap > 0 and not _glitch and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
+                pos.vwap_last_good = curr_vwap
+                if curr_vwap < pos.session_min_vwap:
+                    pos.session_min_vwap = curr_vwap
+                if pos.session_min_vwap < float("inf"):
+                    rise_pct = (curr_vwap - pos.session_min_vwap) / pos.session_min_vwap * 100
+                    if rise_pct >= self._vwap_rise_threshold:
+                        _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
+                        _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
+                        _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
+                        logger.info(
+                            "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → "
+                            "single-side roll (CE pnl=%.2f PE pnl=%.2f)",
+                            self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
+                            _ce_pnl, _pe_pnl,
+                        )
+                        await self._single_side_roll(now, "vwap_rise_roll")
+                        return
+
+        # 9. ITM PAIR GATE (armed-watching phase: cumulative was ≤0 at rollover time)
         if getattr(self, "_itm_gate_armed", False):
             await self._check_itm_pair_gate(now)
 

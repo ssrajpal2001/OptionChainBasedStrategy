@@ -693,6 +693,16 @@ document.addEventListener('alpine:init', () => {
     csSaving: false, csSaveMsg: '', csSaveOk: null,
     csSelectionsLoaded: false,
 
+    /* ── Client risk overrides ──────────────────────────────────────── */
+    csRiskOverride: {
+      strategy: 'sell_straddle',
+      instrument: 'CRUDEOIL',
+      admin_defaults: {},
+      client_overrides: {},
+      edited: {},
+    },
+    csRiskSaving: false, csRiskMsg: '', csRiskOk: null,
+
     /* ── Client positions / history ─────────────────────────────────── */
     csActiveBrokerTab: '',   // binding_id of the selected broker in positions view
     csPositions: {},         // keyed by binding_id → [{strategy, instrument, legs, pnl}]
@@ -1691,8 +1701,6 @@ document.addEventListener('alpine:init', () => {
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
-        guardrail_roc: { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 },
-        guardrail_pnl: { enabled: false, target_pts: 0, stoploss_pts: 0 },
         itm_pair_gate_enabled: false,
         ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
@@ -1742,8 +1750,6 @@ document.addEventListener('alpine:init', () => {
       if (ss.entry_basis  === undefined) ss.entry_basis  = 'ltp';
       if (ss.theta_target === undefined) ss.theta_target = 0;
       if (ss.trail_basis  === undefined) ss.trail_basis  = 'ltp';
-      if (!ss.guardrail_roc) ss.guardrail_roc = { enabled: false, tf: 15, length: 9, target: 20.0, stoploss: -40.0 };
-      if (!ss.guardrail_pnl) ss.guardrail_pnl = { enabled: false, target_pts: 0, stoploss_pts: 0 };
       if (!ss.ratio_exit)    ss.ratio_exit    = { enabled: false, threshold: 3.0, max_entry_ratio: 0 };
       if (ss.ratio_exit.max_entry_ratio === undefined) ss.ratio_exit.max_entry_ratio = 0;
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
@@ -2563,6 +2569,34 @@ document.addEventListener('alpine:init', () => {
       finally   { this.csSaving = false; }
     },
 
+    async loadRiskOverrides() {
+      try {
+        const r = await this._fetch(`/api/client/risk_overrides?strategy=${this.csRiskOverride.strategy}&instrument=${this.csRiskOverride.instrument}`);
+        if (r && r.ok) {
+          const d = await r.json();
+          this.csRiskOverride.admin_defaults = d.admin_defaults || {};
+          this.csRiskOverride.client_overrides = d.client_overrides || {};
+          this.csRiskOverride.edited = { ...(d.client_overrides || {}) };
+        }
+      } catch {}
+    },
+    async saveRiskOverrides() {
+      this.csRiskSaving = true; this.csRiskMsg = ''; this.csRiskOk = null;
+      try {
+        const r = await this._fetch(`/api/client/risk_overrides?strategy=${this.csRiskOverride.strategy}&instrument=${this.csRiskOverride.instrument}`, { json: { overrides: this.csRiskOverride.edited } });
+        if (!r) return;
+        const d = await r.json();
+        this.csRiskOk = r.ok;
+        this.csRiskMsg = r.ok ? 'Risk overrides saved.' : (d.detail || 'Save failed.');
+        if (r.ok) this.csRiskOverride.client_overrides = { ...this.csRiskOverride.edited };
+        setTimeout(() => { this.csRiskMsg = ''; }, 3000);
+      } catch { this.csRiskOk = false; this.csRiskMsg = 'Request failed.'; }
+      finally { this.csRiskSaving = false; }
+    },
+    riskAdminValue(key) {
+      return this.csRiskOverride.admin_defaults[key];
+    },
+
     /* ── Client positions ───────────────────────────────────────────────── */
     async loadClientPositions() {
       this.csPosBrokerLoading = true;
@@ -2740,8 +2774,7 @@ document.addEventListener('alpine:init', () => {
       if (s === 'day_loss_sl') return 'Day loss SL';
       if (s === 'day_profit_target') return 'Day profit target';
       if (s === 'exit_rules') return 'Exit rules hit';
-      if (s === 'guardrail_pnl_sl') return 'PnL guardrail SL';
-      if (s.startsWith('guardrail_roc')) return 'ROC guardrail';
+      if (s === 'exit_rules') return 'Dynamic exit (rollover)';
       if (s === 'itm_pair_gate_profit') return 'ITM pair gate → re-entry';
       return s;
     },
@@ -4298,65 +4331,6 @@ function amoTest() {
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
             <div class="flex flex-col gap-2">
               <div class="sec-label mb-1">EXIT GUARDRAILS &amp; TARGETS</div>
-
-              <!-- ROC Guardrail -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ROC TREND GUARDRAIL</span>
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled" class="accent-yellow-400">
-                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled?'ON':'OFF'"
-                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
-                  </label>
-                </div>
-                <div class="grid grid-cols-4 gap-2">
-                  <div>
-                    <label class="sec-label">TF (min)</label>
-                    <input type="number" step="1" class="t-input mt-0.5"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.tf">
-                  </div>
-                  <div>
-                    <label class="sec-label">Length</label>
-                    <input type="number" step="1" class="t-input mt-0.5"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.length">
-                  </div>
-                  <div>
-                    <label class="sec-label">Target (pts)</label>
-                    <input type="number" step="1" class="t-input mt-0.5"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.target">
-                  </div>
-                  <div>
-                    <label class="sec-label">SL (pts)</label>
-                    <input type="number" step="1" class="t-input mt-0.5"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_roc.stoploss">
-                  </div>
-                </div>
-              </div>
-
-              <!-- PnL Guardrail (points-based session target / stoploss) -->
-              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
-                <div class="flex items-center justify-between mb-2">
-                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">PNL GUARDRAIL
-                    <span style="color:var(--t-muted);font-weight:400"> — session P&amp;L in points</span></span>
-                  <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled" class="accent-yellow-400">
-                    <span class="font-mono text-xs" x-text="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'ON':'OFF'"
-                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
-                  </label>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                  <div>
-                    <label class="sec-label">Target (pts) <span style="color:var(--t-muted)">stop for day on profit</span></label>
-                    <input type="number" step="1" class="t-input mt-0.5" placeholder="0 = off"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.target_pts">
-                  </div>
-                  <div>
-                    <label class="sec-label">SL (pts) <span style="color:var(--t-muted)">negative, stop for day on loss</span></label>
-                    <input type="number" step="1" class="t-input mt-0.5" placeholder="e.g. -60"
-                           x-model.number="indexConfig[adminSelectedIndex].sell_straddle.guardrail_pnl.stoploss_pts">
-                  </div>
-                </div>
-              </div>
 
               <!-- ITM Pair Gate -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
@@ -6943,6 +6917,70 @@ function amoTest() {
               <span x-text="sel.instrument"></span>
             </div>
           </template>
+        </div>
+      </div>
+
+      <!-- Risk overrides -->
+      <div class="t-card rounded p-4" x-init="loadRiskOverrides()">
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <div class="font-ui font-bold text-base" style="color:var(--t-bright)">Risk Override</div>
+            <div class="text-xs mt-0.5" style="color:var(--t-muted)">Override admin defaults for this strategy / instrument. Empty fields use admin defaults.</div>
+          </div>
+          <select class="t-input text-xs" x-model="csRiskOverride.instrument" @change="loadRiskOverrides()">
+            <template x-for="ins in availableInstruments" :key="ins"><option x-text="ins"></option></template>
+          </select>
+        </div>
+        <div class="grid grid-cols-2 gap-3 text-xs">
+          <div>
+            <label class="sec-label">Day Profit Target % <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('day_profit_target_pct') || 0"></span></span></label>
+            <input type="number" step="0.5" class="t-input mt-0.5" placeholder="use admin"
+                   x-model.number="csRiskOverride.edited.day_profit_target_pct">
+          </div>
+          <div>
+            <label class="sec-label">Day Loss SL % <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('day_loss_sl_pct') || 0"></span></span></label>
+            <input type="number" step="0.5" class="t-input mt-0.5" placeholder="use admin"
+                   x-model.number="csRiskOverride.edited.day_loss_sl_pct">
+          </div>
+          <div>
+            <label class="sec-label">Trail Lock % <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('trail_lock_pct') || 0"></span></span></label>
+            <input type="number" step="0.5" class="t-input mt-0.5" placeholder="use admin"
+                   x-model.number="csRiskOverride.edited.trail_lock_pct">
+          </div>
+          <div>
+            <label class="sec-label">Trail Floor % <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('trail_floor_pct') || 0"></span></span></label>
+            <input type="number" step="0.5" class="t-input mt-0.5" placeholder="use admin"
+                   x-model.number="csRiskOverride.edited.trail_floor_pct">
+          </div>
+          <div>
+            <label class="sec-label">Square-off Time <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('force_exit') || '—'"></span></span></label>
+            <input type="text" class="t-input mt-0.5" placeholder="HH:MM"
+                   x-model="csRiskOverride.edited.force_exit">
+          </div>
+          <div>
+            <label class="sec-label">Ratio Threshold <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('ratio_threshold') || 0"></span></span></label>
+            <input type="number" step="0.1" class="t-input mt-0.5" placeholder="use admin"
+                   x-model.number="csRiskOverride.edited.ratio_threshold">
+          </div>
+          <div>
+            <label class="sec-label">LTP Decay Min <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('ltp_exit_min') || 0"></span></span></label>
+            <input type="number" step="1" class="t-input mt-0.5" placeholder="use admin"
+                   x-model.number="csRiskOverride.edited.ltp_exit_min">
+          </div>
+          <div>
+            <label class="sec-label">VWAP Rise % <span style="color:var(--t-muted)">admin=<span x-text="riskAdminValue('vwap_rise_threshold') || 0"></span></span></label>
+            <input type="number" step="0.1" class="t-input mt-0.5" placeholder="use admin"
+                   x-model.number="csRiskOverride.edited.vwap_rise_threshold">
+          </div>
+        </div>
+        <div class="flex items-center gap-3 mt-4">
+          <button class="btn-primary text-xs" @click="saveRiskOverrides()" :disabled="csRiskSaving">
+            <span x-show="!csRiskSaving">Save Overrides</span>
+            <span x-show="csRiskSaving">Saving…</span>
+          </button>
+          <span x-show="csRiskMsg" class="text-xs font-mono"
+                :style="csRiskOk ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                x-text="csRiskMsg"></span>
         </div>
       </div>
     </div>

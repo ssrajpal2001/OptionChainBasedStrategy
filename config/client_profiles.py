@@ -18,7 +18,7 @@ import json
 import os
 from dataclasses import dataclass, field, asdict
 from datetime import date
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +144,11 @@ class ClientProfile:
     is_client_bot_active: bool = False   # Set by client master toggle
     target_index: str = "NIFTY"         # Client-selected index (NIFTY / BANKNIFTY / FINNIFTY)
 
+    # Per-client, per-strategy, per-index risk overrides.
+    # Admin sets defaults in RuntimeConfig; any key present here overrides the admin value.
+    # Format: {"<strategy>:<underlying>": {"day_loss_sl_pct": 15.0, ...}}
+    strategy_risk_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # Runtime state — not persisted
     _daily_pnl: float = field(default=0.0, compare=False, repr=False)
     _daily_trades: int = field(default=0, compare=False, repr=False)
@@ -208,6 +213,7 @@ class ClientProfile:
             "is_admin_approved": self.is_admin_approved,
             "is_client_bot_active": self.is_client_bot_active,
             "target_index": self.target_index,
+            "strategy_risk_overrides": self.strategy_risk_overrides,
         }
 
 
@@ -293,6 +299,7 @@ class ClientRegistry:
                 is_admin_approved=rec.get("is_admin_approved", True),
                 is_client_bot_active=rec.get("is_client_bot_active", False),
                 target_index=rec.get("target_index", "NIFTY"),
+                strategy_risk_overrides=rec.get("strategy_risk_overrides", {}),
             )
             self._clients[profile.client_id] = profile
 

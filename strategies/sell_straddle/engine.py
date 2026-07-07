@@ -87,17 +87,6 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._itm_gate_armed: bool = False
         self._ltp_target: float = 0.0
 
-        self._guardrail_pnl_enabled: bool = False
-        self._guardrail_pnl_target_pts: float = 0.0
-        self._guardrail_pnl_sl_pts: float = 0.0
-
-        self._guardrail_roc_enabled: bool = False
-        self._guardrail_roc_tf: int = 15
-        self._guardrail_roc_length: int = 9
-        self._guardrail_roc_target: float = -20.0
-        self._guardrail_roc_stoploss: float = 10.0
-        self._last_roc_guard_bucket: str = ""
-
         self._market_open_dt: Optional[datetime] = None
         self._primed: bool = False
         self._order_pending: bool = False
@@ -386,15 +375,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"Base:{self._tsl_base_profit_rs:.0f}/{self._tsl_base_lock_rs:.0f} "
             f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} ({self._ccy_symbol}/BTC if crypto) "
             f"BASIS:{self._tsl_basis.upper()}",
-            f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%) | "
-            f"ROC GUARDRAIL: {'ON' if self._guardrail_roc_enabled else 'OFF'}"
-            f"({self._guardrail_roc_tf}m T:{self._guardrail_roc_target}/SL:{self._guardrail_roc_stoploss})",
-            f"║ PNL GUARDRAIL: {'ON' if self._guardrail_pnl_enabled else 'OFF'} "
-            f"T:{self._guardrail_pnl_target_pts:.0f}pts SL:{self._guardrail_pnl_sl_pts:.0f}pts | "
-            f"DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
+            f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%)",
+            f"║ DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
             f"BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
-            f"║ EXIT PRIORITY: EOD→PnLguard→Day%→LTPdecay→Ratio→ScalableTSL→ROC→VWAPrise→exit_rules",
+            f"║ EXIT PRIORITY: EOD→TrailingSL→Day%→LTPdecay→Ratio→ScalableTSL→exit_rules→VWAPrise→ITMgate",
             f"║ LIMITS: Max Daily Trades:{self._max_trades}",
             "╚══════════════════════════════════════════════════════════════════════",
         ]
@@ -524,7 +509,6 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._last_exit_rules_bucket = ""
         self._last_entry_bucket_b = ""
         self._last_entry_bucket_r = ""
-        self._last_roc_guard_bucket = ""
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
         self._beginning_failed = False

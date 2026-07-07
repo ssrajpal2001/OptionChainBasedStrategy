@@ -4,13 +4,17 @@ strategies/sell_straddle/config.py — SellStraddleConfig dataclass + loader.
 Reads the per-index ``sell_straddle`` section from RuntimeConfig and exposes it as a
 typed dataclass.  The engine copies these values onto ``self`` so existing callers can
 keep reading ``ss._ltp_target``, ``ss._entry_start``, etc.
+
+Risk-management values are loaded from the admin RuntimeConfig first, then optionally
+overridden by per-client settings in ``ClientProfile.strategy_risk_overrides``.  A
+missing/null client override falls back to the admin default.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, time as dtime
-from typing import List
+from typing import Any, Dict, List, Optional
 
 from config.global_config import IST
 from data_layer.runtime_config import RuntimeConfig, validate_index_section
@@ -55,9 +59,6 @@ class SellStraddleConfig:
     tsl_step_lock_rs: float
     tsl_basis: str
 
-    per_trade_profit_pct: float
-    per_trade_sl_pct: float
-
     day_profit_target_pct: float
     day_loss_sl_pct: float
     day_exit_basis: str
@@ -71,21 +72,68 @@ class SellStraddleConfig:
 
     exit_rules: List[dict]
 
-    guardrail_pnl_enabled: bool
-    guardrail_pnl_target_pts: float
-    guardrail_pnl_sl_pts: float
-
-    guardrail_roc_enabled: bool
-    guardrail_roc_tf: int
-    guardrail_roc_length: int
-    guardrail_roc_target: float
-    guardrail_roc_stoploss: float
-
     itm_pair_gate_enabled: bool
 
 
-def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
-    """Load and validate the sell_straddle section for ``underlying``."""
+def _apply_client_overrides(
+    cfg: SellStraddleConfig,
+    overrides: Dict[str, Any],
+    client_id: str,
+    underlying: str,
+) -> None:
+    """Apply client-provided risk overrides onto the admin config.
+
+    Only fields that are explicitly present and non-None in ``overrides`` are changed.
+    Time fields may be sent as ``"HH:MM"`` strings and are parsed.
+    """
+    if not overrides:
+        return
+
+    _time_fields = {"entry_start", "entry_cutoff", "force_exit"}
+    applied: List[str] = []
+
+    for field in fields(cfg):
+        key = field.name
+        if key not in overrides:
+            continue
+        raw = overrides[key]
+        if raw is None:
+            continue
+
+        try:
+            if key in _time_fields and isinstance(raw, str):
+                value = _parse_time(raw)
+            else:
+                # Let Python coerce the value; dataclass type hints are not enforced
+                # at runtime, so a bool/int/float/list/string will simply replace the
+                # admin value.
+                value = raw
+            setattr(cfg, key, value)
+            applied.append(key)
+        except Exception as exc:
+            logger.warning(
+                "SellStraddle[%s|%s]: ignoring invalid client override %s=%r: %s",
+                underlying, client_id, key, raw, exc,
+            )
+
+    if applied:
+        logger.info(
+            "SellStraddle[%s|%s]: client risk overrides applied: %s",
+            underlying, client_id, ", ".join(applied),
+        )
+
+
+def load_sell_straddle_config(
+    underlying: str,
+    cfg,
+    client_id: str = "",
+) -> SellStraddleConfig:
+    """Load and validate the sell_straddle section for ``underlying``.
+
+    If ``client_id`` is provided and the client profile contains
+    ``strategy_risk_overrides["sell_straddle:<underlying>"]``, those values override
+    the admin RuntimeConfig values.
+    """
     ss = RuntimeConfig.index_section(underlying, "sell_straddle")
     if not ss:
         logger.warning(
@@ -143,10 +191,6 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
     now_day = datetime.now(IST).strftime("%A").lower()
     _day = ss.get("per_day", {}).get(now_day, {})
     _day_on = bool(_day.get("enabled", True))
-    # Per-trade hard target / stop-loss (% of net credit received for THIS trade).
-    # These are independent of the day-level guardrails above.
-    per_trade_profit_pct = float(ss.get("profit_pct", 0.0) or 0.0)
-    per_trade_sl_pct = float(ss.get("sl_pct", 0.0) or 0.0)
 
     _pt = float(_day.get("profit_target_pct", 0)) if _day_on else 0.0
     day_profit_target_pct = _pt if _pt > 0 else float(ss.get("profit_target_pct", 0))
@@ -164,21 +208,9 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
 
     exit_rules = ss.get("exit_rules", [])
 
-    _pnl_g = ss.get("guardrail_pnl", {})
-    guardrail_pnl_enabled = bool(_pnl_g.get("enabled", False))
-    guardrail_pnl_target_pts = float(_pnl_g.get("target_pts", 0.0))
-    guardrail_pnl_sl_pts = float(_pnl_g.get("stoploss_pts", 0.0))
-
-    _roc_g = ss.get("guardrail_roc", {})
-    guardrail_roc_enabled = bool(_roc_g.get("enabled", False))
-    guardrail_roc_tf = int(_roc_g.get("tf", 15))
-    guardrail_roc_length = int(_roc_g.get("length", 9))
-    guardrail_roc_target = float(_roc_g.get("target", -20.0))
-    guardrail_roc_stoploss = float(_roc_g.get("stoploss", 10.0))
-
     itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", False))
 
-    return SellStraddleConfig(
+    config = SellStraddleConfig(
         entry_start=entry_start,
         entry_cutoff=entry_cutoff,
         force_exit=force_exit,
@@ -201,8 +233,6 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
         tsl_step_profit_rs=tsl_step_profit_rs,
         tsl_step_lock_rs=tsl_step_lock_rs,
         tsl_basis=tsl_basis,
-        per_trade_profit_pct=per_trade_profit_pct,
-        per_trade_sl_pct=per_trade_sl_pct,
         day_profit_target_pct=day_profit_target_pct,
         day_loss_sl_pct=day_loss_sl_pct,
         day_exit_basis=day_exit_basis,
@@ -212,23 +242,34 @@ def load_sell_straddle_config(underlying: str, cfg) -> SellStraddleConfig:
         ltp_decay_enabled=ltp_decay_enabled,
         ltp_exit_min=ltp_exit_min,
         exit_rules=exit_rules,
-        guardrail_pnl_enabled=guardrail_pnl_enabled,
-        guardrail_pnl_target_pts=guardrail_pnl_target_pts,
-        guardrail_pnl_sl_pts=guardrail_pnl_sl_pts,
-        guardrail_roc_enabled=guardrail_roc_enabled,
-        guardrail_roc_tf=guardrail_roc_tf,
-        guardrail_roc_length=guardrail_roc_length,
-        guardrail_roc_target=guardrail_roc_target,
-        guardrail_roc_stoploss=guardrail_roc_stoploss,
         itm_pair_gate_enabled=itm_pair_gate_enabled,
     )
+
+    # Apply per-client risk overrides if a client_id is provided.
+    if client_id:
+        try:
+            from config.client_profiles import REGISTRY
+            profile = REGISTRY.get(client_id)
+            if profile is not None:
+                overrides = getattr(profile, "strategy_risk_overrides", {}).get(
+                    f"sell_straddle:{underlying}", {}
+                )
+                _apply_client_overrides(config, overrides, client_id, underlying)
+        except Exception as exc:
+            logger.warning(
+                "SellStraddle[%s|%s]: failed to apply client risk overrides: %s",
+                underlying, client_id, exc,
+            )
+
+    return config
 
 
 class ConfigMixin:
     """Provides ``_load_thresholds`` / ``reconfigure`` for the sell-straddle engine."""
 
     def _load_thresholds(self) -> None:
-        cfg = load_sell_straddle_config(self._underlying, self._cfg)
+        client_id = getattr(self, "_client_id", "")
+        cfg = load_sell_straddle_config(self._underlying, self._cfg, client_id=client_id)
         self._config = cfg
         self._entry_start = cfg.entry_start
         self._entry_cutoff = cfg.entry_cutoff
@@ -257,9 +298,6 @@ class ConfigMixin:
         self._tsl_step_lock_rs = cfg.tsl_step_lock_rs
         self._tsl_basis = cfg.tsl_basis
 
-        self._per_trade_profit_pct = cfg.per_trade_profit_pct
-        self._per_trade_sl_pct = cfg.per_trade_sl_pct
-
         self._day_profit_target_pct = cfg.day_profit_target_pct
         self._day_loss_sl_pct = cfg.day_loss_sl_pct
         self._day_exit_basis = cfg.day_exit_basis
@@ -273,15 +311,6 @@ class ConfigMixin:
 
         self._exit_rules = cfg.exit_rules
 
-        self._guardrail_pnl_enabled = cfg.guardrail_pnl_enabled
-        self._guardrail_pnl_target_pts = cfg.guardrail_pnl_target_pts
-        self._guardrail_pnl_sl_pts = cfg.guardrail_pnl_sl_pts
-
-        self._guardrail_roc_enabled = cfg.guardrail_roc_enabled
-        self._guardrail_roc_tf = cfg.guardrail_roc_tf
-        self._guardrail_roc_length = cfg.guardrail_roc_length
-        self._guardrail_roc_target = cfg.guardrail_roc_target
-        self._guardrail_roc_stoploss = cfg.guardrail_roc_stoploss
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
 
     def reconfigure(self) -> None:

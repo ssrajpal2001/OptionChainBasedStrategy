@@ -37,8 +37,11 @@ class _Broker:
         return self._residual
 
     async def get_order_status(self, oid):
-        return OrderFill(order_id=oid, broker_symbol="X", side=OrderSide.BUY, qty=6,
-                         avg_price=70.0, status=OrderStatus.COMPLETE)
+        # By default the exchange has NOT filled the pending leg.  If a real broker reports a fill
+        # here the post-poll path would overwrite the executor's filled_qty, so keep avg_price=0
+        # to preserve the under-fill reported by execute_leg.
+        return OrderFill(order_id=oid, broker_symbol="X", side=OrderSide.BUY, qty=0,
+                         avg_price=0.0, status=OrderStatus.OPEN)
 
 
 class _Router:

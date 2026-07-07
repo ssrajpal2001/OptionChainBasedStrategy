@@ -39,7 +39,7 @@ import hmac
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from config.global_config import IST, Topic, SysEvent
 from data_layer.base_feeder import EventBus
@@ -361,6 +361,9 @@ try:
 
     class _StrategySelectionsSchema(_PydanticBase):
         selections: list  # List[_StrategySelectionItem]
+
+    class _RiskOverridesSchema(_PydanticBase):
+        overrides: dict  # { field_name: value } per strategy:underlying
 
     class _DeploymentSchema(_PydanticBase):
         binding_id:     str
@@ -2186,6 +2189,63 @@ class DashboardServer:
                     validated.append({"strategy": s, "instrument": ins.upper()})
             await _srv._client_db.upsert_client(cid, strategy_selections=_json.dumps(validated))
             return {"ok": True, "saved": len(validated)}
+
+        # ── CLIENT — risk overrides (per-client per-strategy per-index) ────────
+
+        @app.get("/api/client/risk_overrides", tags=["Client"])
+        async def api_client_get_risk_overrides(
+            strategy: str = "sell_straddle",
+            instrument: str = "NIFTY",
+            user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            profile = _srv._registry.get(cid) if _srv._registry else None
+            overrides = {}
+            if profile is not None:
+                overrides = getattr(profile, "strategy_risk_overrides", {}).get(f"{strategy}:{instrument}", {})
+
+            admin_defaults: Dict[str, Any] = {}
+            if strategy == "sell_straddle":
+                from strategies.sell_straddle.config import load_sell_straddle_config
+                from dataclasses import fields as _fields
+                from datetime import time as _dtime
+                cfg = load_sell_straddle_config(instrument, _srv._cfg, client_id="")
+                for field in _fields(cfg):
+                    v = getattr(cfg, field.name)
+                    if isinstance(v, _dtime):
+                        v = v.strftime("%H:%M")
+                    admin_defaults[field.name] = v
+
+            return {
+                "ok": True,
+                "strategy": strategy,
+                "instrument": instrument,
+                "admin_defaults": admin_defaults,
+                "client_overrides": overrides,
+            }
+
+        @app.post("/api/client/risk_overrides", tags=["Client"])
+        async def api_client_save_risk_overrides(
+            body: _RiskOverridesSchema,
+            strategy: str = "sell_straddle",
+            instrument: str = "NIFTY",
+            user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            profile = _srv._registry.get(cid) if _srv._registry else None
+            if profile is None:
+                raise HTTPException(404, "Client profile not found.")
+            key = f"{strategy}:{instrument}"
+            cleaned: Dict[str, Any] = {}
+            for k, v in (body.overrides or {}).items():
+                if v is None:
+                    continue
+                if isinstance(v, str) and v.strip() == "":
+                    continue
+                cleaned[k] = v
+            profile.strategy_risk_overrides[key] = cleaned
+            _srv._registry.save()
+            return {"ok": True, "strategy": strategy, "instrument": instrument, "saved": cleaned}
 
         # ── CLIENT — positions (live open legs) ───────────────────────────────
 

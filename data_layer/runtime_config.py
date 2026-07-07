@@ -48,16 +48,10 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],
-    "profit_target_enabled": True,
-    "profit_pct":            30.0,   # per-trade target as % of credit
-    "sl_enabled":            True,
-    "sl_pct":                200.0,
     # Day-level % guardrails (% of initial net credit). 0 = disabled.
     "profit_target_pct":     0.0,    # stop for day when session P&L ≥ X% of credit
     "loss_sl_pct":           0.0,    # stop for day when session loss ≥ X% of credit
     "tsl_enabled":           False,
-    "trail_lock_pct":        20.0,
-    "trail_floor_pct":       10.0,
     "tsl_scalable": {
         "enabled":      False,
         "base_profit":  3000,
@@ -65,10 +59,6 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
         "step_profit":  1000,
         "step_lock":    500,
     },
-    # ROC guardrail: exit if ROC-of-combined-premium exceeds bounds (pts)
-    "guardrail_roc": {"enabled": False, "tf": 15, "length": 9, "target": 20.0, "stoploss": -40.0},
-    # Session P&L guardrail (points): optional per-day overrides in per_day section
-    "guardrail_pnl": {"enabled": False, "target_pts": 100.0, "stoploss_pts": -60.0},
     # Ratio exit: exit when max(CE_ltp, PE_ltp) / min(CE_ltp, PE_ltp) >= threshold
     "ratio_exit":    {"enabled": False, "threshold": 3.0},
     # LTP decay: smart-roll or exit when either leg LTP decays below ltp_exit_min
@@ -177,9 +167,6 @@ _DEFAULTS: Dict[str, Any] = {
         "entry_start":              "09:20",
         "entry_end":                "15:20",
         "squareoff_time":           "15:20",
-        # Per-TRADE exit thresholds (% of credit collected on this trade)
-        "profit_pct":               30.0,   # exit this trade when it reaches 30% of its credit
-        "sl_pct":                   200.0,  # hard SL: exit when loss = 2× credit
         "trail_lock_pct":           20.0,
         "trail_floor_pct":          10.0,
         # DAY-LEVEL % guardrails (% of initial net credit — fires stop_for_day)

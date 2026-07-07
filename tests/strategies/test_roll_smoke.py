@@ -82,15 +82,13 @@ def test_single_side_roll_skips_when_best_partner_is_same_strike():
 def _neutralize_other_exits(s):
     """Turn off every _check_exits branch EXCEPT vwap_rise so a test can isolate it."""
     s._force_exit = datetime.time(23, 59)          # not EOD
-    s._guardrail_pnl_enabled = False
+    s._trail_sl_enabled = False
     s._day_profit_target_pct = 0.0
     s._day_loss_sl_pct = 0.0
     s._initial_net_credit = 0.0                    # skips the day-% block
     s._ltp_decay_enabled = False
     s._ratio_threshold = 99.0                      # ratio 1.0 < 99 → no ratio exit
     s._tsl_enabled = False
-    s._guardrail_roc_enabled = False
-    s._roc_guardrail_enabled = False
     s._exit_rules = []                             # no Dynamic / EXIT-EVAL dump
     s._vwap_rise_enabled = True
     s._vwap_rise_threshold = 1.0

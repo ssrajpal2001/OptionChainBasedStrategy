@@ -50,9 +50,8 @@ def main() -> int:
     print("Cloned NIFTY sell_straddle -> CRUDEOIL.")
     print(f"  timing (MCX kept): {new_ss['entry_start']} / {new_ss['entry_end']} / {new_ss['squareoff_time']}")
     print("  enabled conditions now on CRUDEOIL:")
-    for k in ("profit_pct", "sl_pct", "ratio_exit", "ltp_decay", "tsl_scalable",
-              "guardrail_roc", "guardrail_pnl", "vwap_rise_sl",
-              "entry_rules_beginning", "entry_rules_reentry", "exit_rules"):
+    for k in ("ratio_exit", "ltp_decay", "tsl_scalable",
+              "vwap_rise_sl", "entry_rules_beginning", "entry_rules_reentry", "exit_rules"):
         v = new_ss.get(k)
         if isinstance(v, list):
             print(f"    {k}: {len(v)} rule(s)")
