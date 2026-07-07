@@ -208,6 +208,11 @@ class ExitMixin:
                 self._stop_for_day = True
             return
 
+        # A single-side roll is in flight (close fill awaited / open fill pending).
+        # Skip further exit checks so we don't close the new or remaining leg twice.
+        if getattr(self, "_roll_in_progress", False):
+            return
+
         # POST-RESTORE WARM-UP GUARD
         if self._post_restore_warmup:
             if (self._ce_ltp_fresh and self._pe_ltp_fresh) or (_t.monotonic() - self._post_restore_at > 20.0):
@@ -477,6 +482,7 @@ class ExitMixin:
         if not self._position or getattr(self, "_close_in_progress", False):
             return
         self._close_in_progress = True
+        self._roll_in_progress = False
         try:
             from execution_bridge.straddle_bridge import StraddleOrderEvent
             pos = self._position
@@ -568,12 +574,21 @@ class ExitMixin:
         finally:
             self._close_in_progress = False
 
-    async def _close_leg(self, side: str, reason: str, now: datetime) -> float:
-        """Close ONE leg (publish EXIT legs=[side]); book that leg's P&L into the session total."""
+    async def _close_leg(self, side: str, reason: str, now: datetime) -> StraddleOrderEvent:
+        """Close ONE leg (publish EXIT legs=[side]); book that leg's P&L into the session total.
+
+        Returns the emitted order event so callers (e.g. single-side rolls) can wait for the
+        corresponding fill before sending the next order.
+        """
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         pos = self._position
         if not pos:
-            return 0.0
+            # Return a sentinel with the expected attributes so callers don't crash.
+            return StraddleOrderEvent(
+                action="EXIT", underlying=self._underlying, atm=0.0,
+                ce_strike=0.0, pe_strike=0.0, ce_ltp=0.0, pe_ltp=0.0,
+                event_id="", legs=[side],
+            )
         leg = pos.ce_leg if side == "CE" else pos.pe_leg
         if leg.entry_price and leg.entry_price > 0:
             leg_pnl = leg.entry_price - leg.ltp
@@ -605,7 +620,7 @@ class ExitMixin:
                     self._underlying, _cid, _bid, side, leg.strike, leg_pnl, reason)
         self._clog.info("CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
                         side, leg.strike, leg_pnl, reason)
-        return leg_pnl
+        return order_ev
 
     async def _open_leg(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Open ONE leg at a new strike (publish ENTRY legs=[side]); update the leg."""

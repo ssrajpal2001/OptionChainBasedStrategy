@@ -189,11 +189,15 @@ class TradeLogger:
         ts    = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         ind   = ev.indicators
         qty   = ev.lot_size * ev.lot_multiplier
-        credit = fill.ce_fill + fill.pe_fill
+        _sides = set(getattr(ev, "legs", None) or ["CE", "PE"])
+        credit = (fill.ce_fill if "CE" in _sides else 0.0) + (fill.pe_fill if "PE" in _sides else 0.0)
+        _legtag = "+".join(sorted(_sides)) if _sides != {"CE", "PE"} else "CE+PE"
+        _ce_str = f"{ev.ce_strike:.0f}@{fill.ce_fill:.2f}" if "CE" in _sides else f"{ev.ce_strike:.0f}@-"
+        _pe_str = f"{ev.pe_strike:.0f}@{fill.pe_fill:.2f}" if "PE" in _sides else f"{ev.pe_strike:.0f}@-"
         line = (
-            f"{ts} | ENTRY | {ev.underlying} | ATM={ev.atm:.0f} | "
-            f"CE={ev.ce_strike:.0f}@{fill.ce_fill:.2f} | "
-            f"PE={ev.pe_strike:.0f}@{fill.pe_fill:.2f} | "
+            f"{ts} | ENTRY | {ev.underlying} | ATM={ev.atm:.0f} | legs={_legtag} | "
+            f"CE={_ce_str} | "
+            f"PE={_pe_str} | "
             f"Credit={credit:.2f} | Qty={qty} | Spot={ev.spot:.0f} | "
             f"RSI={ind.get('rsi', 0):.1f} ADX={ind.get('adx', 0):.1f} "
             f"VWAP={ind.get('vwap', 0):.2f} | "
@@ -818,21 +822,25 @@ class StraddleExecutionBridge:
                 await self._bus.publish(Topic.ORDER_FILL, abort_ev)
                 return
 
+        # Single-leg EXIT/ENTRY events must not carry a fake fill price for the untouched leg;
+        # otherwise the strategy logs/trade-history look like the whole straddle was closed/re-opened.
+        _ce_in = "CE" in ev.legs
+        _pe_in = "PE" in ev.legs
         fill_ev = StraddleFillEvent(
             action     = ev.action,
             underlying = ev.underlying,
             atm        = ev.atm,
             ce_strike  = ev.ce_strike,
             pe_strike  = ev.pe_strike,
-            ce_fill    = fills.get("CE", ev.ce_ltp),
-            pe_fill    = fills.get("PE", ev.pe_ltp),
+            ce_fill    = fills.get("CE", ev.ce_ltp) if _ce_in else 0.0,
+            pe_fill    = fills.get("PE", ev.pe_ltp) if _pe_in else 0.0,
             client_id  = client_id,
             binding_id = binding_id,
             event_id   = ev.event_id,
             paper_mode = paper,
             legs       = ev.legs,
-            ce_symbol  = symbol_by_leg.get("CE", ""),
-            pe_symbol  = symbol_by_leg.get("PE", ""),
+            ce_symbol  = symbol_by_leg.get("CE", "") if _ce_in else "",
+            pe_symbol  = symbol_by_leg.get("PE", "") if _pe_in else "",
         )
 
         if ev.action == "ENTRY":

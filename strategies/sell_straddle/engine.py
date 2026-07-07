@@ -101,6 +101,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._market_open_dt: Optional[datetime] = None
         self._primed: bool = False
         self._order_pending: bool = False
+        self._roll_close_waiters: Dict[str, asyncio.Event] = {}
+        self._roll_in_progress: bool = False
         self._last_exit_rules_bucket: str = ""
         self._last_entry_bucket_b: str = ""
         self._last_entry_bucket_r: str = ""
@@ -661,6 +663,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     self._position = None
                     self._trades_today = max(0, self._trades_today - 1)
                     self._order_pending = False
+                    self._roll_in_progress = False
                     self._persist()
                     # Routing failures carry no broker risk; cooldown only for real asymmetric fills.
                     if not _routing_failed:
@@ -696,18 +699,30 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         _pe_disp, self._position.pe_leg.entry_price,
                         self._position.net_credit, _legs,
                     )
+                self._roll_in_progress = False
                 self._order_pending = False
             elif fill.action == "EXIT":
+                _exit_legs = getattr(fill, "legs", ["CE", "PE"])
+                _legtag = "+".join(sorted(_exit_legs)) if set(_exit_legs) != {"CE", "PE"} else "CE+PE"
                 logger.info(
-                    "SellStraddle[%s|%s|%s]: EXIT confirmed — CE=%.2f PE=%.2f",
+                    "SellStraddle[%s|%s|%s]: EXIT confirmed — legs=%s CE=%.2f PE=%.2f",
                     self._underlying, fill.client_id, fill.binding_id,
-                    fill.ce_fill, fill.pe_fill,
+                    _legtag, fill.ce_fill, fill.pe_fill,
                 )
                 self._clog.info(
-                    "EXIT confirmed — CE=%.2f PE=%.2f",
-                    fill.ce_fill, fill.pe_fill,
+                    "EXIT confirmed — legs=%s CE=%.2f PE=%.2f",
+                    _legtag, fill.ce_fill, fill.pe_fill,
                 )
                 self._order_pending = False
+                # Wake any single-side roll that is waiting for its close fill.
+                # Use .get() (not .pop()) so a fill that arrives before the waiter is
+                # registered still leaves the event set when the roll routine checks it.
+                waiter = self._roll_close_waiters.get(getattr(fill, "event_id", ""))
+                if waiter is not None:
+                    try:
+                        waiter.set()
+                    except RuntimeError:
+                        pass
         except Exception as _exc:
             logger.exception(
                 "SellStraddle[%s]: _on_fill error (recovered): %s",

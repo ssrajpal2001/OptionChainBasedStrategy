@@ -5,6 +5,7 @@ Rollover logic shared by ratio exit, LTP decay, VWAP rise, and scalable TSL.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -74,11 +75,34 @@ class RollingMixin:
                         "(no-op, no orders sent).", self._underlying, reason, orig_strike)
             return
 
-        # 3. Execute the roll: close the good leg, open the new partner.
+        # 3. Execute the roll: close the good leg FIRST, wait for the close fill,
+        #    then open the new partner. This guarantees the buy-to-close is confirmed
+        #    before the sell-to-open, avoiding a transient double-short / margin spike.
         logger.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (good leg vs running %s%d @%.2f) [%s]",
                     self._underlying, roll_side, roll_side, new_strike, new_ltp,
                     keep_side, keep_strike, keep_ltp, reason)
-        await self._close_leg(roll_side, reason, now)
+        self._roll_in_progress = True
+        close_ev = await self._close_leg(roll_side, reason, now)
+        close_eid = getattr(close_ev, "event_id", "") or ""
+        waiter: asyncio.Event | None = None
+        if close_eid:
+            waiter = asyncio.Event()
+            self._roll_close_waiters[close_eid] = waiter
+        try:
+            if waiter is not None:
+                try:
+                    await asyncio.wait_for(waiter.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "SellStraddle[%s]: roll close fill not confirmed within 10s (close_eid=%s) — "
+                        "aborting the open side to avoid a naked/duplicate position.",
+                        self._underlying, close_eid,
+                    )
+                    self._roll_in_progress = False
+                    return
+        finally:
+            self._roll_close_waiters.pop(close_eid, None)
+
         await self._open_leg(roll_side, int(new_strike), float(new_ltp), now, f"single_side_roll_{reason}")
         if self._position:
             self._position.session_min_vwap = float("inf")
