@@ -38,6 +38,8 @@ import asyncio
 import hmac
 import logging
 import os
+import shlex
+import subprocess
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -364,6 +366,13 @@ try:
 
     class _RiskOverridesSchema(_PydanticBase):
         overrides: dict  # { field_name: value } per strategy:underlying
+
+    class _FullCleanRestartSchema(_PydanticBase):
+        index:      str  = "NIFTY"
+        strategies: str  = "sell_straddle"
+        port:       int  = 5000
+        log_level:  str  = "INFO"
+        dry_run:    bool = False
 
     class _DeploymentSchema(_PydanticBase):
         binding_id:     str
@@ -3429,6 +3438,55 @@ class DashboardServer:
             return {
                 "feeder": _srv._auth_alerts.get("feeder", ""),
                 "ts":     datetime.now(IST).isoformat(),
+            }
+
+        @app.post("/api/admin/full_clean_restart", tags=["Admin"])
+        async def api_full_clean_restart(
+            _: dict = Depends(_require_admin),
+            body: _FullCleanRestartSchema = _FullCleanRestartSchema(),
+        ):
+            """Stop terminus, delete all logs + runtime JSON/state files, backup config, then restart.
+
+            The actual stop/delete/start is run in a detached subprocess so the HTTP response
+            returns before this server process is shut down by PM2.
+            """
+            ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+            backup_dir = os.path.join(os.getcwd(), "backups", f"{ts}_full_clean")
+
+            q_index      = shlex.quote(body.index)
+            q_strategies = shlex.quote(body.strategies)
+            q_port       = shlex.quote(str(body.port))
+            q_log_level  = shlex.quote(body.log_level)
+            q_backup     = shlex.quote(backup_dir)
+
+            script = f"""set -e
+mkdir -p {q_backup}
+cp -n data/strategy_config.json {q_backup}/ 2>/dev/null || true
+cp -n config/client_profiles.json {q_backup}/ 2>/dev/null || true
+pm2 stop terminus || true
+rm -rf logs/* logs/trades/*.log 2>/dev/null || true
+rm -rf data/positions/* data/live_records/* data/recorded/* data/history/* data/nse_option_cache/* 2>/dev/null || true
+rm -f data/state_snapshots.db data/trade_history.db data/client_trade_history.db 2>/dev/null || true
+pm2 delete terminus || true
+pm2 start run_system.py --name terminus -- --mode live --index {q_index} --strategies {q_strategies} --ui --port {q_port} --log-level {q_log_level}
+pm2 save
+"""
+            if body.dry_run:
+                return {"ok": True, "dry_run": True, "backup_dir": backup_dir, "script": script}
+
+            logger.warning("Dashboard: full_clean_restart requested by admin. Backup=%s", backup_dir)
+            subprocess.Popen(
+                ["bash", "-c", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return {
+                "ok": True,
+                "message": "Full clean restart scheduled. Server will stop in ~3s and terminus will restart fresh.",
+                "backup_dir": backup_dir,
+                "index": body.index,
+                "strategies": body.strategies,
             }
 
         # ── ADMIN — premium-selling strategy registry ────────────────────
