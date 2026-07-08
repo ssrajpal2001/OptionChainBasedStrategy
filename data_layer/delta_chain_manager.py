@@ -100,7 +100,9 @@ class DeltaChainManager:
     # ── lifecycle ─────────────────────────────────────────────────────────────
     async def run(self) -> None:
         if not self._unds:
-            return
+            # No crypto configured; keep this task alive so run_system doesn't treat
+            # a finished optional task as a shutdown trigger.
+            await asyncio.Event().wait()
         self._running = True
         # Retry the WS connect forever — a feed hiccup must NOT return (run_system treats a finished
         # task as a shutdown trigger). Keep the app alive and reconnect.
