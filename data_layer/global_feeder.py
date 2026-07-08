@@ -368,6 +368,29 @@ class UpstoxFeeder(BaseFeeder):
         """Upstox instrument_keys contain a pipe (e.g. NSE_FO|...). Fyers symbols don't."""
         return "|" in token
 
+    def _to_upstox_key(self, token: str) -> Optional[str]:
+        """Convert Fyers symbols / internal canonical / MCX symbols into Upstox instrument keys."""
+        if self._is_upstox_key(token):
+            return token
+        from data_layer.symbol_translator import SymbolTranslator
+        from data_layer.instrument_registry import REGISTRY
+        # Fyers index symbol (NSE:NIFTY50-INDEX, MCX:CRUDEOIL26JUNFUT)
+        internal_idx = _FYERS_TO_INTERNAL.get(token) or _mcx_fyers_fut_to_internal(token)
+        if internal_idx:
+            return SymbolTranslator.to_upstox_index(internal_idx)
+        # Fyers option symbol
+        if token.startswith(("NSE:", "BSE:", "MCX:")):
+            sym = SymbolTranslator.from_fyers(token)
+            if sym is None:
+                sym = _parse_mcx_fyers_option(token)
+            if sym is not None:
+                if isinstance(sym, tuple):
+                    und, strike, ot, exp = sym
+                else:
+                    und, strike, ot, exp = sym.underlying, sym.strike, sym.option_type, sym.expiry
+                return REGISTRY.get_broker_symbol(und, exp, int(strike), ot, "upstox")
+        return None
+
     def set_rebalancer(self, rebalancer) -> None:
         """Optional StrikeRebalancer reference so market-close cleanup can avoid
         unsubscribing strikes that are pinned by an open position."""
@@ -378,8 +401,18 @@ class UpstoxFeeder(BaseFeeder):
         self._extra_spot_keys.update(mapping)
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
-        # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
-        mine = [t for t in tokens if self._is_upstox_key(t)]
+        # In dual mode the rebalancer may send Fyers-format tokens.  Convert any non-Upstox
+        # token into the matching Upstox instrument key so both feeders subscribe the same leg.
+        mine: List[str] = []
+        for t in tokens:
+            if self._is_upstox_key(t):
+                mine.append(t)
+            else:
+                ukey = self._to_upstox_key(t)
+                if ukey:
+                    mine.append(ukey)
+                else:
+                    logger.debug("UpstoxFeeder: could not convert token %s to Upstox key", t)
         new_keys = [t for t in mine if t not in self._subscribed_keys]
         if not new_keys:
             return
@@ -411,7 +444,14 @@ class UpstoxFeeder(BaseFeeder):
         Use in engine heartbeats to recover from silent WS subscription drops
         (Upstox SDK can silently stop delivering ticks for subscribed keys without
         triggering a reconnect — explicit re-subscribe recovers them)."""
-        mine = [t for t in tokens if self._is_upstox_key(t)]
+        mine: List[str] = []
+        for t in tokens:
+            if self._is_upstox_key(t):
+                mine.append(t)
+            else:
+                ukey = self._to_upstox_key(t)
+                if ukey:
+                    mine.append(ukey)
         if not mine:
             return
         for k in mine:
@@ -428,7 +468,14 @@ class UpstoxFeeder(BaseFeeder):
                 logger.warning("UpstoxFeeder: resubscribe error: %s", exc)
 
     async def unsubscribe_tokens(self, tokens: List[str]) -> None:
-        mine = [t for t in tokens if self._is_upstox_key(t)]
+        mine: List[str] = []
+        for t in tokens:
+            if self._is_upstox_key(t):
+                mine.append(t)
+            else:
+                ukey = self._to_upstox_key(t)
+                if ukey:
+                    mine.append(ukey)
         for t in mine:
             if t in self._subscribed_keys:
                 self._subscribed_keys.remove(t)
@@ -723,6 +770,23 @@ class FyersFeeder(BaseFeeder):
     def set_credentials(self, creds: Dict[str, str]) -> None:
         self._creds = creds
 
+    @staticmethod
+    def _normalize_access_token(raw_token: str, app_id: str = "") -> str:
+        """
+        FyersDataSocket expects the raw JWT access_token (e.g. eyJ...).  Some callers
+        pass it as 'app_id:token'.  Strip the app_id prefix when present so the SDK
+        can decode the JWT and extract the hsm_key.
+        """
+        raw_token = (raw_token or "").strip()
+        if not raw_token:
+            return ""
+        # If someone passed "APP-100:jwt", keep the JWT part.
+        if ":" in raw_token:
+            parts = raw_token.split(":", 1)
+            if "." in parts[1]:
+                return parts[1]
+        return raw_token
+
     async def connect(self) -> bool:
         if not self._sdk_available:
             logger.warning(
@@ -730,7 +794,10 @@ class FyersFeeder(BaseFeeder):
                 "pip install fyers-apiv3.  Feeder will not connect."
             )
             return False
-        access_token = self._creds.get("access_token", "")
+        access_token = self._normalize_access_token(
+            self._creds.get("access_token", ""),
+            self._creds.get("api_key") or self._creds.get("app_key", ""),
+        )
         if not access_token:
             logger.warning("FyersFeeder: no access_token in credentials — cannot connect.")
             return False
@@ -841,18 +908,48 @@ class FyersFeeder(BaseFeeder):
         except Exception:
             return None
 
+    def _meta_from_upstox_key(self, key: str) -> Optional[Tuple[str, float, str, date]]:
+        """Reverse-map an Upstox instrument key → (underlying, strike, opt_type, expiry)."""
+        from data_layer.instrument_registry import REGISTRY
+        for und, kmap in REGISTRY._upstox_keys.items():
+            for (exp_str, strike, ot), stored in kmap.items():
+                if stored == key:
+                    return (und, float(strike), ot, date.fromisoformat(exp_str))
+        return None
+
+    def _to_fyers_symbol(self, token: str) -> Optional[str]:
+        """Convert Upstox keys / internal canonical / MCX symbols into Fyers format."""
+        if self._is_fyers_symbol(token):
+            return token
+        # Upstox instrument key → lookup via registry
+        if "|" in token:
+            meta = self._meta_from_upstox_key(token)
+            if meta:
+                und, strike, ot, exp = meta
+                from data_layer.instrument_registry import REGISTRY
+                return REGISTRY.get_broker_symbol(und, exp, int(strike), ot, "fyers")
+            return None
+        # Fyers MCX option fallback parser
+        mcx = _parse_mcx_fyers_option(token)
+        if mcx is not None:
+            und, strike, ot, exp = mcx
+            from data_layer.instrument_registry import REGISTRY
+            return REGISTRY.get_broker_symbol(und, exp, int(strike), ot, "fyers")
+        return None
+
     async def subscribe_tokens(self, tokens: List[str]) -> None:
-        # In dual mode the rebalancer sends BOTH Upstox + Fyers tokens; take only ours.
-        # Also convert any MCX_FO|... Upstox keys to Fyers MCX:... format.
-        converted = []
+        # In dual mode the rebalancer usually sends Upstox-format keys.  Convert any
+        # non-Fyers token (Upstox key / MCX / BSE / NSE) into the matching Fyers symbol.
+        mine: List[str] = []
         for t in tokens:
-            if (t.startswith("MCX_FO|") or t.startswith("BSE_FO|")) and not self._is_fyers_symbol(t):
-                fyers_sym = self._upstox_mcx_to_fyers(t)
-                if fyers_sym:
-                    converted.append(fyers_sym)
+            if self._is_fyers_symbol(t):
+                mine.append(t)
+            else:
+                fy = self._to_fyers_symbol(t)
+                if fy:
+                    mine.append(fy)
                 else:
-                    logger.debug("FyersFeeder: could not convert MCX key %s to Fyers format", t)
-        mine = [t for t in tokens if self._is_fyers_symbol(t)] + converted
+                    logger.debug("FyersFeeder: could not convert token %s to Fyers format", t)
         # Diagnostic: reveal received vs matched so we can see why options may be 0.
         logger.info(
             "FyersFeeder.subscribe_tokens: received=%d matched_fyers=%d connected=%s sample_in=%r sample_mine=%r",
@@ -882,8 +979,19 @@ class FyersFeeder(BaseFeeder):
             except Exception as exc:
                 logger.warning("FyersFeeder: subscribe_tokens error: %s", exc)
 
+    async def resubscribe_tokens(self, tokens: List[str]) -> None:
+        """Force re-subscribe tokens (used by engine heartbeats to recover silent drops)."""
+        await self.subscribe_tokens(tokens)
+
     async def unsubscribe_tokens(self, tokens: List[str]) -> None:
-        mine = [t for t in tokens if self._is_fyers_symbol(t)]
+        mine: List[str] = []
+        for t in tokens:
+            if self._is_fyers_symbol(t):
+                mine.append(t)
+            else:
+                fy = self._to_fyers_symbol(t)
+                if fy:
+                    mine.append(fy)
         for t in mine:
             if t in self._subscribed_tokens:
                 self._subscribed_tokens.remove(t)
@@ -1009,28 +1117,51 @@ class DualFeeder:
         self._tasks: List[asyncio.Task] = []
         self._feeders: Dict[str, BaseFeeder] = {}
 
-    async def start(self, upstox_creds: Dict[str, str], fyers_creds: Dict[str, str]) -> None:
-        self._running = True
-        upstox = UpstoxFeeder(self._bus, self._cfg)
-        upstox.set_credentials(upstox_creds)
-        fyers = FyersFeeder(self._bus, self._cfg)
-        fyers.set_credentials(fyers_creds)
+    _FEEDER_CLS: Dict[str, type] = {
+        "upstox":  UpstoxFeeder,
+        "upstox2": UpstoxFeeder,
+        "fyers":   FyersFeeder,
+    }
 
-        # Active-PASSIVE: the primary provider drives all prices; the secondary is
-        # used only when the primary goes stale (down). Avoids the two feeds
-        # disagreeing on a contract (price flip-flop). Primary from config
-        # (primary_feeder_provider), default upstox.
+    async def start(self, upstox_creds: Dict[str, str], fyers_creds: Dict[str, str]) -> None:
+        """Legacy convenience wrapper — maps positional args to the generic creds map."""
+        creds_map: Dict[str, Dict[str, str]] = {}
+        if upstox_creds and upstox_creds.get("access_token"):
+            creds_map["upstox"] = upstox_creds
+        if fyers_creds and fyers_creds.get("access_token"):
+            creds_map["fyers"] = fyers_creds
+        await self.start_providers(creds_map)
+
+    async def start_providers(self, creds_map: Dict[str, Dict[str, str]]) -> None:
+        """
+        Start any number of provider streams from a {provider: creds} map.
+
+        The configured primary drives prices; every other connected provider is a
+        hot standby. If the primary goes stale, all standby ticks are accepted
+        until the primary returns.
+        """
+        self._running = True
+
+        # Active-PASSIVE: the primary provider drives all prices; standbys are
+        # used only when the primary goes stale (down). Avoids two feeds
+        # disagreeing on a contract (price flip-flop).
         _primary = (getattr(self._cfg, "primary_feeder_provider", "upstox") or "upstox").lower()
-        if _primary not in ("upstox", "fyers"):
+        if _primary not in self._FEEDER_CLS:
             _primary = "upstox"
         self._dedup.set_primary(_primary, float(getattr(self._cfg, "feeder_failover_stale_sec", 3.0)))
-        logger.info("DualFeeder: active-passive — primary=%s (secondary used only when primary stale).", _primary)
+        logger.info("DualFeeder: active-passive — primary=%s (standbys used only when primary stale).", _primary)
 
-        for provider, feeder in (("upstox", upstox), ("fyers", fyers)):
+        for provider, creds in creds_map.items():
+            provider = provider.lower()
+            cls = self._FEEDER_CLS.get(provider)
+            if cls is None:
+                logger.warning("DualFeeder: unknown provider '%s' — skipping.", provider)
+                continue
+            feeder = cls(self._bus, self._cfg)
+            feeder.set_credentials(creds)
             feeder.set_provider_name(provider)
             if hasattr(feeder, "set_latency_tracker"):
                 feeder.set_latency_tracker(provider, self._latency)
-            # Shared gate across both feeders → active-passive failover.
             feeder.set_dedup_buffer(self._dedup)
             try:
                 ok = await feeder.connect()
@@ -1145,6 +1276,7 @@ def _load_shared_client():
 _FEEDER_REGISTRY: Dict[str, type] = {
     "mock":    MockFeeder,
     "upstox":  UpstoxFeeder,
+    "upstox2": UpstoxFeeder,
     "fyers":   FyersFeeder,
     "shared":  None,   # populated on first access via register_feeder("shared", ...)
     # "shoonya": ShoonyaFeeder,
@@ -1202,34 +1334,70 @@ class GlobalFeeder:
         self._extra_spot_keys: Dict[str, str] = {}   # inst_key → ticker for FnoStockMonitor
         self._rebalancer = None
 
+    def _load_feeder_creds(self, provider: str) -> Dict[str, str]:
+        """Load {api_key, api_secret, user_id, access_token} for a provider from DB."""
+        creds: Dict[str, str] = {}
+        if self._client_db is None or not provider:
+            return creds
+        try:
+            row = self._client_db.get_feeder_creds_sync(provider) or {}
+            creds = {
+                "api_key": row.get("api_key", ""),
+                "api_secret": row.get("secret", ""),
+                "user_id": row.get("client_id", ""),
+                "access_token": row.get("access_token", ""),
+                "token_generated_at": row.get("token_generated_at", ""),
+                "token_expiry_at": row.get("token_expiry_at", ""),
+            }
+        except Exception as exc:
+            logger.warning("GlobalFeeder: could not load %s creds from DB: %s", provider, exc)
+        return creds
+
     async def start(self) -> None:
-        """Create feeder, connect, and launch the run + heartbeat tasks."""
+        """
+        Create feeder, connect, and launch run + heartbeat tasks.
+
+        If both the configured primary and secondary feeders have valid-looking
+        tokens in the DB, they are started together as an active-passive dual
+        feed (primary drives prices; secondary takes over when primary is stale).
+        Otherwise a single-provider feed is used.
+        """
         self._running = True
-        provider = self._cfg.primary_feeder_provider.lower()
+        primary = self._cfg.primary_feeder_provider.lower()
+        secondary = (getattr(self._cfg, "secondary_feeder_provider", "fyers") or "none").lower()
+        if secondary in ("none", primary):
+            secondary = ""
+
+        primary_creds = self._load_feeder_creds(primary) if primary not in ("mock", "shared") else {}
+        secondary_creds = self._load_feeder_creds(secondary) if secondary and secondary not in ("mock", "shared") else {}
+
+        # If a secondary token is available, start them as a hot-standby pair.
+        if secondary and secondary_creds.get("access_token"):
+            creds_map = {primary: primary_creds}
+            if primary_creds.get("access_token"):
+                creds_map[secondary] = secondary_creds
+            else:
+                # Primary has no token but secondary does — start secondary as the active feed.
+                creds_map = {secondary: secondary_creds}
+            await self.start_providers(creds_map)
+            return
+
+        # Single-provider fallback.
+        await self._start_single_internal(primary, primary_creds)
+
+    async def _start_single_internal(self, provider: str, creds: Dict[str, str]) -> None:
+        """Back-end for single-provider start (shared by start() and start_single())."""
         cls = _FEEDER_REGISTRY.get(provider)
         if cls is None:
             raise ValueError(f"GlobalFeeder: Unknown provider '{provider}'. Available: {list(_FEEDER_REGISTRY)}")
 
-        # Pass cfg only if the constructor accepts it (MockFeeder does; others may vary)
         try:
             self._feeder = cls(self._bus, self._cfg)
         except TypeError:
             self._feeder = cls(self._bus)
 
-        # Load feeder credentials from DB for real broker providers.
-        if self._client_db is not None and provider in ("upstox", "fyers", "dhan", "angelone"):
-            try:
-                row = self._client_db.get_feeder_creds_sync(provider) or {}
-                if row.get("access_token"):
-                    if hasattr(self._feeder, "set_credentials"):
-                        self._feeder.set_credentials({
-                            "api_key": row.get("api_key", ""),
-                            "api_secret": row.get("secret", ""),
-                            "user_id": row.get("client_id", ""),
-                            "access_token": row.get("access_token", ""),
-                        })
-            except Exception as exc:
-                logger.warning("GlobalFeeder: could not load %s creds from DB: %s", provider, exc)
+        if creds.get("access_token") and hasattr(self._feeder, "set_credentials"):
+            self._feeder.set_credentials(creds)
 
         if not await self._feeder.connect():
             raise ConnectionError(f"GlobalFeeder: Failed to connect via '{provider}'.")
@@ -1383,23 +1551,48 @@ class GlobalFeeder:
         self._tick_listener_task = None
         logger.info("GlobalFeeder: initial feeder stopped — switching to live provider.")
 
-    async def start_dual(self, upstox_creds: Dict[str, str], fyers_creds: Dict[str, str]) -> None:
-        """Bootstrap active-active DualFeeder. Stops MockFeeder and any prior DualFeeder."""
+    async def start_providers(self, creds_map: Dict[str, Dict[str, str]]) -> None:
+        """
+        Bootstrap a DualFeeder with an arbitrary set of providers.
+        Stops MockFeeder and any prior DualFeeder.
+        """
+        if not creds_map:
+            raise ValueError("GlobalFeeder: start_providers called with empty creds_map.")
         if self._dual_feeder is not None:
             await self._dual_feeder.stop()
             self._dual_feeder = None
         await self._stop_initial_feeder()
         dual = DualFeeder(self._bus, self._cfg)
-        await dual.start(upstox_creds, fyers_creds)
+        await dual.start_providers(creds_map)
         self._dual_feeder = dual
         self._active_provider = "dual"
+        self._market_close_handled = False
+        if not getattr(self, "_market_close_task", None) or self._market_close_task.done():
+            self._market_close_task = asyncio.create_task(
+                self._market_close_loop(), name="global_feeder_market_close"
+            )
+        if self._client_db is not None and (
+            not getattr(self, "_candle_persist_task", None) or self._candle_persist_task.done()
+        ):
+            self._candle_persist_task = asyncio.create_task(
+                self._candle_persist_loop(), name="candle_persist_1m"
+            )
         await self._bus.publish(
             Topic.SYSTEM_EVENT,
             SystemEvent(SysEvent.FEEDER_RESTORED, "dual_active_active"),
         )
-        logger.info("GlobalFeeder: DualFeeder (active-active) started.")
+        logger.info("GlobalFeeder: DualFeeder active-passive started with %s.", list(creds_map.keys()))
         self._reapply_extra_spot_keys()
         await self._reapply_cached_tokens()
+
+    async def start_dual(self, upstox_creds: Dict[str, str], fyers_creds: Dict[str, str]) -> None:
+        """Legacy convenience wrapper around start_providers for Upstox + Fyers."""
+        creds_map: Dict[str, Dict[str, str]] = {}
+        if upstox_creds and upstox_creds.get("access_token"):
+            creds_map["upstox"] = upstox_creds
+        if fyers_creds and fyers_creds.get("access_token"):
+            creds_map["fyers"] = fyers_creds
+        await self.start_providers(creds_map)
 
     async def start_single(self, provider: str, creds: Dict[str, str]) -> None:
         """Bootstrap single-provider DualFeeder. Stops MockFeeder and any prior DualFeeder."""
@@ -1408,9 +1601,7 @@ class GlobalFeeder:
             self._dual_feeder = None
         await self._stop_initial_feeder()
         dual = DualFeeder(self._bus, self._cfg)
-        upstox_creds = creds if provider == "upstox" else {}
-        fyers_creds  = creds if provider == "fyers"  else {}
-        await dual.start(upstox_creds, fyers_creds)
+        await dual.start_providers({provider: creds} if creds and creds.get("access_token") else {})
         self._dual_feeder = dual
         self._active_provider = provider
         await self._bus.publish(

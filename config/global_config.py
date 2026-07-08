@@ -312,13 +312,22 @@ class GlobalConfig:
     candle_timeframes: List[int] = field(default_factory=lambda: [1, 2, 5, 15, 75])
 
     # Primary feeder broker (admin-selected)
-    primary_feeder_provider: Literal["upstox", "fyers", "dhan", "angelone", "mock", "shared"] = "upstox"
+    primary_feeder_provider: Literal["upstox", "upstox2", "fyers", "dhan", "angelone", "mock", "shared"] = "upstox"
+
+    # Secondary / backup feeder. Used in dual-feed mode when its token is also valid.
+    # Set to "fyers" for Upstox+Fyers, or "upstox2" for two independent Upstox accounts.
+    secondary_feeder_provider: Literal["fyers", "upstox2", "upstox", "none"] = "fyers"
+
+    # How many seconds the primary feed can be silent before the secondary is promoted.
+    feeder_failover_stale_sec: float = 3.0
 
     def validate(self) -> None:
         if self.active_index not in self.monitored_indices:
             raise ValueError(f"active_index '{self.active_index}' not in monitored_indices.")
         if self.chain_depth < 1:
             raise ValueError("chain_depth must be ≥ 1.")
+        if self.secondary_feeder_provider.lower() == self.primary_feeder_provider.lower():
+            self.secondary_feeder_provider = "none"
         self.storage.ensure_dirs()
 
     @classmethod

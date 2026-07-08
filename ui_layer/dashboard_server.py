@@ -85,13 +85,14 @@ def _base_url(request) -> str:
     return f"{scheme}://{host}"
 
 
-async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, client_db=None) -> None:
+async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, client_db=None, cfg=None) -> None:
     """
     Switch GlobalFeeder to the given live provider.
 
-    If the OTHER provider also has a fresh token in DB, starts DualFeeder (active-active).
-    Otherwise starts single-provider stream.
-    Upstox is primary; Fyers is backup. Both run in parallel when available.
+    If the configured secondary provider (or any other cached feeder) also has a
+    fresh token in DB, starts a DualFeeder active-passive pair.  Otherwise starts
+    a single-provider stream.  The configured primary always drives prices; the
+    other connected providers are hot standbys.
     """
     if feeder is None:
         logger.warning("[Feeder/Toggle] GlobalFeeder not wired — cannot start stream.")
@@ -99,31 +100,45 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
 
     from broker_auth.headless_auth import _token_is_fresh
 
-    current_creds = {"api_key": api_key, "access_token": token}
-    other = "fyers" if provider == "upstox" else "upstox"
+    primary   = (getattr(cfg, "primary_feeder_provider", "upstox") or "upstox").lower() if cfg else "upstox"
+    secondary = (getattr(cfg, "secondary_feeder_provider", "fyers") or "none").lower() if cfg else "fyers"
+    if secondary in ("none", primary):
+        secondary = ""
 
-    # Check if the other provider also has a valid token
-    other_creds: dict = {}
-    if client_db is not None:
-        other_row = client_db.get_feeder_creds_sync(other) or {}
-        other_token = other_row.get("access_token", "")
-        other_api_key = other_row.get("api_key", "")
-        other_gen_at = other_row.get("token_generated_at", "")
-        other_exp_at = other_row.get("token_expiry_at", "")
-        if other_token and _token_is_fresh(other_gen_at, other_exp_at):
-            other_creds = {"api_key": other_api_key, "access_token": other_token}
+    def _load_creds(p: str) -> dict:
+        row = client_db.get_feeder_creds_sync(p) or {} if client_db is not None else {}
+        if not row.get("access_token"):
+            return {}
+        if not _token_is_fresh(row.get("token_generated_at", ""), row.get("token_expiry_at", "")):
+            # Allow the explicit toggle to attempt with a possibly-stale token
+            pass
+        return {
+            "api_key": row.get("api_key", ""),
+            "access_token": row.get("access_token", ""),
+        }
+
+    creds_map: dict = {}
+    # Always include the provider that was just toggled on.
+    if provider and token:
+        creds_map[provider] = {"api_key": api_key, "access_token": token}
+
+    # Add the configured primary + secondary if they have tokens.
+    for p in {primary, secondary}:
+        if p and p not in creds_map:
+            c = _load_creds(p)
+            if c:
+                creds_map[p] = c
 
     try:
-        if other_creds:
-            # Both providers have valid tokens → active-active DualFeeder
-            upstox_creds = current_creds if provider == "upstox" else other_creds
-            fyers_creds  = current_creds if provider == "fyers"  else other_creds
-            await feeder.start_dual(upstox_creds, fyers_creds)
-            logger.info("[Feeder/Toggle] DUAL stream started (upstox primary + fyers backup).")
+        if len(creds_map) >= 2:
+            await feeder.start_providers(creds_map)
+            logger.info("[Feeder/Toggle] DUAL stream started — providers=%s.", list(creds_map.keys()))
+        elif creds_map:
+            p, c = next(iter(creds_map.items()))
+            await feeder.start_single(p, c)
+            logger.info("[Feeder/Toggle] [%s] single stream started.", p)
         else:
-            # Only this provider available → single stream
-            await feeder.start_single(provider, current_creds)
-            logger.info("[Feeder/Toggle] [%s] single stream started.", provider)
+            logger.warning("[Feeder/Toggle] No usable credentials — stream not started.")
     except Exception as exc:
         logger.error("[Feeder/Toggle] [%s] stream start failed: %s", provider, exc)
 
@@ -1408,7 +1423,7 @@ class DashboardServer:
                 elapsed = (_time.monotonic() - t0) * 1000
                 if valid:
                     # Token valid — start the live feeder stream
-                    await _start_feeder_stream(_srv._feeder, p, api_key, token, _srv._client_db)
+                    await _start_feeder_stream(_srv._feeder, p, api_key, token, _srv._client_db, _srv._cfg)
                     logger.info(
                         "[Feeder/Toggle] [%s] cached token valid → feeder started in %.1fms", p, elapsed,
                     )
@@ -5259,6 +5274,9 @@ pm2 save
         On server startup, check DB for cached feeder credentials and
         auto-reconnect if found.  Runs after a 4-second settle delay so the
         feeder object is fully initialised before we touch it.
+
+        Starts the configured primary + secondary providers as a hot-standby dual
+        feed when both tokens are available, otherwise the single available feed.
         """
         await asyncio.sleep(4.0)
         try:
@@ -5266,64 +5284,53 @@ pm2 save
             if feeder is None:
                 return
 
-            from broker_auth.headless_auth import headless_engine as _he, _token_is_fresh, _ist_eod
-            u_row = self._client_db.get_feeder_creds_sync("upstox") or {}
-            f_row = self._client_db.get_feeder_creds_sync("fyers")  or {}
+            from broker_auth.headless_auth import _token_is_fresh
 
-            has_upstox = bool(u_row.get("client_id") or u_row.get("api_key"))
-            has_fyers  = bool(f_row.get("client_id") or f_row.get("api_key"))
+            primary   = (self._cfg.primary_feeder_provider or "upstox").lower()
+            secondary = (getattr(self._cfg, "secondary_feeder_provider", "fyers") or "none").lower()
+            if secondary in ("none", primary):
+                secondary = ""
 
-            if not has_upstox and not has_fyers:
+            providers = [p for p in {primary, secondary, "upstox", "upstox2", "fyers"} if p]
+            creds_map: dict = {}
+            present: List[str] = []
+
+            for p in providers:
+                row = self._client_db.get_feeder_creds_sync(p) or {}
+                has_creds = bool(row.get("client_id") or row.get("api_key"))
+                if not has_creds:
+                    continue
+                creds = {
+                    "client_id":          row.get("client_id", ""),
+                    "api_key":            row.get("api_key", ""),
+                    "access_token":       row.get("access_token", ""),
+                    "token_generated_at": row.get("token_generated_at", ""),
+                    "token_expiry_at":    row.get("token_expiry_at", ""),
+                }
+                if not _token_is_fresh(row.get("token_generated_at", ""), row.get("token_expiry_at", "")):
+                    logger.info("DashboardServer: %s token stale — will attempt stream without fresh token.", p)
+                    if not creds["access_token"]:
+                        continue
+                creds_map[p] = creds
+                present.append(p)
+
+            if not present:
                 logger.info("DashboardServer: No cached feeder credentials — skipping auto-connect.")
                 return
 
             logger.info(
-                "DashboardServer: Boot-time auto-connect (upstox=%s, fyers=%s).",
-                has_upstox, has_fyers,
+                "DashboardServer: Boot-time auto-connect (providers=%s).",
+                ",".join(present),
             )
-            now_ist = datetime.now(IST).isoformat()
-            eod     = _ist_eod()
 
-            upstox_creds: dict = {}
-            fyers_creds:  dict = {}
-
-            if has_upstox:
-                upstox_creds = {
-                    "client_id":          u_row.get("client_id", ""),
-                    "api_key":            u_row.get("api_key", ""),
-                    "access_token":       u_row.get("access_token", ""),
-                    "token_generated_at": u_row.get("token_generated_at", ""),
-                    "token_expiry_at":    u_row.get("token_expiry_at", ""),
-                }
-                if not _token_is_fresh(u_row.get("token_generated_at",""), u_row.get("token_expiry_at","")):
-                    logger.info("DashboardServer: Upstox token stale — will attempt stream without fresh token.")
-                    if not upstox_creds["access_token"]:
-                        has_upstox = False
-
-            if has_fyers:
-                fyers_creds = {
-                    "client_id":          f_row.get("client_id", ""),
-                    "api_key":            f_row.get("api_key", ""),
-                    "access_token":       f_row.get("access_token", ""),
-                    "token_generated_at": f_row.get("token_generated_at", ""),
-                    "token_expiry_at":    f_row.get("token_expiry_at", ""),
-                }
-                if not _token_is_fresh(f_row.get("token_generated_at",""), f_row.get("token_expiry_at","")):
-                    logger.info("DashboardServer: Fyers token stale — will attempt stream without fresh token.")
-                    if not fyers_creds["access_token"]:
-                        has_fyers = False
-
-            # Connect the feeder with whatever credentials are ready
             try:
-                if has_upstox and has_fyers:
-                    await feeder.start_dual(upstox_creds, fyers_creds)
-                    logger.info("DashboardServer: Boot auto-connect — dual feed active.")
-                elif has_upstox:
-                    await feeder.start_single("upstox", upstox_creds)
-                    logger.info("DashboardServer: Boot auto-connect — Upstox feed active.")
-                elif has_fyers:
-                    await feeder.start_single("fyers", fyers_creds)
-                    logger.info("DashboardServer: Boot auto-connect — Fyers feed active.")
+                if len(creds_map) >= 2:
+                    await feeder.start_providers(creds_map)
+                    logger.info("DashboardServer: Boot auto-connect — dual feed active (%s).", ",".join(creds_map))
+                else:
+                    p, c = next(iter(creds_map.items()))
+                    await feeder.start_single(p, c)
+                    logger.info("DashboardServer: Boot auto-connect — %s feed active.", p)
             except Exception as exc:
                 logger.error("DashboardServer: Boot auto-connect feeder start failed: %s", exc)
         except Exception as exc:
