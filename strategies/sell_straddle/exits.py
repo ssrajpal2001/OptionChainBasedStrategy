@@ -6,7 +6,7 @@ Implements the exact exit priority order and log format strings used by the engi
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from config.global_config import IST, Topic
@@ -59,6 +59,47 @@ class ExitMixin:
                         int(pe_strike), _max_tf)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: entry-seed exec legs failed: %s", self._underlying, exc)
+
+    def _exit_max_tf(self, reason: str) -> int:
+        """Maximum timeframe (minutes) for an exit reason.
+        Rule-based reasons use the max tf of their rule list; tick-based reasons default to 1."""
+        if reason == "exit_rules":
+            return max((int(r.get("tf", 1)) for r in (self._exit_rules or [])), default=1)
+        if reason == "vwap_rise":
+            return int(getattr(self, "_vwap_rise_tf", 1) or 1)
+        return 1
+
+    @staticmethod
+    def _at_exit_boundary(now: datetime, tf: int) -> bool:
+        """True when `now` is at the execution boundary for a tf-minute decision."""
+        return now.minute % tf == 0 and now.second >= 5
+
+    @staticmethod
+    def _next_boundary(now: datetime, tf: int) -> datetime:
+        """Next execution boundary at or after `now`."""
+        rem = now.minute % tf
+        if rem == 0 and now.second < 5:
+            return now.replace(second=5, microsecond=0)
+        add = tf - rem
+        nxt = now + timedelta(minutes=add)
+        return nxt.replace(second=5, microsecond=0)
+
+    def _defer_exit(self, reason: str, now: datetime) -> bool:
+        """Return True if we are at the boundary for this reason's max tf and should execute now.
+        Otherwise log once and defer to the next boundary."""
+        tf = self._exit_max_tf(reason)
+        if self._at_exit_boundary(now, tf):
+            self._exit_pending_reason = None
+            return True
+        if getattr(self, "_exit_pending_reason", None) != reason:
+            self._exit_pending_reason = reason
+            self._exit_pending_tf = tf
+            boundary = self._next_boundary(now, tf)
+            logger.info(
+                "SellStraddle[%s]: EXIT %s triggered mid-candle — deferring to next %d-min boundary at %s",
+                self._underlying, reason, tf, boundary.strftime("%H:%M:%S"),
+            )
+        return False
 
     def _build_exit_criteria(self, pos, pnl: float, credit: float):
         """Build the live exit-criteria list (and per-tf indicator dump)."""
@@ -237,6 +278,8 @@ class ExitMixin:
                         "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → full exit",
                         self._underlying, self._trail_basis, _profit_pct, pos.trail_peak_pct, _floor_pts,
                     )
+                    if not self._defer_exit("trailing_sl", now):
+                        return
                     await self._close_position(f"trailing_sl_{self._trail_basis}")
                     return
 
@@ -262,6 +305,8 @@ class ExitMixin:
                     self._session_realized_pnl_pts, pnl, _day_denom,
                     pos.net_credit, pos.current_value,
                 )
+                if not self._defer_exit("day_profit_target", now):
+                    return
                 self._stop_for_day = True
                 await self._close_position("day_profit_target")
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (profit target reached).", self._underlying)
@@ -275,6 +320,8 @@ class ExitMixin:
                     self._session_realized_pnl_pts, pnl, _day_denom,
                     pos.net_credit, pos.current_value,
                 )
+                if not self._defer_exit("day_loss_sl", now):
+                    return
                 self._stop_for_day = True
                 await self._close_position("day_loss_sl")
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
@@ -286,6 +333,8 @@ class ExitMixin:
             if 0 < _min_ltp < self._ltp_exit_min and self._position and self._position.status == "open":
                 logger.info("SellStraddle[%s]: LTP DECAY min_ltp=%.2f < %.2f — single-side roll",
                             self._underlying, _min_ltp, self._ltp_exit_min)
+                if not self._defer_exit("ltp_decay", now):
+                    return
                 await self._single_side_roll(now, "ltp_decay")
                 return
 
@@ -295,6 +344,8 @@ class ExitMixin:
             if ratio >= self._ratio_threshold:
                 logger.info("SellStraddle[%s]: RATIO EXIT ratio=%.2fx — single-side roll",
                             self._underlying, ratio)
+                if not self._defer_exit("ratio_exit", now):
+                    return
                 await self._single_side_roll(now, "ratio_exit")
                 return
 
@@ -310,6 +361,8 @@ class ExitMixin:
                             self._underlying, self._tsl_basis,
                             self._ccy_symbol, pos.tsl_high_lock_rs,
                             self._ccy_symbol, self._pnl_rs(_tsl_pnl))
+                if not self._defer_exit("scalable_tsl", now):
+                    return
                 await self._single_side_roll(now, "scalable_tsl")
                 return
 
@@ -381,6 +434,8 @@ class ExitMixin:
                             self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
                             _ce_pnl, _pe_pnl,
                         )
+                        if not self._defer_exit("vwap_rise", now):
+                            return
                         await self._single_side_roll(now, "vwap_rise_roll")
                         return
 

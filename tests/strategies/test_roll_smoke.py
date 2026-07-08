@@ -44,16 +44,15 @@ def test_single_side_roll_emits_close_and_open_when_candidate_exists():
         assert int(s._position.ce_leg.strike) != 23650   # rolled to a DIFFERENT strike (no same-strike wash)
 
 
-def test_single_side_roll_skips_when_best_partner_is_same_strike():
-    """A roll whose best balanced partner IS the leg's current strike must fire NO orders
-    (no buy-to-close + re-sell wash on the identical strike — the order-book bug)."""
+def test_single_side_roll_closes_when_best_partner_is_same_strike():
+    """If the only eligible partner is the SAME strike, there is no new pair.
+    The position must close fully instead of doing a wash roll."""
     async def run():
         bus = EventBus()
         seen = []
         q = bus.subscribe(Topic.ORDER_REQUEST)
         s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
         s._spot = 23500
-        # CE leg already AT the strike select_partner_for will pick (ATM 23500) → no-op roll.
         s._position = StraddlePosition(
             underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
             ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
@@ -73,8 +72,8 @@ def test_single_side_roll_skips_when_best_partner_is_same_strike():
         while not q.empty():
             seen.append(q.get_nowait())
         orders = [e for e in seen if isinstance(e, StraddleOrderEvent)]
-        assert orders == []                                 # NO orders fired
-        assert int(s._position.ce_leg.strike) == 23500      # position unchanged
+        assert len(orders) == 1 and orders[0].action == "EXIT"  # full close
+        assert s._position is None
     asyncio.run(run())
     asyncio.run(run())
 

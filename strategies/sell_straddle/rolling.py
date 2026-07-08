@@ -23,7 +23,7 @@ class RollingMixin:
         """Check-first rollover: close the GOOD leg (less loss / more profit) and re-sell a new
         partner for the RUNNING / bleeding leg ONLY if a candidate passes LTP threshold +
         re-entry rules + ratio. If no candidate passes, the existing trade continues unchanged."""
-        from strategies.sell_straddle.selection import find_rollover_partner
+        from strategies.sell_straddle.selection import select_partner_for
         pos = self._position
         if not pos or pos.status != "open":
             return
@@ -43,10 +43,13 @@ class RollingMixin:
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
-        max_itm = int(ss.get("roll_max_itm_steps", 2))
+        max_itm = int(ss.get("roll_max_itm_steps", 5))
 
-        # 2. CHECK-FIRST: find a valid partner before closing anything.
-        partner = find_rollover_partner(
+        # 2. FIND A VALID PARTNER for the running/bleeding leg.
+        #    - premium must be <= kept leg (select_partner_for)
+        #    - must pass LTP/theta floor and re-entry rule
+        #    - must be within roll_max_itm_steps
+        partner = select_partner_for(
             self._strike_prem,
             roll_side=roll_side,
             kept_strike=keep_strike,
@@ -55,27 +58,64 @@ class RollingMixin:
             step=step,
             offset=offset,
             ltp_target=ltp_target,
-            max_entry_ratio=self._max_entry_ratio,
-            rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
             max_itm_steps=max_itm,
             theta_target=self._theta_target,
         )
 
         if not partner:
             logger.info(
-                "SellStraddle[%s]: ROLLOVER CHECK %s — no valid partner for running %s%d @%.2f "
-                "(CE pnl=%.2f PE pnl=%.2f); keeping trade unchanged.",
+                "SellStraddle[%s]: ROLLOVER %s — no valid partner for running %s%d @%.2f "
+                "(CE pnl=%.2f PE pnl=%.2f); closing position.",
                 self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
             )
+            await self._close_position(f"single_side_roll_{reason}_no_partner")
             return
 
         new_strike, new_ltp = partner
         if int(new_strike) == orig_strike:
-            logger.info("SellStraddle[%s]: ROLLOVER %s SKIPPED — best partner is the SAME strike %d "
-                        "(no-op, no orders sent).", self._underlying, reason, orig_strike)
+            logger.info(
+                "SellStraddle[%s]: ROLLOVER %s — best partner is the SAME strike %d; "
+                "no new pair, closing position.", self._underlying, reason, orig_strike
+            )
+            await self._close_position(f"single_side_roll_{reason}_same_strike")
             return
 
-        # 3. Execute the roll: close the good leg FIRST, wait for the close fill,
+        # 3. MAX SKEW CHECK (max_entry_ratio).
+        #    Because select_partner_for guarantees new_ltp <= keep_ltp,
+        #    ratio = keep_ltp / new_ltp. Set ratio_exit.max_entry_ratio > 0 to enable.
+        if self._max_entry_ratio > 0 and keep_ltp > 0 and new_ltp > 0:
+            _skew = float(keep_ltp) / float(new_ltp)
+            if _skew > self._max_entry_ratio:
+                logger.info(
+                    "SellStraddle[%s]: ROLLOVER %s — partner %s%d @%.2f is too skewed "
+                    "vs running %s%d @%.2f (ratio=%.2f > max=%.2f); closing position.",
+                    self._underlying, reason, roll_side, new_strike, new_ltp,
+                    keep_side, keep_strike, keep_ltp, _skew, self._max_entry_ratio,
+                )
+                await self._close_position(f"single_side_roll_{reason}_skew")
+                return
+
+        # 4. CURRENT-TICK SANITY CHECK: the configured re-entry rule may use a higher
+        # timeframe (e.g. tf=2), so a partner can pass on the last closed candle while
+        # the current 1-min tick already shows close >= vwap. Reject the roll in that
+        # case — rolling into a pair that is already above its combined VWAP is a bad
+        # re-entry, exactly what the chart at 13:46 showed.
+        cand_ce = int(new_strike if roll_side == "CE" else keep_strike)
+        cand_pe = int(keep_strike if roll_side == "CE" else new_strike)
+        cur_ind = self._pair_indicators(cand_ce, cand_pe) or {}
+        cur_close = float(cur_ind.get("close", 0.0) or 0.0)
+        cur_vwap = float(cur_ind.get("vwap", 0.0) or 0.0)
+        if cur_close > 0 and cur_vwap > 0 and cur_close >= cur_vwap:
+            logger.info(
+                "SellStraddle[%s]: ROLLOVER %s — partner CE%d/PE%d current close=%.2f "
+                ">= vwap=%.2f; closing position.",
+                self._underlying, reason, cand_ce, cand_pe, cur_close, cur_vwap,
+            )
+            await self._close_position(f"single_side_roll_{reason}_current_vwap")
+            return
+
+        # 5. Execute the roll: close the good leg FIRST, wait for the close fill,
         #    then open the new partner. This guarantees the buy-to-close is confirmed
         #    before the sell-to-open, avoiding a transient double-short / margin spike.
         logger.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (good leg vs running %s%d @%.2f) [%s]",
@@ -259,9 +299,17 @@ class RollingMixin:
                 )
 
     def _apply_sl_cooldown(self) -> None:
-        """Block re-entry for the configured number of MINUTES after a full exit."""
-        cooldown_min = int(self._sl_cooldown_minutes)
-        if cooldown_min > 0:
-            self._sl_cooldown_until = datetime.now(IST) + timedelta(minutes=cooldown_min)
-            logger.info("SellStraddle[%s]: re-entry cooldown %d min (no re-entry until %s).",
-                        self._underlying, cooldown_min, self._sl_cooldown_until.strftime("%H:%M"))
+        """Block re-entry until the next boundary of the max re-entry timeframe.
+        This makes the cooldown dynamic: if an exit happens mid-candle, re-entry is
+        allowed only after that candle/tf closes."""
+        from data_layer.runtime_config import RuntimeConfig
+        now = datetime.now(IST)
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        rules = ss.get("entry_rules_reentry", [])
+        max_tf = max((int(r.get("tf", 1)) for r in rules), default=1)
+        boundary = self._next_boundary(now, max_tf)
+        self._sl_cooldown_until = boundary
+        logger.info(
+            "SellStraddle[%s]: re-entry cooldown dynamic — max_tf=%d min, no re-entry until %s.",
+            self._underlying, max_tf, boundary.strftime("%H:%M:%S"),
+        )

@@ -8,9 +8,10 @@ from execution_bridge.straddle_bridge import StraddleFillEvent
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 
 
-def test_single_side_roll_no_candidate_keeps_position():
+def test_single_side_roll_no_candidate_closes_position():
     async def run():
-        s = SellStraddleStrategy(EventBus(), cfg=GlobalConfig(), underlying="NIFTY")
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
         s._position = StraddlePosition(
             underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
             ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
@@ -20,8 +21,7 @@ def test_single_side_roll_no_candidate_keeps_position():
         s._spot = 23500
         s._strike_prem = {}   # empty → no rollover partner found
         await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
-        assert s._position is not None
-        assert s._position.status == "open"   # check-first: keep running trade
+        assert s._position is None   # no partner → full exit
     asyncio.run(run())
 
 
@@ -51,7 +51,7 @@ def test_single_side_roll_waits_for_close_fill_before_open():
 
         s._emit_order = capture_emit
 
-        with patch("strategies.sell_straddle.selection.find_rollover_partner",
+        with patch("strategies.sell_straddle.selection.select_partner_for",
                    return_value=(24350, 156.90)):
             async def deliver_fills():
                 await asyncio.sleep(0.02)
