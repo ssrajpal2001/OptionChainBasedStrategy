@@ -376,15 +376,13 @@ async def _run_live(
     # for the min-LTP expiry shift (no-op if the feature is unused).
     if iron_condor_manager is not None and hasattr(iron_condor_manager, "set_feeder"):
         iron_condor_manager.set_feeder(feeder)
-    # Crypto (Delta) feed: for any BTC/ETH in monitored_indices, run a DeltaChainManager that
-    # drives a DeltaFeeder (spot + ATM±N strikes for the active daily expiry + 17:30 rollover) onto
-    # the SAME EventBus the sell-straddle books consume. Runs alongside the NSE GlobalFeeder.
-    # DeltaChainManager always starts for BTC/ETH — crypto has its own Delta feed independent
-    # of monitored_indices (Upstox/Fyers). A client can deploy BTC even if --index BTC is absent.
+    # Crypto (Delta) feed: for any BTC/ETH in monitored_indices or with an active deployment,
+    # run a DeltaChainManager that drives a DeltaFeeder onto the same EventBus. If nothing crypto
+    # is configured/deployed, the Delta feed stays off to avoid noisy BTC logs on pure NSE setups.
     from data_layer.delta_chain_manager import DeltaChainManager
     _crypto_idx_base = list({u for u in cfg.monitored_indices if cfg.exchange.is_crypto(u)})
     # Only start DeltaChainManager for crypto underlyings with active (is_running=1) deployments
-    # or in monitored_indices — avoids subscribing ETH strikes when only BTC is deployed.
+    # or in monitored_indices.
     try:
         import sqlite3 as _sq3
         _conn = _sq3.connect(os.path.join("data", "clients.db"))
@@ -393,7 +391,7 @@ async def _run_live(
         _active_crypto = {r[0] for r in _rows if cfg.exchange.is_crypto(r[0])}
     except Exception:
         _active_crypto = set()
-    _crypto_all = list({u for u in (list(_active_crypto) + _crypto_idx_base) if cfg.exchange.is_crypto(u)} or {"BTC"})
+    _crypto_all = list({u for u in (list(_active_crypto) + _crypto_idx_base) if cfg.exchange.is_crypto(u)})
     # Option chain (ATM strikes) only for underlyings with active sell_straddle deployment
     try:
         _conn2 = _sq3.connect(os.path.join("data", "clients.db"))
