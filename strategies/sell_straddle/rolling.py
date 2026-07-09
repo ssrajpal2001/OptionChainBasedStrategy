@@ -301,15 +301,22 @@ class RollingMixin:
     def _apply_sl_cooldown(self) -> None:
         """Block re-entry until the next boundary of the max re-entry timeframe.
         This makes the cooldown dynamic: if an exit happens mid-candle, re-entry is
-        allowed only after that candle/tf closes."""
+        allowed only after that candle/tf closes.
+        Additionally honours `sl_cooldown_minutes` from config so crude/MCX can rest
+        longer between failed rolls without changing the indicator timeframe."""
         from data_layer.runtime_config import RuntimeConfig
         now = datetime.now(IST)
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
         max_tf = max((int(r.get("tf", 1)) for r in rules), default=1)
         boundary = self._next_boundary(now, max_tf)
+        fixed_minutes = float(getattr(self, "_sl_cooldown_minutes", 0.0) or 0.0)
+        if fixed_minutes > 0:
+            fixed_boundary = now + timedelta(minutes=fixed_minutes)
+            if fixed_boundary > boundary:
+                boundary = fixed_boundary
         self._sl_cooldown_until = boundary
         logger.info(
-            "SellStraddle[%s]: re-entry cooldown dynamic — max_tf=%d min, no re-entry until %s.",
-            self._underlying, max_tf, boundary.strftime("%H:%M:%S"),
+            "SellStraddle[%s]: re-entry cooldown dynamic — max_tf=%d min, fixed=%.0f min, no re-entry until %s.",
+            self._underlying, max_tf, fixed_minutes, boundary.strftime("%H:%M:%S"),
         )

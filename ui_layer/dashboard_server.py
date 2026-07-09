@@ -2579,13 +2579,16 @@ class DashboardServer:
                 _entry_time = (pos.open_time.isoformat(timespec="seconds") if pos and getattr(pos, "open_time", None)
                                else (legs[0].get("entry_time") if legs else None))
                 _expiry_date = pos.expiry_date.isoformat() if pos and getattr(pos, "expiry_date", None) else None
-                by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
-                                          "booked": booked, "tracking": tracking,
-                                          "straddle": straddle_info,
-                                          "entry_time": _entry_time,
-                                          "expiry_date": _expiry_date,
-                                          "ccy": (legs[0].get("ccy", "₹") if legs else
-                                                  ("$" if str(underlying).upper() in ("BTC", "ETH") else "₹"))}
+                # Key by deploy_id so multiple deployments of the same strategy on the
+                # same broker (e.g. NIFTY + CRUDEOIL sell_straddle) do not overwrite each other.
+                _deploy_id = dep.get("deploy_id") or f"{cid}_{bid}_{sname}_{underlying}"
+                by_broker[bid][_deploy_id] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
+                                              "booked": booked, "tracking": tracking,
+                                              "straddle": straddle_info,
+                                              "entry_time": _entry_time,
+                                              "expiry_date": _expiry_date,
+                                              "ccy": (legs[0].get("ccy", "₹") if legs else
+                                                      ("$" if str(underlying).upper() in ("BTC", "ETH") else "₹"))}
             return {"ok": True, "by_broker": by_broker}
 
         # ── CLIENT — history ──────────────────────────────────────────────────
@@ -5045,6 +5048,27 @@ pm2 save
             cid = user.get("client_id") or user.get("username")
             books = [b for b in mgr.telemetry_all() if b.get("client_id") == cid]
             return {"ok": True, "books": books}
+
+        # ── ADMIN — Sell Straddle book registry (per-binding) ─────────────────
+
+        @app.get("/api/admin/straddle/books", tags=["Admin"])
+        async def api_admin_straddle_books(_: dict = Depends(_require_admin)):
+            """List every spawned sell_straddle book: (client, binding, underlying).
+            Useful for confirming all requested indices (e.g. NIFTY + CRUDEOIL) actually
+            spawned and for diagnosing missing log files."""
+            mgr = getattr(_srv, "_straddle_manager", None)
+            if mgr is None:
+                return {"ok": True, "books": []}
+            books = []
+            for (cid, bid, und), book in mgr._books.items():
+                books.append({
+                    "client_id": cid,
+                    "binding_id": bid,
+                    "underlying": und,
+                    "lot_multiplier": getattr(book, "_lot_multiplier", 1),
+                    "position_open": getattr(book, "_position", None) is not None,
+                })
+            return {"ok": True, "books": books, "monitored_indices": sorted(mgr._indices)}
 
         # ── Backtest ──────────────────────────────────────────────────────────
 

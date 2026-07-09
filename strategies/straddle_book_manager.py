@@ -48,6 +48,10 @@ class StraddleBookManager(StrategyBookManager):
             if not cid or not bid:
                 continue
             if self._indices and und not in self._indices:
+                logger.info(
+                    "StraddleBookManager: skipping %s/%s/%s — not in monitored_indices %s",
+                    cid, bid, und, sorted(self._indices),
+                )
                 continue
             try:
                 lots = max(1, int(round(float(d.get("lot_multiplier", 1) or 1))))
@@ -87,8 +91,19 @@ class StraddleBookManager(StrategyBookManager):
         logger.info("StraddleBookManager: re-spawned %s/%s/%s lots→%d", *key, lots)
 
     def _log_reconcile(self, wanted, current):
-        if logger.isEnabledFor(logging.DEBUG):
+        # Log the reconcile snapshot at INFO only when the wanted set changes so
+        # operators can verify which (client,binding,underlying) books are active
+        # without being flooded every 5s.
+        _wanted_keys = list(wanted.keys())
+        _current_keys = list(current)
+        if getattr(self, "_last_logged_wanted", None) != _wanted_keys:
+            self._last_logged_wanted = _wanted_keys
+            logger.info(
+                "StraddleBookManager reconcile: wanted=%s current=%s",
+                _wanted_keys, _current_keys,
+            )
+        elif logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "StraddleBookManager reconcile: wanted=%s current=%s",
-                list(wanted.keys()), list(current),
+                _wanted_keys, _current_keys,
             )

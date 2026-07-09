@@ -97,3 +97,16 @@ def test_auto_spawn_on_deploy_and_stop_on_remove(monkeypatch):
     m._reconcile()
     assert removed.stopped is True
     assert m.find("C1", "Z1", "NIFTY") is None and m.find("C1", "Z2", "NIFTY") is not None
+
+
+def test_spawns_one_book_per_underlying_on_same_binding(monkeypatch):
+    # Same client/broker can run sell_straddle on NIFTY and CRUDEOIL simultaneously.
+    monkeypatch.setattr(bm_mod, "SellStraddleStrategy", _FakeBook)
+    db = _DB({"C1": [_dep("Z1", und="NIFTY"), _dep("Z1", und="CRUDEOIL")]})
+    m = StraddleBookManager(None, None, db, ["NIFTY", "CRUDEOIL"])
+    m._reconcile()
+    keys = {(b._client_id, b._binding_id, b._underlying) for b in m.books}
+    assert keys == {("C1", "Z1", "NIFTY"), ("C1", "Z1", "CRUDEOIL")}
+    assert all(b.started for b in m.books)
+    assert m.find("C1", "Z1", "NIFTY") is not None
+    assert m.find("C1", "Z1", "CRUDEOIL") is not None
