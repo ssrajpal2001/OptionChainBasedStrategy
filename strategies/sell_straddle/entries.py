@@ -270,10 +270,11 @@ class EntryMixin:
 
         _trace: list = []
         # Re-entry now uses the same balanced-pair logic as beginning: anchor at the
-        # ATM side with lower raw LTP, partner must be lower than anchor and pass the
-        # re-entry rules.  This prevents the old scan_pool behaviour that picked the
-        # globally most-balanced LTP pair, often deep ITM on both sides (e.g. CE6500/PE7300
-        # when ATM was 6900).
+        # ATM side with lower TIME VALUE, partner raw LTP must be <= anchor time value
+        # and pass the dual floor.  This prevents the old scan_pool behaviour that picked
+        # the globally most-balanced LTP pair, often deep ITM on both sides (e.g.
+        # CE6500/PE7300 when ATM was 6900).  The re-entry rules are evaluated AFTER the
+        # pair is selected, not during selection (same as beginning).
         sel = select_balanced_pair(
             self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=self._theta_target,
