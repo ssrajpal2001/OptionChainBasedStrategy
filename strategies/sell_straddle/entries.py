@@ -266,22 +266,18 @@ class EntryMixin:
                 except Exception:
                     pass
 
-        from strategies.sell_straddle.selection import select_balanced_pair, scan_pool
+        from strategies.sell_straddle.selection import select_balanced_pair, reentry_block_reason
 
         _trace: list = []
-        if use_beginning_sel:
-            sel = select_balanced_pair(
-                self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace,
-                entry_basis=self._entry_basis, theta_target=self._theta_target,
-            )
-        else:
-            sel = scan_pool(
-                self._strike_prem, self._spot, step, offset, ltp_target,
-                rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
-                metric=ss.get("reentry_best_metric", "balanced_premium"),
-                trace=_trace,
-                entry_basis=self._entry_basis, theta_target=self._theta_target,
-            )
+        # Re-entry now uses the same balanced-pair logic as beginning: anchor at the
+        # ATM side with lower raw LTP, partner must be lower than anchor and pass the
+        # re-entry rules.  This prevents the old scan_pool behaviour that picked the
+        # globally most-balanced LTP pair, often deep ITM on both sides (e.g. CE6500/PE7300
+        # when ATM was 6900).
+        sel = select_balanced_pair(
+            self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace,
+            entry_basis=self._entry_basis, theta_target=self._theta_target,
+        )
 
         for _ln in _trace:
             self._clog.info("SELECT %s | %s", self._underlying, _ln)
@@ -293,7 +289,6 @@ class EntryMixin:
                     self._underlying, rule_key, self._spot, ltp_target, theta_target, offset,
                 )
             else:
-                from strategies.sell_straddle.selection import reentry_block_reason
                 diag = reentry_block_reason(
                     self._strike_prem, self._spot, step, offset, ltp_target,
                     rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),

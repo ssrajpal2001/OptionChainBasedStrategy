@@ -135,14 +135,18 @@ def select_balanced_pair(
     trace: Optional[list] = None,
     entry_basis: str = "ltp",
     theta_target: float = 0.0,
+    rule_pass=None,  # optional callable(ce_strike, pe_strike) -> bool
 ) -> Optional[Tuple[int, int, float, float]]:
     """
-    Beginning concept (reference _get_strictly_lower_balanced_pair):
+    Balanced-pair selection for beginning AND re-entry:
       1. ATM both sides; require both LTP > 0.
-      2. Anchor = side with LOWER time-value (intrinsic-stripped) LTP.
-      3. Anchor raw LTP must be >= ltp_target.
-      4. Partner = scan other side over ATM +/- offset for ltp_target <= ltp < anchor_ltp;
-         pick the HIGHEST such LTP (closest below anchor).
+      2. Anchor = side with LOWER raw LTP at ATM.
+      3. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target).
+      4. Partner = scan the other side over ATM +/- offset for a strike whose raw LTP is
+         < anchor_ltp and passes the dual floor.  If rule_pass is supplied, the combined
+         (ce_strike, pe_strike) pair must also pass it.  Pick the HIGHEST such LTP
+         (closest below anchor).  The partner may be ITM or OTM — only the LTP and rule
+         filters matter.
     Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
     """
     atm = int(round(spot / step) * step)
@@ -155,17 +159,15 @@ def select_balanced_pair(
     if ce_ltp <= 0 or pe_ltp <= 0:
         return None
 
-    ce_corr = strip_intrinsic(ce_ltp, "CE", atm, spot)
-    pe_corr = strip_intrinsic(pe_ltp, "PE", atm, spot)
-
-    if ce_corr < pe_corr:
+    # Anchor = side with lower RAW LTP at ATM (user spec).
+    if ce_ltp < pe_ltp:
         anchor_side, anchor_strike, anchor_ltp, partner_side = "CE", atm, ce_ltp, "PE"
     else:
         anchor_side, anchor_strike, anchor_ltp, partner_side = "PE", atm, pe_ltp, "CE"
 
     if trace is not None:
         trace.append(
-            f"ANCHOR atm={atm} ce_tv={ce_corr:.2f} pe_tv={pe_corr:.2f} -> "
+            f"ANCHOR atm={atm} ce_ltp={ce_ltp:.2f} pe_ltp={pe_ltp:.2f} -> "
             f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} "
             f"(need ltp>={ltp_target:.0f} theta>={theta_target:.0f}); partner={partner_side} "
             f"wants same floor and ltp<{anchor_ltp:.2f}"
@@ -188,12 +190,26 @@ def select_balanced_pair(
             continue
         ltp = leg.get("ltp", 0.0)
         _ok_floor = leg_passes_dual_floor(partner_side, s, ltp, spot, ltp_target, theta_target)
-        _ok = _ok_floor and (ltp < anchor_ltp)
+        _ok_balance = ltp < anchor_ltp
+        # Build the combined pair for the optional rule gate.
+        if anchor_side == "CE":
+            cs, ps = anchor_strike, s
+        else:
+            cs, ps = s, anchor_strike
+        _ok_rule = rule_pass(cs, ps) if rule_pass is not None else True
+        _ok = _ok_floor and _ok_balance and _ok_rule
         if trace is not None:
             _tv = strip_intrinsic(ltp, partner_side, s, spot) if ltp > 0 else 0.0
+            if not _ok_floor:
+                _why = "floor"
+            elif not _ok_balance:
+                _why = "balance"
+            elif not _ok_rule:
+                _why = "rule"
+            else:
+                _why = "OK"
             trace.append(
-                f"  cand {partner_side}{s} ltp={ltp:.2f} tv={_tv:.2f} "
-                f"{'OK' if _ok else 'skip(' + ('floor' if not _ok_floor else 'balance') + ')'}"
+                f"  cand {partner_side}{s} ltp={ltp:.2f} tv={_tv:.2f} {_why}"
             )
         if _ok:
             if best is None or ltp > best[0]:
@@ -211,7 +227,8 @@ def select_balanced_pair(
         ce, pe = partner_strike, anchor_strike
         result = (partner_strike, anchor_strike, partner_ltp, anchor_ltp)
     if trace is not None:
-        trace.append(f"SELECTED CE{ce}/PE{pe} (beginning)")
+        _ctx = "rule-filtered " if rule_pass is not None else ""
+        trace.append(f"SELECTED CE{ce}/PE{pe} ({_ctx}balanced-pair)")
     return result
 
 
