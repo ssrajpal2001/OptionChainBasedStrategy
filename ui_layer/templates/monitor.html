@@ -11,8 +11,8 @@
 
   <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- TradingView Lightweight Charts CDN — client-side 1-min combined-premium chart -->
-  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <!-- Chart.js CDN — client-side 1-min combined-premium chart (VWAP/RSI/SLOPE overlays) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <!-- Alpine.js CDN -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
 
@@ -831,7 +831,7 @@ document.addEventListener('alpine:init', () => {
     // Client premium-chart state (per deploy_id)
     chartOpen: {},        // deploy_id → bool (panel open)
     chartData: {},        // deploy_id → series array
-    _chartInst: {},       // deploy_id → { prem, rsi, slope } TradingView chart instances
+    _chartInst: {},       // deploy_id → { prem, rsi, slope } Chart.js instances
     _chartTimer: {},      // deploy_id → setInterval handle
     // Strategy deployment modal
     showDeployModal: false,
@@ -917,7 +917,7 @@ document.addEventListener('alpine:init', () => {
       return best;
     },
 
-    // ── Client premium chart (TradingView Lightweight Charts) ────────────
+    // ── Client premium chart (Chart.js) ─────────────────────────────────
     togglePremiumChart(deployId) {
       const open = !this.chartOpen[deployId];
       this.chartOpen = { ...this.chartOpen, [deployId]: open };
@@ -944,60 +944,39 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderChart(deployId, series) {
-      console.log('[chart]', deployId, 'series_len=', series.length, 'first=', series[0], 'last=', series[series.length-1]);
-      if (typeof LightweightCharts === 'undefined') { console.error('[chart] LightweightCharts not loaded'); return; }
-      if (!series.length) { console.log('[chart] no data'); return; }
-
+      if (typeof Chart === 'undefined' || !series.length) return;
+      const labels = series.map(p => {
+        const dt = new Date((p.ts||0) * 1000);
+        return dt.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:false });
+      });
       const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
       const cyan = css('--t-cyan'), green = css('--t-green'), amber = css('--t-amber'), red = css('--t-red');
-      const muted = css('--t-muted');
-      const gridColor = 'rgba(128,128,128,0.1)';
-      const chartOptions = (container, height) => ({
-        width: container.clientWidth || 600,
-        height,
-        layout: { background: { color: 'transparent' }, textColor: muted, fontSize: 10 },
-        grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
-        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-        rightPriceScale: { borderColor: gridColor, scaleMargins: { top: 0.1, bottom: 0.1 } },
-        timeScale: { borderColor: gridColor, timeVisible: true, secondsVisible: false },
-        handleScroll: { vertTouchDrag: false },
+      const baseOpts = (title) => ({
+        responsive:true, maintainAspectRatio:false, animation:false,
+        plugins:{ legend:{ display:true, labels:{ color: css('--t-muted'), font:{ size:9 }, boxWidth:10 } },
+                  title:{ display:!!title, text:title, color: css('--t-muted'), font:{ size:9 } } },
+        scales:{ x:{ ticks:{ color: css('--t-muted'), font:{ size:8 }, maxTicksLimit:8 }, grid:{ display:false } },
+                 y:{ ticks:{ color: css('--t-muted'), font:{ size:8 } }, grid:{ color:'rgba(128,128,128,0.1)' } } },
+        elements:{ point:{ radius:0 } },
       });
-      const toSeries = (field) => series.map(p => ({ time: Math.floor(p.ts || 0), value: Number(p[field] || 0) }));
-
+      const mk = (canvasId, datasets, title) => {
+        const el = document.getElementById(canvasId);
+        if (!el) return null;
+        return new Chart(el.getContext('2d'), { type:'line', data:{ labels, datasets }, options: baseOpts(title) });
+      };
       const inst = this._chartInst[deployId] || {};
-      ['prem','rsi','slope'].forEach(k => { if (inst[k]) { try { inst[k].remove(); } catch(e) { console.error('[chart] remove error', e); } } });
-
-      try {
-        const premContainer = document.getElementById('premchart_'+deployId);
-        if (premContainer) {
-          console.log('[chart] prem container w=', premContainer.clientWidth);
-          inst.prem = LightweightCharts.createChart(premContainer, chartOptions(premContainer, 180));
-          const combinedSeries = inst.prem.addLineSeries({ color: cyan, lineWidth: 2, title: 'Combined' });
-          combinedSeries.setData(toSeries('combined'));
-          const vwapSeries = inst.prem.addLineSeries({ color: amber, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.LargeDashed, title: 'VWAP' });
-          vwapSeries.setData(toSeries('vwap'));
-          inst.prem.timeScale().fitContent();
-        }
-
-        const rsiContainer = document.getElementById('rsichart_'+deployId);
-        if (rsiContainer) {
-          inst.rsi = LightweightCharts.createChart(rsiContainer, chartOptions(rsiContainer, 80));
-          const rsiSeries = inst.rsi.addLineSeries({ color: green, lineWidth: 1, title: 'RSI' });
-          rsiSeries.setData(toSeries('rsi'));
-          inst.rsi.timeScale().fitContent();
-        }
-
-        const slopeContainer = document.getElementById('slopechart_'+deployId);
-        if (slopeContainer) {
-          inst.slope = LightweightCharts.createChart(slopeContainer, chartOptions(slopeContainer, 80));
-          const slopeSeries = inst.slope.addLineSeries({ color: red, lineWidth: 1, title: 'SLOPE' });
-          slopeSeries.setData(toSeries('slope'));
-          inst.slope.timeScale().fitContent();
-        }
-      } catch (e) {
-        console.error('[chart] render error', e);
-      }
-
+      // Destroy old instances before re-creating (avoids canvas reuse error)
+      ['prem','rsi','slope'].forEach(k => { if (inst[k]) { try { inst[k].destroy(); } catch {} } });
+      inst.prem = mk('premchart_'+deployId, [
+        { label:'Combined', data: series.map(p=>p.combined), borderColor: cyan,  borderWidth:1.4, tension:0.2 },
+        { label:'VWAP',     data: series.map(p=>p.vwap),     borderColor: amber, borderWidth:1.1, borderDash:[4,3], tension:0.2 },
+      ]);
+      inst.rsi = mk('rsichart_'+deployId, [
+        { label:'RSI', data: series.map(p=>p.rsi), borderColor: green, borderWidth:1.1, tension:0.2 },
+      ], 'RSI');
+      inst.slope = mk('slopechart_'+deployId, [
+        { label:'SLOPE', data: series.map(p=>p.slope), borderColor: red, borderWidth:1.1, tension:0.2 },
+      ], 'SLOPE (VWAP Δ)');
       this._chartInst[deployId] = inst;
     },
 
@@ -8317,9 +8296,9 @@ function amoTest() {
                                 x-text="chartOpen[dep.deploy_id] ? '▾ hide' : '▸ show'"></button>
                       </div>
                       <div x-show="chartOpen[dep.deploy_id]">
-                        <div style="height:180px;position:relative;" :id="'premchart_'+dep.deploy_id"></div>
-                        <div style="height:80px;position:relative;" class="mt-1" :id="'rsichart_'+dep.deploy_id"></div>
-                        <div style="height:80px;position:relative;" class="mt-1" :id="'slopechart_'+dep.deploy_id"></div>
+                        <div style="height:160px"><canvas :id="'premchart_'+dep.deploy_id"></canvas></div>
+                        <div style="height:70px" class="mt-1"><canvas :id="'rsichart_'+dep.deploy_id"></canvas></div>
+                        <div style="height:70px" class="mt-1"><canvas :id="'slopechart_'+dep.deploy_id"></canvas></div>
                         <div x-show="(chartData[dep.deploy_id]||[]).length===0" class="text-xs text-center py-3 font-mono" style="color:var(--t-muted)">
                           No 1-min data yet today.
                         </div>
