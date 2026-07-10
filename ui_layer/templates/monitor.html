@@ -938,7 +938,6 @@ document.addEventListener('alpine:init', () => {
         if (!r || !r.ok) return;
         const d = await r.json();
         const series = d.series || [];
-        console.log('[chart]', deployId, 'data_points=', series.length, 'first=', series[0], 'last=', series[series.length-1]);
         this.chartData = { ...this.chartData, [deployId]: series };
         // Delay render so Alpine x-show has finished making the panel visible.
         this.$nextTick(() => setTimeout(() => this._renderChart(deployId, series), 150));
@@ -946,12 +945,11 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderChart(deployId, series) {
-      if (typeof ApexCharts === 'undefined') { console.error('[chart] ApexCharts not loaded'); return; }
+      if (typeof ApexCharts === 'undefined') return;
       // Server timestamps are UTC epoch; shift to IST for display.
       const IST_OFFSET_SEC = 5 * 3600 + 30 * 60;
       const validSeries = series.filter(p => Number(p.combined || 0) > 0);
-      if (!validSeries.length) { console.log('[chart] no valid data to render'); return; }
-      console.log('[chart] rendering', deployId, 'points=', validSeries.length, 'first=', validSeries[0], 'last=', validSeries[validSeries.length-1]);
+      if (!validSeries.length) return;
 
       const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
       const cyan = css('--t-cyan'), green = css('--t-green'), amber = css('--t-amber'), red = css('--t-red');
