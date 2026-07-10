@@ -168,13 +168,20 @@ class IndicatorMixin:
                 int(self._position.ce_leg.strike), int(self._position.pe_leg.strike), 1) or {}
             if _pi:
                 _ci = {**self._ind, **_pi}
+        _combined = round(float(_ce_l + _pe_l), 2)
+        _vwap = round(float(_ci.get("vwap", 0.0) or 0.0), 2)
+        _rsi = round(float(_ci.get("rsi", 0.0) or 0.0), 2)
+        _slope = round(float(_ci.get("slope", 0.0) or 0.0), 2)
+        # Skip incomplete points (e.g. during rollover/startup when vwap or a leg is still 0)
+        if _combined <= 0 or _ce_l <= 0 or _pe_l <= 0 or _vwap <= 0:
+            return
         self._chart_series.append({
             "ts": ts.timestamp(),
-            "combined": round(float(_ce_l + _pe_l), 2),
+            "combined": _combined,
             "ce_ltp": round(float(_ce_l), 2),
             "pe_ltp": round(float(_pe_l), 2),
-            "vwap": round(float(_ci.get("vwap", 0.0) or 0.0), 2),
-            "rsi": round(float(_ci.get("rsi", 0.0) or 0.0), 2),
-            "slope": round(float(_ci.get("slope", 0.0) or 0.0), 2),
+            "vwap": _vwap,
+            "rsi": _rsi,
+            "slope": _slope,
         })
         self._save_chart_history()
