@@ -8,7 +8,9 @@ public accessors.  Strategy-specific logic lives in the sibling modules.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from collections import deque
 from datetime import datetime, date, time as dtime
 from typing import Dict, List, Optional, Tuple
@@ -119,6 +121,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._prem_closes: deque = deque(maxlen=_BUF)
         self._prem_volumes: deque = deque(maxlen=_BUF)
         self._chart_series: deque = deque(maxlen=375)
+        self._load_chart_history()
 
         self._pool_engine = PoolIndicatorEngine(rsi_len=14, roc_len=10)
 

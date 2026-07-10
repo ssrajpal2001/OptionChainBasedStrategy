@@ -5,8 +5,10 @@ All methods read from the book's buffers / pool engine and update ``self._ind``.
 """
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, date
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -120,6 +122,39 @@ class IndicatorMixin:
                 out[tf] = self._pool_engine.pair_indicators_tf(int(ce_strike), int(pe_strike), tf) or {}
         return out
 
+    def _load_chart_history(self) -> None:
+        """Load today's 1-min chart history from disk so restarts don't wipe it."""
+        try:
+            _path = os.path.join("data", "chart_history", f"{self._persist_key}.json")
+            if not os.path.exists(_path):
+                return
+            with open(_path) as f:
+                _data = json.load(f)
+            if _data.get("date") != date.today().isoformat():
+                return
+            _series = _data.get("series", [])
+            for p in _series:
+                self._chart_series.append(p)
+            logger.info("IndicatorMixin[%s]: loaded %d chart history points", self._underlying, len(_series))
+        except Exception as exc:
+            logger.debug("IndicatorMixin[%s]: chart history load failed: %s", self._underlying, exc)
+
+    def _save_chart_history(self) -> None:
+        """Persist today's 1-min chart history to disk."""
+        try:
+            _dir = os.path.join("data", "chart_history")
+            os.makedirs(_dir, exist_ok=True)
+            _path = os.path.join(_dir, f"{self._persist_key}.json")
+            _tmp = _path + ".tmp"
+            with open(_tmp, "w") as f:
+                json.dump({
+                    "date": date.today().isoformat(),
+                    "series": list(self._chart_series),
+                }, f, default=str)
+            os.replace(_tmp, _path)
+        except Exception as exc:
+            logger.debug("IndicatorMixin[%s]: chart history save failed: %s", self._underlying, exc)
+
     def _append_chart_point(self, ts: datetime) -> None:
         """Append one chart point for the given minute."""
         _m = ts.hour * 60 + ts.minute
@@ -142,3 +177,4 @@ class IndicatorMixin:
             "rsi": round(float(_ci.get("rsi", 0.0) or 0.0), 2),
             "slope": round(float(_ci.get("slope", 0.0) or 0.0), 2),
         })
+        self._save_chart_history()
