@@ -947,14 +947,17 @@ document.addEventListener('alpine:init', () => {
 
     _renderChart(deployId, series) {
       if (typeof ApexCharts === 'undefined') { console.error('[chart] ApexCharts not loaded'); return; }
-      if (!series.length) { console.log('[chart] no data to render'); return; }
-      console.log('[chart] rendering', deployId, 'points=', series.length);
+      // Server timestamps are UTC epoch; shift to IST for display.
+      const IST_OFFSET_SEC = 5 * 3600 + 30 * 60;
+      const validSeries = series.filter(p => Number(p.combined || 0) > 0);
+      if (!validSeries.length) { console.log('[chart] no valid data to render'); return; }
+      console.log('[chart] rendering', deployId, 'points=', validSeries.length, 'first=', validSeries[0], 'last=', validSeries[validSeries.length-1]);
 
       const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
       const cyan = css('--t-cyan'), green = css('--t-green'), amber = css('--t-amber'), red = css('--t-red');
       const muted = css('--t-muted');
       const gridColor = 'rgba(128,128,128,0.12)';
-      const toData = (field) => series.map(p => [Math.floor((p.ts || 0)) * 1000, Number(p[field] || 0)]);
+      const toData = (field) => validSeries.map(p => [Math.floor((p.ts || 0) + IST_OFFSET_SEC) * 1000, Number(p[field] || 0)]);
 
       const baseOptions = (height) => ({
         chart: {
