@@ -11,8 +11,8 @@
 
   <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Chart.js CDN — client-side 1-min combined-premium chart (VWAP/RSI/SLOPE overlays) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- ApexCharts CDN — client-side multi-line straddle/strangle chart -->
+  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
   <!-- Alpine.js CDN -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
 
@@ -831,7 +831,7 @@ document.addEventListener('alpine:init', () => {
     // Client premium-chart state (per deploy_id)
     chartOpen: {},        // deploy_id → bool (panel open)
     chartData: {},        // deploy_id → series array
-    _chartInst: {},       // deploy_id → { prem, rsi, slope } Chart.js instances
+    _chartInst: {},       // deploy_id → { prem, rsi, slope } ApexCharts instances
     _chartTimer: {},      // deploy_id → setInterval handle
     // Strategy deployment modal
     showDeployModal: false,
@@ -917,7 +917,7 @@ document.addEventListener('alpine:init', () => {
       return best;
     },
 
-    // ── Client premium chart (Chart.js) ─────────────────────────────────
+    // ── Client premium chart (ApexCharts multi-line) ────────────────────
     togglePremiumChart(deployId) {
       const open = !this.chartOpen[deployId];
       this.chartOpen = { ...this.chartOpen, [deployId]: open };
@@ -946,41 +946,92 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderChart(deployId, series) {
-      if (typeof Chart === 'undefined') { console.error('[chart] Chart.js not loaded'); return; }
+      if (typeof ApexCharts === 'undefined') { console.error('[chart] ApexCharts not loaded'); return; }
       if (!series.length) { console.log('[chart] no data to render'); return; }
-      console.log('[chart] rendering', deployId, 'values sample combined=', series.slice(0,3).map(p=>p.combined));
-      const labels = series.map(p => {
-        const dt = new Date((p.ts||0) * 1000);
-        return dt.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:false });
-      });
+      console.log('[chart] rendering', deployId, 'points=', series.length);
+
       const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
       const cyan = css('--t-cyan'), green = css('--t-green'), amber = css('--t-amber'), red = css('--t-red');
-      const baseOpts = (title) => ({
-        responsive:true, maintainAspectRatio:false, animation:false,
-        plugins:{ legend:{ display:true, labels:{ color: css('--t-muted'), font:{ size:9 }, boxWidth:10 } },
-                  title:{ display:!!title, text:title, color: css('--t-muted'), font:{ size:9 } } },
-        scales:{ x:{ ticks:{ color: css('--t-muted'), font:{ size:8 }, maxTicksLimit:8 }, grid:{ display:false } },
-                 y:{ ticks:{ color: css('--t-muted'), font:{ size:8 } }, grid:{ color:'rgba(128,128,128,0.1)' } } },
-        elements:{ point:{ radius:0 } },
+      const muted = css('--t-muted');
+      const gridColor = 'rgba(128,128,128,0.12)';
+      const toData = (field) => series.map(p => [Math.floor((p.ts || 0)) * 1000, Number(p[field] || 0)]);
+
+      const baseOptions = (height) => ({
+        chart: {
+          type: 'line',
+          height: height,
+          fontFamily: "'Plus Jakarta Sans', sans-serif",
+          toolbar: { show: false },
+          zoom: { enabled: false },
+          animations: { enabled: false },
+        },
+        stroke: { curve: 'straight', width: 1.8 },
+        xaxis: {
+          type: 'datetime',
+          labels: { style: { colors: muted, fontSize: '10px' } },
+          axisBorder: { show: true, color: gridColor },
+          axisTicks: { show: true, color: gridColor },
+          tooltip: { enabled: false },
+        },
+        yaxis: {
+          labels: { style: { colors: muted, fontSize: '10px' } },
+        },
+        grid: { borderColor: gridColor, strokeDashArray: 3 },
+        legend: {
+          show: true,
+          position: 'top',
+          horizontalAlign: 'left',
+          fontSize: '11px',
+          fontFamily: "'Plus Jakarta Sans', sans-serif",
+          labels: { colors: muted },
+          markers: { size: 4 },
+          itemMargin: { horizontal: 8 },
+        },
+        tooltip: {
+          theme: 'dark',
+          x: { format: 'HH:mm' },
+        },
+        markers: { size: 0 },
       });
-      const mk = (canvasId, datasets, title) => {
-        const el = document.getElementById(canvasId);
-        if (!el) return null;
-        return new Chart(el.getContext('2d'), { type:'line', data:{ labels, datasets }, options: baseOpts(title) });
-      };
+
       const inst = this._chartInst[deployId] || {};
-      // Destroy old instances before re-creating (avoids canvas reuse error)
       ['prem','rsi','slope'].forEach(k => { if (inst[k]) { try { inst[k].destroy(); } catch {} } });
-      inst.prem = mk('premchart_'+deployId, [
-        { label:'Combined', data: series.map(p=>p.combined), borderColor: cyan,  borderWidth:1.4, tension:0.2 },
-        { label:'VWAP',     data: series.map(p=>p.vwap),     borderColor: amber, borderWidth:1.1, borderDash:[4,3], tension:0.2 },
-      ]);
-      inst.rsi = mk('rsichart_'+deployId, [
-        { label:'RSI', data: series.map(p=>p.rsi), borderColor: green, borderWidth:1.1, tension:0.2 },
-      ], 'RSI');
-      inst.slope = mk('slopechart_'+deployId, [
-        { label:'SLOPE', data: series.map(p=>p.slope), borderColor: red, borderWidth:1.1, tension:0.2 },
-      ], 'SLOPE (VWAP Δ)');
+
+      const premContainer = document.getElementById('premchart_'+deployId);
+      if (premContainer) {
+        inst.prem = new ApexCharts(premContainer, {
+          ...baseOptions(300),
+          series: [
+            { name: 'Strategy Price', data: toData('combined') },
+            { name: 'Strategy VWAP',  data: toData('vwap') },
+            { name: 'CE LTP',         data: toData('ce_ltp') },
+            { name: 'PE LTP',         data: toData('pe_ltp') },
+          ],
+          colors: [cyan, amber, green, red],
+        });
+        inst.prem.render();
+      }
+
+      const rsiContainer = document.getElementById('rsichart_'+deployId);
+      if (rsiContainer) {
+        inst.rsi = new ApexCharts(rsiContainer, {
+          ...baseOptions(80),
+          series: [{ name: 'RSI', data: toData('rsi') }],
+          colors: [green],
+        });
+        inst.rsi.render();
+      }
+
+      const slopeContainer = document.getElementById('slopechart_'+deployId);
+      if (slopeContainer) {
+        inst.slope = new ApexCharts(slopeContainer, {
+          ...baseOptions(80),
+          series: [{ name: 'SLOPE', data: toData('slope') }],
+          colors: [red],
+        });
+        inst.slope.render();
+      }
+
       this._chartInst[deployId] = inst;
     },
 
@@ -8300,9 +8351,9 @@ function amoTest() {
                                 x-text="chartOpen[dep.deploy_id] ? '▾ hide' : '▸ show'"></button>
                       </div>
                       <div x-show="chartOpen[dep.deploy_id]">
-                        <div style="height:160px"><canvas :id="'premchart_'+dep.deploy_id"></canvas></div>
-                        <div style="height:70px" class="mt-1"><canvas :id="'rsichart_'+dep.deploy_id"></canvas></div>
-                        <div style="height:70px" class="mt-1"><canvas :id="'slopechart_'+dep.deploy_id"></canvas></div>
+                        <div style="height:300px" :id="'premchart_'+dep.deploy_id"></div>
+                        <div style="height:80px" class="mt-1" :id="'rsichart_'+dep.deploy_id"></div>
+                        <div style="height:80px" class="mt-1" :id="'slopechart_'+dep.deploy_id"></div>
                         <div x-show="(chartData[dep.deploy_id]||[]).length===0" class="text-xs text-center py-3 font-mono" style="color:var(--t-muted)">
                           No 1-min data yet today.
                         </div>
