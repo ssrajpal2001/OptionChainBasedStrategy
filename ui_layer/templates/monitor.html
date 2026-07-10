@@ -938,13 +938,17 @@ document.addEventListener('alpine:init', () => {
         if (!r || !r.ok) return;
         const d = await r.json();
         const series = d.series || [];
+        console.log('[chart]', deployId, 'data_points=', series.length, 'first=', series[0], 'last=', series[series.length-1]);
         this.chartData = { ...this.chartData, [deployId]: series };
-        this.$nextTick(() => this._renderChart(deployId, series));
-      } catch {}
+        // Delay render so Alpine x-show has finished making the panel visible.
+        this.$nextTick(() => setTimeout(() => this._renderChart(deployId, series), 150));
+      } catch (e) { console.error('[chart] load error', e); }
     },
 
     _renderChart(deployId, series) {
-      if (typeof Chart === 'undefined' || !series.length) return;
+      if (typeof Chart === 'undefined') { console.error('[chart] Chart.js not loaded'); return; }
+      if (!series.length) { console.log('[chart] no data to render'); return; }
+      console.log('[chart] rendering', deployId, 'values sample combined=', series.slice(0,3).map(p=>p.combined));
       const labels = series.map(p => {
         const dt = new Date((p.ts||0) * 1000);
         return dt.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:false });
