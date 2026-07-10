@@ -944,7 +944,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     _renderChart(deployId, series) {
-      if (typeof LightweightCharts === 'undefined' || !series.length) return;
+      console.log('[chart]', deployId, 'series_len=', series.length, 'first=', series[0], 'last=', series[series.length-1]);
+      if (typeof LightweightCharts === 'undefined') { console.error('[chart] LightweightCharts not loaded'); return; }
+      if (!series.length) { console.log('[chart] no data'); return; }
+
       const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
       const cyan = css('--t-cyan'), green = css('--t-green'), amber = css('--t-amber'), red = css('--t-red');
       const muted = css('--t-muted');
@@ -962,32 +965,37 @@ document.addEventListener('alpine:init', () => {
       const toSeries = (field) => series.map(p => ({ time: Math.floor(p.ts || 0), value: Number(p[field] || 0) }));
 
       const inst = this._chartInst[deployId] || {};
-      ['prem','rsi','slope'].forEach(k => { if (inst[k]) { try { inst[k].remove(); } catch {} } });
+      ['prem','rsi','slope'].forEach(k => { if (inst[k]) { try { inst[k].remove(); } catch(e) { console.error('[chart] remove error', e); } } });
 
-      const premContainer = document.getElementById('premchart_'+deployId);
-      if (premContainer) {
-        inst.prem = LightweightCharts.createChart(premContainer, chartOptions(premContainer, 180));
-        const combinedSeries = inst.prem.addLineSeries({ color: cyan, lineWidth: 2, title: 'Combined' });
-        combinedSeries.setData(toSeries('combined'));
-        const vwapSeries = inst.prem.addLineSeries({ color: amber, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.LargeDashed, title: 'VWAP' });
-        vwapSeries.setData(toSeries('vwap'));
-        inst.prem.timeScale().fitContent();
-      }
+      try {
+        const premContainer = document.getElementById('premchart_'+deployId);
+        if (premContainer) {
+          console.log('[chart] prem container w=', premContainer.clientWidth);
+          inst.prem = LightweightCharts.createChart(premContainer, chartOptions(premContainer, 180));
+          const combinedSeries = inst.prem.addLineSeries({ color: cyan, lineWidth: 2, title: 'Combined' });
+          combinedSeries.setData(toSeries('combined'));
+          const vwapSeries = inst.prem.addLineSeries({ color: amber, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.LargeDashed, title: 'VWAP' });
+          vwapSeries.setData(toSeries('vwap'));
+          inst.prem.timeScale().fitContent();
+        }
 
-      const rsiContainer = document.getElementById('rsichart_'+deployId);
-      if (rsiContainer) {
-        inst.rsi = LightweightCharts.createChart(rsiContainer, chartOptions(rsiContainer, 80));
-        const rsiSeries = inst.rsi.addLineSeries({ color: green, lineWidth: 1, title: 'RSI' });
-        rsiSeries.setData(toSeries('rsi'));
-        inst.rsi.timeScale().fitContent();
-      }
+        const rsiContainer = document.getElementById('rsichart_'+deployId);
+        if (rsiContainer) {
+          inst.rsi = LightweightCharts.createChart(rsiContainer, chartOptions(rsiContainer, 80));
+          const rsiSeries = inst.rsi.addLineSeries({ color: green, lineWidth: 1, title: 'RSI' });
+          rsiSeries.setData(toSeries('rsi'));
+          inst.rsi.timeScale().fitContent();
+        }
 
-      const slopeContainer = document.getElementById('slopechart_'+deployId);
-      if (slopeContainer) {
-        inst.slope = LightweightCharts.createChart(slopeContainer, chartOptions(slopeContainer, 80));
-        const slopeSeries = inst.slope.addLineSeries({ color: red, lineWidth: 1, title: 'SLOPE' });
-        slopeSeries.setData(toSeries('slope'));
-        inst.slope.timeScale().fitContent();
+        const slopeContainer = document.getElementById('slopechart_'+deployId);
+        if (slopeContainer) {
+          inst.slope = LightweightCharts.createChart(slopeContainer, chartOptions(slopeContainer, 80));
+          const slopeSeries = inst.slope.addLineSeries({ color: red, lineWidth: 1, title: 'SLOPE' });
+          slopeSeries.setData(toSeries('slope'));
+          inst.slope.timeScale().fitContent();
+        }
+      } catch (e) {
+        console.error('[chart] render error', e);
       }
 
       this._chartInst[deployId] = inst;
