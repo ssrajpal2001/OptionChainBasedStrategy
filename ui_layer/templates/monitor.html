@@ -977,6 +977,8 @@ document.addEventListener('alpine:init', () => {
           tooltip: { enabled: false },
         },
         yaxis: {
+          min: (min) => (min === undefined || min === null ? 0 : Math.floor(min * 0.98)),
+          max: (max) => (max === undefined || max === null ? 100 : Math.ceil(max * 1.02)),
           labels: { style: { colors: muted, fontSize: '10px' } },
         },
         grid: { borderColor: gridColor, strokeDashArray: 3 },
