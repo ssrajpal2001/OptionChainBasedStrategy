@@ -12,7 +12,7 @@
   <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- TradingView Lightweight Charts CDN — client-side 1-min combined-premium chart -->
-  <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
   <!-- Alpine.js CDN -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
 
@@ -949,8 +949,8 @@ document.addEventListener('alpine:init', () => {
       const cyan = css('--t-cyan'), green = css('--t-green'), amber = css('--t-amber'), red = css('--t-red');
       const muted = css('--t-muted');
       const gridColor = 'rgba(128,128,128,0.1)';
-      const chartOptions = (height) => ({
-        autoSize: true,
+      const chartOptions = (container, height) => ({
+        width: container.clientWidth || 600,
         height,
         layout: { background: { color: 'transparent' }, textColor: muted, fontSize: 10 },
         grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
@@ -966,7 +966,7 @@ document.addEventListener('alpine:init', () => {
 
       const premContainer = document.getElementById('premchart_'+deployId);
       if (premContainer) {
-        inst.prem = LightweightCharts.createChart(premContainer, chartOptions(180));
+        inst.prem = LightweightCharts.createChart(premContainer, chartOptions(premContainer, 180));
         const combinedSeries = inst.prem.addLineSeries({ color: cyan, lineWidth: 2, title: 'Combined' });
         combinedSeries.setData(toSeries('combined'));
         const vwapSeries = inst.prem.addLineSeries({ color: amber, lineWidth: 1, lineStyle: LightweightCharts.LineStyle.LargeDashed, title: 'VWAP' });
@@ -976,7 +976,7 @@ document.addEventListener('alpine:init', () => {
 
       const rsiContainer = document.getElementById('rsichart_'+deployId);
       if (rsiContainer) {
-        inst.rsi = LightweightCharts.createChart(rsiContainer, chartOptions(80));
+        inst.rsi = LightweightCharts.createChart(rsiContainer, chartOptions(rsiContainer, 80));
         const rsiSeries = inst.rsi.addLineSeries({ color: green, lineWidth: 1, title: 'RSI' });
         rsiSeries.setData(toSeries('rsi'));
         inst.rsi.timeScale().fitContent();
@@ -984,7 +984,7 @@ document.addEventListener('alpine:init', () => {
 
       const slopeContainer = document.getElementById('slopechart_'+deployId);
       if (slopeContainer) {
-        inst.slope = LightweightCharts.createChart(slopeContainer, chartOptions(80));
+        inst.slope = LightweightCharts.createChart(slopeContainer, chartOptions(slopeContainer, 80));
         const slopeSeries = inst.slope.addLineSeries({ color: red, lineWidth: 1, title: 'SLOPE' });
         slopeSeries.setData(toSeries('slope'));
         inst.slope.timeScale().fitContent();
