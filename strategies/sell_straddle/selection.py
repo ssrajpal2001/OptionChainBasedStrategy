@@ -10,28 +10,78 @@ Cache shape (built by the strategy from option ticks):
 """
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 Key = Tuple[int, str]
 
 
+def _available_strikes(strike_prem: Dict[Key, dict], side: str) -> List[int]:
+    """Return all available strike prices for `side` with positive LTP."""
+    return [
+        int(strike) for (strike, s), v in strike_prem.items()
+        if s == side and float(v.get("ltp", 0.0) or 0.0) > 0
+    ]
+
+
+def _common_atm(strike_prem: Dict[Key, dict], spot: float) -> int:
+    """Return the strike closest to `spot` that has both CE and PE quotes.
+
+    For crypto/variable-strike chains this is safer than computing ATM from a
+    fixed step because the actual strikes may be 100, 200 or 500 apart.
+    """
+    ce_strikes = set(_available_strikes(strike_prem, "CE"))
+    pe_strikes = set(_available_strikes(strike_prem, "PE"))
+    common = sorted(ce_strikes & pe_strikes)
+    if not common:
+        return 0
+    if spot <= 0:
+        return common[0]
+    return min(common, key=lambda s: abs(float(s) - spot))
+
+
+def _strikes_near_spot(
+    strike_prem: Dict[Key, dict],
+    side: str,
+    spot: float,
+    n: int,
+) -> List[int]:
+    """Return up to `n` available strikes of `side` closest to `spot`, sorted by strike."""
+    strikes = _available_strikes(strike_prem, side)
+    if not strikes:
+        return []
+    if spot <= 0:
+        return sorted(strikes)[:n]
+    strikes.sort(key=lambda s: abs(float(s) - spot))
+    nearest = strikes[:n]
+    return sorted(nearest)
+
+
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        spot, step, offset, ltp_target, rule_pass, max_itm_steps=None,
-                       theta_target: float = 0.0):
+                       theta_target: float = 0.0, variable_strikes: bool = False):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
     `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target
     and >= theta_target, with premium STRICTLY <= the kept leg's premium (never roll into a leg
     richer than the leg we keep), and passing rule_pass(ce_strike, pe_strike). Among the eligible
     (<= kept_ltp) strikes it picks the one CLOSEST to kept_ltp (most balanced from below).
+
+    `variable_strikes=True`: for crypto chains where strike gaps are non-uniform.
+    In that mode `offset` is interpreted as "number of nearest strikes" rather than
+    fixed-step count, and ATM is discovered from the actual quoted strikes.
+
     `max_itm_steps` (optional): cap how deep ITM the re-sold leg may be (in strike steps) so the
     roll stays near ATM (a real straddle) instead of selling a deep-ITM strike.
     Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
-    atm = round(spot / step) * step if spot > 0 else 0
+    if variable_strikes:
+        candidate_strikes = _strikes_near_spot(strike_prem, roll_side, spot, n=max(1, int(offset)))
+    else:
+        atm = round(spot / step) * step if spot > 0 else 0
+        candidate_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
+
     best = None  # (premium_diff, strike, ltp)
-    for (strike, side), v in strike_prem.items():
-        if side != roll_side:
-            continue
-        if atm and abs(strike - atm) > offset * step:
+    for strike in candidate_strikes:
+        v = strike_prem.get((strike, roll_side))
+        if not v:
             continue
         # Keep the re-sold leg near ATM: skip strikes deeper ITM than max_itm_steps.
         if max_itm_steps is not None and spot > 0 and step > 0:
@@ -136,6 +186,7 @@ def select_balanced_pair(
     entry_basis: str = "ltp",
     theta_target: float = 0.0,
     rule_pass=None,  # optional callable(ce_strike, pe_strike) -> bool
+    variable_strikes: bool = False,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Balanced-pair selection for beginning AND re-entry:
@@ -146,9 +197,15 @@ def select_balanced_pair(
          <= anchor_time_value and passes the dual floor.  If rule_pass is supplied, the
          combined (ce_strike, pe_strike) pair must also pass it.  Pick the HIGHEST such LTP
          (closest to anchor time value from below).  The partner may be ITM or OTM.
+
+    `variable_strikes=True`: discover ATM and candidate strikes from the actual quoted
+    chain instead of assuming a fixed strike step. Used for Delta BTC/ETH daily options.
     Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
     """
-    atm = int(round(spot / step) * step)
+    if variable_strikes:
+        atm = _common_atm(strike_prem, spot)
+    else:
+        atm = int(round(spot / step) * step)
     ce_atm = strike_prem.get((atm, "CE"))
     pe_atm = strike_prem.get((atm, "PE"))
     if not ce_atm or not pe_atm:
@@ -185,9 +242,15 @@ def select_balanced_pair(
             )
         return None
 
+    if variable_strikes:
+        partner_strikes = _strikes_near_spot(
+            strike_prem, partner_side, spot, n=max(1, int(offset))
+        )
+    else:
+        partner_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
+
     best = None  # (ltp, strike)
-    for i in range(-offset, offset + 1):
-        s = int(atm + i * step)
+    for s in partner_strikes:
         leg = strike_prem.get((s, partner_side))
         if not leg:
             continue
@@ -236,7 +299,7 @@ def select_balanced_pair(
 
 
 def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
-                         theta_target: float = 0.0):
+                         theta_target: float = 0.0, variable_strikes: bool = False):
     """Diagnose why the re-entry pool produced no trade, so the log can distinguish
     'no balanced pair exists' from 'a pair exists but the gate blocked it'.
 
@@ -244,7 +307,8 @@ def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
     Returns: {"kind": "no_pair"} | {"kind": "blocked"|"passed", ce, pe, ce_ltp, pe_ltp, reason}
     """
     pair = select_balanced_pair(strike_prem, spot, step, offset, ltp_target,
-                                theta_target=theta_target)
+                                theta_target=theta_target,
+                                variable_strikes=variable_strikes)
     if not pair:
         return {"kind": "no_pair"}
     ce, pe, ce_ltp, pe_ltp = pair
@@ -264,6 +328,7 @@ def scan_pool(
     trace: Optional[list] = None,
     entry_basis: str = "ltp",
     theta_target: float = 0.0,
+    variable_strikes: bool = False,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Re-entry concept (reference _scan_v_slope_pool, balanced_premium metric):
@@ -273,9 +338,15 @@ def scan_pool(
          (CE stronger -> ce_ltp < pe_ltp; else pe_ltp < ce_ltp).
       4. rule_pass(ce_strike, pe_strike) must be True (dynamic technical gate).
       5. balanced_score = abs(ce-pe)/(ce+pe); pick MIN score.
+
+    `variable_strikes=True`: discover ATM and candidate strikes from the actual quoted
+    chain instead of assuming a fixed strike step.
     Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
     """
-    atm = int(round(spot / step) * step)
+    if variable_strikes:
+        atm = _common_atm(strike_prem, spot)
+    else:
+        atm = int(round(spot / step) * step)
     ce_atm = strike_prem.get((atm, "CE"))
     pe_atm = strike_prem.get((atm, "PE"))
     if not ce_atm or not pe_atm:
@@ -292,16 +363,21 @@ def scan_pool(
         )
 
     skipped = 0
-    strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
+    if variable_strikes:
+        ce_strikes = _strikes_near_spot(strike_prem, "CE", spot, n=max(1, int(offset)))
+        pe_strikes = _strikes_near_spot(strike_prem, "PE", spot, n=max(1, int(offset)))
+    else:
+        ce_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
+        pe_strikes = ce_strikes
     best = None  # (score, ce_strike, pe_strike, ce_ltp, pe_ltp)
-    for s_ce in strikes:
+    for s_ce in ce_strikes:
         ce = strike_prem.get((s_ce, "CE"))
         if not ce:
             continue
         ce_ltp = ce.get("ltp", 0.0)
         if ce_ltp <= 0:
             continue
-        for s_pe in strikes:
+        for s_pe in pe_strikes:
             pe = strike_prem.get((s_pe, "PE"))
             if not pe:
                 continue
@@ -372,6 +448,7 @@ def find_rollover_partner(
     rule_eval,                      # callable(ce_strike:int, pe_strike:int) -> (passed:bool, reason:str)
     max_itm_steps: Optional[int] = None,
     theta_target: float = 0.0,
+    variable_strikes: bool = False,
 ) -> Optional[Tuple[int, float]]:
     """
     Rollover partner selection (check-first):
@@ -381,14 +458,21 @@ def find_rollover_partner(
       - For each candidate, build the combined pair and apply the re-entry rules.
       - Enforce CE/PE ratio <= max_entry_ratio.
       - Return the candidate with the LOWEST ratio (most balanced) or None.
+
+    `variable_strikes=True`: discover ATM and candidate strikes from the actual quoted
+    chain instead of assuming a fixed strike step.
     Returns (new_strike, new_ltp) or None.
     """
-    atm = round(spot / step) * step if spot > 0 else 0
+    if variable_strikes:
+        candidate_strikes = _strikes_near_spot(strike_prem, roll_side, spot, n=max(1, int(offset)))
+    else:
+        atm = round(spot / step) * step if spot > 0 else 0
+        candidate_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
+
     best = None  # (ratio, strike, ltp)
-    for (strike, side), v in strike_prem.items():
-        if side != roll_side:
-            continue
-        if atm and abs(strike - atm) > offset * step:
+    for strike in candidate_strikes:
+        v = strike_prem.get((strike, roll_side))
+        if not v:
             continue
         if max_itm_steps is not None and spot > 0 and step > 0:
             itm_pts = (spot - strike) if roll_side == "CE" else (strike - spot)

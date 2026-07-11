@@ -44,6 +44,7 @@ class RollingMixin:
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         max_itm = int(ss.get("roll_max_itm_steps", 5))
+        variable_strikes = bool(ss.get("variable_strikes", False))
 
         # 2. FIND A VALID PARTNER for the running/bleeding leg.
         #    - premium must be <= kept leg (select_partner_for)
@@ -61,6 +62,7 @@ class RollingMixin:
             rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
             max_itm_steps=max_itm,
             theta_target=self._theta_target,
+            variable_strikes=variable_strikes,
         )
 
         if not partner:

@@ -362,6 +362,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"║ TIMING: Start:{self._entry_start.strftime('%H:%M')} | EntryEnd:{self._entry_cutoff.strftime('%H:%M')} | "
             f"SquareOff:{self._force_exit.strftime('%H:%M')} | Lot:{self._lot_size} x{self._lot_multiplier}",
             f"║ SELECTION: workflow={workflow} | pool_offset=±{offset} | "
+            f"variable_strikes={'ON' if ss.get('variable_strikes') else 'OFF'} | "
             f"DUAL FLOOR: ltp≥{self._ltp_target:.0f} theta≥{self._theta_target:.0f}",
 
 

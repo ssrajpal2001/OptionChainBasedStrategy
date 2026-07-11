@@ -246,6 +246,7 @@ class EntryMixin:
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         theta_target = self._theta_target
+        variable_strikes = bool(ss.get("variable_strikes", False))
 
         if (self._position is None or self._position.status != "open"):
             _audit_clients = self._granular_audit_clients()
@@ -278,6 +279,7 @@ class EntryMixin:
         sel = select_balanced_pair(
             self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=self._theta_target,
+            variable_strikes=variable_strikes,
         )
 
         for _ln in _trace:
@@ -294,6 +296,7 @@ class EntryMixin:
                     self._strike_prem, self._spot, step, offset, ltp_target,
                     rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
                     theta_target=self._theta_target,
+                    variable_strikes=variable_strikes,
                 )
                 if diag["kind"] == "no_pair":
                     self._clog.info(
