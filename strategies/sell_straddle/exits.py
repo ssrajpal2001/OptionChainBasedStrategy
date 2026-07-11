@@ -29,6 +29,9 @@ class ExitMixin:
     async def _seed_exec_legs(self, ce_strike: int, pe_strike: int) -> None:
         """At strike selection (entry), warm the EXACT exec strikes' RSI/ROC from REST 1m history."""
         try:
+            if getattr(self, "_is_crypto", False):
+                # Crypto indicators warm from live Delta ticks; no Upstox history available.
+                return
             from data_layer.historical_candles import fetch_upstox_warm_1m
             from data_layer.instrument_registry import REGISTRY
             from data_layer.client_db import ClientDB

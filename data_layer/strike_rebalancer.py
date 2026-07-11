@@ -426,6 +426,11 @@ class StrikeRebalancer:
         """
         from data_layer.instrument_registry import REGISTRY, next_expiry as _next_expiry
 
+        if self._cfg and self._cfg.exchange.is_crypto(underlying):
+            # Crypto (Delta) option ticks come directly from DeltaChainManager;
+            # do not build Upstox/Fyers tokens.
+            return []
+
         today  = datetime.now(IST).date()
         expiry = _next_expiry(underlying, today)
         if expiry is None:

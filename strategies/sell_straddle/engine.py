@@ -267,6 +267,12 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             from data_layer.instrument_registry import REGISTRY
             from data_layer.client_db import ClientDB
             import asyncio as _aio
+            if self._is_crypto:
+                # Crypto (Delta) uses live ticks from DeltaChainManager; no Upstox warm seed available.
+                self._entry_expiry_date = self._effective_entry_expiry()
+                logger.info("SellStraddle[%s]: pool seed skipped for crypto (relying on live Delta ticks).",
+                            self._underlying)
+                return
             for _ in range(30):
                 if self._spot > 0:
                     break
@@ -432,6 +438,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
 
     async def _subscribe_expiry_window(self, expiry: date) -> None:
         """Subscribe the ATM ± pool-depth window for the chosen expiry so live ticks arrive."""
+        if self._is_crypto:
+            # DeltaChainManager already maintains the active expiry window.
+            return
         if not self._rebalancer:
             return
         feeder = getattr(self._rebalancer, "_feeder", None)
