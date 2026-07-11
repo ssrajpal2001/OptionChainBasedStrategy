@@ -396,7 +396,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
     def _effective_entry_expiry(self) -> Optional[date]:
         """Return the expiry to use for NEW entries.
         On the current active expiry's date we shift to the next weekly expiry.
-        On all other days we stay on the current active expiry."""
+        On all other days we stay on the current active expiry.
+        For Delta crypto (BTC/ETH) the active daily expiry is computed directly."""
+        if self._is_crypto:
+            from data_layer.universal_option_mapper import UniversalOptionMapper
+            return UniversalOptionMapper.active_daily_expiry()
         from data_layer.instrument_registry import REGISTRY
         today = datetime.now(IST).date()
         current = REGISTRY.get_active_expiry(self._underlying, today)
