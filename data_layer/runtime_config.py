@@ -111,7 +111,9 @@ _IC_STRIKE_DEFAULTS: Dict[str, Dict[str, float]] = {
 
 # MCX commodities trade the evening session — different hours/lots/strikes.
 _MCX_INDICES = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS"}
-_ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"]
+# Crypto (Delta Exchange India) — daily options, 24/7/365, 17:30 IST rollover.
+_CRYPTO_INDICES = {"BTC", "ETH"}
+_ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"]
 
 
 def _ss_index_default(index: str) -> Dict[str, Any]:
@@ -119,6 +121,9 @@ def _ss_index_default(index: str) -> Dict[str, Any]:
     if index.upper() in _MCX_INDICES:
         # MCX session: start 09:00, NO new trade after 23:15, square off 23:30.
         base.update({"entry_start": "09:00", "entry_end": "23:15", "squareoff_time": "23:30"})
+    elif index.upper() in _CRYPTO_INDICES:
+        # Delta crypto daily options: entry after 17:30 rollover sleep, run through 16:30 next day.
+        base.update({"entry_start": "18:30", "entry_end": "16:30", "squareoff_time": "16:30"})
     return base
 
 

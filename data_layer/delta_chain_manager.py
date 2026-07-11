@@ -50,13 +50,18 @@ class DeltaChainManager:
         self._chain: Dict[str, list] = {}            # underlying -> sorted strikes (active expiry)
         self._running = False
         self._idx_q = bus.subscribe(Topic.INDEX_TICK)
+        logger.info("DeltaChainManager: init underlyings=%s option_chain=%s window=%d.",
+                    self._unds, sorted(self._option_chain_unds), self._window)
 
     # ── chain discovery (public REST) ─────────────────────────────────────────
     def _fetch_chain_sync(self, und: str):
         try:
-            rows = requests.get(PROD_BASE + "/v2/products", timeout=12).json().get("result", [])
+            resp = requests.get(PROD_BASE + "/v2/products", timeout=12)
+            resp.raise_for_status()
+            rows = resp.json().get("result", [])
         except Exception as exc:
-            logger.warning("DeltaChain: products fetch failed: %s", exc); return [], 0.0
+            logger.warning("DeltaChain[%s]: /v2/products fetch failed: %s", und, exc)
+            return [], 0.0
         active = _M.active_daily_expiry()
         ddmmyy = active.strftime("%d%m%y")
         strikes, sym0 = [], None
@@ -76,10 +81,13 @@ class DeltaChainManager:
         spot = 0.0
         if sym0:
             try:
-                spot = float(requests.get(PROD_BASE + f"/v2/tickers/{sym0}", timeout=10)
-                             .json().get("result", {}).get("spot_price") or 0)
-            except Exception:
-                pass
+                t = requests.get(PROD_BASE + f"/v2/tickers/{sym0}", timeout=10)
+                t.raise_for_status()
+                spot = float(t.json().get("result", {}).get("spot_price") or 0)
+            except Exception as exc:
+                logger.warning("DeltaChain[%s]: /v2/tickers/%s spot fetch failed: %s", und, sym0, exc)
+        logger.info("DeltaChain[%s]: discovered %d strikes for expiry %s (sample %s).",
+                    und, len(strikes), ddmmyy, sym0 or "n/a")
         return strikes, spot
 
     def _window_symbols(self, und: str) -> set:
@@ -188,6 +196,8 @@ class DeltaChainManager:
     async def _reconcile(self, und: str, force: bool = False) -> None:
         # Skip option chain subscription if this underlying has no active sell_straddle deployment
         if und not in self._option_chain_unds:
+            if force:
+                logger.info("DeltaChain[%s]: skipping option chain — not in option_chain_unds.", und)
             return
         if force or und not in self._chain:
             strikes, spot = await asyncio.to_thread(self._fetch_chain_sync, und)
@@ -197,6 +207,12 @@ class DeltaChainManager:
                 self._spot[und] = spot
         want = self._window_symbols(und)
         if not want:
+            if force or not self._chain.get(und):
+                logger.warning(
+                    "DeltaChain[%s]: cannot build window — chain=%d strikes spot=%s. "
+                    "Check /v2/products reachability and IP whitelisting.",
+                    und, len(self._chain.get(und, [])), self._spot.get(und),
+                )
             return
         cur = self._subbed[und]
         add = want - cur

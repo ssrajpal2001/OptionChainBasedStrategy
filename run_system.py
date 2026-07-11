@@ -382,25 +382,30 @@ async def _run_live(
     from data_layer.delta_chain_manager import DeltaChainManager
     _crypto_idx_base = list({u for u in cfg.monitored_indices if cfg.exchange.is_crypto(u)})
     # Only start DeltaChainManager for crypto underlyings with active (is_running=1) deployments
-    # or in monitored_indices.
+    # or in monitored_indices. Read from the same SQLite path ClientDB uses to avoid a CWD
+    # mismatch loading a different (possibly empty) clients.db.
     try:
         import sqlite3 as _sq3
-        _conn = _sq3.connect(os.path.join("data", "clients.db"))
+        _db_path = getattr(_shared_client_db, "_db_path", os.path.join("data", "clients.db"))
+        _conn = _sq3.connect(_db_path)
         _rows = _conn.execute("SELECT underlying FROM strategy_deployments WHERE is_running=1").fetchall()
         _conn.close()
         _active_crypto = {r[0] for r in _rows if cfg.exchange.is_crypto(r[0])}
-    except Exception:
+    except Exception as exc:
+        logger.warning("Delta crypto feed: could not read running deployments: %s", exc)
         _active_crypto = set()
     _crypto_all = list({u for u in (list(_active_crypto) + _crypto_idx_base) if cfg.exchange.is_crypto(u)})
-    # Option chain (ATM strikes) only for underlyings with active sell_straddle deployment
+    # Option chain (ATM strikes) only for underlyings with active sell_straddle deployment.
     try:
-        _conn2 = _sq3.connect(os.path.join("data", "clients.db"))
+        _db_path = getattr(_shared_client_db, "_db_path", os.path.join("data", "clients.db"))
+        _conn2 = _sq3.connect(_db_path)
         _ss_rows = _conn2.execute(
             "SELECT underlying FROM strategy_deployments WHERE is_running=1 AND strategy_name='sell_straddle'"
         ).fetchall()
         _conn2.close()
         _option_chain_unds = [r[0] for r in _ss_rows if cfg.exchange.is_crypto(r[0])]
-    except Exception:
+    except Exception as exc:
+        logger.warning("Delta crypto feed: could not read sell_straddle deployments: %s", exc)
         _option_chain_unds = []
     delta_chain = DeltaChainManager(bus, cfg, _crypto_all, option_chain_unds=_option_chain_unds)
     logger.info("Delta crypto feed for %s (active: %s, option_chain: %s).",
