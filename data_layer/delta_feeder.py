@@ -168,20 +168,32 @@ class DeltaFeeder(BaseFeeder):
         q = d.get("quotes") or {}
         g = d.get("greeks") or {}
         now = datetime.now(IST)
-        # Delta's 'close' can be 0 on thin crypto options; fall back to mark_price so the tick is
-        # still usable. atp stays mark_price so VWAP (close vs atp) remains meaningful when close is live.
+        # Pricing hierarchy for crypto options on Delta:
+        #   1. Mid of live bid/ask (most realistic executable price)
+        #   2. Last traded close (if bid/ask are missing)
+        #   3. mark_price (Delta's fair value / VWAP proxy; always present)
+        # atp = mark_price: this is the broker-provided fair value per strike; the strategy adds
+        # ce_atp + pe_atp to form the combined VWAP. No local VWAP calculation is done.
+        _bid = float(q.get("best_bid") or 0.0)
+        _ask = float(q.get("best_ask") or 0.0)
         _close = float(d.get("close") or 0.0)
         _mark = float(d.get("mark_price") or 0.0)
+        if _bid > 0 and _ask > 0:
+            _ltp = (_bid + _ask) / 2.0
+        elif _close > 0:
+            _ltp = _close
+        else:
+            _ltp = _mark
         await self._publish_option(OptionTick(
             symbol=sym, underlying=internal.underlying, strike=internal.strike,
             option_type=internal.option_type, expiry=internal.expiry,
-            ltp=_close if _close > 0 else _mark,
-            bid=float(q.get("best_bid") or 0.0), ask=float(q.get("best_ask") or 0.0),
+            ltp=_ltp,
+            bid=_bid, ask=_ask,
             oi=int(float(d.get("oi") or 0.0)), change_oi=0,
             volume=int(float(d.get("volume") or 0.0)),
             iv=float(q.get("mark_iv") or 0.0), delta=float(g.get("delta") or 0.0),
             timestamp=now,
-            atp=_mark if _mark > 0 else _close,     # VWAP source on Delta
+            atp=_mark if _mark > 0 else _close,     # broker-provided fair value per strike
         ))
         # Underlying spot → IndexTick (so the strategy's ATM/spot logic works unchanged).
         spot = float(d.get("spot_price") or 0.0)
