@@ -585,6 +585,10 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         _state = (f"COOLDOWN active — re-entry at "
                                   f"{self._sl_cooldown_until.strftime('%H:%M:%S')} ({_left}s left) | "
                                   f"data flowing: {_strikes} pool strikes tracked")
+                    elif not self._is_in_entry_window(datetime.now(IST)):
+                        _state = (f"SLEEP until {self._entry_start.strftime('%H:%M')} "
+                                  f"(trades_today={self._trades_today} "
+                                  f"stop_for_day={self._stop_for_day})")
                     else:
                         _state = (f"no position — entry path (trades_today={self._trades_today} "
                                   f"stop_for_day={self._stop_for_day} term={self._any_active_terminal()})")

@@ -197,6 +197,14 @@ class EntryMixin:
                             self._underlying)
             return
         if not self._is_in_entry_window(now):
+            import time as _t
+            if _t.monotonic() - getattr(self, "_sleep_log", 0.0) > 60.0:
+                self._sleep_log = _t.monotonic()
+                window = (f"{self._entry_start.strftime('%H:%M')}"
+                          f"-{self._entry_cutoff.strftime('%H:%M')}")
+                logger.info("SellStraddle[%s]: SLEEP — outside entry window %s "
+                            "(no new entries until window reopens).",
+                            self._underlying, window)
             return
         if self._trades_today >= self._max_trades:
             return
