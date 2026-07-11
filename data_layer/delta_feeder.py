@@ -168,16 +168,20 @@ class DeltaFeeder(BaseFeeder):
         q = d.get("quotes") or {}
         g = d.get("greeks") or {}
         now = datetime.now(IST)
+        # Use Delta's mark_price (fair value) as ltp: close can be stale/zero on thin crypto options,
+        # while mark is always fresh and is the exchange's official valuation.
+        _close = float(d.get("close") or 0.0)
+        _mark = float(d.get("mark_price") or 0.0)
         await self._publish_option(OptionTick(
             symbol=sym, underlying=internal.underlying, strike=internal.strike,
             option_type=internal.option_type, expiry=internal.expiry,
-            ltp=float(d.get("close") or 0.0),
+            ltp=_mark if _mark > 0 else _close,
             bid=float(q.get("best_bid") or 0.0), ask=float(q.get("best_ask") or 0.0),
             oi=int(float(d.get("oi") or 0.0)), change_oi=0,
             volume=int(float(d.get("volume") or 0.0)),
             iv=float(q.get("mark_iv") or 0.0), delta=float(g.get("delta") or 0.0),
             timestamp=now,
-            atp=float(d.get("mark_price") or 0.0),     # VWAP source on Delta
+            atp=_mark if _mark > 0 else _close,     # VWAP source on Delta
         ))
         # Underlying spot → IndexTick (so the strategy's ATM/spot logic works unchanged).
         spot = float(d.get("spot_price") or 0.0)
