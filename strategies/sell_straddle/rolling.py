@@ -96,11 +96,13 @@ class RollingMixin:
             # from "pool not warm / missing candidate data".
             _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=offset * 2 + 1)
             _summary = _summarize_partner_trace(_partner_trace)
+            _why_plain = _summary.get("message", "no candidates")
             logger.info(
                 "SellStraddle[%s]: ROLLOVER %s — no valid partner for running %s%d @%.2f "
-                "(CE pnl=%.2f PE pnl=%.2f); closing position. summary=%s trace=%s pool_warmth=%s",
+                "(CE pnl=%.2f PE pnl=%.2f); closing position. reason: %s | "
+                "summary=%s trace=%s pool_warmth=%s",
                 self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
-                _summary, _partner_trace, _pool_diag,
+                _why_plain, _summary, _partner_trace, _pool_diag,
             )
             await self._close_position(f"single_side_roll_{reason}_no_partner")
             return
@@ -191,6 +193,15 @@ class RollingMixin:
                     self._initial_entry_time_value = self._position.entry_time_value
             except Exception:
                 pass
+            logger.info(
+                "SellStraddle[%s]: ROLL complete — fresh pair CE%d/PE%d. "
+                "Exit conditions reset: min_vwap=inf, peak_profit=0, tsl_lock=0, entry_tv=%.2f. "
+                "Day%% guardrail continues on cumulative realized=%.2f.",
+                self._underlying,
+                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike),
+                float(getattr(self._position, "entry_time_value", 0.0) or 0.0),
+                float(getattr(self, "_session_realized_pnl_pts", 0.0) or 0.0),
+            )
         self._persist()
         await self._check_itm_pair_gate(now)
 

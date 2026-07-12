@@ -119,6 +119,11 @@ def apply_deployment_to_runtime_config(deploy: Dict[str, Any]) -> None:
     Push deployment thresholds into RuntimeConfig so running strategy
     immediately picks up the new lot size, profit target and SL.
     Called by the engine hot-reload on engine-start.
+
+    NOTE: Timing fields (entry_start, entry_end, squareoff_time) are intentionally
+    NOT applied from the deployment record. They must always come from the per-index
+    JSON config so an index like BTC (16:30 sq-off) is never overwritten by a stale
+    deployment that carried another index's timing (e.g. NIFTY 15:20).
     """
     from data_layer.runtime_config import RuntimeConfig
 
@@ -128,16 +133,26 @@ def apply_deployment_to_runtime_config(deploy: Dict[str, Any]) -> None:
 
     if deploy.get("lot_multiplier"):
         patch["lot_multiplier"] = float(deploy["lot_multiplier"])
-    if deploy.get("squareoff_time"):
-        patch["squareoff_time"] = str(deploy["squareoff_time"])
     if deploy.get("max_profit_rs") and float(deploy["max_profit_rs"]) > 0:
         patch["capital_deployed_inr"] = float(deploy["max_profit_rs"]) * 100 / 30  # rough
     if deploy.get("max_sl_rs") and float(deploy["max_sl_rs"]) > 0:
         patch["max_sl_rs"] = float(deploy["max_sl_rs"])
+
+    # Timing is controlled by the per-index JSON config, not deployment records.
+    _ignored_timing = {
+        k: str(deploy[k]) for k in ("squareoff_time", "entry_start", "entry_end")
+        if deploy.get(k)
+    }
 
     if patch:
         RuntimeConfig.update({"indices": {underlying: {strategy: patch}}})
         logger.info(
             "DeploymentStore: applied to RuntimeConfig — %s/%s %s",
             underlying, strategy, patch,
+        )
+    if _ignored_timing:
+        logger.info(
+            "DeploymentStore: ignored timing fields from deployment — %s/%s %s "
+            "(use per-index JSON config instead).",
+            underlying, strategy, _ignored_timing,
         )
