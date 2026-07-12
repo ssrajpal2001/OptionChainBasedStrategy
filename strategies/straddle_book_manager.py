@@ -30,6 +30,13 @@ SellStraddleStrategy = None
 class StraddleBookManager(StrategyBookManager):
     def __init__(self, bus, cfg, client_db, monitored_indices, reconcile_sec: float = 5.0) -> None:
         super().__init__(bus, cfg, client_db, monitored_indices, reconcile_sec)
+        self._delta_chain = None
+
+    def set_delta_chain_manager(self, delta_chain) -> None:
+        self._delta_chain = delta_chain
+        for book in self._books.values():
+            if hasattr(book, "set_delta_chain_manager"):
+                book.set_delta_chain_manager(delta_chain)
 
     def _wanted(self) -> Dict[tuple, int]:
         """Map of (client,binding,underlying) → lot_multiplier for every sell_straddle
@@ -74,6 +81,8 @@ class StraddleBookManager(StrategyBookManager):
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
             book.set_rebalancer(self._rebalancer)
+        if self._delta_chain is not None and hasattr(book, "set_delta_chain_manager"):
+            book.set_delta_chain_manager(self._delta_chain)
         if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
             self._rebalancer.enable_chain(und)
         return book

@@ -16,6 +16,30 @@ from strategies.core.rule_evaluator import eval_rules as _eval_rules
 logger = logging.getLogger(__name__)
 
 
+def _summarize_partner_trace(trace: list) -> dict:
+    """Return a human-readable summary of why select_partner_for rejected every candidate."""
+    if not trace:
+        return {"reason": "no_trace"}
+    start = next((t for t in trace if t.get("event") == "select_partner_for_start"), {})
+    end = next((t for t in trace if t.get("event") == "select_partner_for_end"), {})
+    candidates_total = end.get("candidates_total", start.get("candidate_strikes", []).__len__())
+    counts = end.get("reject_counts", {})
+    if candidates_total == 0:
+        return {"reason": "no_candidates", "candidates_total": 0}
+    # Determine the dominant blocker.
+    dominant = max(counts.items(), key=lambda kv: kv[1]) if counts else ("unknown", 0)
+    return {
+        "candidates_total": candidates_total,
+        "reject_counts": counts,
+        "dominant_reason": dominant[0],
+        "dominant_count": dominant[1],
+        "message": (
+            f"checked {candidates_total} candidates; "
+            f"all blocked ({dominant[0]}={dominant[1]})"
+        ),
+    }
+
+
 class RollingMixin:
     """Rolling / single-side-roll logic for the sell-straddle book."""
 
@@ -50,6 +74,7 @@ class RollingMixin:
         #    - premium must be <= kept leg (select_partner_for)
         #    - must pass LTP/theta floor and re-entry rule
         #    - must be within roll_max_itm_steps
+        _partner_trace: list = []
         partner = select_partner_for(
             self._strike_prem,
             roll_side=roll_side,
@@ -63,13 +88,19 @@ class RollingMixin:
             max_itm_steps=max_itm,
             theta_target=self._theta_target,
             variable_strikes=variable_strikes,
+            trace=_partner_trace,
         )
 
         if not partner:
+            # Dump pool warmth diagnostics so we can distinguish "market moved too far"
+            # from "pool not warm / missing candidate data".
+            _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=offset * 2 + 1)
+            _summary = _summarize_partner_trace(_partner_trace)
             logger.info(
                 "SellStraddle[%s]: ROLLOVER %s — no valid partner for running %s%d @%.2f "
-                "(CE pnl=%.2f PE pnl=%.2f); closing position.",
+                "(CE pnl=%.2f PE pnl=%.2f); closing position. summary=%s trace=%s pool_warmth=%s",
                 self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
+                _summary, _partner_trace, _pool_diag,
             )
             await self._close_position(f"single_side_roll_{reason}_no_partner")
             return

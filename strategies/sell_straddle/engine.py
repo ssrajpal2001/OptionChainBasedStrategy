@@ -115,6 +115,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._event_counter: int = 0
         self._order_emitter = OrderEmitter(self._bus, self._client_id, self._binding_id)
         self._rebalancer = None  # set via set_rebalancer()
+        self._delta_chain = None  # set via set_delta_chain_manager() for crypto
         self._entry_expiry_date: Optional[date] = None  # effective expiry for new entries
         self._entry_expiry_tokens: list = []  # window tokens subscribed for _entry_expiry_date
 
@@ -151,6 +152,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         """Inject StrikeRebalancer so the engine can fetch option-chain snapshots and subscribe
         next-week expiry strikes when the current weekly expiry fails the dual floor."""
         self._rebalancer = rebalancer
+
+    def set_delta_chain_manager(self, delta_chain) -> None:
+        """Inject DeltaChainManager so crypto books can pin open-position legs and keep them
+        subscribed through sharp moves / re-subscription. No-op for non-crypto underlyings."""
+        self._delta_chain = delta_chain
 
     async def _emit_order(self, ev) -> None:
         """Stamp this book's identity on every order so the bridge routes to ONLY this binding."""
@@ -466,6 +472,39 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 self._underlying, self._underlying, len(tokens), expiry.isoformat(),
             )
 
+    def _pin_position_legs(self, pos) -> None:
+        """Pin the open position legs in DeltaChainManager so a sharp move or window
+        re-subscription never unsubscribes them. No-op for non-crypto or missing manager."""
+        if not getattr(self, "_is_crypto", False) or not self._delta_chain or not pos:
+            return
+        from data_layer.universal_option_mapper import UniversalOptionMapper as _M
+        from data_layer.symbol_translator import InternalSymbol
+        exp = getattr(pos, "expiry_date", None) or self._entry_expiry_date
+        if not exp:
+            return
+        syms = []
+        for side, leg in (("CE", pos.ce_leg), ("PE", pos.pe_leg)):
+            if leg and getattr(leg, "strike", 0) > 0:
+                syms.append(_M.to_delta_symbol(InternalSymbol(self._underlying, float(leg.strike), side, exp)))
+        if syms:
+            self._delta_chain.pin_symbols(self._underlying, syms)
+
+    def _unpin_position_legs(self, pos) -> None:
+        """Remove the DeltaChainManager pin for the given position legs."""
+        if not getattr(self, "_is_crypto", False) or not self._delta_chain or not pos:
+            return
+        from data_layer.universal_option_mapper import UniversalOptionMapper as _M
+        from data_layer.symbol_translator import InternalSymbol
+        exp = getattr(pos, "expiry_date", None) or self._entry_expiry_date
+        if not exp:
+            return
+        syms = []
+        for side, leg in (("CE", pos.ce_leg), ("PE", pos.pe_leg)):
+            if leg and getattr(leg, "strike", 0) > 0:
+                syms.append(_M.to_delta_symbol(InternalSymbol(self._underlying, float(leg.strike), side, exp)))
+        if syms:
+            self._delta_chain.unpin_symbols(self._underlying, syms)
+
     async def _unsubscribe_entry_expiry_tokens(self) -> None:
         """Clean up tokens that were subscribed solely for the entry-expiry window."""
         if not getattr(self, "_entry_expiry_tokens", None):
@@ -590,6 +629,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _now_m = _t.monotonic()
                 if _now_m - _last_hb >= 60.0:
                     _last_hb = _now_m
+                    # Crypto daily expiry rolls at 17:30 IST. Refresh the effective entry
+                    # expiry periodically so we don't ignore new-expiry ticks after rollover.
+                    if self._is_crypto:
+                        _new_exp = self._effective_entry_expiry()
+                        if _new_exp and _new_exp != self._entry_expiry_date:
+                            logger.info(
+                                "SellStraddle[%s]: crypto expiry rollover detected "
+                                "entry_expiry %s -> %s",
+                                self._underlying,
+                                self._entry_expiry_date.isoformat() if self._entry_expiry_date else None,
+                                _new_exp.isoformat(),
+                            )
+                            self._entry_expiry_date = _new_exp
                     if self._position and self._position.status == "open":
                         _state = "position OPEN — exit-checking"
                     elif self._sl_cooldown_until and datetime.now(IST) < self._sl_cooldown_until:

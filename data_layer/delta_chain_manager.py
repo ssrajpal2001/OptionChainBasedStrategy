@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import requests
 
@@ -47,6 +47,9 @@ class DeltaChainManager:
         self._feeder = DeltaFeeder(bus, cfg)
         self._spot: Dict[str, float] = {}
         self._subbed: Dict[str, set] = {u: set() for u in self._unds}
+        # Symbols explicitly pinned by a strategy (e.g. open position legs). These are
+        # ALWAYS kept subscribed even if they fall outside the ATM window.
+        self._pinned: Dict[str, Set[str]] = {u: set() for u in self._unds}
         self._chain: Dict[str, list] = {}            # underlying -> sorted strikes (active expiry)
         self._running = False
         self._idx_q = bus.subscribe(Topic.INDEX_TICK)
@@ -103,7 +106,37 @@ class DeltaChainManager:
         for k in sel:
             for ot in ("CE", "PE"):
                 out.add(_M.to_delta_symbol(InternalSymbol(und, float(k), ot, exp)))
+        # Always include any symbols explicitly pinned by a strategy (open position legs).
+        out.update(self._pinned.get(und, set()))
         return out
+
+    def pin_symbols(self, und: str, symbols: List[str]) -> None:
+        """Pin symbols so they are never unsubscribed, even if they leave the ATM window.
+
+        Call this when a strategy opens a position so the position legs keep ticking
+        through sharp moves and rollover re-subscriptions.
+        """
+        und = und.upper()
+        if und not in self._unds:
+            return
+        before = set(self._pinned.get(und, set()))
+        self._pinned.setdefault(und, set()).update(symbols)
+        if self._pinned[und] != before:
+            logger.info("DeltaChain[%s]: pinned symbols %s (total pinned=%d).",
+                        und, sorted(self._pinned[und]), len(self._pinned[und]))
+            asyncio.create_task(self._reconcile(und))
+
+    def unpin_symbols(self, und: str, symbols: List[str]) -> None:
+        """Remove a previous pin."""
+        und = und.upper()
+        if und not in self._unds:
+            return
+        before = set(self._pinned.get(und, set()))
+        self._pinned.setdefault(und, set()).difference_update(symbols)
+        if self._pinned[und] != before:
+            logger.info("DeltaChain[%s]: unpinned symbols %s (remaining pinned=%d).",
+                        und, sorted(symbols), len(self._pinned[und]))
+            asyncio.create_task(self._reconcile(und))
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
     async def run(self) -> None:
@@ -229,6 +262,13 @@ class DeltaChainManager:
     async def _on_rollover(self, old, new) -> None:
         logger.info("DeltaChain: rollover %s→%s — re-discovering chains.", old, new)
         for und in self._unds:
+            if self._pinned.get(und):
+                logger.warning(
+                    "DeltaChain[%s]: clearing %d pinned symbol(s) on rollover "
+                    "(position legs should not be open during crypto sleep window).",
+                    und, len(self._pinned[und]),
+                )
+                self._pinned[und].clear()
             self._subbed[und] = set()        # force full re-subscribe to the new daily expiry
             await self._reconcile(und, force=True)
 

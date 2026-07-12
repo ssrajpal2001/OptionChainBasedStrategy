@@ -400,6 +400,7 @@ class EntryMixin:
             expiry_date=expiry_date,
         )
         self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
+        self._pin_position_legs(self._position)
         self._persist()
         asyncio.create_task(self._seed_exec_legs(int(ce_strike), int(pe_strike)))
         self._trades_today += 1

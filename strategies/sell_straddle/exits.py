@@ -483,6 +483,7 @@ class ExitMixin:
             pos.ce_leg.close_time = pos.close_time
             pos.pe_leg.close_time = pos.close_time
             pos.status = "closed"
+            self._unpin_position_legs(pos)
 
             _cid = getattr(self, "_client_id", "") or "-"
             _bid = getattr(self, "_binding_id", "") or "-"

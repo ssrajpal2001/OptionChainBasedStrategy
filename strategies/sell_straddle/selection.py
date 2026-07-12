@@ -39,13 +39,37 @@ def _common_atm(strike_prem: Dict[Key, dict], spot: float) -> int:
     return min(common, key=lambda s: abs(float(s) - spot))
 
 
+def _strikes_around_atm(
+    strike_prem: Dict[Key, dict],
+    side: str,
+    spot: float,
+    offset: int,
+) -> List[int]:
+    """Return `offset` strikes below and `offset` strikes above the ATM for `side`.
+
+    Uses the actual available strikes from the chain (handles variable gaps such as
+    100/200/400/500 on Delta crypto). This mirrors DeltaChainManager._window_symbols.
+    If `spot` is unavailable, fall back to the first `2*offset+1` strikes.
+    """
+    strikes = sorted(_available_strikes(strike_prem, side))
+    if not strikes:
+        return []
+    if spot <= 0:
+        return strikes[:min(len(strikes), 2 * offset + 1)]
+    atm = min(strikes, key=lambda s: abs(float(s) - spot))
+    i = strikes.index(atm)
+    lo = max(0, i - offset)
+    hi = min(len(strikes), i + offset + 1)
+    return strikes[lo:hi]
+
+
 def _strikes_near_spot(
     strike_prem: Dict[Key, dict],
     side: str,
     spot: float,
     n: int,
 ) -> List[int]:
-    """Return up to `n` available strikes of `side` closest to `spot`, sorted by strike."""
+    """Backward-compat helper: return up to `n` available strikes closest to `spot`."""
     strikes = _available_strikes(strike_prem, side)
     if not strikes:
         return []
@@ -58,7 +82,8 @@ def _strikes_near_spot(
 
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        spot, step, offset, ltp_target, rule_pass, max_itm_steps=None,
-                       theta_target: float = 0.0, variable_strikes: bool = False):
+                       theta_target: float = 0.0, variable_strikes: bool = False,
+                       trace: Optional[list] = None):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
     `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target
     and >= theta_target, with premium STRICTLY <= the kept leg's premium (never roll into a leg
@@ -66,39 +91,142 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
     (<= kept_ltp) strikes it picks the one CLOSEST to kept_ltp (most balanced from below).
 
     `variable_strikes=True`: for crypto chains where strike gaps are non-uniform.
-    In that mode `offset` is interpreted as "number of nearest strikes" rather than
-    fixed-step count, and ATM is discovered from the actual quoted strikes.
+    In that mode `offset` is interpreted as "number of strikes below and above ATM"
+    (i.e. the candidate window is ATM±offset from the actual quoted strikes).
 
     `max_itm_steps` (optional): cap how deep ITM the re-sold leg may be (in strike steps) so the
     roll stays near ATM (a real straddle) instead of selling a deep-ITM strike.
+
+    `trace` (optional): a list to which structured diagnostic dicts are appended for every
+    candidate strike considered. This makes it easy to see WHY each candidate was rejected.
     Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
     if variable_strikes:
-        candidate_strikes = _strikes_near_spot(strike_prem, roll_side, spot, n=max(1, int(offset)))
+        candidate_strikes = _strikes_around_atm(strike_prem, roll_side, spot, offset=max(1, int(offset)))
     else:
         atm = round(spot / step) * step if spot > 0 else 0
         candidate_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
 
+    if trace is not None:
+        trace.append({
+            "event": "select_partner_for_start",
+            "roll_side": roll_side,
+            "kept_strike": int(kept_strike),
+            "kept_ltp": float(kept_ltp or 0.0),
+            "spot": float(spot or 0.0),
+            "step": float(step or 0.0),
+            "offset": int(offset or 0),
+            "ltp_target": float(ltp_target or 0.0),
+            "theta_target": float(theta_target or 0.0),
+            "max_itm_steps": max_itm_steps,
+            "variable_strikes": variable_strikes,
+            "candidate_strikes": [int(s) for s in candidate_strikes],
+        })
+
     best = None  # (premium_diff, strike, ltp)
+    reject_counts = {
+        "no_quote_in_pool": 0,
+        "too_itm": 0,
+        "dual_floor_fail": 0,
+        "ltp_above_kept": 0,
+        "rule_fail": 0,
+        "not_closest": 0,
+    }
     for strike in candidate_strikes:
         v = strike_prem.get((strike, roll_side))
+        diag = {
+            "event": "candidate",
+            "roll_side": roll_side,
+            "strike": int(strike),
+            "ltp": None,
+            "has_quote": bool(v),
+            "itm_pass": None,
+            "dual_floor_pass": None,
+            "ltp_le_kept_pass": None,
+            "rule_pass": None,
+            "rule_reason": None,
+            "selected": False,
+            "reject_reason": None,
+        }
         if not v:
+            diag["reject_reason"] = "no_quote_in_pool"
+            reject_counts["no_quote_in_pool"] += 1
+            if trace is not None:
+                trace.append(diag)
             continue
+        ltp = float(v.get("ltp", 0.0) or 0.0)
+        diag["ltp"] = ltp
         # Keep the re-sold leg near ATM: skip strikes deeper ITM than max_itm_steps.
         if max_itm_steps is not None and spot > 0 and step > 0:
             itm_pts = (spot - strike) if roll_side == "CE" else (strike - spot)  # >0 = ITM
+            diag["itm_pts"] = float(itm_pts)
+            diag["itm_limit"] = float(max_itm_steps * step)
             if itm_pts > max_itm_steps * step:
+                diag["itm_pass"] = False
+                diag["reject_reason"] = f"too_itm ({itm_pts:.2f} > {max_itm_steps * step:.2f})"
+                reject_counts["too_itm"] += 1
+                if trace is not None:
+                    trace.append(diag)
                 continue
-        ltp = float(v.get("ltp", 0.0) or 0.0)
+            diag["itm_pass"] = True
+        else:
+            diag["itm_pass"] = True
         if not leg_passes_dual_floor(roll_side, strike, ltp, spot, ltp_target, theta_target):
+            diag["dual_floor_pass"] = False
+            _tv = strip_intrinsic(float(ltp), roll_side, float(strike), float(spot)) if ltp > 0 and spot > 0 else 0.0
+            diag["reject_reason"] = (
+                f"dual_floor_fail (ltp={ltp:.2f} < ltp_target={ltp_target:.2f} "
+                f"or tv={_tv:.2f} < theta_target={theta_target:.2f})"
+            )
+            reject_counts["dual_floor_fail"] += 1
+            if trace is not None:
+                trace.append(diag)
             continue
+        diag["dual_floor_pass"] = True
         if kept_ltp and ltp > float(kept_ltp):
+            diag["ltp_le_kept_pass"] = False
+            diag["reject_reason"] = f"ltp_above_kept ({ltp:.2f} > {float(kept_ltp):.2f})"
+            reject_counts["ltp_above_kept"] += 1
+            if trace is not None:
+                trace.append(diag)
             continue   # strict: partner must NOT be richer than the kept (losing) leg
+        diag["ltp_le_kept_pass"] = True
         ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
-        if not rule_pass(ce_s, pe_s):
+        try:
+            _rp = rule_pass(ce_s, pe_s)
+            # Backward compat: rule_pass may return just a bool or a (bool, reason) tuple.
+            if isinstance(_rp, tuple):
+                rp, rr = bool(_rp[0]), str(_rp[1]) if len(_rp) > 1 else ""
+            else:
+                rp, rr = bool(_rp), ""
+        except Exception as exc:
+            rp, rr = False, f"rule_eval_exception: {exc}"
+        diag["rule_pass"] = bool(rp)
+        diag["rule_reason"] = str(rr)
+        if not rp:
+            diag["reject_reason"] = f"rule_fail ({rr})"
+            reject_counts["rule_fail"] += 1
+            if trace is not None:
+                trace.append(diag)
             continue
         diff = abs(ltp - float(kept_ltp))
         if best is None or diff < best[0]:
+            diag["selected"] = True
+            diag["diff_to_kept"] = float(diff)
             best = (diff, int(strike), ltp)
+        else:
+            diag["reject_reason"] = f"not_closest (diff={diff:.2f} > best={best[0]:.2f})"
+            reject_counts["not_closest"] += 1
+        if trace is not None:
+            trace.append(diag)
+
+    if trace is not None:
+        trace.append({
+            "event": "select_partner_for_end",
+            "best_strike": int(best[1]) if best else None,
+            "best_ltp": float(best[2]) if best else None,
+            "reject_counts": reject_counts,
+            "candidates_total": len(candidate_strikes),
+        })
     return (best[1], best[2]) if best else None
 
 
@@ -243,8 +371,8 @@ def select_balanced_pair(
         return None
 
     if variable_strikes:
-        partner_strikes = _strikes_near_spot(
-            strike_prem, partner_side, spot, n=max(1, int(offset))
+        partner_strikes = _strikes_around_atm(
+            strike_prem, partner_side, spot, offset=max(1, int(offset))
         )
     else:
         partner_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
@@ -364,8 +492,8 @@ def scan_pool(
 
     skipped = 0
     if variable_strikes:
-        ce_strikes = _strikes_near_spot(strike_prem, "CE", spot, n=max(1, int(offset)))
-        pe_strikes = _strikes_near_spot(strike_prem, "PE", spot, n=max(1, int(offset)))
+        ce_strikes = _strikes_around_atm(strike_prem, "CE", spot, offset=max(1, int(offset)))
+        pe_strikes = _strikes_around_atm(strike_prem, "PE", spot, offset=max(1, int(offset)))
     else:
         ce_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
         pe_strikes = ce_strikes
@@ -464,7 +592,7 @@ def find_rollover_partner(
     Returns (new_strike, new_ltp) or None.
     """
     if variable_strikes:
-        candidate_strikes = _strikes_near_spot(strike_prem, roll_side, spot, n=max(1, int(offset)))
+        candidate_strikes = _strikes_around_atm(strike_prem, roll_side, spot, offset=max(1, int(offset)))
     else:
         atm = round(spot / step) * step if spot > 0 else 0
         candidate_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]

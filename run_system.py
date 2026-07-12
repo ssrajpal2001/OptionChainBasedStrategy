@@ -407,9 +407,21 @@ async def _run_live(
     except Exception as exc:
         logger.warning("Delta crypto feed: could not read sell_straddle deployments: %s", exc)
         _option_chain_unds = []
-    delta_chain = DeltaChainManager(bus, cfg, _crypto_all, option_chain_unds=_option_chain_unds)
-    logger.info("Delta crypto feed for %s (active: %s, option_chain: %s).",
-                _crypto_all, _active_crypto, _option_chain_unds)
+    # Crypto option-chain subscription window: use the largest pool depth requested by any
+    # active crypto sell_straddle deployment. This guarantees the candidate strikes needed by
+    # select_partner_for() are actually subscribed and present in _strike_prem.
+    from data_layer.runtime_config import RuntimeConfig as _RuntimeConfig
+    _chain_window = 6
+    for _und in _option_chain_unds:
+        _ss = _RuntimeConfig.index_section(_und, "sell_straddle")
+        _w = max(int(_ss.get("pool_itm_depth", 0) or 0), int(_ss.get("pool_otm_depth", 0) or 0))
+        if _w > _chain_window:
+            _chain_window = _w
+    delta_chain = DeltaChainManager(
+        bus, cfg, _crypto_all, option_chain_unds=_option_chain_unds, window=_chain_window
+    )
+    logger.info("Delta crypto feed for %s (active: %s, option_chain: %s, window=%d).",
+                _crypto_all, _active_crypto, _option_chain_unds, _chain_window)
     straddle_bridge = StraddleExecutionBridge(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
@@ -462,6 +474,11 @@ async def _run_live(
     for manager in managers.values():
         if hasattr(manager, "set_rebalancer"):
             manager.set_rebalancer(rebalancer)
+    # Wire DeltaChainManager to the sell-straddle manager so crypto books can pin
+    # open-position legs and keep them subscribed through sharp moves / re-subscription.
+    if straddle_manager is not None and hasattr(straddle_manager, "set_delta_chain_manager"):
+        straddle_manager.set_delta_chain_manager(delta_chain)
+        logger.info("DeltaChainManager wired to StraddleBookManager for crypto leg pinning.")
     # Iron condor needs the full ATM chain — enable for all IC indices
     for _ic in _iron_condors:
         if hasattr(rebalancer, "enable_chain"):

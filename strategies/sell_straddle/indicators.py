@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, date
 from typing import Dict, Optional, Tuple
 
@@ -120,6 +121,45 @@ class IndicatorMixin:
                 out[tf] = self._pair_indicators(int(ce_strike), int(pe_strike)) or {}
             else:
                 out[tf] = self._pool_engine.pair_indicators_tf(int(ce_strike), int(pe_strike), tf) or {}
+        return out
+
+    def _pool_warmth_diag(self, side_filter: str | None = None, candidate_count: int = 20) -> dict:
+        """Return a compact diagnostic of how warm the pool engine and strike_prem are.
+
+        Used on roll failure to answer: did we reject all candidates because the market
+        moved too far, or because the pool lacks recent ticks/history for them?
+        """
+        now = time.time()
+        side_filter = (side_filter or "").upper()
+        strike_prem_keys = list(self._strike_prem.keys())
+        keys = [(s, sd) for (s, sd) in strike_prem_keys if not side_filter or sd == side_filter]
+        # Keep only the strikes closest to spot for a compact summary.
+        spot = getattr(self, "_spot", 0.0) or 0.0
+        if spot > 0:
+            keys.sort(key=lambda k: abs(float(k[0]) - spot))
+            keys = keys[:candidate_count]
+        else:
+            keys = keys[:candidate_count]
+        out = {
+            "spot": spot,
+            "pool_total_legs": len(strike_prem_keys),
+            "sampled_legs": len(keys),
+            "legs": [],
+        }
+        for (strike, side) in keys:
+            v = self._strike_prem.get((strike, side), {})
+            k = self._pool_engine._key(strike, side)
+            bars = len(self._pool_engine._closes.get(k, []))
+            last_ts = self._pool_engine._last_atp_ts.get(k)
+            stale_sec = round(now - last_ts, 1) if last_ts else None
+            out["legs"].append({
+                "strike": int(strike),
+                "side": side,
+                "ltp": float(v.get("ltp", 0.0) or 0.0),
+                "atp": float(v.get("atp", 0.0) or 0.0),
+                "bars": bars,
+                "stale_sec": stale_sec,
+            })
         return out
 
     def _load_chart_history(self) -> None:
