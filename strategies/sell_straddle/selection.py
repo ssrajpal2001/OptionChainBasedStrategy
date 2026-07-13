@@ -83,12 +83,16 @@ def _strikes_near_spot(
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        spot, step, offset, ltp_target, rule_pass, max_itm_steps=None,
                        theta_target: float = 0.0, variable_strikes: bool = False,
-                       trace: Optional[list] = None, ltp_le_kept: bool = False):
+                       trace: Optional[list] = None, ltp_le_kept: bool = False,
+                       metric: str = "closest_to_kept"):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
     `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target
-    and >= theta_target, with premium STRICTLY <= the kept leg's premium (never roll into a leg
-    richer than the leg we keep), and passing rule_pass(ce_strike, pe_strike). Among the eligible
-    (<= kept_ltp) strikes it picks the one CLOSEST to kept_ltp (most balanced from below).
+    and >= theta_target, optionally with premium <= the kept leg's premium, and passing
+    rule_pass(ce_strike, pe_strike).
+
+    Selection metric:
+      - "closest_to_kept": minimize abs(ltp - kept_ltp)
+      - "balanced_ratio": minimize abs(ltp - kept_ltp) / (ltp + kept_ltp)
 
     `variable_strikes=True`: for crypto chains where strike gaps are non-uniform.
     In that mode `offset` is interpreted as "number of strikes below and above ATM"
@@ -213,13 +217,17 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
             if trace is not None:
                 trace.append(diag)
             continue
-        diff = abs(ltp - float(kept_ltp))
-        if best is None or diff < best[0]:
-            diag["selected"] = True
-            diag["diff_to_kept"] = float(diff)
-            best = (diff, int(strike), ltp)
+        if metric == "balanced_ratio":
+            denom = ltp + float(kept_ltp)
+            score = abs(ltp - float(kept_ltp)) / denom if denom > 0 else 999.0
         else:
-            diag["reject_reason"] = f"not_closest (diff={diff:.2f} > best={best[0]:.2f})"
+            score = abs(ltp - float(kept_ltp))
+        if best is None or score < best[0]:
+            diag["selected"] = True
+            diag["score"] = float(score)
+            best = (score, int(strike), ltp)
+        else:
+            diag["reject_reason"] = f"not_best (metric={metric} score={score:.4f} > best={best[0]:.4f})"
             reject_counts["not_closest"] += 1
         if trace is not None:
             trace.append(diag)

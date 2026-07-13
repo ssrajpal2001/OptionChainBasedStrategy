@@ -160,6 +160,7 @@ class RollingMixin:
             variable_strikes=variable_strikes,
             trace=_partner_trace,
             ltp_le_kept=False,
+            metric="balanced_ratio",
         )
 
         # Always dump the full partner-search trace so it is obvious which

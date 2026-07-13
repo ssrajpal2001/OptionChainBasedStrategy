@@ -46,6 +46,22 @@ def test_partner_respects_ltp_target_and_rules():
     assert res is None
 
 
+def test_partner_uses_balanced_ratio_metric():
+    # kept CE @100. Two PE candidates:
+    #   PE95 @30 -> diff 70, ratio 70/130 = 0.538
+    #   PE105 @180 -> diff 80, ratio 80/280 = 0.286
+    # With balanced_ratio the lower ratio wins even though it is farther in absolute terms.
+    cache = _cache({
+        (100, "CE"): 100.0,
+        (95, "PE"): 30.0,
+        (105, "PE"): 180.0,
+    })
+    res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=100.0,
+                             spot=100, step=5, offset=4, ltp_target=10.0,
+                             rule_pass=lambda cs, ps: True, metric="balanced_ratio")
+    assert res == (105, 180.0)
+
+
 def test_partner_none_when_no_strikes():
     res = select_partner_for(_cache({(100, "CE"): 60.0}), "PE", 100, 60.0,
                              100, 5, 4, 30.0, rule_pass=lambda cs, ps: True)
