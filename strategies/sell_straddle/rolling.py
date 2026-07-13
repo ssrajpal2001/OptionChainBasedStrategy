@@ -76,6 +76,12 @@ def _format_partner_trace(trace: list) -> str:
             else:
                 status = "✓ PASSED (not closest)"
             lines.append(f"  {roll_side}{strike:>6} ltp={ltp:>8.2f}  {status}")
+            # For rule-fail candidates, also dump the exact indicators that were evaluated.
+            _rr = str(c.get("reject_reason") or "")
+            if _rr.startswith("rule_fail") and c.get("rule_ind_by_tf"):
+                for tf, inds in c["rule_ind_by_tf"].items():
+                    ind_summary = " ".join(f"{k}={v:.2f}" for k, v in inds.items() if isinstance(v, float))
+                    lines.append(f"          ind_by_tf[{tf}]: {ind_summary}")
     if end:
         best_strike = end.get("best_strike")
         best_ltp = end.get("best_ltp")
@@ -123,6 +129,12 @@ class RollingMixin:
         #    - premium must be <= kept leg (select_partner_for)
         #    - must pass LTP/theta floor and re-entry rule
         #    - must be within roll_max_itm_steps
+        def _rule_pass_with_detail(ce_s: int, pe_s: int):
+            """Return (passed, reason, ind_by_tf) so the trace can show exact values."""
+            ind = self._ind_by_tf(ce_s, pe_s, rules)
+            passed, reason = _eval_rules(rules, ind)
+            return passed, reason, ind
+
         _partner_trace: list = []
         partner = select_partner_for(
             self._strike_prem,
@@ -133,7 +145,7 @@ class RollingMixin:
             step=step,
             offset=offset,
             ltp_target=ltp_target,
-            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
+            rule_pass=_rule_pass_with_detail,
             max_itm_steps=max_itm,
             theta_target=self._theta_target,
             variable_strikes=variable_strikes,

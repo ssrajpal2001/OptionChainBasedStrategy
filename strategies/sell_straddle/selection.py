@@ -193,9 +193,12 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
         ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
         try:
             _rp = rule_pass(ce_s, pe_s)
-            # Backward compat: rule_pass may return just a bool or a (bool, reason) tuple.
+            # Backward compat: rule_pass may return bool, (bool, reason), or (bool, reason, ind_by_tf).
             if isinstance(_rp, tuple):
-                rp, rr = bool(_rp[0]), str(_rp[1]) if len(_rp) > 1 else ""
+                rp = bool(_rp[0])
+                rr = str(_rp[1]) if len(_rp) > 1 else ""
+                if len(_rp) > 2 and _rp[2] is not None:
+                    diag["rule_ind_by_tf"] = _rp[2]
             else:
                 rp, rr = bool(_rp), ""
         except Exception as exc:
