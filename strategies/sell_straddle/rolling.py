@@ -117,6 +117,15 @@ class RollingMixin:
         keep_ltp = float(getattr(keep_leg, "ltp", 0.0) or getattr(keep_leg, "entry_price", 0.0) or 0.0)
         orig_strike = int((pos.ce_leg if roll_side == "CE" else pos.pe_leg).strike)
 
+        logger.info(
+            "SellStraddle[%s]: ROLLOVER STARTED — reason=%s | position CE%d@%.2f PE%d@%.2f | "
+            "rolling the %s leg (CE pnl=%.2f PE pnl=%.2f), keeping %s%d@%.2f",
+            self._underlying, reason,
+            int(pos.ce_leg.strike), float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0),
+            int(pos.pe_leg.strike), float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0),
+            roll_side, ce_pnl, pe_pnl, keep_side, keep_strike, keep_ltp,
+        )
+
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
