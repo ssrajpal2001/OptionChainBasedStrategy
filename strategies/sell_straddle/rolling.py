@@ -378,11 +378,12 @@ class RollingMixin:
 
     async def _check_itm_pair_gate(self, now: datetime) -> None:
         """
-        Called after every rollover completes.
-        If both legs are ITM AND cumulative P&L > 0 → close both and re-enter via re-entry.
-        If both legs are ITM AND cumulative P&L <= 0 → arm the watching flag; the eval
-        loop (_check_exits) will call this every cycle until profit arrives or a normal
-        exit fires first.
+        Called after every rollover completes and on every exit-check cycle while armed.
+        If both legs are ITM AND cumulative P&L in INR >= itm_pair_gate_profit_inr → close
+        both legs fully and restart via re-entry.
+        If both legs are ITM AND cumulative P&L < threshold → arm the watching flag; the eval
+        loop (_check_exits) will call this every cycle until profit reaches the threshold or
+        a normal exit fires first.
         Does nothing if the toggle is OFF or the pair is not both ITM.
         """
         if not getattr(self, "_itm_pair_gate_enabled", False):
@@ -396,15 +397,17 @@ class RollingMixin:
             self._itm_gate_armed = False
             return
 
-        cumulative = self._cumulative_pnl_pts()
+        cumulative_pts = self._cumulative_pnl_pts()
+        cumulative_inr = self._pnl_rs(cumulative_pts)
+        threshold_inr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
         ce_s = int(pos.ce_leg.strike)
         pe_s = int(pos.pe_leg.strike)
 
-        if cumulative > 0:
+        if cumulative_inr >= threshold_inr:
             logger.info(
                 "SellStraddle[%s]: ITM-PAIR GATE — both legs ITM (CE%d/PE%d) spot=%.0f "
-                "cumulative=%.2f pts > 0 → closing both and restarting.",
-                self._underlying, ce_s, pe_s, self._spot, cumulative,
+                "cumulative=%.2f pts (₹%.2f) >= threshold ₹%.2f → closing both and restarting.",
+                self._underlying, ce_s, pe_s, self._spot, cumulative_pts, cumulative_inr, threshold_inr,
             )
             self._itm_gate_armed = False
             await self._close_position("itm_pair_gate_profit")
@@ -413,11 +416,11 @@ class RollingMixin:
         else:
             if not getattr(self, "_itm_gate_armed", False):
                 self._itm_gate_armed = True
-                logger.info(
-                    "SellStraddle[%s]: ITM-PAIR GATE ARMED — both legs ITM (CE%d/PE%d) spot=%.0f "
-                    "cumulative=%.2f pts ≤ 0. Watching for profit before closing.",
-                    self._underlying, ce_s, pe_s, self._spot, cumulative,
-                )
+            logger.info(
+                "SellStraddle[%s]: ITM-PAIR GATE ARMED — both legs ITM (CE%d/PE%d) spot=%.0f "
+                "cumulative=%.2f pts (₹%.2f) < threshold ₹%.2f. Watching for profit before closing.",
+                self._underlying, ce_s, pe_s, self._spot, cumulative_pts, cumulative_inr, threshold_inr,
+            )
 
     def _apply_sl_cooldown(self) -> None:
         """Block re-entry until the next boundary of the max re-entry timeframe.

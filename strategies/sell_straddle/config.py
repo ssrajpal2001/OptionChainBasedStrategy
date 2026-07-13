@@ -73,6 +73,7 @@ class SellStraddleConfig:
     exit_rules: List[dict]
 
     itm_pair_gate_enabled: bool
+    itm_pair_gate_profit_inr: float
 
 
 def _apply_client_overrides(
@@ -209,6 +210,7 @@ def load_sell_straddle_config(
     exit_rules = ss.get("exit_rules", [])
 
     itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", False))
+    itm_pair_gate_profit_inr = float(ss.get("itm_pair_gate_profit_inr", 500.0))
 
     config = SellStraddleConfig(
         entry_start=entry_start,
@@ -243,6 +245,7 @@ def load_sell_straddle_config(
         ltp_exit_min=ltp_exit_min,
         exit_rules=exit_rules,
         itm_pair_gate_enabled=itm_pair_gate_enabled,
+        itm_pair_gate_profit_inr=itm_pair_gate_profit_inr,
     )
 
     # Apply per-client risk overrides if a client_id is provided.
@@ -312,6 +315,7 @@ class ConfigMixin:
         self._exit_rules = cfg.exit_rules
 
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
+        self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr
 
     def reconfigure(self) -> None:
         self._load_thresholds()

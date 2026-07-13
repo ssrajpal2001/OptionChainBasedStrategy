@@ -1241,7 +1241,6 @@
         "entry_workflow_mode": "hybrid",
         "variable_strikes": true,
         "ltp_target": 20,
-        "theta_target": 15,
         "trail_lock_pct": 50,
         "trail_floor_pct": 30,
         "pool_itm_depth": 6,
@@ -1349,10 +1348,10 @@
         "tsl_enabled": true,
         "tsl_scalable": {
           "enabled": true,
-          "base_profit": 2500,
-          "base_lock": 1500,
-          "step_profit": 1500,
-          "step_lock": 1000,
+          "base_profit": 25,
+          "base_lock": 15,
+          "step_profit": 15,
+          "step_lock": 10,
           "basis": "theta"
         },
         "guardrail_roc": {
