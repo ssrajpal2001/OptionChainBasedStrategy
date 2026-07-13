@@ -392,6 +392,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} ({self._ccy_symbol}/BTC if crypto) "
             f"BASIS:{self._tsl_basis.upper()}",
             f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%)",
+            f"║ ITM PAIR GATE: {'ON' if self._itm_pair_gate_enabled else 'OFF'} "
+            f"(profit≥₹{self._itm_pair_gate_profit_inr:.0f})",
             f"║ DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
             f"BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
