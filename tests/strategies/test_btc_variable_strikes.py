@@ -106,14 +106,32 @@ class TestSelectPartnerForVariable:
             (100500, "PE"): 600,
         })
         # Keep CE100000 @500, roll PE side. Nearest PE to spot=100150 are 100000,100200,100500.
-        # Partner must be <= kept_ltp=500 and pass dual floor.
-        # Most balanced (closest to 500 from below) is PE100500 @600 -> too rich.
-        # PE100200 @350 is richest <=500 -> selected.
+        # ltp_le_kept is DISABLED by default, so partner is simply closest premium to 500.
+        # PE100500 @600 diff=100 is closer than PE100200 @350 diff=150 -> selected.
         res = select_partner_for(
             sp, roll_side="PE", kept_strike=100000, kept_ltp=500,
             spot=100150, step=200, offset=6, ltp_target=20,
             rule_pass=lambda c, p: True,
             theta_target=10, variable_strikes=True,
+        )
+        assert res == (100500, 600.0)
+
+    def test_rolls_respects_ltp_le_kept_when_enabled(self):
+        sp = _sp({
+            (100000, "CE"): 500,
+            (100200, "CE"): 400,
+            (100500, "CE"): 250,
+            (100000, "PE"): 300,
+            (100200, "PE"): 350,
+            (100500, "PE"): 600,
+        })
+        # With ltp_le_kept=True, partner must be <= kept_ltp=500.
+        # PE100500 @600 is too rich -> PE100200 @350 selected.
+        res = select_partner_for(
+            sp, roll_side="PE", kept_strike=100000, kept_ltp=500,
+            spot=100150, step=200, offset=6, ltp_target=20,
+            rule_pass=lambda c, p: True,
+            theta_target=10, variable_strikes=True, ltp_le_kept=True,
         )
         assert res == (100200, 350.0)
 

@@ -83,7 +83,7 @@ def _strikes_near_spot(
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        spot, step, offset, ltp_target, rule_pass, max_itm_steps=None,
                        theta_target: float = 0.0, variable_strikes: bool = False,
-                       trace: Optional[list] = None):
+                       trace: Optional[list] = None, ltp_le_kept: bool = False):
     """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
     `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target
     and >= theta_target, with premium STRICTLY <= the kept leg's premium (never roll into a leg
@@ -182,13 +182,15 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                 trace.append(diag)
             continue
         diag["dual_floor_pass"] = True
-        if kept_ltp and ltp > float(kept_ltp):
+        # Optional: require partner premium <= kept leg premium. Disabled by default for rollover
+        # so the bot can choose the closest premium regardless of direction.
+        if ltp_le_kept and kept_ltp and ltp > float(kept_ltp):
             diag["ltp_le_kept_pass"] = False
             diag["reject_reason"] = f"ltp_above_kept ({ltp:.2f} > {float(kept_ltp):.2f})"
             reject_counts["ltp_above_kept"] += 1
             if trace is not None:
                 trace.append(diag)
-            continue   # strict: partner must NOT be richer than the kept (losing) leg
+            continue
         diag["ltp_le_kept_pass"] = True
         ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
         try:

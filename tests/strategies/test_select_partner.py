@@ -7,19 +7,34 @@ def _cache(d):
     return {k: {"ltp": v, "atp": v} for k, v in d.items()}
 
 
-def test_partner_capped_at_kept_premium_then_closest():
-    # Keep CE (running) at ltp 60. Roll PE — STRICT: the new partner must NOT be richer than the
-    # kept leg (ltp <= 60), then pick the one CLOSEST to 60 among those eligible.
+def test_partner_picks_closest_premium_ignoring_ltp_cap():
+    # Keep CE (running) at ltp 60. Roll PE — ltp_le_kept is DISABLED by default for rollover,
+    # so the new partner is simply the one CLOSEST to 60 (above or below).
     cache = _cache({
         (100, "CE"): 60.0,
-        (95,  "PE"): 95.0,   # > 60 -> EXCLUDED (richer than kept leg)
-        (105, "PE"): 62.0,   # > 60 -> EXCLUDED (even though closest)
+        (95,  "PE"): 95.0,   # diff 35
+        (105, "PE"): 62.0,   # diff 2   ← closest
+        (110, "PE"): 58.0,   # diff 2   (encountered after 105)
+        (115, "PE"): 40.0,   # diff 20
+    })
+    res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
+                             spot=100, step=5, offset=4, ltp_target=30.0,
+                             rule_pass=lambda cs, ps: True)
+    assert res == (105, 62.0)
+
+
+def test_partner_can_enforce_ltp_le_kept():
+    # With ltp_le_kept=True, the partner must NOT be richer than the kept leg.
+    cache = _cache({
+        (100, "CE"): 60.0,
+        (95,  "PE"): 95.0,   # > 60 -> EXCLUDED
+        (105, "PE"): 62.0,   # > 60 -> EXCLUDED
         (110, "PE"): 58.0,   # <= 60, diff 2   ← best eligible
         (115, "PE"): 40.0,   # <= 60, diff 20
     })
     res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
                              spot=100, step=5, offset=4, ltp_target=30.0,
-                             rule_pass=lambda cs, ps: True)
+                             rule_pass=lambda cs, ps: True, ltp_le_kept=True)
     assert res == (110, 58.0)
 
 

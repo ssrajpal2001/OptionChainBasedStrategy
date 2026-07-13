@@ -159,6 +159,7 @@ class RollingMixin:
             theta_target=self._theta_target,
             variable_strikes=variable_strikes,
             trace=_partner_trace,
+            ltp_le_kept=False,
         )
 
         # Always dump the full partner-search trace so it is obvious which
