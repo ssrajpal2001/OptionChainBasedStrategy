@@ -40,6 +40,55 @@ def _summarize_partner_trace(trace: list) -> dict:
     }
 
 
+def _format_partner_trace(trace: list) -> str:
+    """Return a detailed, line-by-line dump of the partner search for logs."""
+    if not trace:
+        return "no candidate trace"
+    start = next((t for t in trace if t.get("event") == "select_partner_for_start"), {})
+    end = next((t for t in trace if t.get("event") == "select_partner_for_end"), {})
+    roll_side = start.get("roll_side", "?")
+    kept_strike = start.get("kept_strike", "?")
+    kept_ltp = float(start.get("kept_ltp", 0.0) or 0.0)
+    spot = float(start.get("spot", 0.0) or 0.0)
+    ltp_target = float(start.get("ltp_target", 0.0) or 0.0)
+    theta_target = float(start.get("theta_target", 0.0) or 0.0)
+    max_itm_steps = start.get("max_itm_steps")
+    lines = [
+        f"Partner search: keep {kept_strike} @ {kept_ltp:.2f} | "
+        f"roll_side={roll_side} | spot={spot:.2f}",
+        f"Filters: ltp_target={ltp_target:.2f} theta_target={theta_target:.2f} "
+        f"max_itm_steps={max_itm_steps}",
+    ]
+    candidates = [t for t in trace if t.get("event") == "candidate"]
+    if not candidates:
+        lines.append("No candidate trace records.")
+    else:
+        lines.append("Candidates:")
+        for c in candidates:
+            strike = c.get("strike", "?")
+            ltp = float(c.get("ltp", 0.0) or 0.0)
+            selected = bool(c.get("selected"))
+            reject = c.get("reject_reason") or ""
+            if selected:
+                status = "✓ PASSED (selected)"
+            elif reject:
+                status = f"✗ BLOCKED: {reject}"
+            else:
+                status = "✓ PASSED (not closest)"
+            lines.append(f"  {roll_side}{strike:>6} ltp={ltp:>8.2f}  {status}")
+    if end:
+        best_strike = end.get("best_strike")
+        best_ltp = end.get("best_ltp")
+        if best_strike is not None and best_ltp is not None:
+            lines.append(f"Selected: {roll_side}{best_strike} @ {float(best_ltp):.2f}")
+        else:
+            lines.append("Selected: NONE")
+        counts = end.get("reject_counts")
+        if counts:
+            lines.append(f"Reject counts: {counts}")
+    return "\n".join(lines)
+
+
 class RollingMixin:
     """Rolling / single-side-roll logic for the sell-straddle book."""
 
@@ -91,18 +140,23 @@ class RollingMixin:
             trace=_partner_trace,
         )
 
+        # Always dump the full partner-search trace so it is obvious which
+        # candidates were checked, which filters blocked them, and which passed.
+        _trace_dump = _format_partner_trace(_partner_trace)
+        _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=offset * 2 + 1)
+        logger.info(
+            "SellStraddle[%s]: ROLLOVER %s partner-search trace for running %s%d @%.2f "
+            "(CE pnl=%.2f PE pnl=%.2f):\n%s\npool_warmth=%s",
+            self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
+            _trace_dump, _pool_diag,
+        )
+
         if not partner:
-            # Dump pool warmth diagnostics so we can distinguish "market moved too far"
-            # from "pool not warm / missing candidate data".
-            _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=offset * 2 + 1)
             _summary = _summarize_partner_trace(_partner_trace)
             _why_plain = _summary.get("message", "no candidates")
             logger.info(
-                "SellStraddle[%s]: ROLLOVER %s — no valid partner for running %s%d @%.2f "
-                "(CE pnl=%.2f PE pnl=%.2f); closing position. reason: %s | "
-                "summary=%s trace=%s pool_warmth=%s",
-                self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
-                _why_plain, _summary, _partner_trace, _pool_diag,
+                "SellStraddle[%s]: ROLLOVER %s — no valid partner; closing position. reason: %s",
+                self._underlying, reason, _why_plain,
             )
             await self._close_position(f"single_side_roll_{reason}_no_partner")
             return
