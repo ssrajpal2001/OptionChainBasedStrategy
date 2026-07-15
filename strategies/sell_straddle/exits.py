@@ -143,6 +143,12 @@ class ExitMixin:
                 if 1 in _exit_dump:
                     _exit_dump[1]["stale"] = (0.0 if self._pool_engine.pair_atp_fresh(
                         pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec) else 1.0)
+            if getattr(self, "_itm_pair_gate_enabled", False):
+                _both = self._both_itm()
+                _cum_inr = self._pnl_rs(self._cumulative_pnl_pts()) if _both else 0.0
+                _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+                _crit.append(("ITMgate", f"bothITM={_both} cum₹{_cum_inr:.0f} vs threshold₹{_thr:.0f}",
+                              _both and _cum_inr >= _thr))
             return _crit, _exit_dump
         except Exception:
             return _crit, None
