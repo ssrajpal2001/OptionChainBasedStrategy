@@ -1759,7 +1759,7 @@ document.addEventListener('alpine:init', () => {
         entry_rules_beginning: [], entry_rules_reentry: [], exit_rules: [],
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
-        itm_pair_gate_enabled: false,
+        itm_pair_gate_enabled: true,
         ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
@@ -1812,7 +1812,7 @@ document.addEventListener('alpine:init', () => {
       if (ss.ratio_exit.max_entry_ratio === undefined) ss.ratio_exit.max_entry_ratio = 0;
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
-      if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = false;
+      if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = true;
       // Migrate legacy tf-multiplier → direct minutes (× 5) if the new field is absent.
       if (ss.sl_cooldown_minutes === undefined)
         ss.sl_cooldown_minutes = (ss.sl_cooldown_tf_multiplier !== undefined ? ss.sl_cooldown_tf_multiplier * 5 : 5);

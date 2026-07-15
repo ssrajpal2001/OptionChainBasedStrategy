@@ -32,6 +32,7 @@ def test_single_side_roll_waits_for_close_fill_before_open():
     async def run():
         bus = EventBus()
         s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._itm_pair_gate_enabled = False   # isolate roll mechanics from ITM gate
         s._spot = 24400.0
         s._position = StraddlePosition(
             underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,

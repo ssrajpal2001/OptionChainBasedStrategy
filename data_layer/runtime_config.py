@@ -46,6 +46,8 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "pool_itm_depth":        4,
     "pool_otm_depth":        4,
     "roll_max_itm_steps":    5,
+    "itm_pair_gate_enabled": True,
+    "itm_pair_gate_profit_inr": 500.0,
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],

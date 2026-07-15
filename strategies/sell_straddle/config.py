@@ -209,7 +209,7 @@ def load_sell_straddle_config(
 
     exit_rules = ss.get("exit_rules", [])
 
-    itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", False))
+    itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", True))
     itm_pair_gate_profit_inr = float(ss.get("itm_pair_gate_profit_inr", 500.0))
 
     config = SellStraddleConfig(

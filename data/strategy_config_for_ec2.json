@@ -327,7 +327,7 @@
         "entry_basis": "ltp",
         "theta_target": 20,
         "trail_basis": "ltp",
-        "itm_pair_gate_enabled": false
+        "itm_pair_gate_enabled": true
       },
       "iron_condor": {
         "enabled": true,
@@ -1457,7 +1457,7 @@
         "theta_target": 15,
         "sl_cooldown_minutes": 5,
         "trail_basis": "theta",
-        "itm_pair_gate_enabled": false
+        "itm_pair_gate_enabled": true
       },
       "iron_condor": {
         "product_type": "NRML"

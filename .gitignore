@@ -44,3 +44,20 @@ discussion.txt
 knowledge_graph_imp
 data/positions/
 data/history/
+
+# Generated scan / validation outputs
+data/fno_scan_*.json
+data/fno_scan_summary_*.md
+data/fno_scanner_validation*.csv
+data/fno_scanner_validation*.md
+data/nse_option_cache/
+data/trap_scanner_*.json
+data/btc_*.csv
+data/btc_*.txt
+
+# Ad-hoc / temporary scripts
+scan_js.sh
+entry_time_fix.patch
+tools/revert_to_nifty.py
+tools/start_crude_test.py
+.agents/skills/fix-btc-sell-straddle-workflow.skill
