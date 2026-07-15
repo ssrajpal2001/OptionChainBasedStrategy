@@ -278,12 +278,12 @@ class ExitMixin:
                 _floor_pts = self._trail_floor_pct * 100.0
                 if pos.trail_peak_pct >= _lock_pts and _profit_pct <= (pos.trail_peak_pct - _floor_pts):
                     logger.info(
-                        "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → full exit",
+                        "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → single-side roll",
                         self._underlying, self._trail_basis, _profit_pct, pos.trail_peak_pct, _floor_pts,
                     )
                     if not self._defer_exit("trailing_sl", now):
                         return
-                    await self._close_position(f"trailing_sl_{self._trail_basis}")
+                    await self._single_side_roll(now, f"trailing_sl_{self._trail_basis}")
                     return
 
         # 3. DAY-LEVEL % GUARDRAILS

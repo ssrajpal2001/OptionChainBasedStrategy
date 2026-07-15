@@ -15,6 +15,10 @@ from strategies.core.rule_evaluator import eval_rules as _eval_rules
 
 logger = logging.getLogger(__name__)
 
+# Minimum seconds between rollover retries for the same reason, to avoid
+# spamming partner searches every tick when a market condition persists.
+_ROLL_RETRY_SECONDS = 60
+
 
 def _summarize_partner_trace(trace: list) -> dict:
     """Return a human-readable summary of why select_partner_for rejected every candidate."""
@@ -107,6 +111,15 @@ class RollingMixin:
         if not pos or pos.status != "open":
             return
 
+        # Throttle: do not re-attempt the same rollover reason more often than
+        # _ROLL_RETRY_SECONDS, otherwise every tick would re-run partner search.
+        _attempts = getattr(self, "_last_roll_attempt", None) or {}
+        _last = _attempts.get(reason)
+        if _last and (now - _last).total_seconds() < _ROLL_RETRY_SECONDS:
+            return
+        _attempts[reason] = now
+        self._last_roll_attempt = _attempts
+
         # 1. Identify the "good" leg to roll: higher short P&L = more profit / less loss.
         ce_pnl = float(getattr(pos.ce_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
         pe_pnl = float(getattr(pos.pe_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
@@ -178,19 +191,17 @@ class RollingMixin:
             _summary = _summarize_partner_trace(_partner_trace)
             _why_plain = _summary.get("message", "no candidates")
             logger.info(
-                "SellStraddle[%s]: ROLLOVER %s — no valid partner; closing position. reason: %s",
+                "SellStraddle[%s]: ROLLOVER %s — no valid partner; keeping original pair. reason: %s",
                 self._underlying, reason, _why_plain,
             )
-            await self._close_position(f"single_side_roll_{reason}_no_partner")
             return
 
         new_strike, new_ltp = partner
         if int(new_strike) == orig_strike:
             logger.info(
                 "SellStraddle[%s]: ROLLOVER %s — best partner is the SAME strike %d; "
-                "no new pair, closing position.", self._underlying, reason, orig_strike
+                "no new pair, keeping original pair.", self._underlying, reason, orig_strike
             )
-            await self._close_position(f"single_side_roll_{reason}_same_strike")
             return
 
         # 3. MAX SKEW CHECK (max_entry_ratio).
@@ -201,11 +212,10 @@ class RollingMixin:
             if _skew > self._max_entry_ratio:
                 logger.info(
                     "SellStraddle[%s]: ROLLOVER %s — partner %s%d @%.2f is too skewed "
-                    "vs running %s%d @%.2f (ratio=%.2f > max=%.2f); closing position.",
+                    "vs running %s%d @%.2f (ratio=%.2f > max=%.2f); keeping original pair.",
                     self._underlying, reason, roll_side, new_strike, new_ltp,
                     keep_side, keep_strike, keep_ltp, _skew, self._max_entry_ratio,
                 )
-                await self._close_position(f"single_side_roll_{reason}_skew")
                 return
 
         # 4. CURRENT-TICK SANITY CHECK: the configured re-entry rule may use a higher
@@ -221,10 +231,9 @@ class RollingMixin:
         if cur_close > 0 and cur_vwap > 0 and cur_close >= cur_vwap:
             logger.info(
                 "SellStraddle[%s]: ROLLOVER %s — partner CE%d/PE%d current close=%.2f "
-                ">= vwap=%.2f; closing position.",
+                ">= vwap=%.2f; keeping original pair.",
                 self._underlying, reason, cand_ce, cand_pe, cur_close, cur_vwap,
             )
-            await self._close_position(f"single_side_roll_{reason}_current_vwap")
             return
 
         # 5. Execute the roll: close the good leg FIRST, wait for the close fill,

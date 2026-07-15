@@ -94,6 +94,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._order_pending: bool = False
         self._roll_close_waiters: Dict[str, asyncio.Event] = {}
         self._roll_in_progress: bool = False
+        self._last_roll_attempt: Dict[str, datetime] = {}
         self._last_exit_rules_bucket: str = ""
         self._last_entry_bucket_b: str = ""
         self._last_entry_bucket_r: str = ""

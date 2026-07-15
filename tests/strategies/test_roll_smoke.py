@@ -44,9 +44,9 @@ def test_single_side_roll_emits_close_and_open_when_candidate_exists():
         assert int(s._position.ce_leg.strike) != 23650   # rolled to a DIFFERENT strike (no same-strike wash)
 
 
-def test_single_side_roll_closes_when_best_partner_is_same_strike():
+def test_single_side_roll_keeps_original_pair_when_best_partner_is_same_strike():
     """If the only eligible partner is the SAME strike, there is no new pair.
-    The position must close fully instead of doing a wash roll."""
+    The position must keep the original pair instead of doing a wash roll."""
     async def run():
         bus = EventBus()
         seen = []
@@ -72,8 +72,9 @@ def test_single_side_roll_closes_when_best_partner_is_same_strike():
         while not q.empty():
             seen.append(q.get_nowait())
         orders = [e for e in seen if isinstance(e, StraddleOrderEvent)]
-        assert len(orders) == 1 and orders[0].action == "EXIT"  # full close
-        assert s._position is None
+        assert len(orders) == 0  # no orders emitted
+        assert s._position is not None
+        assert s._position.status == "open"
     asyncio.run(run())
     asyncio.run(run())
 

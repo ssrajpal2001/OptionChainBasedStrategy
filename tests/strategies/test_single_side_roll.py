@@ -8,7 +8,7 @@ from execution_bridge.straddle_bridge import StraddleFillEvent
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 
 
-def test_single_side_roll_no_candidate_closes_position():
+def test_single_side_roll_no_candidate_keeps_original_pair():
     async def run():
         bus = EventBus()
         s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
@@ -21,7 +21,8 @@ def test_single_side_roll_no_candidate_closes_position():
         s._spot = 23500
         s._strike_prem = {}   # empty → no rollover partner found
         await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
-        assert s._position is None   # no partner → full exit
+        assert s._position is not None   # no partner → keep original pair
+        assert s._position.status == "open"
     asyncio.run(run())
 
 
