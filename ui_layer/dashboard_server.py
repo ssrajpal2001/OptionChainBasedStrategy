@@ -2607,6 +2607,7 @@ class DashboardServer:
                 "entry_price": r.get("entry_price", "—"),
                 "exit_price":  r.get("exit_price", "—"),
                 "exit_reason": r.get("exit_reason", "—"),
+                "exit_remark": r.get("exit_remark", "—"),
                 "pnl":         float(r.get("pnl", 0)),
                 "legs":        r.get("legs"),   # per-leg detail (side/strike/entry/exit/pnl) if recorded
             } for r in rows]

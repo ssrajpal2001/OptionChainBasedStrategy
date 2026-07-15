@@ -147,6 +147,127 @@ class ExitMixin:
         except Exception:
             return _crit, None
 
+    def _close_remark(self, pos, reason: str, now: datetime, side: str = "") -> str:
+        """Build a human-readable remark for a full or single-leg exit.
+
+        `reason` is the internal close code (kept for tests / throttling).  This method
+        returns display text with live numbers (peak%, thresholds, ratios, etc.) so the
+        dashboard History column is immediately understandable.
+        """
+        try:
+            _side = side or (
+                "CE"
+                if (pos.ce_leg.entry_price - pos.ce_leg.ltp) >= (pos.pe_leg.entry_price - pos.pe_leg.ltp)
+                else "PE"
+            )
+            _full_close = not side
+
+            if reason in ("eod_squareoff", "time_exit_eod"):
+                _pnl = self._pnl_rs(pos.realized_pnl) if pos else 0.0
+                return f"EOD square-off at {now.strftime('%H:%M')} | P&L {self._ccy_symbol}{_pnl:+.0f}"
+
+            if reason == "day_profit_target":
+                _credit = self._initial_net_credit or pos.net_credit or 0.0
+                _pct = ((self._session_realized_pnl_pts + pos.unrealized_pnl) / _credit * 100.0) if _credit else 0.0
+                return (f"Day profit target | day={_pct:.1f}% (basis {self._day_exit_basis}) "
+                        f"vs T={self._day_profit_target_pct:.1f}%")
+
+            if reason == "day_loss_sl":
+                _credit = self._initial_net_credit or pos.net_credit or 0.0
+                _pct = ((self._session_realized_pnl_pts + pos.unrealized_pnl) / _credit * 100.0) if _credit else 0.0
+                return (f"Day loss stoploss | day={_pct:.1f}% (basis {self._day_exit_basis}) "
+                        f"vs SL={self._day_loss_sl_pct:.1f}%")
+
+            if reason == "itm_pair_gate":
+                _cum = self._session_realized_pnl_pts + pos.unrealized_pnl
+                _inr = self._pnl_rs(_cum)
+                _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+                return (f"ITM pair gate escape | both legs ITM (CE{int(pos.ce_leg.strike)}/PE{int(pos.pe_leg.strike)}) "
+                        f"spot={self._spot:.0f} cumulative {self._ccy_symbol}{_inr:+.0f} < threshold {self._ccy_symbol}{_thr:.0f} "
+                        f"→ rolled {_side}")
+
+            if reason == "itm_pair_gate_profit":
+                _cum = self._session_realized_pnl_pts + pos.unrealized_pnl
+                _inr = self._pnl_rs(_cum)
+                _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+                return (f"Both legs ITM | cumulative P&L {self._ccy_symbol}{_inr:+.0f} ≥ threshold {self._ccy_symbol}{_thr:.0f} "
+                        f"| CE{int(pos.ce_leg.strike)} PE{int(pos.pe_leg.strike)} spot={self._spot:.0f}")
+
+            if reason.startswith("manual_squareoff_"):
+                return f"Manual square-off ({reason})"
+            if reason == "kill_switch":
+                return "Kill switch / emergency liquidation"
+            if reason == "deployment_stop":
+                return "Deployment stopped"
+            if reason == "system_shutdown":
+                return "System shutdown"
+
+            if reason.startswith("trailing_sl_"):
+                _basis = reason.split("_")[-1] if "_" in reason else self._trail_basis
+                if _basis == "theta":
+                    _profit_pct = pos.premium_decay_pct()
+                elif pos.net_credit > 0:
+                    _profit_pct = pos.unrealized_pnl / pos.net_credit * 100.0
+                else:
+                    _profit_pct = 0.0
+                _lock_pct = self._trail_lock_pct * 100.0
+                _floor_pct = self._trail_floor_pct * 100.0
+                _roll = "closed" if _full_close else f"rolled {_side}"
+                return (f"Trailing SL ({_basis}) | profit={_profit_pct:.1f}% peak={pos.trail_peak_pct:.1f}% "
+                        f"lock≥{_lock_pct:.1f}% floor={_floor_pct:.1f}% → {_roll}")
+
+            if reason == "ltp_decay":
+                _min = min(pos.ce_leg.ltp, pos.pe_leg.ltp) if pos.ce_leg and pos.pe_leg else 0.0
+                _roll = "closed" if _full_close else f"rolled {_side}"
+                return f"LTP decay | min LTP={_min:.2f} < threshold={self._ltp_exit_min:.2f} → {_roll}"
+
+            if reason == "ratio_exit":
+                _ce = pos.ce_leg.ltp if pos.ce_leg else 0.0
+                _pe = pos.pe_leg.ltp if pos.pe_leg else 0.0
+                _r = max(_ce, _pe) / min(_ce, _pe) if _ce > 0 and _pe > 0 else 0.0
+                _roll = "closed" if _full_close else f"rolled {_side}"
+                return f"Ratio exit | leg ratio={_r:.2f}x ≥ threshold={self._ratio_threshold:.1f}x → {_roll}"
+
+            if reason == "scalable_tsl":
+                _pnl = pos.unrealized_pnl
+                if self._tsl_basis == "theta":
+                    _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+                    if _etv > 0:
+                        _pnl = _etv - pos.current_time_value(self._spot)
+                _profit_rs = self._pnl_rs(_pnl)
+                return (f"Scalable TSL ({self._tsl_basis}) hit | locked={self._ccy_symbol}{pos.tsl_high_lock_rs:.0f} "
+                        f"current={self._ccy_symbol}{_profit_rs:.0f} → FULL EXIT (reset)")
+
+            if reason == "exit_rules":
+                _credit = self._initial_net_credit or pos.net_credit or 0.0
+                _crit, _ = self._build_exit_criteria(pos, pos.unrealized_pnl, _credit)
+                _dyn = next((d for d in _crit if d[0] == "Dynamic"), None)
+                _detail = _dyn[1] if _dyn else "rules fired"
+                _roll = "closed" if _full_close else f"rolled {_side}"
+                return f"Dynamic exit rules | {_detail} → {_roll}"
+
+            if reason == "vwap_rise_roll":
+                _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike)) or {}
+                _curr = float(_vp.get("vwap", 0.0))
+                _min = getattr(pos, "session_min_vwap", 0.0) or 0.0
+                _rise = ((_curr - _min) / _min * 100.0) if _min > 0 else 0.0
+                _roll = "closed" if _full_close else f"rolled {_side}"
+                return (f"VWAP rise | VWAP {_curr:.2f} rose {_rise:.2f}% from session low {_min:.2f} "
+                        f"(threshold {self._vwap_rise_threshold:.2f}%) → {_roll}")
+
+            if reason.startswith("partial_roll_"):
+                return f"Partial roll | closed old {_side} leg"
+            if reason.startswith("partial_cleanup_"):
+                return f"Partial roll failed | closed {_side} leg to flatten"
+            if reason.startswith("single_side_cleanup_"):
+                return f"No rollover partner | closed {_side} leg"
+            if reason.startswith("single_side_roll_"):
+                return f"Single-side roll | closed old {_side} leg"
+
+            return reason
+        except Exception as _exc:
+            return reason
+
     async def _publish_exit_audit(self, pos, pnl: float, now: datetime) -> None:
         """Publish the live exit-criteria to enabled client UIs, throttled to ~3s."""
         _audit_clients = self._granular_audit_clients()
@@ -214,11 +335,11 @@ class ExitMixin:
             logger.debug(
                 "TICK-EXIT[%s] pnl=%.2f day%%=%.1f(T%.0f/SL%.0f) "
                 "CE=%.2f PE=%.2f ratio=%.2fx "
-                "tsl_rs=%.2f lock=%.2f peak_pct=%.1f spot=%.2f",
+                "tsl_rs=%.2f lock=%.2f spot=%.2f",
                 self._underlying, pnl, _dbg_day_pct,
                 self._day_profit_target_pct, self._day_loss_sl_pct,
                 _dbg_ce, _dbg_pe, _dbg_ratio,
-                _dbg_tsl_rs, _dbg_tsl_lock, getattr(pos, "tsl_high_lock_rs", 0.0),
+                _dbg_tsl_rs, _dbg_tsl_lock,
                 getattr(self, "_spot", 0.0),
             )
 
@@ -228,7 +349,6 @@ class ExitMixin:
                 " Decay" if self._ltp_decay_enabled else "",
                 " Ratio" if getattr(self, "_ratio_threshold", 0.0) > 0 else "",
                 " TSL" if self._tsl_enabled else "",
-                " TrailSL" if self._trail_sl_enabled else "",
                 " VWAPrise" if self._vwap_rise_enabled else "",
                 " exit_rules" if getattr(self, "_exit_rules", None) else "",
                 " ITMgate" if getattr(self, "_itm_pair_gate_enabled", False) else "",
@@ -263,30 +383,7 @@ class ExitMixin:
             else:
                 return
 
-        # 2. TRAILING SL (lock-%/floor-%-below-peak)
-        if self._trail_sl_enabled:
-            if self._trail_basis == "theta":
-                _profit_pct = pos.premium_decay_pct()
-            elif pos.net_credit > 0:
-                _profit_pct = pnl / pos.net_credit * 100.0
-            else:
-                _profit_pct = None
-            if _profit_pct is not None:
-                if _profit_pct > pos.trail_peak_pct:
-                    pos.trail_peak_pct = _profit_pct
-                _lock_pts = self._trail_lock_pct * 100.0
-                _floor_pts = self._trail_floor_pct * 100.0
-                if pos.trail_peak_pct >= _lock_pts and _profit_pct <= (pos.trail_peak_pct - _floor_pts):
-                    logger.info(
-                        "SellStraddle[%s]: TRAILING SL [%s] — profit=%.1f%% dropped to peak(%.1f%%)−floor(%.1f%%) → single-side roll",
-                        self._underlying, self._trail_basis, _profit_pct, pos.trail_peak_pct, _floor_pts,
-                    )
-                    if not self._defer_exit("trailing_sl", now):
-                        return
-                    await self._single_side_roll(now, f"trailing_sl_{self._trail_basis}")
-                    return
-
-        # 3. DAY-LEVEL % GUARDRAILS
+        # 2. DAY-LEVEL % GUARDRAILS
         if self._initial_net_credit > 0:
             if self._day_exit_basis == "theta" and self._initial_entry_time_value > 0:
                 _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
@@ -330,7 +427,7 @@ class ExitMixin:
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 
-        # 4. LTP Decay → single-side roll
+        # 3. LTP Decay → single-side roll
         if self._ltp_decay_enabled:
             _min_ltp = min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if 0 < _min_ltp < self._ltp_exit_min and self._position and self._position.status == "open":
@@ -341,7 +438,7 @@ class ExitMixin:
                 await self._single_side_roll(now, "ltp_decay")
                 return
 
-        # 5. Ratio exit → rollover
+        # 4. Ratio exit → rollover
         if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
             ratio = max(pos.ce_leg.ltp, pos.pe_leg.ltp) / min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if ratio >= self._ratio_threshold:
@@ -352,7 +449,7 @@ class ExitMixin:
                 await self._single_side_roll(now, "ratio_exit")
                 return
 
-        # 6. Scalable TSL → single-side roll
+        # 5. Scalable TSL → FULL EXIT (no rollover; reset on next entry)
         if self._tsl_enabled:
             _tsl_pnl = pnl
             if self._tsl_basis == "theta":
@@ -360,16 +457,16 @@ class ExitMixin:
                 if _etv > 0:
                     _tsl_pnl = _etv - pos.current_time_value(self._spot)
             if self._check_scalable_tsl(pos, _tsl_pnl):
-                logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=%s%.4f pnl=%s%.4f",
+                logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=%s%.4f pnl=%s%.4f → FULL EXIT",
                             self._underlying, self._tsl_basis,
                             self._ccy_symbol, pos.tsl_high_lock_rs,
                             self._ccy_symbol, self._pnl_rs(_tsl_pnl))
                 if not self._defer_exit("scalable_tsl", now):
                     return
-                await self._single_side_roll(now, "scalable_tsl")
+                await self._close_position("scalable_tsl")
                 return
 
-        # 7. EXIT-EVAL — dynamic exit_rules → single-side roll
+        # 6. EXIT-EVAL — dynamic exit_rules → single-side roll
         _max_tf = (max((int(r.get("tf", 1)) for r in self._exit_rules), default=1)
                    if self._exit_rules else 5)
         _er_bucket = f"{now.strftime('%Y%m%d_%H')}{(now.minute // _max_tf) * _max_tf:02d}"
@@ -413,7 +510,7 @@ class ExitMixin:
                 fired_reason=_reason if _passed else "",
             )
 
-        # 8. VWAP Rise SL → smart roll
+        # 7. VWAP Rise SL → smart roll
         if self._vwap_rise_enabled and self._pool_engine.pair_atp_fresh(
                 int(pos.ce_leg.strike), int(pos.pe_leg.strike), self._vwap_stale_sec):
             _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
@@ -442,7 +539,7 @@ class ExitMixin:
                         await self._single_side_roll(now, "vwap_rise_roll")
                         return
 
-        # 9. ITM PAIR GATE (armed-watching phase: cumulative was ≤0 at rollover time)
+        # 8. ITM PAIR GATE (armed-watching phase: cumulative was ≤0 at rollover time)
         if getattr(self, "_itm_gate_armed", False):
             await self._check_itm_pair_gate(now)
 
@@ -484,6 +581,7 @@ class ExitMixin:
             pos.pe_leg.close_time = pos.close_time
             pos.status = "closed"
             self._unpin_position_legs(pos)
+            _close_remark = self._close_remark(pos, reason, pos.close_time)
 
             _cid = getattr(self, "_client_id", "") or "-"
             _bid = getattr(self, "_binding_id", "") or "-"
@@ -515,6 +613,7 @@ class ExitMixin:
                 lot_size=self._lot_size,
                 spot=self._spot,
                 close_reason=reason,
+                close_remark=_close_remark,
                 realized_pnl=pos.realized_pnl,
                 ce_entry=pos.ce_leg.entry_price,
                 pe_entry=pos.pe_leg.entry_price,
@@ -587,13 +686,14 @@ class ExitMixin:
                          "(NOT a real loss; entry was lost). reason=%s",
                          self._underlying, side, int(leg.strike), float(leg.entry_price or 0.0), reason)
         leg.close_time = now
+        _close_remark = self._close_remark(pos, reason, now, side=side)
         self._event_counter += 1
         order_ev = StraddleOrderEvent(
             action="EXIT", underlying=self._underlying, atm=pos.atm_at_entry,
             ce_strike=pos.ce_leg.strike, pe_strike=pos.pe_leg.strike,
             ce_ltp=pos.ce_leg.ltp, pe_ltp=pos.pe_leg.ltp,
             lot_multiplier=self._lot_multiplier, lot_size=self._lot_size,
-            spot=self._spot, close_reason=reason, realized_pnl=leg_pnl,
+            spot=self._spot, close_reason=reason, close_remark=_close_remark, realized_pnl=leg_pnl,
             ce_entry=pos.ce_leg.entry_price, pe_entry=pos.pe_leg.entry_price,
             event_id=f"{self._underlying}_EXITLEG_{side}_{self._event_counter}",
             legs=[side],

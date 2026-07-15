@@ -64,7 +64,8 @@ class StraddleOrderEvent:
     lot_size:       int  = 50
     spot:           float = 0.0
     indicators:     dict = field(default_factory=dict)
-    close_reason:   str  = ""  # populated on EXIT
+    close_reason:   str  = ""  # populated on EXIT (machine code; used by tests/throttling)
+    close_remark:   str  = ""  # populated on EXIT (human-readable context)
     realized_pnl:   float = 0.0  # populated on EXIT
     # True per-leg ENTRY (sold) prices, carried on EXIT events. The bridge used to read these
     # from its in-memory `_last_entry`, which is EMPTY after a restart → history recorded the
@@ -240,6 +241,7 @@ class TradeLogger:
             f"PE={ev.pe_strike:.0f} {entry_pe:.2f}→{fill.pe_fill:.2f} | "
             f"PnL={pnl_pts:+.2f}pts {_ccy}{_rs_fmt} | "
             f"Reason={ev.close_reason} | "
+            f"Remark={getattr(ev, 'close_remark', '') or '-'} | "
             f"{'[PAPER]' if fill.paper_mode else '[LIVE]'}\n"
         )
         self._handle(client_id, binding_id).write(line)
@@ -270,6 +272,7 @@ class TradeLogger:
                     sum(l["entry"] for l in _legs), sum(l["exit"] for l in _legs),
                     ev.close_reason, sum(l["pnl"] for l in _legs),
                     binding_id=binding_id, legs=_legs,
+                    exit_remark=getattr(ev, "close_remark", "") or "",
                 )
         except Exception:
             pass

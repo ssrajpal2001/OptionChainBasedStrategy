@@ -390,9 +390,9 @@ class RollingMixin:
         Called after every rollover completes and on every exit-check cycle while armed.
         If both legs are ITM AND cumulative P&L in INR >= itm_pair_gate_profit_inr → close
         both legs fully and restart via re-entry.
-        If both legs are ITM AND cumulative P&L < threshold → arm the watching flag; the eval
-        loop (_check_exits) will call this every cycle until profit reaches the threshold or
-        a normal exit fires first.
+        If both legs are ITM AND cumulative P&L < threshold → try to roll out of the ITM pair
+        (single-side roll).  If no valid partner is available, keep watching until profit hits
+        the threshold or the pair is no longer both ITM.
         Does nothing if the toggle is OFF or the pair is not both ITM.
         """
         if not getattr(self, "_itm_pair_gate_enabled", False):
@@ -422,14 +422,20 @@ class RollingMixin:
             await self._close_position("itm_pair_gate_profit")
             # No cooldown — restart immediately via re-entry (not beginning).
             self._beginning_failed = True   # force re-entry path on next entry attempt
-        else:
-            if not getattr(self, "_itm_gate_armed", False):
-                self._itm_gate_armed = True
+            return
+
+        # Below threshold: arm the gate and try to roll out of the ITM pair.
+        if not getattr(self, "_itm_gate_armed", False):
+            self._itm_gate_armed = True
             logger.info(
                 "SellStraddle[%s]: ITM-PAIR GATE ARMED — both legs ITM (CE%d/PE%d) spot=%.0f "
-                "cumulative=%.2f pts (₹%.2f) < threshold ₹%.2f. Watching for profit before closing.",
+                "cumulative=%.2f pts (₹%.2f) < threshold ₹%.2f. Will attempt rollover to escape ITM.",
                 self._underlying, ce_s, pe_s, self._spot, cumulative_pts, cumulative_inr, threshold_inr,
             )
+
+        # Let _single_side_roll manage its own per-reason throttle; setting it here would
+        # block the roll before it even starts.
+        await self._single_side_roll(now, "itm_pair_gate")
 
     def _apply_sl_cooldown(self) -> None:
         """Block re-entry until the next boundary of the max re-entry timeframe.

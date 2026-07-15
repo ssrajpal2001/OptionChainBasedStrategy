@@ -385,9 +385,6 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"Ratio:{'ON' if ratio_on else 'OFF'}({self._ratio_threshold:.1f}x"
             + (f" MaxEntry:{self._max_entry_ratio:.1f}x" if self._max_entry_ratio > 0 else "")
             + ") | SmartRoll:ON",
-            f"║ TRAILING SL: {'ON' if self._trail_sl_enabled else 'OFF'} "
-            f"Lock:{self._trail_lock_pct*100:.1f}% Floor:{self._trail_floor_pct*100:.1f}% "
-            f"BASIS:{self._trail_basis.upper()}",
             f"║ SCALABLE TSL: {'ON' if self._tsl_enabled else 'OFF'} "
             f"Base:{self._tsl_base_profit_rs:.0f}/{self._tsl_base_lock_rs:.0f} "
             f"Step:{self._tsl_step_profit_rs:.0f}/{self._tsl_step_lock_rs:.0f} ({self._ccy_symbol}/BTC if crypto) "
@@ -398,7 +395,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"║ DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
             f"BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
-            f"║ EXIT PRIORITY: EOD→TrailingSL→Day%→LTPdecay→Ratio→ScalableTSL→exit_rules→VWAPrise→ITMgate",
+            f"║ EXIT PRIORITY: EOD→Day%→LTPdecay→Ratio→ScalableTSL→exit_rules→VWAPrise→ITMgate",
             f"║ LIMITS: Max Daily Trades:{self._max_trades}",
             "╚══════════════════════════════════════════════════════════════════════",
         ]
