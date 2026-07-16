@@ -111,7 +111,7 @@ class ExitMixin:
             _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
             _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
             if credit and (_dpt or _dsl):
-                _dpct = (self._session_realized_pnl_pts + pnl) / credit * 100.0
+                _dpct = self._day_pct(pos)
                 _lbl = "Day%(θ)" if self._day_exit_basis == "theta" else "Day%"
                 _crit.append((_lbl, f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
                               (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
@@ -153,6 +153,17 @@ class ExitMixin:
         except Exception:
             return _crit, None
 
+    def _day_pct(self, pos) -> float:
+        """Session day-% using the same basis as the guardrail trigger in _check_exits."""
+        if self._day_exit_basis == "theta" and getattr(self, "_initial_entry_time_value", 0.0) > 0:
+            _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+            _running_theta = (_etv - pos.current_time_value(self._spot)) if _etv > 0 else pos.unrealized_pnl
+            _day_pts = self._session_realized_pnl_pts + _running_theta
+            _day_denom = self._initial_entry_time_value
+            return (_day_pts / _day_denom * 100.0) if _day_denom > 0 else 0.0
+        _credit = self._initial_net_credit or pos.net_credit or 0.0
+        return ((self._session_realized_pnl_pts + pos.unrealized_pnl) / _credit * 100.0) if _credit else 0.0
+
     def _close_remark(self, pos, reason: str, now: datetime, side: str = "") -> str:
         """Build a human-readable remark for a full or single-leg exit.
 
@@ -173,14 +184,12 @@ class ExitMixin:
                 return f"EOD square-off at {now.strftime('%H:%M')} | P&L {self._ccy_symbol}{_pnl:+.0f}"
 
             if reason == "day_profit_target":
-                _credit = self._initial_net_credit or pos.net_credit or 0.0
-                _pct = ((self._session_realized_pnl_pts + pos.unrealized_pnl) / _credit * 100.0) if _credit else 0.0
+                _pct = self._day_pct(pos)
                 return (f"Day profit target | day={_pct:.1f}% (basis {self._day_exit_basis}) "
                         f"vs T={self._day_profit_target_pct:.1f}%")
 
             if reason == "day_loss_sl":
-                _credit = self._initial_net_credit or pos.net_credit or 0.0
-                _pct = ((self._session_realized_pnl_pts + pos.unrealized_pnl) / _credit * 100.0) if _credit else 0.0
+                _pct = self._day_pct(pos)
                 return (f"Day loss stoploss | day={_pct:.1f}% (basis {self._day_exit_basis}) "
                         f"vs SL={self._day_loss_sl_pct:.1f}%")
 
@@ -545,7 +554,7 @@ class ExitMixin:
                         await self._single_side_roll(now, "vwap_rise_roll")
                         return
 
-        # 8. ITM PAIR GATE (armed-watching phase: cumulative was ≤0 at rollover time)
+        # 8. ITM PAIR GATE (armed-watching phase: both legs ITM but cumulative below profit threshold)
         if getattr(self, "_itm_gate_armed", False):
             await self._check_itm_pair_gate(now)
 

@@ -1090,7 +1090,7 @@
           "base_lock": 5000,
           "step_profit": 5000,
           "step_lock": 2500,
-          "basis": "theta"
+          "basis": "ltp"
         },
         "ratio_exit": {
           "enabled": true,
@@ -1119,7 +1119,7 @@
               "target_pts": 0,
               "stoploss_pts": 0
             },
-            "exit_basis": "theta"
+            "exit_basis": "ltp"
           },
           "tuesday": {
             "enabled": true,
@@ -1129,7 +1129,7 @@
               "target_pts": 0,
               "stoploss_pts": 0
             },
-            "exit_basis": "theta"
+            "exit_basis": "ltp"
           },
           "wednesday": {
             "enabled": true,
@@ -1139,7 +1139,7 @@
               "target_pts": 0,
               "stoploss_pts": 0
             },
-            "exit_basis": "theta"
+            "exit_basis": "ltp"
           },
           "thursday": {
             "enabled": true,
@@ -1149,7 +1149,7 @@
               "target_pts": 0,
               "stoploss_pts": 0
             },
-            "exit_basis": "theta"
+            "exit_basis": "ltp"
           },
           "friday": {
             "enabled": true,
@@ -1159,19 +1159,19 @@
               "target_pts": 0,
               "stoploss_pts": 0
             },
-            "exit_basis": "theta"
+            "exit_basis": "ltp"
           },
           "saturday": {
             "enabled": false,
             "profit_target_pct": 0,
             "loss_sl_pct": 0,
-            "exit_basis": "theta"
+            "exit_basis": "ltp"
           },
           "sunday": {
             "enabled": false,
             "profit_target_pct": 0,
             "loss_sl_pct": 0,
-            "exit_basis": "theta"
+            "exit_basis": "ltp"
           }
         },
         "profit_target_enabled": true,
@@ -1195,7 +1195,7 @@
         "entry_basis": "theta",
         "theta_target": 15,
         "sl_cooldown_minutes": 5,
-        "trail_basis": "theta"
+        "trail_basis": "ltp"
       },
       "iron_condor": {
         "enabled": true,

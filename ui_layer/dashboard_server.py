@@ -2611,7 +2611,11 @@ class DashboardServer:
                 "pnl":         float(r.get("pnl", 0)),
                 "legs":        r.get("legs"),   # per-leg detail (side/strike/entry/exit/pnl) if recorded
             } for r in rows]
-            return {"ok": True, "trades": trades}
+            # Also surface currently OPEN positions so the History tab shows the
+            # trade as soon as it starts.  Once closed, the OPEN row disappears and
+            # the persistent closed record takes its place.
+            open_rows = await asyncio.to_thread(_srv._open_history_rows, cid)
+            return {"ok": True, "trades": open_rows + trades}
 
         # ── CLIENT — kill broker ──────────────────────────────────────────────
 
@@ -5398,6 +5402,137 @@ pm2 save
                         client_id, binding_id, underlying,
                         list(self._trap_scanner_manager._books.keys()))
         return None
+
+    def _open_history_rows(self, cid: str) -> list:
+        """
+        Return synthetic history rows for currently OPEN positions so the dashboard
+        History tab shows trades that have started but not yet closed.  These rows
+        use the same schema as closed-trade history and disappear automatically
+        once the position is closed (the closed record then takes over).
+        """
+        rows: list = []
+        try:
+            deps = self._client_db.get_deployments_sync(cid)
+        except Exception:
+            return rows
+
+        def _ts(dt):
+            if not dt:
+                return None
+            if isinstance(dt, datetime):
+                return dt.isoformat(timespec="seconds")
+            return str(dt)
+
+        for dep in deps or []:
+            sname = dep.get("strategy_name", "")
+            underlying = dep.get("underlying") or dep.get("assigned_instrument") or ""
+            bid = dep.get("binding_id", "")
+            if not sname or not underlying:
+                continue
+
+            if sname == "sell_straddle":
+                strat = self._find_ss_book(cid, bid, underlying)
+                pos = getattr(strat, "_position", None) if strat else None
+                if pos is None or getattr(pos, "status", "") != "open":
+                    continue
+                _ot = getattr(pos, "open_time", None)
+                _lot = int(getattr(pos, "lot_size", 0) or 0)
+                _legs = []
+                for side, leg in (("CE", pos.ce_leg), ("PE", pos.pe_leg)):
+                    strike = int(getattr(leg, "strike", 0) or 0)
+                    if strike <= 0:
+                        continue
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    _legs.append({
+                        "side": side, "strike": strike,
+                        "entry": round(ep, 2), "exit": 0,
+                        "pnl": round((ep - ltp) * _lot, 2),
+                        "entry_ts": _ts(getattr(leg, "open_time", None)),
+                        "exit_ts": None,
+                        "entry_reason": getattr(leg, "open_reason", "") or "",
+                    })
+                if _legs:
+                    rows.append({
+                        "date": _ts(_ot) or datetime.now(IST).isoformat(timespec="seconds"),
+                        "strategy": "sell_straddle",
+                        "instrument": str(underlying).upper(),
+                        "entry_price": round(sum(l["entry"] for l in _legs), 2),
+                        "exit_price": 0,
+                        "exit_reason": "OPEN",
+                        "exit_remark": "Live open position",
+                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
+                        "legs": _legs,
+                    })
+
+            elif sname == "iron_condor":
+                strat = next((s for s in (self._iron_condors or [])
+                              if getattr(s, "_underlying", None) == underlying), None)
+                pos = getattr(strat, "_position", None) if strat else None
+                if pos is None or getattr(pos, "status", "") != "open":
+                    continue
+                _ot = getattr(pos, "open_time", None)
+                _lot = int(getattr(pos, "lot_size", 0) or 0)
+                _legs = []
+                for leg in pos.legs:
+                    strike = int(getattr(leg, "strike", 0) or 0)
+                    if strike <= 0:
+                        continue
+                    side = getattr(leg, "option_type", "")
+                    ls = getattr(leg, "side", "sell")
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    qty = -_lot if ls == "sell" else _lot
+                    _legs.append({
+                        "side": side, "strike": strike,
+                        "entry": round(ep, 2), "exit": 0,
+                        "pnl": round((ep - ltp) * qty, 2),
+                        "entry_ts": _ts(getattr(leg, "fill_time", None)),
+                        "exit_ts": None,
+                        "entry_reason": "entry",
+                    })
+                if _legs:
+                    rows.append({
+                        "date": _ts(_ot) or datetime.now(IST).isoformat(timespec="seconds"),
+                        "strategy": "iron_condor",
+                        "instrument": str(underlying).upper(),
+                        "entry_price": round(sum(l["entry"] for l in _legs), 2),
+                        "exit_price": 0,
+                        "exit_reason": "OPEN",
+                        "exit_remark": "Live open position",
+                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
+                        "legs": _legs,
+                    })
+
+            elif sname == "trap_scanner":
+                strat = self._find_trap_book(cid, bid, underlying)
+                pos = getattr(strat, "_position", None) if strat else None
+                if not pos or int(pos.get("remaining_qty", 0) or 0) <= 0:
+                    continue
+                ep = float(pos.get("entry_price", 0.0) or 0.0)
+                qty = int(pos.get("remaining_qty", 0) or 0)
+                side = str(pos.get("side", ""))
+                strike = int(pos.get("strike", 0) or 0)
+                _legs = [{
+                    "side": side, "strike": strike,
+                    "entry": round(ep, 2), "exit": 0, "pnl": 0,
+                    "entry_ts": pos.get("entry_ts"),
+                    "exit_ts": None,
+                    "entry_reason": pos.get("signal_source", "HTF"),
+                }]
+                rows.append({
+                    "date": pos.get("entry_ts") or datetime.now(IST).isoformat(timespec="seconds"),
+                    "strategy": "trap_scanner",
+                    "instrument": f"{str(underlying).upper()} {side} {strike}".strip(),
+                    "entry_price": round(ep, 2),
+                    "exit_price": 0,
+                    "exit_reason": "OPEN",
+                    "exit_remark": "Live open position",
+                    "pnl": 0,
+                    "legs": _legs,
+                })
+
+        return rows
 
     def stop(self) -> None:
         self._ws_bridge.stop()

@@ -2683,6 +2683,7 @@ document.addEventListener('alpine:init', () => {
           // straddle that opened and closed = 4 rows.
           const flat = [];
           for (const tr of this.csHistory) {
+            const isOpen = tr.exit_reason === 'OPEN';
             const legs = (tr.legs && tr.legs.length) ? tr.legs
                        : [{ side: '', strike: '', entry: tr.entry_price,
                             exit: tr.exit_price, pnl: tr.pnl, entry_ts: null,
@@ -2700,7 +2701,9 @@ document.addEventListener('alpine:init', () => {
                 action: 'SELL', side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
                 price: lg.entry,
-                pnl: null, reason: (lg.entry_reason || 'entry'),
+                pnl: null,
+                reason: isOpen ? 'OPEN' : (lg.entry_reason || 'entry'),
+                remark: isOpen ? (tr.exit_remark || 'Live open position') : '',
               });
             }
             // CLOSE rows (bought to close).
@@ -2824,6 +2827,7 @@ document.addEventListener('alpine:init', () => {
       if (s === 'beginning') return 'Beginning entry';
       if (s === 'reentry') return 'Re-entry';
       if (s === 'entry') return 'Open (sold)';   // generic fallback — open reason not recorded (pre-fix data)
+      if (s === 'OPEN') return 'Open (live)';
       if (s === 'eod_squareoff' || s === 'time_exit_eod') return 'EOD square-off';
       if (s === 'day_loss_sl') return 'Day loss SL';
       if (s === 'day_profit_target') return 'Day profit target';
