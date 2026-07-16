@@ -212,9 +212,9 @@
         ],
         "profit_target_pct": 0,
         "loss_sl_pct": 0,
-        "tsl_enabled": true,
+        "tsl_enabled": false,
         "tsl_scalable": {
-          "enabled": true,
+          "enabled": false,
           "base_profit": 1500,
           "base_lock": 500,
           "step_profit": 500,
@@ -326,8 +326,7 @@
         "max_sl_rs": 5000,
         "entry_basis": "ltp",
         "theta_target": 20,
-        "trail_basis": "ltp",
-        "itm_pair_gate_enabled": true
+        "trail_basis": "ltp"
       },
       "iron_condor": {
         "enabled": true,
@@ -703,9 +702,9 @@
         ],
         "profit_target_pct": 0,
         "loss_sl_pct": 0,
-        "tsl_enabled": true,
+        "tsl_enabled": false,
         "tsl_scalable": {
-          "enabled": true,
+          "enabled": false,
           "base_profit": 1500,
           "base_lock": 500,
           "step_profit": 500,
@@ -1084,9 +1083,9 @@
         ],
         "profit_target_pct": 0,
         "loss_sl_pct": 0,
-        "tsl_enabled": true,
+        "tsl_enabled": false,
         "tsl_scalable": {
-          "enabled": true,
+          "enabled": false,
           "base_profit": 10000,
           "base_lock": 5000,
           "step_profit": 5000,
@@ -1349,9 +1348,9 @@
         "sl_pct": 30,
         "profit_target_pct": 100,
         "loss_sl_pct": 100,
-        "tsl_enabled": true,
+        "tsl_enabled": false,
         "tsl_scalable": {
-          "enabled": true,
+          "enabled": false,
           "base_profit": 2500,
           "base_lock": 1500,
           "step_profit": 1500,
@@ -1455,7 +1454,6 @@
         "lot_multiplier": 5,
         "product_type": "NRML",
         "entry_basis": "theta",
-        "theta_target": 15,
         "sl_cooldown_minutes": 5,
         "trail_basis": "theta",
         "itm_pair_gate_enabled": true
@@ -1594,9 +1592,9 @@
         "sl_pct": 30,
         "profit_target_pct": 0,
         "loss_sl_pct": 0,
-        "tsl_enabled": true,
+        "tsl_enabled": false,
         "tsl_scalable": {
-          "enabled": true,
+          "enabled": false,
           "base_profit": 1500,
           "base_lock": 500,
           "step_profit": 500,
