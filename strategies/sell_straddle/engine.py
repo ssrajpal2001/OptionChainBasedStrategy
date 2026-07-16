@@ -392,6 +392,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"║ VWAP RISE SL: {'ON' if self._vwap_rise_enabled else 'OFF'}({self._vwap_rise_threshold:.2f}%)",
             f"║ ITM PAIR GATE: {'ON' if self._itm_pair_gate_enabled else 'OFF'} "
             f"(profit≥₹{self._itm_pair_gate_profit_inr:.0f})",
+            f"║ SAME-DAY EXPIRY: {'ALLOWED' if getattr(self, '_same_day_expiry_enabled', False) else 'SHIFT TO NEXT'}",
             f"║ DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
             f"BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
@@ -419,6 +420,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         if not current:
             return None
         if today == current:
+            if getattr(self, "_same_day_expiry_enabled", False):
+                return current
             exps = [e for e in REGISTRY.all_expiries(self._underlying) if e > current]
             if exps:
                 return exps[0]

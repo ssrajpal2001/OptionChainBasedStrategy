@@ -984,6 +984,7 @@
         "trail_floor_pct": 12.5,
         "itm_pair_gate_enabled": true,
         "itm_pair_gate_profit_inr": 500,
+        "same_day_expiry_enabled": true,
         "pool_itm_depth": 4,
         "pool_otm_depth": 4,
         "roll_max_itm_steps": 5,
