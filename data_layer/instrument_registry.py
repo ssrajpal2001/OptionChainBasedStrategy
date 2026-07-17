@@ -43,7 +43,7 @@ _EXPIRY_WEEKDAY: Dict[str, int] = {
     "BANKNIFTY":   2,   # Wednesday
     "FINNIFTY":    1,   # Tuesday
     "MIDCPNIFTY":  0,   # Monday
-    "SENSEX":      1,   # Tuesday
+    "SENSEX":      4,   # Friday (BSE Sensex weekly options)
 }
 
 # Upstox underlying instrument key (used for get_option_contracts call)
@@ -111,6 +111,13 @@ class InstrumentRegistry:
         # MCX commodities load from the MCX master JSON (no Upstox SDK needed).
         if underlying.upper() in _MCX_UNDERLYINGS:
             self._load_mcx(underlying.upper(), today, diag)
+            return
+
+        # BSE indices (SENSEX, BANKEX) — load from BSE master JSON directly.
+        # The API's weekday-based expiry math is unreliable for BSE weekly options,
+        # so we use the actual exchange master register instead of calendar days.
+        if underlying.upper() in ("SENSEX", "BANKEX"):
+            self._load_from_master_json(underlying, today, diag)
             return
 
         try:
@@ -369,19 +376,19 @@ class InstrumentRegistry:
         keys: Dict[Tuple[str, int, str], str] = {}
         expiry_set: Set[date] = set()
 
-        # Segment prefix for this underlying (BSE for SENSEX, NSE for rest)
-        seg_prefix = "BSE_FO|" if underlying == "SENSEX" else "NSE_FO|"
+        # Segment prefix for this underlying (BSE for SENSEX/BANKEX, NSE for rest)
+        seg_prefix = "BSE_FO|" if underlying in ("SENSEX", "BANKEX") else "NSE_FO|"
         diag.append(f"Filtering master JSON: ikey startswith '{seg_prefix}' AND ts startswith '{underlying}'")
 
-        # Log first 3 overall samples + first matching NSE_FO sample
+        # Log first 3 overall samples + first matching {seg_prefix} sample
         for i, si in enumerate(raw_instruments[:3]):
             ik, ts_i, _, _ = self._parse_instrument(si)
             diag.append(f"  sample[{i}]: ikey={ik!r} ts={ts_i!r}")
-        # Find first NSE_FO instrument to show actual NIFTY format
+        # Find first {seg_prefix} instrument to show actual format
         for si in raw_instruments:
             ik, ts_i, _, _ = self._parse_instrument(si)
             if ik.startswith(seg_prefix):
-                diag.append(f"  first NSE_FO sample: ikey={ik!r} ts={ts_i!r}")
+                diag.append(f"  first {seg_prefix} sample: ikey={ik!r} ts={ts_i!r}")
                 break
 
         for inst in raw_instruments:

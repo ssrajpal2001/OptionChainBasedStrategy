@@ -620,7 +620,7 @@ class DataMixin:
         # Fallback: weekday math (works for NSE; BSE/MCX may differ — prefer REGISTRY)
         _EXPIRY_DOW = {
             "NIFTY": 3, "BANKNIFTY": 2, "FINNIFTY": 1,
-            "SENSEX": 3, "MIDCPNIFTY": 1,  # SENSEX = Thursday (verified from BSE master 2026-06-17)
+            "SENSEX": 4, "MIDCPNIFTY": 1,  # SENSEX = Friday (BSE weekly options)
         }
         if self._und == "CRUDEOIL":
             # MCX CrudeOil options expire on 20th (or nearest preceding Monday if 20th is weekend)

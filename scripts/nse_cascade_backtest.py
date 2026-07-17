@@ -63,7 +63,7 @@ def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
 # Weekly expiry weekday per underlying (matches REGISTRY)
 _EXPIRY_WEEKDAY = {
     "NIFTY": 1, "BANKNIFTY": 2, "FINNIFTY": 1,
-    "MIDCPNIFTY": 0, "SENSEX": 1,
+    "MIDCPNIFTY": 0, "SENSEX": 4,  # SENSEX = Friday (BSE weekly options)
 }
 
 def _get_monthly_expiry(symbol: str, year: int, month: int) -> date:

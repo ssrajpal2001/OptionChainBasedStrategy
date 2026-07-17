@@ -458,7 +458,7 @@ _WEEKLY_EXPIRY_WEEKDAY: Dict[str, int] = {
     "BANKNIFTY":   2,   # Wednesday
     "FINNIFTY":    1,   # Tuesday
     "MIDCPNIFTY":  0,   # Monday
-    "SENSEX":      1,   # Tuesday
+    "SENSEX":      4,   # Friday (BSE Sensex weekly options)
 }
 
 _STRIKE_STEPS: Dict[str, int] = {
