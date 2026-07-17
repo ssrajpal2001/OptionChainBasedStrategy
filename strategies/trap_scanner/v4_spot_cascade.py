@@ -651,6 +651,254 @@ def _simulate_micro_trade(
     }
 
 
+def _compute_trailing_sl(
+    kind: str,
+    current_1m_ts: pd.Timestamp,
+    df_5m_full: pd.DataFrame,
+    current_sl: float,
+    entry: float,
+    initial_risk: float,
+    running_best: float,
+) -> float:
+    """
+    Dynamic 5-minute structural trailing stop for Tranche 2.
+
+    Once price reaches 1.5R profit, trail at the lowest low (long) or highest
+    high (short) of the two completed 5-minute candles preceding the current
+    1-minute bar. The trailing stop only tightens, never widens.
+    """
+    if kind == "BEAR":  # long
+        if running_best < entry + 1.5 * initial_risk:
+            return current_sl
+        current_5m_start = current_1m_ts.floor("5min")
+        prev_5m = df_5m_full[
+            (df_5m_full["datetime"] < current_5m_start)
+            & (df_5m_full["datetime"].dt.date == current_1m_ts.date())
+        ].tail(2)
+        if len(prev_5m) < 2:
+            return current_sl
+        trail = float(prev_5m["low"].min())
+        return max(current_sl, trail)
+    else:  # short
+        if running_best > entry - 1.5 * initial_risk:
+            return current_sl
+        current_5m_start = current_1m_ts.floor("5min")
+        prev_5m = df_5m_full[
+            (df_5m_full["datetime"] < current_5m_start)
+            & (df_5m_full["datetime"].dt.date == current_1m_ts.date())
+        ].tail(2)
+        if len(prev_5m) < 2:
+            return current_sl
+        trail = float(prev_5m["high"].max())
+        return min(current_sl, trail)
+
+
+def _simulate_micro_trade_tranches(
+    ltf: Dict,
+    df_1m: pd.DataFrame,
+    df_5m_full: pd.DataFrame,
+    eod: datetime,
+    entry_mode: str = "close",
+) -> List[Dict]:
+    """
+    Dual-tranche risk-managed execution of a V4 LTF setup.
+
+    Tranche 1 (50%): exits at 2R target or SL (initial or break-even).
+    Tranche 2 (50%): exits via trailing stop after 1.5R, or break-even SL,
+                     or initial SL, or EOD.
+
+    Break-even: once price reaches 1R profit, both tranches move SL to entry.
+    Trailing: once price reaches 1.5R profit, Tranche 2 trails at the lowest
+    low (long) or highest high (short) of the two preceding completed 5m candles.
+
+    Returns a list of two tranche records (one per tranche). If no valid entry
+    is found, returns an empty list.
+    """
+    trigger = ltf["trigger"]
+    sl = ltf["sl"]
+    target = ltf["target"]
+    kind = ltf["kind"]
+    htf_entry = ltf["htf_entry_level"]
+
+    initial_risk = trigger - sl if kind == "BEAR" else sl - trigger
+    if initial_risk <= 0:
+        return []
+
+    # --- 1m entry gate (same as single mode) ---
+    future = df_1m[df_1m["datetime"] > ltf["setup_ts"]].copy()
+    if future.empty:
+        return []
+    future = future.sort_values("datetime").reset_index(drop=True)
+
+    entry_ts = None
+    for i in range(1, len(future)):
+        prev = future.iloc[i - 1]
+        curr = future.iloc[i]
+        if curr["datetime"] > eod:
+            return []
+
+        if kind == "BEAR":  # long
+            if entry_mode == "close":
+                if curr["close"] > prev["high"] and curr["high"] >= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "limit":
+                if curr["high"] >= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "wick":
+                if curr["high"] > prev["high"] and curr["high"] >= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            else:
+                raise ValueError(f"Unknown entry_mode: {entry_mode}")
+        else:  # short
+            if entry_mode == "close":
+                if curr["close"] < prev["low"] and curr["low"] <= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "limit":
+                if curr["low"] <= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "wick":
+                if curr["low"] < prev["low"] and curr["low"] <= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            else:
+                raise ValueError(f"Unknown entry_mode: {entry_mode}")
+
+    if entry_ts is None:
+        return []
+
+    after = df_1m[df_1m["datetime"] >= entry_ts].copy()
+    if after.empty:
+        return []
+    after = after.sort_values("datetime").reset_index(drop=True)
+
+    # Tranche 1 target = 2R
+    t1_target = trigger + 2 * initial_risk if kind == "BEAR" else trigger - 2 * initial_risk
+
+    t1_active, t2_active = True, True
+    t1_sl, t2_sl = sl, sl
+    t1_exit_ts = t2_exit_ts = None
+    t1_exit_price = t2_exit_price = None
+    t1_exit_reason = t2_exit_reason = None
+    running_best = trigger
+
+    for _, row in after.iterrows():
+        bar_end = row["datetime"] + timedelta(minutes=1)
+
+        # Update running best price (intrabar) for 1R / 1.5R thresholds
+        if kind == "BEAR":
+            running_best = max(running_best, row["high"])
+        else:
+            running_best = min(running_best, row["low"])
+
+        # Break-even: at 1R, move both SLs to entry
+        if kind == "BEAR":
+            if running_best >= trigger + initial_risk:
+                t1_sl = max(t1_sl, trigger)
+                t2_sl = max(t2_sl, trigger)
+        else:
+            if running_best <= trigger - initial_risk:
+                t1_sl = min(t1_sl, trigger)
+                t2_sl = min(t2_sl, trigger)
+
+        # Tranche 2 trailing stop after 1.5R
+        t2_sl = _compute_trailing_sl(
+            kind, row["datetime"], df_5m_full, t2_sl, trigger, initial_risk, running_best
+        )
+
+        # Tranche 1 exit: 2R target or SL
+        if t1_active:
+            if kind == "BEAR":
+                if row["high"] >= t1_target:
+                    t1_exit_price, t1_exit_reason, t1_exit_ts = t1_target, "TARGET_2R", min(bar_end, eod)
+                    t1_active = False
+                elif row["low"] <= t1_sl:
+                    t1_exit_price, t1_exit_reason, t1_exit_ts = t1_sl, "SL", min(bar_end, eod)
+                    t1_active = False
+            else:
+                if row["low"] <= t1_target:
+                    t1_exit_price, t1_exit_reason, t1_exit_ts = t1_target, "TARGET_2R", min(bar_end, eod)
+                    t1_active = False
+                elif row["high"] >= t1_sl:
+                    t1_exit_price, t1_exit_reason, t1_exit_ts = t1_sl, "SL", min(bar_end, eod)
+                    t1_active = False
+
+        # Tranche 2 exit: SL or EOD
+        if t2_active:
+            if kind == "BEAR":
+                if row["low"] <= t2_sl:
+                    t2_exit_price, t2_exit_reason, t2_exit_ts = t2_sl, "SL", min(bar_end, eod)
+                    t2_active = False
+            else:
+                if row["high"] >= t2_sl:
+                    t2_exit_price, t2_exit_reason, t2_exit_ts = t2_sl, "SL", min(bar_end, eod)
+                    t2_active = False
+
+        # EOD square-off for any remaining active tranche
+        if bar_end >= eod:
+            if t1_active:
+                t1_exit_price, t1_exit_reason, t1_exit_ts = float(row["close"]), "EOD", eod
+                t1_active = False
+            if t2_active:
+                t2_exit_price, t2_exit_reason, t2_exit_ts = float(row["close"]), "EOD", eod
+                t2_active = False
+            break
+
+        if not t1_active and not t2_active:
+            break
+
+    if t1_exit_ts is None or t2_exit_ts is None:
+        return []
+
+    t1_pts = t1_exit_price - trigger if kind == "BEAR" else trigger - t1_exit_price
+    t2_pts = t2_exit_price - trigger if kind == "BEAR" else trigger - t2_exit_price
+
+    # 50/50 volume split
+    t1_pnl = t1_pts * LOT_SIZE * 0.5
+    t2_pnl = t2_pts * LOT_SIZE * 0.5
+
+    base = {
+        "kind": kind,
+        "direction": ltf["direction"],
+        "macro_type": "Bull" if kind == "BULL" else "Bear",
+        "setup_ts": ltf["setup_ts"],
+        "entry_ts": entry_ts,
+        "entry_price": trigger,
+        "entry_mode": entry_mode,
+        "sl": sl,
+        "target": target,
+        "zone_high": ltf["zone_high"],
+        "zone_low": ltf["zone_low"],
+        "htf_entry_level": htf_entry,
+        "initial_risk": round(initial_risk, 2),
+    }
+
+    return [
+        {
+            **base,
+            "tranche": 1,
+            "exit_ts": t1_exit_ts,
+            "exit_price": t1_exit_price,
+            "exit_reason": t1_exit_reason,
+            "pts": round(t1_pts, 2),
+            "pnl_rs": round(t1_pnl, 2),
+        },
+        {
+            **base,
+            "tranche": 2,
+            "exit_ts": t2_exit_ts,
+            "exit_price": t2_exit_price,
+            "exit_reason": t2_exit_reason,
+            "pts": round(t2_pts, 2),
+            "pnl_rs": round(t2_pnl, 2),
+        },
+    ]
+
+
 def simulate_macro_to_micro_trade(
     macro: Dict,
     df_1m: pd.DataFrame,
@@ -668,21 +916,25 @@ def simulate_macro_to_micro_trade(
     entry_mode: str = "close",
     use_filters: bool = True,
     require_mtf_ltf_rejection: bool = False,
-) -> Optional[Dict]:
+    dual_tranche: bool = False,
+) -> List[Dict]:
     """
     For a single confirmed macro trap, wait for price to re-enter the validated
     trap zone (unless require_zone_reentry=False, in which case we start at
     confirmation), then run the V4 15m -> 5m cascade and 1m entry gate.
-    Returns the first completed trade (max one trade per macro trap).
+    Returns a list of completed trade/tranche records (max one setup per macro trap).
 
     Set use_filters=False to run pure price action: ADX/RSI/VWAP gates are bypassed.
     Set require_mtf_ltf_rejection=True to require a 15m or 5m rejection candle
     inside the macro trap zone before the 1m entry is allowed.
+    Set dual_tranche=True to split each position into 50/50 tranches with 1R
+    break-even, 2R target for tranche 1, and 5m structural trailing stop for
+    tranche 2 after 1.5R.
     """
     reentry_ts = _find_zone_reentry_ts(macro, df_1m)
     cascade_ts = reentry_ts if reentry_ts is not None else macro["confirm_ts"]
     if require_zone_reentry and reentry_ts is None:
-        return None
+        return []
 
     htf_trap = _macro_to_htf_trap(macro)
     htf_trap["breach_ts"] = cascade_ts
@@ -693,7 +945,7 @@ def simulate_macro_to_micro_trade(
     day_5m = df_5m_full[df_5m_full["datetime"].dt.date == day]
     day_15m = df_15m_full[df_15m_full["datetime"].dt.date == day]
     if day_5m.empty or day_15m.empty:
-        return None
+        return []
 
     eod = pd.Timestamp(f"{day} {intraday_exit}", tz="Asia/Kolkata")
 
@@ -711,13 +963,22 @@ def simulate_macro_to_micro_trade(
                     macro, df_5m_full, df_15m_full, cascade_ts, ltf["setup_ts"]
                 ):
                     continue
-            trade = _simulate_micro_trade(ltf, df_1m, eod, entry_mode=entry_mode)
-            if trade:
-                trade["macro_confirm_ts"] = macro["confirm_ts"]
-                trade["macro_reentry_ts"] = reentry_ts
-                trade["multiplier"] = macro.get("multiplier", f"{HTF_MIN}m")
-                return trade
-    return None
+            if dual_tranche:
+                tranches = _simulate_micro_trade_tranches(ltf, df_1m, df_5m_full, eod, entry_mode=entry_mode)
+                if tranches:
+                    for tr in tranches:
+                        tr["macro_confirm_ts"] = macro["confirm_ts"]
+                        tr["macro_reentry_ts"] = reentry_ts
+                        tr["multiplier"] = macro.get("multiplier", f"{HTF_MIN}m")
+                    return tranches
+            else:
+                trade = _simulate_micro_trade(ltf, df_1m, eod, entry_mode=entry_mode)
+                if trade:
+                    trade["macro_confirm_ts"] = macro["confirm_ts"]
+                    trade["macro_reentry_ts"] = reentry_ts
+                    trade["multiplier"] = macro.get("multiplier", f"{HTF_MIN}m")
+                    return [trade]
+    return []
 
 
 def backtest_macro_to_micro(
@@ -737,6 +998,7 @@ def backtest_macro_to_micro(
     entry_mode: str = "close",
     use_filters: bool = True,
     require_mtf_ltf_rejection: bool = False,
+    dual_tranche: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the macro-to-micro trap engine on NIFTY spot data.
@@ -757,7 +1019,7 @@ def backtest_macro_to_micro(
             t["multiplier_min"] = mult
             t["multiplier"] = f"{mult}m"
             macro_records.append(t)
-            trade = simulate_macro_to_micro_trade(
+            tranches = simulate_macro_to_micro_trade(
                 t, df_1m, df_5m_full, df_15m_full,
                 max_adx=max_adx, rsi_long_min=rsi_long_min, rsi_short_max=rsi_short_max,
                 use_vwap=use_vwap, use_adx=use_adx, use_rsi=use_rsi,
@@ -766,9 +1028,10 @@ def backtest_macro_to_micro(
                 entry_mode=entry_mode,
                 use_filters=use_filters,
                 require_mtf_ltf_rejection=require_mtf_ltf_rejection,
+                dual_tranche=dual_tranche,
             )
-            if trade:
-                trades.append(trade)
+            if tranches:
+                trades.extend(tranches)
 
     macro_df = pd.DataFrame(macro_records)
     trades_df = pd.DataFrame(trades)
@@ -782,7 +1045,7 @@ def summarize_macro_to_micro_trades(trades: pd.DataFrame) -> Dict:
             "total": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
             "gross_profit": 0.0, "gross_loss": 0.0, "net_pnl": 0.0,
             "profit_factor": 0.0, "avg_win": 0.0, "avg_loss": 0.0, "rr": 0.0,
-            "max_dd": 0.0,
+            "max_dd": 0.0, "setup_count": 0,
         }
 
     pnls = trades["pnl_rs"].values
@@ -800,9 +1063,12 @@ def summarize_macro_to_micro_trades(trades: pd.DataFrame) -> Dict:
     cummax = np.maximum.accumulate(cum)
     max_dd = float((cummax - cum).max())
 
+    setup_count = trades["setup_ts"].nunique() if "setup_ts" in trades.columns else len(trades)
+
     return {
         "total": len(trades), "wins": len(wins), "losses": len(losses),
         "win_rate": 100 * len(wins) / len(trades), "gross_profit": gp,
         "gross_loss": gl, "net_pnl": net, "profit_factor": pf,
         "avg_win": avg_win, "avg_loss": avg_loss, "rr": rr, "max_dd": max_dd,
+        "setup_count": setup_count,
     }
