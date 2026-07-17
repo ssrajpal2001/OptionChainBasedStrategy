@@ -15,7 +15,7 @@ and reused by both the backtest and the live engine.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -30,6 +30,7 @@ SL_BUFFER = 10.0
 VWAP_PERIOD = 500
 ADX_PERIOD = 20
 RSI_PERIOD = 14
+LOT_SIZE = 75
 
 
 def _resample_per_day(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
@@ -419,3 +420,286 @@ def find_latest_v4_setup(
     if not setups:
         return None
     return setups[-1]
+
+
+# ---------------------------------------------------------------------------
+# Macro-to-micro trap execution engine
+# ---------------------------------------------------------------------------
+
+def _macro_to_htf_trap(macro: Dict) -> Dict:
+    """Map a macro trap (Bull/Bear) to the V4 htf_trap shape used by MTF/LTF."""
+    kind = "BULL" if macro["type"] == "Bull" else "BEAR"
+    return {
+        "kind": kind,
+        "direction": "SHORT" if kind == "BULL" else "LONG",
+        "breach_ts": macro["confirm_ts"],
+        "breach_end": macro["confirm_ts"] + timedelta(minutes=macro.get("multiplier_min", HTF_MIN)),
+        "target": macro["anchor_sl"],
+        "htf_entry_level": macro["breakout_line"],
+        "htf_breach_ts": macro["confirm_ts"],
+    }
+
+
+def _find_zone_reentry_ts(macro: Dict, df_1m: pd.DataFrame) -> Optional[datetime]:
+    """First 1m timestamp after confirmation where price is back inside the validated zone."""
+    after = df_1m[df_1m["datetime"] > macro["confirm_ts"]].copy()
+    if after.empty:
+        return None
+    after = after.sort_values("datetime").reset_index(drop=True)
+    if macro["type"] == "Bull":
+        inside = after[(after["close"] >= macro["breakout_line"]) & (after["close"] <= macro["peak"])]
+    else:
+        inside = after[(after["close"] >= macro["peak"]) & (after["close"] <= macro["breakout_line"])]
+    return inside["datetime"].iloc[0] if not inside.empty else None
+
+
+def _simulate_micro_trade(
+    ltf: Dict,
+    df_1m: pd.DataFrame,
+    eod: datetime,
+) -> Optional[Dict]:
+    """
+    Execute a V4 LTF setup with the 1-minute micro trigger:
+      - Long (Bear macro): 1m candle closes above the prior 1m high.
+      - Short (Bull macro): 1m candle closes below the prior 1m low.
+    Entry price is the V4 1/3 retracement trigger (limit fill) once both the
+    micro-trigger and limit-cross conditions are satisfied.
+    """
+    trigger = ltf["trigger"]
+    sl = ltf["sl"]
+    target = ltf["target"]
+    kind = ltf["kind"]
+    htf_entry = ltf["htf_entry_level"]
+
+    future = df_1m[df_1m["datetime"] > ltf["setup_ts"]].copy()
+    if future.empty:
+        return None
+    future = future.sort_values("datetime").reset_index(drop=True)
+
+    entry_ts = None
+    for i in range(1, len(future)):
+        prev = future.iloc[i - 1]
+        curr = future.iloc[i]
+        if curr["datetime"] > eod:
+            return None
+
+        if kind == "BEAR":  # long
+            if curr["close"] > prev["high"] and curr["high"] >= trigger:
+                entry_ts = curr["datetime"]
+                break
+        else:  # short
+            if curr["close"] < prev["low"] and curr["low"] <= trigger:
+                entry_ts = curr["datetime"]
+                break
+
+    if entry_ts is None:
+        return None
+
+    after = df_1m[df_1m["datetime"] >= entry_ts].copy()
+    if after.empty:
+        return None
+    after = after.sort_values("datetime").reset_index(drop=True)
+
+    exit_ts = None
+    exit_spot = None
+    exit_reason = "OPEN"
+    void_lifted = False
+
+    for _, row in after.iterrows():
+        bar_end = row["datetime"] + timedelta(minutes=1)
+
+        if kind == "BEAR":  # long
+            if not void_lifted and row["low"] <= htf_entry:
+                void_lifted = True
+            if void_lifted:
+                if row["low"] <= sl:
+                    exit_spot, exit_reason, exit_ts = sl, "SL", min(bar_end, eod)
+                    break
+                if row["high"] >= target:
+                    exit_spot, exit_reason, exit_ts = target, "TARGET", min(bar_end, eod)
+                    break
+            else:
+                if row["low"] <= sl:
+                    exit_spot, exit_reason, exit_ts = sl, "SL", min(bar_end, eod)
+                    break
+        else:  # short
+            if not void_lifted and row["high"] >= htf_entry:
+                void_lifted = True
+            if void_lifted:
+                if row["high"] >= sl:
+                    exit_spot, exit_reason, exit_ts = sl, "SL", min(bar_end, eod)
+                    break
+                if row["low"] <= target:
+                    exit_spot, exit_reason, exit_ts = target, "TARGET", min(bar_end, eod)
+                    break
+            else:
+                if row["high"] >= sl:
+                    exit_spot, exit_reason, exit_ts = sl, "SL", min(bar_end, eod)
+                    break
+
+        if bar_end >= eod:
+            exit_spot, exit_reason, exit_ts = float(row["close"]), "EOD", eod
+            break
+
+    if exit_ts is None or exit_spot is None:
+        return None
+
+    pts = exit_spot - trigger if kind == "BEAR" else trigger - exit_spot
+    return {
+        "kind": kind,
+        "direction": ltf["direction"],
+        "macro_type": "Bull" if kind == "BULL" else "Bear",
+        "setup_ts": ltf["setup_ts"],
+        "entry_ts": entry_ts,
+        "entry_price": trigger,
+        "sl": sl,
+        "target": target,
+        "exit_ts": exit_ts,
+        "exit_price": exit_spot,
+        "exit_reason": exit_reason,
+        "pts": round(pts, 2),
+        "pnl_rs": round(pts * LOT_SIZE, 2),
+        "zone_high": ltf["zone_high"],
+        "zone_low": ltf["zone_low"],
+        "htf_entry_level": htf_entry,
+        "void_lifted": void_lifted,
+    }
+
+
+def simulate_macro_to_micro_trade(
+    macro: Dict,
+    df_1m: pd.DataFrame,
+    df_5m_full: pd.DataFrame,
+    df_15m_full: pd.DataFrame,
+    max_adx: float = 22.5,
+    rsi_long_min: float = 40.0,
+    rsi_short_max: float = 60.0,
+    use_vwap: bool = True,
+    use_adx: bool = True,
+    use_rsi: bool = True,
+    entry_end: time = time(15, 15),
+    intraday_exit: time = time(15, 30),
+    require_zone_reentry: bool = False,
+) -> Optional[Dict]:
+    """
+    For a single confirmed macro trap, wait for price to re-enter the validated
+    trap zone (unless require_zone_reentry=False, in which case we start at
+    confirmation), then run the V4 15m -> 5m cascade and 1m micro-trigger entry.
+    Returns the first completed trade (max one trade per macro trap).
+    """
+    reentry_ts = _find_zone_reentry_ts(macro, df_1m)
+    cascade_ts = reentry_ts if reentry_ts is not None else macro["confirm_ts"]
+    if require_zone_reentry and reentry_ts is None:
+        return None
+
+    htf_trap = _macro_to_htf_trap(macro)
+    htf_trap["breach_ts"] = cascade_ts
+    htf_trap["breach_end"] = cascade_ts + timedelta(minutes=macro.get("multiplier_min", HTF_MIN))
+    htf_trap["htf_breach_ts"] = cascade_ts
+
+    day = cascade_ts.date()
+    day_5m = df_5m_full[df_5m_full["datetime"].dt.date == day]
+    day_15m = df_15m_full[df_15m_full["datetime"].dt.date == day]
+    if day_5m.empty or day_15m.empty:
+        return None
+
+    eod = pd.Timestamp(f"{day} {intraday_exit}", tz="Asia/Kolkata")
+
+    for mtf in find_mtf_15m_traps(day_15m, htf_trap):
+        for ltf in find_ltf_5m_traps(day_5m, mtf):
+            if ltf["setup_ts"].time() > entry_end:
+                continue
+            if not check_ltf_filters(
+                ltf, df_5m_full, max_adx, rsi_long_min, rsi_short_max,
+                use_vwap, use_adx, use_rsi,
+            ):
+                continue
+            trade = _simulate_micro_trade(ltf, df_1m, eod)
+            if trade:
+                trade["macro_confirm_ts"] = macro["confirm_ts"]
+                trade["macro_reentry_ts"] = reentry_ts
+                trade["multiplier"] = macro.get("multiplier", f"{HTF_MIN}m")
+                return trade
+    return None
+
+
+def backtest_macro_to_micro(
+    df_1m: pd.DataFrame,
+    multipliers: List[int] = (75, 150, 225),
+    lookback: int = 3,
+    max_adx: float = 22.5,
+    rsi_long_min: float = 40.0,
+    rsi_short_max: float = 60.0,
+    use_vwap: bool = True,
+    use_adx: bool = True,
+    use_rsi: bool = True,
+    entry_start: time = time(9, 15),
+    entry_end: time = time(15, 15),
+    intraday_exit: time = time(15, 30),
+    require_zone_reentry: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Run the macro-to-micro trap engine on NIFTY spot data.
+    Returns (macro_table, trade_log).
+    """
+    df_5m_full = prepare_5m_with_indicators(df_1m)
+    df_15m_full = _resample_per_day(df_1m, MTF_MIN)
+
+    macro_records: List[Dict] = []
+    trades: List[Dict] = []
+
+    for mult in multipliers:
+        df_htf = _resample_per_day(df_1m, mult)
+        if df_htf.empty or len(df_htf) < lookback + 2:
+            continue
+        traps = detect_macro_htf_traps(df_htf, lookback=lookback)
+        for t in traps:
+            t["multiplier_min"] = mult
+            t["multiplier"] = f"{mult}m"
+            macro_records.append(t)
+            trade = simulate_macro_to_micro_trade(
+                t, df_1m, df_5m_full, df_15m_full,
+                max_adx=max_adx, rsi_long_min=rsi_long_min, rsi_short_max=rsi_short_max,
+                use_vwap=use_vwap, use_adx=use_adx, use_rsi=use_rsi,
+                entry_end=entry_end, intraday_exit=intraday_exit,
+                require_zone_reentry=require_zone_reentry,
+            )
+            if trade:
+                trades.append(trade)
+
+    macro_df = pd.DataFrame(macro_records)
+    trades_df = pd.DataFrame(trades)
+    return macro_df, trades_df
+
+
+def summarize_macro_to_micro_trades(trades: pd.DataFrame) -> Dict:
+    """Standard performance summary for the macro-to-micro trade log."""
+    if trades.empty:
+        return {
+            "total": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "gross_profit": 0.0, "gross_loss": 0.0, "net_pnl": 0.0,
+            "profit_factor": 0.0, "avg_win": 0.0, "avg_loss": 0.0, "rr": 0.0,
+            "max_dd": 0.0,
+        }
+
+    pnls = trades["pnl_rs"].values
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    gp = float(wins.sum()) if len(wins) else 0.0
+    gl = abs(float(losses.sum())) if len(losses) else 0.0
+    net = float(pnls.sum())
+    pf = gp / gl if gl > 0 else float("inf")
+    avg_win = float(wins.mean()) if len(wins) else 0.0
+    avg_loss = abs(float(losses.mean())) if len(losses) else 0.0
+    rr = avg_win / avg_loss if avg_loss > 0 else 0.0
+
+    cum = pnls.cumsum()
+    cummax = np.maximum.accumulate(cum)
+    max_dd = float((cummax - cum).max())
+
+    return {
+        "total": len(trades), "wins": len(wins), "losses": len(losses),
+        "win_rate": 100 * len(wins) / len(trades), "gross_profit": gp,
+        "gross_loss": gl, "net_pnl": net, "profit_factor": pf,
+        "avg_win": avg_win, "avg_loss": avg_loss, "rr": rr, "max_dd": max_dd,
+    }
