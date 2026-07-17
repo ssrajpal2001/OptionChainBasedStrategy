@@ -27,7 +27,10 @@ _INDEX_CFG: Dict[str, dict] = {
                    "dynamic_premium_entry": False,
                    "target_premium": 100.0,
                    "premium_pick_mode": "nearest_below",
-                   "dynamic_entry_fallback": "current"},
+                   "dynamic_entry_fallback": "current",
+                   "v4_mode": False, "v4_max_adx": 20.0,
+                   "v4_rsi_long_min": 40.0, "v4_rsi_short_max": 60.0,
+                   "v4_use_vwap": False},
     # BANKNIFTY 4-tier cascade: HTF=180m → MTF=30m → LTF=3m → Exec=3m
     # Confirmed optimal from nse_cascade_backtest.py 18k-combo sweep (Apr-Jun 2026).
     # dte_min_filter DISABLED (0): BANKNIFTY trades the monthly expiry. A 10-day
@@ -254,6 +257,15 @@ class ConfigMixin:
         # Exit trigger source toggle: if True, SL/target checks use NIFTY spot price
         # instead of option LTP. Fill price and P&L still use option LTP.
         self._exit_on_spot    = bool(_adm.get("exit_on_spot", _def.get("exit_on_spot", False)))
+
+        # V4 spot-cascade config (NIFTY): 75m HTF -> 15m MTF -> 5m LTF -> 1m execution.
+        # When enabled, the live engine uses the backtest-validated V4 math on NIFTY spot
+        # and executes via the pre-selected CE1/PE1 option strikes.
+        self._v4_mode         = bool(_adm.get("v4_mode",         _def.get("v4_mode", False)))
+        self._v4_max_adx      = float(_adm.get("v4_max_adx",      _def.get("v4_max_adx", 20.0)))
+        self._v4_rsi_long_min = float(_adm.get("v4_rsi_long_min", _def.get("v4_rsi_long_min", 40.0)))
+        self._v4_rsi_short_max = float(_adm.get("v4_rsi_short_max", _def.get("v4_rsi_short_max", 60.0)))
+        self._v4_use_vwap     = bool(_adm.get("v4_use_vwap",     _def.get("v4_use_vwap", False)))
 
         # HTF direct limit-entry mode: fire a limit order as soon as an HTF zone is
         # trapped, without waiting for MTF/LTF confirmation. Designed for fast NIFTY

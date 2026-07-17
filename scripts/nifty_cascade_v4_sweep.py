@@ -50,6 +50,14 @@ DEFAULT_MAX_ADX = 20.0
 DEFAULT_RSI_LONG_MIN = 50.0
 DEFAULT_RSI_SHORT_MAX = 50.0
 
+# Option premium simulation defaults
+OPTION_MODE = False
+OPTION_DELTA = 0.55
+OPTION_LOT_SIZE = 75
+ENTRY_SLIPPAGE_PTS = 0.0
+EXIT_SLIPPAGE_PTS = 0.0
+COST_PER_LOT_RS = 0.0
+
 # Sweep parameter grids
 MAX_ADX_LIMITS = [20.0, 25.0, 30.0, 35.0]
 RSI_LONG_THRESHOLDS = [40.0, 45.0, 50.0]
@@ -298,7 +306,16 @@ def check_5m_filters(ltf_trap: Dict, df_5m_full: pd.DataFrame,
     return True
 
 
-def simulate_trade(ltf_trap: Dict, df_1m_day: pd.DataFrame, eod: datetime) -> Optional[Dict]:
+def simulate_trade(
+    ltf_trap: Dict,
+    df_1m_day: pd.DataFrame,
+    eod: datetime,
+    option_delta: float = 1.0,
+    option_lot_size: int = LOT_SIZE,
+    entry_slippage_pts: float = 0.0,
+    exit_slippage_pts: float = 0.0,
+    cost_per_lot_rs: float = 0.0,
+) -> Optional[Dict]:
     trigger, sl, target = ltf_trap["trigger"], ltf_trap["sl"], ltf_trap["target"]
     kind = ltf_trap["kind"]
     htf_entry = ltf_trap["htf_entry_level"]
@@ -369,6 +386,10 @@ def simulate_trade(ltf_trap: Dict, df_1m_day: pd.DataFrame, eod: datetime) -> Op
         return None
 
     pts = exit_spot - trigger if kind == "BEAR" else trigger - exit_spot
+    spot_pnl_rs = pts * LOT_SIZE
+    option_pts = pts * option_delta - entry_slippage_pts - exit_slippage_pts
+    option_pnl_rs = option_pts * option_lot_size - cost_per_lot_rs
+
     return {
         "kind": kind,
         "direction": ltf_trap["direction"],
@@ -381,7 +402,10 @@ def simulate_trade(ltf_trap: Dict, df_1m_day: pd.DataFrame, eod: datetime) -> Op
         "exit_price": exit_spot,
         "exit_reason": exit_reason,
         "pts": round(pts, 2),
-        "pnl_rs": round(pts * LOT_SIZE, 2),
+        "spot_pnl_rs": round(spot_pnl_rs, 2),
+        "option_delta": option_delta,
+        "option_pnl_rs": round(option_pnl_rs, 2),
+        "pnl_rs": round(option_pnl_rs, 2) if option_delta < 1.0 else round(spot_pnl_rs, 2),
         "zone_high": ltf_trap["zone_high"],
         "zone_low": ltf_trap["zone_low"],
     }
@@ -393,7 +417,12 @@ def run_backtest(df_1m: pd.DataFrame,
                  rsi_short_max: float = DEFAULT_RSI_SHORT_MAX,
                  use_vwap: bool = True,
                  use_adx: bool = True,
-                 use_rsi: bool = True) -> pd.DataFrame:
+                 use_rsi: bool = True,
+                 option_delta: float = 1.0,
+                 option_lot_size: int = LOT_SIZE,
+                 entry_slippage_pts: float = 0.0,
+                 exit_slippage_pts: float = 0.0,
+                 cost_per_lot_rs: float = 0.0) -> pd.DataFrame:
     df_5m_full = prepare_5m_with_indicators(df_1m)
     df_15m_full = resample_per_day(df_1m, MTF_MIN)
     df_75m_full = resample_per_day(df_1m, HTF_MIN)
@@ -426,7 +455,12 @@ def run_backtest(df_1m: pd.DataFrame,
                         continue
                     if not check_5m_filters(ltf, df_5m_full, max_adx, rsi_long_min, rsi_short_max, use_vwap, use_adx, use_rsi):
                         continue
-                    trade = simulate_trade(ltf, day_1m, eod)
+                    trade = simulate_trade(ltf, day_1m, eod,
+                                          option_delta=option_delta,
+                                          option_lot_size=option_lot_size,
+                                          entry_slippage_pts=entry_slippage_pts,
+                                          exit_slippage_pts=exit_slippage_pts,
+                                          cost_per_lot_rs=cost_per_lot_rs)
                     if trade:
                         all_trades.append(trade)
                         in_position = True
@@ -470,7 +504,12 @@ def summarize(trades: pd.DataFrame) -> Dict:
 # Parameter sensitivity sweep
 # ──────────────────────────────────────────────────────────────────────────────
 
-def run_sweep(df_1m: pd.DataFrame) -> pd.DataFrame:
+def run_sweep(df_1m: pd.DataFrame,
+              option_delta: float = 1.0,
+              option_lot_size: int = LOT_SIZE,
+              entry_slippage_pts: float = 0.0,
+              exit_slippage_pts: float = 0.0,
+              cost_per_lot_rs: float = 0.0) -> pd.DataFrame:
     """Grid search over ADX, RSI, and VWAP toggle."""
     rows = []
     total = len(MAX_ADX_LIMITS) * len(RSI_LONG_THRESHOLDS) * len(VWAP_FILTER_TOGGLE)
@@ -480,7 +519,12 @@ def run_sweep(df_1m: pd.DataFrame) -> pd.DataFrame:
         rsi_short = 100.0 - rsi_long  # symmetric threshold
         trades = run_backtest(df_1m, max_adx=max_adx, rsi_long_min=rsi_long,
                               rsi_short_max=rsi_short, use_vwap=use_vwap,
-                              use_adx=True, use_rsi=True)
+                              use_adx=True, use_rsi=True,
+                              option_delta=option_delta,
+                              option_lot_size=option_lot_size,
+                              entry_slippage_pts=entry_slippage_pts,
+                              exit_slippage_pts=exit_slippage_pts,
+                              cost_per_lot_rs=cost_per_lot_rs)
         s = summarize(trades)
         rows.append({
             "max_adx": max_adx,
@@ -538,7 +582,21 @@ def main():
     parser.add_argument("--rsi-long-min", type=float, default=DEFAULT_RSI_LONG_MIN)
     parser.add_argument("--rsi-short-max", type=float, default=DEFAULT_RSI_SHORT_MAX)
     parser.add_argument("--no-vwap", action="store_true", help="Disable VWAP filter")
+    parser.add_argument("--option-mode", action="store_true",
+                        help="Simulate option P&L using delta multiplier instead of spot points")
+    parser.add_argument("--option-delta", type=float, default=OPTION_DELTA,
+                        help="ATM option delta (default 0.55)")
+    parser.add_argument("--option-lot-size", type=int, default=OPTION_LOT_SIZE,
+                        help="NIFTY option lot size (default 75)")
+    parser.add_argument("--entry-slippage-pts", type=float, default=ENTRY_SLIPPAGE_PTS,
+                        help="Entry slippage in premium points")
+    parser.add_argument("--exit-slippage-pts", type=float, default=EXIT_SLIPPAGE_PTS,
+                        help="Exit slippage in premium points")
+    parser.add_argument("--cost-per-lot-rs", type=float, default=COST_PER_LOT_RS,
+                        help="Transaction cost per lot in rupees")
     args = parser.parse_args()
+
+    option_delta = args.option_delta if args.option_mode else 1.0
 
     df_1m = load_1m_spot()
     start = args.start or df_1m["datetime"].dt.date.min()
@@ -546,9 +604,16 @@ def main():
     df_1m = df_1m[(df_1m["datetime"].dt.date >= start) & (df_1m["datetime"].dt.date <= end)]
 
     print(f"Data: {start} to {end} | {len(df_1m)} 1m bars")
+    if args.option_mode:
+        print(f"Option simulation: delta={option_delta} lot={args.option_lot_size} "
+              f"slippage={args.entry_slippage_pts}/{args.exit_slippage_pts}pts cost=Rs.{args.cost_per_lot_rs}")
 
     if args.sweep:
-        results = run_sweep(df_1m)
+        results = run_sweep(df_1m, option_delta=option_delta,
+                            option_lot_size=args.option_lot_size,
+                            entry_slippage_pts=args.entry_slippage_pts,
+                            exit_slippage_pts=args.exit_slippage_pts,
+                            cost_per_lot_rs=args.cost_per_lot_rs)
         out = os.path.join(OUTPUT_DIR, f"nifty_cascade_v4_sweep_results_{start}_{end}.csv")
         results.to_csv(out, index=False)
         print(f"\nSaved sweep results to {out}")
@@ -557,7 +622,12 @@ def main():
         trades = run_backtest(df_1m, max_adx=args.max_adx,
                               rsi_long_min=args.rsi_long_min,
                               rsi_short_max=args.rsi_short_max,
-                              use_vwap=not args.no_vwap)
+                              use_vwap=not args.no_vwap,
+                              option_delta=option_delta,
+                              option_lot_size=args.option_lot_size,
+                              entry_slippage_pts=args.entry_slippage_pts,
+                              exit_slippage_pts=args.exit_slippage_pts,
+                              cost_per_lot_rs=args.cost_per_lot_rs)
         if trades.empty:
             print("No trades generated.")
             return
