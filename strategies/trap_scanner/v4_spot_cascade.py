@@ -457,13 +457,23 @@ def _simulate_micro_trade(
     ltf: Dict,
     df_1m: pd.DataFrame,
     eod: datetime,
+    entry_mode: str = "close",
 ) -> Optional[Dict]:
     """
-    Execute a V4 LTF setup with the 1-minute micro trigger:
-      - Long (Bear macro): 1m candle closes above the prior 1m high.
-      - Short (Bull macro): 1m candle closes below the prior 1m low.
-    Entry price is the V4 1/3 retracement trigger (limit fill) once both the
-    micro-trigger and limit-cross conditions are satisfied.
+    Execute a V4 LTF setup on the 1m stream.
+
+    entry_mode:
+      - "close": 1m candle must close above/below the prior 1m extreme
+                 (long: close > prev_high; short: close < prev_low) and cross
+                 the V4 1/3 retracement trigger.
+      - "limit": pure limit order at the V4 1/3 retracement trigger; entry
+                 fires as soon as price touches the trigger line.
+      - "wick": 1m candle must wick past the prior 1m extreme
+                (long: high > prev_high; short: low < prev_low) and cross the
+                V4 1/3 retracement trigger.
+
+    Entry price is always the V4 1/3 retracement trigger for consistent R:R
+    bookkeeping.
     """
     trigger = ltf["trigger"]
     sl = ltf["sl"]
@@ -484,13 +494,35 @@ def _simulate_micro_trade(
             return None
 
         if kind == "BEAR":  # long
-            if curr["close"] > prev["high"] and curr["high"] >= trigger:
-                entry_ts = curr["datetime"]
-                break
+            if entry_mode == "close":
+                if curr["close"] > prev["high"] and curr["high"] >= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "limit":
+                if curr["high"] >= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "wick":
+                if curr["high"] > prev["high"] and curr["high"] >= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            else:
+                raise ValueError(f"Unknown entry_mode: {entry_mode}")
         else:  # short
-            if curr["close"] < prev["low"] and curr["low"] <= trigger:
-                entry_ts = curr["datetime"]
-                break
+            if entry_mode == "close":
+                if curr["close"] < prev["low"] and curr["low"] <= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "limit":
+                if curr["low"] <= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            elif entry_mode == "wick":
+                if curr["low"] < prev["low"] and curr["low"] <= trigger:
+                    entry_ts = curr["datetime"]
+                    break
+            else:
+                raise ValueError(f"Unknown entry_mode: {entry_mode}")
 
     if entry_ts is None:
         return None
@@ -552,6 +584,7 @@ def _simulate_micro_trade(
         "setup_ts": ltf["setup_ts"],
         "entry_ts": entry_ts,
         "entry_price": trigger,
+        "entry_mode": entry_mode,
         "sl": sl,
         "target": target,
         "exit_ts": exit_ts,
@@ -580,11 +613,12 @@ def simulate_macro_to_micro_trade(
     entry_end: time = time(15, 15),
     intraday_exit: time = time(15, 30),
     require_zone_reentry: bool = False,
+    entry_mode: str = "close",
 ) -> Optional[Dict]:
     """
     For a single confirmed macro trap, wait for price to re-enter the validated
     trap zone (unless require_zone_reentry=False, in which case we start at
-    confirmation), then run the V4 15m -> 5m cascade and 1m micro-trigger entry.
+    confirmation), then run the V4 15m -> 5m cascade and 1m entry gate.
     Returns the first completed trade (max one trade per macro trap).
     """
     reentry_ts = _find_zone_reentry_ts(macro, df_1m)
@@ -614,7 +648,7 @@ def simulate_macro_to_micro_trade(
                 use_vwap, use_adx, use_rsi,
             ):
                 continue
-            trade = _simulate_micro_trade(ltf, df_1m, eod)
+            trade = _simulate_micro_trade(ltf, df_1m, eod, entry_mode=entry_mode)
             if trade:
                 trade["macro_confirm_ts"] = macro["confirm_ts"]
                 trade["macro_reentry_ts"] = reentry_ts
@@ -637,6 +671,7 @@ def backtest_macro_to_micro(
     entry_end: time = time(15, 15),
     intraday_exit: time = time(15, 30),
     require_zone_reentry: bool = False,
+    entry_mode: str = "close",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the macro-to-micro trap engine on NIFTY spot data.
@@ -663,6 +698,7 @@ def backtest_macro_to_micro(
                 use_vwap=use_vwap, use_adx=use_adx, use_rsi=use_rsi,
                 entry_end=entry_end, intraday_exit=intraday_exit,
                 require_zone_reentry=require_zone_reentry,
+                entry_mode=entry_mode,
             )
             if trade:
                 trades.append(trade)
