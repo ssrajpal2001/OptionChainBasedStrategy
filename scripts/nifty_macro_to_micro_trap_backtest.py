@@ -166,20 +166,33 @@ def print_performance_summary(trades_df: pd.DataFrame) -> None:
 
 
 def run_comparison(df_1m: pd.DataFrame) -> pd.DataFrame:
-    """Compare single-tranche (baseline) vs dual-tranche (new risk engine)."""
+    """
+    Compare single-tranche vs original dual-tranche vs optimized dual-tranche
+    trailing configurations.
+    """
+    configs = [
+        ("single_tranche", False, None, None),
+        ("dual_1.5R_2x5m", True, 1.5, ("5m", 2)),
+        ("dual_2R_4x5m", True, 2.0, ("5m", 4)),
+        ("dual_2R_2x15m", True, 2.0, ("15m", 2)),
+    ]
     rows = []
-    for label, dual in [("single_tranche", False), ("dual_tranche", True)]:
+    for label, dual, act_r, trail_cfg in configs:
         print(f"\nRunning {label} mode ...")
-        _, trades_df = v4.backtest_macro_to_micro(
-            df_1m,
-            multipliers=MULTIPLIERS,
-            lookback=3,
-            use_filters=False,
-            require_zone_reentry=True,
-            require_mtf_ltf_rejection=True,
-            entry_mode=ENTRY_MODE,
-            dual_tranche=dual,
-        )
+        kwargs = {
+            "multipliers": MULTIPLIERS,
+            "lookback": 3,
+            "use_filters": False,
+            "require_zone_reentry": True,
+            "require_mtf_ltf_rejection": True,
+            "entry_mode": ENTRY_MODE,
+            "dual_tranche": dual,
+        }
+        if trail_cfg:
+            kwargs["trailing_activation_r"] = act_r
+            kwargs["trailing_tf"] = trail_cfg[0]
+            kwargs["trailing_lookback"] = trail_cfg[1]
+        _, trades_df = v4.backtest_macro_to_micro(df_1m, **kwargs)
         s = v4.summarize_macro_to_micro_trades(trades_df)
         rows.append({
             "mode": label,
@@ -199,6 +212,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="NIFTY Macro-to-Micro Trap Backtest")
     parser.add_argument("--start", type=date.fromisoformat, default=DEFAULT_START, help="YYYY-MM-DD")
     parser.add_argument("--end", type=date.fromisoformat, default=DEFAULT_END, help="YYYY-MM-DD")
+    parser.add_argument(
+        "--trailing-config",
+        type=str,
+        default="2R_4x5m",
+        choices=["1.5R_2x5m", "2R_4x5m", "2R_2x15m"],
+        help="Dual-tranche trailing configuration for the detailed run",
+    )
     args = parser.parse_args()
 
     start, end = args.start, args.end
@@ -213,10 +233,19 @@ def main() -> None:
         f"{df_1m['datetime'].dt.date.min()} to {df_1m['datetime'].dt.date.max()}"
     )
 
+    # Map CLI choice to engine parameters
+    trail_map = {
+        "1.5R_2x5m": (1.5, "5m", 2),
+        "2R_4x5m": (2.0, "5m", 4),
+        "2R_2x15m": (2.0, "15m", 2),
+    }
+    act_r, trail_tf, trail_lb = trail_map[args.trailing_config]
+
     # Detailed dual-tranche run
     print(
         "\nEngine config: use_filters=False | require_zone_reentry=True | "
-        "require_mtf_ltf_rejection=True | entry_mode=close | dual_tranche=True"
+        "require_mtf_ltf_rejection=True | entry_mode=close | dual_tranche=True | "
+        f"trailing={act_r}R {trail_lb}x{trail_tf}"
     )
     macro_df, trades_df = v4.backtest_macro_to_micro(
         df_1m,
@@ -227,19 +256,22 @@ def main() -> None:
         require_mtf_ltf_rejection=True,
         entry_mode=ENTRY_MODE,
         dual_tranche=True,
+        trailing_activation_r=act_r,
+        trailing_tf=trail_tf,
+        trailing_lookback=trail_lb,
     )
 
     print_macro_summary(macro_df)
     print_trade_log(trades_df)
     print_performance_summary(trades_df)
 
-    # Single vs dual tranche comparison
-    print("\n" + "=" * 80)
-    print("Single-Tranche vs Dual-Tranche Comparison")
-    print("=" * 80)
+    # Single vs original vs optimized comparison
+    print("\n" + "=" * 100)
+    print("Single-Tranche vs Dual-Tranche Trailing Comparison")
+    print("=" * 100)
     comparison = run_comparison(df_1m)
     print(comparison.to_string(index=False))
-    print("=" * 80)
+    print("=" * 100)
 
     out_macro = os.path.join(OUTPUT_DIR, f"nifty_macro_traps_{start}_{end}.csv")
     out_trades = os.path.join(OUTPUT_DIR, f"nifty_macro_to_micro_trades_{start}_{end}.csv")

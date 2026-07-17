@@ -655,41 +655,63 @@ def _compute_trailing_sl(
     kind: str,
     current_1m_ts: pd.Timestamp,
     df_5m_full: pd.DataFrame,
+    df_15m_full: pd.DataFrame,
     current_sl: float,
     entry: float,
     initial_risk: float,
     running_best: float,
+    trailing_activation_r: float = 1.5,
+    trailing_tf: str = "5m",
+    trailing_lookback: int = 2,
 ) -> float:
     """
-    Dynamic 5-minute structural trailing stop for Tranche 2.
+    Dynamic structural trailing stop for Tranche 2.
 
-    Once price reaches 1.5R profit, trail at the lowest low (long) or highest
-    high (short) of the two completed 5-minute candles preceding the current
-    1-minute bar. The trailing stop only tightens, never widens.
+    Parameters:
+      trailing_activation_r: profit multiple (in R) at which trailing starts.
+      trailing_tf: "5m" or "15m" — which timeframe to use for the trailing anchor.
+      trailing_lookback: number of completed candles of trailing_tf to look back.
+
+    For longs: trail at the lowest low of the lookback candles (only tightens).
+    For shorts: trail at the highest high of the lookback candles (only tightens).
     """
     if kind == "BEAR":  # long
-        if running_best < entry + 1.5 * initial_risk:
+        if running_best < entry + trailing_activation_r * initial_risk:
             return current_sl
-        current_5m_start = current_1m_ts.floor("5min")
-        prev_5m = df_5m_full[
-            (df_5m_full["datetime"] < current_5m_start)
-            & (df_5m_full["datetime"].dt.date == current_1m_ts.date())
-        ].tail(2)
-        if len(prev_5m) < 2:
+        if trailing_tf == "5m":
+            current_tf_start = current_1m_ts.floor("5min")
+            df_tf = df_5m_full
+        elif trailing_tf == "15m":
+            current_tf_start = current_1m_ts.floor("15min")
+            df_tf = df_15m_full
+        else:
+            raise ValueError(f"Unknown trailing_tf: {trailing_tf}")
+        prev_bars = df_tf[
+            (df_tf["datetime"] < current_tf_start)
+            & (df_tf["datetime"].dt.date == current_1m_ts.date())
+        ].tail(trailing_lookback)
+        if len(prev_bars) < trailing_lookback:
             return current_sl
-        trail = float(prev_5m["low"].min())
+        trail = float(prev_bars["low"].min())
         return max(current_sl, trail)
     else:  # short
-        if running_best > entry - 1.5 * initial_risk:
+        if running_best > entry - trailing_activation_r * initial_risk:
             return current_sl
-        current_5m_start = current_1m_ts.floor("5min")
-        prev_5m = df_5m_full[
-            (df_5m_full["datetime"] < current_5m_start)
-            & (df_5m_full["datetime"].dt.date == current_1m_ts.date())
-        ].tail(2)
-        if len(prev_5m) < 2:
+        if trailing_tf == "5m":
+            current_tf_start = current_1m_ts.floor("5min")
+            df_tf = df_5m_full
+        elif trailing_tf == "15m":
+            current_tf_start = current_1m_ts.floor("15min")
+            df_tf = df_15m_full
+        else:
+            raise ValueError(f"Unknown trailing_tf: {trailing_tf}")
+        prev_bars = df_tf[
+            (df_tf["datetime"] < current_tf_start)
+            & (df_tf["datetime"].dt.date == current_1m_ts.date())
+        ].tail(trailing_lookback)
+        if len(prev_bars) < trailing_lookback:
             return current_sl
-        trail = float(prev_5m["high"].max())
+        trail = float(prev_bars["high"].max())
         return min(current_sl, trail)
 
 
@@ -697,19 +719,25 @@ def _simulate_micro_trade_tranches(
     ltf: Dict,
     df_1m: pd.DataFrame,
     df_5m_full: pd.DataFrame,
+    df_15m_full: pd.DataFrame,
     eod: datetime,
     entry_mode: str = "close",
+    trailing_activation_r: float = 1.5,
+    trailing_tf: str = "5m",
+    trailing_lookback: int = 2,
 ) -> List[Dict]:
     """
     Dual-tranche risk-managed execution of a V4 LTF setup.
 
     Tranche 1 (50%): exits at 2R target or SL (initial or break-even).
-    Tranche 2 (50%): exits via trailing stop after 1.5R, or break-even SL,
-                     or initial SL, or EOD.
+    Tranche 2 (50%): exits via trailing stop after trailing_activation_r,
+                     or break-even SL, or initial SL, or EOD.
 
     Break-even: once price reaches 1R profit, both tranches move SL to entry.
-    Trailing: once price reaches 1.5R profit, Tranche 2 trails at the lowest
-    low (long) or highest high (short) of the two preceding completed 5m candles.
+    Trailing: configurable via trailing_activation_r, trailing_tf ("5m" or "15m"),
+    and trailing_lookback. Once the profit threshold is hit, Tranche 2 trails at the
+    lowest low (long) or highest high (short) of the last `trailing_lookback` completed
+    candles of `trailing_tf`.
 
     Returns a list of two tranche records (one per tranche). If no valid entry
     is found, returns an empty list.
@@ -789,7 +817,7 @@ def _simulate_micro_trade_tranches(
     for _, row in after.iterrows():
         bar_end = row["datetime"] + timedelta(minutes=1)
 
-        # Update running best price (intrabar) for 1R / 1.5R thresholds
+        # Update running best price (intrabar) for 1R / trailing thresholds
         if kind == "BEAR":
             running_best = max(running_best, row["high"])
         else:
@@ -805,9 +833,10 @@ def _simulate_micro_trade_tranches(
                 t1_sl = min(t1_sl, trigger)
                 t2_sl = min(t2_sl, trigger)
 
-        # Tranche 2 trailing stop after 1.5R
+        # Tranche 2 trailing stop (configurable activation and anchor)
         t2_sl = _compute_trailing_sl(
-            kind, row["datetime"], df_5m_full, t2_sl, trigger, initial_risk, running_best
+            kind, row["datetime"], df_5m_full, df_15m_full, t2_sl, trigger,
+            initial_risk, running_best, trailing_activation_r, trailing_tf, trailing_lookback
         )
 
         # Tranche 1 exit: 2R target or SL
@@ -917,6 +946,9 @@ def simulate_macro_to_micro_trade(
     use_filters: bool = True,
     require_mtf_ltf_rejection: bool = False,
     dual_tranche: bool = False,
+    trailing_activation_r: float = 1.5,
+    trailing_tf: str = "5m",
+    trailing_lookback: int = 2,
 ) -> List[Dict]:
     """
     For a single confirmed macro trap, wait for price to re-enter the validated
@@ -928,8 +960,8 @@ def simulate_macro_to_micro_trade(
     Set require_mtf_ltf_rejection=True to require a 15m or 5m rejection candle
     inside the macro trap zone before the 1m entry is allowed.
     Set dual_tranche=True to split each position into 50/50 tranches with 1R
-    break-even, 2R target for tranche 1, and 5m structural trailing stop for
-    tranche 2 after 1.5R.
+    break-even, 2R target for tranche 1, and configurable structural trailing stop
+    for tranche 2 (controlled by trailing_activation_r, trailing_tf, trailing_lookback).
     """
     reentry_ts = _find_zone_reentry_ts(macro, df_1m)
     cascade_ts = reentry_ts if reentry_ts is not None else macro["confirm_ts"]
@@ -964,7 +996,12 @@ def simulate_macro_to_micro_trade(
                 ):
                     continue
             if dual_tranche:
-                tranches = _simulate_micro_trade_tranches(ltf, df_1m, df_5m_full, eod, entry_mode=entry_mode)
+                tranches = _simulate_micro_trade_tranches(
+                    ltf, df_1m, df_5m_full, df_15m_full, eod, entry_mode=entry_mode,
+                    trailing_activation_r=trailing_activation_r,
+                    trailing_tf=trailing_tf,
+                    trailing_lookback=trailing_lookback,
+                )
                 if tranches:
                     for tr in tranches:
                         tr["macro_confirm_ts"] = macro["confirm_ts"]
@@ -999,6 +1036,9 @@ def backtest_macro_to_micro(
     use_filters: bool = True,
     require_mtf_ltf_rejection: bool = False,
     dual_tranche: bool = False,
+    trailing_activation_r: float = 1.5,
+    trailing_tf: str = "5m",
+    trailing_lookback: int = 2,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the macro-to-micro trap engine on NIFTY spot data.
@@ -1029,6 +1069,9 @@ def backtest_macro_to_micro(
                 use_filters=use_filters,
                 require_mtf_ltf_rejection=require_mtf_ltf_rejection,
                 dual_tranche=dual_tranche,
+                trailing_activation_r=trailing_activation_r,
+                trailing_tf=trailing_tf,
+                trailing_lookback=trailing_lookback,
             )
             if tranches:
                 trades.extend(tranches)
