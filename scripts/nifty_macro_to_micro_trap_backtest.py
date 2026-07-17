@@ -96,7 +96,7 @@ def print_macro_table(macro_df: pd.DataFrame) -> None:
 
 
 def run_pure_price_action_sweep(df_1m: pd.DataFrame) -> pd.DataFrame:
-    """Run the three entry modes with all indicator filters disabled."""
+    """Run the three entry modes with all indicator filters disabled and the 15m/5m rejection gate enforced."""
     rows = []
     for entry_mode in ENTRY_MODES:
         print(f"\nRunning pure price action: entry_mode={entry_mode} ...")
@@ -104,8 +104,9 @@ def run_pure_price_action_sweep(df_1m: pd.DataFrame) -> pd.DataFrame:
             df_1m,
             multipliers=MULTIPLIERS,
             lookback=3,
-            use_filters=False,           # bypass ADX/RSI/VWAP
-            require_zone_reentry=True,   # wait for price to re-enter validated zone
+            use_filters=False,              # bypass ADX/RSI/VWAP
+            require_zone_reentry=True,      # wait for price to re-enter validated zone
+            require_mtf_ltf_rejection=True, # 15m or 5m rejection inside zone before 1m entry
             entry_mode=entry_mode,
         )
         s = v4.summarize_macro_to_micro_trades(trades_df)
@@ -137,11 +138,14 @@ def main() -> None:
         f"{df_1m['datetime'].dt.date.min()} to {df_1m['datetime'].dt.date.max()}"
     )
     print(
-        "\nPure Price Action sweep: ADX/RSI/VWAP disabled | "
-        "require_zone_reentry=True | entry_modes=[close, limit, wick]"
+        "\nPure Price Action + Nested MTF/LTF sweep: ADX/RSI/VWAP disabled | "
+        "require_zone_reentry=True | require_mtf_ltf_rejection=True | "
+        "entry_modes=[close, limit, wick]"
     )
 
-    macro_df, _ = v4.backtest_macro_to_micro(df_1m, multipliers=MULTIPLIERS, use_filters=False)
+    macro_df, _ = v4.backtest_macro_to_micro(
+        df_1m, multipliers=MULTIPLIERS, use_filters=False, require_mtf_ltf_rejection=True
+    )
     print_macro_table(macro_df)
 
     results = run_pure_price_action_sweep(df_1m)
@@ -150,7 +154,7 @@ def main() -> None:
     ).reset_index(drop=True)
 
     print("\n" + "=" * 90)
-    print("Pure Price Action Entry-Mode Comparison (NIFTY spot, lot size = 75)")
+    print("Pure Price Action + MTF/LTF Rejection Comparison (NIFTY spot, lot size = 75)")
     print("=" * 90)
     print(results_sorted.to_string(index=False))
     print("=" * 90)

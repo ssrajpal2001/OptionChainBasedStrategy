@@ -453,6 +453,58 @@ def _find_zone_reentry_ts(macro: Dict, df_1m: pd.DataFrame) -> Optional[datetime
     return inside["datetime"].iloc[0] if not inside.empty else None
 
 
+def _has_rejection_bars(df: pd.DataFrame, macro: Dict) -> bool:
+    """
+    Detect a rejection candle: price pushes into the macro trap zone but the
+    candle closes back inside the body range of its own preceding candle.
+
+    Bull trap (short setup): a candle pushes up into the zone (high >= breakout_line)
+    but closes inside the previous candle's body.
+    Bear trap (long setup): a candle pushes down into the zone (low <= breakout_line)
+    but closes inside the previous candle's body.
+    """
+    if len(df) < 2:
+        return False
+    for i in range(1, len(df)):
+        prev = df.iloc[i - 1]
+        curr = df.iloc[i]
+        prev_body_low = min(prev["open"], prev["close"])
+        prev_body_high = max(prev["open"], prev["close"])
+        if macro["type"] == "Bull":
+            if curr["high"] >= macro["breakout_line"] and prev_body_low <= curr["close"] <= prev_body_high:
+                return True
+        else:
+            if curr["low"] <= macro["breakout_line"] and prev_body_low <= curr["close"] <= prev_body_high:
+                return True
+    return False
+
+
+def _check_mtf_ltf_rejection(
+    macro: Dict,
+    df_5m_full: pd.DataFrame,
+    df_15m_full: pd.DataFrame,
+    start_ts: datetime,
+    end_ts: datetime,
+) -> bool:
+    """
+    Verify structural rejection on 15m OR 5m between start_ts and end_ts.
+    Returns True as soon as one valid rejection candle is found on either TF.
+    """
+    bars15 = df_15m_full[
+        (df_15m_full["datetime"] >= start_ts) & (df_15m_full["datetime"] <= end_ts)
+    ].copy()
+    if _has_rejection_bars(bars15, macro):
+        return True
+
+    bars5 = df_5m_full[
+        (df_5m_full["datetime"] >= start_ts) & (df_5m_full["datetime"] <= end_ts)
+    ].copy()
+    if _has_rejection_bars(bars5, macro):
+        return True
+
+    return False
+
+
 def _simulate_micro_trade(
     ltf: Dict,
     df_1m: pd.DataFrame,
@@ -615,6 +667,7 @@ def simulate_macro_to_micro_trade(
     require_zone_reentry: bool = False,
     entry_mode: str = "close",
     use_filters: bool = True,
+    require_mtf_ltf_rejection: bool = False,
 ) -> Optional[Dict]:
     """
     For a single confirmed macro trap, wait for price to re-enter the validated
@@ -623,6 +676,8 @@ def simulate_macro_to_micro_trade(
     Returns the first completed trade (max one trade per macro trap).
 
     Set use_filters=False to run pure price action: ADX/RSI/VWAP gates are bypassed.
+    Set require_mtf_ltf_rejection=True to require a 15m or 5m rejection candle
+    inside the macro trap zone before the 1m entry is allowed.
     """
     reentry_ts = _find_zone_reentry_ts(macro, df_1m)
     cascade_ts = reentry_ts if reentry_ts is not None else macro["confirm_ts"]
@@ -651,6 +706,11 @@ def simulate_macro_to_micro_trade(
                 use_vwap, use_adx, use_rsi,
             ):
                 continue
+            if require_mtf_ltf_rejection:
+                if not _check_mtf_ltf_rejection(
+                    macro, df_5m_full, df_15m_full, cascade_ts, ltf["setup_ts"]
+                ):
+                    continue
             trade = _simulate_micro_trade(ltf, df_1m, eod, entry_mode=entry_mode)
             if trade:
                 trade["macro_confirm_ts"] = macro["confirm_ts"]
@@ -676,6 +736,7 @@ def backtest_macro_to_micro(
     require_zone_reentry: bool = False,
     entry_mode: str = "close",
     use_filters: bool = True,
+    require_mtf_ltf_rejection: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the macro-to-micro trap engine on NIFTY spot data.
@@ -704,6 +765,7 @@ def backtest_macro_to_micro(
                 require_zone_reentry=require_zone_reentry,
                 entry_mode=entry_mode,
                 use_filters=use_filters,
+                require_mtf_ltf_rejection=require_mtf_ltf_rejection,
             )
             if trade:
                 trades.append(trade)
