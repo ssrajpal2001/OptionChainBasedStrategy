@@ -84,24 +84,28 @@ def main() -> None:
     rows.sort(key=lambda x: x["trap_ts"])
 
     header = (
-        f"{'Trap Date/Time':<20} {'Type':<6} {'Mult':<8} "
+        f"{'Ref Candle Time':<20} {'Breakout Candle Time':<20} {'Trap Confirmed Time':<20} "
+        f"{'Trap Type':<12} {'Multiplier':<14} "
         f"{'Range Breakout Line':>18} {'Anchor SL Level':>16} "
-        f"{'Peak Trap H/L':>16} {'Validated Trap Zone':>26}"
+        f"{'Peak Trap High/Low':>18} {'Validated Trap Zone':>22}"
     )
     print("\n" + header)
     print("-" * len(header))
     for r in rows:
-        ts = r["trap_ts"]
-        ts_str = ts.strftime("%Y-%m-%d %H:%M") if isinstance(ts, pd.Timestamp) else str(ts)[:16]
+        ref_ts = r["ref_ts"]
+        bo_ts = r["breakout_ts"]
+        conf_ts = r["confirm_ts"]
+        fmt = lambda ts: ts.strftime("%Y-%m-%d %H:%M") if isinstance(ts, pd.Timestamp) else str(ts)[:16]
         if r["type"] == "Bull":
-            peak_str = f"H {r['peak']:>13.2f}"
+            peak_str = f"H {r['peak']:>14.2f}"
         else:
-            peak_str = f"L {r['peak']:>13.2f}"
+            peak_str = f"L {r['peak']:>14.2f}"
         zone_str = f"{r['zone_low']:.2f} - {r['zone_high']:.2f}"
         print(
-            f"{ts_str:<20} {r['type']:<6} {r['multiplier']:<8} "
+            f"{fmt(ref_ts):<20} {fmt(bo_ts):<20} {fmt(conf_ts):<20} "
+            f"{r['type']:<12} {r['multiplier']:<14} "
             f"{r['breakout_line']:>18.2f} {r['anchor_sl']:>16.2f} "
-            f"{peak_str:>16} {zone_str:>26}"
+            f"{peak_str:>18} {zone_str:>22}"
         )
 
     print(f"\n{'Summary':=^60}")

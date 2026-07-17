@@ -306,78 +306,102 @@ def detect_macro_htf_traps(df_htf: pd.DataFrame, lookback: int = 3) -> List[Dict
     Detect macro structural bull/bear traps on an HTF DataFrame.
 
     Bull trap (short setup):
-      - Resistance = highest high of the previous `lookback` candles.
-      - Breakout candle closes above resistance. Anchor SL = low of the breakout candle.
+      - Base = previous `lookback` candles. Breakout line = highest high of the base.
+      - Breakout candle closes above the breakout line.
+      - Anchor SL = lowest low of the same base (the swing low of the breakout move).
       - Confirmed when a later candle trades below the anchor SL.
-      - Trap zone = [resistance, highest high from breakout to confirmation].
+      - Trap zone = [breakout line, highest high from breakout to confirmation].
 
     Bear trap (long setup):
-      - Support = lowest low of the previous `lookback` candles.
-      - Breakdown candle closes below support. Anchor SL = high of the breakdown candle.
+      - Base = previous `lookback` candles. Breakout line = lowest low of the base.
+      - Breakdown candle closes below the breakout line.
+      - Anchor SL = highest high of the same base (the swing high of the breakdown move).
       - Confirmed when a later candle trades above the anchor SL.
-      - Trap zone = [lowest low from breakdown to confirmation, support].
+      - Trap zone = [lowest low from breakdown to confirmation, breakout line].
+
+    A state machine is used so only one pending trap per direction is tracked at a time,
+    preventing the noisy overlapping duplicates produced by the previous implementation.
+
+    Returns one dict per trap with ref/breakout/confirmation timestamps for audit.
     """
     traps: List[Dict] = []
     n = len(df_htf)
     if n < lookback + 2:
         return traps
 
-    i = lookback
-    while i < n:
-        # --- Bull trap (breakout above resistance, then fail below anchor low) ---
-        resistance = float(df_htf["high"].iloc[i - lookback:i].max())
-        if df_htf["close"].iloc[i] > resistance:
-            anchor_sl = float(df_htf["low"].iloc[i])
-            peak_high = float(df_htf["high"].iloc[i])
-            j = i + 1
-            while j < n:
-                peak_high = max(peak_high, float(df_htf["high"].iloc[j]))
-                if df_htf["low"].iloc[j] < anchor_sl:
-                    traps.append({
-                        "trap_ts": df_htf["datetime"].iloc[j],
-                        "type": "Bull",
-                        "multiplier": None,
-                        "breakout_line": resistance,
-                        "anchor_sl": anchor_sl,
-                        "peak": peak_high,
-                        "zone_low": resistance,
-                        "zone_high": peak_high,
-                    })
-                    i = j + 1
-                    break
-                j += 1
-            else:
-                i += 1
-            continue
+    pending_bull: Optional[Dict] = None
+    pending_bear: Optional[Dict] = None
 
-        # --- Bear trap (breakdown below support, then fail above anchor high) ---
-        support = float(df_htf["low"].iloc[i - lookback:i].min())
-        if df_htf["close"].iloc[i] < support:
-            anchor_sl = float(df_htf["high"].iloc[i])
-            peak_low = float(df_htf["low"].iloc[i])
-            j = i + 1
-            while j < n:
-                peak_low = min(peak_low, float(df_htf["low"].iloc[j]))
-                if df_htf["high"].iloc[j] > anchor_sl:
-                    traps.append({
-                        "trap_ts": df_htf["datetime"].iloc[j],
-                        "type": "Bear",
-                        "multiplier": None,
-                        "breakout_line": support,
-                        "anchor_sl": anchor_sl,
-                        "peak": peak_low,
-                        "zone_low": peak_low,
-                        "zone_high": support,
-                    })
-                    i = j + 1
-                    break
-                j += 1
-            else:
-                i += 1
-            continue
+    for i in range(lookback, n):
+        base = df_htf.iloc[i - lookback:i]
+        cur_low = float(df_htf["low"].iloc[i])
+        cur_high = float(df_htf["high"].iloc[i])
+        cur_close = float(df_htf["close"].iloc[i])
+        cur_ts = df_htf["datetime"].iloc[i]
 
-        i += 1
+        # Update pending bull trap
+        if pending_bull is not None:
+            pending_bull["peak"] = max(pending_bull["peak"], cur_high)
+            if cur_low < pending_bull["anchor_sl"]:
+                pending_bull["confirm_ts"] = cur_ts
+                pending_bull["trap_ts"] = cur_ts
+                pending_bull["zone_high"] = pending_bull["peak"]
+                traps.append(pending_bull.copy())
+                pending_bull = None
 
+        # Update pending bear trap
+        if pending_bear is not None:
+            pending_bear["peak"] = min(pending_bear["peak"], cur_low)
+            if cur_high > pending_bear["anchor_sl"]:
+                pending_bear["confirm_ts"] = cur_ts
+                pending_bear["trap_ts"] = cur_ts
+                pending_bear["zone_low"] = pending_bear["peak"]
+                traps.append(pending_bear.copy())
+                pending_bear = None
+
+        # Start a new bull trap only if none is pending, or replace it with a stronger one
+        if pending_bull is None or float(base["high"].max()) > pending_bull["breakout_line"]:
+            resistance = float(base["high"].max())
+            ref_idx = base["high"].idxmax()
+            ref_ts = df_htf.loc[ref_idx, "datetime"]
+            base_low = float(base["low"].min())
+            if cur_close > resistance:
+                pending_bull = {
+                    "trap_ts": None,
+                    "ref_ts": ref_ts,
+                    "breakout_ts": cur_ts,
+                    "confirm_ts": None,
+                    "type": "Bull",
+                    "multiplier": None,
+                    "breakout_line": resistance,
+                    "anchor_sl": base_low,
+                    "peak": cur_high,
+                    "zone_low": resistance,
+                    "zone_high": cur_high,
+                }
+
+        # Start a new bear trap only if none is pending, or replace it with a stronger one
+        if pending_bear is None or float(base["low"].min()) < pending_bear["breakout_line"]:
+            support = float(base["low"].min())
+            ref_idx = base["low"].idxmin()
+            ref_ts = df_htf.loc[ref_idx, "datetime"]
+            base_high = float(base["high"].max())
+            if cur_close < support:
+                pending_bear = {
+                    "trap_ts": None,
+                    "ref_ts": ref_ts,
+                    "breakout_ts": cur_ts,
+                    "confirm_ts": None,
+                    "type": "Bear",
+                    "multiplier": None,
+                    "breakout_line": support,
+                    "anchor_sl": base_high,
+                    "peak": cur_low,
+                    "zone_low": cur_low,
+                    "zone_high": support,
+                }
+
+    # Unconfirmed pending traps are discarded — no structural trap until confirmed.
     return traps
 
 
