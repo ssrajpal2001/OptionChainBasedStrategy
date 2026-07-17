@@ -614,12 +614,15 @@ def simulate_macro_to_micro_trade(
     intraday_exit: time = time(15, 30),
     require_zone_reentry: bool = False,
     entry_mode: str = "close",
+    use_filters: bool = True,
 ) -> Optional[Dict]:
     """
     For a single confirmed macro trap, wait for price to re-enter the validated
     trap zone (unless require_zone_reentry=False, in which case we start at
     confirmation), then run the V4 15m -> 5m cascade and 1m entry gate.
     Returns the first completed trade (max one trade per macro trap).
+
+    Set use_filters=False to run pure price action: ADX/RSI/VWAP gates are bypassed.
     """
     reentry_ts = _find_zone_reentry_ts(macro, df_1m)
     cascade_ts = reentry_ts if reentry_ts is not None else macro["confirm_ts"]
@@ -643,7 +646,7 @@ def simulate_macro_to_micro_trade(
         for ltf in find_ltf_5m_traps(day_5m, mtf):
             if ltf["setup_ts"].time() > entry_end:
                 continue
-            if not check_ltf_filters(
+            if use_filters and not check_ltf_filters(
                 ltf, df_5m_full, max_adx, rsi_long_min, rsi_short_max,
                 use_vwap, use_adx, use_rsi,
             ):
@@ -672,6 +675,7 @@ def backtest_macro_to_micro(
     intraday_exit: time = time(15, 30),
     require_zone_reentry: bool = False,
     entry_mode: str = "close",
+    use_filters: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the macro-to-micro trap engine on NIFTY spot data.
@@ -699,6 +703,7 @@ def backtest_macro_to_micro(
                 entry_end=entry_end, intraday_exit=intraday_exit,
                 require_zone_reentry=require_zone_reentry,
                 entry_mode=entry_mode,
+                use_filters=use_filters,
             )
             if trade:
                 trades.append(trade)
