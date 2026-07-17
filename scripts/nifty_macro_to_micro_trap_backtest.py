@@ -2,18 +2,24 @@
 """
 scripts/nifty_macro_to_micro_trap_backtest.py
 
-Pure Price Action macro-to-micro trap backtest on NIFTY spot data.
+Production-grade macro-to-micro trap backtest on NIFTY spot data.
 
-All indicator filters (ADX, RSI, VWAP) are bypassed. The strategy relies on:
-  1. HTF structural trap confirmation (Anchor SL broken).
-  2. 1m price re-entering the validated trap zone.
-  3. 5m localized range + V4 1/3 retracement entry line.
-  4. 1m entry via one of three structural modes: limit, wick, close.
+Defaults to a 1-year window (2025-07-01 to 2026-07-03) and runs the top
+performing configuration in pure price action mode:
+  - ADX/RSI/VWAP indicators disabled (use_filters=False)
+  - Zone re-entry required (require_zone_reentry=True)
+  - 15m/5m structural rejection gate required (require_mtf_ltf_rejection=True)
+  - Entry mode: close (1m candle close past prior 1m extreme + V4 1/3 trigger)
 
-Output: comparison table of the three entry modes for June 1 - July 3, 2026.
+Outputs:
+  1. Macro structural trap summary.
+  2. Chronological trade execution log (one row per trade).
+  3. Aggregate performance matrix.
+  4. CSV files with the raw data.
 """
 from __future__ import annotations
 
+import argparse
 import glob
 import os
 import sys
@@ -32,10 +38,10 @@ IST = pytz.timezone("Asia/Kolkata")
 CACHE_DIR = os.path.join(ROOT, "data", "nse_option_cache")
 OUTPUT_DIR = os.path.join(ROOT, "data")
 
-START = date(2026, 6, 1)
-END = date(2026, 7, 3)
+DEFAULT_START = date(2025, 7, 1)
+DEFAULT_END = date(2026, 7, 3)
 MULTIPLIERS = [75, 150, 225]
-ENTRY_MODES = ["close", "limit", "wick"]
+ENTRY_MODE = "close"
 
 
 def load_1m_spot(start: date, end: date) -> pd.DataFrame:
@@ -59,76 +65,99 @@ def load_1m_spot(start: date, end: date) -> pd.DataFrame:
     return df
 
 
-def print_macro_table(macro_df: pd.DataFrame) -> None:
+def print_macro_summary(macro_df: pd.DataFrame) -> None:
     if macro_df.empty:
         print("No macro structural traps detected.")
         return
 
-    macro_df = macro_df.sort_values("trap_ts").reset_index(drop=True)
-    fmt = lambda ts: ts.strftime("%Y-%m-%d %H:%M") if isinstance(ts, pd.Timestamp) else str(ts)[:16]
-
-    header = (
-        f"{'Ref Candle Time':<20} {'Breakout Candle Time':<20} {'Trap Confirmed Time':<20} "
-        f"{'Trap Type':<12} {'Multiplier':<14} "
-        f"{'Range Breakout Line':>18} {'Anchor SL Level':>16} "
-        f"{'Peak Trap High/Low':>18} {'Validated Trap Zone':>22}"
-    )
-    print("\n" + header)
-    print("-" * len(header))
-
-    for _, r in macro_df.iterrows():
-        peak_str = f"H {r['peak']:>14.2f}" if r['type'] == 'Bull' else f"L {r['peak']:>14.2f}"
-        zone_str = f"{r['zone_low']:.2f} - {r['zone_high']:.2f}"
-        print(
-            f"{fmt(r['ref_ts']):<20} {fmt(r['breakout_ts']):<20} {fmt(r['confirm_ts']):<20} "
-            f"{r['type']:<12} {r['multiplier']:<14} "
-            f"{r['breakout_line']:>18.2f} {r['anchor_sl']:>16.2f} "
-            f"{peak_str:>18} {zone_str:>22}"
-        )
-
-    print(f"\n{'Macro Trap Summary':=^60}")
+    print(f"\n{'Macro Structural Trap Summary':=^60}")
     print(f"Total structural traps: {len(macro_df)}")
-    print(f"  Bull traps: {sum(macro_df['type'] == 'Bull')}")
-    print(f"  Bear traps: {sum(macro_df['type'] == 'Bear')}")
+    print(f"  Bull traps (short setups): {sum(macro_df['type'] == 'Bull')}")
+    print(f"  Bear traps (long setups):  {sum(macro_df['type'] == 'Bear')}")
     for mult in MULTIPLIERS:
         cnt = sum(macro_df["multiplier"] == f"{mult}m")
         print(f"  {mult}m: {cnt}")
 
-
-def run_pure_price_action_sweep(df_1m: pd.DataFrame) -> pd.DataFrame:
-    """Run the three entry modes with all indicator filters disabled and the 15m/5m rejection gate enforced."""
-    rows = []
-    for entry_mode in ENTRY_MODES:
-        print(f"\nRunning pure price action: entry_mode={entry_mode} ...")
-        _, trades_df = v4.backtest_macro_to_micro(
-            df_1m,
-            multipliers=MULTIPLIERS,
-            lookback=3,
-            use_filters=False,              # bypass ADX/RSI/VWAP
-            require_zone_reentry=True,      # wait for price to re-enter validated zone
-            require_mtf_ltf_rejection=True, # 15m or 5m rejection inside zone before 1m entry
-            entry_mode=entry_mode,
+    print("\nFirst 5 macro traps (chronological):")
+    fmt = lambda ts: ts.strftime("%Y-%m-%d %H:%M") if isinstance(ts, pd.Timestamp) else str(ts)[:16]
+    cols = ["ref_ts", "breakout_ts", "confirm_ts", "type", "multiplier", "breakout_line", "anchor_sl", "peak"]
+    head = macro_df.sort_values("trap_ts").head(5)[cols]
+    for _, r in head.iterrows():
+        print(
+            f"  {fmt(r['ref_ts'])} -> {fmt(r['breakout_ts'])} -> {fmt(r['confirm_ts'])} | "
+            f"{r['type']:<4} {r['multiplier']:<5} | zone {r['breakout_line']:.2f} / anchor {r['anchor_sl']:.2f} / peak {r['peak']:.2f}"
         )
-        s = v4.summarize_macro_to_micro_trades(trades_df)
-        rows.append({
-            "entry_mode": entry_mode,
-            "trades": s["total"],
-            "wins": s["wins"],
-            "losses": s["losses"],
-            "win_pct": round(s["win_rate"], 1),
-            "profit_factor": round(s["profit_factor"], 2) if s["profit_factor"] != float("inf") else "inf",
-            "max_dd": round(s["max_dd"], 2),
-            "net_pnl": round(s["net_pnl"], 2),
-            "avg_win": round(s["avg_win"], 2),
-            "avg_loss": round(s["avg_loss"], 2),
-            "rr": round(s["rr"], 2),
-        })
-    return pd.DataFrame(rows)
+
+
+def print_trade_log(trades_df: pd.DataFrame) -> None:
+    if trades_df.empty:
+        print("\nNo trades generated.")
+        return
+
+    trades_df = trades_df.sort_values("entry_ts").reset_index(drop=True)
+    print("\n" + "=" * 110)
+    print("Chronological Trade Execution Log — Close Entry Mode")
+    print("=" * 110)
+    header = (
+        f"{'#':<4} {'Execution Time':<20} {'Direction':<8} {'Macro TF':<8} "
+        f"{'Entry Price':>12} {'SL':>12} {'Target':>12} {'Exit Time':<20} "
+        f"{'Outcome':<10} {'P&L (Rs.)':>12}"
+    )
+    print(header)
+    print("-" * 110)
+
+    for i, r in trades_df.iterrows():
+        direction = "LONG" if r["direction"] == "LONG" else "SHORT"
+        outcome = r["exit_reason"]
+        print(
+            f"{i+1:<4} "
+            f"{r['entry_ts'].strftime('%Y-%m-%d %H:%M'):<20} "
+            f"{direction:<8} "
+            f"{r['multiplier']:<8} "
+            f"{r['entry_price']:>12.2f} "
+            f"{r['sl']:>12.2f} "
+            f"{r['target']:>12.2f} "
+            f"{r['exit_ts'].strftime('%Y-%m-%d %H:%M'):<20} "
+            f"{outcome:<10} "
+            f"{r['pnl_rs']:>12,.2f}"
+        )
+    print("=" * 110)
+
+
+def print_performance_summary(trades_df: pd.DataFrame) -> None:
+    if trades_df.empty:
+        print("\nNo trades available for performance summary.")
+        return
+
+    s = v4.summarize_macro_to_micro_trades(trades_df)
+    print("\n" + "=" * 70)
+    print("Aggregate Performance Matrix — Close Entry Mode")
+    print("=" * 70)
+    print(f"Total trades        : {s['total']}")
+    print(f"Wins                : {s['wins']} ({s['win_rate']:.1f}%)")
+    print(f"Losses              : {s['losses']}")
+    print(f"Gross profit        : Rs. {s['gross_profit']:,.2f}")
+    print(f"Gross loss          : Rs. {s['gross_loss']:,.2f}")
+    print(f"Net P&L             : Rs. {s['net_pnl']:,.2f}")
+    print(f"Profit factor       : {s['profit_factor']:.2f}")
+    print(f"Avg win / avg loss  : Rs. {s['avg_win']:,.2f} / Rs. {s['avg_loss']:,.2f} (R:R = {s['rr']:.2f})")
+    print(f"Max drawdown        : Rs. {s['max_dd']:,.2f}")
+    print("=" * 70)
+    print("\nExit reason distribution:")
+    print(trades_df["exit_reason"].value_counts().to_string())
+    print("\nDirection distribution:")
+    print(trades_df["direction"].value_counts().to_string())
 
 
 def main() -> None:
-    print("Loading NIFTY 1m spot data ...")
-    df_1m = load_1m_spot(START, END)
+    parser = argparse.ArgumentParser(description="NIFTY Macro-to-Micro Trap Backtest")
+    parser.add_argument("--start", type=date.fromisoformat, default=DEFAULT_START, help="YYYY-MM-DD")
+    parser.add_argument("--end", type=date.fromisoformat, default=DEFAULT_END, help="YYYY-MM-DD")
+    args = parser.parse_args()
+
+    start, end = args.start, args.end
+    print(f"Loading NIFTY 1m spot data from {start} to {end} ...")
+    df_1m = load_1m_spot(start, end)
     if df_1m.empty:
         print("No NIFTY 1m spot data found in the requested range.")
         return
@@ -138,32 +167,30 @@ def main() -> None:
         f"{df_1m['datetime'].dt.date.min()} to {df_1m['datetime'].dt.date.max()}"
     )
     print(
-        "\nPure Price Action + Nested MTF/LTF sweep: ADX/RSI/VWAP disabled | "
-        "require_zone_reentry=True | require_mtf_ltf_rejection=True | "
-        "entry_modes=[close, limit, wick]"
+        f"\nEngine config: use_filters=False | require_zone_reentry=True | "
+        f"require_mtf_ltf_rejection=True | entry_mode={ENTRY_MODE}"
     )
 
-    macro_df, _ = v4.backtest_macro_to_micro(
-        df_1m, multipliers=MULTIPLIERS, use_filters=False, require_mtf_ltf_rejection=True
+    macro_df, trades_df = v4.backtest_macro_to_micro(
+        df_1m,
+        multipliers=MULTIPLIERS,
+        lookback=3,
+        use_filters=False,
+        require_zone_reentry=True,
+        require_mtf_ltf_rejection=True,
+        entry_mode=ENTRY_MODE,
     )
-    print_macro_table(macro_df)
 
-    results = run_pure_price_action_sweep(df_1m)
-    results_sorted = results.sort_values(
-        ["net_pnl", "trades"], ascending=[False, False]
-    ).reset_index(drop=True)
+    print_macro_summary(macro_df)
+    print_trade_log(trades_df)
+    print_performance_summary(trades_df)
 
-    print("\n" + "=" * 90)
-    print("Pure Price Action + MTF/LTF Rejection Comparison (NIFTY spot, lot size = 75)")
-    print("=" * 90)
-    print(results_sorted.to_string(index=False))
-    print("=" * 90)
-
-    out_results = os.path.join(
-        OUTPUT_DIR, f"nifty_pure_price_action_sweep_{START}_{END}.csv"
-    )
-    results_sorted.to_csv(out_results, index=False)
-    print(f"\nSaved sweep results to {out_results}")
+    out_macro = os.path.join(OUTPUT_DIR, f"nifty_macro_traps_{start}_{end}.csv")
+    out_trades = os.path.join(OUTPUT_DIR, f"nifty_macro_to_micro_trades_{start}_{end}.csv")
+    macro_df.to_csv(out_macro, index=False)
+    trades_df.to_csv(out_trades, index=False)
+    print(f"\nSaved macro traps to {out_macro}")
+    print(f"Saved trade log to {out_trades}")
 
 
 if __name__ == "__main__":
