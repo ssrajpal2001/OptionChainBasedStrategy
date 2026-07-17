@@ -446,7 +446,7 @@ class ExitMixin:
         if self._ltp_decay_enabled:
             _min_ltp = min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if 0 < _min_ltp < self._ltp_exit_min and self._position and self._position.status == "open":
-                logger.info("SellStraddle[%s]: LTP DECAY min_ltp=%.2f < %.2f — single-side roll",
+                self._clog.info("SellStraddle[%s]: LTP DECAY min_ltp=%.2f < %.2f — single-side roll",
                             self._underlying, _min_ltp, self._ltp_exit_min)
                 if not self._defer_exit("ltp_decay", now):
                     return
@@ -457,7 +457,7 @@ class ExitMixin:
         if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
             ratio = max(pos.ce_leg.ltp, pos.pe_leg.ltp) / min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if ratio >= self._ratio_threshold:
-                logger.info("SellStraddle[%s]: RATIO EXIT ratio=%.2fx — single-side roll",
+                self._clog.info("SellStraddle[%s]: RATIO EXIT ratio=%.2fx — single-side roll",
                             self._underlying, ratio)
                 if not self._defer_exit("ratio_exit", now):
                     return
@@ -508,7 +508,7 @@ class ExitMixin:
                     )
 
             if self._exit_rules and _passed:
-                logger.info("SellStraddle[%s]: EXIT_RULES triggered — %s", self._underlying, _reason)
+                self._clog.info("SellStraddle[%s]: EXIT_RULES triggered — %s", self._underlying, _reason)
                 await self._single_side_roll(now, "exit_rules")
                 return
             # Persist the exit-evaluation audit once per max-TF bucket (throttled by bucket).
@@ -543,7 +543,7 @@ class ExitMixin:
                         _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
                         _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
                         _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
-                        logger.info(
+                        self._clog.info(
                             "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → "
                             "single-side roll (CE pnl=%.2f PE pnl=%.2f)",
                             self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,

@@ -130,7 +130,7 @@ class RollingMixin:
         keep_ltp = float(getattr(keep_leg, "ltp", 0.0) or getattr(keep_leg, "entry_price", 0.0) or 0.0)
         orig_strike = int((pos.ce_leg if roll_side == "CE" else pos.pe_leg).strike)
 
-        logger.info(
+        self._clog.info(
             "SellStraddle[%s]: ROLLOVER STARTED — reason=%s | position CE%d@%.2f PE%d@%.2f | "
             "rolling the %s leg (CE pnl=%.2f PE pnl=%.2f), keeping %s%d@%.2f",
             self._underlying, reason,
@@ -180,7 +180,7 @@ class RollingMixin:
         # candidates were checked, which filters blocked them, and which passed.
         _trace_dump = _format_partner_trace(_partner_trace)
         _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=offset * 2 + 1)
-        logger.info(
+        self._clog.info(
             "SellStraddle[%s]: ROLLOVER %s partner-search trace for running %s%d @%.2f "
             "(CE pnl=%.2f PE pnl=%.2f):\n%s\npool_warmth=%s",
             self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
@@ -190,7 +190,7 @@ class RollingMixin:
         if not partner:
             _summary = _summarize_partner_trace(_partner_trace)
             _why_plain = _summary.get("message", "no candidates")
-            logger.info(
+            self._clog.info(
                 "SellStraddle[%s]: ROLLOVER %s — no valid partner; keeping original pair. reason: %s",
                 self._underlying, reason, _why_plain,
             )
@@ -198,7 +198,7 @@ class RollingMixin:
 
         new_strike, new_ltp = partner
         if int(new_strike) == orig_strike:
-            logger.info(
+            self._clog.info(
                 "SellStraddle[%s]: ROLLOVER %s — best partner is the SAME strike %d; "
                 "no new pair, keeping original pair.", self._underlying, reason, orig_strike
             )
@@ -210,7 +210,7 @@ class RollingMixin:
         if self._max_entry_ratio > 0 and keep_ltp > 0 and new_ltp > 0:
             _skew = float(keep_ltp) / float(new_ltp)
             if _skew > self._max_entry_ratio:
-                logger.info(
+                self._clog.info(
                     "SellStraddle[%s]: ROLLOVER %s — partner %s%d @%.2f is too skewed "
                     "vs running %s%d @%.2f (ratio=%.2f > max=%.2f); keeping original pair.",
                     self._underlying, reason, roll_side, new_strike, new_ltp,
@@ -229,7 +229,7 @@ class RollingMixin:
         cur_close = float(cur_ind.get("close", 0.0) or 0.0)
         cur_vwap = float(cur_ind.get("vwap", 0.0) or 0.0)
         if cur_close > 0 and cur_vwap > 0 and cur_close >= cur_vwap:
-            logger.info(
+            self._clog.info(
                 "SellStraddle[%s]: ROLLOVER %s — partner CE%d/PE%d current close=%.2f "
                 ">= vwap=%.2f; keeping original pair.",
                 self._underlying, reason, cand_ce, cand_pe, cur_close, cur_vwap,
@@ -239,7 +239,7 @@ class RollingMixin:
         # 5. Execute the roll: close the good leg FIRST, wait for the close fill,
         #    then open the new partner. This guarantees the buy-to-close is confirmed
         #    before the sell-to-open, avoiding a transient double-short / margin spike.
-        logger.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (good leg vs running %s%d @%.2f) [%s]",
+        self._clog.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (good leg vs running %s%d @%.2f) [%s]",
                     self._underlying, roll_side, roll_side, new_strike, new_ltp,
                     keep_side, keep_strike, keep_ltp, reason)
         self._roll_in_progress = True
@@ -254,7 +254,7 @@ class RollingMixin:
                 try:
                     await asyncio.wait_for(waiter.wait(), timeout=10.0)
                 except asyncio.TimeoutError:
-                    logger.warning(
+                    self._clog.warning(
                         "SellStraddle[%s]: roll close fill not confirmed within 10s (close_eid=%s) — "
                         "aborting the open side to avoid a naked/duplicate position.",
                         self._underlying, close_eid,
@@ -279,7 +279,7 @@ class RollingMixin:
                     self._initial_entry_time_value = self._position.entry_time_value
             except Exception:
                 pass
-            logger.info(
+            self._clog.info(
                 "SellStraddle[%s]: ROLL complete — fresh pair CE%d/PE%d. "
                 "Exit conditions reset: min_vwap=inf, peak_profit=0, tsl_lock=0, entry_tv=%.2f. "
                 "Day%% guardrail continues on cumulative realized=%.2f.",
