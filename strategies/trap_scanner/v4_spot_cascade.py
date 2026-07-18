@@ -30,7 +30,14 @@ SL_BUFFER = 10.0
 VWAP_PERIOD = 500
 ADX_PERIOD = 20
 RSI_PERIOD = 14
-LOT_SIZE = 75
+
+# Per-index lot configuration: each tranche = 1 lot, total position = 2 lots.
+# Values are the number of units per tranche (1 lot).
+INDEX_LOT_CONFIG: Dict[str, int] = {
+    "NIFTY": 65,
+    "SENSEX": 20,
+    "BANKNIFTY": 35,
+}
 
 
 def _resample_per_day(df_1m: pd.DataFrame, minutes: int) -> pd.DataFrame:
@@ -510,6 +517,7 @@ def _simulate_micro_trade(
     df_1m: pd.DataFrame,
     eod: datetime,
     entry_mode: str = "close",
+    index_name: str = "NIFTY",
 ) -> Optional[Dict]:
     """
     Execute a V4 LTF setup on the 1m stream.
@@ -628,11 +636,13 @@ def _simulate_micro_trade(
     if exit_ts is None or exit_spot is None:
         return None
 
+    tranche_units = INDEX_LOT_CONFIG.get(index_name, 75)
     pts = exit_spot - trigger if kind == "BEAR" else trigger - exit_spot
     return {
         "kind": kind,
         "direction": ltf["direction"],
         "macro_type": "Bull" if kind == "BULL" else "Bear",
+        "index_name": index_name,
         "setup_ts": ltf["setup_ts"],
         "entry_ts": entry_ts,
         "entry_price": trigger,
@@ -643,7 +653,7 @@ def _simulate_micro_trade(
         "exit_price": exit_spot,
         "exit_reason": exit_reason,
         "pts": round(pts, 2),
-        "pnl_rs": round(pts * LOT_SIZE, 2),
+        "pnl_rs": round(pts * tranche_units, 2),
         "zone_high": ltf["zone_high"],
         "zone_low": ltf["zone_low"],
         "htf_entry_level": htf_entry,
@@ -725,6 +735,7 @@ def _simulate_micro_trade_tranches(
     trailing_activation_r: float = 1.5,
     trailing_tf: str = "5m",
     trailing_lookback: int = 2,
+    index_name: str = "NIFTY",
 ) -> List[Dict]:
     """
     Dual-tranche risk-managed execution of a V4 LTF setup.
@@ -886,14 +897,16 @@ def _simulate_micro_trade_tranches(
     t1_pts = t1_exit_price - trigger if kind == "BEAR" else trigger - t1_exit_price
     t2_pts = t2_exit_price - trigger if kind == "BEAR" else trigger - t2_exit_price
 
-    # 50/50 volume split
-    t1_pnl = t1_pts * LOT_SIZE * 0.5
-    t2_pnl = t2_pts * LOT_SIZE * 0.5
+    # 1 lot per tranche (2 lots total), index-specific lot size
+    tranche_units = INDEX_LOT_CONFIG.get(index_name, 75)
+    t1_pnl = t1_pts * tranche_units
+    t2_pnl = t2_pts * tranche_units
 
     base = {
         "kind": kind,
         "direction": ltf["direction"],
         "macro_type": "Bull" if kind == "BULL" else "Bear",
+        "index_name": index_name,
         "setup_ts": ltf["setup_ts"],
         "entry_ts": entry_ts,
         "entry_price": trigger,
@@ -949,6 +962,7 @@ def simulate_macro_to_micro_trade(
     trailing_activation_r: float = 1.5,
     trailing_tf: str = "5m",
     trailing_lookback: int = 2,
+    index_name: str = "NIFTY",
 ) -> List[Dict]:
     """
     For a single confirmed macro trap, wait for price to re-enter the validated
@@ -1001,6 +1015,7 @@ def simulate_macro_to_micro_trade(
                     trailing_activation_r=trailing_activation_r,
                     trailing_tf=trailing_tf,
                     trailing_lookback=trailing_lookback,
+                    index_name=index_name,
                 )
                 if tranches:
                     for tr in tranches:
@@ -1009,7 +1024,7 @@ def simulate_macro_to_micro_trade(
                         tr["multiplier"] = macro.get("multiplier", f"{HTF_MIN}m")
                     return tranches
             else:
-                trade = _simulate_micro_trade(ltf, df_1m, eod, entry_mode=entry_mode)
+                trade = _simulate_micro_trade(ltf, df_1m, eod, entry_mode=entry_mode, index_name=index_name)
                 if trade:
                     trade["macro_confirm_ts"] = macro["confirm_ts"]
                     trade["macro_reentry_ts"] = reentry_ts
@@ -1039,6 +1054,7 @@ def backtest_macro_to_micro(
     trailing_activation_r: float = 1.5,
     trailing_tf: str = "5m",
     trailing_lookback: int = 2,
+    index_name: str = "NIFTY",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run the macro-to-micro trap engine on NIFTY spot data.
@@ -1072,6 +1088,7 @@ def backtest_macro_to_micro(
                 trailing_activation_r=trailing_activation_r,
                 trailing_tf=trailing_tf,
                 trailing_lookback=trailing_lookback,
+                index_name=index_name,
             )
             if tranches:
                 trades.extend(tranches)
