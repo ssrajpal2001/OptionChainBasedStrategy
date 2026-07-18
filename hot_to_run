@@ -1,0 +1,14 @@
+cd ~/OptionChainBasedStrategy
+rm -rf logs/clients/* logs/trades/* logs/algo_*.log logs/system-*.log logs/2026-*/
+rm -f data/positions/*.json
+rm -f data/history/*.json
+rm -f data/live_records/*.csv
+pm2 flush
+echo "Clean. Ready to start."
+pm2 stop terminus
+pm2 delete terminus
+git fetch origin
+git checkout nifty-cascade-v4-indicators
+git pull origin nifty-cascade-v4-indicators
+pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --index BTC --strategies sell_straddle --ui
+pm2 logs terminus

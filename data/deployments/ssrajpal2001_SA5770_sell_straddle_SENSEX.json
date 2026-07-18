@@ -1,0 +1,14 @@
+{
+  "deploy_id": "ssrajpal2001_SA5770_sell_straddle_SENSEX",
+  "client_id": "ssrajpal2001",
+  "binding_id": "SA5770",
+  "strategy_name": "sell_straddle",
+  "underlying": "SENSEX",
+  "lot_multiplier": 1.0,
+  "max_profit_rs": 0.0,
+  "max_sl_rs": 0.0,
+  "squareoff_time": "15:15",
+  "is_active": false,
+  "saved_at": "2026-07-17T08:45:28.274995+05:30",
+  "deleted_at": "2026-07-17T18:47:22.113269+05:30"
+}
