@@ -395,7 +395,10 @@ async def _run_live(
         logger.warning("Delta crypto feed: could not read running deployments: %s", exc)
         _active_crypto = set()
     _crypto_all = list({u for u in (list(_active_crypto) + _crypto_idx_base) if cfg.exchange.is_crypto(u)})
-    # Option chain (ATM strikes) only for underlyings with active sell_straddle deployment.
+    # Option chain (ATM strikes) for crypto underlyings with active sell_straddle deployment,
+    # PLUS any crypto underlying in monitored_indices (fallback so a sell_straddle book spawned
+    # from the command-line --index BTC still receives its option chain even if the DB deployment
+    # query is empty or stale).
     try:
         _db_path = getattr(_shared_client_db, "_db_path", os.path.join("data", "clients.db"))
         _conn2 = _sq3.connect(_db_path)
@@ -403,10 +406,19 @@ async def _run_live(
             "SELECT underlying FROM strategy_deployments WHERE is_running=1 AND strategy_name='sell_straddle'"
         ).fetchall()
         _conn2.close()
-        _option_chain_unds = [r[0] for r in _ss_rows if cfg.exchange.is_crypto(r[0])]
+        _option_chain_unds = {r[0].upper() for r in _ss_rows if cfg.exchange.is_crypto(r[0])}
     except Exception as exc:
         logger.warning("Delta crypto feed: could not read sell_straddle deployments: %s", exc)
-        _option_chain_unds = []
+        _option_chain_unds = set()
+    # Fallback to monitored crypto indices so manually-started BTC sell_straddle still gets ticks.
+    _option_chain_unds.update({u for u in _crypto_idx_base if cfg.exchange.is_crypto(u)})
+    _option_chain_unds = list(_option_chain_unds)
+    if not _option_chain_unds and _crypto_all:
+        logger.warning(
+            "Delta crypto feed: no crypto option-chain underlyings resolved. "
+            "BTC/ETH sell_straddle option ticks will not arrive. "
+            "Add a sell_straddle deployment or include BTC/ETH in monitored_indices."
+        )
     # Crypto option-chain subscription window: use the largest pool depth requested by any
     # active crypto sell_straddle deployment. This guarantees the candidate strikes needed by
     # select_partner_for() are actually subscribed and present in _strike_prem.
