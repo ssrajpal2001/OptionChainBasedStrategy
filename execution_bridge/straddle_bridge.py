@@ -370,10 +370,21 @@ class StraddleExecutionBridge:
         # Per-binding TARGETED routing: if the event is stamped with a client+binding (emitted by
         # a per-binding book), route to ONLY that broker — never mirror to others.
         _target = (ev.client_id, ev.binding_id) if (ev.client_id and ev.binding_id) else None
+        if ev.action == "ENTRY":
+            logger.warning(
+                "StraddleExecutionBridge: DIAG target=%r ev.client_id=%r ev.binding_id=%r "
+                "active_clients=%s",
+                _target, ev.client_id, ev.binding_id, [c.client_id for c in clients],
+            )
 
         routed = 0
         for client in clients:
             if _target and client.client_id != _target[0]:
+                if ev.action == "ENTRY":
+                    logger.warning(
+                        "StraddleExecutionBridge: DIAG client-skip client.client_id=%r != target[0]=%r",
+                        client.client_id, _target[0],
+                    )
                 continue
             # Fetch live DB state for this client's bindings (checks engine_active)
             db = getattr(self._router, "_client_db", None) or getattr(self._router, "_db", None)
@@ -395,6 +406,13 @@ class StraddleExecutionBridge:
                 except Exception:
                     deployments = []
 
+            if ev.action == "ENTRY":
+                logger.warning(
+                    "StraddleExecutionBridge: DIAG live_bindings for %s = %s",
+                    client.client_id,
+                    [(b.get("binding_id"), b.get("terminal_connected")) for b in live_bindings],
+                )
+
             for live_b in live_bindings:
                 binding_id = live_b.get("binding_id", "")
 
@@ -404,6 +422,11 @@ class StraddleExecutionBridge:
 
                 # Gate: terminal must be connected (broker authenticated).
                 if not live_b.get("terminal_connected"):
+                    if ev.action == "ENTRY":
+                        logger.warning(
+                            "StraddleExecutionBridge: DIAG terminal-not-connected binding_id=%r",
+                            binding_id,
+                        )
                     continue
 
                 # Gate: this binding must have a RUNNING sell_straddle deployment on THIS
