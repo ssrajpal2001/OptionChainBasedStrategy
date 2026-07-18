@@ -44,6 +44,9 @@ discussion.txt
 knowledge_graph_imp
 data/positions/
 data/history/
+data/chart_history/
+data/deployments/
+data/live_records/
 
 # Generated scan / validation outputs
 data/fno_scan_*.json
