@@ -1132,3 +1132,12 @@ def summarize_macro_to_micro_trades(trades: pd.DataFrame) -> Dict:
         "avg_win": avg_win, "avg_loss": avg_loss, "rr": rr, "max_dd": max_dd,
         "setup_count": setup_count,
     }
+
+
+# Public aliases so the monthly option cascade module can import them cleanly.
+resample_per_day = _resample_per_day
+macro_to_htf_trap = _macro_to_htf_trap
+has_rejection_bars = _has_rejection_bars
+check_mtf_ltf_rejection = _check_mtf_ltf_rejection
+find_zone_reentry_ts = _find_zone_reentry_ts
+simulate_micro_trade_tranches = _simulate_micro_trade_tranches
