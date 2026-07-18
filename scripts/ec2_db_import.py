@@ -8,7 +8,7 @@ Usage:
     python scripts/ec2_db_import.py db_export_20260701_120000.json
 
 After this, run the bot normally:
-    python run_system.py --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle,trap_scanner
+    python run_system.py --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle
 """
 import json
 import sqlite3
@@ -158,7 +158,7 @@ def import_db(export_file: str):
     conn.close()
     print(f"\n[done] DB imported to: {DB_PATH}")
     print("\nTo run the bot locally with live tokens:")
-    print("  python run_system.py --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle,trap_scanner")
+    print("  python run_system.py --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle")
 
 
 if __name__ == "__main__":

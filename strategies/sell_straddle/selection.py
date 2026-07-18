@@ -328,6 +328,7 @@ def select_balanced_pair(
     theta_target: float = 0.0,
     rule_pass=None,  # optional callable(ce_strike, pe_strike) -> bool
     variable_strikes: bool = False,
+    balance_ratio: float = 1.0,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Balanced-pair selection for beginning AND re-entry:
@@ -335,7 +336,7 @@ def select_balanced_pair(
       2. Anchor = side with LOWER TIME VALUE at ATM.
       3. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target).
       4. Partner = scan the other side over ATM +/- offset for a strike whose raw LTP is
-         <= anchor_time_value and passes the dual floor.  If rule_pass is supplied, the
+         <= anchor_time_value * balance_ratio and passes the dual floor.  If rule_pass is supplied, the
          combined (ce_strike, pe_strike) pair must also pass it.  Pick the HIGHEST such LTP
          (closest to anchor time value from below).  The partner may be ITM or OTM.
 
@@ -360,7 +361,8 @@ def select_balanced_pair(
     pe_tv = strip_intrinsic(pe_ltp, "PE", atm, spot)
 
     # Anchor = side with lower TIME VALUE at ATM.  The partner's raw LTP must not
-    # exceed the anchor's TIME VALUE so the pair is balanced in theta/extrinsic value.
+    # exceed the anchor's TIME VALUE * balance_ratio so the pair is balanced in
+    # theta/extrinsic value while allowing a small configurable skew.
     if ce_tv < pe_tv:
         anchor_side, anchor_strike, anchor_ltp, anchor_tv, partner_side = "CE", atm, ce_ltp, ce_tv, "PE"
     else:
@@ -371,7 +373,7 @@ def select_balanced_pair(
             f"ANCHOR atm={atm} ce_tv={ce_tv:.2f} pe_tv={pe_tv:.2f} -> "
             f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} tv={anchor_tv:.2f} "
             f"(need ltp>={ltp_target:.0f} theta>={theta_target:.0f}); partner={partner_side} "
-            f"wants same floor and ltp<={anchor_tv:.2f}"
+            f"wants same floor and ltp<={anchor_tv * balance_ratio:.2f} (ratio={balance_ratio:.2f})"
         )
 
     if not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target):
@@ -397,7 +399,7 @@ def select_balanced_pair(
             continue
         ltp = leg.get("ltp", 0.0)
         _ok_floor = leg_passes_dual_floor(partner_side, s, ltp, spot, ltp_target, theta_target)
-        _ok_balance = ltp <= anchor_tv
+        _ok_balance = ltp <= anchor_tv * balance_ratio
         # Build the combined pair for the optional rule gate.
         if anchor_side == "CE":
             cs, ps = anchor_strike, s
@@ -440,7 +442,8 @@ def select_balanced_pair(
 
 
 def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
-                         theta_target: float = 0.0, variable_strikes: bool = False):
+                         theta_target: float = 0.0, variable_strikes: bool = False,
+                         balance_ratio: float = 1.0):
     """Diagnose why the re-entry pool produced no trade, so the log can distinguish
     'no balanced pair exists' from 'a pair exists but the gate blocked it'.
 
@@ -449,7 +452,8 @@ def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
     """
     pair = select_balanced_pair(strike_prem, spot, step, offset, ltp_target,
                                 theta_target=theta_target,
-                                variable_strikes=variable_strikes)
+                                variable_strikes=variable_strikes,
+                                balance_ratio=balance_ratio)
     if not pair:
         return {"kind": "no_pair"}
     ce, pe, ce_ltp, pe_ltp = pair

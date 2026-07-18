@@ -6,8 +6,8 @@ Holds the immutable trade-signal value objects shared across the system
 parallel worker pool import SignalPackage from here.
 
 The legacy ConfluenceEngine + BaseStrategy ABC (the A/B/C confluence path) were
-removed — the three live strategies (SellStraddle, IronCondor, TrapScanner) emit
-their own order events directly and do not go through this module.
+removed — SellStraddle emits its own order events directly and does not go
+through this module. IronCondor and TrapScanner were removed 2026-07-18.
 """
 
 from __future__ import annotations
@@ -29,9 +29,7 @@ class Direction(Enum):
 
 
 class StrategyID(Enum):
-    TRAP_SCANNER = "TrapScanner"
     SELL_STRADDLE = "SellStraddle"
-    IRON_CONDOR = "IronCondor"
 
 
 @dataclass(frozen=True)

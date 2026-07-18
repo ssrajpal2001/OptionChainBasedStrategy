@@ -75,11 +75,6 @@ class WsBridge:
         self._option_q    = bus.subscribe(Topic.OPTION_TICK)
         self._audit_q     = bus.subscribe(Topic.EXIT_AUDIT)
         self._pos_q       = bus.subscribe(Topic.POSITION_UPDATE)
-        self._trap_tick_q  = bus.subscribe(Topic.TRAP_TICK)
-        self._trap_state_q = bus.subscribe(Topic.TRAP_STATE)
-        self._fno_alert_q  = bus.subscribe(Topic.FNO_STOCK_ALERT)
-        self._fno_status_q = bus.subscribe(Topic.FNO_STOCK_STATUS)
-        self._trap_scanner_mgr = None   # set by dashboard_server after WsBridge init
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
@@ -167,11 +162,6 @@ class WsBridge:
                 self._option_loop(),
                 self._exit_audit_loop(),
                 self._position_update_loop(),
-                self._trap_tick_loop(),
-                self._trap_state_loop(),
-                self._fno_alert_loop(),
-                self._fno_status_loop(),
-                self._trap_scanner_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -448,48 +438,6 @@ class WsBridge:
             except Exception as exc:
                 logger.debug("WsBridge._position_update_loop: %s", exc)
 
-    async def _trap_tick_loop(self) -> None:
-        """Forward trap scanner per-tick LTP updates to the UI in real time (no 2s poll delay)."""
-        while self._running:
-            try:
-                ev = await asyncio.wait_for(self._trap_tick_q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            try:
-                if isinstance(ev, dict):
-                    await self.broadcast({"type": "trap_tick", **ev})
-            except Exception as exc:
-                logger.debug("WsBridge._trap_tick_loop: %s", exc)
-
-    async def _fno_alert_loop(self) -> None:
-        """Forward FnO stock monitor alerts to the UI in real time."""
-        while self._running:
-            try:
-                payload = await asyncio.wait_for(self._fno_alert_q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            try:
-                if isinstance(payload, dict):
-                    # Convert datetime to isoformat for JSON serialisation
-                    if isinstance(payload.get("fired_at"), datetime):
-                        payload = dict(payload)
-                        payload["fired_at"] = payload["fired_at"].isoformat()
-                    await self.broadcast({"type": "fno_alert", "alert": payload})
-            except Exception as exc:
-                logger.debug("WsBridge._fno_alert_loop: %s", exc)
-
-    async def _fno_status_loop(self) -> None:
-        """Forward live stock LTP + MTF/LTF status to dashboard every 3s."""
-        while self._running:
-            try:
-                status = await asyncio.wait_for(self._fno_status_q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            try:
-                await self.broadcast({"type": "fno_status", "stocks": status})
-            except Exception as exc:
-                logger.debug("WsBridge._fno_status_loop: %s", exc)
-
     async def _heartbeat_loop(self) -> None:
         """Broadcast worker stats and client summaries every HEARTBEAT_INTERVAL seconds."""
         while self._running:
@@ -503,38 +451,6 @@ class WsBridge:
                     await self.broadcast({"type": "stats", "name": name, "data": data})
                 except Exception as exc:
                     logger.debug("WsBridge.heartbeat[%s]: %s", name, exc)
-
-    async def _trap_state_loop(self) -> None:
-        """Forward trap scanner state snapshots to the UI immediately on every state change."""
-        while self._running:
-            try:
-                snap = await asyncio.wait_for(self._trap_state_q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                return
-            try:
-                if isinstance(snap, dict):
-                    await self.broadcast({"type": "trap_scanner_update", "books": [snap]})
-            except Exception as exc:
-                logger.debug("WsBridge._trap_state_loop: %s", exc)
-
-    async def _trap_scanner_loop(self) -> None:
-        """Fallback: push trap scanner full telemetry every 30 seconds (covers cold-start / missed events)."""
-        while self._running:
-            try:
-                await asyncio.sleep(30.0)
-            except asyncio.CancelledError:
-                return
-            mgr = self._trap_scanner_mgr
-            if mgr is None:
-                continue
-            try:
-                books = mgr.telemetry_all()
-                if books:
-                    await self.broadcast({"type": "trap_scanner_update", "books": books})
-            except Exception as exc:
-                logger.debug("WsBridge._trap_scanner_loop: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -125,7 +125,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--strategies",
-        default="sell_straddle,iron_condor,trap_scanner",
+        default="sell_straddle",
         help="Comma-list of strategies to RUN. Others are constructed but never started. "
              "e.g. --strategies sell_straddle (run only the sell-straddle).",
     )
@@ -311,7 +311,7 @@ async def _run_live(
     ui: bool = False,
     ui_host: str = "0.0.0.0",
     ui_port: int = 5000,
-    strategies: str = "sell_straddle,iron_condor,trap",
+    strategies: str = "sell_straddle",
 ) -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting %s mode for %s%s", mode.upper(), underlying,
@@ -340,7 +340,6 @@ async def _run_live(
     from execution_bridge import ExecutionRouter
     from strategies.registry import STRATEGY_REGISTRY, create_strategy_manager
     from execution_bridge.straddle_bridge import StraddleExecutionBridge
-    from execution_bridge.ic_bridge import ICExecutionBridge
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
     from management.risk_manager import RiskManager
@@ -368,14 +367,7 @@ async def _run_live(
 
     # Backward-compat variables consumed by the dashboard and bridges.
     straddle_manager = managers.get("sell_straddle")
-    trap_scanner_manager = managers.get("trap_scanner")
-    iron_condor_manager = managers.get("iron_condor")
-    _iron_condors = iron_condor_manager.books if iron_condor_manager else []
 
-    # Give each Iron Condor the feeder so it can subscribe next-expiry strikes
-    # for the min-LTP expiry shift (no-op if the feature is unused).
-    if iron_condor_manager is not None and hasattr(iron_condor_manager, "set_feeder"):
-        iron_condor_manager.set_feeder(feeder)
     # Crypto (Delta) feed: for any BTC/ETH in monitored_indices or with an active deployment,
     # run a DeltaChainManager that drives a DeltaFeeder onto the same EventBus. If nothing crypto
     # is configured/deployed, the Delta feed stays off to avoid noisy BTC logs on pure NSE setups.
@@ -438,7 +430,6 @@ async def _run_live(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
-    ic_bridge     = ICExecutionBridge(bus, registry, router)
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -491,17 +482,9 @@ async def _run_live(
     if straddle_manager is not None and hasattr(straddle_manager, "set_delta_chain_manager"):
         straddle_manager.set_delta_chain_manager(delta_chain)
         logger.info("DeltaChainManager wired to StraddleBookManager for crypto leg pinning.")
-    # Iron condor needs the full ATM chain — enable for all IC indices
-    for _ic in _iron_condors:
-        if hasattr(rebalancer, "enable_chain"):
-            rebalancer.enable_chain(_ic._underlying)
     # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
     # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
     _mcx_feeder = None  # Upstox1 handles MCX options (Upstox2 lacks MCX options data plan)
-    # Wire DeltaFeeder to TrapBookManager — it propagates to all current + future BTC/ETH books.
-    if trap_scanner_manager and hasattr(trap_scanner_manager, "set_delta_feeder"):
-        trap_scanner_manager.set_delta_feeder(delta_chain._feeder)
-        logger.info("DeltaFeeder wired to TrapBookManager for all crypto books.")
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 
@@ -524,10 +507,8 @@ async def _run_live(
                 rebalancer=rebalancer,
                 feeder=feeder,
                 risk_manager=risk_mgr,
-                iron_condors=_iron_condors,
                 straddle_manager=straddle_manager,
                 straddle_bridge=straddle_bridge,
-                trap_scanner_manager=trap_scanner_manager,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -569,26 +550,9 @@ async def _run_live(
     except Exception as exc:
         logger.warning("TickRecorder could not be instantiated: %s", exc)
 
-    if "iron_condor" in _enabled_strats:
-        for _ic in _iron_condors:
-            _ic.start()
     # SellStraddle: the book manager spawns/starts one independent book per (client,binding,index)
     # deployment and keeps reconciling (auto-start on deploy). Started as a task below.
-    # TrapScanner: same per-binding pattern via trap_scanner_manager (task below).
-
-    # FnO Stock Monitor — intraday alert engine driven off the nightly scan file
-    try:
-        from strategies.fno_stock_monitor import FnoStockMonitor
-        fno_monitor = FnoStockMonitor(bus, cfg, _shared_client_db)
-        fno_monitor.warm_start()
-        if feeder:
-            fno_monitor.set_feeder(feeder)
-        if dashboard is not None:
-            dashboard.set_fno_monitor(fno_monitor)
-        tasks_pre = [asyncio.create_task(fno_monitor.start(), name="fno_stock_monitor")]
-    except ImportError as _exc:
-        logger.warning("FnoStockMonitor not available: %s", _exc)
-        tasks_pre = []
+    tasks_pre = []
 
     # Admin console runs as a detached background task — its completion or any
     # internal stream error must NOT trigger the engine shutdown.  Only the
@@ -630,7 +594,6 @@ async def _run_live(
     tasks += [
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
-        asyncio.create_task(ic_bridge.run(),            name="ic_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -665,7 +628,6 @@ async def _run_live(
     strike_cleanup.stop()
     gap_handler.stop()
     straddle_bridge.stop()
-    ic_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task

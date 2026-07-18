@@ -12,7 +12,6 @@ Usage:
 
     # Per-index config (new, rule-builder based):
     ss_cfg = RuntimeConfig.index_section("NIFTY", "sell_straddle")
-    ic_cfg = RuntimeConfig.index_section("NIFTY", "iron_condor")
 
     RuntimeConfig.update(patch_dict)                       # flat section update
     RuntimeConfig.set_index_section("NIFTY", "sell_straddle", data)  # per-index
@@ -84,33 +83,6 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     },
 }
 
-# ── Per-index iron_condor defaults — matches old repo iron_condor_manager.py ──
-# Entry is purely time-gated; NO RSI/ADX filter.
-# P&L targets are in ₹, not %; roll side on ratio breach instead of full exit.
-_IC_BASE_DEFAULT: Dict[str, Any] = {
-    "enabled":                  True,
-    "start_time":               "09:16",
-    "squareoff_time":           "15:20",
-    "entry_day":                "daily",     # daily | monday | monday,thursday
-    "product_type":             "MIS",
-    "lot_size":                 65,
-    "strike_step":              50,
-    "max_adjustments_per_side": 3,
-    "roll_step_pts":            5,
-    "profit_target_inr":        5000.0,      # ₹ profit to exit all 4 legs
-    "stoploss_inr":             2000.0,      # ₹ loss to exit all 4 legs
-    "ratio_exit_threshold":     3.0,         # short_call_ltp/short_put_ltp ratio to roll
-}
-
-_IC_STRIKE_DEFAULTS: Dict[str, Dict[str, float]] = {
-    "NIFTY":      {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0},
-    "BANKNIFTY":  {"short_leg_otm_pts": 400.0, "long_leg_otm_pts": 600.0},
-    "FINNIFTY":   {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0},
-    "SENSEX":     {"short_leg_otm_pts": 500.0, "long_leg_otm_pts": 750.0},
-    "MIDCPNIFTY": {"short_leg_otm_pts": 150.0, "long_leg_otm_pts": 250.0},
-    "CRUDEOIL":   {"short_leg_otm_pts": 100.0, "long_leg_otm_pts": 200.0},
-}
-
 # MCX commodities trade the evening session — different hours/lots/strikes.
 _MCX_INDICES = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS"}
 # Crypto (Delta Exchange India) — daily options, 24/7/365, 17:30 IST rollover.
@@ -129,20 +101,10 @@ def _ss_index_default(index: str) -> Dict[str, Any]:
     return base
 
 
-def _ic_index_default(index: str) -> Dict[str, Any]:
-    strikes = _IC_STRIKE_DEFAULTS.get(index, {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0})
-    base = {**_IC_BASE_DEFAULT, **strikes}
-    if index.upper() in _MCX_INDICES:
-        base.update({"start_time": "09:00", "squareoff_time": "23:30",
-                     "strike_step": 100, "lot_size": 100})
-    return base
-
-
 def _build_index_defaults() -> Dict[str, Any]:
     return {
         idx: {
             "sell_straddle": _ss_index_default(idx),
-            "iron_condor":   _ic_index_default(idx),
         }
         for idx in _ALL_INDICES
     }
@@ -162,14 +124,6 @@ _DEFAULTS: Dict[str, Any] = {
         "ema_slow":     21,
         "htf_minutes":  75,
         "ltf_minutes":  5,
-    },
-    # Legacy flat section — use indices[idx][iron_condor] for per-index config
-    "iron_condor": {
-        "enabled": True, "start_time": "09:16", "squareoff_time": "15:20",
-        "entry_day": "daily", "product_type": "MIS", "lot_size": 65, "strike_step": 50,
-        "max_adjustments_per_side": 3, "roll_step_pts": 5,
-        "profit_target_inr": 5000.0, "stoploss_inr": 2000.0,
-        "ratio_exit_threshold": 3.0,
     },
     "sell_straddle": {
         "entry_start":              "09:20",
@@ -309,10 +263,6 @@ class RuntimeConfig:
                     defaults[idx]["sell_straddle"],
                     stored.get(idx, {}).get("sell_straddle", {}),
                 ),
-                "iron_condor": _deep_merge(
-                    defaults[idx]["iron_condor"],
-                    stored.get(idx, {}).get("iron_condor", {}),
-                ),
             }
         return result
 
@@ -349,7 +299,7 @@ def validate_index_section(index: str, section: str, raw: dict) -> None:
 
     @staticmethod
     def set_index_config(index: str, data: Dict[str, Any]) -> None:
-        """Persist full per-index config (sell_straddle + iron_condor together)."""
+        """Persist full per-index config (sell_straddle)."""
         global _live
         _ensure_loaded()
         _live.setdefault("indices", {})[index] = data
