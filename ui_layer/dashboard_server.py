@@ -2277,14 +2277,12 @@ class DashboardServer:
             deployments = [d for d in _all_deps if _is_running(d) or _has_open_position(d)]
 
             def _ccy_cv(underlying):
-                """(currency_symbol, contract_value) per exchange. Crypto (Delta) P&L is in USD and
-                each contract is a fraction of a coin (BTC 0.001, ETH 0.01), so the premium-points
-                P&L must be scaled by the contract value to match the Delta app. NSE/MCX = ₹, ×1."""
+                """(currency_symbol, contract_value) per exchange. P&L is tracked directly off
+                the displayed lot/contract count (2026-07-19 — per user confirmation): premium
+                points x contracts sold, no fractional-BTC scaling. NSE/MCX = ₹, crypto = $."""
                 u = str(underlying).upper()
-                if u == "BTC":
-                    return ("$", 0.001)
-                if u == "ETH":
-                    return ("$", 0.01)
+                if u in ("BTC", "ETH"):
+                    return ("$", 1.0)
                 return ("₹", 1.0)
 
             def _fmt_exp(d):
@@ -2427,9 +2425,8 @@ class DashboardServer:
                                 _lot_sz  = int(getattr(strat, "_lot_size", 1) or 1)
                                 _lot_mul = int(getattr(strat, "_lot_multiplier", 1) or 1)
                                 _qty     = _lot_sz * _lot_mul
-                                # Contract value: BTC=0.001, ETH=0.01, NSE=1.0
-                                _und_u = str(pos.underlying).upper()
-                                _cv = 0.001 if _und_u == "BTC" else (0.01 if _und_u == "ETH" else 1.0)
+                                # P&L tracked directly off displayed contract count (2026-07-19) — no fractional-BTC scaling.
+                                _cv = 1.0
                                 _qty_cv = _qty * _cv   # actual currency units per premium pt
                                 straddle_info["total_value_sold"] = round(_entryC, 2)
                                 straddle_info["ltp"] = {"total_sold": round(_entryC, 2),
