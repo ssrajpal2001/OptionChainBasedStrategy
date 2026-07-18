@@ -262,23 +262,6 @@ try:
         distance_filter_pct:    float = 5.0
 
     class _StrategyConfigSchema(_PydanticBase):
-        # Iron Condor (global fallback — per-index config preferred)
-        ic_squareoff_time: str   = "15:20"
-        ic_rsi_min:        float = 40.0
-        ic_rsi_max:        float = 60.0
-        ic_adx_max:        float = 25.0
-        ic_profit_pct:     float = 50.0
-        ic_sl_pct:         float = 200.0
-        ic_nifty_otm:      float = 200.0
-        ic_nifty_wing:     float = 200.0
-        ic_banknifty_otm:  float = 400.0
-        ic_banknifty_wing: float = 500.0
-        ic_finnifty_otm:   float = 200.0
-        ic_finnifty_wing:  float = 200.0
-        ic_sensex_otm:     float = 500.0
-        ic_sensex_wing:    float = 500.0
-        ic_midcp_otm:      float = 150.0
-        ic_midcp_wing:     float = 200.0
         # Sell Straddle (global fallback — per-index config preferred)
         ss_entry_start:    str   = "09:15"
         ss_entry_end:      str   = "12:00"
@@ -373,7 +356,7 @@ try:
         index: str  # NIFTY / BANKNIFTY / FINNIFTY
 
     class _StrategySelectionItem(_PydanticBase):
-        strategy: str   # sell_straddle | iron_condor | trap_scanner
+        strategy: str   # sell_straddle
         instrument: str # NIFTY | BANKNIFTY | FINNIFTY | SENSEX | MIDCPNIFTY
 
     class _StrategySelectionsSchema(_PydanticBase):
@@ -660,11 +643,9 @@ class DashboardServer:
         rebalancer=None,  # StrikeRebalancer
         feeder=None,      # GlobalFeeder — optional, for admin feeder management
         risk_manager=None, # RiskManager — optional, for firm risk summary + kill-all
-        iron_condors=None,  # List[IronCondorStrategy]
         sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
         straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
-        trap_scanner_manager=None,  # TrapBookManager — per-binding trap scanner books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -673,14 +654,11 @@ class DashboardServer:
         self._rebalancer = rebalancer
         self._feeder = feeder
         self._risk_manager = risk_manager
-        self._iron_condors: list = iron_condors or []
         self._straddle_manager = straddle_manager
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
-        self._trap_scanner_manager = trap_scanner_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
-        self._ws_bridge._trap_scanner_mgr = trap_scanner_manager
         self._uvicorn_server = None
 
         from data_layer.client_db import ClientDB
@@ -2044,15 +2022,6 @@ class DashboardServer:
             if mode not in valid and not _re.match(r"^\d{4}-\d{2}-\d{2}$", mode):
                 raise HTTPException(400, f"Invalid expiry_mode '{mode}'. Use: current|next_week|monthly|YYYY-MM-DD")
             await _srv._client_db.set_deployment_expiry_mode(deploy_id, cid, mode)
-            # Notify the trap scanner manager to re-init with new expiry
-            if _srv._trap_scanner_manager is not None:
-                try:
-                    dep = next(d for d in deps if d["deploy_id"] == deploy_id)
-                    await _srv._trap_scanner_manager.set_expiry_mode(
-                        dep["client_id"], dep["binding_id"], dep["underlying"], mode
-                    )
-                except Exception as exc:
-                    logger.warning("expiry_mode hot-swap failed: %s", exc)
             return {"ok": True, "deploy_id": deploy_id, "expiry_mode": mode}
 
         @app.get("/api/client/deployment/{deploy_id}/available_expiries", tags=["Client"])
@@ -2202,7 +2171,7 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "iron_condor", "trap_scanner"}
+            allowed_strategies = {"sell_straddle"}
             allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
             import json as _json
             validated = []
@@ -2277,7 +2246,7 @@ class DashboardServer:
         async def api_client_positions(user: dict = Depends(_require_client)):
             """
             Live open legs per (binding, strategy), read from the GLOBAL strategy
-            instances (_iron_condors / _sell_straddles / trap_scanner books). Positions
+            instances (_sell_straddles books). Positions
             are engine-level (per underlying); we surface them under each of the
             client's deployments so the portal shows the strikes being traded.
             """
@@ -2290,12 +2259,6 @@ class DashboardServer:
             def _is_running(dep: dict) -> bool:
                 return int(dep.get("is_running", 0) or 0) == 1
 
-            def _find(strategies, underlying):
-                for s in strategies or []:
-                    if getattr(s, "_underlying", None) == underlying:
-                        return s
-                return None
-
             def _has_open_position(dep: dict) -> bool:
                 """A stopped deployment may still have a live open position that must be visible."""
                 if _is_running(dep):
@@ -2307,48 +2270,11 @@ class DashboardServer:
                     strat = _srv._find_ss_book(cid, bid, underlying)
                     pos = getattr(strat, "_position", None) if strat else None
                     return pos is not None and getattr(pos, "status", "") == "open"
-                if sname == "iron_condor":
-                    _ics = getattr(_srv, "_iron_condors", []) or []
-                    strat = next((s for s in _ics if getattr(s, "_underlying", None) == underlying), None)
-                    pos = getattr(strat, "_position", None) if strat else None
-                    return pos is not None and getattr(pos, "status", "") == "open"
-                if sname == "trap_scanner":
-                    strat = _srv._find_trap_book(cid, bid, underlying)
-                    pos = getattr(strat, "_position", None) if strat else None
-                    return pos is not None
                 return False
 
             # Show running deployments (live cards) OR stopped deployments that still
             # hold an open position (so the user can monitor/close it).
             deployments = [d for d in _all_deps if _is_running(d) or _has_open_position(d)]
-
-            def _ic_legs(pos, product="NRML"):
-                out = []
-                for leg in (pos.short_ce, pos.short_pe, pos.long_ce, pos.long_pe):
-                    strike = int(getattr(leg, "strike", 0))
-                    if strike <= 0:
-                        continue
-                    side = getattr(leg, "side", "")
-                    ot   = getattr(leg, "option_type", "")
-                    ep   = float(getattr(leg, "entry_price", 0.0) or 0.0)
-                    ltp  = float(getattr(leg, "ltp", ep) or ep)
-                    ls   = int(getattr(pos, "lot_size", 0) or 0)
-                    qty  = ls * (-1 if side == "sell" else 1)
-                    # sell profits when price falls; buy profits when price rises
-                    pnl = round((ep - ltp) * abs(qty), 2) if side == "sell" else round((ltp - ep) * abs(qty), 2)
-                    _ot = getattr(leg, "open_time", None)
-                    _ot_iso = _ot.isoformat(timespec="seconds") if _ot else None
-                    _exp_lbl = _fmt_exp(getattr(pos, "expiry", None))
-                    out.append({"symbol": f"{pos.underlying} {strike}{ot} {side.upper()}",
-                                "instrument": f"{pos.underlying} {strike} {ot}" + (f" {_exp_lbl}" if _exp_lbl else ""),
-                                "type": product, "side": side.upper(),
-                                "qty": qty, "lot_size": ls, "lots": 1,
-                                "entry_price": round(ep, 2),
-                                "sell_avg": round(ep, 2) if side == "sell" else 0.0,
-                                "buy_avg":  round(ep, 2) if side != "sell" else 0.0,
-                                "ltp": round(ltp, 2), "pnl": pnl, "mtm": pnl,
-                                "entry_time": _ot_iso})
-                return out
 
             def _ccy_cv(underlying):
                 """(currency_symbol, contract_value) per exchange. Crypto (Delta) P&L is in USD and
@@ -2426,17 +2352,7 @@ class DashboardServer:
                 booked = 0.0   # session realized P&L (₹) — straddle re-entries/rolls booked today
                 pos = None     # active position for extracting top-level entry time
                 try:
-                    if sname == "iron_condor":
-                        strat = _find(getattr(_srv, "_iron_condors", []), underlying)
-                        pos = getattr(strat, "_position", None) if strat else None
-                        if pos and getattr(pos, "status", "open") == "open":
-                            try:
-                                from data_layer.runtime_config import RuntimeConfig as _RC2
-                                _icp = str(_RC2.index_section(underlying, "iron_condor").get("product_type", "NRML")).upper()
-                            except Exception:
-                                _icp = "NRML"
-                            legs = _ic_legs(pos, product=_icp if _icp in ("MIS", "NRML") else "NRML")
-                    elif sname == "sell_straddle":
+                    if sname == "sell_straddle":
                         strat = _srv._find_ss_book(cid, bid, underlying)
                         pos = getattr(strat, "_position", None) if strat else None
                         # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
@@ -3100,7 +3016,7 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle", "iron_condor", "trap_scanner"}
+            allowed_strategies = {"sell_straddle"}
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 
@@ -3519,31 +3435,6 @@ pm2 save
             now_ist = datetime.now(IST).isoformat()
             try:
                 out = []
-                for ic in _srv._iron_condors:
-                    pos = ic.position
-                    entry = None
-                    if pos:
-                        entry = {
-                            "short_ce": pos.short_ce.strike,
-                            "short_pe": pos.short_pe.strike,
-                            "long_ce":  pos.long_ce.strike,
-                            "long_pe":  pos.long_pe.strike,
-                            "net_credit":    round(pos.net_credit, 2),
-                            "profit_target": round(pos.profit_target_rs, 2),
-                            "stop_loss":     round(pos.sl_rs, 2),
-                            "unrealized_pnl": round(pos.total_pnl_pts * pos.lot_size, 2),
-                            "open_time": pos.open_time.isoformat() if pos.open_time else None,
-                            "entry_time": pos.open_time.isoformat() if pos.open_time else None,
-                        }
-                    out.append({
-                        "type":         "iron_condor",
-                        "underlying":   ic._underlying,
-                        "running":      ic._running,
-                        "has_position": ic.has_open_position,
-                        "spot":         round(ic._spot, 2),
-                        "entry_allowed": getattr(ic, "entry_allowed", True),
-                        "position":     entry,
-                    })
                 for ss in _srv._sell_straddles:
                     pos = ss.position
                     entry = None
@@ -3584,26 +3475,8 @@ pm2 save
         async def api_strategy_config_get(_: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             cfg = RuntimeConfig.get()
-            ic  = cfg.get("iron_condor", {})
             ss  = cfg.get("sell_straddle", {})
-            ic_idx = ic.get("per_index", {})
             return {
-                "ic_squareoff_time":  ic.get("squareoff_time", "15:20"),
-                "ic_rsi_min":         ic.get("rsi_min",  40.0),
-                "ic_rsi_max":         ic.get("rsi_max",  60.0),
-                "ic_adx_max":         ic.get("adx_max",  25.0),
-                "ic_profit_pct":      ic.get("profit_pct", 50.0),
-                "ic_sl_pct":          ic.get("sl_pct",   200.0),
-                "ic_nifty_otm":       ic_idx.get("NIFTY",      {}).get("short_otm_pts", 200.0),
-                "ic_nifty_wing":      ic_idx.get("NIFTY",      {}).get("wing_width_pts",200.0),
-                "ic_banknifty_otm":   ic_idx.get("BANKNIFTY",  {}).get("short_otm_pts", 400.0),
-                "ic_banknifty_wing":  ic_idx.get("BANKNIFTY",  {}).get("wing_width_pts",500.0),
-                "ic_finnifty_otm":    ic_idx.get("FINNIFTY",   {}).get("short_otm_pts", 200.0),
-                "ic_finnifty_wing":   ic_idx.get("FINNIFTY",   {}).get("wing_width_pts",200.0),
-                "ic_sensex_otm":      ic_idx.get("SENSEX",     {}).get("short_otm_pts", 500.0),
-                "ic_sensex_wing":     ic_idx.get("SENSEX",     {}).get("wing_width_pts",500.0),
-                "ic_midcp_otm":       ic_idx.get("MIDCPNIFTY", {}).get("short_otm_pts", 150.0),
-                "ic_midcp_wing":      ic_idx.get("MIDCPNIFTY", {}).get("wing_width_pts",200.0),
                 "ss_entry_start":     ss.get("entry_start",    "09:15"),
                 "ss_entry_end":       ss.get("entry_end",      "12:00"),
                 "ss_squareoff_time":  ss.get("squareoff_time", "15:20"),
@@ -3617,21 +3490,6 @@ pm2 save
         ):
             from data_layer.runtime_config import RuntimeConfig
             patch = {
-                "iron_condor": {
-                    "squareoff_time": body.ic_squareoff_time,
-                    "rsi_min":        body.ic_rsi_min,
-                    "rsi_max":        body.ic_rsi_max,
-                    "adx_max":        body.ic_adx_max,
-                    "profit_pct":     body.ic_profit_pct,
-                    "sl_pct":         body.ic_sl_pct,
-                    "per_index": {
-                        "NIFTY":      {"short_otm_pts": body.ic_nifty_otm,     "wing_width_pts": body.ic_nifty_wing},
-                        "BANKNIFTY":  {"short_otm_pts": body.ic_banknifty_otm, "wing_width_pts": body.ic_banknifty_wing},
-                        "FINNIFTY":   {"short_otm_pts": body.ic_finnifty_otm,  "wing_width_pts": body.ic_finnifty_wing},
-                        "SENSEX":     {"short_otm_pts": body.ic_sensex_otm,    "wing_width_pts": body.ic_sensex_wing},
-                        "MIDCPNIFTY": {"short_otm_pts": body.ic_midcp_otm,     "wing_width_pts": body.ic_midcp_wing},
-                    },
-                },
                 "sell_straddle": {
                     "entry_start":    body.ss_entry_start,
                     "entry_end":      body.ss_entry_end,
@@ -3643,11 +3501,6 @@ pm2 save
 
             # Live-inject into running strategy instances
             reconfigure_errors = []
-            for ic in (_srv._iron_condors or []):
-                try:
-                    ic.reconfigure()
-                except Exception as e:
-                    reconfigure_errors.append(f"iron_condor[{ic._underlying}]: {e}")
             for ss in (_srv._sell_straddles or []):
                 try:
                     ss.reconfigure()
@@ -3673,7 +3526,6 @@ pm2 save
             return {
                 "index": idx,
                 "sell_straddle": RuntimeConfig.index_section(idx, "sell_straddle"),
-                "iron_condor":   RuntimeConfig.index_section(idx, "iron_condor"),
             }
 
         @app.post("/api/admin/strategy/config/{index}", tags=["Admin"])
@@ -3699,15 +3551,6 @@ pm2 save
                             ss.reconfigure()
                         except Exception as exc:
                             logger.warning("reconfigure SS[%s]: %s", idx, exc)
-
-            if "iron_condor" in body:
-                RuntimeConfig.set_index_section(idx, "iron_condor", body["iron_condor"])
-                for ic in (_srv._iron_condors or []):
-                    if getattr(ic, "_underlying", None) == idx:
-                        try:
-                            ic.reconfigure()
-                        except Exception as exc:
-                            logger.warning("reconfigure IC[%s]: %s", idx, exc)
 
             logger.info("Dashboard: per-index config saved for %s.", idx)
             return {"ok": True, "message": f"Config for {idx} saved and injected into running strategies."}
@@ -4984,76 +4827,6 @@ pm2 save
             finally:
                 bridge.remove_connection(websocket)
 
-        # ── ADMIN — Trap Scanner config ───────────────────────────────────────
-
-        @app.get("/api/admin/trap_scanner/settings", tags=["Admin"])
-        async def api_trap_scanner_settings_get(_: dict = Depends(_require_admin)):
-            """Return the current trap_scanner global admin settings (stored in system_settings)."""
-            import json
-            raw = await asyncio.to_thread(
-                _srv._client_db.get_setting_sync, "trap_scanner", ""
-            )
-            cfg = {}
-            if raw:
-                try:
-                    cfg = json.loads(raw)
-                except Exception:
-                    pass
-            return {"ok": True, "settings": cfg}
-
-        @app.post("/api/admin/trap_scanner/settings", tags=["Admin"])
-        async def api_trap_scanner_settings_save(
-            request: Request, _: dict = Depends(_require_admin),
-        ):
-            """Persist trap_scanner admin settings (htf_minutes, ltf_minutes, per_index config etc.)."""
-            import json
-            try:
-                body = await request.json()
-            except Exception:
-                return {"ok": False, "error": "Invalid JSON body."}
-            # Whitelist top-level keys
-            allowed_top = {"htf_minutes", "ltf_minutes", "gap_threshold_pct", "per_index"}
-            filtered = {k: v for k, v in body.items() if k in allowed_top}
-            if not filtered:
-                return {"ok": False, "error": "No valid fields provided."}
-            # Load existing and merge
-            raw = await asyncio.to_thread(_srv._client_db.get_setting_sync, "trap_scanner", "{}")
-            try:
-                existing = json.loads(raw)
-            except Exception:
-                existing = {}
-            existing.update(filtered)
-            await _srv._client_db.set_setting("trap_scanner", json.dumps(existing))
-            logger.info("TrapScanner admin settings saved: %s", filtered)
-            # Hot-reload into all running books immediately (no restart needed)
-            mgr = getattr(_srv, "_trap_scanner_manager", None)
-            reloaded = 0
-            if mgr is not None and hasattr(mgr, "reload_admin_config"):
-                await asyncio.to_thread(mgr.reload_admin_config)
-                reloaded = len(mgr.books)
-            msg = f"Trap scanner settings saved."
-            if reloaded:
-                msg += f" Applied to {reloaded} running book(s) immediately."
-            return {"ok": True, "message": msg}
-
-        @app.get("/api/admin/trap_scanner/status", tags=["Admin"])
-        async def api_trap_scanner_status(_: dict = Depends(_require_admin)):
-            """Return live telemetry for all running trap scanner books."""
-            mgr = getattr(_srv, "_trap_scanner_manager", None)
-            if mgr is None:
-                return {"ok": True, "books": []}
-            return {"ok": True, "books": mgr.telemetry_all()}
-
-        @app.get("/api/client/trap_scanner/status", tags=["Client"])
-        async def api_client_trap_scanner_status(user: dict = Depends(_current_user)):
-            """Return live telemetry for trap scanner books belonging to this client."""
-            mgr = getattr(_srv, "_trap_scanner_manager", None)
-            if mgr is None:
-                return {"ok": True, "books": []}
-            cid = user.get("client_id") or user.get("username")
-            books = [b for b in mgr.telemetry_all() if b.get("client_id") == cid]
-            return {"ok": True, "books": books}
-
         # ── ADMIN — Sell Straddle book registry (per-binding) ─────────────────
 
         @app.get("/api/admin/straddle/books", tags=["Admin"])
@@ -5392,17 +5165,6 @@ pm2 save
                 return s
         return None
 
-    def _find_trap_book(self, client_id: str, binding_id: str, underlying: str):
-        """Locate the per-binding trap-scanner book for this deployment."""
-        if self._trap_scanner_manager is not None:
-            b = self._trap_scanner_manager.find(client_id, binding_id, underlying)
-            if b is not None:
-                return b
-            logger.debug("_find_trap_book miss: cid=%s bid=%s und=%s books=%s",
-                        client_id, binding_id, underlying,
-                        list(self._trap_scanner_manager._books.keys()))
-        return None
-
     def _open_history_rows(self, cid: str) -> list:
         """
         Return synthetic history rows for currently OPEN positions so the dashboard
@@ -5465,73 +5227,6 @@ pm2 save
                         "legs": _legs,
                     })
 
-            elif sname == "iron_condor":
-                strat = next((s for s in (self._iron_condors or [])
-                              if getattr(s, "_underlying", None) == underlying), None)
-                pos = getattr(strat, "_position", None) if strat else None
-                if pos is None or getattr(pos, "status", "") != "open":
-                    continue
-                _ot = getattr(pos, "open_time", None)
-                _lot = int(getattr(pos, "lot_size", 0) or 0)
-                _legs = []
-                for leg in pos.legs:
-                    strike = int(getattr(leg, "strike", 0) or 0)
-                    if strike <= 0:
-                        continue
-                    side = getattr(leg, "option_type", "")
-                    ls = getattr(leg, "side", "sell")
-                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
-                    ltp = float(getattr(leg, "ltp", ep) or ep)
-                    qty = -_lot if ls == "sell" else _lot
-                    _legs.append({
-                        "side": side, "strike": strike,
-                        "entry": round(ep, 2), "exit": 0,
-                        "pnl": round((ep - ltp) * qty, 2),
-                        "entry_ts": _ts(getattr(leg, "fill_time", None)),
-                        "exit_ts": None,
-                        "entry_reason": "entry",
-                    })
-                if _legs:
-                    rows.append({
-                        "date": _ts(_ot) or datetime.now(IST).isoformat(timespec="seconds"),
-                        "strategy": "iron_condor",
-                        "instrument": str(underlying).upper(),
-                        "entry_price": round(sum(l["entry"] for l in _legs), 2),
-                        "exit_price": 0,
-                        "exit_reason": "OPEN",
-                        "exit_remark": "Live open position",
-                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
-                        "legs": _legs,
-                    })
-
-            elif sname == "trap_scanner":
-                strat = self._find_trap_book(cid, bid, underlying)
-                pos = getattr(strat, "_position", None) if strat else None
-                if not pos or int(pos.get("remaining_qty", 0) or 0) <= 0:
-                    continue
-                ep = float(pos.get("entry_price", 0.0) or 0.0)
-                qty = int(pos.get("remaining_qty", 0) or 0)
-                side = str(pos.get("side", ""))
-                strike = int(pos.get("strike", 0) or 0)
-                _legs = [{
-                    "side": side, "strike": strike,
-                    "entry": round(ep, 2), "exit": 0, "pnl": 0,
-                    "entry_ts": pos.get("entry_ts"),
-                    "exit_ts": None,
-                    "entry_reason": pos.get("signal_source", "HTF"),
-                }]
-                rows.append({
-                    "date": pos.get("entry_ts") or datetime.now(IST).isoformat(timespec="seconds"),
-                    "strategy": "trap_scanner",
-                    "instrument": f"{str(underlying).upper()} {side} {strike}".strip(),
-                    "entry_price": round(ep, 2),
-                    "exit_price": 0,
-                    "exit_reason": "OPEN",
-                    "exit_remark": "Live open position",
-                    "pnl": 0,
-                    "legs": _legs,
-                })
-
         return rows
 
     def stop(self) -> None:
@@ -5549,15 +5244,8 @@ pm2 save
         try:
             clients = self._registry.all_active() if self._registry else []
             sslist  = self._sell_straddles or []
-            iclist  = self._iron_condors or []
             from data_layer import trade_history as _th
             _today = datetime.now(IST).date().isoformat()
-
-            def _find(lst, u):
-                for s in lst:
-                    if getattr(s, "_underlying", None) == u:
-                        return s
-                return None
 
             def _lot(u):
                 return int(self._cfg.exchange.lot_sizes.get(u, 0) or 0) if self._cfg else 0
@@ -5584,11 +5272,6 @@ pm2 save
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
-                    elif sname == "iron_condor":
-                        s = _find(iclist, u)
-                        p = getattr(s, "_position", None) if s else None
-                        if p and getattr(p, "status", "open") == "open":
-                            running += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
                 try:
                     c._daily_pnl = round(booked + running, 2)
                 except Exception:
