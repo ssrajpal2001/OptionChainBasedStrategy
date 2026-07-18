@@ -424,11 +424,29 @@ class StraddleExecutionBridge:
                 _is_exit = (ev.action == "EXIT")
                 if not _is_exit:
                     if not _matching:
+                        logger.warning(
+                            "StraddleExecutionBridge: DIAG no-match target=%s binding_id=%s "
+                            "underlying=%s deployments=%s",
+                            _target, binding_id, ev.underlying,
+                            [(d.get("binding_id"), d.get("strategy_name"), d.get("underlying"),
+                              d.get("is_running")) for d in deployments],
+                        )
                         continue
                     if _target:
                         if not any(int(d.get("is_running", 0) or 0) == 1 for d in _matching):
+                            logger.warning(
+                                "StraddleExecutionBridge: DIAG matched-not-running target=%s "
+                                "matching=%s",
+                                _target,
+                                [(d.get("deploy_id"), d.get("is_running")) for d in _matching],
+                            )
                             continue
                     elif not live_b.get("engine_active"):
+                        logger.warning(
+                            "StraddleExecutionBridge: DIAG legacy-path target=%s (client_id=%r "
+                            "binding_id=%r on event) engine_active=%s",
+                            _target, ev.client_id, ev.binding_id, live_b.get("engine_active"),
+                        )
                         continue
 
                 broker = (self._router._brokers or {}).get(client.client_id, {}).get(binding_id)
