@@ -66,6 +66,7 @@ class SellStraddleConfig:
     ltp_target: float
     entry_basis: str
     theta_target: float
+    balance_ratio: float
 
     ltp_decay_enabled: bool
     ltp_exit_min: float
@@ -204,6 +205,7 @@ def load_sell_straddle_config(
     ltp_target = float(ss.get("ltp_target") or ss.get("min_ltp") or ss.get("ltp_min") or 0.0)
     entry_basis = str(_day.get("entry_basis", ss.get("entry_basis", "ltp"))).lower()
     theta_target = float(_day.get("theta_target", ss.get("theta_target") or ss.get("entry_theta_target") or 0.0))
+    balance_ratio = float(ss.get("balance_ratio", 1.0))
 
     _ltp_d = ss.get("ltp_decay", {})
     ltp_decay_enabled = bool(_ltp_d.get("enabled", ss.get("ltp_decay_enabled", False)))
@@ -245,6 +247,7 @@ def load_sell_straddle_config(
         ltp_target=ltp_target,
         entry_basis=entry_basis,
         theta_target=theta_target,
+        balance_ratio=balance_ratio,
         ltp_decay_enabled=ltp_decay_enabled,
         ltp_exit_min=ltp_exit_min,
         exit_rules=exit_rules,
@@ -313,6 +316,7 @@ class ConfigMixin:
         self._ltp_target = cfg.ltp_target
         self._entry_basis = cfg.entry_basis
         self._theta_target = cfg.theta_target
+        self._balance_ratio = cfg.balance_ratio
 
         self._ltp_decay_enabled = cfg.ltp_decay_enabled
         self._ltp_exit_min = cfg.ltp_exit_min

@@ -686,7 +686,6 @@ document.addEventListener('alpine:init', () => {
     /* ── Client strategy selections ─────────────────────────────────── */
     availableStrategies: [
       { id: 'sell_straddle', name: 'Sell Straddle',  desc: 'ATM straddle — premium decay (theta)' },
-      { id: 'iron_condor',   name: 'Iron Condor',    desc: 'OTM 4-leg credit spread (range-bound)' },
     ],
     availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
@@ -750,14 +749,9 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Per-index strategy config (rule builder) ────────────────────── */
     adminSelectedIndex: 'NIFTY',
-    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'iron_condor' | 'trap_scanner'
+    adminStrategyTab:   'sell_straddle',  // 'sell_straddle'
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
     indexConfig: {},
-    trapSaveMsg: '', trapSaveOk: null,
-    trapScannerCfg: { htf_minutes: 75, ltf_minutes: 5, gap_threshold_pct: 1.0, per_index: {} },
-    trapScannerSaveMsg: '', trapScannerSaveOk: null,
-    trapScannerBooks: [],
-    trapLtpCache: {},   // key: bid+"_"+und+"_"+leg → real-time LTP (tick-by-tick via WS)
     indexConfigLoading: false,
     indexConfigSaving:  false,
     indexConfigMsg:     '',
@@ -1075,7 +1069,6 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadStrategyTelemetry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
-      // trap scanner books pushed via WebSocket (trap_scanner_update) — no polling needed
       // Background P&L refresh for positions tab. Trade events (entry/exit/roll) are
       // pushed instantly via WebSocket, so this poll only needs to catch P&L drift.
       setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 2000);
@@ -1089,7 +1082,6 @@ document.addEventListener('alpine:init', () => {
       this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
-      this.loadTrapScannerCfg();
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); }, 800);
       setTimeout(() => { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); }, 1200);
       setTimeout(() => { this.loadIndexConfig(this.adminSelectedIndex); }, 1500);
@@ -1237,12 +1229,6 @@ document.addEventListener('alpine:init', () => {
     _handle(msg) {
       if (msg.type === 'tick') {
         this.spots = { ...this.spots, [msg.sym]: { ltp: msg.ltp, atm: msg.atm, ts: msg.ts } };
-        // Pipe spot tick directly into trap scanner books — no 2s delay
-        for (let i = 0; i < this.trapScannerBooks.length; i++) {
-          if (this.trapScannerBooks[i].underlying === msg.sym) {
-            this.trapScannerBooks[i] = { ...this.trapScannerBooks[i], spot_ltp: msg.ltp };
-          }
-        }
       } else if (msg.type === 'snapshot') {
         this.snapshots = { ...this.snapshots, [msg.sym]: msg };
       } else if (msg.type === 'fill') {
@@ -1281,44 +1267,6 @@ document.addEventListener('alpine:init', () => {
         if (this.screen === 'client' && (this.clientMenu === 'positions' || this.clientMenu === 'dashboard')) {
           this.loadClientPositions();
         }
-      } else if (msg.type === 'trap_tick') {
-        // Real-time per-tick LTP — write to flat top-level cache so Alpine
-        // proxy definitely fires (nested splice/assign on trapScannerBooks is unreliable).
-        const key = msg.bid + '_' + msg.und + '_' + msg.leg;
-        this.trapLtpCache[key] = msg.ltp;
-        // Also update position opt_ltp in the book for real-time P&L (no 2s delay)
-        for (let i = 0; i < this.trapScannerBooks.length; i++) {
-          const bk = this.trapScannerBooks[i];
-          if (bk.binding_id === msg.bid && bk.underlying === msg.und && bk.position) {
-            const pos = bk.position;
-            // leg matches the position's exec_key via the cached leg name
-            const legMatches = (bk.htf_source === 'futures' && msg.leg === 'FUT')
-              || (pos.side === 'CE' && msg.leg === 'CE1')
-              || (pos.side === 'PE' && msg.leg === 'PE1');
-            if (legMatches) {
-              this.trapScannerBooks[i] = {
-                ...bk,
-                position: { ...pos, opt_ltp: msg.ltp }
-              };
-            }
-          }
-        }
-      } else if (msg.type === 'fno_alert') {
-        const a = msg.alert;
-        if (!this.fnoAlerts.find(x => x.uid === a.uid)) {
-          this.fnoAlerts.unshift(a);
-          this._playAlertSound();
-        }
-      } else if (msg.type === 'fno_status') {
-        this.fnoStocks = msg.stocks || [];
-      } else if (msg.type === 'trap_scanner_update') {
-        this.trapScannerBooks = msg.books || [];
-        (msg.books || []).forEach(b => {
-          if (b.htf_source === 'futures') {
-            const k = b.underlying + '_' + b.client_id;
-            if (this.futZonesOpen[k] === undefined) this.futZonesOpen[k] = true;
-          }
-        });
       }
     },
 
@@ -1776,25 +1724,11 @@ document.addEventListener('alpine:init', () => {
         }
       };
     },
-    _icDefaults(idx) {
-      const strikes = { NIFTY:{s:200,w:200}, BANKNIFTY:{s:400,w:500}, FINNIFTY:{s:200,w:200}, SENSEX:{s:500,w:500}, MIDCPNIFTY:{s:150,w:200}, CRUDEOIL:{s:100,w:200}, GOLDM:{s:100,w:200}, BTC:{s:200,w:2000}, ETH:{s:20,w:200} };
-      const d = strikes[idx] || {s:200,w:200};
-      return {
-        enabled: true, start_time: '09:16', squareoff_time: '15:20',
-        entry_day: 'daily', product_type: 'NRML',
-        lot_size: 65, strike_step: 50,
-        max_adjustments_per_side: 3, roll_step_pts: 5,
-        profit_target_inr: 5000, stoploss_inr: 2000,
-        ratio_exit_threshold: 3.0,
-        short_leg_otm_pts: d.s, long_leg_otm_pts: d.w,
-      };
-    },
     _ensureIndexConfig(idx) {
       if (!this.indexConfig[idx]) {
-        this.indexConfig[idx] = { sell_straddle: this._ssDefaults(), iron_condor: this._icDefaults(idx) };
+        this.indexConfig[idx] = { sell_straddle: this._ssDefaults() };
       }
       if (!this.indexConfig[idx].sell_straddle) this.indexConfig[idx].sell_straddle = this._ssDefaults();
-      if (!this.indexConfig[idx].iron_condor)   this.indexConfig[idx].iron_condor   = this._icDefaults(idx);
       // Ensure rule arrays exist
       const ss = this.indexConfig[idx].sell_straddle;
       if (!Array.isArray(ss.entry_rules_beginning)) ss.entry_rules_beginning = [];
@@ -1820,8 +1754,6 @@ document.addEventListener('alpine:init', () => {
       if (ss.pool_itm_depth === undefined) ss.pool_itm_depth = 4;
       if (ss.pool_otm_depth === undefined) ss.pool_otm_depth = 4;
       if (ss.product_type === undefined) ss.product_type = 'MIS';
-      const ic = this.indexConfig[idx].iron_condor;
-      if (ic && ic.product_type === undefined) ic.product_type = 'NRML';
       const _dayDef = () => ({ enabled: false, profit_target_pct: 0, loss_sl_pct: 0, exit_basis: 'ltp' });
       if (!ss.per_day) ss.per_day = { monday:_dayDef(), tuesday:_dayDef(), wednesday:_dayDef(), thursday:_dayDef(), friday:_dayDef(), saturday:_dayDef(), sunday:_dayDef() };
       for (const d of ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']) {
@@ -1843,7 +1775,7 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch(`/api/admin/strategy/config/${idx}`);
         if (r && r.ok) {
           const d = await r.json();
-          this.indexConfig[idx] = { sell_straddle: d.sell_straddle || {}, iron_condor: d.iron_condor || {} };
+          this.indexConfig[idx] = { sell_straddle: d.sell_straddle || {} };
         }
       } catch {}
       this._ensureIndexConfig(idx);
@@ -1872,63 +1804,6 @@ document.addEventListener('alpine:init', () => {
       this.indexConfigSaving = false;
     },
 
-    async loadTrapScannerCfg() {
-      try {
-        const r = await this._fetch('/api/admin/trap_scanner/settings');
-        if (r) { const d = await r.json(); if (d && d.ok !== false && d.settings) this.trapScannerCfg = d.settings; }
-      } catch (e) {}
-      try {
-        const r = await this._fetch('/api/admin/trap_scanner/status');
-        if (r) { const d = await r.json(); if (d && d.books) this.trapScannerBooks = d.books; }
-      } catch (e) {}
-      // Also load client-scoped books (works for non-admin users too; merges if admin already loaded all)
-      try {
-        const rc = await this._fetch('/api/client/trap_scanner/status');
-        if (rc) { const dc = await rc.json(); if (dc && dc.books) {
-          const existing = new Set(this.trapScannerBooks.map(b=>b.client_id+'_'+b.binding_id+'_'+b.underlying));
-          dc.books.forEach(b => { if (!existing.has(b.client_id+'_'+b.binding_id+'_'+b.underlying)) this.trapScannerBooks.push(b); });
-        }}
-      } catch (e) {}
-    },
-
-    // Returns the per-index admin slot for the currently selected index,
-    // auto-creating it so x-model can write directly into the reactive object.
-    _tsIdx() {
-      if (!this.trapScannerCfg.per_index) this.trapScannerCfg.per_index = {};
-      if (!this.trapScannerCfg.per_index[this.adminSelectedIndex])
-        this.trapScannerCfg.per_index[this.adminSelectedIndex] = {};
-      return this.trapScannerCfg.per_index[this.adminSelectedIndex];
-    },
-
-    async saveTrapScannerCfg() {
-      this.trapScannerSaveMsg = 'Saving…'; this.trapScannerSaveOk = null;
-      try {
-        // Strip empty-string fields from per_index before saving so they don't
-        // shadow hardcoded defaults (e.g. blank HTF means "use code default").
-        const payload = JSON.parse(JSON.stringify(this.trapScannerCfg));
-        if (payload.per_index) {
-          for (const idx of Object.keys(payload.per_index)) {
-            const obj = payload.per_index[idx];
-            for (const k of Object.keys(obj)) {
-              if (obj[k] === '' || obj[k] === null) delete obj[k];
-            }
-            if (Object.keys(obj).length === 0) delete payload.per_index[idx];
-          }
-        }
-        const r = await this._fetch('/api/admin/trap_scanner/settings', {
-          method: 'POST', json: payload
-        });
-        if (!r) throw new Error('No response');
-        const d = await r.json();
-        this.trapScannerSaveOk  = d.ok !== false;
-        this.trapScannerSaveMsg = d.message || (d.ok ? 'Saved.' : (d.error || 'Save failed.'));
-      } catch (e) {
-        this.trapScannerSaveOk = false;
-        this.trapScannerSaveMsg = 'Error: ' + (e.message || String(e));
-      }
-      setTimeout(() => { this.trapScannerSaveMsg = ''; }, 4000);
-    },
-
     _newRule() {
       return { indicator: 'advanced', operator: 'AND', openBrackets: '', closeBrackets: '', tf: '5', operator_sym: '<', operand1: 'CLOSE', operand2: 'VWAP', operand2_val: 0 };
     },
@@ -1942,17 +1817,6 @@ document.addEventListener('alpine:init', () => {
       const ss = (this.indexConfig[this.adminSelectedIndex] || {}).sell_straddle;
       if (ss && Array.isArray(ss[ruleKey])) ss[ruleKey].splice(i, 1);
     },
-    addIcRule(ruleKey) {
-      const ic = (this.indexConfig[this.adminSelectedIndex] || {}).iron_condor;
-      if (!ic) return;
-      if (!Array.isArray(ic[ruleKey])) ic[ruleKey] = [];
-      ic[ruleKey].push(this._newRule());
-    },
-    removeIcRule(ruleKey, i) {
-      const ic = (this.indexConfig[this.adminSelectedIndex] || {}).iron_condor;
-      if (ic && Array.isArray(ic[ruleKey])) ic[ruleKey].splice(i, 1);
-    },
-
     /* ── Risk command center ─────────────────────────────────────────────── */
     async loadRiskSummary() {
       try {
@@ -2154,7 +2018,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':'Trap')+' · '+dep.underlying;
+      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name)+' · '+dep.underlying;
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
         : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
@@ -2736,40 +2600,6 @@ document.addEventListener('alpine:init', () => {
           this.csHistPage = 1;   // reset to first page on (re)load
         }
       } catch {} finally { this.csHistoryLoading = false; }
-    },
-
-    // Find the live trap scanner book for a given (binding_id, underlying).
-    trapBookFor(bid, und) {
-      return this.trapScannerBooks.find(b => b.binding_id === bid && b.underlying === und) || null;
-    },
-
-    // Refresh trap scanner books (called every 5s for live client card updates).
-    // Returns the real-time LTP for a contract leg, falling back to snapshot value.
-    // trapLtpCache is updated tick-by-tick via WS trap_tick events.
-    ctLtp(bk, leg, ct) {
-      const v = this.trapLtpCache[bk.binding_id + '_' + bk.underlying + '_' + leg];
-      return v != null ? v : (ct ? ct.ltp : null);
-    },
-
-    async loadTrapScannerBooks() {
-      try {
-        const rc = await this._fetch('/api/client/trap_scanner/status');
-        if (rc) { const d = await rc.json(); if (d && d.books) {
-          d.books.forEach(nb => {
-            const idx = this.trapScannerBooks.findIndex(b=>b.binding_id===nb.binding_id&&b.underlying===nb.underlying);
-            if (idx >= 0) this.trapScannerBooks.splice(idx, 1, nb); else this.trapScannerBooks.push(nb);
-          });
-        }}
-      } catch (e) {}
-      if (this.screen === 'admin') try {
-        const ra = await this._fetch('/api/admin/trap_scanner/status');
-        if (ra) { const d = await ra.json(); if (d && d.books) {
-          d.books.forEach(nb => {
-            const idx = this.trapScannerBooks.findIndex(b=>b.binding_id===nb.binding_id&&b.underlying===nb.underlying);
-            if (idx >= 0) this.trapScannerBooks.splice(idx, 1, nb); else this.trapScannerBooks.push(nb);
-          });
-        }}
-      } catch (e) {}
     },
 
     // Day P&L for one broker binding = sum of running + booked across its deployed strategies.
@@ -3916,7 +3746,7 @@ function amoTest() {
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-2">
               <span class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                    x-text="(s.type==='iron_condor'?'IRON CONDOR':'SELL STRADDLE')+' · '+s.underlying"></span>
+                    x-text="'SELL STRADDLE · '+s.underlying"></span>
               <span class="font-mono text-xs px-1.5 py-0.5 rounded"
                     :style="`background:${s.has_position?'rgba(16,185,129,0.15)':'rgba(100,116,139,0.12)'};color:${s.has_position?'var(--t-green)':'var(--t-muted)'}`"
                     x-text="s.has_position ? 'IN TRADE' : 'IDLE'"></span>
@@ -3927,28 +3757,6 @@ function amoTest() {
                   :style="`color:${s.running?'var(--t-green)':'var(--t-red)'}`"
                   x-text="s.running ? '● RUN' : '○ STOP'"></span>
           </div>
-          <!-- Iron Condor: time-gated only — no RSI/ADX -->
-          <template x-if="s.type==='iron_condor'">
-            <div class="grid grid-cols-3 gap-2 mb-2">
-              <div class="text-center">
-                <div class="font-mono text-xs" style="color:var(--t-muted)">TIME GATE</div>
-                <div class="font-mono text-xs font-bold"
-                     :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-muted)'}`"
-                     x-text="s.entry_allowed ? '✓ OPEN' : '✗ CLOSED'"></div>
-              </div>
-              <div class="text-center">
-                <div class="font-mono text-xs" style="color:var(--t-muted)">ENTRY</div>
-                <div class="font-mono text-xs font-bold"
-                     :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-red)'}`"
-                     x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
-              </div>
-              <div class="text-center">
-                <div class="font-mono text-xs" style="color:var(--t-muted)">SPOT</div>
-                <div class="font-mono text-xs" style="color:var(--t-text)"
-                     x-text="s.spot ? fmt(s.spot) : '—'"></div>
-              </div>
-            </div>
-          </template>
           <!-- Sell Straddle V3: entry via rule builder; RSI/ADX shown as live reference only -->
           <template x-if="s.type==='sell_straddle'">
             <div class="grid grid-cols-4 gap-2 mb-2">
@@ -3979,13 +3787,6 @@ function amoTest() {
           </template>
           <div x-show="s.has_position && s.position" class="rounded p-2"
                style="background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15)">
-            <template x-if="s.type === 'iron_condor' && s.position">
-              <div class="font-mono text-xs space-y-0.5">
-                <div class="flex justify-between"><span style="color:var(--t-muted)">Short CE/PE</span><span x-text="(s.position.short_ce||'—')+' / '+(s.position.short_pe||'—')"></span></div>
-                <div class="flex justify-between"><span style="color:var(--t-muted)">Wing CE/PE</span><span style="color:var(--t-dim)" x-text="(s.position.long_ce||'—')+' / '+(s.position.long_pe||'—')"></span></div>
-                <div class="flex justify-between"><span style="color:var(--t-muted)">Credit / Target / SL</span><span style="color:var(--t-green)" x-text="(s.position.net_credit||0).toFixed(1)+' / '+(s.position.profit_target||0).toFixed(1)+' / '+(s.position.stop_loss||0).toFixed(1)"></span></div>
-              </div>
-            </template>
             <template x-if="s.type === 'sell_straddle' && s.position">
               <div class="font-mono text-xs space-y-0.5">
                 <div class="flex justify-between"><span style="color:var(--t-muted)">ATM</span><span x-text="s.position.atm||'—'"></span></div>
@@ -4039,7 +3840,7 @@ function amoTest() {
          :style="`background:${indexConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${indexConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${indexConfigOk?'var(--t-green)':'var(--t-red)'}`"
          x-text="indexConfigMsg"></div>
 
-    <!-- ── Strategy tabs: SELL STRADDLE | IRON CONDOR | TRAP TRADING ──── -->
+    <!-- ── Strategy tabs: SELL STRADDLE ──── -->
     <div class="t-card rounded" style="overflow:hidden">
       <div class="flex border-b" style="border-color:var(--t-border)">
         <button @click="adminStrategyTab='sell_straddle'"
@@ -4048,20 +3849,6 @@ function amoTest() {
                   ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           SELL STRADDLE
-        </button>
-        <button @click="adminStrategyTab='iron_condor'"
-                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
-                :style="adminStrategyTab==='iron_condor'
-                  ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
-                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
-          IRON CONDOR
-        </button>
-        <button @click="adminStrategyTab='trap_scanner'"
-                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
-                :style="adminStrategyTab==='trap_scanner'
-                  ? 'color:var(--t-yellow);background:rgba(var(--t-yellow-rgb),0.08);border-bottom:2px solid var(--t-yellow)'
-                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
-          TRAP SCANNER
         </button>
         <div class="ml-auto flex items-center px-3">
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
@@ -4696,617 +4483,6 @@ function amoTest() {
 
       </div><!-- end sell_straddle config -->
 
-      <!-- ══ IRON CONDOR config ════════════════════════════════════════════ -->
-      <!-- Entry is TIME-GATED only (no RSI/ADX). P&L targets in ₹. -->
-      <div x-show="adminStrategyTab==='iron_condor'" class="p-4 flex flex-col gap-3">
-        <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].iron_condor">
-          <div class="flex flex-col gap-3">
-
-            <!-- Timing & Session -->
-            <div>
-              <div class="sec-label mb-2">TIMING &amp; SESSION — <span x-text="adminSelectedIndex"></span></div>
-              <div class="grid grid-cols-3 gap-2">
-                <div>
-                  <label class="sec-label">Start Time</label>
-                  <input type="text" placeholder="09:16" class="t-input mt-0.5"
-                         x-model="indexConfig[adminSelectedIndex].iron_condor.start_time">
-                </div>
-                <div>
-                  <label class="sec-label">Square-off Time</label>
-                  <input type="text" placeholder="15:15" class="t-input mt-0.5"
-                         x-model="indexConfig[adminSelectedIndex].iron_condor.squareoff_time">
-                </div>
-                <div>
-                  <label class="sec-label">Entry Day</label>
-                  <select class="t-input mt-0.5" x-model="indexConfig[adminSelectedIndex].iron_condor.entry_day">
-                    <option value="daily">Daily</option>
-                    <option value="monday">Monday only</option>
-                    <option value="monday,thursday">Mon + Thu</option>
-                  </select>
-                </div>
-                <div>
-                  <label class="sec-label">Product Type</label>
-                  <select class="t-input mt-0.5" x-model="indexConfig[adminSelectedIndex].iron_condor.product_type">
-                    <option value="MIS">MIS (Intraday)</option>
-                    <option value="NRML">NRML (Carry)</option>
-                  </select>
-                </div>
-                <div>
-                  <label class="sec-label">Lot Size</label>
-                  <input type="number" step="1" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.lot_size">
-                </div>
-                <div>
-                  <label class="sec-label">Strike Step (pts)</label>
-                  <input type="number" step="50" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.strike_step">
-                </div>
-              </div>
-            </div>
-
-            <!-- Strike Distances -->
-            <div>
-              <div class="sec-label mb-1">STRIKE DISTANCES — <span x-text="adminSelectedIndex"></span></div>
-              <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">Short = ATM ± short_otm. Hedge = Short ± wing_pts (further from ATM)</p>
-              <div class="grid grid-cols-3 gap-2">
-                <div>
-                  <label class="sec-label">Short Leg OTM (pts)</label>
-                  <input type="number" step="50" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.short_leg_otm_pts"
-                         title="Distance from ATM to short call/put strikes">
-                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">e.g. 300 → SELL ATM±300</div>
-                </div>
-                <div>
-                  <label class="sec-label">Wing Width (pts)</label>
-                  <input type="number" step="50" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.long_leg_otm_pts"
-                         title="Distance from short strike to hedge (BUY) strike">
-                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">e.g. 150 → BUY short±150</div>
-                </div>
-                <div>
-                  <label class="sec-label">Min LTP Filter (₹)</label>
-                  <input type="number" step="1" min="0" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.min_ltp"
-                         title="Both short legs must have LTP >= this value before entry fires">
-                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">0 = disabled. Skips penny-premium entries</div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Rolling / Adjustment -->
-            <div class="p-3 rounded" style="background:rgba(255,165,0,0.06);border:1px solid rgba(255,165,0,0.18)">
-              <div class="sec-label mb-2">DYNAMIC ROLLING (RATIO SHIFT)</div>
-              <p class="font-mono text-xs mb-2" style="color:var(--t-muted)">
-                When one short leg LTP ÷ other ≥ Ratio Trigger: close profitable side at 2× qty,
-                old short becomes new hedge, new short = ATM ± (original_diff ÷ 2).
-              </p>
-              <div class="grid grid-cols-3 gap-2">
-                <div>
-                  <label class="sec-label">Ratio Trigger</label>
-                  <input type="number" step="0.1" min="1.5" max="5" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.ratio_trigger"
-                         title="CE/PE ltp ratio that triggers a roll (default 2.0 = 2:1)">
-                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">2.0 = one leg 2× the other</div>
-                </div>
-                <div>
-                  <label class="sec-label">Max Adjustments/Side</label>
-                  <input type="number" step="1" min="1" max="10" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.max_adjustments_per_side"
-                         title="After this many rolls on one side, close entire IC and re-enter">
-                  <div class="text-xs mt-0.5" style="color:var(--t-muted)">Hard stop → fresh IC</div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Exit & Risk -->
-            <div>
-              <div class="sec-label mb-2">EXIT &amp; RISK (cumulative across all rolls)</div>
-              <div class="grid grid-cols-2 gap-2">
-                <div>
-                  <label class="sec-label">Profit Target (₹)</label>
-                  <input type="number" step="500" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.profit_target_inr"
-                         title="Close all legs when total cumulative P&L (incl. adj) reaches this">
-                </div>
-                <div>
-                  <label class="sec-label">Stop Loss (₹)</label>
-                  <input type="number" step="500" class="t-input mt-0.5"
-                         x-model.number="indexConfig[adminSelectedIndex].iron_condor.stoploss_inr"
-                         title="Close all legs when total cumulative loss reaches this">
-                </div>
-              </div>
-            </div>
-
-          </div>
-        </template>
-        <div x-show="!indexConfig[adminSelectedIndex] || !indexConfig[adminSelectedIndex].iron_condor"
-             class="font-mono text-xs py-4 text-center" style="color:var(--t-muted)">
-          Loading Iron Condor config for <span x-text="adminSelectedIndex"></span>…
-        </div>
-      </div><!-- end iron_condor config -->
-
-      <!-- ══ TRAP SCANNER config ════════════════════════════════════════════ -->
-      <div x-show="adminStrategyTab==='trap_scanner'" class="p-4 flex flex-col gap-3">
-
-        <div class="rounded border p-3" style="border-color:var(--t-border)">
-          <div class="font-display text-sm font-black tracking-widest mb-2" style="color:var(--t-yellow)">
-            TRAP SCANNER — GLOBAL TIMEFRAME SETTINGS
-          </div>
-          <div class="grid grid-cols-2 gap-3 text-xs font-mono">
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">HTF Minutes (bearish trap reference)</span>
-              <input type="number" min="15" max="240" class="t-input"
-                     x-model.number="trapScannerCfg.htf_minutes" placeholder="75">
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">LTF Minutes (entry confirmation)</span>
-              <input type="number" min="1" max="30" class="t-input"
-                     x-model.number="trapScannerCfg.ltf_minutes" placeholder="5">
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Gap Threshold % (auto pivot vs ITM strikes)</span>
-              <input type="number" min="0.1" max="5" step="0.1" class="t-input"
-                     x-model.number="trapScannerCfg.gap_threshold_pct" placeholder="1.0">
-            </label>
-          </div>
-        </div>
-
-        <!-- Per-index overrides -->
-        <div class="rounded border p-3" style="border-color:var(--t-border)">
-          <div class="font-display text-xs font-bold tracking-widest mb-2" style="color:var(--t-muted)">
-            PER-INDEX OVERRIDE — <span x-text="adminSelectedIndex"></span>
-            <span class="ml-2 text-xs font-normal" style="color:var(--t-muted)">(blank = use hardcoded defaults for this index)</span>
-          </div>
-          <div class="grid grid-cols-2 gap-3 text-xs font-mono">
-            <!-- HTF / LTF per-index override — takes priority over both global AND hardcoded _INDEX_CFG -->
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-yellow);font-weight:700">HTF Minutes (overrides code default)</span>
-              <input type="number" min="15" max="480" class="t-input" placeholder="e.g. 180"
-                     x-model.number="_tsIdx().htf_minutes">
-              <span style="color:var(--t-dim);font-size:10px">NIFTY default=150 · BANKNIFTY default=180 · blank=use code default</span>
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-yellow);font-weight:700">LTF Minutes (overrides code default)</span>
-              <input type="number" min="1" max="30" class="t-input" placeholder="e.g. 3"
-                     x-model.number="_tsIdx().ltf_minutes">
-              <span style="color:var(--t-dim);font-size:10px">NIFTY default=5 · BANKNIFTY default=3 · blank=use code default</span>
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">SL Buffer (pts below zone_low)</span>
-              <input type="number" step="0.5" class="t-input" placeholder="e.g. 30"
-                     x-model.number="_tsIdx().sl_buffer">
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Entry Cutoff (IST, HH:MM)</span>
-              <input type="text" class="t-input" placeholder="15:10"
-                     x-model="_tsIdx().entry_cutoff">
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Square Off (IST, HH:MM)</span>
-              <input type="text" class="t-input" placeholder="15:20"
-                     x-model="_tsIdx().sq_off_time">
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Gap Threshold % (this index only)</span>
-              <input type="number" min="0.1" max="5" step="0.1" class="t-input" placeholder="e.g. 0.8"
-                     x-model.number="_tsIdx().gap_threshold_pct">
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Gap ITM Near (pts)</span>
-              <input type="number" class="t-input" placeholder="400"
-                     x-model.number="_tsIdx().gap_itm_near">
-            </label>
-            <label class="flex flex-col gap-1">
-              <span style="color:var(--t-muted)">Gap ITM Far (pts)</span>
-              <input type="number" class="t-input" placeholder="800"
-                     x-model.number="_tsIdx().gap_itm_far">
-            </label>
-            <label class="flex flex-col gap-1 col-span-2">
-              <span style="color:var(--t-yellow);font-weight:700">Profit Floor ₹ (0 = off)</span>
-              <input type="number" min="0" step="1000" class="t-input" placeholder="0"
-                     x-model.number="_tsIdx().profit_floor">
-              <span style="color:var(--t-dim);font-size:10px">Lock ₹N total once hit · exit at that tick if P&L drops back below</span>
-            </label>
-            <label class="flex flex-col gap-1 col-span-2">
-              <span style="color:var(--t-muted)">Entry Window (CrudeOil only — blank for equity indices)</span>
-              <input type="text" class="t-input" placeholder='e.g. 18:45-19:15'
-                     x-model="_tsIdx().entry_window_str">
-            </label>
-            <label class="flex flex-col gap-1 col-span-2">
-              <span style="color:var(--t-yellow);font-weight:700">No Target / No TSL</span>
-              <div class="flex items-center gap-2 mt-1">
-                <input type="checkbox" class="accent-[var(--t-yellow)]"
-                       :checked="_tsIdx().no_target_tsl||false"
-                       @change="_tsIdx().no_target_tsl=$event.target.checked">
-                <span style="color:var(--t-dim);font-size:10px">Skip T1 half-exit + TSL · Exit only: SL · Opp-side signal · Floor · EOD</span>
-              </div>
-            </label>
-            <label class="flex flex-col gap-1 col-span-2">
-              <span style="color:var(--t-yellow);font-weight:700">Scale-in Mode</span>
-              <div class="flex items-center gap-2 mt-1">
-                <input type="checkbox" class="accent-[var(--t-yellow)]"
-                       :checked="_tsIdx().scale_in_enabled||false"
-                       @change="_tsIdx().scale_in_enabled=$event.target.checked">
-                <span style="color:var(--t-dim);font-size:10px">1 lot probe → 3 lot add → rest on 1m breach</span>
-              </div>
-            </label>
-            <!-- Expiry selection is per-client deployment card, not global admin -->
-          </div>
-        </div>
-
-        <!-- Save -->
-        <div class="flex items-center gap-3 mt-1">
-          <button @click="saveTrapScannerCfg()"
-                  class="font-mono text-xs font-bold py-2 px-5 rounded transition-all"
-                  style="background:var(--t-yellow);color:#0a0e14;border:none;cursor:pointer;letter-spacing:0.08em">
-            SAVE TRAP SCANNER SETTINGS
-          </button>
-          <span x-show="trapScannerSaveMsg" class="font-mono text-xs px-2 py-1 rounded"
-                :style="trapScannerSaveOk?'color:var(--t-green)':'color:var(--t-red)'"
-                x-text="trapScannerSaveMsg"></span>
-        </div>
-
-        <!-- Live books status -->
-        <div class="rounded border p-3 mt-1" style="border-color:var(--t-border)">
-          <div class="font-display text-xs font-bold tracking-widest mb-2" style="color:var(--t-muted)">LIVE TRAP SCANNER BOOKS</div>
-          <template x-if="trapScannerBooks.length===0">
-            <div class="font-mono text-xs" style="color:var(--t-muted)">No active trap scanner deployments.</div>
-          </template>
-          <template x-for="bk in trapScannerBooks" :key="bk.client_id+'_'+bk.binding_id+'_'+bk.underlying">
-            <div class="rounded border p-2 mb-2 text-xs font-mono" style="border-color:var(--t-border)">
-              <!-- Header row -->
-              <div class="flex gap-3 flex-wrap items-center">
-                <span style="color:var(--t-cyan);font-weight:700" x-text="bk.underlying"></span>
-                <span style="color:var(--t-muted)" x-text="bk.client_id+'/'+bk.binding_id"></span>
-                <span :style="bk.initialized?'color:var(--t-green)':'color:var(--t-yellow)'"
-                      x-text="bk.initialized?(bk.intraday_mode?'CASCADE':'HTF READY'):'WARMING'"></span>
-                <span x-show="bk.gap_fired" style="color:var(--t-red);font-weight:700">GAP</span>
-                <!-- Entry window badge -->
-                <span :style="bk.entry_window_open?'color:var(--t-green);font-weight:700;background:rgba(0,255,100,0.08);padding:1px 6px;border-radius:3px':'color:var(--t-red);background:rgba(255,50,50,0.08);padding:1px 6px;border-radius:3px'"
-                      x-text="bk.entry_window_open?'WINDOW OPEN':'WINDOW CLOSED'"
-                      x-show="bk.entry_window_status"></span>
-                <span x-show="bk.entry_window_status" style="color:var(--t-dim)" x-text="bk.entry_window_status"></span>
-                <span x-text="(bk.htf_source==='futures'?'FUT':'SPOT')+'='+bk.spot_ltp" style="color:var(--t-bright);font-weight:700"></span>
-                <span x-show="bk.htf_atr>0" x-text="'ATR='+bk.htf_atr" style="color:var(--t-dim)"></span>
-              </div>
-              <!-- Strike selection row -->
-              <div class="flex gap-3 flex-wrap mt-1">
-                <span x-show="bk.ce1_strike" x-text="'CE1='+bk.ce1_strike" style="color:var(--t-green)"></span>
-                <span x-show="bk.ce2_strike" x-text="'CE2='+bk.ce2_strike" style="color:var(--t-green)"></span>
-                <span x-show="bk.pe1_strike" x-text="'PE1='+bk.pe1_strike" style="color:var(--t-red)"></span>
-                <span x-show="bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
-                <span x-show="bk.expiry" style="color:var(--t-dim)" x-text="'exp='+bk.expiry"></span>
-              </div>
-              <!-- CASCADE PIPELINE — stage-aware zone drill-down for futures-mode -->
-              <template x-if="bk.htf_source==='futures'">
-                <div class="mt-2 rounded p-2" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2)">
-                  <!-- Header + stage badge -->
-                  <div class="font-mono text-xs font-bold mb-2 flex items-center gap-2" style="color:var(--t-yellow)">
-                    <span>CASCADE PIPELINE</span>
-                    <span class="rounded px-1"
-                          :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===25?'background:#9c27b0;color:#fff;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
-                          x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===25?'◈ OB GATE':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
-                  </div>
-                  <!-- Stage 0: scanning — show nearest zones -->
-                  <template x-if="(bk.cascade_stage||0)===0">
-                    <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
-                      <template x-if="bk.nearest_ce_zone">
-                        <div class="text-xs font-mono">
-                          <span style="color:var(--t-red);font-weight:700">BEAR TRAP</span>
-                          <span style="color:var(--t-muted)"> → FUT </span>
-                          <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
-                          <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
-                          <span x-show="bk.nearest_ce_zone.dist_pts!=null"
-                                :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
-                                x-text="' '+bk.nearest_ce_zone.dist_pts+'pts '+(bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
-                        </div>
-                      </template>
-                      <template x-if="bk.nearest_pe_zone">
-                        <div class="text-xs font-mono">
-                          <span style="color:var(--t-green);font-weight:700">BULL TRAP</span>
-                          <span style="color:var(--t-muted)"> → FUT </span>
-                          <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
-                          <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
-                          <span x-show="bk.nearest_pe_zone.dist_pts!=null"
-                                :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
-                                x-text="' '+bk.nearest_pe_zone.dist_pts+'pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-                  <!-- Stage 1: HTF armed, scanning MTF -->
-                  <template x-if="(bk.cascade_stage||0)===1">
-                    <div class="text-xs font-mono" style="line-height:1.8">
-                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 — INSIDE HTF ZONE</span>
-                        <template x-if="bk.htf_zone_data">
-                          <span style="color:var(--t-bright)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+'] '+(bk.htf_zone_side==='CE'?'BEAR':'BULL')+' trap'"></span>
-                        </template>
-                        <template x-if="bk.spot_ltp&&bk.htf_zone_data">
-                          <span style="color:var(--t-cyan)" x-text="' spot='+bk.spot_ltp.toFixed(1)+' ('+(bk.spot_ltp-bk.htf_zone_data.zone_low).toFixed(0)+'pts from low)'"></span>
-                        </template>
-                        <template x-if="bk.htf_zone_data&&bk.htf_zone_data.ref_ts">
-                          <span style="color:var(--t-muted)" x-text="' formed@'+bk.htf_zone_data.ref_ts.slice(11,16)"></span>
-                        </template>
-                      </div>
-                      <div style="color:var(--t-yellow)">⟳ S2 — Need <span x-text="(bk.cascade_min||3)+'m'"></span> <span x-text="bk.htf_zone_side==='CE'?'BEAR':'BULL'"></span> zone formed after <span x-text="bk.htf_zone_data?bk.htf_zone_data.ref_ts.slice(11,16):'?'"></span>, spot inside it</div>
-                      <!-- OB zones preview if OB gate is enabled -->
-                      <template x-if="bk.ob_gate_enabled">
-                        <div style="color:var(--t-dim);margin-top:2px">
-                          <span>OB gate ON · CHoCH: </span>
-                          <span :style="bk.choch_direction?(bk.choch_direction==='UP'?'color:var(--t-green)':'color:var(--t-red)'):'color:var(--t-dim)'" x-text="bk.choch_direction||'—'"></span>
-                          <span> · need </span>
-                          <span style="color:var(--t-bright)" x-text="bk.htf_zone_side==='CE'?'UP+bullOB':'DOWN+bearOB'"></span>
-                          <template x-if="bk.htf_zone_side==='CE'&&bk.ob_bull_zones&&bk.ob_bull_zones.length">
-                            <span style="color:var(--t-green)" x-text="' bull OBs: '+bk.ob_bull_zones.map(o=>o.zone_low+'–'+o.zone_high).join(', ')"></span>
-                          </template>
-                          <template x-if="bk.htf_zone_side==='PE'&&bk.ob_bear_zones&&bk.ob_bear_zones.length">
-                            <span style="color:var(--t-red)" x-text="' bear OBs: '+bk.ob_bear_zones.map(o=>o.zone_low+'–'+o.zone_high).join(', ')"></span>
-                          </template>
-                        </div>
-                      </template>
-                      <div style="color:var(--t-dim)">  S3 — 1m candle break (pending)</div>
-                    </div>
-                  </template>
-                  <!-- Stage 2: MTF confirmed, OB gate enabled → show OB zones; no gate → show candle wait -->
-                  <template x-if="(bk.cascade_stage||0)===2">
-                    <div class="text-xs font-mono" style="line-height:1.8">
-                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 — HTF ZONE</span>
-                        <template x-if="bk.htf_zone_data">
-                          <span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span>
-                        </template>
-                      </div>
-                      <div><span style="color:var(--t-cyan);font-weight:700">✓ S2 — MTF ZONE CONFIRMED</span>
-                        <template x-if="bk.mtf_zone_data">
-                          <span style="color:var(--t-bright)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span>
-                        </template>
-                      </div>
-                      <div style="color:var(--t-yellow)">⟳ S3 — Waiting for 1m candle close to arm entry…</div>
-                    </div>
-                  </template>
-                  <!-- Stage 25: OB gate pending — show OB zones + CHoCH status -->
-                  <template x-if="(bk.cascade_stage||0)===25">
-                    <div class="text-xs font-mono" style="line-height:1.8">
-                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
-                        <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
-                        <span style="color:var(--t-cyan);font-weight:700"> · ✓ S2 MTF</span>
-                        <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
-                      </div>
-                      <div style="background:rgba(156,39,176,0.12);border:1px solid #9c27b0;border-radius:4px;padding:4px 8px;margin-top:4px">
-                        <div style="color:#ce93d8;font-weight:700">◈ OB GATE — waiting for price to enter Order Block</div>
-                        <div style="margin-top:2px">
-                          <span style="color:var(--t-muted)">CHoCH: </span>
-                          <span :style="bk.choch_direction?(bk.choch_direction==='UP'?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'):'color:var(--t-dim)'"
-                                x-text="bk.choch_direction||'—'"></span>
-                          <span style="color:var(--t-dim)"> · Need: </span>
-                          <span style="color:var(--t-bright)" x-text="bk.htf_zone_side==='CE'?'UP (bullish OB)':'DOWN (bearish OB)'"></span>
-                        </div>
-                        <template x-if="bk.htf_zone_side==='CE'&&bk.ob_bull_zones&&bk.ob_bull_zones.length">
-                          <div style="margin-top:3px;color:var(--t-green)">Bullish OBs:
-                            <template x-for="ob in bk.ob_bull_zones" :key="ob.zone_low">
-                              <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
-                            </template>
-                          </div>
-                        </template>
-                        <template x-if="bk.htf_zone_side==='PE'&&bk.ob_bear_zones&&bk.ob_bear_zones.length">
-                          <div style="margin-top:3px;color:var(--t-red)">Bearish OBs:
-                            <template x-for="ob in bk.ob_bear_zones" :key="ob.zone_low">
-                              <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
-                            </template>
-                          </div>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                  <!-- Stage 3: LTF candle armed — entry pending on break -->
-                  <template x-if="(bk.cascade_stage||0)===3">
-                    <div class="text-xs font-mono" style="line-height:1.8">
-                      <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
-                        <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
-                        <span style="color:var(--t-green);font-weight:700"> · ✓ S2 MTF</span>
-                        <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
-                      </div>
-                      <div style="background:rgba(255,152,0,0.15);border:1px solid #ff9800;border-radius:4px;padding:4px 8px;margin-top:4px">
-                        <div style="color:#ff9800;font-weight:700">⚡ S3 — ENTRY PENDING</div>
-                        <template x-if="bk.htf_zone_side==='CE'">
-                          <div>LONG when FUT &gt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_high||'—'"></span>
-                            <span x-show="bk.spot_ltp&&bk.ltf_candle_high" style="color:var(--t-dim)"
-                                  x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_high||0)).toFixed(0)+' pts away)'"></span>
-                          </div>
-                        </template>
-                        <template x-if="bk.htf_zone_side==='PE'">
-                          <div>LONG when FUT &lt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_low||'—'"></span>
-                            <span x-show="bk.spot_ltp&&bk.ltf_candle_low" style="color:var(--t-dim)"
-                                  x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_low||0)).toFixed(0)+' pts away)'"></span>
-                          </div>
-                        </template>
-                      </div>
-                    </div>
-                  </template>
-                </div>
-              </template>
-              <!-- Contracts table: per-leg zone + LTF status (matches NiftyTrapScanner reference) -->
-              <template x-if="bk.contracts">
-                <div class="mt-2 text-xs font-mono">
-                  <!-- Header -->
-                  <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;color:var(--t-muted)">
-                    <span>LEG</span><span>STRIKE</span><span>LTP</span>
-                    <span x-text="bk.htf_source==='futures'?'HTF ZONE (FUT PRICE)':'HTF ZONE (OPT PRICE)'"></span>
-                    <span>LTF STATUS</span>
-                  </div>
-                  <template x-for="[leg, ct] in Object.entries(bk.contracts)" :key="leg">
-                    <!-- CE1 / PE1 — show full zone info block -->
-                    <template x-if="leg==='CE1'||leg==='PE1'">
-                      <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
-                        <!-- LEG -->
-                        <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
-                        <!-- STRIKE -->
-                        <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
-                        <!-- LTP — highlight bright, shows option premium -->
-                        <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
-                        <!-- Zone block — matches reference format -->
-                        <div x-show="ct.zone">
-                          <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
-                          <div :style="ct.zone?.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'"
-                               x-text="ct.zone?.kind==='BEAR'?'Bear seller trap → '+( bk.exchange==='DELTA'?'BUY perp':'BUY call'):'Bull buyer trap → '+(bk.exchange==='DELTA'?'SELL perp':'BUY put')"></div>
-                          <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
-                          <div style="color:var(--t-cyan)"
-                               x-text="ct.zone?(bk.htf_source==='futures'?(ct.zone.kind==='BEAR'?'Entry if FUT < ':'Entry if FUT > ')+ct.zone.zone_trigger:(ct.zone.kind==='BEAR'?'Entry if OPT < ':'Entry if OPT > ')+ct.zone.zone_trigger):'—'"></div>
-                          <div style="color:var(--t-green)" x-text="ct.zone&&ct.zone.t1_target?'Target: '+ct.zone.t1_target:''"></div>
-                          <div x-show="ct.zone?.dist_pts!=null"
-                               :style="ct.zone?.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
-                               x-text="ct.zone?.dist_pts!=null?ct.zone.dist_pts+' pts away':''"></div>
-                        </div>
-                        <div x-show="!ct.zone && bk.htf_source!=='futures'" style="color:var(--t-dim)">No zone — scanning</div>
-                        <!-- Futures mode: show nearest FUT zone on leg even when no active trap -->
-                        <div x-show="!ct.zone && bk.htf_source==='futures'">
-                          <template x-if="(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)">
-                            <div>
-                              <div style="color:var(--t-muted)" x-text="'Nearest FUT zone ('+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.htf_label||'30-min')+') · '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.trapped_on?.slice(5,16))"></div>
-                              <div :style="(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'"
-                                   x-text="(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.kind==='BEAR'?'Bear seller trap → '+(bk.exchange==='DELTA'?'BUY perp':'BUY call'):'Bull buyer trap → '+(bk.exchange==='DELTA'?'SELL perp':'BUY put')"></div>
-                              <div style="color:var(--t-dim)" x-text="'Zone '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_low)+' → '+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_high)"></div>
-                              <div style="color:var(--t-cyan)" x-text="((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.kind==='BEAR'?'Entry if FUT < ':'Entry if FUT > ')+((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.zone_trigger)"></div>
-                              <div :style="((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.dist_pts||999)<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
-                                   x-text="((leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)?.dist_pts)+' pts away'"></div>
-                            </div>
-                          </template>
-                          <div x-show="!(leg==='CE1'?bk.nearest_ce_zone:bk.nearest_pe_zone)" style="color:var(--t-dim)">No zone — scanning</div>
-                        </div>
-                        <!-- LTF Status -->
-                        <div>
-                          <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':ct.zone&&ct.zone.ltf_status==='waiting_15m'?'color:var(--t-amber);font-weight:600':(ct.zone&&(ct.zone.ltf_status==='price_above_zone'||ct.zone.ltf_status==='price_below_zone'))?'color:var(--t-dim)':'color:var(--t-muted)'"
-                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?(bk.ltf_min||5)+'M TRAP READY!':ct.zone.ltf_status==='waiting_15m'?'Waiting '+(bk.cascade_min||15)+'m zone':ct.zone.ltf_status==='price_above_zone'?'LTP above zone':ct.zone.ltf_status==='price_below_zone'?'LTP below zone':'Monitoring'):'—'"></span>
-                          <div x-show="ct.zone&&(ct.zone.ltf_status==='watching'||ct.zone.ltf_status==='waiting_15m')" style="color:var(--t-dim);margin-top:2px"
-                               x-text="ct.zone&&ct.zone.ltf_status==='waiting_15m'?((bk.cascade_min||15)+'m closed zone needed (MTF gate)'):(bk.ltf_min||5)+'-min trap needed inside zone'"></div>
-                        </div>
-                      </div>
-                    </template>
-                    <!-- CE2 / PE2 — full zone block (same as CE1/PE1) -->
-                    <template x-if="leg==='CE2'||leg==='PE2'">
-                      <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
-                        <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
-                        <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
-                        <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
-                        <div x-show="ct.zone">
-                          <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
-                          <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
-                          <div style="color:var(--t-cyan)" x-text="ct.zone?'Entry if OPT > '+ct.zone.zone_trigger:'—'"></div>
-                          <div :style="ct.zone?.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'" x-text="ct.zone?.dist_pts!=null?ct.zone.dist_pts+' pts away':''"></div>
-                        </div>
-                        <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
-                        <div>
-                          <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':ct.zone&&ct.zone.ltf_status==='waiting_15m'?'color:var(--t-amber);font-weight:600':(ct.zone&&(ct.zone.ltf_status==='price_above_zone'||ct.zone.ltf_status==='price_below_zone'))?'color:var(--t-dim)':'color:var(--t-muted)'"
-                                x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':ct.zone.ltf_status==='waiting_15m'?'Waiting '+(bk.cascade_min||15)+'m zone':ct.zone.ltf_status==='price_above_zone'?'LTP above zone':ct.zone.ltf_status==='price_below_zone'?'LTP below zone':'Monitoring'):'—'"></span>
-                        </div>
-                      </div>
-                    </template>
-                  </template>
-                </div>
-              </template>
-              <!-- Option zones (CE/PE) — collapsed by default, expand to see all -->
-              <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
-                <div class="mt-2" x-data="{ farOpen: false, zonesOpen: false }">
-                  <!-- Collapsible header for entire zone table -->
-                  <button @click="zonesOpen=!zonesOpen" class="font-mono text-xs py-0.5 px-2 rounded mb-1" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer;width:100%">
-                    <span x-text="zonesOpen ? '▲ Hide zone table' : '▼ Zone table ('+bk.zones.filter(z=>z.opt_type!==\'FUT\').length+' zones, '+bk.zones.filter(z=>z.opt_type!==\'FUT\'&&z.status===\'TRAPPED\').length+' TRAPPED)'"></span>
-                  </button>
-                  <template x-if="zonesOpen">
-                  <div>
-                  <div class="grid text-center mb-1" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
-                    <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
-                  </div>
-                  <!-- TRAPPED / NEAR / IN TRADE zones -->
-                  <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT' && (z.status==='TRAPPED'||z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'))" :key="z.uid">
-                    <div class="grid text-center py-0.5"
-                         :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
-                      <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
-                      <span x-text="z.zone_low"></span>
-                      <span x-text="z.zone_high"></span>
-                      <span x-text="z.zone_trigger"></span>
-                      <span x-text="z.htf_target"></span>
-                      <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
-                      <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                            x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
-                    </div>
-                  </template>
-                  <!-- FAR zones collapsed by default -->
-                  <template x-if="bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
-                    <div class="mt-1">
-                      <button @click="farOpen=!farOpen" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                        <span x-text="farOpen?'▲ Hide FAR zones':'▼ FAR zones ('+bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length+')'"></span>
-                      </button>
-                      <template x-if="farOpen">
-                        <div class="mt-1">
-                          <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal')" :key="z.uid">
-                            <div class="grid text-center py-0.5"
-                                 :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)'">
-                              <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
-                              <span x-text="z.zone_low"></span>
-                              <span x-text="z.zone_high"></span>
-                              <span x-text="z.zone_trigger"></span>
-                              <span x-text="z.htf_target"></span>
-                              <span style="color:var(--t-red)">FAR</span>
-                              <span style="color:var(--t-muted)">ARMED</span>
-                            </div>
-                          </template>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-                  </div>
-                  </template><!-- end zonesOpen -->
-                </div>
-              </template>
-              <!-- FUT zones (futures bias — collapsible, hidden by default) -->
-              <template x-if="bk.zones && bk.zones.filter(z=>z.opt_type==='FUT').length>0">
-                <div class="mt-1">
-                  <button @click="futZonesOpen[bk.underlying+'_'+bk.client_id]=!futZonesOpen[bk.underlying+'_'+bk.client_id]"
-                          class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                    <span x-text="futZonesOpen[bk.underlying+'_'+bk.client_id]?'▲ Hide FUT Zones':'▼ FUT Zones ('+bk.zones.filter(z=>z.opt_type==='FUT').length+')'"></span>
-                  </button>
-                  <template x-if="futZonesOpen[bk.underlying+'_'+bk.client_id]">
-                    <div class="mt-1">
-                      <div class="grid text-center mb-1" style="grid-template-columns:4rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;color:var(--t-muted)">
-                        <span>DIR</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
-                      </div>
-                      <template x-for="z in bk.zones.filter(z=>z.opt_type==='FUT')" :key="z.uid">
-                        <div class="grid text-center py-0.5"
-                             :style="'grid-template-columns:4rem 1fr 1fr 1fr 1fr 4rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
-                          <span :style="z.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'" x-text="z.kind||'FUT'"></span>
-                          <span x-text="z.zone_low"></span>
-                          <span x-text="z.zone_high"></span>
-                          <span x-text="z.zone_trigger"></span>
-                          <span x-text="z.htf_target"></span>
-                          <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
-                          <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                                x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-                </div>
-              </template>
-              <template x-if="!bk.contracts && (!bk.zones || bk.zones.length===0)">
-                <div class="mt-1" style="color:var(--t-muted)">No HTF zones detected yet.</div>
-              </template>
-              <!-- Position row -->
-              <template x-if="bk.position">
-                <div class="mt-1 pt-1 border-t flex gap-3 flex-wrap" style="border-color:var(--t-border)">
-                  <span style="color:var(--t-yellow)">POSITION</span>
-                  <span x-text="bk.position.side+' '+bk.position.strike"></span>
-                  <span x-text="'entry='+bk.position.entry_price"></span>
-                  <span x-text="'sl='+bk.position.sl_price"></span>
-                  <span x-show="bk.position.t1_hit" x-text="'trail_sl='+bk.position.trail_sl" style="color:var(--t-cyan)"></span>
-                  <span x-text="'t1='+bk.position.t1_price" style="color:var(--t-green)"></span>
-                  <span x-text="'qty='+bk.position.remaining_qty+'/'+bk.position.total_qty"></span>
-                  <span x-show="bk.position.t1_hit" style="color:var(--t-green)">T1✓</span>
-                </div>
-              </template>
-            </div>
-          </template>
-        </div>
-
-      </div><!-- end trap scanner config -->
 
     </div><!-- end strategy tabs card -->
 
@@ -6903,7 +6079,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT')+' · '+dep.underlying"></span>
+                            x-text="'SS · '+dep.underlying"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -7121,7 +6297,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT')+' · '+dep.underlying"></span>
+                            x-text="'SS · '+dep.underlying"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -7214,7 +6390,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':'Trap')+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="'Sell Straddle · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -7336,10 +6512,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="dep.strategy_name==='sell_straddle'?'SS':dep.strategy_name==='iron_condor'?'IC':'TT'"></span>
+                        x-text="'SS'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="(dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':dep.strategy_name)+' · '+dep.underlying"></div>
+                         x-text="'Sell Straddle · '+dep.underlying"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
                   </div>
@@ -7365,8 +6541,6 @@ function amoTest() {
               <label class="sec-label mb-1">STRATEGY</label>
               <select x-model="deployForm.strategy_name" class="t-input">
                 <option value="sell_straddle">Sell Straddle (SS)</option>
-                <option value="iron_condor">Iron Condor (IC)</option>
-                <option value="trap_scanner">Trap Scanner (TS) — lot must be even</option>
               </select>
             </div>
             <div>
@@ -7645,11 +6819,11 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='iron_condor'?'Iron Condor':dep.strategy_name==='trap_scanner'?'Trap Scanner':dep.strategy_name"></div>
+                           x-text="'Sell Straddle'"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
-                              x-text="dep.lot_multiplier+'L'+(dep.strategy_name==='trap_scanner'&&(trapBookFor(b.binding_id,dep.underlying)||{}).htf_source==='futures'?'':' · SQ '+(dep.squareoff_time||'—'))"></span>
+                              x-text="dep.lot_multiplier+'L · SQ '+(dep.squareoff_time||'—')"></span>
                       </div>
                       <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">
                         Entry <span style="color:var(--t-text)"
@@ -7757,404 +6931,8 @@ function amoTest() {
                       </div>
                     </div>
                   </template>
-                  <!-- Trap Scanner live zone panel (replaces generic idle message for trap_scanner) -->
-                  <template x-if="dep.strategy_name==='trap_scanner'">
-                    <div x-data="{
-                          bk: null,
-                          availExpiries: [],
-                          expiryMode: dep.expiry_mode || 'current',
-                          expiryLoaded: false,
-                          expirySaving: false,
-                          async loadExpiries() {
-                            if (this.expiryLoaded) return;
-                            try {
-                              const r = await fetch('/api/client/deployment/'+dep.deploy_id+'/available_expiries', {credentials:'include'});
-                              const d = await r.json();
-                              if (d && d.ok !== false) { this.availExpiries = d.expiries || []; this.expiryMode = d.current_mode || 'current'; }
-                            } catch(e) {}
-                            this.expiryLoaded = true;
-                          },
-                          async saveExpiry() {
-                            this.expirySaving = true;
-                            try {
-                              await fetch('/api/client/deployment/'+dep.deploy_id+'/expiry_mode', {
-                                method:'POST', credentials:'include',
-                                headers:{'Content-Type':'application/json'},
-                                body: JSON.stringify({expiry_mode: this.expiryMode})
-                              });
-                            } catch(e) {}
-                            this.expirySaving = false;
-                          }
-                        }"
-                         x-effect="bk = trapBookFor(b.binding_id, dep.underlying)"
-                         x-init="loadExpiries()">
-                      <!-- Expiry selector row -->
-                      <div class="flex flex-wrap gap-2 items-center mb-2 p-2 rounded"
-                           style="background:rgba(0,200,255,0.04);border:1px solid rgba(0,200,255,0.15)">
-                        <span class="text-xs font-mono font-bold" style="color:var(--t-cyan)">EXPIRY</span>
-                        <select class="text-xs font-mono rounded px-2 py-0.5"
-                                style="background:var(--t-surface);color:var(--t-bright);border:1px solid var(--t-border)"
-                                x-model="expiryMode"
-                                @change="saveExpiry()">
-                          <option value="current">Current Week</option>
-                          <option value="next_week">Next Week</option>
-                          <option value="monthly">Monthly (last of month)</option>
-                          <template x-for="e in availExpiries" :key="e.date">
-                            <option :value="e.date" x-text="e.label + (e.date===bk?.expiry_date?'  ← active':'')"></option>
-                          </template>
-                        </select>
-                        <span x-show="bk&&bk.expiry" class="text-xs font-mono px-2 py-0.5 rounded"
-                              style="color:var(--t-green);background:rgba(0,255,100,0.08);border:1px solid rgba(0,255,100,0.2)"
-                              x-text="'Active: '+bk?.expiry"></span>
-                        <span x-show="expirySaving" class="text-xs font-mono" style="color:var(--t-amber)">saving…</span>
-                      </div>
-                      <!-- Status header -->
-                      <div class="flex flex-wrap gap-2 text-xs font-mono mb-2">
-                        <span :style="(bk&&bk.initialized)?'color:var(--t-green)':'color:var(--t-yellow)'"
-                              x-text="bk?(bk.initialized?(bk.intraday_mode?(bk.cascade_ce&&bk.cascade_pe?'INTRADAY CASCADE':(bk.cascade_ce?'CE CASCADE':'PE CASCADE')):'HTF READY'):'WARMING'):'Not started'"></span>
-                        <span x-show="bk&&bk.gap_fired" style="color:var(--t-red)">GAP</span>
-                        <span style="color:var(--t-muted)" x-show="bk&&bk.spot_ltp" x-text="'Spot '+bk.spot_ltp"></span>
-                        <span style="color:var(--t-muted)" x-show="bk&&bk.htf_atr>0" x-text="'ATR '+bk.htf_atr"></span>
-                        <span x-show="bk&&bk.ce1_strike" x-text="'CE='+bk.ce1_strike" style="color:var(--t-green)"></span>
-                        <span x-show="bk&&bk.ce2_strike" x-text="'CE2='+bk.ce2_strike" style="color:var(--t-green)"></span>
-                        <span x-show="bk&&bk.pe1_strike" x-text="'PE='+bk.pe1_strike" style="color:var(--t-red)"></span>
-                        <span x-show="bk&&bk.pe2_strike" x-text="'PE2='+bk.pe2_strike" style="color:var(--t-red)"></span>
-                      </div>
-                      <!-- CASCADE PIPELINE — stage-aware zone drill-down for futures-mode -->
-                      <template x-if="bk&&bk.htf_source==='futures'">
-                        <div class="mt-2 rounded p-2" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2)">
-                          <div class="font-mono text-xs font-bold mb-2 flex items-center gap-2" style="color:var(--t-yellow)">
-                            <span>CASCADE PIPELINE</span>
-                            <span class="rounded px-1"
-                                  :style="(bk.cascade_stage||0)===3?'background:#ff9800;color:#000;font-weight:700':(bk.cascade_stage||0)===25?'background:#9c27b0;color:#fff;font-weight:700':(bk.cascade_stage||0)===2?'background:#00bcd4;color:#000;font-weight:700':(bk.cascade_stage||0)===1?'background:#4caf50;color:#000;font-weight:700':'background:#333;color:#aaa'"
-                                  x-text="(bk.cascade_stage||0)===3?'⚡ ENTRY PENDING':(bk.cascade_stage||0)===25?'◈ OB GATE':(bk.cascade_stage||0)===2?'● MTF CONFIRMED':(bk.cascade_stage||0)===1?'● HTF ARMED':'○ SCANNING'"></span>
-                          </div>
-                          <!-- Stage 0: scanning -->
-                          <template x-if="(bk.cascade_stage||0)===0">
-                            <div class="grid gap-1" style="grid-template-columns:1fr 1fr">
-                              <template x-if="bk.nearest_ce_zone">
-                                <div class="text-xs font-mono">
-                                  <span style="color:var(--t-red);font-weight:700">BEAR TRAP</span>
-                                  <span style="color:var(--t-muted)"> → FUT </span>
-                                  <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_ce_zone.zone_trigger"></span>
-                                  <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_ce_zone.zone_low+'-'+bk.nearest_ce_zone.zone_high+']'"></span>
-                                  <span x-show="bk.nearest_ce_zone.dist_pts!=null"
-                                        :style="bk.nearest_ce_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
-                                        x-text="' '+bk.nearest_ce_zone.dist_pts+'pts '+(bk.nearest_ce_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
-                                </div>
-                              </template>
-                              <template x-if="bk.nearest_pe_zone">
-                                <div class="text-xs font-mono">
-                                  <span style="color:var(--t-green);font-weight:700">BULL TRAP</span>
-                                  <span style="color:var(--t-muted)"> → FUT </span>
-                                  <span style="color:var(--t-bright);font-weight:700" x-text="bk.nearest_pe_zone.zone_trigger"></span>
-                                  <span style="color:var(--t-dim)" x-text="' ['+bk.nearest_pe_zone.zone_low+'-'+bk.nearest_pe_zone.zone_high+']'"></span>
-                                  <span x-show="bk.nearest_pe_zone.dist_pts!=null"
-                                        :style="bk.nearest_pe_zone.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
-                                        x-text="' '+bk.nearest_pe_zone.dist_pts+'pts '+(bk.nearest_pe_zone.dist_pts<bk.htf_atr?'CLOSE':'FAR')"></span>
-                                </div>
-                              </template>
-                            </div>
-                          </template>
-                          <!-- Stage 1: HTF armed, scanning MTF -->
-                          <template x-if="(bk.cascade_stage||0)===1">
-                            <div class="text-xs font-mono" style="line-height:1.8">
-                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 — INSIDE HTF ZONE</span>
-                                <template x-if="bk.htf_zone_data">
-                                  <span style="color:var(--t-bright)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+'] '+(bk.htf_zone_side==='CE'?'BEAR':'BULL')+' trap'"></span>
-                                </template>
-                                <template x-if="bk.htf_zone_data&&bk.htf_zone_data.ref_ts">
-                                  <span style="color:var(--t-muted)" x-text="' formed@'+bk.htf_zone_data.ref_ts.slice(11,16)"></span>
-                                </template>
-                              </div>
-                              <div style="color:var(--t-yellow)">⟳ S2 — Need <span x-text="(bk.cascade_min||3)+'m'"></span> <span x-text="bk.htf_zone_side==='CE'?'BEAR':'BULL'"></span> zone formed after <span x-text="bk.htf_zone_data?bk.htf_zone_data.ref_ts.slice(11,16):'?'"></span>, spot inside it</div>
-                              <template x-if="bk.ob_gate_enabled">
-                                <div style="color:var(--t-dim);margin-top:2px">
-                                  <span>OB gate ON · CHoCH: </span>
-                                  <span :style="bk.choch_direction?(bk.choch_direction==='UP'?'color:var(--t-green)':'color:var(--t-red)'):'color:var(--t-dim)'" x-text="bk.choch_direction||'—'"></span>
-                                  <span> · need </span>
-                                  <span style="color:var(--t-bright)" x-text="bk.htf_zone_side==='CE'?'UP+bullOB':'DOWN+bearOB'"></span>
-                                  <template x-if="bk.htf_zone_side==='CE'&&bk.ob_bull_zones&&bk.ob_bull_zones.length">
-                                    <span style="color:var(--t-green)" x-text="' bull OBs: '+bk.ob_bull_zones.map(o=>o.zone_low+'–'+o.zone_high).join(', ')"></span>
-                                  </template>
-                                  <template x-if="bk.htf_zone_side==='PE'&&bk.ob_bear_zones&&bk.ob_bear_zones.length">
-                                    <span style="color:var(--t-red)" x-text="' bear OBs: '+bk.ob_bear_zones.map(o=>o.zone_low+'–'+o.zone_high).join(', ')"></span>
-                                  </template>
-                                </div>
-                              </template>
-                              <div style="color:var(--t-dim)">  S3 — 1m candle break (pending)</div>
-                            </div>
-                          </template>
-                          <!-- Stage 2: MTF confirmed, waiting for 1m candle -->
-                          <template x-if="(bk.cascade_stage||0)===2">
-                            <div class="text-xs font-mono" style="line-height:1.8">
-                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 — HTF ZONE</span>
-                                <template x-if="bk.htf_zone_data">
-                                  <span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span>
-                                </template>
-                              </div>
-                              <div><span style="color:var(--t-cyan);font-weight:700">✓ S2 — MTF ZONE CONFIRMED</span>
-                                <template x-if="bk.mtf_zone_data">
-                                  <span style="color:var(--t-bright)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span>
-                                </template>
-                              </div>
-                              <div style="color:var(--t-yellow)">⟳ S3 — Waiting for 1m candle close to arm entry…</div>
-                            </div>
-                          </template>
-                          <!-- Stage 25: OB gate pending — show OB zones + CHoCH status -->
-                          <template x-if="(bk.cascade_stage||0)===25">
-                            <div class="text-xs font-mono" style="line-height:1.8">
-                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
-                                <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
-                                <span style="color:var(--t-cyan);font-weight:700"> · ✓ S2 MTF</span>
-                                <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
-                              </div>
-                              <div style="background:rgba(156,39,176,0.12);border:1px solid #9c27b0;border-radius:4px;padding:4px 8px;margin-top:4px">
-                                <div style="color:#ce93d8;font-weight:700">◈ OB GATE — waiting for price to enter Order Block</div>
-                                <div style="margin-top:2px">
-                                  <span style="color:var(--t-muted)">CHoCH: </span>
-                                  <span :style="bk.choch_direction?(bk.choch_direction==='UP'?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'):'color:var(--t-dim)'"
-                                        x-text="bk.choch_direction||'—'"></span>
-                                  <span style="color:var(--t-dim)"> · Need: </span>
-                                  <span style="color:var(--t-bright)" x-text="bk.htf_zone_side==='CE'?'UP (bullish OB)':'DOWN (bearish OB)'"></span>
-                                </div>
-                                <template x-if="bk.htf_zone_side==='CE'&&bk.ob_bull_zones&&bk.ob_bull_zones.length">
-                                  <div style="margin-top:3px;color:var(--t-green)">Bullish OBs:
-                                    <template x-for="ob in bk.ob_bull_zones" :key="ob.zone_low">
-                                      <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
-                                    </template>
-                                  </div>
-                                </template>
-                                <template x-if="bk.htf_zone_side==='PE'&&bk.ob_bear_zones&&bk.ob_bear_zones.length">
-                                  <div style="margin-top:3px;color:var(--t-red)">Bearish OBs:
-                                    <template x-for="ob in bk.ob_bear_zones" :key="ob.zone_low">
-                                      <span x-text="' ['+ob.zone_low+'–'+ob.zone_high+']'"></span>
-                                    </template>
-                                  </div>
-                                </template>
-                              </div>
-                            </div>
-                          </template>
-                          <!-- Stage 3: LTF candle armed — entry pending -->
-                          <template x-if="(bk.cascade_stage||0)===3">
-                            <div class="text-xs font-mono" style="line-height:1.8">
-                              <div><span style="color:var(--t-green);font-weight:700">✓ S1 HTF</span>
-                                <template x-if="bk.htf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.htf_zone_data.zone_low+' – '+bk.htf_zone_data.zone_high+']'"></span></template>
-                                <span style="color:var(--t-green);font-weight:700"> · ✓ S2 MTF</span>
-                                <template x-if="bk.mtf_zone_data"><span style="color:var(--t-dim)" x-text="' ['+bk.mtf_zone_data.zone_low+' – '+bk.mtf_zone_data.zone_high+']'"></span></template>
-                              </div>
-                              <div style="background:rgba(255,152,0,0.15);border:1px solid #ff9800;border-radius:4px;padding:4px 8px;margin-top:4px">
-                                <div style="color:#ff9800;font-weight:700">⚡ S3 — ENTRY PENDING</div>
-                                <template x-if="bk.htf_zone_side==='CE'">
-                                  <div>LONG when FUT &gt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_high||'—'"></span>
-                                    <span x-show="bk.spot_ltp&&bk.ltf_candle_high" style="color:var(--t-dim)"
-                                          x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_high||0)).toFixed(0)+' pts away)'"></span>
-                                  </div>
-                                </template>
-                                <template x-if="bk.htf_zone_side==='PE'">
-                                  <div>LONG when FUT &lt; <span style="color:#ff9800;font-weight:700" x-text="bk.ltf_candle_low||'—'"></span>
-                                    <span x-show="bk.spot_ltp&&bk.ltf_candle_low" style="color:var(--t-dim)"
-                                          x-text="' ('+Math.abs((bk.spot_ltp||0)-(bk.ltf_candle_low||0)).toFixed(0)+' pts away)'"></span>
-                                  </div>
-                                </template>
-                              </div>
-                            </div>
-                          </template>
-                        </div>
-                      </template>
-                      <!-- Contracts table (CE1/CE2/PE1/PE2 LTP + zone — mirrors NiftyTrapScanner) -->
-                      <template x-if="bk&&bk.contracts">
-                        <div class="mt-2 text-xs font-mono">
-                          <!-- Header -->
-                          <div class="grid mb-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;color:var(--t-muted)">
-                            <span>LEG</span><span>STRIKE</span><span>LTP</span>
-                            <span x-text="bk.htf_source==='futures'?'HTF ZONE (FUT PRICE)':'HTF ZONE (OPT PRICE)'"></span>
-                            <span>LTF STATUS</span>
-                          </div>
-                          <template x-for="[leg, ct] in Object.entries(bk.contracts)" :key="leg">
-                            <div>
-                            <!-- CE1 / PE1 — full zone info block -->
-                            <template x-if="leg==='CE1'||leg==='PE1'">
-                              <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
-                                <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
-                                <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
-                                <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
-                                <div x-show="ct.zone">
-                                  <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
-                                  <div :style="ct.zone?.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'"
-                                       x-text="ct.zone?.kind==='BEAR'?'Bear seller trap → '+(bk.exchange==='DELTA'?'BUY perp':'BUY call'):'Bull buyer trap → '+(bk.exchange==='DELTA'?'SELL perp':'BUY put')"></div>
-                                  <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
-                                  <div style="color:var(--t-cyan)"
-                                       x-text="ct.zone?(bk.htf_source==='futures'?(ct.zone.kind==='BEAR'?'Entry if FUT < ':'Entry if FUT > ')+ct.zone.zone_trigger:(ct.zone.kind==='BEAR'?'Entry if OPT < ':'Entry if OPT > ')+ct.zone.zone_trigger):'—'"></div>
-                                  <div style="color:var(--t-green)" x-text="ct.zone&&ct.zone.t1_target?'Target: '+ct.zone.t1_target:''"></div>
-                                  <div x-show="ct.zone?.dist_pts!=null"
-                                       :style="ct.zone?.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'"
-                                       x-text="ct.zone?.dist_pts!=null?ct.zone.dist_pts+' pts away':''"></div>
-                                </div>
-                                <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
-                                <div>
-                                  <span :style="ct.zone&&ct.zone.ltf_status==='entered'?'color:var(--t-yellow);font-weight:700':ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
-                                        x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?(bk.ltf_min||5)+'M TRAP READY!':'Monitoring'):'—'"></span>
-                                  <div x-show="ct.zone&&ct.zone.ltf_status==='watching'" style="color:var(--t-dim);margin-top:2px"
-                                       x-text="(bk.ltf_min||5)+'-min trap needed'+(bk.htf_source==='futures'?' inside FUT zone':' inside zone')"></div>
-                                </div>
-                              </div>
-                            </template>
-                            <!-- CE2 / PE2 — compact hedge row -->
-                            <template x-if="leg==='CE2'||leg==='PE2'">
-                              <div class="grid py-1" style="grid-template-columns:2.5rem 3.5rem 3.5rem 1fr 6rem;gap:4px;border-top:1px solid var(--t-border)">
-                                <span :style="leg.startsWith('CE')?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'" x-text="leg"></span>
-                                <span style="color:var(--t-bright)" x-text="ct.strike||'—'"></span>
-                                <span style="color:var(--t-yellow);font-weight:700" x-text="ctLtp(bk,leg,ct)!=null?ctLtp(bk,leg,ct).toFixed(1):'—'"></span>
-                                <div x-show="ct.zone">
-                                  <div style="color:var(--t-muted)" x-text="(ct.zone?.htf_label||'75-min')+' zone · Trapped: '+(ct.zone?.trapped_on?ct.zone.trapped_on.slice(5,16):'—')"></div>
-                                  <div style="color:var(--t-bright)" x-text="ct.zone?'Zone '+ct.zone.zone_low+' → '+ct.zone.zone_high:'—'"></div>
-                                  <div style="color:var(--t-cyan)" x-text="ct.zone?'Entry if OPT > '+ct.zone.zone_trigger:'—'"></div>
-                                  <div :style="ct.zone?.dist_pts<bk.htf_atr?'color:var(--t-green)':'color:var(--t-dim)'" x-text="ct.zone?.dist_pts!=null?ct.zone.dist_pts+' pts away':''"></div>
-                                </div>
-                                <div x-show="!ct.zone" style="color:var(--t-dim)">No zone — scanning</div>
-                                <div>
-                                  <span :style="ct.zone&&ct.zone.ltf_status==='ltf_signal'?'color:var(--t-cyan);font-weight:700':'color:var(--t-muted)'"
-                                        x-text="ct.zone?(ct.zone.ltf_status==='entered'?'IN TRADE':ct.zone.ltf_status==='ltf_signal'?'5M TRAP READY!':'Monitoring'):'—'"></span>
-                                </div>
-                              </div>
-                            </template>
-                                                      </div>
-</template>
-                        </div>
-                      </template>
-                      <!-- Option zones (CE/PE) — always visible -->
-                      <template x-if="bk&&bk.zones&&bk.zones.filter(z=>z.opt_type!=='FUT').length>0">
-                        <div class="mt-1" x-data="{ farOpen: false }">
-                          <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
-                            <span>TYPE</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
-                          </div>
-                          <!-- TRAPPED / NEAR / IN TRADE always visible -->
-                          <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&(z.status==='TRAPPED'||z.reachable||z.ltf_status==='entered'||z.ltf_status==='ltf_signal'))" :key="z.uid">
-                            <div class="grid text-center py-0.5 text-xs font-mono"
-                                 :style="'grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
-                              <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
-                              <span x-text="z.zone_low"></span>
-                              <span x-text="z.zone_high"></span>
-                              <span x-text="z.zone_trigger"></span>
-                              <span x-text="z.htf_target"></span>
-                              <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
-                              <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                                    x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
-                            </div>
-                          </template>
-                          <!-- FAR zones collapsed -->
-                          <template x-if="bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length>0">
-                            <div class="mt-1">
-                              <button @click="farOpen=!farOpen" class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                                <span x-text="farOpen?'▲ Hide FAR':'▼ FAR zones ('+bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal').length+')'"></span>
-                              </button>
-                              <template x-if="farOpen">
-                                <div class="mt-1">
-                                  <template x-for="z in bk.zones.filter(z=>z.opt_type!=='FUT'&&!z.reachable&&z.status!=='TRAPPED'&&z.ltf_status!=='entered'&&z.ltf_status!=='ltf_signal')" :key="z.uid">
-                                    <div class="grid text-center py-0.5 text-xs font-mono"
-                                         style="grid-template-columns:3rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);color:var(--t-dim)">
-                                      <span :style="z.opt_type==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.opt_type"></span>
-                                      <span x-text="z.zone_low"></span>
-                                      <span x-text="z.zone_high"></span>
-                                      <span x-text="z.zone_trigger"></span>
-                                      <span x-text="z.htf_target"></span>
-                                      <span style="color:var(--t-red)">FAR</span>
-                                      <span style="color:var(--t-muted)">ARMED</span>
-                                    </div>
-                                  </template>
-                                </div>
-                              </template>
-                            </div>
-                          </template>
-                        </div>
-                      </template>
-                      <!-- FUT zones (futures bias — collapsible, hidden by default) -->
-                      <template x-if="bk&&bk.zones&&bk.zones.filter(z=>z.opt_type==='FUT').length>0">
-                        <div class="mt-1">
-                          <button @click="futZonesOpen[bk.underlying+'_'+bk.client_id]=!futZonesOpen[bk.underlying+'_'+bk.client_id]"
-                                  class="font-mono text-xs py-0.5 px-2 rounded" style="background:var(--t-border);color:var(--t-muted);border:none;cursor:pointer">
-                            <span x-text="futZonesOpen[bk.underlying+'_'+bk.client_id]?'^ Hide FUT Zones':'+ FUT Zones ('+bk.zones.filter(z=>z.opt_type==='FUT').length+')'"></span>
-                          </button>
-                          <template x-if="futZonesOpen[bk.underlying+'_'+bk.client_id]">
-                            <div class="mt-1">
-                              <div class="grid text-center mb-1 text-xs font-mono" style="grid-template-columns:4rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;color:var(--t-muted)">
-                                <span>DIR</span><span>LOW</span><span>HIGH</span><span>TRIGGER</span><span>TARGET</span><span>NEAR?</span><span>5M STATUS</span>
-                              </div>
-                              <template x-for="z in bk.zones.filter(z=>z.opt_type==='FUT')" :key="z.uid">
-                                <div class="grid text-center py-0.5 text-xs font-mono"
-                                     :style="'grid-template-columns:4rem 1fr 1fr 1fr 1fr 3.5rem 5rem;gap:2px;border-top:1px solid var(--t-border);'+(z.status==='TRAPPED'?'color:var(--t-bright)':'color:var(--t-dim)')">
-                                  <span :style="z.kind==='BEAR'?'color:var(--t-red);font-weight:700':'color:var(--t-green);font-weight:700'" x-text="z.kind||z.opt_type"></span>
-                                  <span x-text="z.zone_low"></span>
-                                  <span x-text="z.zone_high"></span>
-                                  <span x-text="z.zone_trigger"></span>
-                                  <span x-text="z.htf_target"></span>
-                                  <span :style="z.reachable?'color:var(--t-green)':'color:var(--t-red)'" x-text="z.reachable?'CLOSE':'FAR'"></span>
-                                  <span :style="z.ltf_status==='entered'?'color:var(--t-yellow)':z.ltf_status==='ltf_signal'?'color:var(--t-cyan)':'color:var(--t-muted)'"
-                                        x-text="z.ltf_status==='entered'?'IN TRADE':z.ltf_status==='ltf_signal'?'5M TRAP':'ARMED'"></span>
-                                </div>
-                              </template>
-                            </div>
-                          </template>
-                        </div>
-                      </template>
-                      <div x-show="!bk||(!bk.contracts&&(!bk.zones||bk.zones.length===0))" class="text-xs font-mono py-1" style="color:var(--t-muted)">No HTF zones detected yet.</div>
-                      <!-- Open position — live ledger table -->
-                      <template x-if="bk&&bk.position">
-                        <div class="mt-2 pt-2 border-t text-xs font-mono" style="border-color:var(--t-border)"
-                             x-data="{
-                               get isFut(){ return bk.htf_source==='futures' },
-                               get leg(){ return bk.position.side==='CE'?'CE1':'PE1' },
-                               get optLtp(){ return bk.position.opt_ltp||0 },
-                               get ltp(){ return this.isFut ? this.optLtp : ((bk.contracts&&bk.contracts[this.leg]?.ltp)||0) },
-                               get ep(){ return bk.position.entry_price||0 },
-                               get qty(){ return bk.position.remaining_qty||0 },
-                               get pnl(){ return this.ltp&&this.ep ? Math.round((this.ltp-this.ep)*this.qty) : 0 },
-                               get pnlPts(){ return this.ltp&&this.ep ? (this.ltp-this.ep).toFixed(1) : '—' }
-                             }">
-                          <!-- header row -->
-                          <div class="grid gap-1 pb-1 mb-1" style="grid-template-columns:3rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 4rem;border-bottom:1px solid var(--t-border);color:var(--t-muted)">
-                            <span>LEG</span><span>STRIKE</span>
-                            <span x-text="isFut?'FUT@ENTRY':'ENTRY'"></span>
-                            <span x-text="isFut?'OPT ENTRY':'LTP'"></span>
-                            <span x-text="isFut?'OPT LTP':'SL'"></span>
-                            <span x-text="isFut?'FUT SL':'T1'"></span>
-                            <span>QTY</span><span>P&amp;L (₹)</span>
-                          </div>
-                          <!-- data row -->
-                          <div class="grid gap-1 py-1" style="grid-template-columns:3rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 3.5rem 4rem">
-                            <span :style="bk.position.side==='CE'?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'"
-                                  x-text="bk.position.side"></span>
-                            <span style="color:var(--t-bright)" x-text="bk.position.strike"></span>
-                            <template x-if="isFut">
-                              <span style="color:var(--t-bright)" x-text="bk.position.spot_at_entry||'—'"></span>
-                            </template>
-                            <template x-if="!isFut">
-                              <span style="color:var(--t-bright)" x-text="ep.toFixed(1)"></span>
-                            </template>
-                            <span style="color:var(--t-bright)" x-text="isFut?(ep>0?ep.toFixed(1):'—'):(ltp?ltp.toFixed(1):'—')"></span>
-                            <span style="color:var(--t-yellow);font-weight:700" x-text="isFut?(optLtp?optLtp.toFixed(1):'—'):(bk.position.t1_hit?(bk.position.trail_sl||'—'):(bk.position.sl_price||'—'))"></span>
-                            <span :style="isFut?'color:var(--t-red)':(bk.position.t1_hit?'color:var(--t-cyan)':'color:var(--t-red)')"
-                                  x-text="isFut?(bk.position.t1_hit?(bk.position.trail_sl||'—'):(bk.position.sl_price||'—')):(bk.position.t1_price||'—')"></span>
-                            <span style="color:var(--t-muted)" x-text="qty+'/'+bk.position.total_qty"></span>
-                            <span :style="pnl>=0?'color:var(--t-green);font-weight:700':'color:var(--t-red);font-weight:700'"
-                                  x-text="ltp?(( pnl>=0?'+':'')+pnl+' ('+pnlPts+'pts)'):'—'"></span>
-                          </div>
-                          <!-- meta row -->
-                          <div class="flex flex-wrap gap-2 pt-1" style="color:var(--t-muted);border-top:1px solid var(--t-border)">
-                            <span x-show="bk.position.t1_hit" style="color:var(--t-green);font-weight:700">T1 ✓ trailing</span>
-                            <span x-show="!isFut" x-text="'spot@entry='+bk.position.spot_at_entry"></span>
-                            <span x-show="isFut&&bk.position.fut_entry_ref" x-text="'fut zone='+bk.position.fut_entry_ref"></span>
-                            <span x-show="isFut&&bk.position.spot_at_entry" x-text="'fut@entry='+bk.position.spot_at_entry"></span>
-                            <span x-show="bk.position.entry_ts" x-text="'at '+bk.position.entry_ts.substring(11,19)"></span>
-                          </div>
-                        </div>
-                      </template>
-                      <div x-show="!bk||!bk.position" class="text-xs font-mono mt-1" style="color:var(--t-muted)">No open position — scanning zones</div>
-                    </div>
-                  </template>
 
-                  <template x-if="dep.strategy_name!=='trap_scanner'&&(!csPositions[b.binding_id]||!csPositions[b.binding_id][dep.deploy_id]||(csPositions[b.binding_id][dep.deploy_id].legs||[]).length===0)">
+                  <template x-if="!csPositions[b.binding_id]||!csPositions[b.binding_id][dep.deploy_id]||(csPositions[b.binding_id][dep.deploy_id].legs||[]).length===0">
                     <div class="text-xs text-center py-4 font-mono" style="color:var(--t-muted)">
                       No open position — waiting for entry signal
                     </div>

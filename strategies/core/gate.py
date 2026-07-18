@@ -1,9 +1,8 @@
 """
 strategies/core/gate.py — reusable per-binding trade gate.
 
-Mirrors the gating logic from:
-  - strategies/sell_straddle.py::_any_active_terminal (per-binding path)
-  - strategies/trap_scanner_engine.py::_can_trade
+Mirrors the gating logic from strategies/sell_straddle.py::_any_active_terminal
+(per-binding path).
 
 Fail-open when no ClientDB is wired so unit tests / headless runs are
 unaffected. Cached for 5 seconds to keep the per-tick hot path cheap.
@@ -44,22 +43,6 @@ def _evaluate(client_id: str, binding_id: str, client_db: Any, strategy_name: st
             return False
 
         strategy = strategy_name.lower()
-        if strategy == "trap_scanner":
-            if not binding.get("is_trade_enabled"):
-                return False
-            try:
-                deployments = client_db.get_deployments_sync(client_id)
-            except Exception:
-                deployments = []
-            return any(
-                d.get("binding_id") == binding_id
-                and str(d.get("strategy_name", "")).lower() == "trap_scanner"
-                and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
-                == (underlying or "").upper()
-                and int(d.get("is_running", 0) or 0) == 1
-                for d in deployments
-            )
-
         if strategy == "sell_straddle":
             # Trade toggle must be ON for this binding (same dual-toggle gate as
             # trap scanner). Then check the deployment's per-strategy Run toggle.
