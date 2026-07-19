@@ -2657,7 +2657,20 @@ class DashboardServer:
                                                       if leg.entry_time else None,
                                     })
                             else:
-                                tracking = {"is_crypto": _is_crypto, "atm": 0, "dte": "—", "offset": 0, "phase": ""}
+                                from strategies.v4_cascade.book import _TRACKING_OFFSET
+                                _bias = "none"
+                                _sc = getattr(book._engine, "_spot_confirm", None)
+                                if _sc is not None:
+                                    _bias = getattr(_sc.current_kind, "value", str(_sc.current_kind))
+                                if _is_crypto:
+                                    _atm, _dte, _offset = 0, "—", 0   # atm filled in below (= live spot)
+                                else:
+                                    _atm = round(float(book._atm_open or 0.0), 2)
+                                    _dte = ((book._expiry - datetime.now(IST).date()).days
+                                            if book._expiry else "—")
+                                    _offset = int(_TRACKING_OFFSET)
+                                tracking = {"is_crypto": _is_crypto, "atm": _atm, "dte": _dte,
+                                            "offset": _offset, "phase": "", "bias": _bias}
                                 _phases = []
                                 _gate_order = list(GateState)
                                 _htf_idx = _gate_order.index(GateState.HTF_LOCKED)

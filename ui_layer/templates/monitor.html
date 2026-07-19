@@ -7014,8 +7014,17 @@ function amoTest() {
                         <template x-if="_t.is_crypto">
                           <span>SPOT <span style="color:var(--t-cyan)" x-text="_t.atm"></span></span>
                         </template>
-                        <span x-text="'phase: '+_t.phase"></span>
+                        <!-- Spot-side bias: which direction the market's own structure is
+                             currently confirming. A BEAR TRAP on spot means sellers got
+                             trapped into a reclaim -- a BULLISH read that arms the CE/BEAR
+                             (bear-scan) funnel; a BULL TRAP is the mirror bearish read that
+                             arms PE/BULL. Neither confirmed -> both funnels stay ARMED_WAIT. -->
+                        <span>bias
+                          <span :style="`color:${_t.bias==='bear_trap_close'?'var(--t-green)':_t.bias==='bull_trap_close'?'var(--t-red)':'var(--t-muted)'}`"
+                                x-text="_t.bias==='bear_trap_close'?'BULLISH (CE armed)':_t.bias==='bull_trap_close'?'BEARISH (PE armed)':'none'"></span>
+                        </span>
                       </div>
+                      <div class="text-right mb-1" x-text="'phase: '+_t.phase"></div>
                       <!-- Per-leg seller-trap detector state (HTF/MTF) + active LIFO level [L/H], as a
                            column-aligned grid. Crypto has no CE/PE option chain (spot-only) — the
                            backend still keys internally by ce/pe (bear-scan/bull-scan side), but sends
