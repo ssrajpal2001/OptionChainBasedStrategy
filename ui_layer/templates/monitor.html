@@ -7005,21 +7005,29 @@ function amoTest() {
                   <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&(csPositions[b.binding_id][dep.deploy_id].legs||[]).length===0">
                     <div class="text-xs font-mono space-y-1 py-1" style="color:var(--t-muted)">
                       <div class="flex justify-between">
-                        <span>ATM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.atm"></span>
-                          · DTE <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.dte"></span>
-                          · ITM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.offset"></span></span>
+                        <template x-if="!csPositions[b.binding_id][dep.deploy_id].tracking.is_crypto">
+                          <span>ATM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.atm"></span>
+                            · DTE <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.dte"></span>
+                            · ITM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.offset"></span></span>
+                        </template>
+                        <template x-if="csPositions[b.binding_id][dep.deploy_id].tracking.is_crypto">
+                          <span>SPOT <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.atm"></span></span>
+                        </template>
                         <span x-text="'phase '+csPositions[b.binding_id][dep.deploy_id].tracking.phase"></span>
                       </div>
-                      <!-- Per-leg seller-trap detector state (HTF/MTF) + active LIFO level [L/H] -->
+                      <!-- Per-leg seller-trap detector state (HTF/MTF) + active LIFO level [L/H].
+                           Crypto has no CE/PE option chain (spot-only) — the backend still keys
+                           internally by ce/pe (bear-scan/bull-scan side), but sends *_label
+                           ('BEAR'/'BULL') for crypto so the UI never implies an option contract. -->
                       <template x-for="side in ['ce','pe']" :key="side">
                         <div class="mt-1">
                           <div class="flex justify-between">
-                            <span style="color:var(--t-text)" x-text="side.toUpperCase()+' '+csPositions[b.binding_id][dep.deploy_id].tracking[side==='ce'?'ce_strike':'pe_strike']"></span>
+                            <span style="color:var(--t-text)" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side+'_label']||side.toUpperCase())+' '+csPositions[b.binding_id][dep.deploy_id].tracking[side==='ce'?'ce_strike':'pe_strike']"></span>
                             <span>LTP <span class="price-live" style="color:var(--t-bright)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking[side==='ce'?'ce_ltp':'pe_ltp']"></span></span>
                           </div>
                           <div class="flex justify-between pl-2" style="color:var(--t-muted)">
-                            <span>HTF <span :style="`color:${((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).htf_state==='ENTRY_READY')?'var(--t-green)':'var(--t-cyan)'}`" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).htf_state||'—'"></span>
-                              · MTF <span :style="`color:${((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).mtf_state==='ENTRY_READY')?'var(--t-green)':'var(--t-muted)'}`" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).mtf_state||'—'"></span></span>
+                            <span>HTF <span :style="`color:${['limit_armed','triggered'].includes((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).htf_state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).htf_state||'—'"></span>
+                              · MTF <span :style="`color:${['limit_armed','triggered'].includes((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).mtf_state)?'var(--t-green)':'var(--t-muted)'}`" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).mtf_state||'—'"></span></span>
                             <span x-text="'levels '+((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).traps||0)"></span>
                           </div>
                           <div class="flex justify-between pl-2" x-show="((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).level_h||0)>0" style="color:var(--t-text)">

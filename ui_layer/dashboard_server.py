@@ -2623,6 +2623,76 @@ class DashboardServer:
                                     straddle_info["tsl"] = {"enabled": False}
                                 # Exit eval cache — built every 3s by _check_exits
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
+                    elif sname == "v4_cascade":
+                        book = _srv._find_v4_book(cid, bid, underlying)
+                        if book is not None:
+                            from strategies.v4_cascade.dataclasses import GateState
+                            from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
+                            _is_crypto = str(underlying).upper() in ("BTC", "ETH")
+                            live_price = getattr(book, "_live_price", {}) or {}
+                            pos = book._engine.position
+                            if pos is not None and pos.is_open:
+                                # Crypto trades the underlying's own spot/perpetual price directly —
+                                # there is no option chain for BTC/ETH, so CE/PE here are only the
+                                # engine's internal bear-scan/bull-scan side labels, never real
+                                # strikes; the UI must not present them as option contracts.
+                                _cv = _CRYPTO_CONTRACT_VALUE.get(str(underlying).upper(), 1.0)
+                                ccy = "$" if _is_crypto else "₹"
+                                for leg in (pos.t1, pos.t2):
+                                    if leg is None or leg.status != "open":
+                                        continue
+                                    ltp = float(live_price.get(pos.side) or leg.entry_price)
+                                    qty = int(leg.qty)
+                                    _pnl = round((ltp - leg.entry_price) * qty * _cv, 2)
+                                    _instr = (f"{underlying} SPOT {leg.tranche}" if _is_crypto
+                                              else f"{underlying} {int(leg.strike)} {pos.side} {leg.tranche}")
+                                    legs.append({
+                                        "symbol": _instr, "instrument": _instr,
+                                        "type": leg.tranche, "side": "BUY", "ccy": ccy,
+                                        "qty": qty, "lot_size": 1, "lots": 1,
+                                        "entry_price": round(leg.entry_price, 2),
+                                        "sell_avg": 0.0, "buy_avg": round(leg.entry_price, 2),
+                                        "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                        "entry_time": leg.entry_time.isoformat(timespec="seconds")
+                                                      if leg.entry_time else None,
+                                    })
+                            else:
+                                tracking = {"is_crypto": _is_crypto, "atm": 0, "dte": "—", "offset": 0, "phase": ""}
+                                _phases = []
+                                _gate_order = list(GateState)
+                                for side, label in (("CE", "BEAR" if _is_crypto else "CE"),
+                                                     ("PE", "BULL" if _is_crypto else "PE")):
+                                    scanner = book._engine._scanners.get(side)
+                                    side_ltp = float(live_price.get(side) or 0.0)
+                                    setup = None
+                                    if scanner is not None and scanner.setups:
+                                        setup = max(scanner.setups, key=lambda s: _gate_order.index(s.state))
+                                    if setup is not None:
+                                        _levels = [v for v in (
+                                            setup.htf_zone.entry_line if setup.htf_zone else None,
+                                            setup.htf_zone.sl_level if setup.htf_zone else None,
+                                        ) if v is not None]
+                                        level_l = min(_levels) if _levels else 0
+                                        level_h = max(_levels) if _levels else 0
+                                        side_state = setup.state.value
+                                    else:
+                                        level_l = level_h = 0
+                                        side_state = "—"
+                                    strike = round(side_ltp) if _is_crypto else int(
+                                        getattr(book, f"_{side.lower()}_strike", 0) or 0)
+                                    tracking[f"{side.lower()}_label"] = label
+                                    tracking[f"{side.lower()}_strike"] = strike
+                                    tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+                                    tracking[side.lower()] = {
+                                        "htf_state": side_state, "mtf_state": side_state,
+                                        "traps": len(scanner.setups) if scanner else 0,
+                                        "level_l": round(level_l, 2), "level_h": round(level_h, 2),
+                                    }
+                                    _phases.append(side_state)
+                                tracking["phase"] = "/".join(_phases)
+                                if _is_crypto:
+                                    tracking["atm"] = round(
+                                        float(live_price.get("CE") or live_price.get("PE") or 0.0), 2)
                 except Exception as exc:
                     logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
                 _entry_time = (pos.open_time.isoformat(timespec="seconds") if pos and getattr(pos, "open_time", None)
