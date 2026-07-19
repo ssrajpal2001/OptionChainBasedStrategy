@@ -145,6 +145,7 @@ class V4CascadeBook(AbstractStrategyBook):
                               self._client_id, self._binding_id, self._underlying)
         if self._is_crypto:
             self._tasks.append(asyncio.create_task(self._crypto_candle_loop(), name="v4cascade_crypto_candle"))
+            self._tasks.append(asyncio.create_task(self._crypto_tick_loop(), name="v4cascade_crypto_tick"))
         else:
             self._tasks.append(asyncio.create_task(self._option_loop(), name="v4cascade_option"))
             self._tasks.append(asyncio.create_task(self._candle_loop(), name="v4cascade_candle"))
@@ -349,6 +350,29 @@ class V4CascadeBook(AbstractStrategyBook):
             # trim the rolling 1m buffer so it doesn't grow unbounded across days
             if len(buf_1m) > 60 * 24 * (_CRYPTO_LOOKBACK_DAYS + 1):
                 buf_1m = buf_1m[-60 * 24 * (_CRYPTO_LOOKBACK_DAYS + 1):]
+
+    async def _crypto_tick_loop(self) -> None:
+        """Pure display-layer live-price updater. The funnel engine only reacts
+        to closed 1m bars (via _crypto_candle_loop) — that's correct and
+        unchanged. But the UI's SPOT/LTP + 'distance to trap' figures looked
+        frozen for up to a minute at a time since _live_price only moved on
+        bar close. Subscribing raw INDEX_TICK here updates _live_price on
+        every tick instead, same as the NIFTY path already does via
+        _on_option_tick — this never touches engine.update() or any gate
+        state, so it cannot affect trade logic, only what the client card
+        displays between bar closes."""
+        q = self._subscribe(Topic.INDEX_TICK)
+        symbol = self._underlying.upper()
+        while self._running:
+            try:
+                tick = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if getattr(tick, "symbol", "") != symbol:
+                continue
+            ltp = float(getattr(tick, "ltp", 0.0) or 0.0)
+            if ltp > 0:
+                self._live_price["CE"] = self._live_price["PE"] = ltp
 
     async def force_ingest(self) -> bool:
         """Admin-triggered re-ingestion on a live book (POST .../force_ingest)."""
