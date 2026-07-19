@@ -367,6 +367,7 @@ async def _run_live(
 
     # Backward-compat variables consumed by the dashboard and bridges.
     straddle_manager = managers.get("sell_straddle")
+    v4_cascade_manager = managers.get("v4_cascade")
 
     # Crypto (Delta) feed: for any BTC/ETH in monitored_indices or with an active deployment,
     # run a DeltaChainManager that drives a DeltaFeeder onto the same EventBus. If nothing crypto
@@ -509,6 +510,7 @@ async def _run_live(
                 risk_manager=risk_mgr,
                 straddle_manager=straddle_manager,
                 straddle_bridge=straddle_bridge,
+                v4_cascade_manager=v4_cascade_manager,
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)

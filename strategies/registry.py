@@ -9,11 +9,16 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from strategies.sell_straddle import StraddleBookManager
+from strategies.v4_cascade_book_manager import V4CascadeBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     "sell_straddle": {
         "manager_class": StraddleBookManager,
+        "per_binding": True,
+    },
+    "v4_cascade": {
+        "manager_class": V4CascadeBookManager,
         "per_binding": True,
     },
 }

@@ -33,7 +33,16 @@ def _cache_key(client_id: str, binding_id: str, client_db: Any, strategy_name: s
 
 
 def _evaluate(client_id: str, binding_id: str, client_db: Any, strategy_name: str, underlying: str) -> bool:
-    """Uncached gate evaluation."""
+    """Uncached gate evaluation.
+
+    Generalized (2026-07-19) — no more per-strategy-name hardcoding. EVERY
+    strategy (sell_straddle, v4_cascade, and any future one) is gated the
+    same way: terminal_connected AND is_trade_enabled AND a running
+    deployment of THIS strategy_name for THIS underlying on THIS binding.
+    Previously only sell_straddle got the full check and every other
+    strategy silently fell through to a terminal-only check — the exact
+    class of routing bug documented in project memory (the BTC --mode paper
+    routing bug), now closed for good by removing the special case."""
     try:
         bindings = {b.get("binding_id"): b for b in client_db.get_bindings_safe_sync(client_id)}
         binding = bindings.get(binding_id)
@@ -41,28 +50,22 @@ def _evaluate(client_id: str, binding_id: str, client_db: Any, strategy_name: st
             return False
         if not binding.get("terminal_connected"):
             return False
+        if not binding.get("is_trade_enabled"):
+            return False
 
         strategy = strategy_name.lower()
-        if strategy == "sell_straddle":
-            # Trade toggle must be ON for this binding (same dual-toggle gate as
-            # trap scanner). Then check the deployment's per-strategy Run toggle.
-            if not binding.get("is_trade_enabled"):
-                return False
-            try:
-                deployments = client_db.get_deployments_sync(client_id)
-            except Exception:
-                deployments = []
-            return any(
-                d.get("binding_id") == binding_id
-                and str(d.get("strategy_name", "")).lower() == "sell_straddle"
-                and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
-                == (underlying or "").upper()
-                and int(d.get("is_running", 0) or 0) == 1
-                for d in deployments
-            )
-
-        # Unknown strategy: terminal_connected is the only generic check we can apply.
-        return True
+        try:
+            deployments = client_db.get_deployments_sync(client_id)
+        except Exception:
+            deployments = []
+        return any(
+            d.get("binding_id") == binding_id
+            and str(d.get("strategy_name", "")).lower() == strategy
+            and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
+            == (underlying or "").upper()
+            and int(d.get("is_running", 0) or 0) == 1
+            for d in deployments
+        )
     except Exception as exc:
         logger.debug("Gate evaluation error for %s/%s/%s: %s", client_id, binding_id, strategy_name, exc)
         return False

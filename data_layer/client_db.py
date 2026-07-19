@@ -996,6 +996,31 @@ class ClientDB:
             logger.error("get_running_straddle_deployments_sync: %s", exc)
             return []
 
+    def get_running_deployments_by_strategy_sync(self, strategy_name: str) -> list[dict]:
+        """Generalized (2026-07-19) version of get_running_straddle_deployments_sync
+        — parameterized by strategy_name so any new strategy (v4_cascade, etc.) can
+        query its own deployment topology without a bespoke per-strategy method."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """
+                SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
+                       d.strategy_name, d.is_running
+                FROM clients c
+                JOIN strategy_deployments d ON c.client_id = d.client_id
+                WHERE c.is_active = 1
+                  AND d.strategy_name = ?
+                  AND d.is_running = 1
+                """,
+                (strategy_name,),
+            ).fetchall()
+            con.close()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("get_running_deployments_by_strategy_sync(%s): %s", strategy_name, exc)
+            return []
+
     # ── Boot-time bulk load ───────────────────────────────────────────────────
 
     def load_all_profiles(self) -> list:

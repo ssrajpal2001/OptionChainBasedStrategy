@@ -743,13 +743,61 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Per-index strategy config (rule builder) ────────────────────── */
     adminSelectedIndex: 'NIFTY',
-    adminStrategyTab:   'sell_straddle',  // 'sell_straddle'
+    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'v4_cascade'
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
     indexConfig: {},
     indexConfigLoading: false,
     indexConfigSaving:  false,
     indexConfigMsg:     '',
     indexConfigOk:      null,
+
+    /* ── V4 Cascade admin controls ──────────────────────────────────── */
+    v4CascadeDeployId:   '',
+    v4CascadeCeOverride: 0,
+    v4CascadePeOverride: 0,
+    v4CascadeMsg:        '',
+    v4CascadeOk:         null,
+    v4TrapZones:         [],
+    v4TrapPosition:      null,
+
+    async refreshV4TrapStatus() {
+      if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
+      try {
+        const r = await fetch(`/api/client/strategy/${this.v4CascadeDeployId}/v4_trap_status`, {headers: this._v4AuthHeaders()});
+        const d = await r.json();
+        if (d.ok) { this.v4TrapZones = d.zones || []; this.v4TrapPosition = d.position || null; }
+        else { this.v4CascadeOk = false; this.v4CascadeMsg = d.detail || d.error || 'Failed'; }
+      } catch (e) { this.v4CascadeOk = false; this.v4CascadeMsg = String(e); }
+    },
+
+    _v4AuthHeaders() {
+      return this.authToken
+        ? { 'Authorization': 'Bearer ' + this.authToken, 'Content-Type': 'application/json' }
+        : { 'Content-Type': 'application/json' };
+    },
+    async forceIngestV4Cascade() {
+      if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
+      try {
+        const r = await fetch(`/api/admin/v4_cascade/force_ingest/${this.v4CascadeDeployId}`, {
+          method: 'POST', headers: this._v4AuthHeaders(),
+        });
+        const d = await r.json();
+        this.v4CascadeOk = !!d.ok;
+        this.v4CascadeMsg = d.ok ? 'Force ingest triggered.' : (d.detail || d.error || 'Failed');
+      } catch (e) { this.v4CascadeOk = false; this.v4CascadeMsg = String(e); }
+    },
+    async lockV4CascadeContract() {
+      if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
+      try {
+        const r = await fetch(`/api/client/deployment/${this.v4CascadeDeployId}/v4_cascade/lock_contract`, {
+          method: 'POST', headers: this._v4AuthHeaders(),
+          body: JSON.stringify({ce_strike: this.v4CascadeCeOverride||0, pe_strike: this.v4CascadePeOverride||0}),
+        });
+        const d = await r.json();
+        this.v4CascadeOk = !!d.ok;
+        this.v4CascadeMsg = d.ok ? `Override applied: CE=${d.ce_strike||'auto'} PE=${d.pe_strike||'auto'}` : (d.detail || d.error || 'Failed');
+      } catch (e) { this.v4CascadeOk = false; this.v4CascadeMsg = String(e); }
+    },
 
     /* ── Stock scanner ──────────────────────────────────────────────── */
     stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], ce_stocks: [], pe_stocks: [], use_nifty_bias: false, loaded: false, error: '' },
@@ -3844,8 +3892,104 @@ function amoTest() {
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           SELL STRADDLE
         </button>
+        <button @click="adminStrategyTab='v4_cascade'"
+                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
+                :style="adminStrategyTab==='v4_cascade'
+                  ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
+                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
+          V4 CASCADE
+        </button>
         <div class="ml-auto flex items-center px-3">
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
+        </div>
+      </div>
+
+      <!-- ══ V4 CASCADE admin panel ═══════════════════════════════════════ -->
+      <!-- On/off control reuses the SAME per-deployment Run/Stop toggle every
+           strategy (including sell_straddle) already has — no separate
+           global switch here; start/stop v4_cascade for a client the same
+           way you start/stop their sell_straddle deployment. -->
+      <div x-show="adminStrategyTab==='v4_cascade'" class="p-4 flex flex-col gap-3">
+        <div class="grid grid-cols-3 gap-2 items-end t-card rounded p-3">
+          <div>
+            <label class="sec-label">Deploy ID (for force-ingest / override)</label>
+            <input type="text" class="t-input mt-0.5" placeholder="{client}_{binding}_v4_cascade_NIFTY"
+                   x-model="v4CascadeDeployId">
+          </div>
+          <div>
+            <label class="sec-label">CE Strike Override (0=auto)</label>
+            <input type="number" class="t-input mt-0.5" x-model.number="v4CascadeCeOverride">
+          </div>
+          <div>
+            <label class="sec-label">PE Strike Override (0=auto)</label>
+            <input type="number" class="t-input mt-0.5" x-model.number="v4CascadePeOverride">
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <button @click="forceIngestV4Cascade()" class="t-btn font-display font-bold text-xs px-4 py-2 rounded">
+            Force Ingest Zones
+          </button>
+          <button @click="lockV4CascadeContract()" class="t-btn font-display font-bold text-xs px-4 py-2 rounded">
+            Apply Strike Override
+          </button>
+        </div>
+        <div x-show="v4CascadeMsg" class="rounded px-3 py-2 font-mono text-xs"
+             :style="`background:${v4CascadeOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${v4CascadeOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${v4CascadeOk?'var(--t-green)':'var(--t-red)'}`"
+             x-text="v4CascadeMsg"></div>
+
+        <!-- ── Live Trap Status grid + active-trade table ─────────────────── -->
+        <div class="t-card rounded p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="font-display font-bold text-xs" style="color:var(--t-text)">Live Trap Status</div>
+            <button @click="refreshV4TrapStatus()" class="t-btn font-mono text-xs px-3 py-1 rounded">Refresh</button>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full font-mono text-xs">
+              <thead>
+                <tr style="color:var(--t-muted)">
+                  <th class="text-left px-1 py-1">Side</th>
+                  <th class="text-left px-1 py-1">Gate State</th>
+                  <th class="text-left px-1 py-1">HTF Ref</th>
+                  <th class="text-right px-1 py-1">HTF Entry</th>
+                  <th class="text-right px-1 py-1">HTF SL</th>
+                  <th class="text-left px-1 py-1">MTF Ref</th>
+                  <th class="text-right px-1 py-1">MTF Entry</th>
+                  <th class="text-right px-1 py-1">Inner Zone Low</th>
+                  <th class="text-right px-1 py-1">Gate 3 Sweep Level</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template x-for="z in v4TrapZones" :key="z.side+z.htf_ref_ts">
+                  <tr style="border-top:1px solid var(--t-border)">
+                    <td class="px-1 py-1" x-text="z.side"></td>
+                    <td class="px-1 py-1" style="color:var(--t-cyan)" x-text="z.state"></td>
+                    <td class="px-1 py-1" x-text="z.htf_ref_ts"></td>
+                    <td class="text-right px-1 py-1" x-text="(z.htf_entry||0).toFixed(2)"></td>
+                    <td class="text-right px-1 py-1" x-text="(z.htf_sl||0).toFixed(2)"></td>
+                    <td class="px-1 py-1" x-text="z.mtf_ref_ts || '—'"></td>
+                    <td class="text-right px-1 py-1" x-text="z.mtf_entry ? z.mtf_entry.toFixed(2) : '—'"></td>
+                    <td class="text-right px-1 py-1" x-text="z.inner_zone_low ? z.inner_zone_low.toFixed(2) : '—'"></td>
+                    <td class="text-right px-1 py-1" x-text="z.limit_entry_price ? z.limit_entry_price.toFixed(2) : '—'"></td>
+                  </tr>
+                </template>
+                <tr x-show="!v4TrapZones.length"><td colspan="9" class="text-center py-2" style="color:var(--t-muted)">No unmitigated zones in memory.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div x-show="v4TrapPosition" class="mt-3 rounded p-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
+            <div class="font-display font-bold text-xs mb-1" style="color:var(--t-text)">Active Position</div>
+            <div class="grid grid-cols-4 gap-2 font-mono text-xs">
+              <div><span style="color:var(--t-muted)">Side:</span> <span x-text="v4TrapPosition && v4TrapPosition.side"></span></div>
+              <div><span style="color:var(--t-muted)">Entry:</span> <span x-text="v4TrapPosition && (v4TrapPosition.entry_price||0).toFixed(2)"></span></div>
+              <div><span style="color:var(--t-muted)">Live LTP:</span> <span x-text="v4TrapPosition && (v4TrapPosition.live_ltp||0).toFixed(2)"></span></div>
+              <div><span style="color:var(--t-muted)">SL:</span> <span style="color:var(--t-red)" x-text="v4TrapPosition && (v4TrapPosition.sl_price||0).toFixed(2)"></span></div>
+              <div><span style="color:var(--t-muted)">Target A/B1/B2:</span> <span style="color:var(--t-green)" x-text="v4TrapPosition && (v4TrapPosition.target_price||0).toFixed(2)"></span></div>
+              <div><span style="color:var(--t-muted)">Dist to SL:</span> <span x-text="v4TrapPosition && v4TrapPosition.distance_to_sl!=null ? v4TrapPosition.distance_to_sl.toFixed(2) : '—'"></span></div>
+              <div><span style="color:var(--t-muted)">Dist to Target:</span> <span x-text="v4TrapPosition && v4TrapPosition.distance_to_target!=null ? v4TrapPosition.distance_to_target.toFixed(2) : '—'"></span></div>
+              <div><span style="color:var(--t-muted)">T1/T2 status:</span> <span x-text="v4TrapPosition && (v4TrapPosition.t1_status+'/'+v4TrapPosition.t2_status)"></span></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -6535,6 +6679,7 @@ function amoTest() {
               <label class="sec-label mb-1">STRATEGY</label>
               <select x-model="deployForm.strategy_name" class="t-input">
                 <option value="sell_straddle">Sell Straddle (SS)</option>
+                <option value="v4_cascade">V4 Cascade (Premium Trap)</option>
               </select>
             </div>
             <div>

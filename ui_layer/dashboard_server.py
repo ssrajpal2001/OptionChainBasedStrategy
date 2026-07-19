@@ -286,6 +286,10 @@ try:
     class _ExpiryModeSchema(_PydanticBase):
         expiry_mode: str  # current|next_week|monthly|YYYY-MM-DD
 
+    class _V4LockContractSchema(_PydanticBase):
+        ce_strike: int = 0   # 0 = clear override, revert to auto ATM-200 derivation
+        pe_strike: int = 0   # 0 = clear override, revert to auto ATM+200 derivation
+
     class _SaveUpstoxCredsSchema(_PydanticBase):
         client_id: str = ""
         api_key:   str = ""
@@ -646,6 +650,7 @@ class DashboardServer:
         sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
         straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
+        v4_cascade_manager=None, # V4CascadeBookManager — per-binding books (live list + find)
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -657,6 +662,7 @@ class DashboardServer:
         self._straddle_manager = straddle_manager
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
+        self._v4_cascade_manager = v4_cascade_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -2002,6 +2008,13 @@ class DashboardServer:
                         cid, bid, _srv._sell_straddles, underlying=und)
                 except Exception as exc:
                     logger.error("deployment_run square-off failed for %s: %s", deploy_id, exc)
+            elif not running and strat == "v4_cascade":
+                book = _srv._find_v4_book(cid, bid, und)
+                if book is not None:
+                    try:
+                        squared = await book.square_off(reason="deployment_stop")
+                    except Exception as exc:
+                        logger.error("v4_cascade square-off failed for %s: %s", deploy_id, exc)
             await _srv._client_db.set_deployment_running(deploy_id, cid, running)
             logger.info("Dashboard: strategy RUN %s → %s (squared=%d)",
                         deploy_id, "ON" if running else "OFF", squared)
@@ -2117,6 +2130,44 @@ class DashboardServer:
             logger.info("Dashboard: OI window set to ±%d strikes", int(body.n))
             return {"ok": True, "window": int(max(0, body.n))}
 
+        @app.post("/api/admin/v4_cascade/force_ingest/{deploy_id}", tags=["Admin"])
+        async def api_admin_v4_force_ingest(deploy_id: str, _: dict = Depends(_require_admin)):
+            """Re-trigger the 3-week deep-history ingestion pipeline on a live
+            v4_cascade book on demand."""
+            parts = deploy_id.split("_")
+            if len(parts) < 3:
+                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
+            cid, bid, und = parts[0], parts[1], parts[-1]
+            if _srv._v4_cascade_manager is None:
+                raise HTTPException(503, "v4_cascade strategy is not enabled on this instance.")
+            ok = _srv._v4_cascade_manager.force_ingest(cid, bid, und)
+            if not ok:
+                raise HTTPException(404, f"No live v4_cascade book for deploy_id '{deploy_id}'.")
+            return {"ok": True, "deploy_id": deploy_id, "ingest_triggered": True}
+
+        @app.post("/api/client/deployment/{deploy_id}/v4_cascade/lock_contract", tags=["Client"])
+        async def api_client_v4_lock_contract(
+            deploy_id: str, body: _V4LockContractSchema, user: dict = Depends(_require_client),
+        ):
+            """Manual CE/PE tracking-contract override — bypasses the automatic
+            09:15 ATM-200/ATM+200 derivation. Pass 0 for either field to clear
+            that side's override and revert to auto-derivation."""
+            cid = user.get("client_id", "")
+            deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
+            if dep is None:
+                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
+            bid = dep.get("binding_id", "")
+            und = str(dep.get("underlying", "") or "NIFTY")
+            book = _srv._find_v4_book(cid, bid, und)
+            if book is None:
+                raise HTTPException(404, "No live v4_cascade book for this deployment.")
+            ce = body.ce_strike or None
+            pe = body.pe_strike or None
+            book.set_locked_strikes(ce, pe)
+            logger.info("Dashboard: v4_cascade lock_contract %s CE=%s PE=%s", deploy_id, ce, pe)
+            return {"ok": True, "deploy_id": deploy_id, "ce_strike": ce, "pe_strike": pe}
+
         # ── CLIENT — 1-min combined-premium chart series (VWAP/RSI/SLOPE) ─────
         @app.get("/api/client/strategy/{deploy_id}/premium_series", tags=["Client"])
         async def api_client_premium_series(
@@ -2132,6 +2183,69 @@ class DashboardServer:
                 return {"ok": True, "deploy_id": deploy_id, "underlying": underlying, "series": []}
             return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
                     "series": strat.get_premium_series()}
+
+        # ── CLIENT — V4 Cascade: live trap-zone status + active-trade distances ──
+        @app.get("/api/client/strategy/{deploy_id}/v4_trap_status", tags=["Client"])
+        async def api_client_v4_trap_status(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            """Every in-flight HTF/MTF setup (Live Trap Status grid) plus the
+            live position's real-time distance to Target A / B1(1:2) / B2(1:3)
+            / SL (active-trade table)."""
+            cid = user.get("client_id", "")
+            deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
+            if dep is None:
+                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
+            bid = dep.get("binding_id", "")
+            und = str(dep.get("underlying", "") or "NIFTY")
+            book = _srv._find_v4_book(cid, bid, und)
+            if book is None:
+                return {"ok": True, "deploy_id": deploy_id, "zones": [], "position": None}
+
+            from strategies.v4_cascade.dataclasses import GateState
+            zones = []
+            for side in ("CE", "PE"):
+                scanner = book._engine._scanners.get(side)
+                if scanner is None:
+                    continue
+                for setup in scanner.setups:
+                    z = {
+                        "side": side, "state": setup.state.value,
+                        "htf_ref_ts": setup.htf_ref_ts.isoformat() if setup.htf_ref_ts else None,
+                        "htf_entry": setup.htf_zone.entry_line if setup.htf_zone else None,
+                        "htf_sl": setup.htf_zone.sl_level if setup.htf_zone else None,
+                        "mtf_ref_ts": setup.mtf_zone.reference_low_ts.isoformat()
+                                      if setup.mtf_zone and setup.mtf_zone.reference_low_ts else None,
+                        "mtf_entry": setup.mtf_zone.entry_line if setup.mtf_zone else None,
+                        "inner_zone_low": setup.mtf_zone.sweep_low if setup.mtf_zone else None,
+                        "limit_entry_price": setup.limit_entry_price,
+                    }
+                    zones.append(z)
+
+            position = None
+            pos = book._engine.position
+            if pos is not None and pos.is_open:
+                live_ltp = 0.0
+                try:
+                    bars = book._bars_5m.get(pos.side) or []
+                    if bars:
+                        live_ltp = float(bars[-1].close)
+                except Exception:
+                    pass
+                position = {
+                    "side": pos.side, "status": pos.status,
+                    "entry_price": pos.t1.entry_price if pos.t1 else None,
+                    "sl_price": pos.t1.sl_price if pos.t1 else None,
+                    "target_price": pos.t1.target_price if pos.t1 else None,
+                    "live_ltp": live_ltp,
+                    "distance_to_sl": (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None,
+                    "distance_to_target": (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp) else None,
+                    "t1_status": pos.t1.status if pos.t1 else None,
+                    "t2_status": pos.t2.status if pos.t2 else None,
+                    "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
+                }
+            return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position}
 
         # ── CLIENT — set target index ─────────────────────────────────────────
 
@@ -2171,7 +2285,7 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle"}
+            allowed_strategies = {"sell_straddle", "v4_cascade"}
             allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
             import json as _json
             validated = []
@@ -3013,7 +3127,7 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle"}
+            allowed_strategies = {"sell_straddle", "v4_cascade"}
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 
@@ -5160,6 +5274,18 @@ pm2 save
                 (s._client_id == client_id and s._binding_id == binding_id)
             ):
                 return s
+        return None
+
+    @property
+    def _v4_cascades(self) -> list:
+        """Live list of V4Cascade books — per-binding from the manager."""
+        if self._v4_cascade_manager is not None:
+            return self._v4_cascade_manager.books
+        return []
+
+    def _find_v4_book(self, client_id: str, binding_id: str, underlying: str):
+        if self._v4_cascade_manager is not None:
+            return self._v4_cascade_manager.find(client_id, binding_id, underlying)
         return None
 
     def _open_history_rows(self, cid: str) -> list:

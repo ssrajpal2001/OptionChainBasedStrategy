@@ -74,6 +74,40 @@ async def fetch_upstox_1m(instrument_key: str, access_token: str, max_step_back:
     return []
 
 
+async def fetch_upstox_range_1m(
+    instrument_key: str, access_token: str, start: date, end: date,
+) -> List[dict]:
+    """2026-07-19 — full date-range 1-min history (oldest-first), one Upstox
+    call per weekday in [start, end] inclusive, merged and sorted. Used for
+    deep multi-week re-ingestion on strategy boot (v4_cascade's HTF/MTF zone
+    rebuild) — a production version of the ad-hoc per-day fetch loop used in
+    this session's validation scripts. Each candle:
+    {'ts','open','high','low','close','volume'}. [] if the range yields
+    nothing (holiday-only range, bad instrument_key, etc)."""
+    def _get_day(d: date) -> List[dict]:
+        from urllib.parse import quote as _q
+        url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/1minute/"
+               f"{d.isoformat()}/{d.isoformat()}")
+        try:
+            return _parse_candles(_http_get_json(url, access_token))
+        except Exception as exc:
+            logger.debug("fetch_upstox_range_1m day=%s: %s", d, exc)
+            return []
+
+    def _get_all() -> List[dict]:
+        rows: List[dict] = []
+        d = start
+        while d <= end:
+            if d.weekday() < 5:  # Mon-Fri only
+                rows.extend(_get_day(d))
+            d += timedelta(days=1)
+        return rows
+
+    rows = await asyncio.to_thread(_get_all)
+    rows.sort(key=lambda r: r["ts"])
+    return rows
+
+
 async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> List[dict]:
     """TODAY's 1-min candles (oldest-first, open→now) for an Upstox instrument_key via the
     intraday endpoint (no date range). [] on error/empty."""
