@@ -772,7 +772,7 @@ document.addEventListener('alpine:init', () => {
     async refreshV4TrapStatus() {
       if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
       try {
-        const r = await fetch(`/api/client/strategy/${this.v4CascadeDeployId}/v4_trap_status`, {headers: this._v4AuthHeaders()});
+        const r = await fetch(`/api/admin/strategy/${this.v4CascadeDeployId}/v4_trap_status`, {headers: this._v4AuthHeaders()});
         const d = await r.json();
         if (d.ok) { this.v4TrapZones = d.zones || []; this.v4TrapPosition = d.position || null; }
         else { this.v4CascadeOk = false; this.v4CascadeMsg = d.detail || d.error || 'Failed'; }
@@ -798,7 +798,7 @@ document.addEventListener('alpine:init', () => {
     async lockV4CascadeContract() {
       if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
       try {
-        const r = await fetch(`/api/client/deployment/${this.v4CascadeDeployId}/v4_cascade/lock_contract`, {
+        const r = await fetch(`/api/admin/deployment/${this.v4CascadeDeployId}/v4_cascade/lock_contract`, {
           method: 'POST', headers: this._v4AuthHeaders(),
           body: JSON.stringify({ce_strike: this.v4CascadeCeOverride||0, pe_strike: this.v4CascadePeOverride||0}),
         });

@@ -2145,20 +2145,19 @@ class DashboardServer:
                 raise HTTPException(404, f"No live v4_cascade book for deploy_id '{deploy_id}'.")
             return {"ok": True, "deploy_id": deploy_id, "ingest_triggered": True}
 
-        @app.post("/api/client/deployment/{deploy_id}/v4_cascade/lock_contract", tags=["Client"])
-        async def api_client_v4_lock_contract(
-            deploy_id: str, body: _V4LockContractSchema, user: dict = Depends(_require_client),
+        @app.post("/api/admin/deployment/{deploy_id}/v4_cascade/lock_contract", tags=["Admin"])
+        async def api_admin_v4_lock_contract(
+            deploy_id: str, body: _V4LockContractSchema, _: dict = Depends(_require_admin),
         ):
             """Manual CE/PE tracking-contract override — bypasses the automatic
             09:15 ATM-200/ATM+200 derivation. Pass 0 for either field to clear
-            that side's override and revert to auto-derivation."""
-            cid = user.get("client_id", "")
-            deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
-            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
-            if dep is None:
-                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
-            bid = dep.get("binding_id", "")
-            und = str(dep.get("underlying", "") or "NIFTY")
+            that side's override and revert to auto-derivation. Admin-gated —
+            called from the admin V4 Cascade rule-builder panel with an
+            arbitrary deploy_id, same as force_ingest above."""
+            parts = deploy_id.split("_")
+            if len(parts) < 3:
+                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
+            cid, bid, und = parts[0], parts[1], parts[-1]
             book = _srv._find_v4_book(cid, bid, und)
             if book is None:
                 raise HTTPException(404, "No live v4_cascade book for this deployment.")
@@ -2184,21 +2183,21 @@ class DashboardServer:
             return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
                     "series": strat.get_premium_series()}
 
-        # ── CLIENT — V4 Cascade: live trap-zone status + active-trade distances ──
-        @app.get("/api/client/strategy/{deploy_id}/v4_trap_status", tags=["Client"])
-        async def api_client_v4_trap_status(
-            deploy_id: str, user: dict = Depends(_require_client),
+        # ── ADMIN — V4 Cascade: live trap-zone status + active-trade distances ──
+        @app.get("/api/admin/strategy/{deploy_id}/v4_trap_status", tags=["Admin"])
+        async def api_admin_v4_trap_status(
+            deploy_id: str, _: dict = Depends(_require_admin),
         ):
             """Every in-flight HTF/MTF setup (Live Trap Status grid) plus the
             live position's real-time distance to Target A / B1(1:2) / B2(1:3)
-            / SL (active-trade table)."""
-            cid = user.get("client_id", "")
-            deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
-            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
-            if dep is None:
-                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
-            bid = dep.get("binding_id", "")
-            und = str(dep.get("underlying", "") or "NIFTY")
+            / SL (active-trade table). Admin-gated — called from the admin V4
+            Cascade rule-builder panel with an arbitrary deploy_id, same as
+            force_ingest above (was previously client-gated, which silently
+            403'd every poll from the admin panel's admin-scoped token)."""
+            parts = deploy_id.split("_")
+            if len(parts) < 3:
+                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
+            cid, bid, und = parts[0], parts[1], parts[-1]
             book = _srv._find_v4_book(cid, bid, und)
             if book is None:
                 return {"ok": True, "deploy_id": deploy_id, "zones": [], "position": None}
