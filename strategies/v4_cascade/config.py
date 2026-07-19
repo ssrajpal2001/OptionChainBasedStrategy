@@ -20,6 +20,15 @@ T1_TARGET_R: float = 2.0             # Tranche 1 fixed target, in R-multiples of
 T2_TRAIL_LOOKBACK_BASES: int = 4     # Tranche 2: last 4 locked 5m Rolling Bases
 T2_TRAIL_TF_MINUTES: int = 5
 
+# SL is anchored directly to the Inner (Gate 2/MTF) zone edge, not a scaled
+# distance from entry: long = zone_low - sl_buffer, short = zone_high +
+# sl_buffer, in TRACKING-contract price units (mirrors the same
+# tracking->execution ratio scale already used for the rest of the risk
+# distance). NIFTY = 10 premium points, BTC/ETH = $50 (crypto tracking ==
+# execution price, so this ends up being the exact literal formula there).
+SL_BUFFER_PTS_NIFTY: float = 10.0
+SL_BUFFER_PTS_CRYPTO: float = 50.0
+
 PIERCE_CHECK_TF_MINUTES: int = 5     # granularity of the "candle low pierces entry line" trigger
 SPOT_CONFIRM_TF_MINUTES: int = 75    # spot-side concurrent-confirmation is fixed at 75m (no ladder)
 
@@ -42,6 +51,7 @@ class V4CascadeConfig:
     t1_target_r: float = T1_TARGET_R
     t2_trail_lookback_bases: int = T2_TRAIL_LOOKBACK_BASES
     t2_trail_tf_minutes: int = T2_TRAIL_TF_MINUTES
+    sl_buffer: float = SL_BUFFER_PTS_NIFTY
 
     pierce_check_tf_minutes: int = PIERCE_CHECK_TF_MINUTES
     spot_confirm_tf_minutes: int = SPOT_CONFIRM_TF_MINUTES

@@ -693,7 +693,11 @@ class V4CascadeBook(AbstractStrategyBook):
                 return
             leg.close_price = fill.fill_price
             cv = _CRYPTO_CONTRACT_VALUE.get(self._underlying.upper(), 1.0)
-            leg.realized_pnl = round((fill.fill_price - leg.entry_price) * leg.qty * cv, 4)
+            is_short = self._is_crypto and fill.side == "PE"
+            # SHORT: profit = entry - exit (price falling is the win).
+            leg.realized_pnl = round(
+                ((leg.entry_price - fill.fill_price) if is_short
+                 else (fill.fill_price - leg.entry_price)) * leg.qty * cv, 4)
             self._persist_position()
             logger.info("V4CascadeBook[%s/%s/%s]: EXIT confirmed tranche=%s side=%s @ %.4f pnl=%.4f",
                         self._underlying, self._client_id, self._binding_id,

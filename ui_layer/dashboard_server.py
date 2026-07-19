@@ -2248,15 +2248,24 @@ class DashboardServer:
                 # sell_straddle's same 2026-07-19 convention) -- NIFTY = 1.0.
                 _cv = _CRYPTO_CONTRACT_VALUE.get(und.upper(), 1.0)
                 _qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
-                pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
+                # crypto PE = short (bull-trap -> bearish); everything else = long.
+                _is_short_pos = und.upper() in ("BTC", "ETH") and pos.side == "PE"
+                if _is_short_pos:
+                    pnl_pts = (pos.t1.entry_price - live_ltp) if (pos.t1 and live_ltp) else 0.0
+                    _dist_sl = (pos.t1.sl_price - live_ltp) if (pos.t1 and live_ltp) else None
+                    _dist_tgt = (live_ltp - pos.t1.target_price) if (pos.t1 and live_ltp) else None
+                else:
+                    pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
+                    _dist_sl = (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None
+                    _dist_tgt = (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp) else None
                 position = {
                     "side": pos.side, "status": pos.status,
                     "entry_price": pos.t1.entry_price if pos.t1 else None,
                     "sl_price": pos.t1.sl_price if pos.t1 else None,
                     "target_price": pos.t1.target_price if pos.t1 else None,
                     "live_ltp": live_ltp,
-                    "distance_to_sl": (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None,
-                    "distance_to_target": (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp) else None,
+                    "distance_to_sl": _dist_sl,
+                    "distance_to_target": _dist_tgt,
                     "unrealized_pnl": round(pnl_pts * _qty * _cv, 4),
                     "contract_value": _cv,
                     "t1_status": pos.t1.status if pos.t1 else None,
@@ -2638,20 +2647,25 @@ class DashboardServer:
                                 # strikes; the UI must not present them as option contracts.
                                 _cv = _CRYPTO_CONTRACT_VALUE.get(str(underlying).upper(), 1.0)
                                 ccy = "$" if _is_crypto else "₹"
+                                # crypto PE = short (bull-trap -> bearish); everything else = long.
+                                _is_short_pos = _is_crypto and pos.side == "PE"
                                 for leg in (pos.t1, pos.t2):
                                     if leg is None or leg.status != "open":
                                         continue
                                     ltp = float(live_price.get(pos.side) or leg.entry_price)
                                     qty = int(leg.qty)
-                                    _pnl = round((ltp - leg.entry_price) * qty * _cv, 2)
+                                    _pnl = round(((leg.entry_price - ltp) if _is_short_pos
+                                                  else (ltp - leg.entry_price)) * qty * _cv, 2)
                                     _instr = (f"{underlying} SPOT {leg.tranche}" if _is_crypto
                                               else f"{underlying} {int(leg.strike)} {pos.side} {leg.tranche}")
                                     legs.append({
                                         "symbol": _instr, "instrument": _instr,
-                                        "type": leg.tranche, "side": "BUY", "ccy": ccy,
+                                        "type": leg.tranche,
+                                        "side": "SELL" if _is_short_pos else "BUY", "ccy": ccy,
                                         "qty": qty, "lot_size": 1, "lots": 1,
                                         "entry_price": round(leg.entry_price, 2),
-                                        "sell_avg": 0.0, "buy_avg": round(leg.entry_price, 2),
+                                        "sell_avg": round(leg.entry_price, 2) if _is_short_pos else 0.0,
+                                        "buy_avg": 0.0 if _is_short_pos else round(leg.entry_price, 2),
                                         "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
                                         "entry_time": leg.entry_time.isoformat(timespec="seconds")
                                                       if leg.entry_time else None,

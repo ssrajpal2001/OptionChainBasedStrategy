@@ -271,7 +271,15 @@ class V4CascadeExecutionBridge:
             await self._paper_fill(ev)
             return
 
-        side = OrderSide.BUY if ev.action == "ENTRY" else OrderSide.SELL
+        # Crypto's PE side is a SHORT (bull-trap -> bearish signal), so its
+        # ENTRY sells to open / EXIT buys to close -- mirrored from every
+        # other case (NIFTY CE/PE always buy options; crypto CE always
+        # longs the perpetual), which stays BUY-to-open/SELL-to-close.
+        is_short = ev.is_crypto and ev.side == "PE"
+        if is_short:
+            side = OrderSide.SELL if ev.action == "ENTRY" else OrderSide.BUY
+        else:
+            side = OrderSide.BUY if ev.action == "ENTRY" else OrderSide.SELL
         exchange = order_exchange(ev.underlying)
         use_limit = (exchange == "DELTA")
         executor = self._exit_executor if ev.action == "EXIT" else self._executor
@@ -339,7 +347,11 @@ class V4CascadeExecutionBridge:
         try:
             from data_layer import trade_history as _th
             cv = _CRYPTO_CONTRACT_VALUE.get(ev.underlying.upper(), 1.0)
-            pnl = (exit_price - ev.entry_price) * ev.qty * cv  # LONG: profit = exit - entry
+            is_short = ev.is_crypto and ev.side == "PE"
+            # SHORT: profit = entry - exit (price falling is the win).
+            # LONG (everything else): profit = exit - entry.
+            pnl = ((ev.entry_price - exit_price) if is_short
+                   else (exit_price - ev.entry_price)) * ev.qty * cv
             _th.record(
                 ev.client_id, "v4_cascade", ev.underlying,
                 ev.entry_price, exit_price, ev.close_reason, pnl,

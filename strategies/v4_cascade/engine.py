@@ -122,6 +122,11 @@ class V4CascadeEngine:
     def _open_position(self, side: str, scanner: PremiumGateScanner, setup, bar) -> CascadeEvent:
         zone = setup.mtf_zone
         entry_price = setup.limit_entry_price or bar.low
+        # is_short: True only for a bull-geometry scanner (crypto's PE side
+        # scanning bull traps -> bearish signal -> short). NIFTY's CE and PE
+        # both always use bear=True scanners, so is_short is always False
+        # there -- this branch never fires for NIFTY.
+        is_short = not scanner._bear
         # Pure engine has no separate execution-contract feed yet (book.py,
         # a later phase, resolves the real ATM+-50 fill) — tracking price is
         # used as both tracking_entry_price and exec_entry_price here, per
@@ -129,7 +134,7 @@ class V4CascadeEngine:
         # decision time, not the real fill" contract.
         sl_price, target_price = compute_risk_mapping(
             zone, tracking_entry_price=entry_price, exec_entry_price=entry_price,
-            target_r=self._cfg.t1_target_r,
+            target_r=self._cfg.t1_target_r, sl_buffer=self._cfg.sl_buffer, is_short=is_short,
         )
         qty = self._cfg.tranche_qty
         t1 = TrancheLeg(tranche="T1", option_type=side, strike=0.0, qty=qty,
@@ -145,7 +150,12 @@ class V4CascadeEngine:
             t1=t1, t2=t2, open_time=bar.timestamp,
         )
         self._tracking_entry_price[side] = entry_price
-        self._trackers[side] = TrailingBaseTracker(bear=True)
+        # TrailingBaseTracker's own `bear` flag mirrors the scanner's -- a
+        # long (bear-zone) position trails a RISING floor, a short
+        # (bull-zone, crypto PE) position trails a FALLING ceiling. This was
+        # previously hardcoded bear=True regardless of side (latent bug,
+        # never surfaced before crypto's PE-short path existed).
+        self._trackers[side] = TrailingBaseTracker(bear=scanner._bear)
 
         scanner.pop_setup(setup, bar.timestamp)
         event_type = CascadeEventType.OPEN_LONG_CE if side == "CE" else CascadeEventType.OPEN_LONG_PE
@@ -163,9 +173,10 @@ class V4CascadeEngine:
             return events
         t1, t2 = pos.t1, pos.t2
         tracking_entry = self._tracking_entry_price.get(side, 0.0)
+        is_short = not self._scanners[side]._bear
 
         if t1 is not None and t1.status == "open":
-            r = check_t1(t1, bar)
+            r = check_t1(t1, bar, is_short=is_short)
             if r.hit:
                 t1.status = "closed"
                 t1.close_price = r.price

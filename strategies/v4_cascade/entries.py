@@ -58,34 +58,58 @@ def check_limit_pierce(scanner: PremiumGateScanner, tracking_bar) -> LimitPierce
     """2026-07-19 3-gate funnel — Gate 3 external trigger check, run across
     EVERY concurrently LIMIT_ARMED setup on this scanner (multi-zone, per the
     2026-07-19 same-day fix). Fires on the FIRST setup (oldest HTF ref first)
-    whose ``limit_entry_price`` a 5m tracking-contract bar's low pierces down
-    to or below. No spot-confirmation re-check here — spot bias was already
-    applied once, at Gate 1's arming (see engine.py); it is not re-evaluated
-    per-trigger under the new pure-premium model. The caller (engine.py) is
-    responsible for calling ``scanner.pop_setup(setup, ts)`` once acted on —
-    every OTHER in-flight setup keeps advancing untouched."""
+    whose ``limit_entry_price`` a 5m tracking-contract bar pierces. Direction
+    mirrors the scanner's own geometry: a bear-zone (long) setup fires when
+    the bar's LOW drops down to or below limit_entry_price (retesting the
+    zone from above); a bull-zone (short, crypto PE only) setup fires when
+    the bar's HIGH rises up to or above it (retesting the zone from below) —
+    NIFTY only ever uses bear-zone scanners, so this is unchanged there.
+    No spot-confirmation re-check here — spot bias was already applied once,
+    at Gate 1's arming (see engine.py); it is not re-evaluated per-trigger
+    under the new pure-premium model. The caller (engine.py) is responsible
+    for calling ``scanner.pop_setup(setup, ts)`` once acted on — every OTHER
+    in-flight setup keeps advancing untouched."""
     candidates = sorted(scanner.limit_armed_setups(), key=lambda s: s.htf_ref_ts)
     for setup in candidates:
-        if setup.limit_entry_price is not None and tracking_bar.low <= setup.limit_entry_price:
+        if setup.limit_entry_price is None:
+            continue
+        pierced = (tracking_bar.low <= setup.limit_entry_price if scanner._bear
+                   else tracking_bar.high >= setup.limit_entry_price)
+        if pierced:
             return LimitPierceResult(fired=True, setup=setup, tracking_price=setup.limit_entry_price)
     return LimitPierceResult(fired=False)
 
 
 def compute_risk_mapping(
     zone: RollingBaseZone, tracking_entry_price: float, exec_entry_price: float,
-    target_r: float,
+    target_r: float, sl_buffer: float = 10.0, is_short: bool = False,
 ) -> Tuple[float, float]:
-    """Map the tracking contract's structural risk (entry_line vs sweep_low)
-    proportionally onto the execution contract via the entry-price ratio.
-    Returns (sl_price, target_price) for the execution contract."""
+    """SL is anchored directly to the Inner Zone's edge plus a buffer (long:
+    zone_low - sl_buffer, short: zone_high + sl_buffer), computed in
+    TRACKING-contract terms and scaled onto the execution contract the same
+    way the rest of the risk distance already was. For crypto (tracking ==
+    execution price), this reduces to the literal zone_low-buffer /
+    zone_high+buffer formula. Target stays a target_r multiple of that same
+    risk distance. Returns (sl_price, target_price) for the execution
+    contract."""
     if zone.entry_line is None or zone.sweep_low is None:
         # Defensive fallback — should not happen for a locked zone.
+        if is_short:
+            return exec_entry_price * 1.5, max(0.0, exec_entry_price * (1.0 - target_r * 0.5))
         return max(0.0, exec_entry_price * 0.5), exec_entry_price * (1.0 + target_r * 0.5)
 
-    tracking_risk = abs(zone.entry_line - zone.sweep_low)
+    zone_low = min(zone.entry_line, zone.sweep_low)
+    zone_high = max(zone.entry_line, zone.sweep_low)
     scale = (exec_entry_price / tracking_entry_price) if tracking_entry_price > 0 else 1.0
-    exec_risk = max(tracking_risk * scale, 0.01)
 
-    sl_price = max(0.0, exec_entry_price - exec_risk)
-    target_price = exec_entry_price + target_r * exec_risk
+    if is_short:
+        tracking_risk = max((zone_high - tracking_entry_price) + sl_buffer, 0.01)
+        exec_risk = tracking_risk * scale
+        sl_price = exec_entry_price + exec_risk
+        target_price = max(0.0, exec_entry_price - target_r * exec_risk)
+    else:
+        tracking_risk = max((tracking_entry_price - zone_low) + sl_buffer, 0.01)
+        exec_risk = tracking_risk * scale
+        sl_price = max(0.0, exec_entry_price - exec_risk)
+        target_price = exec_entry_price + target_r * exec_risk
     return sl_price, target_price

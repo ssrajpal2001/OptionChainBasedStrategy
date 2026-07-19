@@ -36,9 +36,18 @@ class ExitCheck:
     reason: str = ""
 
 
-def check_t1(t1: TrancheLeg, bar) -> ExitCheck:
-    """Intrabar check against T1's fixed SL / 2R target using the bar's high/low.
-    SL takes priority if both would be hit within the same bar (conservative)."""
+def check_t1(t1: TrancheLeg, bar, is_short: bool = False) -> ExitCheck:
+    """Intrabar check against T1's fixed SL / 2R target using the bar's
+    high/low. SL takes priority if both would be hit within the same bar
+    (conservative). ``is_short`` mirrors the check for a short position (SL
+    above entry, hit on the bar's HIGH; target below entry, hit on the
+    bar's LOW) — crypto's PE side only; NIFTY (always long) is unaffected."""
+    if is_short:
+        if t1.sl_price and bar.high >= t1.sl_price:
+            return ExitCheck(hit=True, price=t1.sl_price, reason="t1_sl_structural_floor")
+        if t1.target_price and bar.low <= t1.target_price:
+            return ExitCheck(hit=True, price=t1.target_price, reason="t1_target_2r")
+        return ExitCheck(hit=False)
     if t1.sl_price and bar.low <= t1.sl_price:
         return ExitCheck(hit=True, price=t1.sl_price, reason="t1_sl_structural_floor")
     if t1.target_price and bar.high >= t1.target_price:
