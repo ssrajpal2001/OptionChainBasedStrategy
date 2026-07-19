@@ -340,6 +340,7 @@ async def _run_live(
     from execution_bridge import ExecutionRouter
     from strategies.registry import STRATEGY_REGISTRY, create_strategy_manager
     from execution_bridge.straddle_bridge import StraddleExecutionBridge
+    from execution_bridge.cascade_bridge import V4CascadeExecutionBridge
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
     from management.risk_manager import RiskManager
@@ -429,6 +430,12 @@ async def _run_live(
                 _crypto_all, _active_crypto, _option_chain_unds, _chain_window)
     straddle_bridge = StraddleExecutionBridge(
         bus, registry, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
+    # V4 Cascade orders always carry their own (client_id, binding_id) — no
+    # ClientRegistry loop needed, routing is a direct per-binding lookup.
+    cascade_bridge = V4CascadeExecutionBridge(
+        bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
     client_mgr    = ClientManager(bus, registry)
@@ -596,6 +603,7 @@ async def _run_live(
     tasks += [
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
+        asyncio.create_task(cascade_bridge.run(),       name="cascade_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -630,6 +638,7 @@ async def _run_live(
     strike_cleanup.stop()
     gap_handler.stop()
     straddle_bridge.stop()
+    cascade_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task

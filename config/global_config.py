@@ -193,6 +193,7 @@ class Topic:
     SIGNAL           = "signal"
     ORDER_REQUEST    = "order_request"
     IC_ORDER_REQUEST = "ic_order_request"
+    CASCADE_ORDER_REQUEST = "cascade_order_request"  # V4 Cascade order routing (execution_bridge/cascade_bridge.py)
     ORDER_FILL       = "order_fill"
     SYSTEM_EVENT     = "system_event"
     EXIT_AUDIT       = "exit_audit"    # per-tick exit-criteria validation stream (granular UI)

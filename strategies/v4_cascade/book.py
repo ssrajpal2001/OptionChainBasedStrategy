@@ -35,10 +35,9 @@ from data_layer import position_store
 from data_layer.base_feeder import CandleEvent
 from data_layer.historical_candles import _http_get_json, _parse_candles, fetch_upstox_range_1m
 from data_layer.instrument_registry import REGISTRY, is_monthly_expiry
-from strategies.base_strategy import Direction, SignalPackage, StrategyID
 from strategies.core.base_book import AbstractStrategyBook
-from strategies.v4_cascade.config import V4CascadeConfig
-from strategies.v4_cascade.dataclasses import CascadeEventType, CascadePosition
+from strategies.v4_cascade.config import EXECUTION_OFFSET_PTS, V4CascadeConfig
+from strategies.v4_cascade.dataclasses import CascadeEvent, CascadeEventType, CascadePosition
 from strategies.v4_cascade.engine import V4CascadeEngine
 from strategies.v4_cascade.rolling_base import resample_bars
 
@@ -90,7 +89,13 @@ class V4CascadeBook(AbstractStrategyBook):
         self._db = None
         self._rebalancer = None
         self._is_crypto = underlying.upper() in _CRYPTO_UNDERLYINGS
-        self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier)
+        # V4CascadeConfig.lot_size defaulted to 65 (NIFTY-only) — for crypto, 1
+        # "lot" IS the contract itself (contract_value 0.001 BTC / 0.01 ETH is
+        # applied separately at the P&L/order layer, same convention
+        # sell_straddle uses), so lot_multiplier=1000 must yield tranche_qty
+        # in the hundreds, not multiplied by a phantom NIFTY lot size.
+        _real_lot_size = int(getattr(getattr(cfg, "exchange", None), "lot_sizes", {}).get(underlying.upper(), 65) or 65)
+        self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier, lot_size=_real_lot_size)
         self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto)
 
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_v4_cascade"
@@ -106,10 +111,36 @@ class V4CascadeBook(AbstractStrategyBook):
         self._session_day: Optional[date] = None
         self._history_ingested = False
         self._live_price: Dict[str, float] = {"CE": 0.0, "PE": 0.0}   # per-side last price — "distance to trap" in the UI
+        # Live NIFTY spot (NOT the 09:15 ATM lock) — needed to resolve the
+        # real ATM+-50 EXECUTION strike at Gate-3 trigger time, per the
+        # original design ("execution contracts resolved from live spot at
+        # trigger time, not the 09:15 tracking ATM"). Crypto doesn't need
+        # this — it trades the perpetual directly, no strike concept.
+        self._live_spot: float = 0.0
 
         # per-side 5m bucket accumulators, fed by live OPTION_TICK
         self._buckets: Dict[str, Optional[_Bar]] = {"CE": None, "PE": None}
         self._bars_5m: Dict[str, List] = {"CE": [], "PE": []}
+
+        # event_id -> the exact CascadePosition (ENTRY) or TrancheLeg (EXIT)
+        # object stashed at emission time, so _on_fill reconciles the SAME
+        # instance it fired for rather than re-deriving pos.t1/t2 by tranche
+        # lookup (which could point at a NEWER position if the side re-armed
+        # and re-fired before this fill's real broker roundtrip returned).
+        self._pending_fills: Dict[str, object] = {}
+        # Strong refs for fire-and-forget bus.publish() tasks kicked off from
+        # sync call sites (_emit_order and its callers are sync — EventBus's
+        # own publish() is `async def`; asyncio only holds a WEAK ref to a
+        # bare create_task() result, so an unreferenced publish task can be
+        # GC'd before it ever runs, silently dropping the order).
+        self._pending_bus_tasks: set = set()
+
+    def _fire(self, coro) -> None:
+        """Fire-and-forget an async EventBus.publish() from a sync call
+        site, keeping a strong reference until it completes."""
+        t = asyncio.create_task(coro)
+        self._pending_bus_tasks.add(t)
+        t.add_done_callback(self._pending_bus_tasks.discard)
 
     # ── injected deps (mirrors sell_straddle's set_client_db/set_rebalancer) ──
     def set_client_db(self, db) -> None:
@@ -129,6 +160,8 @@ class V4CascadeBook(AbstractStrategyBook):
         self._restore_position()
         self._tasks.append(asyncio.create_task(
             self._boot(), name=f"v4cascade_boot_{self._client_id}_{self._binding_id}"))
+        self._tasks.append(asyncio.create_task(
+            self._fill_loop(), name=f"v4cascade_fill_{self._client_id}_{self._binding_id}"))
 
     def reset_session(self) -> None:
         self._engine.reset_session()
@@ -149,6 +182,23 @@ class V4CascadeBook(AbstractStrategyBook):
         else:
             self._tasks.append(asyncio.create_task(self._option_loop(), name="v4cascade_option"))
             self._tasks.append(asyncio.create_task(self._candle_loop(), name="v4cascade_candle"))
+            self._tasks.append(asyncio.create_task(self._spot_loop(), name="v4cascade_spot"))
+
+    async def _spot_loop(self) -> None:
+        """NIFTY-only: track live spot (distinct from the 09:15 ATM lock) so
+        _emit_order can resolve the real ATM+-50 execution strike at Gate-3
+        trigger time, per the original design intent."""
+        q = self._subscribe(Topic.INDEX_TICK)
+        while self._running:
+            try:
+                tick = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if getattr(tick, "symbol", "") != self._underlying:
+                continue
+            ltp = float(getattr(tick, "ltp", 0.0) or 0.0)
+            if ltp > 0:
+                self._live_spot = ltp
 
     # ── strike resolution ────────────────────────────────────────────────────
     def _access_token(self) -> str:
@@ -379,22 +429,31 @@ class V4CascadeBook(AbstractStrategyBook):
         return await self._ingest_history()
 
     async def square_off(self, reason: str = "manual") -> int:
-        """Client Run-toggle-OFF square-off — closes any open position at its
-        own entry price (paper-mode fill assumption; a real execution bridge
-        would fetch the live LTP). Returns 1 if a leg was closed, else 0."""
+        """Client Run-toggle-OFF square-off — routes a real closing order for
+        each open leg through the bridge (paper: local sim-fill; live: real
+        broker close), same path as a normal T1/T2 exit."""
         pos = self._engine.position
         if pos is None or not pos.is_open:
             return 0
-        for leg in (pos.t1, pos.t2):
-            if leg is not None and leg.status == "open":
-                leg.status = "closed"
-                leg.close_price = leg.entry_price
-                leg.close_reason = reason
-                leg.close_time = datetime.now(IST)
+        ts = datetime.now(IST)
+        closed = 0
+        for tranche, leg in (("T1", pos.t1), ("T2", pos.t2)):
+            if leg is None or leg.status != "open":
+                continue
+            leg.status = "closed"
+            leg.close_price = leg.entry_price  # placeholder; _on_fill overwrites with the real close fill
+            leg.close_reason = reason
+            leg.close_time = ts
+            self._emit_order(CascadeEvent(
+                event_type=CascadeEventType.CLOSE_LONG_CE if pos.side == "CE" else CascadeEventType.CLOSE_LONG_PE,
+                side=pos.side, tranche=tranche, reason=reason,
+                price_hint=leg.entry_price, timestamp=ts,
+            ))
+            closed += 1
         pos.status = "closed"
-        pos.close_time = datetime.now(IST)
+        pos.close_time = ts
         self._persist_position()
-        return 1
+        return closed
 
     # ── live loops ───────────────────────────────────────────────────────────
     async def _candle_loop(self) -> None:
@@ -482,12 +541,18 @@ class V4CascadeBook(AbstractStrategyBook):
             return
         logger.info("V4CascadeBook[%s/%s/%s]: EOD 15:15 force square-off.",
                     self._underlying, self._client_id, self._binding_id)
-        for leg in (pos.t1, pos.t2):
-            if leg is not None and leg.status == "open":
-                leg.status = "closed"
-                leg.close_price = leg.entry_price
-                leg.close_reason = "eod_force_close"
-                leg.close_time = ts
+        for tranche, leg in (("T1", pos.t1), ("T2", pos.t2)):
+            if leg is None or leg.status != "open":
+                continue
+            leg.status = "closed"
+            leg.close_price = leg.entry_price  # placeholder; _on_fill overwrites with the real close fill
+            leg.close_reason = "eod_force_close"
+            leg.close_time = ts
+            self._emit_order(CascadeEvent(
+                event_type=CascadeEventType.CLOSE_LONG_CE if pos.side == "CE" else CascadeEventType.CLOSE_LONG_PE,
+                side=pos.side, tranche=tranche, reason="eod_force_close",
+                price_hint=leg.entry_price, timestamp=ts,
+            ))
         pos.status = "closed"
         pos.close_time = ts
         self._persist_position()
@@ -505,21 +570,134 @@ class V4CascadeBook(AbstractStrategyBook):
                     setup.mtf_consumed_before_ts = None
 
     # ── order emission ───────────────────────────────────────────────────────
+    def _resolve_execution_strike(self, side: str) -> float:
+        """ATM+-50 execution strike, resolved from LIVE spot (not the 09:15
+        tracking-strike ATM) at trigger time, per the original design intent.
+        Crypto trades the perpetual directly — no strike concept, always 0."""
+        if self._is_crypto:
+            return 0.0
+        spot = self._live_spot or self._atm_open or 0.0
+        if not spot:
+            return 0.0
+        step = float(self._cfg.exchange.strike_steps.get(self._underlying, 50.0) or 50.0)
+        atm = round(spot / step) * step
+        return atm + EXECUTION_OFFSET_PTS if side == "CE" else atm - EXECUTION_OFFSET_PTS
+
     def _emit_order(self, ev) -> None:
-        if ev.event_type in (CascadeEventType.OPEN_LONG_CE, CascadeEventType.OPEN_LONG_PE):
-            sig = SignalPackage(
-                source=StrategyID.V4_CASCADE, direction=Direction.LONG,
-                underlying=self._underlying, option_type=ev.side,
-                target_strike=float(self._ce_strike if ev.side == "CE" else self._pe_strike),
-                entry_spot=0.0, stop_spot=0.0, target_spot=0.0, confidence=1.0,
-                timestamp=ev.timestamp or datetime.now(IST),
-                notes=f"v4_cascade {ev.side} gate3 fire",
-                premium_entry=ev.price_hint, premium_sl=ev.sl_price, premium_target=ev.target_price,
-            )
-            self._bus.publish(Topic.SIGNAL, sig)
+        """Publishes a CascadeOrderEvent to the dedicated per-binding bridge
+        (execution_bridge/cascade_bridge.py) for BOTH open and close events —
+        this used to only handle OPEN (via a now-removed broadcast-to-every-
+        client SignalPackage that dropped it for everyone since V4Cascade was
+        never registered in ParallelWorkerPool's enabled_strategies map), and
+        CLOSE was a pure no-op: the engine already marks a leg 'closed' with
+        a STRUCTURAL price (SL/target/trail level), never a real fill — the
+        bridge now reconciles both against the actual broker fill via
+        _on_fill below."""
+        from execution_bridge.cascade_bridge import CascadeOrderEvent
+        pos = self._engine.position
+        is_open_ev = ev.event_type in (CascadeEventType.OPEN_LONG_CE, CascadeEventType.OPEN_LONG_PE)
+        is_close_ev = ev.event_type in (CascadeEventType.CLOSE_LONG_CE, CascadeEventType.CLOSE_LONG_PE)
+        ts = ev.timestamp or datetime.now(IST)
+
+        if is_open_ev and pos is not None:
+            exec_strike = self._resolve_execution_strike(ev.side)
+            if pos.t1 is not None:
+                pos.t1.strike = exec_strike
+            if pos.t2 is not None:
+                pos.t2.strike = exec_strike
+            pos.execution_strike = exec_strike
+            qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
+            event_id = f"{self._persist_key}_{ts.isoformat()}"
+            self._pending_fills[event_id] = pos
+            self._fire(self._bus.publish(Topic.CASCADE_ORDER_REQUEST, CascadeOrderEvent(
+                action="ENTRY", underlying=self._underlying, side=ev.side,
+                strike=exec_strike, qty=qty, price_hint=ev.price_hint, tranche="BOTH",
+                sl_price=ev.sl_price or 0.0, target_price=ev.target_price,
+                is_crypto=self._is_crypto, expiry=self._expiry,
+                client_id=self._client_id, binding_id=self._binding_id,
+                event_id=event_id, timestamp=ts,
+            )))
+        elif is_close_ev and pos is not None:
+            leg = pos.t1 if ev.tranche == "T1" else (pos.t2 if ev.tranche == "T2" else None)
+            if leg is not None:
+                event_id = f"{self._persist_key}_{ev.tranche}_{ts.isoformat()}"
+                self._pending_fills[event_id] = leg
+                self._fire(self._bus.publish(Topic.CASCADE_ORDER_REQUEST, CascadeOrderEvent(
+                    action="EXIT", underlying=self._underlying, side=ev.side,
+                    strike=leg.strike, qty=leg.qty, price_hint=ev.price_hint,
+                    tranche=ev.tranche, close_reason=ev.reason, entry_price=leg.entry_price,
+                    is_crypto=self._is_crypto, expiry=self._expiry,
+                    client_id=self._client_id, binding_id=self._binding_id,
+                    event_id=event_id, timestamp=ts,
+                )))
+
         logger.info("V4CascadeBook[%s/%s/%s]: %s side=%s tranche=%s price=%s reason=%s",
                     self._underlying, self._client_id, self._binding_id,
                     ev.event_type.value, ev.side, ev.tranche, ev.price_hint, ev.reason)
+
+    # ── fill reconciliation ────────────────────────────────────────────────────
+    async def _fill_loop(self) -> None:
+        from execution_bridge.cascade_bridge import CascadeFillEvent
+        q = self._subscribe(Topic.ORDER_FILL)
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(ev, CascadeFillEvent):
+                continue
+            if (ev.underlying != self._underlying or ev.client_id != self._client_id
+                    or ev.binding_id != self._binding_id):
+                continue
+            try:
+                self._on_fill(ev)
+            except Exception:
+                logger.exception("V4CascadeBook[%s/%s/%s]: _on_fill error.",
+                                 self._underlying, self._client_id, self._binding_id)
+
+    def _on_fill(self, fill) -> None:
+        """Reconciles the engine's optimistic tracking-price entry/close
+        against the REAL broker fill from cascade_bridge — mirrors
+        sell_straddle's _on_fill fix (a straddle leg used to book the
+        strategy LTP instead of the real fill; same class of bug applied
+        here to a brand-new order path that never reconciled at all)."""
+        target = self._pending_fills.pop(fill.event_id, None)
+        if fill.action == "ENTRY":
+            if fill.entry_aborted or fill.routing_failed:
+                reason = "routing failed" if fill.routing_failed else "no fill"
+                logger.error("V4CascadeBook[%s/%s/%s]: ENTRY ABORTED (%s) — discarding optimistic position.",
+                             self._underlying, self._client_id, self._binding_id, reason)
+                if target is None or self._engine.position is target:
+                    self._engine.position = None
+                self._engine._tracking_entry_price.pop(fill.side, None)
+                self._engine._trackers.pop(fill.side, None)
+                self._persist_position()
+                return
+            pos = target if target is not None else self._engine.position
+            if pos is None or not pos.is_open:
+                return
+            if pos.t1 is not None:
+                pos.t1.entry_price = fill.fill_price
+            if pos.t2 is not None:
+                pos.t2.entry_price = fill.fill_price
+            self._persist_position()
+            logger.info("V4CascadeBook[%s/%s/%s]: ENTRY confirmed side=%s @ %.4f qty=%d",
+                        self._underlying, self._client_id, self._binding_id,
+                        fill.side, fill.fill_price, fill.qty)
+        elif fill.action == "EXIT":
+            leg = target
+            if leg is None:
+                pos = self._engine.position
+                leg = (pos.t1 if fill.tranche == "T1" else pos.t2) if pos is not None else None
+            if leg is None:
+                return
+            leg.close_price = fill.fill_price
+            cv = _CRYPTO_CONTRACT_VALUE.get(self._underlying.upper(), 1.0)
+            leg.realized_pnl = round((fill.fill_price - leg.entry_price) * leg.qty * cv, 4)
+            self._persist_position()
+            logger.info("V4CascadeBook[%s/%s/%s]: EXIT confirmed tranche=%s side=%s @ %.4f pnl=%.4f",
+                        self._underlying, self._client_id, self._binding_id,
+                        fill.tranche, fill.side, fill.fill_price, leg.realized_pnl)
 
     # ── persistence ──────────────────────────────────────────────────────────
     def _persist_position(self) -> None:
