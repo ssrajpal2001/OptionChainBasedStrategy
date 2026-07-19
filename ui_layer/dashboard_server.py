@@ -2625,6 +2625,13 @@ class DashboardServer:
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
                     elif sname == "v4_cascade":
                         book = _srv._find_v4_book(cid, bid, underlying)
+                        logger.info(
+                            "client/positions v4_cascade lookup: cid=%r bid=%r underlying=%r found=%s "
+                            "manager=%s known_keys=%s", cid, bid, underlying, book is not None,
+                            _srv._v4_cascade_manager is not None,
+                            list(getattr(_srv._v4_cascade_manager, "_books", {}).keys())
+                            if _srv._v4_cascade_manager is not None else None,
+                        )
                         if book is not None:
                             from strategies.v4_cascade.dataclasses import GateState
                             from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
