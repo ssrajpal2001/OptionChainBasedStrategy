@@ -2625,13 +2625,6 @@ class DashboardServer:
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
                     elif sname == "v4_cascade":
                         book = _srv._find_v4_book(cid, bid, underlying)
-                        logger.info(
-                            "client/positions v4_cascade lookup: cid=%r bid=%r underlying=%r found=%s "
-                            "manager=%s known_keys=%s", cid, bid, underlying, book is not None,
-                            _srv._v4_cascade_manager is not None,
-                            list(getattr(_srv._v4_cascade_manager, "_books", {}).keys())
-                            if _srv._v4_cascade_manager is not None else None,
-                        )
                         if book is not None:
                             from strategies.v4_cascade.dataclasses import GateState
                             from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
@@ -2667,6 +2660,8 @@ class DashboardServer:
                                 tracking = {"is_crypto": _is_crypto, "atm": 0, "dte": "—", "offset": 0, "phase": ""}
                                 _phases = []
                                 _gate_order = list(GateState)
+                                _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
+                                _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
                                 for side, label in (("CE", "BEAR" if _is_crypto else "CE"),
                                                      ("PE", "BULL" if _is_crypto else "PE")):
                                     scanner = book._engine._scanners.get(side)
@@ -2682,16 +2677,24 @@ class DashboardServer:
                                         level_l = min(_levels) if _levels else 0
                                         level_h = max(_levels) if _levels else 0
                                         side_state = setup.state.value
+                                        # HTF/MTF are sequential sub-gates of the SAME setup, not
+                                        # two independent states — once past HTF_LOCKED the HTF
+                                        # column just confirms "locked" and the MTF column carries
+                                        # the actual current phase, so the two columns never show
+                                        # the identical raw value.
+                                        _idx = _gate_order.index(setup.state)
+                                        htf_disp = side_state if _idx < _htf_idx else "locked"
+                                        mtf_disp = side_state if _idx >= _mtf_idx else "—"
                                     else:
                                         level_l = level_h = 0
-                                        side_state = "—"
+                                        side_state = htf_disp = mtf_disp = "—"
                                     strike = round(side_ltp) if _is_crypto else int(
                                         getattr(book, f"_{side.lower()}_strike", 0) or 0)
                                     tracking[f"{side.lower()}_label"] = label
                                     tracking[f"{side.lower()}_strike"] = strike
                                     tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
                                     tracking[side.lower()] = {
-                                        "htf_state": side_state, "mtf_state": side_state,
+                                        "htf_state": htf_disp, "mtf_state": mtf_disp,
                                         "traps": len(scanner.setups) if scanner else 0,
                                         "level_l": round(level_l, 2), "level_h": round(level_h, 2),
                                     }

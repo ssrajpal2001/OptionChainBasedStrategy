@@ -7003,39 +7003,43 @@ function amoTest() {
 
                   <!-- Trap tracking (day-locked strikes; shown while scanning, no open position) -->
                   <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&(csPositions[b.binding_id][dep.deploy_id].legs||[]).length===0">
-                    <div class="text-xs font-mono space-y-1 py-1" style="color:var(--t-muted)">
-                      <div class="flex justify-between">
-                        <template x-if="!csPositions[b.binding_id][dep.deploy_id].tracking.is_crypto">
-                          <span>ATM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.atm"></span>
-                            · DTE <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.dte"></span>
-                            · ITM <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.offset"></span></span>
+                    <div class="text-xs font-mono py-1" style="color:var(--t-muted)"
+                         x-data="{ get _t(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
+                      <div class="flex justify-between items-baseline mb-1.5">
+                        <template x-if="!_t.is_crypto">
+                          <span>ATM <span style="color:var(--t-cyan)" x-text="_t.atm"></span>
+                            · DTE <span style="color:var(--t-cyan)" x-text="_t.dte"></span>
+                            · ITM <span style="color:var(--t-cyan)" x-text="_t.offset"></span></span>
                         </template>
-                        <template x-if="csPositions[b.binding_id][dep.deploy_id].tracking.is_crypto">
-                          <span>SPOT <span style="color:var(--t-cyan)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking.atm"></span></span>
+                        <template x-if="_t.is_crypto">
+                          <span>SPOT <span style="color:var(--t-cyan)" x-text="_t.atm"></span></span>
                         </template>
-                        <span x-text="'phase '+csPositions[b.binding_id][dep.deploy_id].tracking.phase"></span>
+                        <span x-text="'phase: '+_t.phase"></span>
                       </div>
-                      <!-- Per-leg seller-trap detector state (HTF/MTF) + active LIFO level [L/H].
-                           Crypto has no CE/PE option chain (spot-only) — the backend still keys
-                           internally by ce/pe (bear-scan/bull-scan side), but sends *_label
-                           ('BEAR'/'BULL') for crypto so the UI never implies an option contract. -->
+                      <!-- Per-leg seller-trap detector state (HTF/MTF) + active LIFO level [L/H], as a
+                           column-aligned grid. Crypto has no CE/PE option chain (spot-only) — the
+                           backend still keys internally by ce/pe (bear-scan/bull-scan side), but sends
+                           *_label ('BEAR'/'BULL' for crypto, 'CE'/'PE' for NIFTY) so the UI never
+                           implies an option contract for crypto. -->
+                      <div class="pos-legs">
+                      <div class="pos-legs-inner space-y-1">
+                      <div class="grid items-center text-xs font-mono" style="color:var(--t-muted);grid-template-columns:0.9fr 0.8fr 1fr 1fr 0.6fr 1.3fr;gap:0.4rem">
+                        <span>SIDE</span><span class="text-right">LTP</span><span>HTF</span><span>MTF</span>
+                        <span class="text-right">LVLS</span><span class="text-right">LOW · HIGH</span>
+                      </div>
                       <template x-for="side in ['ce','pe']" :key="side">
-                        <div class="mt-1">
-                          <div class="flex justify-between">
-                            <span style="color:var(--t-text)" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side+'_label']||side.toUpperCase())+' '+csPositions[b.binding_id][dep.deploy_id].tracking[side==='ce'?'ce_strike':'pe_strike']"></span>
-                            <span>LTP <span class="price-live" style="color:var(--t-bright)" x-text="csPositions[b.binding_id][dep.deploy_id].tracking[side==='ce'?'ce_ltp':'pe_ltp']"></span></span>
-                          </div>
-                          <div class="flex justify-between pl-2" style="color:var(--t-muted)">
-                            <span>HTF <span :style="`color:${['limit_armed','triggered'].includes((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).htf_state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).htf_state||'—'"></span>
-                              · MTF <span :style="`color:${['limit_armed','triggered'].includes((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).mtf_state)?'var(--t-green)':'var(--t-muted)'}`" x-text="(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).mtf_state||'—'"></span></span>
-                            <span x-text="'levels '+((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).traps||0)"></span>
-                          </div>
-                          <div class="flex justify-between pl-2" x-show="((csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).level_h||0)>0" style="color:var(--t-text)">
-                            <span>active level</span>
-                            <span x-text="'L '+(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).level_l+' · H '+(csPositions[b.binding_id][dep.deploy_id].tracking[side]||{}).level_h"></span>
-                          </div>
+                        <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:0.9fr 0.8fr 1fr 1fr 0.6fr 1.3fr;gap:0.4rem">
+                          <span style="color:var(--t-text)" x-text="_t[side+'_label']||side.toUpperCase()"></span>
+                          <span class="text-right price-live" style="color:var(--t-bright)" x-text="_t[side==='ce'?'ce_ltp':'pe_ltp']"></span>
+                          <span :style="`color:${['limit_armed','triggered'].includes((_t[side]||{}).htf_state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="(_t[side]||{}).htf_state||'—'"></span>
+                          <span :style="`color:${['limit_armed','triggered'].includes((_t[side]||{}).mtf_state)?'var(--t-green)':'var(--t-muted)'}`" x-text="(_t[side]||{}).mtf_state||'—'"></span>
+                          <span class="text-right" x-text="(_t[side]||{}).traps||0"></span>
+                          <span class="text-right" style="color:var(--t-text)"
+                                x-text="((_t[side]||{}).level_h||0)>0 ? (_t[side]||{}).level_l+' · '+(_t[side]||{}).level_h : '—'"></span>
                         </div>
                       </template>
+                      </div>
+                      </div>
                     </div>
                   </template>
 
