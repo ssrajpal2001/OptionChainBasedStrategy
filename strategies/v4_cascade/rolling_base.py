@@ -315,6 +315,112 @@ def find_all_bear_traps_2candle(
     return zones
 
 
+def find_bull_trap_2candle(
+    bars: List[_Bar], skip_before_ts: Optional[datetime] = None,
+) -> Optional[RollingBaseZone]:
+    """2026-07-19 — symmetric bull-trap counterpart to ``find_bear_trap_2candle``,
+    added for the crypto spot-only test path (Delta BTC/ETH): unlike a real
+    option premium chart (where PE premium rising after a sweep-down already
+    means bearish spot), raw spot has no such inversion, so PE must scan
+    spot for genuine BULL traps (buyers trapped, price reverses down) to
+    produce an actual bearish signal — scanning bear-only on spot for both
+    CE and PE would just find the same bullish patterns twice. ref.high =
+    entry_line (buyers' entry), ref.low = sl_level (buyers' SL); zone width
+    (``sweep_low``, reused field name for the sweep HIGH — same convention
+    as the original find_bull_zone) pinned to the immediate next candle's
+    high only. Not used anywhere in the NIFTY path — PremiumGateScanner
+    defaults to bear-only exactly as before."""
+    n = len(bars)
+    for i in range(n - 2, -1, -1):
+        ref = bars[i]
+        next_bar = bars[i + 1]
+        if next_bar.high <= ref.high:
+            continue  # no sweep on the immediate next candle
+
+        trapped_idx: Optional[int] = None
+        for k in range(i + 1, n):
+            if bars[k].low < ref.low:
+                trapped_idx = k
+                break
+        if trapped_idx is None:
+            continue
+
+        trapped_ts = bars[trapped_idx].timestamp
+        if skip_before_ts is not None and trapped_ts <= skip_before_ts:
+            continue
+
+        entry_line = ref.high
+        if _is_mitigated_bull(bars, entry_line, trapped_idx=trapped_idx):
+            continue
+
+        return RollingBaseZone(
+            reference_low=ref.high, reference_low_ts=ref.timestamp,
+            prev_close=ref.close,
+            swept=True, sweep_low=next_bar.high, sweep_started_ts=next_bar.timestamp,
+            bars_since_sweep=trapped_idx - (i + 1),
+            locked=True, lock_ts=trapped_ts,
+            entry_line=entry_line, sl_level=ref.low,
+        )
+    return None
+
+
+def find_all_bull_traps_2candle(
+    bars: List[_Bar], skip_before_ts: Optional[datetime] = None,
+) -> List[RollingBaseZone]:
+    """Enumerate ALL confirmed, price-level-independent bull-trap zones —
+    symmetric counterpart to ``find_all_bear_traps_2candle``."""
+    n = len(bars)
+    raw = []
+    for i in range(n - 2, -1, -1):
+        ref = bars[i]
+        next_bar = bars[i + 1]
+        if next_bar.high <= ref.high:
+            continue
+        trapped_idx: Optional[int] = None
+        for k in range(i + 1, n):
+            if bars[k].low < ref.low:
+                trapped_idx = k
+                break
+        if trapped_idx is None:
+            continue
+        trapped_ts = bars[trapped_idx].timestamp
+        if skip_before_ts is not None and trapped_ts <= skip_before_ts:
+            continue
+        entry_line = ref.high
+        if _is_mitigated_bull(bars, entry_line, trapped_idx=trapped_idx):
+            continue
+        raw.append(dict(ref_idx=i, trig_idx=i + 1, trapped_idx=trapped_idx))
+
+    raw_sorted = sorted(raw, key=lambda z: z["ref_idx"])
+    kept: List[dict] = []
+    for z in raw_sorted:
+        entry = bars[z["ref_idx"]].high
+        redundant = False
+        for k in kept:
+            kentry = bars[k["ref_idx"]].high
+            if k["trig_idx"] >= z["trig_idx"] and k["ref_idx"] <= z["ref_idx"] <= k["trig_idx"]:
+                if entry <= kentry:
+                    redundant = True
+                    break
+        if not redundant:
+            kept.append(z)
+
+    zones: List[RollingBaseZone] = []
+    for z in kept:
+        ref = bars[z["ref_idx"]]
+        next_bar = bars[z["ref_idx"] + 1]
+        trapped = bars[z["trapped_idx"]]
+        zones.append(RollingBaseZone(
+            reference_low=ref.high, reference_low_ts=ref.timestamp, prev_close=ref.close,
+            swept=True, sweep_low=next_bar.high, sweep_started_ts=next_bar.timestamp,
+            bars_since_sweep=z["trapped_idx"] - z["trig_idx"],
+            locked=True, lock_ts=trapped.timestamp,
+            entry_line=ref.high, sl_level=ref.low,
+        ))
+    zones.sort(key=lambda z: z.reference_low_ts)
+    return zones
+
+
 _SESSION_OPEN_HOUR = 9
 _SESSION_OPEN_MINUTE = 15
 

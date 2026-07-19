@@ -2,10 +2,14 @@
 strategies/v4_cascade_book_manager.py — per-binding V4Cascade lifecycle.
 
 Mirrors strategies/straddle_book_manager.py exactly. Maintains ONE
-independent V4CascadeBook per (client, binding, NIFTY) deployment.
-NIFTY-only (the ATM-200/ATM+200 tracking-strike offsets and monthly-expiry
-resolution are calibrated specifically for NIFTY) — any deployment targeting
-a different underlying is defensively skipped with a warning log.
+independent V4CascadeBook per (client, binding, underlying) deployment.
+Supported underlyings: NIFTY (real option-premium 3-gate funnel, ATM-200/
+ATM+200 tracking strikes, monthly expiry) and BTC/ETH (2026-07-19, spot-only
+weekend-validated path via Delta Exchange — no option chain, CE scans spot
+for bear traps, PE scans spot for genuine bull traps; see book.py's
+_is_crypto branch). Any OTHER underlying is defensively skipped with a
+warning log — the strategy's structural assumptions don't generalize past
+these two data sources yet.
 
 On/off control reuses the SAME mechanism sell_straddle already has — the
 generic per-deployment Run/Stop toggle (is_running, via the strategy-agnostic
@@ -26,6 +30,8 @@ logger = logging.getLogger(__name__)
 # strategies.v4_cascade.__init__. Unit tests monkeypatch this attribute.
 V4CascadeBook = None
 
+_SUPPORTED_UNDERLYINGS = {"NIFTY", "BTC", "ETH"}
+
 
 class V4CascadeBookManager(StrategyBookManager):
     def _wanted(self) -> Dict[tuple, int]:
@@ -40,10 +46,10 @@ class V4CascadeBookManager(StrategyBookManager):
             und = str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
             if not cid or not bid:
                 continue
-            if und != "NIFTY":
+            if und not in _SUPPORTED_UNDERLYINGS:
                 logger.warning(
-                    "V4CascadeBookManager: skipping %s/%s/%s — v4_cascade is NIFTY-only "
-                    "(ATM offsets are NIFTY-calibrated).", cid, bid, und,
+                    "V4CascadeBookManager: skipping %s/%s/%s — unsupported underlying "
+                    "(only NIFTY/BTC/ETH have a working data path).", cid, bid, und,
                 )
                 continue
             if self._indices and und not in self._indices:

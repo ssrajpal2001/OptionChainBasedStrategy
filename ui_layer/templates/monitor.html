@@ -759,7 +759,16 @@ document.addEventListener('alpine:init', () => {
     v4CascadeOk:         null,
     v4TrapZones:         [],
     v4TrapPosition:      null,
+    v4TrapPollTimer:     null,
 
+    startV4TrapPoll() {
+      this.stopV4TrapPoll();
+      this.refreshV4TrapStatus();
+      this.v4TrapPollTimer = setInterval(() => this.refreshV4TrapStatus(), 5000);
+    },
+    stopV4TrapPoll() {
+      if (this.v4TrapPollTimer) { clearInterval(this.v4TrapPollTimer); this.v4TrapPollTimer = null; }
+    },
     async refreshV4TrapStatus() {
       if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
       try {
@@ -3885,14 +3894,14 @@ function amoTest() {
     <!-- ── Strategy tabs: SELL STRADDLE ──── -->
     <div class="t-card rounded" style="overflow:hidden">
       <div class="flex border-b" style="border-color:var(--t-border)">
-        <button @click="adminStrategyTab='sell_straddle'"
+        <button @click="adminStrategyTab='sell_straddle'; stopV4TrapPoll()"
                 class="font-display font-bold text-xs px-4 py-2.5 transition-all"
                 :style="adminStrategyTab==='sell_straddle'
                   ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           SELL STRADDLE
         </button>
-        <button @click="adminStrategyTab='v4_cascade'"
+        <button @click="adminStrategyTab='v4_cascade'; startV4TrapPoll()"
                 class="font-display font-bold text-xs px-4 py-2.5 transition-all"
                 :style="adminStrategyTab==='v4_cascade'
                   ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
@@ -3956,6 +3965,8 @@ function amoTest() {
                   <th class="text-right px-1 py-1">MTF Entry</th>
                   <th class="text-right px-1 py-1">Inner Zone Low</th>
                   <th class="text-right px-1 py-1">Gate 3 Sweep Level</th>
+                  <th class="text-right px-1 py-1">Live Price</th>
+                  <th class="text-right px-1 py-1">Distance to Trap</th>
                 </tr>
               </thead>
               <tbody>
@@ -3970,6 +3981,10 @@ function amoTest() {
                     <td class="text-right px-1 py-1" x-text="z.mtf_entry ? z.mtf_entry.toFixed(2) : '—'"></td>
                     <td class="text-right px-1 py-1" x-text="z.inner_zone_low ? z.inner_zone_low.toFixed(2) : '—'"></td>
                     <td class="text-right px-1 py-1" x-text="z.limit_entry_price ? z.limit_entry_price.toFixed(2) : '—'"></td>
+                    <td class="text-right px-1 py-1" x-text="z.live_price ? z.live_price.toFixed(2) : '—'"></td>
+                    <td class="text-right px-1 py-1"
+                        :style="`color:${(z.distance_to_trap||0)<0?'var(--t-red)':'var(--t-green)'}`"
+                        x-text="z.distance_to_trap!=null ? z.distance_to_trap.toFixed(2) : '—'"></td>
                   </tr>
                 </template>
                 <tr x-show="!v4TrapZones.length"><td colspan="9" class="text-center py-2" style="color:var(--t-muted)">No unmitigated zones in memory.</td></tr>
@@ -3988,6 +4003,11 @@ function amoTest() {
               <div><span style="color:var(--t-muted)">Dist to SL:</span> <span x-text="v4TrapPosition && v4TrapPosition.distance_to_sl!=null ? v4TrapPosition.distance_to_sl.toFixed(2) : '—'"></span></div>
               <div><span style="color:var(--t-muted)">Dist to Target:</span> <span x-text="v4TrapPosition && v4TrapPosition.distance_to_target!=null ? v4TrapPosition.distance_to_target.toFixed(2) : '—'"></span></div>
               <div><span style="color:var(--t-muted)">T1/T2 status:</span> <span x-text="v4TrapPosition && (v4TrapPosition.t1_status+'/'+v4TrapPosition.t2_status)"></span></div>
+              <div><span style="color:var(--t-muted)">Unrealized P&L:</span>
+                <span :style="`color:${(v4TrapPosition&&v4TrapPosition.unrealized_pnl||0)<0?'var(--t-red)':'var(--t-green)'}`"
+                      x-text="v4TrapPosition && v4TrapPosition.unrealized_pnl!=null ? v4TrapPosition.unrealized_pnl.toFixed(4) : '—'"></span>
+                <span style="color:var(--t-dim)" x-text="v4TrapPosition && v4TrapPosition.contract_value!=1 ? '(cv='+v4TrapPosition.contract_value+')' : ''"></span>
+              </div>
             </div>
           </div>
         </div>

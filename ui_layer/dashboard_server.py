@@ -2204,12 +2204,21 @@ class DashboardServer:
                 return {"ok": True, "deploy_id": deploy_id, "zones": [], "position": None}
 
             from strategies.v4_cascade.dataclasses import GateState
+            from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
             zones = []
+            live_price = getattr(book, "_live_price", {}) or {}
             for side in ("CE", "PE"):
                 scanner = book._engine._scanners.get(side)
                 if scanner is None:
                     continue
+                side_ltp = float(live_price.get(side) or 0.0)
                 for setup in scanner.setups:
+                    # "how far is market from the trap" -- distance from the
+                    # live price to whichever level is currently most relevant:
+                    # the pending limit price once armed, else the HTF entry line.
+                    target_level = setup.limit_entry_price or (
+                        setup.htf_zone.entry_line if setup.htf_zone else None)
+                    distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
                     z = {
                         "side": side, "state": setup.state.value,
                         "htf_ref_ts": setup.htf_ref_ts.isoformat() if setup.htf_ref_ts else None,
@@ -2220,6 +2229,8 @@ class DashboardServer:
                         "mtf_entry": setup.mtf_zone.entry_line if setup.mtf_zone else None,
                         "inner_zone_low": setup.mtf_zone.sweep_low if setup.mtf_zone else None,
                         "limit_entry_price": setup.limit_entry_price,
+                        "live_price": side_ltp or None,
+                        "distance_to_trap": distance,
                     }
                     zones.append(z)
 
@@ -2233,6 +2244,12 @@ class DashboardServer:
                         live_ltp = float(bars[-1].close)
                 except Exception:
                     pass
+                # Contract value: BTC=0.001, ETH=0.01 (1 lot = this fraction of
+                # a coin, matches Delta's real contract_value API field and
+                # sell_straddle's same 2026-07-19 convention) -- NIFTY = 1.0.
+                _cv = _CRYPTO_CONTRACT_VALUE.get(und.upper(), 1.0)
+                _qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
+                pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
                 position = {
                     "side": pos.side, "status": pos.status,
                     "entry_price": pos.t1.entry_price if pos.t1 else None,
@@ -2241,6 +2258,8 @@ class DashboardServer:
                     "live_ltp": live_ltp,
                     "distance_to_sl": (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None,
                     "distance_to_target": (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp) else None,
+                    "unrealized_pnl": round(pnl_pts * _qty * _cv, 4),
+                    "contract_value": _cv,
                     "t1_status": pos.t1.status if pos.t1 else None,
                     "t2_status": pos.t2.status if pos.t2 else None,
                     "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
@@ -2391,12 +2410,15 @@ class DashboardServer:
             deployments = [d for d in _all_deps if _is_running(d) or _has_open_position(d)]
 
             def _ccy_cv(underlying):
-                """(currency_symbol, contract_value) per exchange. P&L is tracked directly off
-                the displayed lot/contract count (2026-07-19 — per user confirmation): premium
-                points x contracts sold, no fractional-BTC scaling. NSE/MCX = ₹, crypto = $."""
+                """(currency_symbol, contract_value) per exchange. Crypto (Delta) P&L is in USD
+                and each lot is a fraction of a coin (BTC 0.001, ETH 0.01 — reverted 2026-07-19,
+                same day, later: confirmed correct after all, matches Delta's real contract_value
+                API field), so premium-points P&L is scaled by contract value. NSE/MCX = ₹, ×1."""
                 u = str(underlying).upper()
-                if u in ("BTC", "ETH"):
-                    return ("$", 1.0)
+                if u == "BTC":
+                    return ("$", 0.001)
+                if u == "ETH":
+                    return ("$", 0.01)
                 return ("₹", 1.0)
 
             def _fmt_exp(d):
@@ -2539,8 +2561,9 @@ class DashboardServer:
                                 _lot_sz  = int(getattr(strat, "_lot_size", 1) or 1)
                                 _lot_mul = int(getattr(strat, "_lot_multiplier", 1) or 1)
                                 _qty     = _lot_sz * _lot_mul
-                                # P&L tracked directly off displayed contract count (2026-07-19) — no fractional-BTC scaling.
-                                _cv = 1.0
+                                # Contract value: BTC=0.001, ETH=0.01, NSE=1.0 (reverted 2026-07-19, same day, later)
+                                _und_u = str(pos.underlying).upper()
+                                _cv = 0.001 if _und_u == "BTC" else (0.01 if _und_u == "ETH" else 1.0)
                                 _qty_cv = _qty * _cv   # actual currency units per premium pt
                                 straddle_info["total_value_sold"] = round(_entryC, 2)
                                 straddle_info["ltp"] = {"total_sold": round(_entryC, 2),

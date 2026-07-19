@@ -50,6 +50,26 @@ _GATE23_RESET = (15, 30)
 _STRIKE_STEP = 100.0
 _TRACKING_OFFSET = 200.0
 
+# ── Crypto (BTC/ETH via Delta) branch — 2026-07-19 weekend-validated ────────
+# No option chain: CE and PE both track the underlying's OWN spot/perpetual
+# price directly (a directional long-bias read, not a real option premium).
+# Reuses the SAME EventBus CANDLE_CLOSE stream every other consumer already
+# gets from matrix_engine/candle_cache.py (which builds 1/2/5/15/75m candles
+# for ANY symbol receiving INDEX_TICK, including BTC via DeltaChainManager's
+# perpetual feed) -- no separate tick/bucket-accumulation path needed.
+# HTF/MTF are faster (15m/1m vs NIFTY's 75m/5m) to match BTC's pace, exactly
+# as validated in scripts/v4_btc_weekend_test.py. No EOD/Gate2-3 daily reset
+# for crypto -- BTC has no session boundary, multi-day zones persist
+# continuously by design (matches the "long-term institutional footprint"
+# philosophy the strategy is built around).
+_CRYPTO_UNDERLYINGS = {"BTC", "ETH"}
+_CRYPTO_HTF_MINUTES = 60   # 2026-07-19 — multiples of 60m for crypto (not 75m NIFTY, not 15m)
+_CRYPTO_MTF_MINUTES = 1
+_CRYPTO_LOOKBACK_DAYS = 10   # crypto is 24/7 -- 10 calendar days of history is enough to warm HTF zones
+_CRYPTO_CONTRACT_VALUE = {"BTC": 0.001, "ETH": 0.01}   # 1 lot = this fraction of a coin (Delta's real contract_value)
+_DELTA_BASE = "https://api.india.delta.exchange"
+_DELTA_SYMBOL = {"BTC": "BTCUSD", "ETH": "ETHUSD"}
+
 
 class _Bar:
     """Minimal CandleEvent-shaped object for internal bucket accumulation."""
@@ -69,8 +89,9 @@ class V4CascadeBook(AbstractStrategyBook):
         self._lot_multiplier = lot_multiplier
         self._db = None
         self._rebalancer = None
+        self._is_crypto = underlying.upper() in _CRYPTO_UNDERLYINGS
         self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier)
-        self._engine = V4CascadeEngine(self._v4cfg)
+        self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto)
 
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_v4_cascade"
         self._expiry: Optional[date] = None
@@ -84,6 +105,7 @@ class V4CascadeBook(AbstractStrategyBook):
 
         self._session_day: Optional[date] = None
         self._history_ingested = False
+        self._live_price: Dict[str, float] = {"CE": 0.0, "PE": 0.0}   # per-side last price — "distance to trap" in the UI
 
         # per-side 5m bucket accumulators, fed by live OPTION_TICK
         self._buckets: Dict[str, Optional[_Bar]] = {"CE": None, "PE": None}
@@ -121,8 +143,11 @@ class V4CascadeBook(AbstractStrategyBook):
         except Exception:
             logger.exception("V4CascadeBook[%s/%s/%s]: boot ingestion failed.",
                               self._client_id, self._binding_id, self._underlying)
-        self._tasks.append(asyncio.create_task(self._option_loop(), name="v4cascade_option"))
-        self._tasks.append(asyncio.create_task(self._candle_loop(), name="v4cascade_candle"))
+        if self._is_crypto:
+            self._tasks.append(asyncio.create_task(self._crypto_candle_loop(), name="v4cascade_crypto_candle"))
+        else:
+            self._tasks.append(asyncio.create_task(self._option_loop(), name="v4cascade_option"))
+            self._tasks.append(asyncio.create_task(self._candle_loop(), name="v4cascade_candle"))
 
     # ── strike resolution ────────────────────────────────────────────────────
     def _access_token(self) -> str:
@@ -200,6 +225,8 @@ class V4CascadeBook(AbstractStrategyBook):
         on an already-running book. Idempotent: PremiumGateScanner de-dupes
         already-known HTF refs via _known_ref_ts, so re-running never
         duplicates zone state."""
+        if self._is_crypto:
+            return await self._ingest_history_crypto()
         ok = await self._resolve_symbols()
         if not ok:
             return False
@@ -231,6 +258,97 @@ class V4CascadeBook(AbstractStrategyBook):
                     self._underlying, self._client_id, self._binding_id,
                     len(spot_5m), len(ce_5m), len(pe_5m))
         return True
+
+    # ── crypto (BTC/ETH) spot-only path — 2026-07-19, see module header ─────
+    def _delta_symbol(self) -> str:
+        return _DELTA_SYMBOL.get(self._underlying.upper(), self._underlying.upper() + "USD")
+
+    @staticmethod
+    def _delta_get(url: str, params: dict) -> dict:
+        from curl_cffi import requests as _cc
+        try:
+            return _cc.get(url, params=params, impersonate="chrome131", timeout=15).json()
+        except Exception as exc:
+            logger.debug("V4CascadeBook crypto http error: %s: %s", url, exc)
+            return {}
+
+    async def _ingest_history_crypto(self) -> bool:
+        self._ce_strike = self._pe_strike = 0
+        self._ce_symbol = self._pe_symbol = self._delta_symbol()
+        end = int(datetime.now(IST).timestamp())
+        start = end - _CRYPTO_LOOKBACK_DAYS * 86400
+        data = await asyncio.to_thread(
+            self._delta_get, f"{_DELTA_BASE}/v2/history/candles",
+            {"resolution": "1m", "symbol": self._ce_symbol, "start": start, "end": end},
+        )
+        rows = sorted(data.get("result", []) or [], key=lambda c: c["time"])
+        if not rows:
+            logger.warning("V4CascadeBook[%s]: no Delta history returned — ingestion skipped.", self._underlying)
+            return False
+        bars_1m = [
+            _Bar(datetime.fromtimestamp(int(c["time"]), tz=IST), float(c["open"]), float(c["high"]),
+                 float(c["low"]), float(c["close"]), int(c.get("volume", 0) or 0), tf=5)
+            for c in rows
+        ]
+        self._bars_5m["CE"] = list(bars_1m)
+        self._bars_5m["PE"] = list(bars_1m)
+        bars_htf = [_Bar(b.timestamp, b.close, b.high, b.low, b.close, tf=75)
+                    for b in resample_bars(bars_1m, _CRYPTO_HTF_MINUTES)]
+        htf_by_ts = {b.timestamp: b for b in bars_htf}
+
+        for i, bar in enumerate(bars_1m):
+            self._engine.update(ce_bar=bar, pe_bar=bar)
+            if _bucket_end_1m(bar.timestamp, _CRYPTO_HTF_MINUTES):
+                bstart = _bucket_start(bar.timestamp, _CRYPTO_HTF_MINUTES)
+                htf_bar = htf_by_ts.get(bstart)
+                if htf_bar is not None:
+                    self._engine.update(spot_bar=htf_bar, ce_bar=htf_bar, pe_bar=htf_bar)
+        if bars_1m:
+            self._live_price["CE"] = self._live_price["PE"] = bars_1m[-1].close
+        self._history_ingested = True
+        self._persist_position()
+        logger.info("V4CascadeBook[%s/%s/%s]: crypto history ingested — %d x 1m bars, "
+                    "CE setups=%d PE setups=%d.",
+                    self._underlying, self._client_id, self._binding_id, len(bars_1m),
+                    len(self._engine._scanners["CE"].setups), len(self._engine._scanners["PE"].setups))
+        return True
+
+    async def _crypto_candle_loop(self) -> None:
+        """No option chain for crypto — CE/PE both track the underlying's OWN
+        live price directly (Topic.CANDLE_CLOSE, already published for BTC by
+        matrix_engine/candle_cache.py off DeltaChainManager's perpetual
+        IndexTick — no separate subscription/bucket-building needed)."""
+        q = self._subscribe(Topic.CANDLE_CLOSE)
+        symbol = self._underlying.upper()
+        buf_1m: List = list(self._bars_5m.get("CE") or [])
+        while self._running:
+            try:
+                ev: CandleEvent = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if getattr(ev, "symbol", "") != symbol or getattr(ev, "timeframe", 0) != 1:
+                continue
+            bar = _Bar(ev.timestamp, ev.open, ev.high, ev.low, ev.close, ev.volume, tf=5)
+            self._live_price["CE"] = self._live_price["PE"] = bar.close
+            buf_1m.append(bar)
+            self._bars_5m["CE"].append(bar)
+            self._bars_5m["PE"].append(bar)
+            events = self._engine.update(ce_bar=bar, pe_bar=bar)
+            for order_ev in events:
+                self._emit_order(order_ev)
+
+            if _bucket_end_1m(bar.timestamp, _CRYPTO_HTF_MINUTES):
+                bstart = _bucket_start(bar.timestamp, _CRYPTO_HTF_MINUTES)
+                recent = [b for b in buf_1m if b.timestamp >= bstart]
+                htf_bars = resample_bars(recent, _CRYPTO_HTF_MINUTES)
+                if htf_bars:
+                    last = htf_bars[-1]
+                    htf_bar = _Bar(last.timestamp, last.close, last.high, last.low, last.close, tf=75)
+                    self._engine.update(spot_bar=htf_bar, ce_bar=htf_bar, pe_bar=htf_bar)
+            self._persist_position()
+            # trim the rolling 1m buffer so it doesn't grow unbounded across days
+            if len(buf_1m) > 60 * 24 * (_CRYPTO_LOOKBACK_DAYS + 1):
+                buf_1m = buf_1m[-60 * 24 * (_CRYPTO_LOOKBACK_DAYS + 1):]
 
     async def force_ingest(self) -> bool:
         """Admin-triggered re-ingestion on a live book (POST .../force_ingest)."""
@@ -287,6 +405,7 @@ class V4CascadeBook(AbstractStrategyBook):
             self._on_option_tick(side, float(tick.ltp), tick.timestamp)
 
     def _on_option_tick(self, side: str, ltp: float, ts: datetime) -> None:
+        self._live_price[side] = ltp
         bucket = _bucket_start(ts, 5)
         cur = self._buckets[side]
         if cur is None or cur.timestamp != bucket:
@@ -435,9 +554,20 @@ def _bucket_start(ts: datetime, multiplier: int) -> datetime:
 
 
 def _bucket_end(ts: datetime, multiplier: int) -> bool:
+    """True if the 5-MINUTE bar at ``ts`` is the last one in its
+    ``multiplier``-minute bucket (NIFTY option-premium path, 5m granularity)."""
     open_dt = ts.replace(hour=9, minute=15, second=0, microsecond=0)
     minutes_since_open = int((ts - open_dt).total_seconds() // 60)
     return (minutes_since_open + 5) % multiplier == 0
+
+
+def _bucket_end_1m(ts: datetime, multiplier: int) -> bool:
+    """Same as ``_bucket_end`` but for 1-MINUTE bar granularity (crypto spot-
+    only path) — a real, not just cosmetic, difference: using the 5m-granularity
+    check here would silently never fire for most multiples of 60."""
+    open_dt = ts.replace(hour=9, minute=15, second=0, microsecond=0)
+    minutes_since_open = int((ts - open_dt).total_seconds() // 60)
+    return (minutes_since_open + 1) % multiplier == 0
 
 
 def _replay_through_engine(engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_daily_boundary=None) -> None:

@@ -51,10 +51,19 @@ class V4CascadeEngine:
     sell_straddle's per-binding book pattern (see project memory), just not
     yet wired to a book.py adapter (that's a later phase)."""
 
-    def __init__(self, cfg: Optional[V4CascadeConfig] = None) -> None:
+    def __init__(self, cfg: Optional[V4CascadeConfig] = None, pe_scans_bull: bool = False) -> None:
+        """``pe_scans_bull``: 2026-07-19, crypto-spot-only path ONLY (see
+        strategies/v4_cascade/book.py's _is_crypto branch) — when True, the
+        PE scanner looks for BULL traps (real option premium has no
+        inversion on raw spot, so PE must scan for genuine bearish patterns
+        directly rather than reusing bear-trap logic). Defaults to False,
+        the exact validated NIFTY behavior (both CE and PE bear-trap-only)."""
         self._cfg = cfg or V4CascadeConfig()
         self._spot_confirm = SpotConfirmTracker()
-        self._scanners: Dict[str, PremiumGateScanner] = {s: PremiumGateScanner() for s in _SIDES}
+        self._scanners: Dict[str, PremiumGateScanner] = {
+            "CE": PremiumGateScanner(bear=True),
+            "PE": PremiumGateScanner(bear=not pe_scans_bull),
+        }
         self._trackers: Dict[str, TrailingBaseTracker] = {}
         # tracking-contract entry price at trigger time, per side — needed to
         # proportionally rescale the T2 trailing stop onto the execution

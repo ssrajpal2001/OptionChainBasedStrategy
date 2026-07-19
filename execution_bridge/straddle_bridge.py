@@ -231,8 +231,7 @@ class TradeLogger:
             pnl_pts += (entry_pe - fill.pe_fill)
         _und = str(ev.underlying).upper()
         _is_crypto = _und in ("BTC", "ETH")
-        # P&L tracked directly off contracts sold (2026-07-19) — no fractional-BTC scaling.
-        _cv  = 1.0
+        _cv  = 0.001 if _und == "BTC" else (0.01 if _und == "ETH" else 1.0)  # reverted 2026-07-19, same day, later
         _ccy = "$" if _is_crypto else "₹"
         pnl_rs   = pnl_pts * qty * _cv
         _legtag  = "+".join(sorted(_sides)) if _sides != {"CE", "PE"} else "CE+PE"

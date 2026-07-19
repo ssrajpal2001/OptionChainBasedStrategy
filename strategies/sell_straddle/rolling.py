@@ -325,12 +325,17 @@ class RollingMixin:
 
     @property
     def _contract_cv(self) -> float:
-        """P&L contract-value multiplier: 1.0 for BTC/ETH/NSE/MCX (2026-07-19 — per user
-        confirmation, P&L is now tracked directly off the displayed lot/contract count with
-        no fractional-BTC scaling: P&L = premium_pts_diff x contracts_sold). This is a
-        DISPLAY/tracking convention only — order routing is untouched: place_order() in
-        execution_bridge/broker_delta.py still sends qty as Delta's real `size` field 1:1
-        (Delta's own contract_value=0.001 BTC/contract is unaffected on the actual exchange)."""
+        """Contract value multiplier: BTC=0.001, ETH=0.01, NSE/MCX=1.0.
+        Reverted 2026-07-19 (same day, later) — user confirmed 1 lot = 0.001
+        BTC is correct after all (matches Delta's real product API
+        contract_value field, see execution_bridge/broker_delta.py
+        discover_chain()); the earlier same-day cv=1.0 "no scaling" change
+        is superseded."""
+        u = str(self._underlying).upper()
+        if u == "BTC":
+            return 0.001
+        if u == "ETH":
+            return 0.01
         return 1.0
 
     @property

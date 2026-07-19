@@ -30,7 +30,8 @@ from typing import Deque, List, Optional
 from strategies.v4_cascade.dataclasses import RollingBaseZone, ZoneState, GateState
 from strategies.v4_cascade.rolling_base import (
     scan_ladder, build_ladder, LadderMatch, find_bear_trap_2candle,
-    find_all_bear_traps_2candle, resample_bars,
+    find_all_bear_traps_2candle, find_bull_trap_2candle, find_all_bull_traps_2candle,
+    resample_bars,
 )
 
 # NSE trading day ~ 6h15m = 375 minutes. Cap the ladder once a multiplier's
@@ -176,7 +177,17 @@ class PremiumGateScanner:
     ``entries.check_limit_pierce``, which pops any setups that fired via
     ``pop_triggered()``."""
 
-    def __init__(self) -> None:
+    def __init__(self, bear: bool = True) -> None:
+        # 2026-07-19 — bear=True (default, UNCHANGED behavior for the NIFTY
+        # premium path): scans for bear traps only, via find_bear_trap_2candle
+        # / find_all_bear_traps_2candle. bear=False (crypto spot-only path
+        # ONLY — see strategies/v4_cascade/book.py's _is_crypto branch): scans
+        # for bull traps instead, via the symmetric bull functions. Nothing
+        # in the NIFTY path ever constructs a scanner with bear=False.
+        self._bear = bear
+        self._find_all = find_all_bear_traps_2candle if bear else find_all_bull_traps_2candle
+        self._find_one = find_bear_trap_2candle if bear else find_bull_trap_2candle
+
         self.armed: bool = False
 
         self._bars_75m: Deque = deque(maxlen=_MAX_75M_BARS_GATE)
@@ -214,18 +225,28 @@ class PremiumGateScanner:
                 self._check_htf_zone_entry(setup, bar)
 
     def _scan_for_new_htf_setups(self) -> None:
-        zones = find_all_bear_traps_2candle(list(self._bars_75m), skip_before_ts=self._htf_consumed_before_ts)
+        zones = self._find_all(list(self._bars_75m), skip_before_ts=self._htf_consumed_before_ts)
         for zone in zones:
             if zone.reference_low_ts in self._known_ref_ts:
                 continue
             self._known_ref_ts.add(zone.reference_low_ts)
             self.setups.append(_HTFSetup(zone))
 
+    def _zone_overlap(self, bar, entry_line: float, sweep_extreme: float) -> bool:
+        """Bear: zone spans [sweep_extreme(low), entry_line(high)] -- price
+        coming DOWN into it. Bull: zone spans [entry_line(low), sweep_extreme
+        (high)] -- price coming UP into it (mirrors find_bull_trap_2candle's
+        geometry: entry_line=ref.high is the BOTTOM of the zone, the reused
+        ``sweep_low`` field holds the swept HIGH, the TOP)."""
+        if self._bear:
+            return bar.low <= entry_line and bar.high >= sweep_extreme
+        return bar.high >= entry_line and bar.low <= sweep_extreme
+
     def _check_htf_zone_entry(self, setup: _HTFSetup, bar) -> None:
         z = setup.htf_zone
         if z is None or z.entry_line is None or z.sweep_low is None:
             return
-        if bar.low <= z.entry_line and bar.high >= z.sweep_low:
+        if self._zone_overlap(bar, z.entry_line, z.sweep_low):
             setup.state = GateState.WAITING_FOR_HTF_ZONE_ENTRY  # transient marker
             setup.state = GateState.MTF_SCANNING_5M
 
@@ -250,7 +271,7 @@ class PremiumGateScanner:
         window = self._mtf_window(setup)
         if len(window) < 3:
             return
-        zone = find_bear_trap_2candle(window, skip_before_ts=setup.mtf_consumed_before_ts)
+        zone = self._find_one(window, skip_before_ts=setup.mtf_consumed_before_ts)
         if zone is not None:
             setup.mtf_zone = zone
             setup.mtf_timeframe = 5
@@ -262,7 +283,7 @@ class PremiumGateScanner:
         if len(resampled) < 3:
             setup.state = GateState.MTF_SCANNING_5M  # keep retrying as the window grows
             return
-        zone15 = find_bear_trap_2candle(resampled, skip_before_ts=setup.mtf_consumed_before_ts)
+        zone15 = self._find_one(resampled, skip_before_ts=setup.mtf_consumed_before_ts)
         if zone15 is not None:
             setup.mtf_zone = zone15
             setup.mtf_timeframe = 15
@@ -274,10 +295,17 @@ class PremiumGateScanner:
         z = setup.mtf_zone
         if z is None or z.entry_line is None or z.sweep_low is None:
             return
-        if bar.low <= z.entry_line and bar.high >= z.sweep_low:
+        if self._zone_overlap(bar, z.entry_line, z.sweep_low):
             setup.state = GateState.WAITING_FOR_MTF_ZONE_ENTRY  # transient marker
-            inner_high, inner_low = z.entry_line, z.sweep_low
-            setup.limit_entry_price = inner_high - (inner_high - inner_low) / 3.0
+            if self._bear:
+                inner_high, inner_low = z.entry_line, z.sweep_low
+                setup.limit_entry_price = inner_high - (inner_high - inner_low) / 3.0
+            else:
+                # Bull: entry_line is the BOTTOM of the zone, sweep_low field
+                # holds the swept HIGH (the top) -- 1/3 UP from the bottom,
+                # mirroring the bear case's "1/3 DOWN from the top".
+                inner_low, inner_high = z.entry_line, z.sweep_low
+                setup.limit_entry_price = inner_low + (inner_high - inner_low) / 3.0
             setup.state = GateState.LIMIT_ARMED
 
     # ── Gate 3 support ───────────────────────────────────────────────────────
