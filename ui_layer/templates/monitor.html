@@ -2729,6 +2729,14 @@ document.addEventListener('alpine:init', () => {
       if (s.startsWith('partial_roll_')) return 'Partial roll (closed leg)';
       if (s.startsWith('partial_cleanup_')) return 'Partial roll cleanup';
       if (s.startsWith('single_side_roll_')) return 'Roll-in (new leg)';
+      // V4 Cascade (trap scanner)
+      if (s === 'gate3_bear_trap_reclaim') return 'Bear trap reclaim (long)';
+      if (s === 'gate3_bull_trap_reclaim') return 'Bull trap reclaim (short)';
+      if (s === 't1_sl_structural_floor') return 'T1 stop-loss';
+      if (s === 't1_target_2r') return 'T1 target (2R)';
+      if (s === 't2_trailing_base_stop') return 'T2 trailing stop';
+      if (s === 'eod_force_close') return 'EOD force close';
+      if (s === 'entry_rejected') return 'Entry REJECTED by exchange';
       return s;
     },
 

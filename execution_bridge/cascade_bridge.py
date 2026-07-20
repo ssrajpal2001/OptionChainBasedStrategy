@@ -290,6 +290,7 @@ class V4CascadeExecutionBridge:
         executor = self._exit_executor if ev.action == "EXIT" else self._executor
         tag = f"V4C_{ev.underlying}_{ev.action}"[:20]
 
+        _reject_reason = ""  # populated below if the order under/zero-fills; surfaced in History
         try:
             legfill = await executor.execute_leg(
                 broker, broker_symbol=symbol, exchange=exchange, side=side, qty=ev.qty,
@@ -316,8 +317,9 @@ class V4CascadeExecutionBridge:
                 try:
                     _f = await broker.get_order_status(str(oids[-1]))
                     _raw = getattr(_f, "raw", {}) or {}
-                    _reason = (f"status={_raw.get('status')} "
-                              f"status_message={_raw.get('status_message') or _raw.get('status_message_raw')}")
+                    _reject_reason = (str(_raw.get("status_message") or _raw.get("status_message_raw") or "").strip()
+                                       or str(_raw.get("status") or "unknown"))
+                    _reason = f"status={_raw.get('status')} status_message={_reject_reason}"
                     logger.warning("[LIVE] V4Cascade %s %s %s UNDER-FILL %d/%d — exchange: %s",
                                    ev.action, ev.underlying, ev.side, fq, ev.qty, _reason)
                     self._trade_log.log(ev.client_id, ev.binding_id,
@@ -330,6 +332,7 @@ class V4CascadeExecutionBridge:
                         ev.action, ev.underlying, ev.side, exc)
             self._trade_log.log(ev.client_id, ev.binding_id,
                 f"LIVE {ev.action} {ev.underlying} {ev.side} ORDER FAILED: {exc}")
+            _reject_reason = str(exc)
             px, fq = ev.price_hint, 0
 
         # ENTRY that didn't fill at all is aborted, not booked at a phantom
@@ -339,6 +342,12 @@ class V4CascadeExecutionBridge:
                         ev.underlying, ev.client_id, ev.binding_id)
             self._trade_log.log(ev.client_id, ev.binding_id,
                 f"ENTRY ABORT {ev.underlying} {ev.side} — zero fill")
+            # Record the rejection into trade_history (pnl=0, exit_reason=
+            # "entry_rejected") so it's visible in the client History tab —
+            # this matters during RnD/dry-run testing (no funds on purpose)
+            # where the whole point IS to confirm the order reached the
+            # exchange and see WHY it was rejected, not just that it vanished.
+            self._record_rejection(ev, _reject_reason or "no fill (see server log)")
             await self._bus.publish(Topic.ORDER_FILL, CascadeFillEvent(
                 action="ENTRY", underlying=ev.underlying, side=ev.side, tranche=ev.tranche,
                 fill_price=0.0, qty=ev.qty, client_id=ev.client_id, binding_id=ev.binding_id,
@@ -383,4 +392,31 @@ class V4CascadeExecutionBridge:
             )
         except Exception:
             logger.exception("V4CascadeExecutionBridge: trade_history record failed for %s/%s",
+                             ev.client_id, ev.binding_id)
+
+    def _record_rejection(self, ev: CascadeOrderEvent, reason: str) -> None:
+        """Persist a REJECTED/zero-fill entry attempt to trade_history (pnl=0)
+        so it's visible in the client History tab, not just the server log —
+        the whole point of a no-funds dry run is confirming the order really
+        reached the exchange and seeing why it came back, without needing
+        server/log access.
+
+        The History ledger only renders a leg's CLOSE/BUY row (where
+        exit_reason + exit_remark actually get displayed) when lg.exit > 0
+        — recording exit=0.0 here would silently render only a bare "opened"
+        row with no visible reason. Recording exit=price_hint (same as
+        entry, pnl=0) makes this render as a normal open+close pair so the
+        rejection reason is actually visible, not just present in the data."""
+        try:
+            from data_layer import trade_history as _th
+            _th.record(
+                ev.client_id, "v4_cascade", ev.underlying,
+                ev.price_hint, ev.price_hint, "entry_rejected", 0.0,
+                binding_id=ev.binding_id,
+                legs=[{"side": ev.side, "strike": ev.strike, "entry": ev.price_hint,
+                       "exit": ev.price_hint, "pnl": 0.0, "entry_reason": "entry_rejected"}],
+                exit_remark=reason[:200],
+            )
+        except Exception:
+            logger.exception("V4CascadeExecutionBridge: rejection record failed for %s/%s",
                              ev.client_id, ev.binding_id)
