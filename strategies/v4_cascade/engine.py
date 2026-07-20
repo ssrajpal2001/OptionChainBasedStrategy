@@ -119,14 +119,19 @@ class V4CascadeEngine:
                 return events
             scanner.on_5m_bar(bar)
             trigger = check_limit_pierce(scanner, bar)
-            if trigger.fired:
+            # 2026-07-20: HTF/MTF discovery now runs on BOTH sides continuously
+            # regardless of bias (zone_state.py no longer gates it) -- bias is
+            # checked HERE instead, at the moment a trigger would actually open
+            # a trade. A pierce on an unarmed side is left alone (not popped,
+            # not opened) so it can still fire later if bias comes back to it.
+            if trigger.fired and scanner.armed:
                 events += self._close_for_structural_flip(bar.timestamp)
                 events.append(self._open_position(side, scanner, trigger.setup, bar))
             return events
 
         scanner.on_5m_bar(bar)
         trigger = check_limit_pierce(scanner, bar)
-        if trigger.fired:
+        if trigger.fired and scanner.armed:
             events.append(self._open_position(side, scanner, trigger.setup, bar))
         return events
 

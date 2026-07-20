@@ -211,15 +211,25 @@ class PremiumGateScanner:
     # ── engine-driven bias control ──────────────────────────────────────────
     def set_armed(self, armed: bool) -> None:
         """Called by the engine each time spot bias is re-evaluated. Gates
-        whether NEW HTF refs are searched for — never aborts an in-flight
-        setup already underway."""
+        whether a completed Gate-3 trigger is allowed to actually open a
+        trade (checked by the engine, not this class) -- never aborts an
+        in-flight setup already underway, and (2026-07-20) no longer gates
+        new-zone discovery either, which now runs unconditionally on both
+        sides regardless of bias."""
         self.armed = armed
 
     # ── Gate 1 (75m) ─────────────────────────────────────────────────────────
     def on_75m_bar(self, bar) -> None:
         self._bars_75m.append(bar)
-        if self.armed:
-            self._scan_for_new_htf_setups()
+        # 2026-07-20: discovery runs unconditionally on both sides now,
+        # regardless of current bias -- `armed` used to gate this too, which
+        # meant a side sitting unarmed for a stretch could miss real
+        # structure forming in its own option premium the whole time, only
+        # picking it up once bias happened to flip back. `armed` now ONLY
+        # gates whether a fully-formed Gate-3 trigger is allowed to actually
+        # open a trade (checked in engine.py._update_side), never whether a
+        # zone gets found/tracked in the first place.
+        self._scan_for_new_htf_setups()
         for setup in self.setups:
             if setup.state == GateState.HTF_LOCKED:
                 self._check_htf_zone_entry(setup, bar)
