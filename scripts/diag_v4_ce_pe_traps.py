@@ -46,6 +46,7 @@ async def main() -> None:
     ap.add_argument("--opt-type", choices=["CE", "PE"], required=True)
     ap.add_argument("--expiry", required=True, help="YYYY-MM-DD")
     ap.add_argument("--days", type=int, default=14, help="lookback days from today")
+    ap.add_argument("--dump-from", default=None, help="YYYY-MM-DD: print every 75m bar from this date on, for cross-checking against a real chart")
     args = ap.parse_args()
 
     db = ClientDB()
@@ -102,6 +103,13 @@ async def main() -> None:
         )
     if not zones:
         print("  (none found — either genuinely no valid pattern, or a real bug)")
+
+    if args.dump_from:
+        from_dt = date.fromisoformat(args.dump_from)
+        print(f"\n=== raw 75m bars from {from_dt} on (cross-check against TradingView) ===")
+        for b in bars_75m:
+            if b.timestamp.date() >= from_dt:
+                print(f"  {b.timestamp.isoformat()}  H={b.high:.2f} L={b.low:.2f} C={b.close:.2f}")
 
 
 if __name__ == "__main__":
