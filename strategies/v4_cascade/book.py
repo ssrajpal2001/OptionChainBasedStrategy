@@ -1038,21 +1038,41 @@ def _bucket_end_1m(ts: datetime, multiplier: int) -> bool:
     return (minutes_since_open + 1) % multiplier == 0
 
 
+def _bucket_key(ts: datetime, multiplier: int):
+    """(day, bucket_idx) identity for a timestamp, matching resample_bars's
+    own internal grouping exactly. Used instead of resample_bars's OUTPUT
+    timestamp for lookups -- resample_bars labels each bucket with its
+    first ACTUAL bar's timestamp (correct for its own purposes), which on a
+    sparse/gappy day can land off the canonical grid (e.g. 11:50 instead of
+    11:45 if the 11:45 5m bar was itself missing/zero-volume-filtered). A
+    grid-computed timestamp (_bucket_start) then fails to match that key,
+    and the whole 75m bar silently vanishes from replay -- a real, confirmed
+    bug: a PE zone's discovery outcome differed between a from-scratch
+    diagnostic run and the live replay purely because of one such dropped
+    bar days earlier in the lookback window, shifting bar-array indices
+    used by find_all_bear_traps_2candle's redundancy dedup. Bucket IDENTITY
+    (day, bucket_idx) is stable regardless of which bar within it happens
+    to carry the label."""
+    open_dt = ts.replace(hour=9, minute=15, second=0, microsecond=0)
+    minutes_since_open = int((ts - open_dt).total_seconds() // 60)
+    return (ts.date(), minutes_since_open // multiplier)
+
+
 def _replay_through_engine(engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_daily_boundary=None) -> None:
     """Chronological replay identical in shape to
     scripts/test_real_premium_replay.py — feeds 5m bars continuously and 75m
     closes (spot bias + CE/PE Gate 1) at each 75m bucket boundary, applying
     the 15:15/15:30 daily rules along the way so the rebuilt state exactly
     matches what live ticks would have produced."""
-    spot_75m_by_ts = {b.timestamp: b for b in resample_bars(spot_5m, 75)} if spot_5m else {}
-    ce_75m_by_ts = {b.timestamp: b for b in resample_bars(ce_5m, 75)} if ce_5m else {}
-    pe_75m_by_ts = {b.timestamp: b for b in resample_bars(pe_5m, 75)} if pe_5m else {}
+    spot_75m_by_key = {_bucket_key(b.timestamp, 75): b for b in resample_bars(spot_5m, 75)} if spot_5m else {}
+    ce_75m_by_key = {_bucket_key(b.timestamp, 75): b for b in resample_bars(ce_5m, 75)} if ce_5m else {}
+    pe_75m_by_key = {_bucket_key(b.timestamp, 75): b for b in resample_bars(pe_5m, 75)} if pe_5m else {}
     ce_by_ts = {b.timestamp: b for b in ce_5m}
     pe_by_ts = {b.timestamp: b for b in pe_5m}
     all_ts = sorted(set(ce_by_ts) | set(pe_by_ts))
 
     last_day = None
-    for ts in all_ts:
+    for idx, ts in enumerate(all_ts):
         day = ts.date()
         if last_day is not None and day != last_day and on_daily_boundary is not None:
             pass  # boundary-time rules (EOD/gate reset) applied via exact-time checks below
@@ -1060,11 +1080,18 @@ def _replay_through_engine(engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_da
 
         engine.update(ce_bar=ce_by_ts.get(ts), pe_bar=pe_by_ts.get(ts))
 
-        if _bucket_end(ts, 75):
-            bstart = _bucket_start(ts, 75)
-            sbar = spot_75m_by_ts.get(bstart)
-            ce75 = ce_75m_by_ts.get(bstart)
-            pe75 = pe_75m_by_ts.get(bstart)
+        # A 75m bucket is complete once a LATER bar (in this same sequence)
+        # belongs to a different bucket -- robust to sparse/gappy data,
+        # unlike checking whether `ts` itself lands exactly on the 75m
+        # grid (which can simply never be true if the grid-aligned bar was
+        # itself missing that day). Never fires on the very last bar of
+        # the whole series -- that bucket may still be incomplete/live.
+        cur_key = _bucket_key(ts, 75)
+        bucket_closing = idx + 1 < len(all_ts) and _bucket_key(all_ts[idx + 1], 75) != cur_key
+        if bucket_closing:
+            sbar = spot_75m_by_key.get(cur_key)
+            ce75 = ce_75m_by_key.get(cur_key)
+            pe75 = pe_75m_by_key.get(cur_key)
             if sbar is not None:
                 sbar75 = _Bar(sbar.timestamp, sbar.close, sbar.high, sbar.low, sbar.close, tf=75)
             else:
