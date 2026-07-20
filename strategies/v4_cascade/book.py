@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config.global_config import IST, Topic
 from data_layer import position_store
@@ -1015,16 +1015,18 @@ def _to_5m_bars(rows: List[dict], filter_zero_volume: bool) -> List:
     return bars
 
 
-def _bucket_start(ts: datetime, multiplier: int) -> datetime:
-    open_dt = ts.replace(hour=9, minute=15, second=0, microsecond=0)
+def _bucket_start(ts: datetime, multiplier: int, session_open: Tuple[int, int] = (9, 15)) -> datetime:
+    open_hour, open_minute = session_open
+    open_dt = ts.replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
     minutes_since_open = int((ts - open_dt).total_seconds() // 60)
     return open_dt + timedelta(minutes=(minutes_since_open // multiplier) * multiplier)
 
 
-def _bucket_end(ts: datetime, multiplier: int) -> bool:
+def _bucket_end(ts: datetime, multiplier: int, session_open: Tuple[int, int] = (9, 15)) -> bool:
     """True if the 5-MINUTE bar at ``ts`` is the last one in its
     ``multiplier``-minute bucket (NIFTY option-premium path, 5m granularity)."""
-    open_dt = ts.replace(hour=9, minute=15, second=0, microsecond=0)
+    open_hour, open_minute = session_open
+    open_dt = ts.replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
     minutes_since_open = int((ts - open_dt).total_seconds() // 60)
     return (minutes_since_open + 5) % multiplier == 0
 
@@ -1038,7 +1040,7 @@ def _bucket_end_1m(ts: datetime, multiplier: int) -> bool:
     return (minutes_since_open + 1) % multiplier == 0
 
 
-def _bucket_key(ts: datetime, multiplier: int):
+def _bucket_key(ts: datetime, multiplier: int, session_open: Tuple[int, int] = (9, 15)):
     """(day, bucket_idx) identity for a timestamp, matching resample_bars's
     own internal grouping exactly. Used instead of resample_bars's OUTPUT
     timestamp for lookups -- resample_bars labels each bucket with its
@@ -1053,7 +1055,8 @@ def _bucket_key(ts: datetime, multiplier: int):
     used by find_all_bear_traps_2candle's redundancy dedup. Bucket IDENTITY
     (day, bucket_idx) is stable regardless of which bar within it happens
     to carry the label."""
-    open_dt = ts.replace(hour=9, minute=15, second=0, microsecond=0)
+    open_hour, open_minute = session_open
+    open_dt = ts.replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
     minutes_since_open = int((ts - open_dt).total_seconds() // 60)
     return (ts.date(), minutes_since_open // multiplier)
 
