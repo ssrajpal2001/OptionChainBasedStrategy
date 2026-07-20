@@ -4,7 +4,7 @@ strike/offset numbers per-underlying: NIFTY unchanged, CRUDEOIL gets MCX's
 400-point tracking offset / 100-point execution offset."""
 from config.global_config import GlobalConfig
 from data_layer.base_feeder import EventBus
-from strategies.v4_cascade.book import V4CascadeBook
+from strategies.v4_cascade.book import V4CascadeBook, _TRACKING_STRIKE_STEP
 
 
 def _book(underlying, squareoff_time="15:15"):
@@ -37,6 +37,16 @@ def test_crudeoil_session_config():
     assert b._execution_offset == 100.0
     assert b._v4cfg.sl_buffer == 20.0
     assert b._v4cfg.lot_size == 100
+
+
+def test_tracking_strike_step_is_flat_100_regardless_of_underlying():
+    # Regression guard: the TRACKING contract's ATM rounding is deliberately
+    # a flat 100 for every underlying -- it is NOT the same value as
+    # self._strike_step (the real per-underlying execution grid, 50 for
+    # NIFTY / 100 for CRUDEOIL). A prior pass incorrectly unified these,
+    # which would have changed NIFTY's live tracking strikes; user caught
+    # it and confirmed NIFTY's tracking rounding must stay 100.
+    assert _TRACKING_STRIKE_STEP == 100.0
 
 
 def test_gate23_reset_wraps_past_midnight_safely():

@@ -46,6 +46,18 @@ logger = logging.getLogger(__name__)
 
 _LOOKBACK_DAYS = 21          # 2 full weeks + current week-to-date headroom
 
+# Tracking-contract ATM rounding step — DELIBERATELY flat 100 for every
+# underlying (NIFTY included), NOT the real per-underlying strike grid
+# (self._strike_step, 50 for NIFTY / 100 for CRUDEOIL, used only for the
+# EXECUTION strike below). The tracking contract is always an ATM-offset
+# wide reference (ATM-200/+200 for NIFTY, ATM-400/+400 for CRUDEOIL), never
+# the actually-traded contract, so it intentionally rounds to a coarser
+# grid regardless of what the real tradeable strike spacing is. Confirmed
+# with the user 2026-07-20 after a prior pass (incorrectly) unified this
+# with the execution step, which would have changed NIFTY's live tracking
+# strikes -- do not re-merge these two without asking again.
+_TRACKING_STRIKE_STEP = 100.0
+
 # ── Crypto (BTC/ETH via Delta) branch — 2026-07-19 weekend-validated ────────
 # No option chain: CE and PE both track the underlying's OWN spot/perpetual
 # price directly (a directional long-bias read, not a real option premium).
@@ -372,7 +384,7 @@ class V4CascadeBook(AbstractStrategyBook):
                            "(no live tick, no historical data).", self._underlying, today)
             return False
         self._atm_open = atm_open
-        atm = round(atm_open / self._strike_step) * self._strike_step
+        atm = round(atm_open / _TRACKING_STRIKE_STEP) * _TRACKING_STRIKE_STEP
         self._ce_strike = self._locked_ce_strike or int(atm - self._tracking_offset)
         self._pe_strike = self._locked_pe_strike or int(atm + self._tracking_offset)
 
