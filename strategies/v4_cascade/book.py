@@ -738,6 +738,19 @@ class V4CascadeBook(AbstractStrategyBook):
         elif is_close_ev and pos is not None:
             leg = pos.t1 if ev.tranche == "T1" else (pos.t2 if ev.tranche == "T2" else None)
             if leg is not None:
+                # Recovery for positions opened before the execution-strike
+                # fix (persisted with strike=0): cascade_bridge can't resolve
+                # a real option symbol for a 0 strike and would silently
+                # fall back to a PAPER close on a real position — meaning
+                # our system thinks it's closed while it stays open for
+                # real on the exchange. Re-resolve before every close, not
+                # just entry, as a safety net.
+                if not leg.strike and not self._is_crypto:
+                    leg.strike = self._resolve_execution_strike(ev.side)
+                    pos.execution_strike = leg.strike
+                    logger.warning("V4CascadeBook[%s/%s/%s]: leg had strike=0 at close — "
+                                   "re-resolved to %s before emitting EXIT.",
+                                   self._underlying, self._client_id, self._binding_id, leg.strike)
                 event_id = f"{self._persist_key}_{ev.tranche}_{ts.isoformat()}"
                 self._pending_fills[event_id] = leg
                 self._fire(self._bus.publish(Topic.CASCADE_ORDER_REQUEST, CascadeOrderEvent(
