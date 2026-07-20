@@ -94,6 +94,14 @@ class CascadeFillEvent:
     # book must discard its optimistic position rather than manage a phantom.
     entry_aborted:  bool = False
     routing_failed: bool = False
+    # True when a LIVE EXIT order got zero fill (rejected, no funds, etc.) —
+    # the book must REVERT the leg back to "open" rather than believe a
+    # rejected order actually closed the position. Previously EXIT had no
+    # such guard at all: a rejected close silently fell back to reporting
+    # ev.price_hint (the THEORETICAL target/SL price) as if it were a real
+    # fill, fabricating a successful "EXIT confirmed" + P&L for an order
+    # that never executed.
+    exit_failed: bool = False
 
 
 # ── Per-client-broker trade logger (reuses the same log dir/convention) ──────
@@ -352,6 +360,27 @@ class V4CascadeExecutionBridge:
                 action="ENTRY", underlying=ev.underlying, side=ev.side, tranche=ev.tranche,
                 fill_price=0.0, qty=ev.qty, client_id=ev.client_id, binding_id=ev.binding_id,
                 event_id=ev.event_id, paper_mode=False, entry_aborted=True,
+            ))
+            return
+
+        # EXIT that didn't fill at all must NOT be reported as a successful
+        # close — the engine already optimistically marked the leg "closed"
+        # at decision time (before this order round-trip); book.py's
+        # _on_fill reverts that back to "open" on exit_failed=True so a
+        # rejected close doesn't get silently mistaken for a real one (the
+        # exact bug this replaces: a rejected EXIT fell through to the code
+        # below and reported ev.price_hint — the THEORETICAL target/SL
+        # price — as if it were a real fill, fabricating a successful
+        # "EXIT confirmed" + P&L for an order the exchange never executed).
+        if ev.action == "EXIT" and fq <= 0:
+            logger.error("[LIVE] V4Cascade %s EXIT got NO fill — NOT closing (leg stays open). client=%s/%s",
+                        ev.underlying, ev.client_id, ev.binding_id)
+            self._trade_log.log(ev.client_id, ev.binding_id,
+                f"EXIT FAILED {ev.underlying} {ev.side} tranche={ev.tranche} — zero fill, leg reverted to open")
+            await self._bus.publish(Topic.ORDER_FILL, CascadeFillEvent(
+                action="EXIT", underlying=ev.underlying, side=ev.side, tranche=ev.tranche,
+                fill_price=0.0, qty=ev.qty, client_id=ev.client_id, binding_id=ev.binding_id,
+                event_id=ev.event_id, paper_mode=False, exit_failed=True,
             ))
             return
 

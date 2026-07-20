@@ -827,6 +827,32 @@ class V4CascadeBook(AbstractStrategyBook):
                 leg = (pos.t1 if fill.tranche == "T1" else pos.t2) if pos is not None else None
             if leg is None:
                 return
+            if fill.exit_failed:
+                # The engine optimistically marked this leg "closed" the
+                # instant it detected the SL/target/trail hit (before this
+                # order round-trip even started) — a rejected order means
+                # that never actually happened on the exchange. Revert the
+                # leg AND the position (which may have been marked fully
+                # "closed" if this was believed to be the last open leg)
+                # back to open, so the next bar re-attempts the close
+                # instead of the system silently losing track of a leg
+                # that's still really open.
+                leg.status = "open"
+                leg.close_price = 0.0
+                leg.close_reason = ""
+                leg.close_time = None
+                pos = self._engine.position
+                if pos is not None and (pos.t1 is leg or pos.t2 is leg):
+                    pos.status = "open"
+                    pos.close_time = None
+                self._persist_position()
+                logger.error("V4CascadeBook[%s/%s/%s]: EXIT FAILED tranche=%s side=%s — "
+                             "reverted leg to open (will retry).",
+                             self._underlying, self._client_id, self._binding_id,
+                             fill.tranche, fill.side)
+                self._clog.error("EXIT FAILED tranche=%s side=%s — reverted leg to open (will retry).",
+                                 fill.tranche, fill.side)
+                return
             leg.close_price = fill.fill_price
             cv = _CRYPTO_CONTRACT_VALUE.get(self._underlying.upper(), 1.0)
             is_short = self._is_crypto and fill.side == "PE"
