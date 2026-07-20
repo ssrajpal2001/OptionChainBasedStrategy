@@ -495,16 +495,6 @@ class V4CascadeBook(AbstractStrategyBook):
                     len(spot_5m), len(ce_5m), len(pe_5m))
         self._clog.info("history ingested — spot=%d CE=%d PE=%d 5m bars.",
                         len(spot_5m), len(ce_5m), len(pe_5m))
-        for side in ("CE", "PE"):
-            scanner = self._engine._scanners[side]
-            summary = "; ".join(
-                f"{s.state.value}@{s.htf_ref_ts.isoformat(timespec='minutes') if s.htf_ref_ts else '?'}"
-                for s in scanner.setups
-            ) or "none"
-            self._clog.info("DIAG post-ingest %s setups (armed=%s, bars_75m=%d): %s",
-                            side, scanner.armed, len(scanner._bars_75m), summary)
-            ts_list = ", ".join(b.timestamp.isoformat(timespec="minutes") for b in scanner._bars_75m)
-            self._clog.info("DIAG %s bars_75m timestamps: %s", side, ts_list)
         return True
 
     # ── crypto (BTC/ETH) spot-only path — 2026-07-19, see module header ─────
