@@ -84,10 +84,18 @@ class _Bar:
 class V4CascadeBook(AbstractStrategyBook):
     def __init__(
         self, bus, cfg, underlying: str, client_id: str, binding_id: str,
-        lot_multiplier: int = 1,
+        lot_multiplier: int = 1, squareoff_time: str = "15:15",
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._lot_multiplier = lot_multiplier
+        # Real configured EOD close time (was hardcoded 15:15 regardless of
+        # what the client set on the deploy form). Parsed once; falls back
+        # to 15:15 on any bad/missing value.
+        try:
+            _hh, _mm = str(squareoff_time or "15:15").split(":")[:2]
+            self._eod_hour_min = (int(_hh), int(_mm))
+        except Exception:
+            self._eod_hour_min = (15, 15)
         self._db = None
         self._rebalancer = None
         self._is_crypto = underlying.upper() in _CRYPTO_UNDERLYINGS
@@ -610,9 +618,18 @@ class V4CascadeBook(AbstractStrategyBook):
         if day != self._session_day:
             self._session_day = day
             self._history_ingested = False  # next boot-equivalent scan will re-check strikes at new 09:15
-        if (ts.hour, ts.minute) == _EOD_SQUARE_OFF:
+        # Checked (not "fired once") on every bar at-or-after the configured
+        # time: an exact "==" minute match would silently never fire if the
+        # configured time doesn't land on this book's bar cadence (e.g. a
+        # user-set "15:22" would never equal a 5-minute-aligned bar close),
+        # AND a position that opens AFTER a one-time EOD event already ran
+        # would never get force-closed at all (the exact bug this replaces —
+        # an entry at 15:25 outliving a squareoff that only fired once at
+        # 15:15). Both callees are naturally idempotent (no-op once already
+        # applied), so re-checking every bar is safe and correct.
+        if (ts.hour, ts.minute) >= self._eod_hour_min:
             self._force_eod_square_off(ts)
-        if (ts.hour, ts.minute) == _GATE23_RESET:
+        if (ts.hour, ts.minute) >= _GATE23_RESET:
             self._apply_eod_gate23_rules(ts)
 
     def _force_eod_square_off(self, ts: datetime) -> None:
@@ -658,11 +675,28 @@ class V4CascadeBook(AbstractStrategyBook):
         if self._is_crypto:
             return 0.0
         spot = self._live_spot or self._atm_open or 0.0
-        if not spot:
-            return 0.0
         step = float(self._cfg.exchange.strike_steps.get(self._underlying, 50.0) or 50.0)
-        atm = round(spot / step) * step
-        return atm + EXECUTION_OFFSET_PTS if side == "CE" else atm - EXECUTION_OFFSET_PTS
+        if spot > 0:
+            atm = round(spot / step) * step
+            return atm + EXECUTION_OFFSET_PTS if side == "CE" else atm - EXECUTION_OFFSET_PTS
+        # Defensive fallback — must NEVER silently return 0 (a live trade
+        # entering with strike=0 is a real, observed bug this guards
+        # against). live_spot and atm_open being simultaneously unavailable
+        # should not happen once boot succeeded, but if it does, derive the
+        # execution strike from the already-known-good TRACKING strike
+        # (resolved once at boot, never zero if _resolve_symbols succeeded)
+        # instead of ever returning 0.
+        logger.error("V4CascadeBook[%s/%s/%s]: live_spot and atm_open both unavailable "
+                     "at execution-strike resolution (side=%s) — falling back to tracking strike.",
+                     self._underlying, self._client_id, self._binding_id, side)
+        self._clog.error("live_spot and atm_open both unavailable at execution-strike "
+                         "resolution (side=%s) — falling back to tracking strike.", side)
+        tracking_strike = self._ce_strike if side == "CE" else self._pe_strike
+        if not tracking_strike:
+            return 0.0
+        # tracking = ATM -/+ 200, execution = ATM +/- 50 -> exec = tracking +/- 250.
+        offset_sum = _TRACKING_OFFSET + EXECUTION_OFFSET_PTS
+        return float(tracking_strike + offset_sum) if side == "CE" else float(tracking_strike - offset_sum)
 
     def _emit_order(self, ev) -> None:
         """Publishes a CascadeOrderEvent to the dedicated per-binding bridge
@@ -687,6 +721,9 @@ class V4CascadeBook(AbstractStrategyBook):
             if pos.t2 is not None:
                 pos.t2.strike = exec_strike
             pos.execution_strike = exec_strike
+            # The pure engine has no REGISTRY access and never sets this —
+            # book.py is the only place that knows the real resolved expiry.
+            pos.expiry_date = self._expiry
             qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
             event_id = f"{self._persist_key}_{ts.isoformat()}"
             self._pending_fills[event_id] = pos

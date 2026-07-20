@@ -66,7 +66,24 @@ class V4CascadeBookManager(StrategyBookManager):
         if cls is None:
             from strategies.v4_cascade.book import V4CascadeBook as cls
         cid, bid, und = key
-        book = cls(self._bus, self._cfg, underlying=und, client_id=cid, binding_id=bid, lot_multiplier=lots)
+        # squareoff_time was previously hardcoded (15:15) regardless of what
+        # the client configured on the deploy form -- a real bug: the UI
+        # showed the configured time as if it were live, but a fresh entry
+        # firing after 15:15 would never get force-closed today. Re-fetch
+        # the deployment row here (not carried through _wanted()'s lots-only
+        # value, to avoid changing the base class's Dict[tuple,int] contract)
+        # and pass the real configured time through.
+        squareoff_time = "15:15"
+        try:
+            for d in (self._db.get_deployments_sync(cid) or []):
+                if (d.get("binding_id") == bid and d.get("strategy_name") == "v4_cascade"
+                        and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper() == und):
+                    squareoff_time = str(d.get("squareoff_time") or "15:15")
+                    break
+        except Exception:
+            pass
+        book = cls(self._bus, self._cfg, underlying=und, client_id=cid, binding_id=bid,
+                   lot_multiplier=lots, squareoff_time=squareoff_time)
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
             book.set_rebalancer(self._rebalancer)
