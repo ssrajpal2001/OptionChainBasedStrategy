@@ -45,10 +45,6 @@ from strategies.v4_cascade.rolling_base import resample_bars
 logger = logging.getLogger(__name__)
 
 _LOOKBACK_DAYS = 21          # 2 full weeks + current week-to-date headroom
-_EOD_SQUARE_OFF = (15, 15)
-_GATE23_RESET = (15, 30)
-_STRIKE_STEP = 100.0
-_TRACKING_OFFSET = 200.0
 
 # ── Crypto (BTC/ETH via Delta) branch — 2026-07-19 weekend-validated ────────
 # No option chain: CE and PE both track the underlying's OWN spot/perpetual
@@ -95,9 +91,21 @@ class V4CascadeBook(AbstractStrategyBook):
             self._eod_hour_min = (int(_hh), int(_mm))
         except Exception:
             self._eod_hour_min = (15, 15)
+        # Gate 2/3 daily reset fires 15 minutes after squareoff (matches the
+        # already-validated NIFTY 15:15->15:30 convention). Clamped to not
+        # overflow past 23:59 -- a squareoff configured very close to
+        # midnight (not expected in practice, MCX closes ~23:30) must not
+        # produce an invalid (hour>=24) tuple.
+        _g_hh, _g_mm = self._eod_hour_min[0], self._eod_hour_min[1] + 15
+        if _g_mm >= 60:
+            _g_hh += 1
+            _g_mm -= 60
+        self._gate23_hour_min = (min(_g_hh, 23), _g_mm if _g_hh <= 23 else 59)
         self._db = None
         self._rebalancer = None
         self._is_crypto = underlying.upper() in _CRYPTO_UNDERLYINGS
+        self._is_mcx = cfg.exchange.is_mcx(underlying)
+        self._session_open: Tuple[int, int] = (9, 0) if self._is_mcx else (9, 15)
         # V4CascadeConfig.lot_size defaulted to 65 (NIFTY-only) — for crypto, 1
         # "lot" IS the contract itself (contract_value 0.001 BTC / 0.01 ETH is
         # applied separately at the P&L/order layer, same convention
@@ -114,15 +122,36 @@ class V4CascadeBook(AbstractStrategyBook):
         # was added — made every crypto SL ~4x tighter than intended,
         # getting clipped by ordinary 1-2 minute noise almost immediately
         # after entry on nearly every trade.)
-        from strategies.v4_cascade.config import SL_BUFFER_PER_COIN_CRYPTO, SL_BUFFER_PTS_NIFTY
+        from strategies.v4_cascade.config import (
+            SL_BUFFER_PER_COIN_CRYPTO, SL_BUFFER_PTS_NIFTY, TRACKING_OFFSET_PTS, EXECUTION_OFFSET_PTS,
+        )
         if self._is_crypto:
             _coin_qty = lot_multiplier * _CRYPTO_CONTRACT_VALUE.get(underlying.upper(), 1.0)
             _sl_buffer = SL_BUFFER_PER_COIN_CRYPTO * _coin_qty
+        elif self._is_mcx:
+            _sl_buffer = 20.0
         else:
             _sl_buffer = SL_BUFFER_PTS_NIFTY
+
+        # Strike step already correctly sourced from ExchangeConfig for the
+        # EXECUTION strike elsewhere (_resolve_execution_strike) -- resolved
+        # here too so the TRACKING strike's ATM rounding uses the same real
+        # per-underlying value instead of a hardcoded NIFTY-only constant
+        # (was silently wrong for any underlying but NIFTY before this).
+        self._strike_step = float(cfg.exchange.strike_steps.get(underlying.upper(), 50.0) or 50.0)
+        if self._is_mcx:
+            self._tracking_offset = 400.0
+            self._execution_offset = 100.0
+        else:
+            self._tracking_offset = TRACKING_OFFSET_PTS
+            self._execution_offset = EXECUTION_OFFSET_PTS
+
         self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier,
-                                       lot_size=_real_lot_size, sl_buffer=_sl_buffer)
-        self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto)
+                                       lot_size=_real_lot_size, sl_buffer=_sl_buffer,
+                                       tracking_offset_pts=self._tracking_offset,
+                                       execution_offset_pts=self._execution_offset)
+        self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto,
+                                        session_open=self._session_open)
 
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_v4_cascade"
         self._expiry: Optional[date] = None
@@ -330,9 +359,9 @@ class V4CascadeBook(AbstractStrategyBook):
                            "(no live tick, no historical data).", self._underlying, today)
             return False
         self._atm_open = atm_open
-        atm = round(atm_open / _STRIKE_STEP) * _STRIKE_STEP
-        self._ce_strike = self._locked_ce_strike or int(atm - _TRACKING_OFFSET)
-        self._pe_strike = self._locked_pe_strike or int(atm + _TRACKING_OFFSET)
+        atm = round(atm_open / self._strike_step) * self._strike_step
+        self._ce_strike = self._locked_ce_strike or int(atm - self._tracking_offset)
+        self._pe_strike = self._locked_pe_strike or int(atm + self._tracking_offset)
 
         await asyncio.to_thread(REGISTRY.load_sync, self._underlying, token)
         self._expiry = self._resolve_expiry()
@@ -423,7 +452,10 @@ class V4CascadeBook(AbstractStrategyBook):
         # scanners/spot_confirm are untouched by this, only .position is.
         _pos_before_replay = self._engine.position
         _replay_through_engine(self._engine, spot_5m, ce_5m, pe_5m,
-                                on_daily_boundary=self._apply_eod_gate23_rules)
+                                on_daily_boundary=self._apply_eod_gate23_rules,
+                                session_open=self._session_open,
+                                eod_square_off=self._eod_hour_min,
+                                gate23_reset=self._gate23_hour_min)
         if self._engine.position is not _pos_before_replay:
             logger.warning("V4CascadeBook[%s/%s/%s]: historical replay tried to open/close "
                            "a position — discarding (replay must never touch live position).",
@@ -645,7 +677,7 @@ class V4CascadeBook(AbstractStrategyBook):
 
     def _on_option_tick(self, side: str, ltp: float, ts: datetime) -> None:
         self._live_price[side] = ltp
-        bucket = _bucket_start(ts, 5)
+        bucket = _bucket_start(ts, 5, self._session_open)
         cur = self._buckets[side]
         if cur is None or cur.timestamp != bucket:
             if cur is not None:
@@ -667,9 +699,9 @@ class V4CascadeBook(AbstractStrategyBook):
         for ev in events:
             self._emit_order(ev, pos_before=_pos_before)
         self._persist_position()
-        if _bucket_end(bar.timestamp, 75):
+        if _bucket_end(bar.timestamp, 75, self._session_open):
             window = [b for b in self._bars_5m[side] if b.timestamp.date() == bar.timestamp.date()]
-            r75 = resample_bars(window, 75)
+            r75 = resample_bars(window, 75, self._session_open)
             if r75:
                 last = r75[-1]
                 b75 = _Bar(last.timestamp, last.close, last.high, last.low, last.close, tf=75)
@@ -698,7 +730,7 @@ class V4CascadeBook(AbstractStrategyBook):
         # applied), so re-checking every bar is safe and correct.
         if (ts.hour, ts.minute) >= self._eod_hour_min:
             self._force_eod_square_off(ts)
-        if (ts.hour, ts.minute) >= _GATE23_RESET:
+        if (ts.hour, ts.minute) >= self._gate23_hour_min:
             self._apply_eod_gate23_rules(ts)
 
     def _force_eod_square_off(self, ts: datetime) -> None:
@@ -747,7 +779,7 @@ class V4CascadeBook(AbstractStrategyBook):
         step = float(self._cfg.exchange.strike_steps.get(self._underlying, 50.0) or 50.0)
         if spot > 0:
             atm = round(spot / step) * step
-            return atm + EXECUTION_OFFSET_PTS if side == "CE" else atm - EXECUTION_OFFSET_PTS
+            return atm + self._execution_offset if side == "CE" else atm - self._execution_offset
         # Defensive fallback — must NEVER silently return 0 (a live trade
         # entering with strike=0 is a real, observed bug this guards
         # against). live_spot and atm_open being simultaneously unavailable
@@ -764,7 +796,7 @@ class V4CascadeBook(AbstractStrategyBook):
         if not tracking_strike:
             return 0.0
         # tracking = ATM -/+ 200, execution = ATM +/- 50 -> exec = tracking +/- 250.
-        offset_sum = _TRACKING_OFFSET + EXECUTION_OFFSET_PTS
+        offset_sum = self._tracking_offset + self._execution_offset
         return float(tracking_strike + offset_sum) if side == "CE" else float(tracking_strike - offset_sum)
 
     def _emit_order(self, ev, pos_before=None) -> None:
