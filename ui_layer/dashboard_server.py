@@ -2736,9 +2736,15 @@ class DashboardServer:
                                         limit_price = (round(setup.limit_entry_price, 2)
                                                        if setup.limit_entry_price is not None else None)
                                         mtf_tf = setup.mtf_timeframe
+                                        _hz = setup.htf_zone
+                                        ref_ts = (_hz.reference_low_ts.isoformat(timespec="minutes")
+                                                  if _hz and _hz.reference_low_ts else None)
+                                        trap_ts = (_hz.lock_ts.isoformat(timespec="minutes")
+                                                   if _hz and _hz.lock_ts else None)
                                     else:
                                         level_l = level_h = 0
                                         mtf_low = mtf_high = limit_price = mtf_tf = None
+                                        ref_ts = trap_ts = None
                                         side_state = htf_disp = mtf_disp = "—"
                                     strike = round(side_ltp) if _is_crypto else int(
                                         getattr(book, f"_{side.lower()}_strike", 0) or 0)
@@ -2751,6 +2757,7 @@ class DashboardServer:
                                         "mtf_low": mtf_low, "mtf_high": mtf_high, "mtf_timeframe": mtf_tf,
                                         "limit_entry_price": limit_price,
                                         "level_l": round(level_l, 2), "level_h": round(level_h, 2),
+                                        "ref_ts": ref_ts, "trap_ts": trap_ts,
                                     }
                                     _phases.append(side_state)
                                 tracking["phase"] = "/".join(_phases)

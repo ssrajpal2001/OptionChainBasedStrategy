@@ -7057,6 +7057,18 @@ function amoTest() {
                           <span class="text-right" style="color:var(--t-text)"
                                 x-text="((_t[side]||{}).level_h||0)>0 ? (_t[side]||{}).level_l+' · '+(_t[side]||{}).level_h : '—'"></span>
                         </div>
+                        <!-- Reference candle (the swept level's own timestamp) and when the
+                             2-candle reclaim actually confirmed the trap (zone lock) -- both for
+                             THIS SAME setup shown above, so it's clear exactly which candle formed
+                             this HTF zone and when it was confirmed, not just its price bounds. -->
+                        <template x-if="(_t[side]||{}).ref_ts">
+                          <div class="pl-4 py-0.5 text-xs font-mono" style="color:var(--t-muted)">
+                            ref candle <span style="color:var(--t-text)" x-text="(_t[side]||{}).ref_ts"></span>
+                            <template x-if="(_t[side]||{}).trap_ts">
+                              <span> · trapped <span style="color:var(--t-text)" x-text="(_t[side]||{}).trap_ts"></span></span>
+                            </template>
+                          </div>
+                        </template>
                         <!-- LOW·HIGH above is always THIS single setup's own HTF (Gate 1) zone --
                              the one currently furthest through the gates (LVLS shows how many
                              others are still in the pool, but only this one is displayed, and
