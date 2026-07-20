@@ -505,9 +505,10 @@ class V4CascadeBook(AbstractStrategyBook):
             buf_1m.append(bar)
             self._bars_5m["CE"].append(bar)
             self._bars_5m["PE"].append(bar)
+            _pos_before = self._engine.position
             events = self._engine.update(ce_bar=bar, pe_bar=bar)
             for order_ev in events:
-                self._emit_order(order_ev)
+                self._emit_order(order_ev, pos_before=_pos_before)
 
             if _bucket_end_1m(bar.timestamp, _CRYPTO_HTF_MINUTES):
                 bstart = _bucket_start(bar.timestamp, _CRYPTO_HTF_MINUTES)
@@ -624,12 +625,13 @@ class V4CascadeBook(AbstractStrategyBook):
     def _close_5m_bucket(self, side: str, bar) -> None:
         self._check_daily_boundary(bar.timestamp)
         self._bars_5m[side].append(bar)
+        _pos_before = self._engine.position
         if side == "CE":
             events = self._engine.update(ce_bar=bar)
         else:
             events = self._engine.update(pe_bar=bar)
         for ev in events:
-            self._emit_order(ev)
+            self._emit_order(ev, pos_before=_pos_before)
         self._persist_position()
         if _bucket_end(bar.timestamp, 75):
             window = [b for b in self._bars_5m[side] if b.timestamp.date() == bar.timestamp.date()]
@@ -731,7 +733,7 @@ class V4CascadeBook(AbstractStrategyBook):
         offset_sum = _TRACKING_OFFSET + EXECUTION_OFFSET_PTS
         return float(tracking_strike + offset_sum) if side == "CE" else float(tracking_strike - offset_sum)
 
-    def _emit_order(self, ev) -> None:
+    def _emit_order(self, ev, pos_before=None) -> None:
         """Publishes a CascadeOrderEvent to the dedicated per-binding bridge
         (execution_bridge/cascade_bridge.py) for BOTH open and close events —
         this used to only handle OPEN (via a now-removed broadcast-to-every-
@@ -740,7 +742,17 @@ class V4CascadeBook(AbstractStrategyBook):
         CLOSE was a pure no-op: the engine already marks a leg 'closed' with
         a STRUCTURAL price (SL/target/trail level), never a real fill — the
         bridge now reconciles both against the actual broker fill via
-        _on_fill below."""
+        _on_fill below.
+
+        ``pos_before``: the engine's position snapshot taken BEFORE the
+        engine.update() call that produced ``ev``. Needed for structural
+        flip: engine.update() can return [CLOSE_<old_side>, OPEN_<new_side>]
+        in the SAME batch, and both the close AND the open mutate
+        self._engine.position synchronously inside that single update()
+        call — by the time this method runs for the CLOSE event, engine.
+        position already points at the freshly-opened NEW side. Without
+        pos_before, the CLOSE event would incorrectly look up legs on the
+        wrong (new) position."""
         from execution_bridge.cascade_bridge import CascadeOrderEvent
         pos = self._engine.position
         is_open_ev = ev.event_type in (CascadeEventType.OPEN_LONG_CE, CascadeEventType.OPEN_LONG_PE)
@@ -768,8 +780,15 @@ class V4CascadeBook(AbstractStrategyBook):
                 client_id=self._client_id, binding_id=self._binding_id,
                 event_id=event_id, timestamp=ts,
             )))
-        elif is_close_ev and pos is not None:
-            leg = pos.t1 if ev.tranche == "T1" else (pos.t2 if ev.tranche == "T2" else None)
+        elif is_close_ev:
+            # Normal close: self._engine.position IS the position being
+            # closed. Structural-flip close: it's already been replaced by
+            # the newly-opened opposite side, so fall back to the pre-update
+            # snapshot the caller took (see docstring above).
+            close_pos = pos if (pos is not None and pos.side == ev.side) else pos_before
+            leg = None
+            if close_pos is not None and close_pos.side == ev.side:
+                leg = close_pos.t1 if ev.tranche == "T1" else (close_pos.t2 if ev.tranche == "T2" else None)
             if leg is not None:
                 # Recovery for positions opened before the execution-strike
                 # fix (persisted with strike=0): cascade_bridge can't resolve
@@ -780,7 +799,7 @@ class V4CascadeBook(AbstractStrategyBook):
                 # just entry, as a safety net.
                 if not leg.strike and not self._is_crypto:
                     leg.strike = self._resolve_execution_strike(ev.side)
-                    pos.execution_strike = leg.strike
+                    close_pos.execution_strike = leg.strike
                     logger.warning("V4CascadeBook[%s/%s/%s]: leg had strike=0 at close — "
                                    "re-resolved to %s before emitting EXIT.",
                                    self._underlying, self._client_id, self._binding_id, leg.strike)

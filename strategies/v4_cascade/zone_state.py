@@ -261,6 +261,31 @@ class PremiumGateScanner:
                 self._attempt_mtf_lock(setup)
             elif setup.state == GateState.MTF_LOCKED:
                 self._check_mtf_zone_entry(setup, bar)
+        self._invalidate_broken_setups(bar)
+
+    def _invalidate_broken_setups(self, bar) -> None:
+        """A setup's Inner Zone represents a CONFIRMED reclaim (price swept
+        below a level, then closed back above it) — LIMIT_ARMED's 1/3-
+        retracement price only makes sense as a shallow pull-back retest of
+        that reclaim. If a later bar re-breaks past the FAR edge of the zone
+        (below the swept low for a bear/long setup, above the swept high for
+        a bull/short setup), the reclaim has structurally failed — this is a
+        continuation breakdown, not a valid trap retest anymore. Drop the
+        setup instead of leaving it armed to fire a bad entry on a future
+        bar that happens to revisit the (now-invalid) 1/3 retracement price.
+        Runs after the state-transition checks above so a bar wide enough to
+        both enter AND blow through the zone in one move is still caught."""
+        for setup in list(self.setups):
+            if setup.state not in (GateState.MTF_LOCKED, GateState.LIMIT_ARMED):
+                continue
+            z = setup.mtf_zone
+            if z is None or z.entry_line is None or z.sweep_low is None:
+                continue
+            zone_low = min(z.entry_line, z.sweep_low)
+            zone_high = max(z.entry_line, z.sweep_low)
+            breached = bar.low < zone_low if self._bear else bar.high > zone_high
+            if breached:
+                self.setups.remove(setup)
 
     def _mtf_window(self, setup: _HTFSetup) -> List:
         if setup.htf_ref_ts is None:

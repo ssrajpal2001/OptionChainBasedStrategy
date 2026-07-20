@@ -106,16 +106,55 @@ class V4CascadeEngine:
         if tf != 5:
             return events
 
-        # Don't re-arm a side that already has a live position.
+        # Don't re-arm a side that already has a live position -- but the
+        # OPPOSITE side keeps scanning (Gate 1/2/3 don't freeze just
+        # because the other side is holding a trade). If the opposite
+        # side independently reaches its own Gate-3 trigger, that's a
+        # fresh, contradicting signal: close the current position
+        # (structural flip) and, if this side's own conditions still hold
+        # at this instant, open it immediately in the same cycle.
         if self.position is not None and self.position.is_open:
             if self.position.side == side:
                 events += self._check_exits(side, bar)
+                return events
+            scanner.on_5m_bar(bar)
+            trigger = check_limit_pierce(scanner, bar)
+            if trigger.fired:
+                events += self._close_for_structural_flip(bar.timestamp)
+                events.append(self._open_position(side, scanner, trigger.setup, bar))
             return events
 
         scanner.on_5m_bar(bar)
         trigger = check_limit_pierce(scanner, bar)
         if trigger.fired:
             events.append(self._open_position(side, scanner, trigger.setup, bar))
+        return events
+
+    def _close_for_structural_flip(self, ts) -> List[CascadeEvent]:
+        """Closes every still-open leg of the CURRENT position because the
+        OPPOSITE side just independently reached its own valid Gate-3
+        trigger -- a fresh, contradicting signal while a position is live.
+        Uses each leg's own entry_price as the theoretical close price,
+        same placeholder convention book.py already uses for EOD/manual
+        closes -- book.py's _on_fill reconciles the REAL fill same as
+        every other close, this is never treated as a real price."""
+        events: List[CascadeEvent] = []
+        pos = self.position
+        if pos is None:
+            return events
+        close_side = pos.side
+        for tranche, leg in (("T1", pos.t1), ("T2", pos.t2)):
+            if leg is None or leg.status != "open":
+                continue
+            leg.status = "closed"
+            leg.close_price = leg.entry_price
+            leg.close_reason = "structural_flip"
+            leg.close_time = ts
+            events.append(self._close_event(close_side, tranche, "structural_flip", leg.close_price, ts))
+        pos.status = "closed"
+        pos.close_time = ts
+        self._trackers.pop(close_side, None)
+        self._tracking_entry_price.pop(close_side, None)
         return events
 
     # ── entry ────────────────────────────────────────────────────────────────
