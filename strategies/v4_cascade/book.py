@@ -1061,15 +1061,26 @@ def _bucket_key(ts: datetime, multiplier: int, session_open: Tuple[int, int] = (
     return (ts.date(), minutes_since_open // multiplier)
 
 
-def _replay_through_engine(engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_daily_boundary=None) -> None:
+def _replay_through_engine(
+    engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_daily_boundary=None,
+    session_open: Tuple[int, int] = (9, 15),
+    eod_square_off: Tuple[int, int] = (15, 15),
+    gate23_reset: Tuple[int, int] = (15, 30),
+) -> None:
     """Chronological replay identical in shape to
     scripts/test_real_premium_replay.py — feeds 5m bars continuously and 75m
     closes (spot bias + CE/PE Gate 1) at each 75m bucket boundary, applying
-    the 15:15/15:30 daily rules along the way so the rebuilt state exactly
-    matches what live ticks would have produced."""
-    spot_75m_by_key = {_bucket_key(b.timestamp, 75): b for b in resample_bars(spot_5m, 75)} if spot_5m else {}
-    ce_75m_by_key = {_bucket_key(b.timestamp, 75): b for b in resample_bars(ce_5m, 75)} if ce_5m else {}
-    pe_75m_by_key = {_bucket_key(b.timestamp, 75): b for b in resample_bars(pe_5m, 75)} if pe_5m else {}
+    the EOD/gate-reset rules along the way so the rebuilt state exactly
+    matches what live ticks would have produced.
+
+    ``session_open``/``eod_square_off``/``gate23_reset``: must match the
+    calling book's own configured values (NIFTY: (9,15)/deployment-configured/
+    +15min; CRUDEOIL/MCX: (9,0)/(23,15)/(23,30)) — these used to be hardcoded
+    NSE-hours module constants here, silently force-closing any non-NIFTY
+    underlying's positions mid-session during replay."""
+    spot_75m_by_key = {_bucket_key(b.timestamp, 75, session_open): b for b in resample_bars(spot_5m, 75, session_open)} if spot_5m else {}
+    ce_75m_by_key = {_bucket_key(b.timestamp, 75, session_open): b for b in resample_bars(ce_5m, 75, session_open)} if ce_5m else {}
+    pe_75m_by_key = {_bucket_key(b.timestamp, 75, session_open): b for b in resample_bars(pe_5m, 75, session_open)} if pe_5m else {}
     ce_by_ts = {b.timestamp: b for b in ce_5m}
     pe_by_ts = {b.timestamp: b for b in pe_5m}
     all_ts = sorted(set(ce_by_ts) | set(pe_by_ts))
@@ -1089,8 +1100,8 @@ def _replay_through_engine(engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_da
         # grid (which can simply never be true if the grid-aligned bar was
         # itself missing that day). Never fires on the very last bar of
         # the whole series -- that bucket may still be incomplete/live.
-        cur_key = _bucket_key(ts, 75)
-        bucket_closing = idx + 1 < len(all_ts) and _bucket_key(all_ts[idx + 1], 75) != cur_key
+        cur_key = _bucket_key(ts, 75, session_open)
+        bucket_closing = idx + 1 < len(all_ts) and _bucket_key(all_ts[idx + 1], 75, session_open) != cur_key
         if bucket_closing:
             sbar = spot_75m_by_key.get(cur_key)
             ce75 = ce_75m_by_key.get(cur_key)
@@ -1105,7 +1116,7 @@ def _replay_through_engine(engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_da
                 pe_bar=_Bar(pe75.timestamp, pe75.close, pe75.high, pe75.low, pe75.close, tf=75) if pe75 else None,
             )
 
-        if (ts.hour, ts.minute) == _EOD_SQUARE_OFF:
+        if (ts.hour, ts.minute) == eod_square_off:
             pos = engine.position
             if pos is not None and pos.is_open:
                 for leg in (pos.t1, pos.t2):
@@ -1116,5 +1127,5 @@ def _replay_through_engine(engine: V4CascadeEngine, spot_5m, ce_5m, pe_5m, on_da
                         leg.close_time = ts
                 pos.status = "closed"
                 pos.close_time = ts
-        if (ts.hour, ts.minute) == _GATE23_RESET and on_daily_boundary is not None:
+        if (ts.hour, ts.minute) == gate23_reset and on_daily_boundary is not None:
             on_daily_boundary(ts)
