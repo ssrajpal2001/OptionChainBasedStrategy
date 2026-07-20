@@ -774,16 +774,28 @@ class V4CascadeBook(AbstractStrategyBook):
         self._persist_position()
 
     def _apply_eod_gate23_rules(self, ts: datetime) -> None:
-        from strategies.v4_cascade.dataclasses import GateState
-        for side in ("CE", "PE"):
-            scanner = self._engine._scanners[side]
-            for setup in scanner.setups:
-                if setup.state != GateState.HTF_LOCKED:
-                    setup.state = GateState.HTF_LOCKED
-                    setup.mtf_zone = None
-                    setup.mtf_timeframe = None
-                    setup.limit_entry_price = None
-                    setup.mtf_consumed_before_ts = None
+        """2026-07-20 Index/Premium decoupling: crypto keeps its exact legacy
+        behavior (roll every in-flight setup back to HTF_LOCKED, discarding
+        only the finer Gate-2/3 progress — the wider Gate-1 zone survives the
+        day boundary). For NIFTY/CRUDEOIL there is no analogous outer zone
+        anymore (Gate 1 lives on the Index chart, which is never day-scoped —
+        spot_confirm.py is untouched by this) — every in-flight
+        IndexGatedPremiumScanner setup IS what used to be the inner zone, so
+        the correct EOD action is simply to discard all of them."""
+        if self._is_crypto:
+            from strategies.v4_cascade.dataclasses import GateState
+            for side in ("CE", "PE"):
+                scanner = self._engine._scanners[side]
+                for setup in scanner.setups:
+                    if setup.state != GateState.HTF_LOCKED:
+                        setup.state = GateState.HTF_LOCKED
+                        setup.mtf_zone = None
+                        setup.mtf_timeframe = None
+                        setup.limit_entry_price = None
+                        setup.mtf_consumed_before_ts = None
+        else:
+            for side in ("CE", "PE"):
+                self._engine._scanners[side].setups.clear()
 
     # ── order emission ───────────────────────────────────────────────────────
     def _resolve_execution_strike(self, side: str) -> float:

@@ -27,7 +27,7 @@ from collections import deque
 from datetime import datetime
 from typing import Deque, List, Optional, Tuple
 
-from strategies.v4_cascade.dataclasses import RollingBaseZone, ZoneState, GateState
+from strategies.v4_cascade.dataclasses import RollingBaseZone, ZoneState, GateState, PremiumZoneState
 from strategies.v4_cascade.rolling_base import (
     scan_ladder, build_ladder, LadderMatch, find_bear_trap_2candle,
     find_all_bear_traps_2candle, find_bull_trap_2candle, find_all_bull_traps_2candle,
@@ -210,13 +210,17 @@ class PremiumGateScanner:
         return max(self.setups, key=lambda s: order.index(s.state) if s.state in order else -1).state
 
     # ── engine-driven bias control ──────────────────────────────────────────
-    def set_armed(self, armed: bool) -> None:
+    def set_armed(self, armed: bool, confirmed_ts: Optional[datetime] = None) -> None:
         """Called by the engine each time spot bias is re-evaluated. Gates
         whether a completed Gate-3 trigger is allowed to actually open a
         trade (checked by the engine, not this class) -- never aborts an
         in-flight setup already underway, and (2026-07-20) no longer gates
         new-zone discovery either, which now runs unconditionally on both
-        sides regardless of bias."""
+        sides regardless of bias.
+
+        ``confirmed_ts`` is accepted (and ignored) only so engine.py can call
+        this and IndexGatedPremiumScanner.set_armed with the same signature —
+        this legacy crypto-only scanner has no window to anchor with it."""
         self.armed = armed
 
     # ── Gate 1 (75m) ─────────────────────────────────────────────────────────
@@ -413,3 +417,182 @@ class PremiumGateScanner:
         self._known_ref_ts.clear()
         self.setups.clear()
         self.armed = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2026-07-20 Index/Premium decoupling (NIFTY/CRUDEOIL real-options path only —
+# crypto keeps using PremiumGateScanner/_HTFSetup above, completely untouched).
+#
+# Gate 1 (structural sweep+reclaim) has moved entirely off the premium chart
+# and onto the Index/Futures chart (spot_confirm.py's SpotConfirmTracker,
+# fixed 75m). This class implements the two gates that remain on the premium
+# chart: Gate 2 (5m, 15m-fallback Demand Block discovery — bear-trap-only,
+# via find_all_bear_traps_2candle) and Gate 3 (1/3-depth limit + pierce).
+# Gate 2 discovery is HARD-GATED on the Index side being armed (``self.armed``)
+# — this is the literal reversal of PremiumGateScanner's 2026-07-20
+# "discovery runs unconditionally" decision, which no longer applies here
+# because Gate 1 doesn't live on this chart anymore. Per the user's explicit
+# "never abort in-flight" decision, ``armed`` only gates whether a NEW setup
+# is allowed to be DISCOVERED — an already-discovered setup keeps advancing
+# to LIMIT_ARMED/trigger/invalidation regardless of later Index flips.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _PremiumSetup:
+    """One independently-tracked premium Demand Block -> limit funnel. Born
+    already at PREMIUM_LOCKED (mirrors _HTFSetup's "setups spring into
+    existence already locked" pattern) — there is no persisted "currently
+    checking 15m" state; the 5m/15m fallback resolves synchronously within a
+    single on_5m_bar() call, recorded retrospectively via ``timeframe``."""
+
+    __slots__ = ("zone", "ref_ts", "timeframe", "state", "limit_entry_price")
+
+    def __init__(self, zone: RollingBaseZone, timeframe: int) -> None:
+        self.zone = zone
+        self.ref_ts = zone.reference_low_ts
+        self.timeframe = timeframe
+        self.state: PremiumZoneState = PremiumZoneState.PREMIUM_LOCKED
+        self.limit_entry_price: Optional[float] = None
+
+
+class IndexGatedPremiumScanner:
+    """One instance per side (CE or PE tracking contract), NIFTY/CRUDEOIL
+    only. Bear-trap-only, unconditionally (no ``bear`` parameter) — per spec,
+    Gate 2 looks "only and only for a Bear Trap pattern" on BOTH CE and PE
+    premium (as option BUYERS, we need sellers trapped out of the premium
+    contract regardless of side). Discovery only runs while ``armed`` (set by
+    engine.py from spot_confirm.py's Index-chart classification); an
+    already-discovered setup is never aborted by a later Index flip — see
+    module docstring above."""
+
+    def __init__(self, session_open: Tuple[int, int] = (9, 15)) -> None:
+        self._bear = True  # hardcoded — see class docstring
+        self._session_open = session_open
+
+        self.armed: bool = False
+        self._scan_window_start_ts: Optional[datetime] = None
+
+        self._bars_5m: Deque = deque(maxlen=_MAX_5M_BARS)
+        self._known_ref_ts: set = set()
+
+        self.setups: List[_PremiumSetup] = []
+
+    @property
+    def state(self) -> PremiumZoneState:
+        """Informational summary only — the most-advanced state across all
+        in-flight setups, or ARMED_WAIT/PREMIUM_SCANNING if none exist yet."""
+        if not self.setups:
+            return PremiumZoneState.PREMIUM_SCANNING if self.armed else PremiumZoneState.ARMED_WAIT
+        order = [PremiumZoneState.PREMIUM_LOCKED, PremiumZoneState.LIMIT_ARMED]
+        return max(self.setups, key=lambda s: order.index(s.state) if s.state in order else -1).state
+
+    # ── engine-driven Index gate control ────────────────────────────────────
+    def set_armed(self, armed: bool, confirmed_ts: Optional[datetime] = None) -> None:
+        """Called by the engine each time the Index-chart classification is
+        re-evaluated. ``armed`` hard-gates whether a NEW premium Demand Block
+        scan may START (see on_5m_bar) — never aborts a setup already
+        in-flight. The scan window anchor is monotonic: it only ever advances
+        to a LATER confirmation timestamp, never rewinds to an older/stale
+        one, and staying unarmed afterward does not clear it (a later re-arm
+        just resumes/advances from where it left off)."""
+        self.armed = armed
+        if armed and confirmed_ts is not None:
+            if self._scan_window_start_ts is None or confirmed_ts > self._scan_window_start_ts:
+                self._scan_window_start_ts = confirmed_ts
+
+    # ── Gate 1 is now the Index chart (spot_confirm.py) — this is a no-op ──
+    def on_75m_bar(self, bar) -> None:
+        """Documented no-op: Gate 1 no longer scans the premium chart at all.
+        Kept only so engine.py's existing tf==75 dispatch branch (and
+        book.py's existing 75m ce_bar/pe_bar feed) need no changes."""
+        return
+
+    # ── Gate 2 (5m, fallback 15m) + Gate-2 zone-entry -> limit calc ─────────
+    def on_5m_bar(self, bar) -> None:
+        self._bars_5m.append(bar)
+        if self.armed and self._scan_window_start_ts is not None:
+            self._scan_for_new_premium_setups()
+        for setup in self.setups:
+            if setup.state == PremiumZoneState.PREMIUM_LOCKED:
+                self._check_zone_entry(setup, bar)
+        self._invalidate_broken_setups(bar)
+
+    def _scan_for_new_premium_setups(self) -> None:
+        window = [b for b in self._bars_5m if b.timestamp >= self._scan_window_start_ts]
+        if len(window) < 3:
+            return
+        new_found = False
+        for zone in find_all_bear_traps_2candle(window):
+            if zone.reference_low_ts in self._known_ref_ts:
+                continue
+            self._known_ref_ts.add(zone.reference_low_ts)
+            self.setups.append(_PremiumSetup(zone, timeframe=5))
+            new_found = True
+        if new_found:
+            return
+        # 5m found nothing NEW this pass -- fall back to a 15m resample of
+        # the same window (mirrors the legacy scanner's 5m-OR-15m ladder).
+        resampled = resample_bars(window, 15, session_open=self._session_open)
+        if len(resampled) < 3:
+            return
+        for zone in find_all_bear_traps_2candle(resampled):
+            if zone.reference_low_ts in self._known_ref_ts:
+                continue
+            self._known_ref_ts.add(zone.reference_low_ts)
+            self.setups.append(_PremiumSetup(zone, timeframe=15))
+
+    def _zone_overlap(self, bar, entry_line: float, sweep_low: float) -> bool:
+        return bar.low <= entry_line and bar.high >= sweep_low
+
+    def _check_zone_entry(self, setup: _PremiumSetup, bar) -> None:
+        z = setup.zone
+        if z is None or z.entry_line is None or z.sweep_low is None:
+            return
+        if self._zone_overlap(bar, z.entry_line, z.sweep_low):
+            setup.state = PremiumZoneState.WAITING_FOR_ZONE_ENTRY  # transient marker
+            inner_high, inner_low = z.entry_line, z.sweep_low
+            setup.limit_entry_price = inner_high - (inner_high - inner_low) / 3.0
+            setup.state = PremiumZoneState.LIMIT_ARMED
+
+    @staticmethod
+    def _zone_span(z):
+        if z is None or z.entry_line is None or z.sweep_low is None:
+            return None, None
+        return min(z.entry_line, z.sweep_low), max(z.entry_line, z.sweep_low)
+
+    def _invalidate_broken_setups(self, bar) -> None:
+        """Close-based breach of a setup's own zone drops it entirely — there
+        is no outer/HTF zone to roll back to anymore (only one zone per
+        setup), so this collapses to a single branch versus the legacy
+        scanner's two-tier version. Judged on CLOSE, not low/high — a wick
+        through the zone is the liquidity-sweep signal itself, not a failure
+        (same rule as rolling_base.py's _is_mitigated_bear)."""
+        for setup in list(self.setups):
+            zone_low, zone_high = self._zone_span(setup.zone)
+            if zone_low is None:
+                continue
+            if bar.close < zone_low:
+                self.setups.remove(setup)
+
+    # ── Gate 3 support ───────────────────────────────────────────────────────
+    def limit_armed_setups(self) -> List[_PremiumSetup]:
+        return [s for s in self.setups if s.state == PremiumZoneState.LIMIT_ARMED]
+
+    def pop_setup(self, setup: _PremiumSetup, ts: datetime) -> None:
+        """A Gate 3 trigger fired on ``setup`` and was acted on — remove just
+        that setup; every OTHER in-flight setup keeps advancing untouched.
+        ``_known_ref_ts`` is NOT cleared for this ref, so a fresh scan can
+        never re-add the exact same already-traded Demand Block."""
+        if setup in self.setups:
+            self.setups.remove(setup)
+
+    def invalidate_setup(self, setup: _PremiumSetup) -> None:
+        if setup in self.setups:
+            self.setups.remove(setup)
+
+    def reset(self) -> None:
+        self._bars_5m.clear()
+        self._known_ref_ts.clear()
+        self.setups.clear()
+        self.armed = False
+        self._scan_window_start_ts = None

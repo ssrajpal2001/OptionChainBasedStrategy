@@ -759,6 +759,7 @@ document.addEventListener('alpine:init', () => {
     v4CascadeOk:         null,
     v4TrapZones:         [],
     v4TrapPosition:      null,
+    v4IndexGate:         null,
     v4TrapPollTimer:     null,
 
     startV4TrapPoll() {
@@ -774,7 +775,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await fetch(`/api/admin/strategy/${this.v4CascadeDeployId}/v4_trap_status`, {headers: this._v4AuthHeaders()});
         const d = await r.json();
-        if (d.ok) { this.v4TrapZones = d.zones || []; this.v4TrapPosition = d.position || null; }
+        if (d.ok) { this.v4TrapZones = d.zones || []; this.v4TrapPosition = d.position || null; this.v4IndexGate = d.index_gate || null; }
         else { this.v4CascadeOk = false; this.v4CascadeMsg = d.detail || d.error || 'Failed'; }
       } catch (e) { this.v4CascadeOk = false; this.v4CascadeMsg = String(e); }
     },
@@ -3960,12 +3961,26 @@ function amoTest() {
             <div class="font-display font-bold text-xs" style="color:var(--t-text)">Live Trap Status</div>
             <button @click="refreshV4TrapStatus()" class="t-btn font-mono text-xs px-3 py-1 rounded">Refresh</button>
           </div>
+          <!-- Index gate summary (2026-07-20: Gate 1 lives on the 75m Index/Futures
+               chart now, separate from the per-side premium zones table below). -->
+          <template x-if="v4IndexGate && v4IndexGate.kind!=='none'">
+            <div class="mb-2 text-xs font-mono" style="color:var(--t-muted)">
+              Index (75m): <span style="color:var(--t-text)" x-text="v4IndexGate.kind"></span>
+              <span x-text="v4IndexGate.armed_side ? (' armed '+v4IndexGate.armed_side) : ''"></span>
+              <template x-if="v4IndexGate.ref_ts"><span> · ref <span style="color:var(--t-text)" x-text="v4IndexGate.ref_ts"></span></span></template>
+              <template x-if="v4IndexGate.confirmed_ts"><span> · confirmed <span style="color:var(--t-text)" x-text="v4IndexGate.confirmed_ts"></span></span></template>
+            </div>
+          </template>
+          <!-- z.model discriminates legacy_two_stage (crypto, HTF+MTF columns) vs
+               index_gated (NIFTY/CRUDEOIL, single ref/entry/sl/timeframe) rows --
+               both render into the same table, unused cells show '—' per row. -->
           <div class="overflow-x-auto">
             <table class="w-full font-mono text-xs">
               <thead>
                 <tr style="color:var(--t-muted)">
                   <th class="text-left px-1 py-1">Side</th>
                   <th class="text-left px-1 py-1">Gate State</th>
+                  <th class="text-left px-1 py-1">TF</th>
                   <th class="text-left px-1 py-1">HTF Ref</th>
                   <th class="text-right px-1 py-1">HTF Entry</th>
                   <th class="text-right px-1 py-1">HTF SL</th>
@@ -3978,16 +3993,17 @@ function amoTest() {
                 </tr>
               </thead>
               <tbody>
-                <template x-for="z in v4TrapZones" :key="z.side+z.htf_ref_ts">
+                <template x-for="z in v4TrapZones" :key="z.side+(z.htf_ref_ts||z.ref_ts)">
                   <tr style="border-top:1px solid var(--t-border)">
                     <td class="px-1 py-1" x-text="z.side"></td>
                     <td class="px-1 py-1" style="color:var(--t-cyan)" x-text="z.state"></td>
-                    <td class="px-1 py-1" x-text="z.htf_ref_ts"></td>
-                    <td class="text-right px-1 py-1" x-text="(z.htf_entry||0).toFixed(2)"></td>
-                    <td class="text-right px-1 py-1" x-text="(z.htf_sl||0).toFixed(2)"></td>
+                    <td class="px-1 py-1" x-text="z.timeframe ? (z.timeframe+'m') : '75m'"></td>
+                    <td class="px-1 py-1" x-text="z.htf_ref_ts || z.ref_ts || '—'"></td>
+                    <td class="text-right px-1 py-1" x-text="((z.htf_entry!=null?z.htf_entry:z.entry)||0).toFixed(2)"></td>
+                    <td class="text-right px-1 py-1" x-text="((z.htf_sl!=null?z.htf_sl:z.sl)||0).toFixed(2)"></td>
                     <td class="px-1 py-1" x-text="z.mtf_ref_ts || '—'"></td>
-                    <td class="text-right px-1 py-1" x-text="z.mtf_entry ? z.mtf_entry.toFixed(2) : '—'"></td>
-                    <td class="text-right px-1 py-1" x-text="z.inner_zone_low ? z.inner_zone_low.toFixed(2) : '—'"></td>
+                    <td class="text-right px-1 py-1" x-text="z.mtf_entry ? z.mtf_entry.toFixed(2) : (z.zone_high ? z.zone_high.toFixed(2) : '—')"></td>
+                    <td class="text-right px-1 py-1" x-text="z.inner_zone_low ? z.inner_zone_low.toFixed(2) : (z.zone_low ? z.zone_low.toFixed(2) : '—')"></td>
                     <td class="text-right px-1 py-1" x-text="z.limit_entry_price ? z.limit_entry_price.toFixed(2) : '—'"></td>
                     <td class="text-right px-1 py-1" x-text="z.live_price ? z.live_price.toFixed(2) : '—'"></td>
                     <td class="text-right px-1 py-1"
@@ -7023,22 +7039,42 @@ function amoTest() {
                         <template x-if="_t.is_crypto">
                           <span>SPOT <span style="color:var(--t-cyan)" x-text="_t.atm"></span></span>
                         </template>
-                        <!-- Spot-side bias: which direction the market's own structure is
-                             currently confirming. A BEAR TRAP on spot means sellers got
+                        <!-- Index-side bias: which direction the Index/Futures chart's own
+                             structure is currently confirming (2026-07-20: Gate 1 lives here now,
+                             not on the premium chart). A BEAR TRAP on the Index means sellers got
                              trapped into a reclaim -- a BULLISH read that arms the CE/BEAR
                              (bear-scan) funnel; a BULL TRAP is the mirror bearish read that
                              arms PE/BULL. Neither confirmed -> both funnels stay ARMED_WAIT. -->
                         <span>bias
-                          <span :style="`color:${_t.bias==='bear_trap_close'?'var(--t-green)':_t.bias==='bull_trap_close'?'var(--t-red)':'var(--t-muted)'}`"
-                                x-text="_t.bias==='bear_trap_close'?'BULLISH (CE armed)':_t.bias==='bull_trap_close'?'BEARISH (PE armed)':'none'"></span>
+                          <span :style="`color:${_t.bias==='bear_trap_confirmed'?'var(--t-green)':_t.bias==='bull_trap_confirmed'?'var(--t-red)':'var(--t-muted)'}`"
+                                x-text="_t.bias==='bear_trap_confirmed'?'BULLISH (CE armed)':_t.bias==='bull_trap_confirmed'?'BEARISH (PE armed)':'none'"></span>
                         </span>
                       </div>
+                      <!-- Explicit Index-gate line: which chart/timeframe Gate 1 is on (always
+                           the 75m Index/Futures chart now) and the confirming candle's own
+                           ref/reclaim timestamps, so it's never ambiguous which chart armed a side. -->
+                      <template x-if="_t.index_gate && _t.index_gate.kind!=='none'">
+                        <div class="text-xs font-mono mb-1" style="color:var(--t-muted)">
+                          Index (75m): <span style="color:var(--t-text)" x-text="_t.index_gate.kind"></span>
+                          <span x-text="_t.index_gate.armed_side ? (' armed '+_t.index_gate.armed_side) : ''"></span>
+                          <template x-if="_t.index_gate.ref_ts">
+                            <span> · ref <span style="color:var(--t-text)" x-text="_t.index_gate.ref_ts"></span></span>
+                          </template>
+                          <template x-if="_t.index_gate.confirmed_ts">
+                            <span> · confirmed <span style="color:var(--t-text)" x-text="_t.index_gate.confirmed_ts"></span></span>
+                          </template>
+                        </div>
+                      </template>
                       <div class="text-right mb-1" x-text="'phase: '+_t.phase"></div>
-                      <!-- Per-leg seller-trap detector state (HTF/MTF) + active LIFO level [L/H], as a
-                           column-aligned grid. Crypto has no CE/PE option chain (spot-only) — the
-                           backend still keys internally by ce/pe (bear-scan/bull-scan side), but sends
-                           *_label ('BEAR'/'BULL' for crypto, 'CE'/'PE' for NIFTY) so the UI never
-                           implies an option contract for crypto. -->
+                      <!-- Per-leg seller-trap detector state, as a column-aligned grid. Crypto has
+                           no CE/PE option chain (spot-only) — the backend still keys internally by
+                           ce/pe (bear-scan/bull-scan side), but sends *_label ('BEAR'/'BULL' for
+                           crypto, 'CE'/'PE' for NIFTY) so the UI never implies an option contract
+                           for crypto. _t.model discriminates the two shapes: 'legacy' (crypto) keeps
+                           the two-stage HTF(75m premium)/MTF(5m/15m premium) grid unchanged;
+                           everything else (NIFTY/CRUDEOIL, 2026-07-20 Index/Premium decoupling) gets
+                           a single-stage STATE/TF grid, since Gate 1 no longer scans this chart. -->
+                      <template x-if="_t.model==='legacy'">
                       <div class="pos-legs">
                       <div class="pos-legs-inner space-y-1">
                       <div class="grid items-center text-xs font-mono" style="color:var(--t-muted);grid-template-columns:0.9fr 0.8fr 1fr 1fr 0.6fr 1.3fr;gap:0.4rem">
@@ -7092,6 +7128,46 @@ function amoTest() {
                       </template>
                       </div>
                       </div>
+                      </template>
+                      <!-- Non-crypto (NIFTY/CRUDEOIL): single-stage STATE/TF grid -- Gate 1
+                           (Index, 75m) is shown separately above; this is Gate 2/3 only. -->
+                      <template x-if="_t.model!=='legacy'">
+                      <div class="pos-legs">
+                      <div class="pos-legs-inner space-y-1">
+                      <div class="grid items-center text-xs font-mono" style="color:var(--t-muted);grid-template-columns:0.9fr 0.8fr 1fr 0.5fr 0.6fr 1.3fr;gap:0.4rem">
+                        <span>SIDE</span><span class="text-right">LTP</span><span>STATE</span><span>TF</span>
+                        <span class="text-right">LVLS</span><span class="text-right">LOW · HIGH</span>
+                      </div>
+                      <template x-for="side in ['ce','pe']" :key="side">
+                        <div>
+                        <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:0.9fr 0.8fr 1fr 0.5fr 0.6fr 1.3fr;gap:0.4rem">
+                          <span style="color:var(--t-text)"
+                                x-text="(_t[side+'_label']||side.toUpperCase())+(_t[side+'_strike']?' '+_t[side+'_strike']:'')"></span>
+                          <span class="text-right price-live" style="color:var(--t-bright)" x-text="_t[side==='ce'?'ce_ltp':'pe_ltp']"></span>
+                          <span :style="`color:${['limit_armed','triggered'].includes((_t[side]||{}).state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="(_t[side]||{}).state||'—'"></span>
+                          <span x-text="(_t[side]||{}).timeframe ? (_t[side].timeframe+'m') : '—'"></span>
+                          <span class="text-right" x-text="(_t[side]||{}).traps||0"></span>
+                          <span class="text-right" style="color:var(--t-text)"
+                                x-text="((_t[side]||{}).zone_high||0)>0 ? (_t[side]||{}).zone_low+' · '+(_t[side]||{}).zone_high : '—'"></span>
+                        </div>
+                        <template x-if="(_t[side]||{}).ref_ts">
+                          <div class="pl-4 py-0.5 text-xs font-mono" style="color:var(--t-muted)">
+                            ref candle <span style="color:var(--t-text)" x-text="(_t[side]||{}).ref_ts"></span>
+                            <template x-if="(_t[side]||{}).trap_ts">
+                              <span> · trapped <span style="color:var(--t-text)" x-text="(_t[side]||{}).trap_ts"></span></span>
+                            </template>
+                          </div>
+                        </template>
+                        <template x-if="(_t[side]||{}).limit_entry_price!==null">
+                          <div class="pl-4 py-0.5 text-xs font-mono" style="color:var(--t-muted);border-left:1px solid var(--t-border)">
+                            <span>limit <span style="color:var(--t-green)" x-text="(_t[side]||{}).limit_entry_price"></span></span>
+                          </div>
+                        </template>
+                        </div>
+                      </template>
+                      </div>
+                      </div>
+                      </template>
                     </div>
                   </template>
 

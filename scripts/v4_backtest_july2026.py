@@ -1,46 +1,53 @@
 """
 scripts/v4_backtest_july2026.py — comprehensive backtest of the 3-gate V4
-Cascade premium funnel over the July 2026 monthly expiry (CE 23900 / PE
-24300, 21-JUL-2026), under the following explicit rules (2026-07-19):
+Cascade funnel over the July 2026 monthly expiry (CE 23900 / PE 24300,
+21-JUL-2026).
 
-1. MACRO ZONE PERSISTENCE: HTF structural zones (Gate 1) are fed and locked
-   continuously across the WHOLE backtest window — the real, unmodified
-   PremiumGateScanner (multi-zone, 2026-07-19) drives Gate 1/Gate 2 exactly
-   as in production, so an HTF zone found on 07-08 stays alive and
-   unmitigated into 07-14 etc., same as already validated this session.
-2. PURE INTRADAY EXECUTION: an open POSITION cannot carry overnight — force
-   square-off (market order) if still open at 15:15. At 15:30 each day,
-   Gate 2 / Gate 3 state is rolled back to HTF_LOCKED for every in-flight
-   setup (MTF zone / limit price / sweep progress discarded) while the
-   underlying HTF zone (Gate 1) is left completely untouched — so tomorrow's
-   09:15 Gate 2 re-scan starts fresh, anchored to the SAME original HTF ref.
-3. Risk model TESTED (this backtest only — does NOT touch the production
+**2026-07-20 Index/Premium decoupling** (supersedes the original 2026-07-19
+premium-only Gate 1/Gate 2 design this script was first written against):
+
+1. GATE 1 = INDEX/FUTURES CHART, 75m: the real, unmodified SpotConfirmTracker
+   drives Gate 1 off NIFTY spot's own 75m sweep+reclaim structure — never the
+   premium chart. A confirmed BEAR_TRAP_CONFIRMED arms CE, BULL_TRAP_CONFIRMED
+   arms PE (spot_confirm.py, unchanged mechanism).
+2. GATE 2 = PREMIUM CHART, 5m (15m fallback): the real, unmodified
+   IndexGatedPremiumScanner scans ONLY once the Index gate arms a side,
+   looking exclusively for a bear-trap 2-candle Demand Block on the CE/PE
+   tracking premium chart. Per the "never abort in-flight" decision, a
+   Demand Block already being scanned/locked keeps advancing even if the
+   Index classification later flips away.
+3. PURE INTRADAY EXECUTION: an open POSITION cannot carry overnight — force
+   square-off (market order) if still open at 15:15. At 15:30 each day, EVERY
+   in-flight premium Demand Block setup is discarded (mirrors book.py's
+   non-crypto `_apply_eod_gate23_rules`) — there is no outer "HTF" zone to
+   roll back to anymore since Gate 1 lives on the Index chart, which is never
+   day-scoped (spot_confirm.py itself is untouched by the daily reset).
+4. Risk model TESTED (this backtest only — does NOT touch the production
    entries.compute_risk_mapping / T1+T2 tranche model in exits.py):
-     SL           = Inner_Zone_Low - 10 points (the MTF/Inner zone's own
-                     Zone_Low — i.e. the next-candle low after the MTF ref —
-                     NOT the original HTF ref; guaranteed < entry_price by
-                     construction, per 2026-07-19 clarification) (5m CANDLE
+     SL           = Inner_Zone_Low - 10 points (the premium Demand Block's
+                     own Zone_Low — the next-candle low after its ref candle
+                     — guaranteed < entry_price by construction) (5m CANDLE
                      CLOSE below -> stop out)
-     Target A     = HTF Reference candle's exact HIGH
+     Target A     = the premium Demand Block's own ref candle HIGH (sl_level)
      Target B 1:2 = entry + 2 x (entry - SL)
      Target B 1:3 = entry + 3 x (entry - SL)
    All three exits are simulated in PARALLEL off the same single entry
    signal (one real position, three hypothetical exit styles compared).
-4. Gate 3 liquidity-sweep filter + invalidation (this backtest only, applied
-   on top of the real MTF_LOCKED Inner Zone): entry requires a 5m bar's low
-   to pierce below the Inner Zone's LOW (deeper than the 1/3-depth limit
-   price). Invalidated (no entry) if EITHER (a) that sweep bar's CLOSE is
-   below Inner_Zone_Low, or (b) the very next 5m bar prints a lower high AND
-   a lower low than the sweep bar. Entry fills at the 1/3-depth limit price
-   on the bar after the sweep bar, once neither invalidation fired.
+5. Gate 3 liquidity-sweep filter + invalidation (this backtest only, applied
+   on top of the real PREMIUM_LOCKED Demand Block): entry requires a 5m bar's
+   low to pierce below the Demand Block's LOW (deeper than the 1/3-depth
+   limit price). Invalidated (no entry) if EITHER (a) that sweep bar's CLOSE
+   is below Inner_Zone_Low, or (b) the very next 5m bar prints a lower high
+   AND a lower low than the sweep bar. Entry fills at the 1/3-depth limit
+   price on the bar after the sweep bar, once neither invalidation fired.
 
 Only one position open at a time across CE+PE (mirrors the production
 engine's single-CascadePosition constraint) — the A/B1/B2 target comparison
 is a pure post-hoc forward simulation off that one real entry.
 
-Reuses the real PremiumGateScanner (Gate 1 + Gate 2, completely unmodified)
-and SpotConfirmTracker, fed real Upstox 1-minute history for every available
-July trading day.
+Reuses the real IndexGatedPremiumScanner and SpotConfirmTracker (both
+completely unmodified from production), fed real Upstox 1-minute history for
+every available July trading day.
 """
 from __future__ import annotations
 
@@ -58,10 +65,10 @@ from config.global_config import IST
 from data_layer.client_db import ClientDB
 from data_layer.historical_candles import _http_get_json, _parse_candles
 from data_layer.instrument_registry import REGISTRY
-from strategies.v4_cascade.dataclasses import GateState
+from strategies.v4_cascade.dataclasses import PremiumZoneState
 from strategies.v4_cascade.rolling_base import resample_bars
 from strategies.v4_cascade.spot_confirm import SpotConfirmTracker
-from strategies.v4_cascade.zone_state import PremiumGateScanner
+from strategies.v4_cascade.zone_state import IndexGatedPremiumScanner
 
 EXPIRY = date(2026, 7, 21)
 CE_STRIKE = 23900
@@ -161,15 +168,13 @@ class Trade:
     target_a: float
     target_b1: float  # 1:2
     target_b2: float  # 1:3
-    htf_ref_ts: datetime
-    htf_ref_low: float
-    htf_ref_high: float
-    htf_lock_ts: datetime
-    mtf_timeframe: int
-    mtf_ref_ts: datetime
-    mtf_ref_low: float
-    mtf_ref_high: float
-    mtf_lock_ts: datetime
+    index_kind: str            # "bear_trap_confirmed" (CE) / "bull_trap_confirmed" (PE)
+    index_confirmed_ts: Optional[datetime]   # the Index-chart reclaim ts that anchored this scan window
+    premium_timeframe: int
+    premium_ref_ts: datetime
+    premium_ref_low: float
+    premium_ref_high: float
+    premium_lock_ts: datetime
     inner_zone_low: float
     exit_a_ts: Optional[datetime] = None
     exit_a_price: Optional[float] = None
@@ -208,7 +213,7 @@ def check_sweep_gate3(setup, ts: datetime, bars_by_ts: Dict[datetime, Bar],
     (same-day only -- a sweep bar with no next bar available before 15:30
     today is left unresolved, not carried into tomorrow). Returns
     (entry_ts, entry_price, invalidated: bool)."""
-    z = setup.mtf_zone
+    z = setup.zone
     if z is None or z.entry_line is None or z.sweep_low is None:
         return None
     inner_high, inner_low = z.entry_line, z.sweep_low
@@ -231,25 +236,19 @@ def check_sweep_gate3(setup, ts: datetime, bars_by_ts: Dict[datetime, Bar],
     return nxt_ts, limit_price, False
 
 
-def reset_gate23_to_htf_locked(scanner: PremiumGateScanner) -> None:
-    """15:30 daily rule: roll every in-flight setup back to HTF_LOCKED,
-    discarding Gate 2/3 progress (MTF zone, limit price, sweep state) while
-    leaving the underlying HTF zone (Gate 1) completely intact."""
-    for setup in scanner.setups:
-        if setup.state != GateState.HTF_LOCKED:
-            setup.state = GateState.HTF_LOCKED
-            setup.mtf_zone = None
-            setup.mtf_timeframe = None
-            setup.limit_entry_price = None
-            setup.mtf_consumed_before_ts = None
+def reset_premium_scan_daily(scanner: IndexGatedPremiumScanner) -> None:
+    """15:30 daily rule (2026-07-20 model): discard EVERY in-flight premium
+    Demand Block setup — there is no outer "HTF" zone to roll back to
+    anymore (Gate 1 lives on the Index chart, which spot_confirm.py keeps
+    continuously and is never day-scoped/reset). Mirrors book.py's
+    non-crypto `_apply_eod_gate23_rules` branch exactly."""
+    scanner.setups.clear()
 
 
 # ── main replay ───────────────────────────────────────────────────────────────
 
 def run_backtest(spot_5m: List[Bar], ce_5m: List[Bar], pe_5m: List[Bar]) -> List[Trade]:
     spot_75m_by_ts = {b.timestamp: b for b in to_75m_bars(spot_5m)}
-    ce_75m_by_ts = {b.timestamp: b for b in to_75m_bars(ce_5m)}
-    pe_75m_by_ts = {b.timestamp: b for b in to_75m_bars(pe_5m)}
     ce_by_ts = {b.timestamp: b for b in ce_5m}
     pe_by_ts = {b.timestamp: b for b in pe_5m}
     bars_by_ts_side = {"CE": ce_by_ts, "PE": pe_by_ts}
@@ -259,7 +258,7 @@ def run_backtest(spot_5m: List[Bar], ce_5m: List[Bar], pe_5m: List[Bar]) -> List
     all_ts = sorted(set(ce_by_ts) | set(pe_by_ts))
 
     spot_confirm = SpotConfirmTracker()
-    scanners = {"CE": PremiumGateScanner(), "PE": PremiumGateScanner()}
+    scanners = {"CE": IndexGatedPremiumScanner(), "PE": IndexGatedPremiumScanner()}
 
     trades: List[Trade] = []
     position_blocked_until: Optional[datetime] = None
@@ -285,14 +284,10 @@ def run_backtest(spot_5m: List[Bar], ce_5m: List[Bar], pe_5m: List[Bar]) -> List
             sbar = spot_75m_by_ts.get(bstart)
             if sbar is not None:
                 spot_confirm.on_75m_bar(sbar)
-                scanners["CE"].set_armed(spot_confirm.confirms("CE"))
-                scanners["PE"].set_armed(spot_confirm.confirms("PE"))
-            ce75 = ce_75m_by_ts.get(bstart)
-            if ce75 is not None:
-                scanners["CE"].on_75m_bar(ce75)
-            pe75 = pe_75m_by_ts.get(bstart)
-            if pe75 is not None:
-                scanners["PE"].on_75m_bar(pe75)
+                scanners["CE"].set_armed(spot_confirm.confirms("CE"),
+                                          confirmed_ts=spot_confirm.confirmation_ts("CE"))
+                scanners["PE"].set_armed(spot_confirm.confirms("PE"),
+                                          confirmed_ts=spot_confirm.confirmation_ts("PE"))
 
         # -- Gate 3 sweep+invalidation check (only while no position blocking) --
         fired_this_bar = False
@@ -304,7 +299,7 @@ def run_backtest(spot_5m: List[Bar], ce_5m: List[Bar], pe_5m: List[Bar]) -> List
                 for setup in list(scanner.setups):
                     if fired_this_bar:
                         break
-                    if setup.state != GateState.MTF_LOCKED:
+                    if setup.state != PremiumZoneState.PREMIUM_LOCKED:
                         continue
                     result = check_sweep_gate3(setup, ts, bars_by_ts_side[side],
                                                 index_side[side], ordered_ts_side[side])
@@ -315,33 +310,32 @@ def run_backtest(spot_5m: List[Bar], ce_5m: List[Bar], pe_5m: List[Bar]) -> List
                         continue
                     entry_ts, entry_price, _ = result
                     fired_this_bar = True
-                    htf_ref_low, htf_ref_high = setup.htf_zone.entry_line, setup.htf_zone.sl_level
-                    # SL is anchored to the INNER/MTF zone that actually produced
-                    # the entry (Zone_Low = the MTF ref's next-candle low), NOT
-                    # the original (possibly many-days-old) HTF ref -- per user
-                    # clarification: "that entry point is our Zone_High and the
-                    # next candle after the ref candle low is our Zone_Low. This
-                    # Zone_Low - 10 is the SL. That can never be above the entry
-                    # price." Guaranteed sl_price < entry_price by construction
-                    # (entry sits strictly between inner_high and inner_low).
-                    sl_price = setup.mtf_zone.sweep_low - SL_OFFSET
+                    z = setup.zone
+                    # SL is anchored to the premium Demand Block that actually
+                    # produced the entry (Zone_Low = its ref's next-candle low),
+                    # per user clarification: "that entry point is our Zone_High
+                    # and the next candle after the ref candle low is our
+                    # Zone_Low. This Zone_Low - 10 is the SL. That can never be
+                    # above the entry price." Guaranteed sl_price < entry_price
+                    # by construction (entry sits strictly between
+                    # inner_high and inner_low).
+                    sl_price = z.sweep_low - SL_OFFSET
                     risk = entry_price - sl_price
-                    target_a = htf_ref_high
+                    target_a = z.sl_level
                     target_b1 = entry_price + 2 * risk
                     target_b2 = entry_price + 3 * risk
                     bars_after = [b for t2, b in sorted(bars_by_ts_side[side].items()) if t2 > entry_ts]
                     a_ts, a_px, a_r = simulate_exit(entry_price, sl_price, target_a, bars_after)
                     b1_ts, b1_px, b1_r = simulate_exit(entry_price, sl_price, target_b1, bars_after)
                     b2_ts, b2_px, b2_r = simulate_exit(entry_price, sl_price, target_b2, bars_after)
-                    mz = setup.mtf_zone
                     trades.append(Trade(
                         side=side, day=entry_ts.date(), entry_ts=entry_ts, entry_price=entry_price,
                         sl_price=sl_price, target_a=target_a, target_b1=target_b1, target_b2=target_b2,
-                        htf_ref_ts=setup.htf_ref_ts, htf_ref_low=htf_ref_low, htf_ref_high=htf_ref_high,
-                        htf_lock_ts=setup.htf_zone.lock_ts,
-                        mtf_timeframe=setup.mtf_timeframe, mtf_ref_ts=mz.reference_low_ts,
-                        mtf_ref_low=mz.entry_line, mtf_ref_high=mz.sl_level, mtf_lock_ts=mz.lock_ts,
-                        inner_zone_low=mz.sweep_low,
+                        index_kind=("bear_trap_confirmed" if side == "CE" else "bull_trap_confirmed"),
+                        index_confirmed_ts=scanner._scan_window_start_ts,
+                        premium_timeframe=setup.timeframe, premium_ref_ts=setup.ref_ts,
+                        premium_ref_low=z.entry_line, premium_ref_high=z.sl_level, premium_lock_ts=z.lock_ts,
+                        inner_zone_low=z.sweep_low,
                         exit_a_ts=a_ts, exit_a_price=a_px, exit_a_reason=a_r,
                         exit_b1_ts=b1_ts, exit_b1_price=b1_px, exit_b1_reason=b1_r,
                         exit_b2_ts=b2_ts, exit_b2_price=b2_px, exit_b2_reason=b2_r,
@@ -350,10 +344,10 @@ def run_backtest(spot_5m: List[Bar], ce_5m: List[Bar], pe_5m: List[Bar]) -> List
                     position_blocked_until = max(
                         [t for t in (a_ts, b1_ts, b2_ts) if t is not None], default=entry_ts)
 
-        # -- 15:30 daily Gate 2/3 reset (HTF zones untouched) --
+        # -- 15:30 daily Gate 2/3 reset (Index/spot_confirm untouched) --
         if (ts.hour, ts.minute) == GATE23_RESET_TIME:
-            reset_gate23_to_htf_locked(scanners["CE"])
-            reset_gate23_to_htf_locked(scanners["PE"])
+            reset_premium_scan_daily(scanners["CE"])
+            reset_premium_scan_daily(scanners["PE"])
 
     return trades
 
@@ -370,7 +364,8 @@ def main() -> None:
     ce_key = REGISTRY.get_upstox_key("NIFTY", EXPIRY, CE_STRIKE, "CE")
     pe_key = REGISTRY.get_upstox_key("NIFTY", EXPIRY, PE_STRIKE, "PE")
     print(f"spot={spot_key}  CE({CE_STRIKE})={ce_key}  PE({PE_STRIKE})={pe_key}")
-    print(f"Backtest window: {START} -> {END} (HTF zones persist across days; positions/Gate2-3 reset daily)\n")
+    print(f"Backtest window: {START} -> {END} (Index gate persists continuously; "
+          f"premium Demand Block scans/positions reset daily)\n")
 
     spot_5m = to_5m_bars(fetch_1m(spot_key, token, START, END), filter_zero_volume=False)
     ce_5m = to_5m_bars(fetch_1m(ce_key, token, START, END), filter_zero_volume=True)
@@ -379,26 +374,25 @@ def main() -> None:
 
     trades = run_backtest(spot_5m, ce_5m, pe_5m)
 
-    print(f"=== TRADE LOG ({len(trades)} trades) — full HTF/MTF detail ===")
+    print(f"=== TRADE LOG ({len(trades)} trades) — full Index/Premium detail ===")
     for i, t in enumerate(trades, 1):
         print(f"\n--- Trade {i}: {t.side} on {t.day} ---")
-        print(f"  HTF (Gate 1, 75m):  ref_ts={t.htf_ref_ts}  entry(Zone_High)={t.htf_ref_low:.2f}  "
-              f"SL_level={t.htf_ref_high:.2f}  TRAPPED(lock)_ts={t.htf_lock_ts}")
-        print(f"  MTF (Gate 2, {t.mtf_timeframe}m): ref_ts={t.mtf_ref_ts}  entry(Zone_High)={t.mtf_ref_low:.2f}  "
-              f"SL_level={t.mtf_ref_high:.2f}  Inner_Zone_Low={t.inner_zone_low:.2f}  TRAPPED(lock)_ts={t.mtf_lock_ts}")
-        print(f"  Gate 3 (sweep):     entry_ts={t.entry_ts}  entry_price={t.entry_price:.2f}  "
+        print(f"  Index (Gate 1, 75m):    kind={t.index_kind}  confirmed_ts={t.index_confirmed_ts}")
+        print(f"  Premium (Gate 2, {t.premium_timeframe}m): ref_ts={t.premium_ref_ts}  entry(Zone_High)={t.premium_ref_low:.2f}  "
+              f"SL_level={t.premium_ref_high:.2f}  Inner_Zone_Low={t.inner_zone_low:.2f}  TRAPPED(lock)_ts={t.premium_lock_ts}")
+        print(f"  Gate 3 (sweep):         entry_ts={t.entry_ts}  entry_price={t.entry_price:.2f}  "
               f"SL(Inner_Zone_Low-10)={t.sl_price:.2f}")
-        print(f"  Target A (HTF ref high={t.target_a:.2f}):  exit={t.exit_a_price:.2f} @ {t.exit_a_ts}  [{t.exit_a_reason}]")
-        print(f"  Target B 1:2 ({t.target_b1:.2f}):          exit={t.exit_b1_price:.2f} @ {t.exit_b1_ts}  [{t.exit_b1_reason}]")
-        print(f"  Target B 1:3 ({t.target_b2:.2f}):          exit={t.exit_b2_price:.2f} @ {t.exit_b2_ts}  [{t.exit_b2_reason}]")
+        print(f"  Target A (Demand Block ref high={t.target_a:.2f}):  exit={t.exit_a_price:.2f} @ {t.exit_a_ts}  [{t.exit_a_reason}]")
+        print(f"  Target B 1:2 ({t.target_b1:.2f}):                    exit={t.exit_b1_price:.2f} @ {t.exit_b1_ts}  [{t.exit_b1_reason}]")
+        print(f"  Target B 1:3 ({t.target_b2:.2f}):                    exit={t.exit_b2_price:.2f} @ {t.exit_b2_ts}  [{t.exit_b2_reason}]")
 
     print(f"\n=== TRADE LOG (condensed table) ===")
-    hdr = (f"{'Day':10} {'Side':4} {'HTF Ref TS':20} {'HTF Lock':20} | {'MTF Ref TS':20} {'MTF Lock':20} tf | "
+    hdr = (f"{'Day':10} {'Side':4} {'Index Confirmed':20} | {'Premium Ref TS':20} {'Premium Lock':20} tf | "
            f"{'EntryTS':20} {'Entry':>8} {'SL':>8} | {'A@':7} {'Arsn':5} | {'B1@':7} {'B1rsn':5} | {'B2@':7} {'B2rsn':5}")
     print(hdr)
     for t in trades:
-        print(f"{str(t.day):10} {t.side:4} {str(t.htf_ref_ts):20} {str(t.htf_lock_ts):20} | "
-              f"{str(t.mtf_ref_ts):20} {str(t.mtf_lock_ts):20} {t.mtf_timeframe:2} | "
+        print(f"{str(t.day):10} {t.side:4} {str(t.index_confirmed_ts):20} | "
+              f"{str(t.premium_ref_ts):20} {str(t.premium_lock_ts):20} {t.premium_timeframe:2} | "
               f"{str(t.entry_ts):20} {t.entry_price:8.2f} {t.sl_price:8.2f} | "
               f"{(t.exit_a_price or 0):7.2f} {t.exit_a_reason:5} | "
               f"{(t.exit_b1_price or 0):7.2f} {t.exit_b1_reason:5} | "

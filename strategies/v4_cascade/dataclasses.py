@@ -89,7 +89,13 @@ class GateState(str, Enum):
     """2026-07-19 3-gate pure-premium funnel (PremiumGateScanner, zone_state.py).
     Separate from ZoneState/TrackingZoneScanner, which stays untouched — T2's
     4x5m trailing stop (exits.py TrailingBaseTracker) still reuses
-    TrackingZoneScanner as-is and must not be disturbed by this refactor."""
+    TrackingZoneScanner as-is and must not be disturbed by this refactor.
+
+    2026-07-20 Index/Premium decoupling: this enum now serves ONLY the legacy
+    two-stage PremiumGateScanner/_HTFSetup path, kept unchanged for the crypto
+    (BTC/ETH) spot-only book — see PremiumZoneState for the NIFTY/CRUDEOIL
+    real-options path, which now hard-gates off spot_confirm.py's Index-chart
+    classification instead of scanning its own 75m premium HTF zone."""
     ARMED_WAIT = "armed_wait"                              # not armed by spot bias yet
     HTF_SCANNING = "htf_scanning"                           # armed; scanning 75m for a ref+next-candle+TRAPPED
     HTF_LOCKED = "htf_locked"                               # HTF zone frozen; watching for price to re-enter it
@@ -102,10 +108,32 @@ class GateState(str, Enum):
     TRIGGERED = "triggered"                                 # fired — engine opens the position
 
 
-class SpotTrapKind(str, Enum):
+class PremiumZoneState(str, Enum):
+    """2026-07-20 Index/Premium decoupling — NIFTY/CRUDEOIL real-options path
+    (IndexGatedPremiumScanner, zone_state.py). Gate 1 (structural sweep+reclaim)
+    now lives entirely on the Index/Futures chart (spot_confirm.py); this state
+    machine covers only the single premium-chart Demand Block scan (Gate 2) and
+    the limit-order pierce (Gate 3) that runs once spot_confirm.py's Index gate
+    arms a side. "limit_armed"/"triggered" values are deliberately identical to
+    GateState's so UI string-literal highlight checks work for both models."""
+    ARMED_WAIT = "armed_wait"                    # Index gate hasn't confirmed this side; no scanning
+    PREMIUM_SCANNING = "premium_scanning"         # armed; hunting the 5m/15m premium chart (informational only —
+                                                   # never a literal setup.state, resolved synchronously per bar)
+    PREMIUM_LOCKED = "premium_locked"             # Demand Block frozen; watching for price to re-enter it
+    WAITING_FOR_ZONE_ENTRY = "waiting_for_zone_entry"  # transient: the instant zone-entry fires
+    LIMIT_ARMED = "limit_armed"                   # pending 1/3-depth limit, watching for a 5m low pierce
+    TRIGGERED = "triggered"                       # fired — engine opens the position (never actually observed on
+                                                   # a stored setup, popped immediately; kept for symmetry)
+
+
+class IndexTrapKind(str, Enum):
+    """2026-07-20 — renamed from SpotTrapKind. The Index/Futures chart's own
+    structural sweep+reclaim classification (spot_confirm.py), now consumed as
+    a HARD discovery gate by IndexGatedPremiumScanner (NIFTY/CRUDEOIL), not
+    just a late trigger-time bias check."""
     NONE = "none"
-    BEAR_TRAP_CLOSE = "bear_trap_close"   # sweep of spot demand zone + reclaim close (CE confirm)
-    BULL_TRAP_CLOSE = "bull_trap_close"   # sweep of spot structural highs + reclaim close (PE confirm)
+    BEAR_TRAP_CONFIRMED = "bear_trap_confirmed"   # sweep of Index demand zone + reclaim close (arms CE)
+    BULL_TRAP_CONFIRMED = "bull_trap_confirmed"   # sweep of Index structural highs + reclaim close (arms PE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

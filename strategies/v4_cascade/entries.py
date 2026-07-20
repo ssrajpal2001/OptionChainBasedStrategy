@@ -16,11 +16,11 @@ No bus/broker/DB dependency.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from strategies.v4_cascade.dataclasses import RollingBaseZone
 from strategies.v4_cascade.spot_confirm import SpotConfirmTracker
-from strategies.v4_cascade.zone_state import PremiumGateScanner, TrackingZoneScanner
+from strategies.v4_cascade.zone_state import PremiumGateScanner, IndexGatedPremiumScanner, TrackingZoneScanner
 
 
 @dataclass(frozen=True)
@@ -54,22 +54,30 @@ class LimitPierceResult:
     tracking_price: float = 0.0
 
 
-def check_limit_pierce(scanner: PremiumGateScanner, tracking_bar) -> LimitPierceResult:
-    """2026-07-19 3-gate funnel — Gate 3 external trigger check, run across
-    EVERY concurrently LIMIT_ARMED setup on this scanner (multi-zone, per the
-    2026-07-19 same-day fix). Fires on the FIRST setup (oldest HTF ref first)
-    whose ``limit_entry_price`` a 5m tracking-contract bar pierces. Direction
-    mirrors the scanner's own geometry: a bear-zone (long) setup fires when
-    the bar's LOW drops down to or below limit_entry_price (retesting the
-    zone from above); a bull-zone (short, crypto PE only) setup fires when
-    the bar's HIGH rises up to or above it (retesting the zone from below) —
-    NIFTY only ever uses bear-zone scanners, so this is unchanged there.
-    No spot-confirmation re-check here — spot bias was already applied once,
-    at Gate 1's arming (see engine.py); it is not re-evaluated per-trigger
-    under the new pure-premium model. The caller (engine.py) is responsible
-    for calling ``scanner.pop_setup(setup, ts)`` once acted on — every OTHER
-    in-flight setup keeps advancing untouched."""
-    candidates = sorted(scanner.limit_armed_setups(), key=lambda s: s.htf_ref_ts)
+def check_limit_pierce(
+    scanner: Union[PremiumGateScanner, IndexGatedPremiumScanner], tracking_bar,
+) -> LimitPierceResult:
+    """3-gate funnel — Gate 3 external trigger check, run across EVERY
+    concurrently LIMIT_ARMED setup on this scanner (multi-zone). Fires on the
+    FIRST setup (oldest ref first) whose ``limit_entry_price`` a 5m
+    tracking-contract bar pierces. Direction mirrors the scanner's own
+    geometry: a bear-zone (long) setup fires when the bar's LOW drops down to
+    or below limit_entry_price (retesting the zone from above); a bull-zone
+    (short, crypto PE only) setup fires when the bar's HIGH rises up to or
+    above it (retesting the zone from below) — NIFTY/CRUDEOIL only ever use
+    bear-zone scanners, so this is unchanged there.
+    No spot/Index re-check here — arming was already applied once, at Gate
+    1/2's discovery gate (see engine.py); it is not re-evaluated per-trigger.
+    The caller (engine.py) is responsible for calling
+    ``scanner.pop_setup(setup, ts)`` once acted on — every OTHER in-flight
+    setup keeps advancing untouched.
+    Sort key is polymorphic: the new IndexGatedPremiumScanner's _PremiumSetup
+    exposes ``.ref_ts``; the legacy (crypto) PremiumGateScanner's _HTFSetup
+    exposes ``.htf_ref_ts``."""
+    candidates = sorted(
+        scanner.limit_armed_setups(),
+        key=lambda s: getattr(s, "ref_ts", None) or getattr(s, "htf_ref_ts", None),
+    )
     for setup in candidates:
         if setup.limit_entry_price is None:
             continue

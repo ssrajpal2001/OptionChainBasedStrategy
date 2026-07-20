@@ -1,38 +1,52 @@
 """
 strategies/v4_cascade/engine.py — V4CascadeEngine: pure orchestration of the
-2026-07-19 3-gate pure-premium funnel.
+3-gate funnel.
 
-**NIFTY Spot vs. Option Premium separation (explicit, per spec):**
-  - NIFTY Spot (75m) is scanned for BOTH bear AND bull traps
-    (spot_confirm.py's SpotConfirmTracker, unchanged) purely to set a
-    directional BIAS: a confirmed spot BEAR trap (bullish read) arms the CE
-    funnel; a confirmed spot BULL trap (bearish read) arms the PE funnel.
-    Spot itself is never traded and never re-checked at trigger time — bias
-    is applied once, at the moment a side would start a fresh Gate 1 scan.
-  - Once armed, each side's OWN option premium chart (CE or PE tracking
-    contract) is scanned EXCLUSIVELY for BEAR TRAPS at every gate
-    (PremiumGateScanner + rolling_base.find_bear_trap_2candle) — option
-    short-sellers trapped as premium spikes back above their structural
-    reference high. Bull traps are never scanned on premium charts.
+**2026-07-20 Index/Premium decoupling (NIFTY/CRUDEOIL real-options path):**
+  - Gate 1 (structural sweep+reclaim) now lives entirely on the Index/Futures
+    chart (75m, spot_confirm.py's SpotConfirmTracker, unchanged mechanism):
+    a confirmed Index BEAR trap (bullish read) arms the CE funnel; a
+    confirmed Index BULL trap (bearish read) arms the PE funnel. This is now
+    a HARD gate on Gate 2 discovery (zone_state.IndexGatedPremiumScanner),
+    not a late trigger-time bias check — but per the user's explicit
+    decision, an already-discovered premium setup is NEVER aborted by a
+    later Index flip; only whether a NEW scan may START is gated.
+  - Once armed, that side's OWN option premium chart (CE or PE tracking
+    contract) is scanned EXCLUSIVELY for BEAR TRAPS on 5m (15m fallback) —
+    option short-sellers trapped as premium spikes back above their
+    structural reference high. Gate 3 (1/3-depth limit + pierce) is
+    unchanged.
 
-Gate sequence (per side, via zone_state.PremiumGateScanner):
+**Crypto (BTC/ETH) path — completely unchanged, kept on the legacy
+zone_state.PremiumGateScanner**, selected via the existing ``pe_scans_bull``
+flag (already exactly the crypto indicator — no new parameter): NIFTY Spot
+is scanned for BOTH bear AND bull traps purely to set bias; each side's own
+option premium chart still runs the full legacy two-stage HTF(75m)+MTF(5m/15m)
+funnel, and the trigger-time bias check (``scanner.armed``) is still
+consulted there exactly as before.
+
+Gate sequence, NIFTY/CRUDEOIL (via zone_state.IndexGatedPremiumScanner):
+  ARMED_WAIT (Index not confirmed) -> [Index confirms] -> PREMIUM_SCANNING
+  -> PREMIUM_LOCKED -> WAITING_FOR_ZONE_ENTRY -> LIMIT_ARMED -> TRIGGERED
+
+Gate sequence, crypto (via zone_state.PremiumGateScanner, unchanged):
   ARMED_WAIT -> HTF_SCANNING -> HTF_LOCKED -> WAITING_FOR_HTF_ZONE_ENTRY
   -> MTF_SCANNING_5M -> MTF_LOCKED (or MTF_SCANNING_15M fallback)
   -> WAITING_FOR_MTF_ZONE_ENTRY -> LIMIT_ARMED -> TRIGGERED
 
 ``update(spot_bar=None, ce_bar=None, pe_bar=None) -> List[CascadeEvent]``
-dispatches internally on each bar's ``.timeframe`` (75 -> spot bias + Gate 1;
-5 -> Gate 2/Gate 3 +, once a position is open, T1/T2 exit checks via
-exits.py, unchanged). Tracking (ATM-200/+200) vs execution (ATM+-50)
-contract split is preserved — this pure engine emits tracking-contract price
-hints only; book.py (a later phase, not yet built) maps to the real
+dispatches internally on each bar's ``.timeframe`` (75 -> Index gate +
+[crypto only] Gate 1; 5 -> Gate 2/Gate 3 +, once a position is open, T1/T2
+exit checks via exits.py, unchanged). Tracking (ATM-200/+200) vs execution
+(ATM+-50) contract split is preserved — this pure engine emits
+tracking-contract price hints only; book.py maps to the real
 execution-contract fill.
 
 No bus/broker/DB/asyncio dependency — pure, fed CandleEvent-shaped bars.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from strategies.v4_cascade.config import V4CascadeConfig
 from strategies.v4_cascade.dataclasses import (
@@ -41,9 +55,10 @@ from strategies.v4_cascade.dataclasses import (
 from strategies.v4_cascade.entries import check_limit_pierce, compute_risk_mapping
 from strategies.v4_cascade.exits import TrailingBaseTracker, check_t1, map_trailing_stop_to_execution
 from strategies.v4_cascade.spot_confirm import SpotConfirmTracker
-from strategies.v4_cascade.zone_state import PremiumGateScanner
+from strategies.v4_cascade.zone_state import PremiumGateScanner, IndexGatedPremiumScanner
 
 _SIDES = ("CE", "PE")
+_Scanner = Union[PremiumGateScanner, IndexGatedPremiumScanner]
 
 
 class V4CascadeEngine:
@@ -66,10 +81,22 @@ class V4CascadeEngine:
         (9,0)."""
         self._cfg = cfg or V4CascadeConfig()
         self._spot_confirm = SpotConfirmTracker()
-        self._scanners: Dict[str, PremiumGateScanner] = {
-            "CE": PremiumGateScanner(bear=True, session_open=session_open),
-            "PE": PremiumGateScanner(bear=not pe_scans_bull, session_open=session_open),
-        }
+        # pe_scans_bull is already exactly the crypto indicator (see
+        # book.py's _is_crypto branch) -- reused here as the router between
+        # the legacy two-stage scanner (crypto, untouched) and the new
+        # Index-gated single-stage scanner (NIFTY/CRUDEOIL real options).
+        self._legacy_scanners = pe_scans_bull
+        self._scanners: Dict[str, _Scanner]
+        if self._legacy_scanners:
+            self._scanners = {
+                "CE": PremiumGateScanner(bear=True, session_open=session_open),
+                "PE": PremiumGateScanner(bear=not pe_scans_bull, session_open=session_open),
+            }
+        else:
+            self._scanners = {
+                "CE": IndexGatedPremiumScanner(session_open=session_open),
+                "PE": IndexGatedPremiumScanner(session_open=session_open),
+            }
         self._trackers: Dict[str, TrailingBaseTracker] = {}
         # tracking-contract entry price at trigger time, per side — needed to
         # proportionally rescale the T2 trailing stop onto the execution
@@ -84,7 +111,7 @@ class V4CascadeEngine:
 
         if spot_bar is not None and getattr(spot_bar, "timeframe", 75) == 75:
             self._spot_confirm.on_75m_bar(spot_bar)
-            self._apply_spot_bias()
+            self._apply_index_gate()
 
         if ce_bar is not None:
             events += self._update_side("CE", ce_bar)
@@ -92,13 +119,19 @@ class V4CascadeEngine:
             events += self._update_side("PE", pe_bar)
         return events
 
-    def _apply_spot_bias(self) -> None:
-        """Arm CE on a spot bear-trap close (bullish read), PE on a spot
-        bull-trap close (bearish read). Only takes effect for a side
-        currently ARMED_WAIT (decision: does not abort an in-flight
-        HTF/MTF/limit sequence already underway on either side)."""
+    def _apply_index_gate(self) -> None:
+        """Arm CE on an Index bear-trap confirmed close (bullish read), PE on
+        an Index bull-trap confirmed close (bearish read) — spot_confirm.py's
+        single mutually-exclusive classification, recency-tiebroken,
+        unchanged mechanism. For NIFTY/CRUDEOIL (IndexGatedPremiumScanner)
+        this is now a HARD gate on new Gate-2 premium-scan discovery; for
+        crypto (legacy PremiumGateScanner) it remains a late trigger-time-only
+        check. Either way, never aborts an in-flight setup already underway."""
         for side in _SIDES:
-            self._scanners[side].set_armed(self._spot_confirm.confirms(side))
+            self._scanners[side].set_armed(
+                self._spot_confirm.confirms(side),
+                confirmed_ts=self._spot_confirm.confirmation_ts(side),
+            )
 
     def _update_side(self, side: str, bar) -> List[CascadeEvent]:
         events: List[CascadeEvent] = []
@@ -125,21 +158,32 @@ class V4CascadeEngine:
                 return events
             scanner.on_5m_bar(bar)
             trigger = check_limit_pierce(scanner, bar)
-            # 2026-07-20: HTF/MTF discovery now runs on BOTH sides continuously
-            # regardless of bias (zone_state.py no longer gates it) -- bias is
-            # checked HERE instead, at the moment a trigger would actually open
-            # a trade. A pierce on an unarmed side is left alone (not popped,
-            # not opened) so it can still fire later if bias comes back to it.
-            if trigger.fired and scanner.armed:
+            if trigger.fired and self._may_fire(scanner):
                 events += self._close_for_structural_flip(bar.timestamp)
                 events.append(self._open_position(side, scanner, trigger.setup, bar))
             return events
 
         scanner.on_5m_bar(bar)
         trigger = check_limit_pierce(scanner, bar)
-        if trigger.fired and scanner.armed:
+        if trigger.fired and self._may_fire(scanner):
             events.append(self._open_position(side, scanner, trigger.setup, bar))
         return events
+
+    def _may_fire(self, scanner: _Scanner) -> bool:
+        """Crypto (legacy PremiumGateScanner): discovery is unconditional, so
+        bias is still checked here, at trigger time (a pierce on an unarmed
+        side is left alone -- not popped, not opened -- so it can still fire
+        later if bias comes back to it). NIFTY/CRUDEOIL
+        (IndexGatedPremiumScanner): discovery is already hard-gated by
+        `armed` at the source (zone_state.py), so every setup in
+        `scanner.setups` was, by construction, discovered while armed --
+        re-checking `armed` again here would wrongly suppress a legitimate
+        in-flight fire the instant the Index flips away mid-flight, which is
+        exactly what the "never abort in-flight" decision says must NOT
+        happen. Always True there."""
+        if self._legacy_scanners:
+            return scanner.armed
+        return True
 
     def _close_for_structural_flip(self, ts) -> List[CascadeEvent]:
         """Closes every still-open leg of the CURRENT position because the
@@ -169,8 +213,14 @@ class V4CascadeEngine:
         return events
 
     # ── entry ────────────────────────────────────────────────────────────────
-    def _open_position(self, side: str, scanner: PremiumGateScanner, setup, bar) -> CascadeEvent:
-        zone = setup.mtf_zone
+    def _open_position(self, side: str, scanner: _Scanner, setup, bar) -> CascadeEvent:
+        # setup.zone (new IndexGatedPremiumScanner._PremiumSetup) or
+        # setup.mtf_zone (legacy PremiumGateScanner._HTFSetup, crypto only) --
+        # resolved here rather than adding a `.zone` alias to the untouched
+        # legacy class.
+        zone = getattr(setup, "zone", None)
+        if zone is None:
+            zone = getattr(setup, "mtf_zone", None)
         entry_price = setup.limit_entry_price or bar.low
         # is_short: True only for a bull-geometry scanner (crypto's PE side
         # scanning bull traps -> bearish signal -> short). NIFTY's CE and PE

@@ -2212,26 +2212,60 @@ class DashboardServer:
                     continue
                 side_ltp = float(live_price.get(side) or 0.0)
                 for setup in scanner.setups:
-                    # "how far is market from the trap" -- distance from the
-                    # live price to whichever level is currently most relevant:
-                    # the pending limit price once armed, else the HTF entry line.
-                    target_level = setup.limit_entry_price or (
-                        setup.htf_zone.entry_line if setup.htf_zone else None)
-                    distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
-                    z = {
-                        "side": side, "state": setup.state.value,
-                        "htf_ref_ts": setup.htf_ref_ts.isoformat() if setup.htf_ref_ts else None,
-                        "htf_entry": setup.htf_zone.entry_line if setup.htf_zone else None,
-                        "htf_sl": setup.htf_zone.sl_level if setup.htf_zone else None,
-                        "mtf_ref_ts": setup.mtf_zone.reference_low_ts.isoformat()
-                                      if setup.mtf_zone and setup.mtf_zone.reference_low_ts else None,
-                        "mtf_entry": setup.mtf_zone.entry_line if setup.mtf_zone else None,
-                        "inner_zone_low": setup.mtf_zone.sweep_low if setup.mtf_zone else None,
-                        "limit_entry_price": setup.limit_entry_price,
-                        "live_price": side_ltp or None,
-                        "distance_to_trap": distance,
-                    }
+                    # model discriminator: the new IndexGatedPremiumScanner's
+                    # _PremiumSetup has ONE zone (.zone); the legacy (crypto)
+                    # PremiumGateScanner's _HTFSetup has TWO (.htf_zone/.mtf_zone).
+                    if hasattr(setup, "zone"):
+                        z_obj = setup.zone
+                        target_level = setup.limit_entry_price or (z_obj.entry_line if z_obj else None)
+                        distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
+                        z = {
+                            "model": "index_gated", "side": side, "state": setup.state.value,
+                            "ref_ts": setup.ref_ts.isoformat() if setup.ref_ts else None,
+                            "timeframe": setup.timeframe,
+                            "entry": z_obj.entry_line if z_obj else None,
+                            "sl": z_obj.sl_level if z_obj else None,
+                            "zone_low": z_obj.sweep_low if z_obj else None,
+                            "zone_high": z_obj.entry_line if z_obj else None,
+                            "limit_entry_price": setup.limit_entry_price,
+                            "live_price": side_ltp or None,
+                            "distance_to_trap": distance,
+                        }
+                    else:
+                        # "how far is market from the trap" -- distance from the
+                        # live price to whichever level is currently most relevant:
+                        # the pending limit price once armed, else the HTF entry line.
+                        target_level = setup.limit_entry_price or (
+                            setup.htf_zone.entry_line if setup.htf_zone else None)
+                        distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
+                        z = {
+                            "model": "legacy_two_stage", "side": side, "state": setup.state.value,
+                            "htf_ref_ts": setup.htf_ref_ts.isoformat() if setup.htf_ref_ts else None,
+                            "htf_entry": setup.htf_zone.entry_line if setup.htf_zone else None,
+                            "htf_sl": setup.htf_zone.sl_level if setup.htf_zone else None,
+                            "mtf_ref_ts": setup.mtf_zone.reference_low_ts.isoformat()
+                                          if setup.mtf_zone and setup.mtf_zone.reference_low_ts else None,
+                            "mtf_entry": setup.mtf_zone.entry_line if setup.mtf_zone else None,
+                            "inner_zone_low": setup.mtf_zone.sweep_low if setup.mtf_zone else None,
+                            "limit_entry_price": setup.limit_entry_price,
+                            "live_price": side_ltp or None,
+                            "distance_to_trap": distance,
+                        }
                     zones.append(z)
+
+            index_gate = None
+            _sc = getattr(book._engine, "_spot_confirm", None)
+            if _sc is not None:
+                _iz = getattr(_sc, "current_zone", None)
+                index_gate = {
+                    "kind": getattr(_sc.current_kind, "value", str(_sc.current_kind)),
+                    "armed_side": "CE" if _sc.confirms("CE") else ("PE" if _sc.confirms("PE") else None),
+                    "timeframe": 75,
+                    "ref_ts": _iz.reference_low_ts.isoformat() if _iz and _iz.reference_low_ts else None,
+                    "confirmed_ts": _iz.lock_ts.isoformat() if _iz and _iz.lock_ts else None,
+                    "entry_line": _iz.entry_line if _iz else None,
+                    "sl_level": _iz.sl_level if _iz else None,
+                }
 
             position = None
             pos = book._engine.position
@@ -2272,7 +2306,8 @@ class DashboardServer:
                     "t2_status": pos.t2.status if pos.t2 else None,
                     "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
                 }
-            return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position}
+            return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position,
+                    "index_gate": index_gate}
 
         # ── CLIENT — set target index ─────────────────────────────────────────
 
@@ -2678,8 +2713,24 @@ class DashboardServer:
                             else:
                                 _bias = "none"
                                 _sc = getattr(book._engine, "_spot_confirm", None)
+                                _index_gate = None
                                 if _sc is not None:
                                     _bias = getattr(_sc.current_kind, "value", str(_sc.current_kind))
+                                    _iz = getattr(_sc, "current_zone", None)
+                                    _index_gate = {
+                                        "kind": _bias,
+                                        "armed_side": ("CE" if _sc.confirms("CE")
+                                                       else ("PE" if _sc.confirms("PE") else None)),
+                                        "timeframe": 75,
+                                        "ref_ts": (_iz.reference_low_ts.isoformat(timespec="minutes")
+                                                   if _iz and _iz.reference_low_ts else None),
+                                        "confirmed_ts": (_iz.lock_ts.isoformat(timespec="minutes")
+                                                          if _iz and _iz.lock_ts else None),
+                                        "entry_line": (round(_iz.entry_line, 2)
+                                                       if _iz and _iz.entry_line is not None else None),
+                                        "sl_level": (round(_iz.sl_level, 2)
+                                                     if _iz and _iz.sl_level is not None else None),
+                                    }
                                 if _is_crypto:
                                     _atm, _dte, _offset, _expiry_str = 0, "—", 0, None   # atm filled in below (= live spot)
                                 else:
@@ -2688,12 +2739,19 @@ class DashboardServer:
                                             if book._expiry else "—")
                                     _offset = int(book._tracking_offset)
                                     _expiry_str = book._expiry.isoformat() if book._expiry else None
-                                tracking = {"is_crypto": _is_crypto, "atm": _atm, "dte": _dte,
-                                            "offset": _offset, "expiry": _expiry_str, "phase": "", "bias": _bias}
+                                # "model" discriminator: crypto keeps the legacy two-stage
+                                # HTF(75m premium)+MTF(5m/15m premium) shape byte-for-byte
+                                # (GateState/PremiumGateScanner, untouched); NIFTY/CRUDEOIL gets
+                                # the 2026-07-20 Index/Premium-decoupled shape (PremiumZoneState/
+                                # IndexGatedPremiumScanner) plus the new index_gate block above,
+                                # which is the explicit "which chart/timeframe is Gate 1
+                                # evaluating" telemetry.
+                                tracking = {"is_crypto": _is_crypto,
+                                            "model": "legacy" if _is_crypto else "index_gated",
+                                            "atm": _atm, "dte": _dte, "offset": _offset,
+                                            "expiry": _expiry_str, "phase": "", "bias": _bias,
+                                            "index_gate": _index_gate}
                                 _phases = []
-                                _gate_order = list(GateState)
-                                _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
-                                _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
 
                                 def _zone_bounds(z):
                                     if z is None or z.entry_line is None or z.sweep_low is None:
@@ -2701,69 +2759,113 @@ class DashboardServer:
                                     return (round(min(z.entry_line, z.sweep_low), 2),
                                             round(max(z.entry_line, z.sweep_low), 2))
 
-                                for side, label in (("CE", "BEAR" if _is_crypto else "CE"),
-                                                     ("PE", "BULL" if _is_crypto else "PE")):
-                                    scanner = book._engine._scanners.get(side)
-                                    side_ltp = float(live_price.get(side) or 0.0)
-                                    setup = None
-                                    if scanner is not None and scanner.setups:
-                                        # Show the single MOST-RECENTLY-DISCOVERED setup (newest HTF
-                                        # reference candle) -- recomputed fresh every poll, so once
-                                        # that setup gets invalidated (dropped from scanner.setups)
-                                        # this naturally "moves back" to whichever setup is next most
-                                        # recent, with no separate fallback logic needed. Note: this
-                                        # can show a brand-new HTF_LOCKED setup OVER an older one
-                                        # that's already further along (e.g. LIMIT_ARMED, about to
-                                        # actually fire) -- recency, not trade-proximity, is the
-                                        # sort key here, per explicit user choice.
-                                        setup = max(scanner.setups,
-                                                    key=lambda s: s.htf_ref_ts or datetime.min.replace(tzinfo=IST))
-                                    if setup is not None:
-                                        # LOW·HIGH always shows THIS setup's own HTF zone (Gate 1) —
-                                        # never switches to the MTF zone -- so the MTF zone can be
-                                        # shown separately, clearly nested UNDER it (same setup,
-                                        # never a different one), instead of the two being conflated
-                                        # into one column or confused with an unrelated setup's zone.
-                                        level_l, level_h = _zone_bounds(setup.htf_zone)
-                                        if level_l is None:
+                                if _is_crypto:
+                                    _gate_order = list(GateState)
+                                    _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
+                                    _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
+                                    for side, label in (("CE", "BEAR"), ("PE", "BULL")):
+                                        scanner = book._engine._scanners.get(side)
+                                        side_ltp = float(live_price.get(side) or 0.0)
+                                        setup = None
+                                        if scanner is not None and scanner.setups:
+                                            # Show the single MOST-RECENTLY-DISCOVERED setup (newest
+                                            # HTF reference candle) -- recomputed fresh every poll,
+                                            # so once that setup gets invalidated (dropped from
+                                            # scanner.setups) this naturally "moves back" to whichever
+                                            # setup is next most recent, with no separate fallback
+                                            # logic needed. Note: this can show a brand-new
+                                            # HTF_LOCKED setup OVER an older one that's already
+                                            # further along (e.g. LIMIT_ARMED, about to actually
+                                            # fire) -- recency, not trade-proximity, is the sort key
+                                            # here, per explicit user choice.
+                                            setup = max(scanner.setups,
+                                                        key=lambda s: s.htf_ref_ts or datetime.min.replace(tzinfo=IST))
+                                        if setup is not None:
+                                            # LOW·HIGH always shows THIS setup's own HTF zone (Gate 1)
+                                            # — never switches to the MTF zone -- so the MTF zone can
+                                            # be shown separately, clearly nested UNDER it (same
+                                            # setup, never a different one), instead of the two being
+                                            # conflated into one column or confused with an unrelated
+                                            # setup's zone.
+                                            level_l, level_h = _zone_bounds(setup.htf_zone)
+                                            if level_l is None:
+                                                level_l = level_h = 0
+                                            mtf_low, mtf_high = _zone_bounds(setup.mtf_zone)
+                                            side_state = setup.state.value
+                                            # HTF/MTF are sequential sub-gates of the SAME setup, not
+                                            # two independent states — once past HTF_LOCKED the HTF
+                                            # column just confirms "locked" and the MTF column
+                                            # carries the actual current phase, so the two columns
+                                            # never show the identical raw value.
+                                            _idx = _gate_order.index(setup.state)
+                                            htf_disp = side_state if _idx < _htf_idx else "locked"
+                                            mtf_disp = side_state if _idx >= _mtf_idx else "—"
+                                            limit_price = (round(setup.limit_entry_price, 2)
+                                                           if setup.limit_entry_price is not None else None)
+                                            mtf_tf = setup.mtf_timeframe
+                                            _hz = setup.htf_zone
+                                            ref_ts = (_hz.reference_low_ts.isoformat(timespec="minutes")
+                                                      if _hz and _hz.reference_low_ts else None)
+                                            trap_ts = (_hz.lock_ts.isoformat(timespec="minutes")
+                                                       if _hz and _hz.lock_ts else None)
+                                        else:
                                             level_l = level_h = 0
-                                        mtf_low, mtf_high = _zone_bounds(setup.mtf_zone)
-                                        side_state = setup.state.value
-                                        # HTF/MTF are sequential sub-gates of the SAME setup, not
-                                        # two independent states — once past HTF_LOCKED the HTF
-                                        # column just confirms "locked" and the MTF column carries
-                                        # the actual current phase, so the two columns never show
-                                        # the identical raw value.
-                                        _idx = _gate_order.index(setup.state)
-                                        htf_disp = side_state if _idx < _htf_idx else "locked"
-                                        mtf_disp = side_state if _idx >= _mtf_idx else "—"
-                                        limit_price = (round(setup.limit_entry_price, 2)
-                                                       if setup.limit_entry_price is not None else None)
-                                        mtf_tf = setup.mtf_timeframe
-                                        _hz = setup.htf_zone
-                                        ref_ts = (_hz.reference_low_ts.isoformat(timespec="minutes")
-                                                  if _hz and _hz.reference_low_ts else None)
-                                        trap_ts = (_hz.lock_ts.isoformat(timespec="minutes")
-                                                   if _hz and _hz.lock_ts else None)
-                                    else:
-                                        level_l = level_h = 0
-                                        mtf_low = mtf_high = limit_price = mtf_tf = None
-                                        ref_ts = trap_ts = None
-                                        side_state = htf_disp = mtf_disp = "—"
-                                    strike = round(side_ltp) if _is_crypto else int(
-                                        getattr(book, f"_{side.lower()}_strike", 0) or 0)
-                                    tracking[f"{side.lower()}_label"] = label
-                                    tracking[f"{side.lower()}_strike"] = strike
-                                    tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
-                                    tracking[side.lower()] = {
-                                        "htf_state": htf_disp, "mtf_state": mtf_disp,
-                                        "traps": len(scanner.setups) if scanner else 0,
-                                        "mtf_low": mtf_low, "mtf_high": mtf_high, "mtf_timeframe": mtf_tf,
-                                        "limit_entry_price": limit_price,
-                                        "level_l": round(level_l, 2), "level_h": round(level_h, 2),
-                                        "ref_ts": ref_ts, "trap_ts": trap_ts,
-                                    }
-                                    _phases.append(side_state)
+                                            mtf_low = mtf_high = limit_price = mtf_tf = None
+                                            ref_ts = trap_ts = None
+                                            side_state = htf_disp = mtf_disp = "—"
+                                        strike = round(side_ltp)
+                                        tracking[f"{side.lower()}_label"] = label
+                                        tracking[f"{side.lower()}_strike"] = strike
+                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+                                        tracking[side.lower()] = {
+                                            "htf_state": htf_disp, "mtf_state": mtf_disp,
+                                            "traps": len(scanner.setups) if scanner else 0,
+                                            "mtf_low": mtf_low, "mtf_high": mtf_high, "mtf_timeframe": mtf_tf,
+                                            "limit_entry_price": limit_price,
+                                            "level_l": round(level_l, 2), "level_h": round(level_h, 2),
+                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
+                                        }
+                                        _phases.append(side_state)
+                                else:
+                                    for side, label in (("CE", "CE"), ("PE", "PE")):
+                                        scanner = book._engine._scanners.get(side)
+                                        side_ltp = float(live_price.get(side) or 0.0)
+                                        setup = None
+                                        if scanner is not None and scanner.setups:
+                                            # Same "most-recently-discovered" recency sort as the
+                                            # crypto branch above, on the single (no more HTF/MTF
+                                            # split) zone per setup.
+                                            setup = max(scanner.setups,
+                                                        key=lambda s: s.ref_ts or datetime.min.replace(tzinfo=IST))
+                                        if setup is not None:
+                                            zone_low, zone_high = _zone_bounds(setup.zone)
+                                            if zone_low is None:
+                                                zone_low = zone_high = 0
+                                            side_state = setup.state.value
+                                            timeframe = setup.timeframe
+                                            limit_price = (round(setup.limit_entry_price, 2)
+                                                           if setup.limit_entry_price is not None else None)
+                                            _z = setup.zone
+                                            ref_ts = (_z.reference_low_ts.isoformat(timespec="minutes")
+                                                      if _z and _z.reference_low_ts else None)
+                                            trap_ts = (_z.lock_ts.isoformat(timespec="minutes")
+                                                       if _z and _z.lock_ts else None)
+                                        else:
+                                            zone_low = zone_high = limit_price = timeframe = None
+                                            ref_ts = trap_ts = None
+                                            side_state = "—"
+                                        strike = int(getattr(book, f"_{side.lower()}_strike", 0) or 0)
+                                        tracking[f"{side.lower()}_label"] = label
+                                        tracking[f"{side.lower()}_strike"] = strike
+                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+                                        tracking[side.lower()] = {
+                                            "state": side_state, "timeframe": timeframe,
+                                            "traps": len(scanner.setups) if scanner else 0,
+                                            "zone_low": zone_low, "zone_high": zone_high,
+                                            "limit_entry_price": limit_price,
+                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
+                                        }
+                                        _phases.append(side_state)
                                 tracking["phase"] = "/".join(_phases)
                                 if _is_crypto:
                                     tracking["atm"] = round(

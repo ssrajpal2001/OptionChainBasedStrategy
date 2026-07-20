@@ -1,6 +1,15 @@
 """
 scripts/test_real_premium_replay.py — historical reality cross-check for the
-2026-07-19 3-gate pure-premium V4CascadeEngine.
+V4CascadeEngine.
+
+**2026-07-20 Index/Premium decoupling**: Gate 1 (structural sweep+reclaim) now
+lives entirely on the 75m NIFTY spot chart (spot_confirm.py's
+SpotConfirmTracker, unchanged) — it arms CE/PE, it is never itself the thing
+that "locks" a tradeable zone. Gate 2 (the only chart-scanning gate left on
+the CE/PE tracking premium contracts) looks exclusively for a 2-candle
+bear-trap Demand Block on 5m (15m fallback), and only starts once Gate 1 has
+armed that side (IndexGatedPremiumScanner, zone_state.py). Gate 3 (1/3-depth
+limit + pierce) is unchanged.
 
 Loads real NIFTY spot + CE 23900 / PE 24300 (21-JUL-2026 monthly-only expiry —
 this is the only expiry currently trading, per user directive) 1-minute
@@ -29,7 +38,6 @@ from config.global_config import IST
 from data_layer.client_db import ClientDB
 from data_layer.historical_candles import _http_get_json, _parse_candles
 from data_layer.instrument_registry import REGISTRY
-from strategies.v4_cascade.dataclasses import GateState
 from strategies.v4_cascade.engine import V4CascadeEngine
 from strategies.v4_cascade.rolling_base import resample_bars
 
@@ -124,11 +132,9 @@ def replay(engine: V4CascadeEngine, spot_5m: List[Bar], ce_5m: List[Bar], pe_5m:
     pe_by_ts = {b.timestamp: b for b in pe_5m}
     all_ts = sorted(set(ce_by_ts) | set(pe_by_ts))
 
-    ce_75m_by_ts = {b.timestamp: b for b in to_resampled_bar(ce_5m, 75)}
-    pe_75m_by_ts = {b.timestamp: b for b in to_resampled_bar(pe_5m, 75)}
-
     prev_scanner_state = {"CE": engine._scanners["CE"].state, "PE": engine._scanners["PE"].state}
-    last_zones: dict = {"CE": {}, "PE": {}}   # side -> {htf_ref_ts: zone_info}, captured before pop_setup() wipes it
+    prev_index_kind = engine._spot_confirm.current_kind
+    last_zones: dict = {"CE": {}, "PE": {}}   # side -> {id(setup): zone_info}, captured before pop_setup() wipes it
     trade_log: List[dict] = []
 
     for ts in all_ts:
@@ -145,23 +151,23 @@ def replay(engine: V4CascadeEngine, spot_5m: List[Bar], ce_5m: List[Bar], pe_5m:
         pre_ids = {side: {id(s): s for s in engine._scanners[side].setups} for side in ("CE", "PE")}
         for side in ("CE", "PE"):
             for setup in engine._scanners[side].setups:
-                if setup.htf_zone is not None and setup.mtf_zone is not None:
+                if setup.zone is not None:
                     last_zones.setdefault(side, {})[id(setup)] = {
-                        "htf_ref_ts": setup.htf_zone.reference_low_ts, "htf_entry": setup.htf_zone.entry_line,
-                        "htf_sl": setup.htf_zone.sl_level, "htf_lock_ts": setup.htf_zone.lock_ts,
-                        "mtf_tf": setup.mtf_timeframe, "mtf_ref_ts": setup.mtf_zone.reference_low_ts,
-                        "mtf_entry": setup.mtf_zone.entry_line, "mtf_sl": setup.mtf_zone.sl_level,
-                        "mtf_lock_ts": setup.mtf_zone.lock_ts, "limit_price": setup.limit_entry_price,
+                        "ref_ts": setup.ref_ts, "entry": setup.zone.entry_line,
+                        "sl": setup.zone.sl_level, "lock_ts": setup.zone.lock_ts,
+                        "tf": setup.timeframe, "limit_price": setup.limit_entry_price,
                     }
 
         events += engine.update(ce_bar=ce_bar, pe_bar=pe_bar)
         if bucket_end_minute(ts, 75):
             bstart = bucket_start(ts, 75)
             spot_bar = spot_75m_all.get(bstart)
-            extra_ce = ce_75m_by_ts.get(bstart)
-            extra_pe = pe_75m_by_ts.get(bstart)
-            if spot_bar is not None or extra_ce is not None or extra_pe is not None:
-                events += engine.update(spot_bar=spot_bar, ce_bar=extra_ce, pe_bar=extra_pe)
+            if spot_bar is not None:
+                events += engine.update(spot_bar=spot_bar)
+
+        if engine._spot_confirm.current_kind != prev_index_kind:
+            print(f"  [{ts}] INDEX gate -> {engine._spot_confirm.current_kind.value}")
+            prev_index_kind = engine._spot_confirm.current_kind
 
         for side in ("CE", "PE"):
             st = engine._scanners[side].state
@@ -184,16 +190,14 @@ def replay(engine: V4CascadeEngine, spot_5m: List[Bar], ce_5m: List[Bar], pe_5m:
                   f"price_hint={ev.price_hint} sl={ev.sl_price} target={ev.target_price} reason={ev.reason}")
 
     print("\n=== ENTRY REASON TABLE (why each trade fired) ===")
-    header = (f"{'Side':4} {'Entry TS':20} {'Entry Px':>9} | {'HTF Ref TS':20} {'HTF Entry':>10} "
-              f"{'HTF SL':>8} {'HTF Lock':20} | {'MTF tf':6} {'MTF Ref TS':20} {'MTF Entry':>10} "
-              f"{'MTF SL':>8} {'MTF Lock':20} | {'LimitPx':>9}")
+    header = (f"{'Side':4} {'Entry TS':20} {'Entry Px':>9} | {'Premium Ref TS':20} {'Entry':>10} "
+              f"{'SL':>8} {'Lock TS':20} {'TF':4} | {'LimitPx':>9}")
     print(header)
     for r in trade_log:
         print(f"{r['side']:4} {str(r['entry_ts']):20} {r['entry_price']:9.2f} | "
-              f"{str(r.get('htf_ref_ts')):20} {(r.get('htf_entry') or 0):10.2f} "
-              f"{(r.get('htf_sl') or 0):8.2f} {str(r.get('htf_lock_ts')):20} | "
-              f"{str(r.get('mtf_tf')):6} {str(r.get('mtf_ref_ts')):20} {(r.get('mtf_entry') or 0):10.2f} "
-              f"{(r.get('mtf_sl') or 0):8.2f} {str(r.get('mtf_lock_ts')):20} | {(r.get('limit_price') or 0):9.2f}")
+              f"{str(r.get('ref_ts')):20} {(r.get('entry') or 0):10.2f} "
+              f"{(r.get('sl') or 0):8.2f} {str(r.get('lock_ts')):20} {str(r.get('tf')):4} | "
+              f"{(r.get('limit_price') or 0):9.2f}")
 
 
 def main() -> None:
@@ -220,27 +224,26 @@ def main() -> None:
     print("\n=== replay (gate transitions + fired events) ===")
     replay(engine, spot_5m, ce_5m, pe_5m)
 
+    print("\n=== INDEX GATE (final state) ===")
+    print(f"kind={engine._spot_confirm.current_kind.value}  "
+          f"CE armed={engine._spot_confirm.confirms('CE')}  PE armed={engine._spot_confirm.confirms('PE')}")
+
     print("\n=== STILL-OPEN SETUPS (no trade fired yet) — prospective entry ===")
-    header2 = (f"{'Side':4} {'State':22} {'HTF Ref TS':20} {'HTF Entry':>10} {'HTF SL':>8} | "
-               f"{'MTF Ref TS':20} {'MTF Entry':>10} {'MTF SL':>8} | {'Prospective Entry':>17}")
+    header2 = (f"{'Side':4} {'State':16} {'TF':4} {'Ref TS':20} {'Entry':>10} {'SL':>8} | "
+               f"{'Prospective Entry':>17}")
     print(header2)
     for side in ("CE", "PE"):
         s = engine._scanners[side]
-        for setup in sorted(s.setups, key=lambda x: x.htf_ref_ts):
-            mtf_ref_ts = mtf_entry = mtf_sl = prospective = ""
-            if setup.mtf_zone is not None:
-                z = setup.mtf_zone
-                mtf_ref_ts, mtf_entry, mtf_sl = str(z.reference_low_ts), f"{z.entry_line:.2f}", f"{z.sl_level:.2f}"
-                # Prospective limit price -- same formula as Gate 3, computed
-                # even if price hasn't re-entered the Inner Zone yet (so it's
-                # visible where this WOULD trigger if/when it does).
-                lp = setup.limit_entry_price
-                if lp is None and z.entry_line is not None and z.sweep_low is not None:
-                    lp = z.entry_line - (z.entry_line - z.sweep_low) / 3.0
-                prospective = f"{lp:.2f}" if lp is not None else "n/a"
-            print(f"{side:4} {setup.state.value:22} {str(setup.htf_ref_ts):20} "
-                  f"{setup.htf_zone.entry_line:10.2f} {setup.htf_zone.sl_level:8.2f} | "
-                  f"{mtf_ref_ts:20} {mtf_entry:>10} {mtf_sl:>8} | {prospective:>17}")
+        for setup in sorted(s.setups, key=lambda x: x.ref_ts):
+            z = setup.zone
+            prospective = ""
+            lp = setup.limit_entry_price
+            if lp is None and z is not None and z.entry_line is not None and z.sweep_low is not None:
+                lp = z.entry_line - (z.entry_line - z.sweep_low) / 3.0
+            if lp is not None:
+                prospective = f"{lp:.2f}"
+            print(f"{side:4} {setup.state.value:16} {setup.timeframe:4} {str(setup.ref_ts):20} "
+                  f"{(z.entry_line if z else 0):10.2f} {(z.sl_level if z else 0):8.2f} | {prospective:>17}")
     print("\nposition:", engine.position)
 
 
