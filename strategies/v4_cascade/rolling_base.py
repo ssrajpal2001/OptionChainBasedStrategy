@@ -454,7 +454,17 @@ def resample_bars(
     ``session_open``: (hour, minute) of the exchange's own session open —
     defaults to NSE/NIFTY's 09:15. MCX underlyings (CRUDEOIL etc.) open at
     09:00 and must pass (9, 0) so bucket boundaries land on the real session
-    start instead of NIFTY's."""
+    start instead of NIFTY's.
+
+    EVERY input bar is grouped into exactly one output bucket, unconditionally
+    — including bars whose timestamp falls before ``session_open`` (these get
+    a negative ``bucket_idx``, but that's still a valid, distinct bucket key;
+    they are NOT dropped). This matters for 24/7 callers like crypto (BTC/ETH),
+    where there is no real "pre-session" — bars before the default 09:15
+    anchor are ordinary trading data, not noise, and must not be filtered
+    out. Callers who genuinely want only the post-session-open bars must
+    filter the input (or output) themselves; this function never does it for
+    them."""
     if multiplier % 5 != 0 or multiplier < 5:
         raise ValueError(f"multiplier must be a positive multiple of 5, got {multiplier}")
 
@@ -476,10 +486,6 @@ def resample_bars(
 
     out: List[_ResampledBar] = []
     for key in order:
-        day, bucket_idx = key
-        # Skip pre-session buckets (negative indices)
-        if bucket_idx < 0:
-            continue
         chunk = buckets[key]
         out.append(_ResampledBar(
             timestamp=chunk[0].timestamp,
