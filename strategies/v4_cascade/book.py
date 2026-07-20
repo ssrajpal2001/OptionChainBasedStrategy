@@ -37,7 +37,7 @@ from data_layer.base_feeder import CandleEvent
 from data_layer.historical_candles import fetch_upstox_range_1m, fetch_upstox_intraday_1m
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
-from strategies.v4_cascade.config import EXECUTION_OFFSET_PTS, V4CascadeConfig
+from strategies.v4_cascade.config import V4CascadeConfig
 from strategies.v4_cascade.dataclasses import CascadeEvent, CascadeEventType, CascadePosition
 from strategies.v4_cascade.engine import V4CascadeEngine
 from strategies.v4_cascade.rolling_base import resample_bars

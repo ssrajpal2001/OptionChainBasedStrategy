@@ -2676,7 +2676,6 @@ class DashboardServer:
                                                       if leg.entry_time else None,
                                     })
                             else:
-                                from strategies.v4_cascade.book import _TRACKING_OFFSET
                                 _bias = "none"
                                 _sc = getattr(book._engine, "_spot_confirm", None)
                                 if _sc is not None:
@@ -2687,7 +2686,7 @@ class DashboardServer:
                                     _atm = round(float(book._atm_open or 0.0), 2)
                                     _dte = ((book._expiry - datetime.now(IST).date()).days
                                             if book._expiry else "—")
-                                    _offset = int(_TRACKING_OFFSET)
+                                    _offset = int(book._tracking_offset)
                                     _expiry_str = book._expiry.isoformat() if book._expiry else None
                                 tracking = {"is_crypto": _is_crypto, "atm": _atm, "dte": _dte,
                                             "offset": _offset, "expiry": _expiry_str, "phase": "", "bias": _bias}
