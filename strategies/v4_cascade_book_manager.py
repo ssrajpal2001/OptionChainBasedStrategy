@@ -30,7 +30,15 @@ logger = logging.getLogger(__name__)
 # strategies.v4_cascade.__init__. Unit tests monkeypatch this attribute.
 V4CascadeBook = None
 
-_SUPPORTED_UNDERLYINGS = {"NIFTY", "BTC", "ETH"}
+_SUPPORTED_UNDERLYINGS = {"NIFTY", "BTC", "ETH", "CRUDEOIL"}
+
+# Default squareoff_time fallback, per underlying -- a deployment row with no
+# configured squareoff_time must not silently fall back to NIFTY's 15:15 for
+# an MCX underlying (would force-close it minutes after the 09:00 open,
+# hours before MCX's real ~23:15-23:30 close -- the same class of bug
+# project memory already documents for sell_straddle).
+_DEFAULT_SQUAREOFF_TIME = {"CRUDEOIL": "23:15"}
+_FALLBACK_SQUAREOFF_TIME = "15:15"
 
 
 class V4CascadeBookManager(StrategyBookManager):
@@ -73,12 +81,12 @@ class V4CascadeBookManager(StrategyBookManager):
         # the deployment row here (not carried through _wanted()'s lots-only
         # value, to avoid changing the base class's Dict[tuple,int] contract)
         # and pass the real configured time through.
-        squareoff_time = "15:15"
+        squareoff_time = _DEFAULT_SQUAREOFF_TIME.get(und, _FALLBACK_SQUAREOFF_TIME)
         try:
             for d in (self._db.get_deployments_sync(cid) or []):
                 if (d.get("binding_id") == bid and d.get("strategy_name") == "v4_cascade"
                         and str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper() == und):
-                    squareoff_time = str(d.get("squareoff_time") or "15:15")
+                    squareoff_time = str(d.get("squareoff_time") or squareoff_time)
                     break
         except Exception:
             pass
