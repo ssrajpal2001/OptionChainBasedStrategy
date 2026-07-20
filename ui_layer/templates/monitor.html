@@ -7059,14 +7059,21 @@ function amoTest() {
                              MOST-ADVANCED in-flight setup (LVLS is just a count) — this lists
                              EVERY concurrently-tracked setup for this side, each with its own
                              gate state and zone bounds, so a setup stuck behind the leader
-                             (or one that just got invalidated) is never hidden. -->
+                             (or one that just got invalidated) is never hidden. Aligned columns
+                             (not a run-on text line) so HTF/MTF zone numbers don't blur together. -->
+                        <template x-if="((_t[side]||{}).setups||[]).length>0">
+                          <div class="grid items-center pl-3 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
+                            <span>STATE</span><span>HTF ZONE</span><span>MTF ZONE</span>
+                            <span class="text-right">LIMIT</span><span>OPENED</span>
+                          </div>
+                        </template>
                         <template x-for="(s,si) in (_t[side]||{}).setups||[]" :key="si">
-                          <div class="pl-3 py-0.5 text-xs font-mono" style="color:var(--t-muted);border-left:1px solid var(--t-border)">
+                          <div class="grid items-center pl-3 py-0.5 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
                             <span :style="`color:${['limit_armed','triggered'].includes(s.state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="s.state"></span>
-                            <template x-if="s.htf_low!==null"><span> HTF <span style="color:var(--t-text)" x-text="s.htf_low+' · '+s.htf_high"></span></span></template>
-                            <template x-if="s.mtf_low!==null"><span> · MTF<span x-text="s.mtf_timeframe"></span>m <span style="color:var(--t-text)" x-text="s.mtf_low+' · '+s.mtf_high"></span></span></template>
-                            <template x-if="s.limit_entry_price!==null"><span> · limit <span style="color:var(--t-green)" x-text="s.limit_entry_price"></span></span></template>
-                            <template x-if="s.htf_ref_ts"><span x-text="' ('+s.htf_ref_ts+')'"></span></template>
+                            <span style="color:var(--t-text)" x-text="s.htf_low!==null ? s.htf_low+' · '+s.htf_high : '—'"></span>
+                            <span style="color:var(--t-text)" x-text="s.mtf_low!==null ? s.mtf_low+' · '+s.mtf_high+' ('+s.mtf_timeframe+'m)' : '—'"></span>
+                            <span class="text-right" :style="`color:${s.limit_entry_price!==null?'var(--t-green)':'var(--t-muted)'}`" x-text="s.limit_entry_price!==null ? s.limit_entry_price : '—'"></span>
+                            <span x-text="s.htf_ref_ts||'—'"></span>
                           </div>
                         </template>
                         </div>

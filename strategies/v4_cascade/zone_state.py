@@ -279,11 +279,13 @@ class PremiumGateScanner:
         price (MTF_LOCKED/LIMIT_ARMED). Runs after the state-transition
         checks above so a bar wide enough to both enter AND blow through the
         zone in one move is still caught. The governing zone is the HTF zone
-        while still waiting on Gate 1's retest, and the Inner (MTF) zone
-        once Gate 2 has locked -- never both at once, since HTF_LOCKED and
-        MTF_LOCKED/LIMIT_ARMED are mutually exclusive states."""
+        for every state before an Inner Zone has locked (HTF_LOCKED, and
+        MTF_SCANNING_5M/15M -- already past Gate 1's retest but not yet
+        found a tighter Gate-2 zone, so the HTF zone is still what "hasn't
+        failed yet" means), and the Inner (MTF) zone once Gate 2 has locked
+        (MTF_LOCKED, LIMIT_ARMED)."""
         for setup in list(self.setups):
-            if setup.state == GateState.HTF_LOCKED:
+            if setup.state in (GateState.HTF_LOCKED, GateState.MTF_SCANNING_5M, GateState.MTF_SCANNING_15M):
                 z = setup.htf_zone
             elif setup.state in (GateState.MTF_LOCKED, GateState.LIMIT_ARMED):
                 z = setup.mtf_zone

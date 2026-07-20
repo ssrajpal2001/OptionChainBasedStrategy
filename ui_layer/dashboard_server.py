@@ -2694,6 +2694,19 @@ class DashboardServer:
                                 _gate_order = list(GateState)
                                 _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
                                 _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
+                                _mtf_locked_idx = _gate_order.index(GateState.MTF_LOCKED)
+
+                                def _zone_bounds(z):
+                                    if z is None or z.entry_line is None or z.sweep_low is None:
+                                        return None, None
+                                    return (round(min(z.entry_line, z.sweep_low), 2),
+                                            round(max(z.entry_line, z.sweep_low), 2))
+
+                                def _governing_zone(s):
+                                    # Same rule as PremiumGateScanner._invalidate_broken_setups:
+                                    # HTF zone until an Inner Zone has locked, MTF zone after.
+                                    return s.mtf_zone if _gate_order.index(s.state) >= _mtf_locked_idx else s.htf_zone
+
                                 for side, label in (("CE", "BEAR" if _is_crypto else "CE"),
                                                      ("PE", "BULL" if _is_crypto else "PE")):
                                     scanner = book._engine._scanners.get(side)
@@ -2702,12 +2715,9 @@ class DashboardServer:
                                     if scanner is not None and scanner.setups:
                                         setup = max(scanner.setups, key=lambda s: _gate_order.index(s.state))
                                     if setup is not None:
-                                        _levels = [v for v in (
-                                            setup.htf_zone.entry_line if setup.htf_zone else None,
-                                            setup.htf_zone.sl_level if setup.htf_zone else None,
-                                        ) if v is not None]
-                                        level_l = min(_levels) if _levels else 0
-                                        level_h = max(_levels) if _levels else 0
+                                        level_l, level_h = _zone_bounds(_governing_zone(setup))
+                                        if level_l is None:
+                                            level_l = level_h = 0
                                         side_state = setup.state.value
                                         # HTF/MTF are sequential sub-gates of the SAME setup, not
                                         # two independent states — once past HTF_LOCKED the HTF
@@ -2725,12 +2735,6 @@ class DashboardServer:
                                     tracking[f"{side.lower()}_label"] = label
                                     tracking[f"{side.lower()}_strike"] = strike
                                     tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
-
-                                    def _zone_bounds(z):
-                                        if z is None or z.entry_line is None or z.sweep_low is None:
-                                            return None, None
-                                        return (round(min(z.entry_line, z.sweep_low), 2),
-                                                round(max(z.entry_line, z.sweep_low), 2))
 
                                     _all_setups = []
                                     if scanner is not None:
