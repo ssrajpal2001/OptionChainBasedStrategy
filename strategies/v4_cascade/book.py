@@ -35,7 +35,9 @@ from urllib.parse import quote as _q
 from config.global_config import IST, Topic
 from data_layer import position_store
 from data_layer.base_feeder import CandleEvent
-from data_layer.historical_candles import _http_get_json, _parse_candles, fetch_upstox_range_1m
+from data_layer.historical_candles import (
+    _http_get_json, _parse_candles, fetch_upstox_range_1m, fetch_upstox_intraday_1m,
+)
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.v4_cascade.config import EXECUTION_OFFSET_PTS, V4CascadeConfig
@@ -372,12 +374,30 @@ class V4CascadeBook(AbstractStrategyBook):
         today = datetime.now(IST).date()
         start = today - timedelta(days=_LOOKBACK_DAYS)
 
+        # fetch_upstox_range_1m hits Upstox's DATED historical-candle endpoint
+        # (/v2/historical-candle/{key}/1minute/{from}/{to}), which only ever
+        # serves already-closed days -- it does NOT return today's still-
+        # forming session no matter what `end` date is passed (documented at
+        # the top of historical_candles.py). Every restart wipes the
+        # in-memory 75m/5m bar buffers, so without ALSO fetching today via
+        # the separate intraday endpoint, replay can never rebuild (or
+        # confirm a reclaim that happened) on TODAY's own candles -- a real,
+        # confirmed bug: a trap whose reference candle was days ago but whose
+        # reclaim only confirmed earlier TODAY was invisible after every
+        # restart, silently falling back to an older, already-known zone.
         spot_key = REGISTRY.get_upstox_index_key(self._underlying)
-        spot_rows, ce_rows, pe_rows = await asyncio.gather(
+        (spot_rows, ce_rows, pe_rows,
+         spot_today, ce_today, pe_today) = await asyncio.gather(
             fetch_upstox_range_1m(spot_key, token, start, today),
             fetch_upstox_range_1m(self._ce_symbol, token, start, today),
             fetch_upstox_range_1m(self._pe_symbol, token, start, today),
+            fetch_upstox_intraday_1m(spot_key, token),
+            fetch_upstox_intraday_1m(self._ce_symbol, token),
+            fetch_upstox_intraday_1m(self._pe_symbol, token),
         )
+        spot_rows = _merge_rows(spot_rows, spot_today)
+        ce_rows = _merge_rows(ce_rows, ce_today)
+        pe_rows = _merge_rows(pe_rows, pe_today)
         spot_5m = _to_5m_bars(spot_rows, filter_zero_volume=False)
         ce_5m = _to_5m_bars(ce_rows, filter_zero_volume=True)
         pe_5m = _to_5m_bars(pe_rows, filter_zero_volume=True)
@@ -945,6 +965,16 @@ class V4CascadeBook(AbstractStrategyBook):
 
 
 # ── module-level bar helpers (shared by ingestion + live bucket close) ──────
+
+def _merge_rows(range_rows: List[dict], today_rows: List[dict]) -> List[dict]:
+    """Combines the dated-range historical fetch (never includes today) with
+    the separate intraday fetch (today only), deduped by timestamp -- today's
+    intraday values win on any overlap since they're the fresher source."""
+    by_ts = {r["ts"]: r for r in range_rows}
+    for r in today_rows:
+        by_ts[r["ts"]] = r
+    return sorted(by_ts.values(), key=lambda r: r["ts"])
+
 
 def _to_5m_bars(rows: List[dict], filter_zero_volume: bool) -> List:
     import pandas as pd
