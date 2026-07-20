@@ -74,26 +74,35 @@ class LadderMatch:
     reclaim_ts: datetime   # the TRAPPED-confirmation candle's timestamp
 
 
-def _is_mitigated_bear(bars: List[_Bar], entry_line: float, trapped_idx: int) -> bool:
+def _is_mitigated_bear(bars: List[_Bar], entry_line: float, sweep_low: float, trapped_idx: int) -> bool:
     """True if any bar strictly after the TRAPPED-confirmation candle, up to
-    (but NOT including) the most recent bar in ``bars``, CLOSED at/through
-    ``entry_line`` again -- a wick alone (bars[j].low <= entry_line) is a
-    liquidity sweep, not a confirmed breakdown, and this whole strategy is
-    built on exactly that distinction (a sweep followed by a reclaim is the
-    SIGNAL, not noise to discard on). Checking .close instead of .low fixed
-    a real, confirmed case: a reclaimed zone was being killed by a single
-    bar that wicked a few points below the entry line and closed well
-    back above it, on the same bar the strategy would otherwise treat as
-    exactly the kind of sweep it's designed to trade."""
+    (but NOT including) the most recent bar in ``bars``, CLOSED through the
+    FAR edge of the zone (min(entry_line, sweep_low) -- i.e. back past the
+    original sweep extreme) again.
+
+    Checks the zone's LOW, not entry_line alone: entry_line is the TOP of
+    the zone (the level that got reclaimed) -- a close back down near/below
+    entry_line is a completely normal, expected RETEST, not a failure; it's
+    the exact behavior "waiting for zone entry" is watching for. Only a
+    close all the way through the zone's actual bottom (the original sweep
+    low) means the reclaim has structurally failed. Confirmed against a
+    real PE 24400 example: 07-20 13:00 closed at 173.90 -- well below
+    entry_line (210.05, a normal retest) but still comfortably above the
+    true zone low (153.85, the original sweep) -- so this must NOT mitigate.
+
+    Also checks .close, not .low: a wick alone is a liquidity sweep (the
+    SIGNAL this whole strategy trades), not a confirmed breakdown."""
+    zone_low = min(entry_line, sweep_low)
     for j in range(trapped_idx + 1, len(bars) - 1):
-        if bars[j].close <= entry_line:
+        if bars[j].close <= zone_low:
             return True
     return False
 
 
-def _is_mitigated_bull(bars: List[_Bar], entry_line: float, trapped_idx: int) -> bool:
+def _is_mitigated_bull(bars: List[_Bar], entry_line: float, sweep_high: float, trapped_idx: int) -> bool:
+    zone_high = max(entry_line, sweep_high)
     for j in range(trapped_idx + 1, len(bars) - 1):
-        if bars[j].close >= entry_line:
+        if bars[j].close >= zone_high:
             return True
     return False
 
@@ -140,7 +149,7 @@ def find_bear_zone(
             continue
 
         entry_line = ref.low
-        if _is_mitigated_bear(bars, entry_line, trapped_idx=trapped_idx):
+        if _is_mitigated_bear(bars, entry_line, sweep_low, trapped_idx=trapped_idx):
             continue
 
         return RollingBaseZone(
@@ -189,7 +198,7 @@ def find_bull_zone(
             continue
 
         entry_line = ref.high
-        if _is_mitigated_bull(bars, entry_line, trapped_idx=trapped_idx):
+        if _is_mitigated_bull(bars, entry_line, sweep_high, trapped_idx=trapped_idx):
             continue
 
         return RollingBaseZone(
@@ -238,7 +247,7 @@ def find_bear_trap_2candle(
             continue
 
         entry_line = ref.low
-        if _is_mitigated_bear(bars, entry_line, trapped_idx=trapped_idx):
+        if _is_mitigated_bear(bars, entry_line, next_bar.low, trapped_idx=trapped_idx):
             continue
 
         return RollingBaseZone(
@@ -288,7 +297,7 @@ def find_all_bear_traps_2candle(
         if skip_before_ts is not None and trapped_ts <= skip_before_ts:
             continue
         entry_line = ref.low
-        if _is_mitigated_bear(bars, entry_line, trapped_idx=trapped_idx):
+        if _is_mitigated_bear(bars, entry_line, next_bar.low, trapped_idx=trapped_idx):
             continue
         raw.append(dict(ref_idx=i, trig_idx=i + 1, trapped_idx=trapped_idx))
 
@@ -357,7 +366,7 @@ def find_bull_trap_2candle(
             continue
 
         entry_line = ref.high
-        if _is_mitigated_bull(bars, entry_line, trapped_idx=trapped_idx):
+        if _is_mitigated_bull(bars, entry_line, next_bar.high, trapped_idx=trapped_idx):
             continue
 
         return RollingBaseZone(
@@ -394,7 +403,7 @@ def find_all_bull_traps_2candle(
         if skip_before_ts is not None and trapped_ts <= skip_before_ts:
             continue
         entry_line = ref.high
-        if _is_mitigated_bull(bars, entry_line, trapped_idx=trapped_idx):
+        if _is_mitigated_bull(bars, entry_line, next_bar.high, trapped_idx=trapped_idx):
             continue
         raw.append(dict(ref_idx=i, trig_idx=i + 1, trapped_idx=trapped_idx))
 
