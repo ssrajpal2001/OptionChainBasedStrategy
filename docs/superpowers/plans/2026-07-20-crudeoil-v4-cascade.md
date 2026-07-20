@@ -446,7 +446,7 @@ from strategies.v4_cascade.engine import V4CascadeEngine
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def _bars(day, start_hour, start_minute, n, price=100.0):
+def _bars(start_hour, start_minute, n, price=100.0):
     out = []
     ts = datetime(2026, 7, 20, start_hour, start_minute, tzinfo=IST)
     for i in range(n):
@@ -459,8 +459,8 @@ def test_replay_does_not_force_close_before_custom_eod():
     # A position opened during replay must NOT be force-closed, since none of
     # these bars reach the custom eod_square_off=(23,15).
     engine = V4CascadeEngine(session_open=(9, 0))
-    ce_5m = _bars("2026-07-20", 9, 0, 76)   # 09:00 .. ~15:15
-    pe_5m = _bars("2026-07-20", 9, 0, 76)
+    ce_5m = _bars(9, 0, 76)   # 09:00 .. ~15:15
+    pe_5m = _bars(9, 0, 76)
     # No spot_5m needed for this check -- just confirm the EOD constant used
     # is the one passed in, not the module default (15,15), by checking the
     # replay runs without raising and completes (a force-close at the wrong
@@ -479,8 +479,8 @@ def test_replay_default_session_open_still_09_15():
     # Backward-compat: calling with no new kwargs must behave exactly as
     # before (NIFTY's 09:15/15:15/15:30).
     engine = V4CascadeEngine()
-    ce_5m = _bars("2026-07-20", 9, 15, 5)
-    pe_5m = _bars("2026-07-20", 9, 15, 5)
+    ce_5m = _bars(9, 15, 5)
+    pe_5m = _bars(9, 15, 5)
     _replay_through_engine(engine, spot_5m=[], ce_5m=ce_5m, pe_5m=pe_5m)
 ```
 
