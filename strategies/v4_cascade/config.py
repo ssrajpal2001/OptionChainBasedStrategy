@@ -24,10 +24,15 @@ T2_TRAIL_TF_MINUTES: int = 5
 # distance from entry: long = zone_low - sl_buffer, short = zone_high +
 # sl_buffer, in TRACKING-contract price units (mirrors the same
 # tracking->execution ratio scale already used for the rest of the risk
-# distance). NIFTY = 10 premium points, BTC/ETH = $50 (crypto tracking ==
-# execution price, so this ends up being the exact literal formula there).
+# distance). NIFTY = flat 10 premium points, regardless of lot_multiplier.
 SL_BUFFER_PTS_NIFTY: float = 10.0
-SL_BUFFER_PTS_CRYPTO: float = 50.0
+# Crypto: buffer is $200 PER 1 FULL COIN (BTC/ETH) of position size, not a
+# flat number -- at lot_multiplier=1000 (1000 x 0.001 BTC = exactly 1 BTC),
+# the buffer is the full $200; a smaller/larger position gets a
+# proportionally smaller/larger buffer. book.py computes the actual
+# sl_buffer passed into V4CascadeConfig as
+# SL_BUFFER_PER_COIN_CRYPTO * (lot_multiplier * contract_value).
+SL_BUFFER_PER_COIN_CRYPTO: float = 200.0
 
 PIERCE_CHECK_TF_MINUTES: int = 5     # granularity of the "candle low pierces entry line" trigger
 SPOT_CONFIRM_TF_MINUTES: int = 75    # spot-side concurrent-confirmation is fixed at 75m (no ladder)

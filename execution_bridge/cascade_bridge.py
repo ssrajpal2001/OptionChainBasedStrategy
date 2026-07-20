@@ -106,7 +106,12 @@ class _CascadeTradeLogger:
 
     def _handle(self, client_id: str, binding_id: str) -> object:
         today = datetime.now(IST).strftime("%Y%m%d")
-        key = f"{client_id}-{binding_id}-{today}"
+        # "-v4cascade" tag keeps this file distinct from straddle_bridge's
+        # TradeLogger, which writes {client}-{binding}-{date}.log in the SAME
+        # directory — without the tag, a client running both strategies on
+        # one binding (e.g. NIFTY sell_straddle + trap scanner today) would
+        # have both strategies' order lines interleaved in one file.
+        key = f"{client_id}-{binding_id}-v4cascade-{today}"
         if key not in self._handles:
             path = os.path.join(self._log_dir, f"{key}.log")
             self._handles[key] = open(path, "a", encoding="utf-8", buffering=1)

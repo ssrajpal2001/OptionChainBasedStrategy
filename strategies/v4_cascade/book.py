@@ -95,14 +95,22 @@ class V4CascadeBook(AbstractStrategyBook):
         # sell_straddle uses), so lot_multiplier=1000 must yield tranche_qty
         # in the hundreds, not multiplied by a phantom NIFTY lot size.
         _real_lot_size = int(getattr(getattr(cfg, "exchange", None), "lot_sizes", {}).get(underlying.upper(), 65) or 65)
-        # SL buffer beyond the Inner Zone edge — 10 premium points for NIFTY,
-        # $50 for BTC/ETH (was silently defaulting to the NIFTY value for
-        # every underlying, including crypto, since this was never wired in
-        # when the field was added — a real bug: it made every crypto SL
-        # ~$40 tighter than intended, getting clipped by ordinary 1-2 minute
-        # noise almost immediately after entry on nearly every trade).
-        from strategies.v4_cascade.config import SL_BUFFER_PTS_CRYPTO, SL_BUFFER_PTS_NIFTY
-        _sl_buffer = SL_BUFFER_PTS_CRYPTO if self._is_crypto else SL_BUFFER_PTS_NIFTY
+        # SL buffer beyond the Inner Zone edge — flat 10 premium points for
+        # NIFTY. For crypto, $200 is calibrated PER 1 FULL COIN of position
+        # size (not a flat number): at lot_multiplier=1000 (1000 x 0.001 BTC
+        # = exactly 1 BTC), buffer = the full $200; a smaller/larger
+        # position gets a proportionally smaller/larger buffer. (Was
+        # silently defaulting to NIFTY's flat 10 for every underlying,
+        # including crypto, since this was never wired in when the field
+        # was added — made every crypto SL ~4x tighter than intended,
+        # getting clipped by ordinary 1-2 minute noise almost immediately
+        # after entry on nearly every trade.)
+        from strategies.v4_cascade.config import SL_BUFFER_PER_COIN_CRYPTO, SL_BUFFER_PTS_NIFTY
+        if self._is_crypto:
+            _coin_qty = lot_multiplier * _CRYPTO_CONTRACT_VALUE.get(underlying.upper(), 1.0)
+            _sl_buffer = SL_BUFFER_PER_COIN_CRYPTO * _coin_qty
+        else:
+            _sl_buffer = SL_BUFFER_PTS_NIFTY
         self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier,
                                        lot_size=_real_lot_size, sl_buffer=_sl_buffer)
         self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto)
@@ -144,6 +152,18 @@ class V4CascadeBook(AbstractStrategyBook):
         # GC'd before it ever runs, silently dropping the order).
         self._pending_bus_tasks: set = set()
 
+        # Dedicated per-strategy log file, same pattern sell_straddle already
+        # has (ss_{UND}_{client}_{binding}_{date}.log via make_strategy_logger)
+        # — so a client running BOTH sell_straddle and v4_cascade on the same
+        # binding gets two separate, readable logs instead of one interleaved
+        # stream. Rotates to a fresh file at the date this book started; a
+        # long-running crypto process (no daily session reset) keeps writing
+        # to that same file until the process itself restarts.
+        from utils.logging_utils import make_strategy_logger
+        _tag = f"{underlying}_{client_id}_{binding_id}"
+        _date_str = datetime.now(IST).strftime("%Y%m%d")
+        self._clog = make_strategy_logger(f"v4_{_tag}_{_date_str}")
+
     def _fire(self, coro) -> None:
         """Fire-and-forget an async EventBus.publish() from a sync call
         site, keeping a strong reference until it completes."""
@@ -166,6 +186,9 @@ class V4CascadeBook(AbstractStrategyBook):
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self) -> None:
         super().start()
+        self._clog.info("=== V4Cascade[%s/%s/%s] started — lot_multiplier=%d sl_buffer=%.2f ===",
+                        self._underlying, self._client_id, self._binding_id,
+                        self._lot_multiplier, self._v4cfg.sl_buffer)
         self._restore_position()
         self._tasks.append(asyncio.create_task(
             self._boot(), name=f"v4cascade_boot_{self._client_id}_{self._binding_id}"))
@@ -267,6 +290,9 @@ class V4CascadeBook(AbstractStrategyBook):
         logger.info("V4CascadeBook[%s/%s/%s]: ATM_open=%.2f CE=%d(%s) PE=%d(%s) expiry=%s",
                     self._underlying, self._client_id, self._binding_id, atm_open,
                     self._ce_strike, self._ce_symbol, self._pe_strike, self._pe_symbol, self._expiry)
+        self._clog.info("ATM_open=%.2f CE=%d(%s) PE=%d(%s) expiry=%s",
+                        atm_open, self._ce_strike, self._ce_symbol,
+                        self._pe_strike, self._pe_symbol, self._expiry)
         return bool(self._ce_symbol and self._pe_symbol)
 
     async def _subscribe_tracking_contracts(self) -> None:
@@ -317,6 +343,8 @@ class V4CascadeBook(AbstractStrategyBook):
         logger.info("V4CascadeBook[%s/%s/%s]: history ingested — spot=%d CE=%d PE=%d 5m bars.",
                     self._underlying, self._client_id, self._binding_id,
                     len(spot_5m), len(ce_5m), len(pe_5m))
+        self._clog.info("history ingested — spot=%d CE=%d PE=%d 5m bars.",
+                        len(spot_5m), len(ce_5m), len(pe_5m))
         return True
 
     # ── crypto (BTC/ETH) spot-only path — 2026-07-19, see module header ─────
@@ -371,6 +399,9 @@ class V4CascadeBook(AbstractStrategyBook):
                     "CE setups=%d PE setups=%d.",
                     self._underlying, self._client_id, self._binding_id, len(bars_1m),
                     len(self._engine._scanners["CE"].setups), len(self._engine._scanners["PE"].setups))
+        self._clog.info("crypto history ingested — %d x 1m bars, CE setups=%d PE setups=%d.",
+                        len(bars_1m), len(self._engine._scanners["CE"].setups),
+                        len(self._engine._scanners["PE"].setups))
         return True
 
     async def _crypto_candle_loop(self) -> None:
@@ -550,6 +581,7 @@ class V4CascadeBook(AbstractStrategyBook):
             return
         logger.info("V4CascadeBook[%s/%s/%s]: EOD 15:15 force square-off.",
                     self._underlying, self._client_id, self._binding_id)
+        self._clog.info("EOD 15:15 force square-off.")
         for tranche, leg in (("T1", pos.t1), ("T2", pos.t2)):
             if leg is None or leg.status != "open":
                 continue
@@ -643,6 +675,8 @@ class V4CascadeBook(AbstractStrategyBook):
         logger.info("V4CascadeBook[%s/%s/%s]: %s side=%s tranche=%s price=%s reason=%s",
                     self._underlying, self._client_id, self._binding_id,
                     ev.event_type.value, ev.side, ev.tranche, ev.price_hint, ev.reason)
+        self._clog.info("%s side=%s tranche=%s price=%s reason=%s",
+                        ev.event_type.value, ev.side, ev.tranche, ev.price_hint, ev.reason)
 
     # ── fill reconciliation ────────────────────────────────────────────────────
     async def _fill_loop(self) -> None:
@@ -676,6 +710,7 @@ class V4CascadeBook(AbstractStrategyBook):
                 reason = "routing failed" if fill.routing_failed else "no fill"
                 logger.error("V4CascadeBook[%s/%s/%s]: ENTRY ABORTED (%s) — discarding optimistic position.",
                              self._underlying, self._client_id, self._binding_id, reason)
+                self._clog.error("ENTRY ABORTED (%s) — discarding optimistic position.", reason)
                 if target is None or self._engine.position is target:
                     self._engine.position = None
                 self._engine._tracking_entry_price.pop(fill.side, None)
@@ -693,6 +728,8 @@ class V4CascadeBook(AbstractStrategyBook):
             logger.info("V4CascadeBook[%s/%s/%s]: ENTRY confirmed side=%s @ %.4f qty=%d",
                         self._underlying, self._client_id, self._binding_id,
                         fill.side, fill.fill_price, fill.qty)
+            self._clog.info("ENTRY confirmed side=%s @ %.4f qty=%d",
+                            fill.side, fill.fill_price, fill.qty)
         elif fill.action == "EXIT":
             leg = target
             if leg is None:
@@ -711,6 +748,8 @@ class V4CascadeBook(AbstractStrategyBook):
             logger.info("V4CascadeBook[%s/%s/%s]: EXIT confirmed tranche=%s side=%s @ %.4f pnl=%.4f",
                         self._underlying, self._client_id, self._binding_id,
                         fill.tranche, fill.side, fill.fill_price, leg.realized_pnl)
+            self._clog.info("EXIT confirmed tranche=%s side=%s @ %.4f pnl=%.4f",
+                            fill.tranche, fill.side, fill.fill_price, leg.realized_pnl)
 
     # ── persistence ──────────────────────────────────────────────────────────
     def _persist_position(self) -> None:
@@ -731,6 +770,8 @@ class V4CascadeBook(AbstractStrategyBook):
                 logger.info("V4CascadeBook[%s/%s/%s]: restored open position from disk (side=%s).",
                             self._underlying, self._client_id, self._binding_id,
                             self._engine.position.side)
+                self._clog.info("restored open position from disk (side=%s).",
+                                self._engine.position.side)
             except Exception:
                 logger.exception("V4CascadeBook[%s]: position restore failed.", self._underlying)
 
