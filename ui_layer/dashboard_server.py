@@ -2682,14 +2682,15 @@ class DashboardServer:
                                 if _sc is not None:
                                     _bias = getattr(_sc.current_kind, "value", str(_sc.current_kind))
                                 if _is_crypto:
-                                    _atm, _dte, _offset = 0, "—", 0   # atm filled in below (= live spot)
+                                    _atm, _dte, _offset, _expiry_str = 0, "—", 0, None   # atm filled in below (= live spot)
                                 else:
                                     _atm = round(float(book._atm_open or 0.0), 2)
                                     _dte = ((book._expiry - datetime.now(IST).date()).days
                                             if book._expiry else "—")
                                     _offset = int(_TRACKING_OFFSET)
+                                    _expiry_str = book._expiry.isoformat() if book._expiry else None
                                 tracking = {"is_crypto": _is_crypto, "atm": _atm, "dte": _dte,
-                                            "offset": _offset, "phase": "", "bias": _bias}
+                                            "offset": _offset, "expiry": _expiry_str, "phase": "", "bias": _bias}
                                 _phases = []
                                 _gate_order = list(GateState)
                                 _htf_idx = _gate_order.index(GateState.HTF_LOCKED)

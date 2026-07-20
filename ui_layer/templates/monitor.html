@@ -7017,7 +7017,8 @@ function amoTest() {
                         <template x-if="!_t.is_crypto">
                           <span>ATM <span style="color:var(--t-cyan)" x-text="_t.atm"></span>
                             · DTE <span style="color:var(--t-cyan)" x-text="_t.dte"></span>
-                            · ITM <span style="color:var(--t-cyan)" x-text="_t.offset"></span></span>
+                            · ITM <span style="color:var(--t-cyan)" x-text="_t.offset"></span>
+                            · Exp <span style="color:var(--t-cyan)" x-text="_t.expiry ? histDayLabel(_t.expiry) : '—'"></span></span>
                         </template>
                         <template x-if="_t.is_crypto">
                           <span>SPOT <span style="color:var(--t-cyan)" x-text="_t.atm"></span></span>
@@ -7047,7 +7048,8 @@ function amoTest() {
                       <template x-for="side in ['ce','pe']" :key="side">
                         <div>
                         <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:0.9fr 0.8fr 1fr 1fr 0.6fr 1.3fr;gap:0.4rem">
-                          <span style="color:var(--t-text)" x-text="_t[side+'_label']||side.toUpperCase()"></span>
+                          <span style="color:var(--t-text)"
+                                x-text="(_t[side+'_label']||side.toUpperCase())+(!_t.is_crypto&&_t[side+'_strike']?' '+_t[side+'_strike']:'')"></span>
                           <span class="text-right price-live" style="color:var(--t-bright)" x-text="_t[side==='ce'?'ce_ltp':'pe_ltp']"></span>
                           <span :style="`color:${['limit_armed','triggered'].includes((_t[side]||{}).htf_state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="(_t[side]||{}).htf_state||'—'"></span>
                           <span :style="`color:${['limit_armed','triggered'].includes((_t[side]||{}).mtf_state)?'var(--t-green)':'var(--t-muted)'}`" x-text="(_t[side]||{}).mtf_state||'—'"></span>
