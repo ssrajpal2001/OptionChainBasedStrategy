@@ -274,6 +274,12 @@ class PremiumGateScanner:
                 self._check_mtf_zone_entry(setup, bar)
         self._invalidate_broken_setups(bar)
 
+    @staticmethod
+    def _zone_span(z):
+        if z is None or z.entry_line is None or z.sweep_low is None:
+            return None, None
+        return min(z.entry_line, z.sweep_low), max(z.entry_line, z.sweep_low)
+
     def _invalidate_broken_setups(self, bar) -> None:
         """A locked zone (HTF or Inner/MTF) represents a CONFIRMED reclaim
         (price swept below a level, then closed back above it) — waiting for
@@ -281,33 +287,54 @@ class PremiumGateScanner:
         make sense as a controlled pull-back retest of that reclaim. If a
         later bar re-breaks past the FAR edge of the GOVERNING zone (below
         the swept low for a bear/long setup, above the swept high for a
-        bull/short setup) before the setup ever advances past it, the
-        reclaim has structurally failed — this is a continuation breakdown,
-        not a valid trap retest anymore. Drop the setup instead of leaving
-        it waiting forever (HTF_LOCKED) or armed to fire a bad entry on a
-        future bar that happens to revisit the (now-invalid) retracement
-        price (MTF_LOCKED/LIMIT_ARMED). Runs after the state-transition
-        checks above so a bar wide enough to both enter AND blow through the
-        zone in one move is still caught. The governing zone is the HTF zone
-        for every state before an Inner Zone has locked (HTF_LOCKED, and
-        MTF_SCANNING_5M/15M -- already past Gate 1's retest but not yet
-        found a tighter Gate-2 zone, so the HTF zone is still what "hasn't
-        failed yet" means), and the Inner (MTF) zone once Gate 2 has locked
-        (MTF_LOCKED, LIMIT_ARMED)."""
+        bull/short setup) before the setup ever advances past it, that
+        specific zone has structurally failed.
+
+        For HTF_LOCKED/MTF_SCANNING_5M/15M (no Inner Zone locked yet), the
+        HTF zone IS the whole thesis — a breach there drops the setup
+        entirely, same as before.
+
+        For MTF_LOCKED/LIMIT_ARMED, a breach of the Inner Zone does NOT by
+        itself mean the setup is dead — the Inner Zone is a narrow 5m/15m
+        sub-structure, easily breached by routine volatility even while
+        price is still well inside the much wider HTF zone it came from
+        (confirmed against a real chart: price sat clearly inside the HTF
+        zone while a tight ~0.5pt Inner Zone next to it had long since been
+        blown through). Only drop the WHOLE setup if the broader HTF zone
+        is ALSO breached; otherwise roll back to HTF_LOCKED (same
+        convention as the 15:30 EOD gate reset in book.py -- HTF zone kept,
+        Inner Zone discarded) so Gate 2 gets a fresh chance to lock a new
+        Inner Zone off the same still-valid HTF structure."""
         for setup in list(self.setups):
             if setup.state in (GateState.HTF_LOCKED, GateState.MTF_SCANNING_5M, GateState.MTF_SCANNING_15M):
-                z = setup.htf_zone
+                zone_low, zone_high = self._zone_span(setup.htf_zone)
+                if zone_low is None:
+                    continue
+                breached = bar.low < zone_low if self._bear else bar.high > zone_high
+                if breached:
+                    self.setups.remove(setup)
             elif setup.state in (GateState.MTF_LOCKED, GateState.LIMIT_ARMED):
-                z = setup.mtf_zone
-            else:
-                continue
-            if z is None or z.entry_line is None or z.sweep_low is None:
-                continue
-            zone_low = min(z.entry_line, z.sweep_low)
-            zone_high = max(z.entry_line, z.sweep_low)
-            breached = bar.low < zone_low if self._bear else bar.high > zone_high
-            if breached:
-                self.setups.remove(setup)
+                mtf_low, mtf_high = self._zone_span(setup.mtf_zone)
+                if mtf_low is None:
+                    continue
+                mtf_breached = bar.low < mtf_low if self._bear else bar.high > mtf_high
+                if not mtf_breached:
+                    continue
+                htf_low, htf_high = self._zone_span(setup.htf_zone)
+                htf_also_breached = (htf_low is None or
+                                      (bar.low < htf_low if self._bear else bar.high > htf_high))
+                if htf_also_breached:
+                    self.setups.remove(setup)
+                else:
+                    setup.state = GateState.HTF_LOCKED
+                    setup.mtf_zone = None
+                    setup.mtf_timeframe = None
+                    setup.limit_entry_price = None
+                    # Exclude the just-failed Inner Zone from being
+                    # immediately re-found on the next Gate-2 scan (would
+                    # otherwise re-lock the identical already-broken zone
+                    # and re-breach it right back out, looping forever).
+                    setup.mtf_consumed_before_ts = bar.timestamp
 
     def _mtf_window(self, setup: _HTFSetup) -> List:
         if setup.htf_ref_ts is None:
