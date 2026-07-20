@@ -242,9 +242,38 @@ class V4CascadeBook(AbstractStrategyBook):
         except Exception:
             return ""
 
+    async def _await_first_tick(self, timeout: float = 60.0) -> Optional[float]:
+        """Subscribe to live NIFTY ticks and use the very first one received
+        as the session's reference price — avoids depending on the
+        historical intraday candle API being queryable right at market open
+        (it can lag a minute or more before the 09:15 bar is even query-
+        able), and naturally handles a mid-day boot too (anchors to
+        whatever NIFTY is trading at THIS moment, not a stale 09:15 value
+        fetched hours later). Raw bus subscribe/unsubscribe (not
+        self._subscribe) — this is a one-shot wait, not a tracked loop."""
+        q = self._bus.subscribe(Topic.INDEX_TICK)
+        try:
+            deadline = asyncio.get_event_loop().time() + timeout
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    tick = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if getattr(tick, "symbol", "") != self._underlying:
+                    continue
+                ltp = float(getattr(tick, "ltp", 0.0) or 0.0)
+                if ltp > 0:
+                    return ltp
+            return None
+        finally:
+            self._bus.unsubscribe(Topic.INDEX_TICK, q)
+
     def _fetch_session_open(self, token: str, day: date) -> Optional[float]:
-        """The CURRENT session's 09:15 spot open, fetched via history (never
-        waits for a live tick — required for mid-day boots)."""
+        """Fallback ONLY (used if the live feed doesn't produce a tick
+        within _await_first_tick's timeout) — the CURRENT session's 09:15
+        spot open via the historical intraday candle API. This is a
+        DIFFERENT historical call than _ingest_history's 10-day HTF/MTF
+        lookback replay — that one stays exactly as-is, still required."""
         spot_key = REGISTRY.get_upstox_index_key(self._underlying)
         url = (f"https://api.upstox.com/v2/historical-candle/{_q(spot_key, safe='')}/1minute/"
                f"{day.isoformat()}/{day.isoformat()}")
@@ -270,10 +299,19 @@ class V4CascadeBook(AbstractStrategyBook):
                             self._underlying)
             return False
         today = datetime.now(IST).date()
-        atm_open = await asyncio.to_thread(self._fetch_session_open, token, today)
+        # Primary: the first live tick received (whenever this book starts —
+        # at market open or mid-day) IS the reference price, no historical
+        # API dependency. Fallback: the 09:15 historical open, only if the
+        # live feed hasn't produced a tick within the wait window.
+        atm_open = await self._await_first_tick()
         if atm_open is None:
-            logger.warning("V4CascadeBook[%s]: could not fetch 09:15 session open for %s.",
-                            self._underlying, today)
+            logger.warning("V4CascadeBook[%s]: no live tick within timeout — "
+                           "falling back to historical 09:15 session open.", self._underlying)
+            self._clog.warning("no live tick within timeout — falling back to historical 09:15 open.")
+            atm_open = await asyncio.to_thread(self._fetch_session_open, token, today)
+        if atm_open is None:
+            logger.warning("V4CascadeBook[%s]: could not resolve session open for %s "
+                           "(no live tick, no historical data).", self._underlying, today)
             return False
         self._atm_open = atm_open
         atm = round(atm_open / _STRIKE_STEP) * _STRIKE_STEP
