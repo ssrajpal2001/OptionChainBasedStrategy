@@ -223,6 +223,7 @@ class PremiumGateScanner:
         for setup in self.setups:
             if setup.state == GateState.HTF_LOCKED:
                 self._check_htf_zone_entry(setup, bar)
+        self._invalidate_broken_setups(bar)
 
     def _scan_for_new_htf_setups(self) -> None:
         zones = self._find_all(list(self._bars_75m), skip_before_ts=self._htf_consumed_before_ts)
@@ -264,21 +265,30 @@ class PremiumGateScanner:
         self._invalidate_broken_setups(bar)
 
     def _invalidate_broken_setups(self, bar) -> None:
-        """A setup's Inner Zone represents a CONFIRMED reclaim (price swept
-        below a level, then closed back above it) — LIMIT_ARMED's 1/3-
-        retracement price only makes sense as a shallow pull-back retest of
-        that reclaim. If a later bar re-breaks past the FAR edge of the zone
-        (below the swept low for a bear/long setup, above the swept high for
-        a bull/short setup), the reclaim has structurally failed — this is a
-        continuation breakdown, not a valid trap retest anymore. Drop the
-        setup instead of leaving it armed to fire a bad entry on a future
-        bar that happens to revisit the (now-invalid) 1/3 retracement price.
-        Runs after the state-transition checks above so a bar wide enough to
-        both enter AND blow through the zone in one move is still caught."""
+        """A locked zone (HTF or Inner/MTF) represents a CONFIRMED reclaim
+        (price swept below a level, then closed back above it) — waiting for
+        "zone entry" (HTF_LOCKED) or LIMIT_ARMED's 1/3-retracement price only
+        make sense as a controlled pull-back retest of that reclaim. If a
+        later bar re-breaks past the FAR edge of the GOVERNING zone (below
+        the swept low for a bear/long setup, above the swept high for a
+        bull/short setup) before the setup ever advances past it, the
+        reclaim has structurally failed — this is a continuation breakdown,
+        not a valid trap retest anymore. Drop the setup instead of leaving
+        it waiting forever (HTF_LOCKED) or armed to fire a bad entry on a
+        future bar that happens to revisit the (now-invalid) retracement
+        price (MTF_LOCKED/LIMIT_ARMED). Runs after the state-transition
+        checks above so a bar wide enough to both enter AND blow through the
+        zone in one move is still caught. The governing zone is the HTF zone
+        while still waiting on Gate 1's retest, and the Inner (MTF) zone
+        once Gate 2 has locked -- never both at once, since HTF_LOCKED and
+        MTF_LOCKED/LIMIT_ARMED are mutually exclusive states."""
         for setup in list(self.setups):
-            if setup.state not in (GateState.MTF_LOCKED, GateState.LIMIT_ARMED):
+            if setup.state == GateState.HTF_LOCKED:
+                z = setup.htf_zone
+            elif setup.state in (GateState.MTF_LOCKED, GateState.LIMIT_ARMED):
+                z = setup.mtf_zone
+            else:
                 continue
-            z = setup.mtf_zone
             if z is None or z.entry_line is None or z.sweep_low is None:
                 continue
             zone_low = min(z.entry_line, z.sweep_low)
