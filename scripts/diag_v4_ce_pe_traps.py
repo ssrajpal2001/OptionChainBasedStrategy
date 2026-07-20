@@ -47,7 +47,11 @@ async def main() -> None:
     ap.add_argument("--expiry", required=True, help="YYYY-MM-DD")
     ap.add_argument("--days", type=int, default=14, help="lookback days from today")
     ap.add_argument("--dump-from", default=None, help="YYYY-MM-DD: print every 75m bar from this date on, for cross-checking against a real chart")
+    ap.add_argument("--session-open", default="9:15", help="HH:MM, e.g. 9:00 for MCX/CRUDEOIL")
     args = ap.parse_args()
+
+    _oh, _om = (int(x) for x in args.session_open.split(":"))
+    session_open = (_oh, _om)
 
     db = ClientDB()
     creds = db.get_feeder_creds_sync("upstox")
@@ -90,7 +94,7 @@ async def main() -> None:
 
     bars_5m = _to_5m_bars(merged, filter_zero_volume=True)
     print(f"Resampled to {len(bars_5m)} x 5m bars.")
-    bars_75m = resample_bars(bars_5m, 75)
+    bars_75m = resample_bars(bars_5m, 75, session_open=session_open)
     print(f"Resampled to {len(bars_75m)} x 75m bars (Gate 1's real timeframe).")
 
     zones = find_all_bear_traps_2candle(bars_75m)
