@@ -309,18 +309,20 @@ class V4CascadeBook(AbstractStrategyBook):
             self._bus.unsubscribe(Topic.INDEX_TICK, q)
 
     async def _fetch_session_open(self, token: str, day: date) -> Optional[float]:
-        """PRIMARY method — today's real 09:15 candle open via Upstox's
-        INTRADAY endpoint (fetch_upstox_intraday_1m), not the dated-range
-        historical-candle endpoint (which never returns today's data
-        regardless of the date passed -- the same distinction that was just
-        fixed for _ingest_history). Correct and available for a restart at
-        ANY time of day, not just right at market open, since it always
+        """PRIMARY method — today's real session-open candle open via
+        Upstox's INTRADAY endpoint (fetch_upstox_intraday_1m). Uses
+        historical_instrument_key() (NOT get_upstox_index_key()) so MCX
+        underlyings correctly source the near-month FUTURES price -- MCX
+        commodities have no tradeable spot index, get_upstox_index_key()
+        has no CRUDEOIL entry and would fall through to a bogus
+        NSE_INDEX|CRUDEOIL key. Correct and available for a restart at ANY
+        time of day, not just right at market open, since it always
         re-reads the FIRST candle of today's session rather than "now".
         This is a DIFFERENT call than _ingest_history's multi-day HTF/MTF
         lookback replay — that one stays exactly as-is, still required."""
-        spot_key = REGISTRY.get_upstox_index_key(self._underlying)
+        instrument_key = REGISTRY.historical_instrument_key(self._underlying)
         try:
-            rows = await fetch_upstox_intraday_1m(spot_key, token)
+            rows = await fetch_upstox_intraday_1m(instrument_key, token)
         except Exception:
             rows = []
         if not rows:
@@ -418,7 +420,7 @@ class V4CascadeBook(AbstractStrategyBook):
         # confirmed bug: a trap whose reference candle was days ago but whose
         # reclaim only confirmed earlier TODAY was invisible after every
         # restart, silently falling back to an older, already-known zone.
-        spot_key = REGISTRY.get_upstox_index_key(self._underlying)
+        spot_key = REGISTRY.historical_instrument_key(self._underlying)
         (spot_rows, ce_rows, pe_rows,
          spot_today, ce_today, pe_today) = await asyncio.gather(
             fetch_upstox_range_1m(spot_key, token, start, today),
