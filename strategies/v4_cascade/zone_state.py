@@ -294,6 +294,13 @@ class PremiumGateScanner:
         HTF zone IS the whole thesis — a breach there drops the setup
         entirely, same as before.
 
+        Breach is judged on the bar's CLOSE, not its low/high — a wick
+        through the zone is a liquidity sweep (this whole strategy is built
+        on exactly that pattern being the SIGNAL, not noise), only a
+        confirmed close past the zone counts as an actual breakdown. Fixed
+        alongside the same wick-vs-close issue in rolling_base.py's
+        _is_mitigated_bear/_is_mitigated_bull.
+
         For MTF_LOCKED/LIMIT_ARMED, a breach of the Inner Zone does NOT by
         itself mean the setup is dead — the Inner Zone is a narrow 5m/15m
         sub-structure, easily breached by routine volatility even while
@@ -310,19 +317,19 @@ class PremiumGateScanner:
                 zone_low, zone_high = self._zone_span(setup.htf_zone)
                 if zone_low is None:
                     continue
-                breached = bar.low < zone_low if self._bear else bar.high > zone_high
+                breached = bar.close < zone_low if self._bear else bar.close > zone_high
                 if breached:
                     self.setups.remove(setup)
             elif setup.state in (GateState.MTF_LOCKED, GateState.LIMIT_ARMED):
                 mtf_low, mtf_high = self._zone_span(setup.mtf_zone)
                 if mtf_low is None:
                     continue
-                mtf_breached = bar.low < mtf_low if self._bear else bar.high > mtf_high
+                mtf_breached = bar.close < mtf_low if self._bear else bar.close > mtf_high
                 if not mtf_breached:
                     continue
                 htf_low, htf_high = self._zone_span(setup.htf_zone)
                 htf_also_breached = (htf_low is None or
-                                      (bar.low < htf_low if self._bear else bar.high > htf_high))
+                                      (bar.close < htf_low if self._bear else bar.close > htf_high))
                 if htf_also_breached:
                     self.setups.remove(setup)
                 else:

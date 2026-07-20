@@ -76,17 +76,24 @@ class LadderMatch:
 
 def _is_mitigated_bear(bars: List[_Bar], entry_line: float, trapped_idx: int) -> bool:
     """True if any bar strictly after the TRAPPED-confirmation candle, up to
-    (but NOT including) the most recent bar in ``bars``, already traded
-    at/through ``entry_line`` again."""
+    (but NOT including) the most recent bar in ``bars``, CLOSED at/through
+    ``entry_line`` again -- a wick alone (bars[j].low <= entry_line) is a
+    liquidity sweep, not a confirmed breakdown, and this whole strategy is
+    built on exactly that distinction (a sweep followed by a reclaim is the
+    SIGNAL, not noise to discard on). Checking .close instead of .low fixed
+    a real, confirmed case: a reclaimed zone was being killed by a single
+    bar that wicked a few points below the entry line and closed well
+    back above it, on the same bar the strategy would otherwise treat as
+    exactly the kind of sweep it's designed to trade."""
     for j in range(trapped_idx + 1, len(bars) - 1):
-        if bars[j].low <= entry_line:
+        if bars[j].close <= entry_line:
             return True
     return False
 
 
 def _is_mitigated_bull(bars: List[_Bar], entry_line: float, trapped_idx: int) -> bool:
     for j in range(trapped_idx + 1, len(bars) - 1):
-        if bars[j].high >= entry_line:
+        if bars[j].close >= entry_line:
             return True
     return False
 
