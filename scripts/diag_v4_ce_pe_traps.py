@@ -55,6 +55,9 @@ async def main() -> None:
         sys.exit(1)
     token = creds["access_token"]
 
+    print(f"Loading {args.underlying} contract registry ...")
+    REGISTRY.load_sync(args.underlying, token)
+
     expiry = date.fromisoformat(args.expiry)
     key = REGISTRY.get_upstox_key(args.underlying, expiry, args.strike, args.opt_type)
     print(f"instrument_key = {key}")
