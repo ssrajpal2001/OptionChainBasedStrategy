@@ -2708,12 +2708,17 @@ class DashboardServer:
                                     side_ltp = float(live_price.get(side) or 0.0)
                                     setup = None
                                     if scanner is not None and scanner.setups:
-                                        # Show the single MOST-ADVANCED setup (closest to actually
-                                        # triggering) -- recomputed fresh every poll, so once that
-                                        # setup gets invalidated (dropped from scanner.setups) this
-                                        # naturally "moves back" to whichever setup is next most
-                                        # advanced, with no separate fallback logic needed.
-                                        setup = max(scanner.setups, key=lambda s: _gate_order.index(s.state))
+                                        # Show the single MOST-RECENTLY-DISCOVERED setup (newest HTF
+                                        # reference candle) -- recomputed fresh every poll, so once
+                                        # that setup gets invalidated (dropped from scanner.setups)
+                                        # this naturally "moves back" to whichever setup is next most
+                                        # recent, with no separate fallback logic needed. Note: this
+                                        # can show a brand-new HTF_LOCKED setup OVER an older one
+                                        # that's already further along (e.g. LIMIT_ARMED, about to
+                                        # actually fire) -- recency, not trade-proximity, is the
+                                        # sort key here, per explicit user choice.
+                                        setup = max(scanner.setups,
+                                                    key=lambda s: s.htf_ref_ts or datetime.min.replace(tzinfo=IST))
                                     if setup is not None:
                                         # LOW·HIGH always shows THIS setup's own HTF zone (Gate 1) —
                                         # never switches to the MTF zone -- so the MTF zone can be
