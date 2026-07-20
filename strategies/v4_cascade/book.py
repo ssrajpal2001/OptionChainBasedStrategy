@@ -398,8 +398,12 @@ class V4CascadeBook(AbstractStrategyBook):
         # afterward -- replay's zone-building side effects on the
         # scanners/spot_confirm are untouched by this, only .position is.
         _pos_before_replay = self._engine.position
+        self._clog.info("DIAG pre-replay position=%s", _pos_diag(_pos_before_replay))
         _replay_through_engine(self._engine, spot_5m, ce_5m, pe_5m,
                                 on_daily_boundary=self._apply_eod_gate23_rules)
+        self._clog.info("DIAG post-replay position=%s (same_obj=%s)",
+                        _pos_diag(self._engine.position),
+                        self._engine.position is _pos_before_replay)
         if self._engine.position is not _pos_before_replay:
             logger.warning("V4CascadeBook[%s/%s/%s]: historical replay tried to open/close "
                            "a position — discarding (replay must never touch live position).",
@@ -931,6 +935,7 @@ class V4CascadeBook(AbstractStrategyBook):
         try:
             data = position_store.load(self._persist_key)
         except Exception:
+            self._clog.info("DIAG restore: load() raised, treating as nothing to restore.")
             data = None
         if data:
             try:
@@ -940,11 +945,30 @@ class V4CascadeBook(AbstractStrategyBook):
                             self._engine.position.side)
                 self._clog.info("restored open position from disk (side=%s).",
                                 self._engine.position.side)
+                self._clog.info("DIAG restored position=%s", _pos_diag(self._engine.position))
             except Exception:
                 logger.exception("V4CascadeBook[%s]: position restore failed.", self._underlying)
+        else:
+            self._clog.info("DIAG restore: nothing found on disk for key=%s (engine.position=%s).",
+                            self._persist_key, _pos_diag(self._engine.position))
 
 
 # ── module-level bar helpers (shared by ingestion + live bucket close) ──────
+
+def _pos_diag(pos) -> str:
+    """Temporary diagnostic helper (2026-07-20) — tracing an unexplained
+    close_long_pe firing right after boot ingestion with no matching
+    restore/open/discard log. Compact one-line summary of a CascadePosition
+    (or None) for correlating pre/post-replay state across restarts."""
+    if pos is None:
+        return "None"
+    t1 = pos.t1
+    t2 = pos.t2
+    return (f"id={id(pos)} side={pos.side} status={pos.status} "
+            f"t1=({t1.status if t1 else 'n/a'},entry={t1.entry_price if t1 else 0},"
+            f"target={t1.target_price if t1 else 0}) "
+            f"t2=({t2.status if t2 else 'n/a'},entry={t2.entry_price if t2 else 0})")
+
 
 def _to_5m_bars(rows: List[dict], filter_zero_volume: bool) -> List:
     import pandas as pd
