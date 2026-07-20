@@ -37,6 +37,13 @@ _SUPPORTED_UNDERLYINGS = {"NIFTY", "BTC", "ETH", "CRUDEOIL"}
 # an MCX underlying (would force-close it minutes after the 09:00 open,
 # hours before MCX's real ~23:15-23:30 close -- the same class of bug
 # project memory already documents for sell_straddle).
+#
+# NOTE: this dict must gain an entry for any new MCX underlying added to
+# _SUPPORTED_UNDERLYINGS above, or it will silently fall back to NIFTY's
+# 15:15 default and force-close it mid-session. book.py's self._is_mcx
+# branch (__init__) also needs its own tracking/execution-offset and SL
+# buffer numbers for that underlying -- it does not silently inherit
+# CRUDEOIL's, but is currently written as if only CRUDEOIL exists.
 _DEFAULT_SQUAREOFF_TIME = {"CRUDEOIL": "23:15"}
 _FALLBACK_SQUAREOFF_TIME = "15:15"
 

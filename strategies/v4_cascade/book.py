@@ -140,6 +140,15 @@ class V4CascadeBook(AbstractStrategyBook):
         # (was silently wrong for any underlying but NIFTY before this).
         self._strike_step = float(cfg.exchange.strike_steps.get(underlying.upper(), 50.0) or 50.0)
         if self._is_mcx:
+            # NOTE: these numbers (400/100 here, plus SL buffer 20.0 above and
+            # session_open (9,0) below) are CRUDEOIL-specific even though the
+            # gate is the broad ExchangeConfig.mcx_underlyings-based is_mcx flag
+            # (also true for CRUDEOILM/NATURALGAS/GOLD/GOLDM/SILVER). Safe today
+            # only because v4_cascade_book_manager._SUPPORTED_UNDERLYINGS gates
+            # deployment to {NIFTY, BTC, ETH, CRUDEOIL}. If a second MCX
+            # underlying is ever added there, it must ALSO get its own numbers
+            # here (not silently inherit CRUDEOIL's) and its own entry in that
+            # manager's _DEFAULT_SQUAREOFF_TIME dict.
             self._tracking_offset = 400.0
             self._execution_offset = 100.0
         else:
@@ -352,9 +361,11 @@ class V4CascadeBook(AbstractStrategyBook):
         # even produced the 09:15 bar).
         atm_open = await self._fetch_session_open(token, today)
         if atm_open is None:
-            logger.warning("V4CascadeBook[%s]: no 09:15 session-open data yet — "
-                           "falling back to first live tick.", self._underlying)
-            self._clog.warning("no 09:15 session-open data yet — falling back to first live tick.")
+            logger.warning("V4CascadeBook[%s]: no %02d:%02d session-open data yet — "
+                           "falling back to first live tick.", self._underlying,
+                           self._session_open[0], self._session_open[1])
+            self._clog.warning(f"no {self._session_open[0]:02d}:{self._session_open[1]:02d} "
+                                f"session-open data yet — falling back to first live tick.")
             atm_open = await self._await_first_tick()
         if atm_open is None:
             logger.warning("V4CascadeBook[%s]: could not resolve session open for %s "
@@ -739,9 +750,11 @@ class V4CascadeBook(AbstractStrategyBook):
         pos = self._engine.position
         if pos is None or not pos.is_open:
             return
-        logger.info("V4CascadeBook[%s/%s/%s]: EOD 15:15 force square-off.",
-                    self._underlying, self._client_id, self._binding_id)
-        self._clog.info("EOD 15:15 force square-off.")
+        logger.info("V4CascadeBook[%s/%s/%s]: EOD %02d:%02d force square-off.",
+                    self._underlying, self._client_id, self._binding_id,
+                    self._eod_hour_min[0], self._eod_hour_min[1])
+        self._clog.info(f"EOD {self._eod_hour_min[0]:02d}:{self._eod_hour_min[1]:02d} "
+                         f"force square-off.")
         for tranche, leg in (("T1", pos.t1), ("T2", pos.t2)):
             if leg is None or leg.status != "open":
                 continue
@@ -778,7 +791,7 @@ class V4CascadeBook(AbstractStrategyBook):
         if self._is_crypto:
             return 0.0
         spot = self._live_spot or self._atm_open or 0.0
-        step = float(self._cfg.exchange.strike_steps.get(self._underlying, 50.0) or 50.0)
+        step = self._strike_step
         if spot > 0:
             atm = round(spot / step) * step
             return atm + self._execution_offset if side == "CE" else atm - self._execution_offset
