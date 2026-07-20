@@ -2694,7 +2694,6 @@ class DashboardServer:
                                 _gate_order = list(GateState)
                                 _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
                                 _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
-                                _mtf_locked_idx = _gate_order.index(GateState.MTF_LOCKED)
 
                                 def _zone_bounds(z):
                                     if z is None or z.entry_line is None or z.sweep_low is None:
@@ -2702,22 +2701,28 @@ class DashboardServer:
                                     return (round(min(z.entry_line, z.sweep_low), 2),
                                             round(max(z.entry_line, z.sweep_low), 2))
 
-                                def _governing_zone(s):
-                                    # Same rule as PremiumGateScanner._invalidate_broken_setups:
-                                    # HTF zone until an Inner Zone has locked, MTF zone after.
-                                    return s.mtf_zone if _gate_order.index(s.state) >= _mtf_locked_idx else s.htf_zone
-
                                 for side, label in (("CE", "BEAR" if _is_crypto else "CE"),
                                                      ("PE", "BULL" if _is_crypto else "PE")):
                                     scanner = book._engine._scanners.get(side)
                                     side_ltp = float(live_price.get(side) or 0.0)
                                     setup = None
                                     if scanner is not None and scanner.setups:
+                                        # Show the single MOST-ADVANCED setup (closest to actually
+                                        # triggering) -- recomputed fresh every poll, so once that
+                                        # setup gets invalidated (dropped from scanner.setups) this
+                                        # naturally "moves back" to whichever setup is next most
+                                        # advanced, with no separate fallback logic needed.
                                         setup = max(scanner.setups, key=lambda s: _gate_order.index(s.state))
                                     if setup is not None:
-                                        level_l, level_h = _zone_bounds(_governing_zone(setup))
+                                        # LOW·HIGH always shows THIS setup's own HTF zone (Gate 1) —
+                                        # never switches to the MTF zone -- so the MTF zone can be
+                                        # shown separately, clearly nested UNDER it (same setup,
+                                        # never a different one), instead of the two being conflated
+                                        # into one column or confused with an unrelated setup's zone.
+                                        level_l, level_h = _zone_bounds(setup.htf_zone)
                                         if level_l is None:
                                             level_l = level_h = 0
+                                        mtf_low, mtf_high = _zone_bounds(setup.mtf_zone)
                                         side_state = setup.state.value
                                         # HTF/MTF are sequential sub-gates of the SAME setup, not
                                         # two independent states — once past HTF_LOCKED the HTF
@@ -2727,36 +2732,24 @@ class DashboardServer:
                                         _idx = _gate_order.index(setup.state)
                                         htf_disp = side_state if _idx < _htf_idx else "locked"
                                         mtf_disp = side_state if _idx >= _mtf_idx else "—"
+                                        limit_price = (round(setup.limit_entry_price, 2)
+                                                       if setup.limit_entry_price is not None else None)
+                                        mtf_tf = setup.mtf_timeframe
                                     else:
                                         level_l = level_h = 0
+                                        mtf_low = mtf_high = limit_price = mtf_tf = None
                                         side_state = htf_disp = mtf_disp = "—"
                                     strike = round(side_ltp) if _is_crypto else int(
                                         getattr(book, f"_{side.lower()}_strike", 0) or 0)
                                     tracking[f"{side.lower()}_label"] = label
                                     tracking[f"{side.lower()}_strike"] = strike
                                     tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
-
-                                    _all_setups = []
-                                    if scanner is not None:
-                                        for s in sorted(scanner.setups,
-                                                         key=lambda s: _gate_order.index(s.state), reverse=True):
-                                            htf_low, htf_high = _zone_bounds(s.htf_zone)
-                                            mtf_low, mtf_high = _zone_bounds(s.mtf_zone)
-                                            _all_setups.append({
-                                                "state": s.state.value,
-                                                "htf_ref_ts": s.htf_ref_ts.isoformat(timespec="minutes")
-                                                              if s.htf_ref_ts else None,
-                                                "htf_low": htf_low, "htf_high": htf_high,
-                                                "mtf_timeframe": s.mtf_timeframe,
-                                                "mtf_low": mtf_low, "mtf_high": mtf_high,
-                                                "limit_entry_price": round(s.limit_entry_price, 2)
-                                                                      if s.limit_entry_price is not None else None,
-                                            })
                                     tracking[side.lower()] = {
                                         "htf_state": htf_disp, "mtf_state": mtf_disp,
                                         "traps": len(scanner.setups) if scanner else 0,
+                                        "mtf_low": mtf_low, "mtf_high": mtf_high, "mtf_timeframe": mtf_tf,
+                                        "limit_entry_price": limit_price,
                                         "level_l": round(level_l, 2), "level_h": round(level_h, 2),
-                                        "setups": _all_setups,
                                     }
                                     _phases.append(side_state)
                                 tracking["phase"] = "/".join(_phases)

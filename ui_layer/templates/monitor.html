@@ -7055,30 +7055,23 @@ function amoTest() {
                           <span class="text-right" style="color:var(--t-text)"
                                 x-text="((_t[side]||{}).level_h||0)>0 ? (_t[side]||{}).level_l+' · '+(_t[side]||{}).level_h : '—'"></span>
                         </div>
-                        <!-- Per-setup breakdown: the row above only ever shows the single
-                             MOST-ADVANCED in-flight setup (LVLS is just a count) — this lists
-                             EVERY concurrently-tracked setup for this side, each with its own
-                             gate state and zone bounds, so a setup stuck behind the leader
-                             (or one that just got invalidated) is never hidden. Aligned columns
-                             (not a run-on text line) so HTF/MTF zone numbers don't blur together.
-                             Each ROW is a fully independent setup (its own HTF ref, own Inner
-                             Zone once locked) -- NOT a parent/child HTF->MTF pair with the row
-                             above or below it. #N makes that explicit; an MTF ZONE value only
-                             ever nests inside that SAME row's own HTF ZONE, never a different row's. -->
-                        <template x-if="((_t[side]||{}).setups||[]).length>0">
-                          <div class="grid items-center pl-3 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:0.3fr 1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
-                            <span>#</span><span>STATE</span><span>HTF ZONE</span><span>MTF ZONE</span>
-                            <span class="text-right">LIMIT</span><span>OPENED</span>
-                          </div>
-                        </template>
-                        <template x-for="(s,si) in (_t[side]||{}).setups||[]" :key="si">
-                          <div class="grid items-center pl-3 py-0.5 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:0.3fr 1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
-                            <span x-text="si+1"></span>
-                            <span :style="`color:${['limit_armed','triggered'].includes(s.state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="s.state"></span>
-                            <span style="color:var(--t-text)" x-text="s.htf_low!==null ? s.htf_low+' · '+s.htf_high : '—'"></span>
-                            <span style="color:var(--t-text)" x-text="s.mtf_low!==null ? s.mtf_low+' · '+s.mtf_high+' ('+s.mtf_timeframe+'m)' : '—'"></span>
-                            <span class="text-right" :style="`color:${s.limit_entry_price!==null?'var(--t-green)':'var(--t-muted)'}`" x-text="s.limit_entry_price!==null ? s.limit_entry_price : '—'"></span>
-                            <span x-text="s.htf_ref_ts||'—'"></span>
+                        <!-- LOW·HIGH above is always THIS single setup's own HTF (Gate 1) zone --
+                             the one currently furthest through the gates (LVLS shows how many
+                             others are still in the pool, but only this one is displayed, and
+                             it's recomputed fresh every poll, so once it gets invalidated the
+                             display automatically falls back to whichever setup is next most
+                             advanced). If Gate 2 has locked an Inner Zone for THIS SAME setup,
+                             it's shown nested directly below, indented -- it can never belong to
+                             a different setup than the HTF zone right above it. -->
+                        <template x-if="(_t[side]||{}).mtf_low!==null || (_t[side]||{}).limit_entry_price!==null">
+                          <div class="pl-4 py-0.5 text-xs font-mono" style="color:var(--t-muted);border-left:1px solid var(--t-border)">
+                            <template x-if="(_t[side]||{}).mtf_low!==null">
+                              <span>↳ MTF <span style="color:var(--t-text)" x-text="(_t[side]||{}).mtf_low+' · '+(_t[side]||{}).mtf_high"></span>
+                                <span x-text="'('+(_t[side]||{}).mtf_timeframe+'m)'"></span></span>
+                            </template>
+                            <template x-if="(_t[side]||{}).limit_entry_price!==null">
+                              <span> · limit <span style="color:var(--t-green)" x-text="(_t[side]||{}).limit_entry_price"></span></span>
+                            </template>
                           </div>
                         </template>
                         </div>
