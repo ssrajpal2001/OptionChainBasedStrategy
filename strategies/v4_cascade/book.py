@@ -95,7 +95,16 @@ class V4CascadeBook(AbstractStrategyBook):
         # sell_straddle uses), so lot_multiplier=1000 must yield tranche_qty
         # in the hundreds, not multiplied by a phantom NIFTY lot size.
         _real_lot_size = int(getattr(getattr(cfg, "exchange", None), "lot_sizes", {}).get(underlying.upper(), 65) or 65)
-        self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier, lot_size=_real_lot_size)
+        # SL buffer beyond the Inner Zone edge — 10 premium points for NIFTY,
+        # $50 for BTC/ETH (was silently defaulting to the NIFTY value for
+        # every underlying, including crypto, since this was never wired in
+        # when the field was added — a real bug: it made every crypto SL
+        # ~$40 tighter than intended, getting clipped by ordinary 1-2 minute
+        # noise almost immediately after entry on nearly every trade).
+        from strategies.v4_cascade.config import SL_BUFFER_PTS_CRYPTO, SL_BUFFER_PTS_NIFTY
+        _sl_buffer = SL_BUFFER_PTS_CRYPTO if self._is_crypto else SL_BUFFER_PTS_NIFTY
+        self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier,
+                                       lot_size=_real_lot_size, sl_buffer=_sl_buffer)
         self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto)
 
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_v4_cascade"
