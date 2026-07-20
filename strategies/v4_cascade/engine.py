@@ -137,11 +137,16 @@ class V4CascadeEngine:
             target_r=self._cfg.t1_target_r, sl_buffer=self._cfg.sl_buffer, is_short=is_short,
         )
         qty = self._cfg.tranche_qty
+        # Why this trade fired: a bear trap (sellers trapped, reclaim up) is
+        # a bullish signal -> long; a bull trap (buyers trapped, reclaim
+        # down) is bearish -> short (crypto PE only). Gate 3 = the 1/3-depth
+        # limit-price pierce into the locked Inner (MTF) zone.
+        entry_reason = "gate3_bull_trap_reclaim" if is_short else "gate3_bear_trap_reclaim"
         t1 = TrancheLeg(tranche="T1", option_type=side, strike=0.0, qty=qty,
-                         entry_price=entry_price, entry_time=bar.timestamp,
+                         entry_price=entry_price, entry_time=bar.timestamp, entry_reason=entry_reason,
                          sl_price=sl_price, target_price=target_price)
         t2 = TrancheLeg(tranche="T2", option_type=side, strike=0.0, qty=qty,
-                         entry_price=entry_price, entry_time=bar.timestamp,
+                         entry_price=entry_price, entry_time=bar.timestamp, entry_reason=entry_reason,
                          sl_price=sl_price, target_price=None)
         self.position = CascadePosition(
             underlying=self._cfg.underlying, side=side,
@@ -160,7 +165,7 @@ class V4CascadeEngine:
         scanner.pop_setup(setup, bar.timestamp)
         event_type = CascadeEventType.OPEN_LONG_CE if side == "CE" else CascadeEventType.OPEN_LONG_PE
         return CascadeEvent(
-            event_type=event_type, side=side, price_hint=entry_price,
+            event_type=event_type, side=side, price_hint=entry_price, reason=entry_reason,
             sl_price=sl_price, target_price=target_price, timestamp=bar.timestamp,
         )
 

@@ -120,6 +120,7 @@ class TrancheLeg:
     qty: int
     entry_price: float = 0.0     # execution-contract entry premium (tracking price_hint until filled)
     entry_time: Optional[datetime] = None
+    entry_reason: str = ""       # why the trade fired, e.g. "bear_trap_gate3_pierce"
     sl_price: float = 0.0        # premium-mapped SL (proportionally scaled from tracking contract)
     target_price: Optional[float] = None       # T1 only: fixed 2R target; None for T2 (trailing-managed)
     trail_stop_price: Optional[float] = None    # T2 only: current trailing stop level
@@ -135,6 +136,7 @@ class TrancheLeg:
             "strike": self.strike, "qty": self.qty,
             "entry_price": self.entry_price,
             "entry_time": self.entry_time.isoformat() if self.entry_time else None,
+            "entry_reason": self.entry_reason,
             "sl_price": self.sl_price, "target_price": self.target_price,
             "trail_stop_price": self.trail_stop_price, "status": self.status,
             "close_price": self.close_price,
@@ -150,6 +152,7 @@ class TrancheLeg:
             tranche=d["tranche"], option_type=d["option_type"],
             strike=d["strike"], qty=d["qty"],
             entry_price=d.get("entry_price", 0.0), entry_time=_dt(d.get("entry_time")),
+            entry_reason=d.get("entry_reason", ""),
             sl_price=d.get("sl_price", 0.0), target_price=d.get("target_price"),
             trail_stop_price=d.get("trail_stop_price"), status=d.get("status", "open"),
             close_price=d.get("close_price", 0.0), close_time=_dt(d.get("close_time")),

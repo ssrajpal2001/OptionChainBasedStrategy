@@ -7079,6 +7079,15 @@ function amoTest() {
                           <span class="text-right font-bold" :style="`color:${(leg.mtm!==undefined?leg.mtm:leg.pnl)>=0?'var(--t-green)':'var(--t-red)'}`"
                                 x-text="(((leg.mtm!==undefined?leg.mtm:leg.pnl))>=0?'+':'')+(leg.mtm!==undefined?leg.mtm:leg.pnl).toFixed(leg.ccy==='$'?2:0)"></span>
                         </div>
+                        <!-- V4 Cascade only: SL / Target / trail + entry reason. Straddle legs
+                             have none of these fields, so this stays hidden for them. -->
+                        <div x-show="leg.sl_price||leg.target_price||leg.entry_reason"
+                             class="text-xs font-mono pl-1 pb-1" style="color:var(--t-muted)">
+                          <span x-show="leg.sl_price">SL <span style="color:var(--t-red)" x-text="leg.sl_price"></span></span>
+                          <span x-show="leg.target_price"> · Target <span style="color:var(--t-green)" x-text="leg.target_price"></span></span>
+                          <span x-show="leg.trail_stop_price"> · Trail <span style="color:var(--t-cyan)" x-text="leg.trail_stop_price"></span></span>
+                          <span x-show="leg.entry_reason"> · <span x-text="leg.entry_reason"></span></span>
+                        </div>
                       </template>
                       <!-- Totals row -->
                       <div class="grid items-center pt-1 border-t text-xs font-mono font-bold" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">

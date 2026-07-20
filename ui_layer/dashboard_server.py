@@ -2667,6 +2667,11 @@ class DashboardServer:
                                         "sell_avg": round(leg.entry_price, 2) if _is_short_pos else 0.0,
                                         "buy_avg": 0.0 if _is_short_pos else round(leg.entry_price, 2),
                                         "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                        "sl_price": round(leg.sl_price, 2) if leg.sl_price else None,
+                                        "target_price": round(leg.target_price, 2) if leg.target_price else None,
+                                        "trail_stop_price": round(leg.trail_stop_price, 2)
+                                                             if leg.trail_stop_price else None,
+                                        "entry_reason": leg.entry_reason or "",
                                         "entry_time": leg.entry_time.isoformat(timespec="seconds")
                                                       if leg.entry_time else None,
                                     })
@@ -5475,6 +5480,44 @@ pm2 save
                         "exit_price": 0,
                         "exit_reason": "OPEN",
                         "exit_remark": "Live open position",
+                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
+                        "legs": _legs,
+                    })
+
+            elif sname == "v4_cascade":
+                book = self._find_v4_book(cid, bid, underlying)
+                pos = getattr(book, "_engine", None) and book._engine.position
+                if pos is None or not pos.is_open:
+                    continue
+                _is_crypto = str(underlying).upper() in ("BTC", "ETH")
+                _is_short = _is_crypto and pos.side == "PE"
+                live_price = getattr(book, "_live_price", {}) or {}
+                ltp = float(live_price.get(pos.side) or 0.0)
+                _legs = []
+                for leg in (pos.t1, pos.t2):
+                    if leg is None or leg.status != "open":
+                        continue
+                    _lp = ltp or leg.entry_price
+                    _pnl = (leg.entry_price - _lp) if _is_short else (_lp - leg.entry_price)
+                    strike = int(leg.strike) if not _is_crypto else 0
+                    _legs.append({
+                        "side": pos.side, "strike": strike,
+                        "entry": round(leg.entry_price, 2), "exit": 0,
+                        "pnl": round(_pnl * leg.qty, 2),
+                        "entry_ts": _ts(leg.entry_time),
+                        "exit_ts": None,
+                        "entry_reason": leg.entry_reason or "",
+                        "tranche": leg.tranche,
+                    })
+                if _legs:
+                    rows.append({
+                        "date": _ts(pos.open_time) or datetime.now(IST).isoformat(timespec="seconds"),
+                        "strategy": "v4_cascade",
+                        "instrument": str(underlying).upper(),
+                        "entry_price": round(sum(l["entry"] for l in _legs) / max(len(_legs), 1), 2),
+                        "exit_price": 0,
+                        "exit_reason": "OPEN",
+                        "exit_remark": _legs[0]["entry_reason"] if _legs else "Live open position",
                         "pnl": round(sum(l["pnl"] for l in _legs), 2),
                         "legs": _legs,
                     })
