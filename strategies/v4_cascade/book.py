@@ -446,6 +446,8 @@ class V4CascadeBook(AbstractStrategyBook):
             ) or "none"
             self._clog.info("DIAG post-ingest %s setups (armed=%s, bars_75m=%d): %s",
                             side, scanner.armed, len(scanner._bars_75m), summary)
+            ts_list = ", ".join(b.timestamp.isoformat(timespec="minutes") for b in scanner._bars_75m)
+            self._clog.info("DIAG %s bars_75m timestamps: %s", side, ts_list)
         return True
 
     # ── crypto (BTC/ETH) spot-only path — 2026-07-19, see module header ─────
