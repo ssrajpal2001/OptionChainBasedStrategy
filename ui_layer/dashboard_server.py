@@ -2725,10 +2725,34 @@ class DashboardServer:
                                     tracking[f"{side.lower()}_label"] = label
                                     tracking[f"{side.lower()}_strike"] = strike
                                     tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+
+                                    def _zone_bounds(z):
+                                        if z is None or z.entry_line is None or z.sweep_low is None:
+                                            return None, None
+                                        return (round(min(z.entry_line, z.sweep_low), 2),
+                                                round(max(z.entry_line, z.sweep_low), 2))
+
+                                    _all_setups = []
+                                    if scanner is not None:
+                                        for s in sorted(scanner.setups,
+                                                         key=lambda s: _gate_order.index(s.state), reverse=True):
+                                            htf_low, htf_high = _zone_bounds(s.htf_zone)
+                                            mtf_low, mtf_high = _zone_bounds(s.mtf_zone)
+                                            _all_setups.append({
+                                                "state": s.state.value,
+                                                "htf_ref_ts": s.htf_ref_ts.isoformat(timespec="minutes")
+                                                              if s.htf_ref_ts else None,
+                                                "htf_low": htf_low, "htf_high": htf_high,
+                                                "mtf_timeframe": s.mtf_timeframe,
+                                                "mtf_low": mtf_low, "mtf_high": mtf_high,
+                                                "limit_entry_price": round(s.limit_entry_price, 2)
+                                                                      if s.limit_entry_price is not None else None,
+                                            })
                                     tracking[side.lower()] = {
                                         "htf_state": htf_disp, "mtf_state": mtf_disp,
                                         "traps": len(scanner.setups) if scanner else 0,
                                         "level_l": round(level_l, 2), "level_h": round(level_h, 2),
+                                        "setups": _all_setups,
                                     }
                                     _phases.append(side_state)
                                 tracking["phase"] = "/".join(_phases)

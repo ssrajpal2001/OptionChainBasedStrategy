@@ -7045,6 +7045,7 @@ function amoTest() {
                         <span class="text-right">LVLS</span><span class="text-right">LOW · HIGH</span>
                       </div>
                       <template x-for="side in ['ce','pe']" :key="side">
+                        <div>
                         <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:0.9fr 0.8fr 1fr 1fr 0.6fr 1.3fr;gap:0.4rem">
                           <span style="color:var(--t-text)" x-text="_t[side+'_label']||side.toUpperCase()"></span>
                           <span class="text-right price-live" style="color:var(--t-bright)" x-text="_t[side==='ce'?'ce_ltp':'pe_ltp']"></span>
@@ -7053,6 +7054,21 @@ function amoTest() {
                           <span class="text-right" x-text="(_t[side]||{}).traps||0"></span>
                           <span class="text-right" style="color:var(--t-text)"
                                 x-text="((_t[side]||{}).level_h||0)>0 ? (_t[side]||{}).level_l+' · '+(_t[side]||{}).level_h : '—'"></span>
+                        </div>
+                        <!-- Per-setup breakdown: the row above only ever shows the single
+                             MOST-ADVANCED in-flight setup (LVLS is just a count) — this lists
+                             EVERY concurrently-tracked setup for this side, each with its own
+                             gate state and zone bounds, so a setup stuck behind the leader
+                             (or one that just got invalidated) is never hidden. -->
+                        <template x-for="(s,si) in (_t[side]||{}).setups||[]" :key="si">
+                          <div class="pl-3 py-0.5 text-xs font-mono" style="color:var(--t-muted);border-left:1px solid var(--t-border)">
+                            <span :style="`color:${['limit_armed','triggered'].includes(s.state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="s.state"></span>
+                            <template x-if="s.htf_low!==null"><span> HTF <span style="color:var(--t-text)" x-text="s.htf_low+' · '+s.htf_high"></span></span></template>
+                            <template x-if="s.mtf_low!==null"><span> · MTF<span x-text="s.mtf_timeframe"></span>m <span style="color:var(--t-text)" x-text="s.mtf_low+' · '+s.mtf_high"></span></span></template>
+                            <template x-if="s.limit_entry_price!==null"><span> · limit <span style="color:var(--t-green)" x-text="s.limit_entry_price"></span></span></template>
+                            <template x-if="s.htf_ref_ts"><span x-text="' ('+s.htf_ref_ts+')'"></span></template>
+                          </div>
+                        </template>
                         </div>
                       </template>
                       </div>
