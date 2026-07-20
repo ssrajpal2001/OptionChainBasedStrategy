@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime
-from typing import Deque, List, Optional
+from typing import Deque, List, Optional, Tuple
 
 from strategies.v4_cascade.dataclasses import RollingBaseZone, ZoneState, GateState
 from strategies.v4_cascade.rolling_base import (
@@ -177,7 +177,7 @@ class PremiumGateScanner:
     ``entries.check_limit_pierce``, which pops any setups that fired via
     ``pop_triggered()``."""
 
-    def __init__(self, bear: bool = True) -> None:
+    def __init__(self, bear: bool = True, session_open: Tuple[int, int] = (9, 15)) -> None:
         # 2026-07-19 — bear=True (default, UNCHANGED behavior for the NIFTY
         # premium path): scans for bear traps only, via find_bear_trap_2candle
         # / find_all_bear_traps_2candle. bear=False (crypto spot-only path
@@ -185,6 +185,7 @@ class PremiumGateScanner:
         # for bull traps instead, via the symmetric bull functions. Nothing
         # in the NIFTY path ever constructs a scanner with bear=False.
         self._bear = bear
+        self._session_open = session_open
         self._find_all = find_all_bear_traps_2candle if bear else find_all_bull_traps_2candle
         self._find_one = find_bear_trap_2candle if bear else find_bull_trap_2candle
 
@@ -360,7 +361,7 @@ class PremiumGateScanner:
             return
         # 5m found nothing yet -- fall back to a 15m resample of the SAME window.
         setup.state = GateState.MTF_SCANNING_15M
-        resampled = resample_bars(window, 15)
+        resampled = resample_bars(window, 15, session_open=self._session_open)
         if len(resampled) < 3:
             setup.state = GateState.MTF_SCANNING_5M  # keep retrying as the window grows
             return

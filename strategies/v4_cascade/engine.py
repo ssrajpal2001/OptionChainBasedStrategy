@@ -32,7 +32,7 @@ No bus/broker/DB/asyncio dependency — pure, fed CandleEvent-shaped bars.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from strategies.v4_cascade.config import V4CascadeConfig
 from strategies.v4_cascade.dataclasses import (
@@ -51,18 +51,24 @@ class V4CascadeEngine:
     sell_straddle's per-binding book pattern (see project memory), just not
     yet wired to a book.py adapter (that's a later phase)."""
 
-    def __init__(self, cfg: Optional[V4CascadeConfig] = None, pe_scans_bull: bool = False) -> None:
+    def __init__(
+        self, cfg: Optional[V4CascadeConfig] = None, pe_scans_bull: bool = False,
+        session_open: Tuple[int, int] = (9, 15),
+    ) -> None:
         """``pe_scans_bull``: 2026-07-19, crypto-spot-only path ONLY (see
         strategies/v4_cascade/book.py's _is_crypto branch) — when True, the
         PE scanner looks for BULL traps (real option premium has no
         inversion on raw spot, so PE must scan for genuine bearish patterns
         directly rather than reusing bear-trap logic). Defaults to False,
-        the exact validated NIFTY behavior (both CE and PE bear-trap-only)."""
+        the exact validated NIFTY behavior (both CE and PE bear-trap-only).
+        ``session_open``: forwarded to both scanners' Gate-2 15m fallback
+        resample — NIFTY/NSE default (9,15), MCX underlyings (CRUDEOIL) pass
+        (9,0)."""
         self._cfg = cfg or V4CascadeConfig()
         self._spot_confirm = SpotConfirmTracker()
         self._scanners: Dict[str, PremiumGateScanner] = {
-            "CE": PremiumGateScanner(bear=True),
-            "PE": PremiumGateScanner(bear=not pe_scans_bull),
+            "CE": PremiumGateScanner(bear=True, session_open=session_open),
+            "PE": PremiumGateScanner(bear=not pe_scans_bull, session_open=session_open),
         }
         self._trackers: Dict[str, TrailingBaseTracker] = {}
         # tracking-contract entry price at trigger time, per side — needed to
