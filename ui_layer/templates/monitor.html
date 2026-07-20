@@ -7060,15 +7060,20 @@ function amoTest() {
                              EVERY concurrently-tracked setup for this side, each with its own
                              gate state and zone bounds, so a setup stuck behind the leader
                              (or one that just got invalidated) is never hidden. Aligned columns
-                             (not a run-on text line) so HTF/MTF zone numbers don't blur together. -->
+                             (not a run-on text line) so HTF/MTF zone numbers don't blur together.
+                             Each ROW is a fully independent setup (its own HTF ref, own Inner
+                             Zone once locked) -- NOT a parent/child HTF->MTF pair with the row
+                             above or below it. #N makes that explicit; an MTF ZONE value only
+                             ever nests inside that SAME row's own HTF ZONE, never a different row's. -->
                         <template x-if="((_t[side]||{}).setups||[]).length>0">
-                          <div class="grid items-center pl-3 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
-                            <span>STATE</span><span>HTF ZONE</span><span>MTF ZONE</span>
+                          <div class="grid items-center pl-3 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:0.3fr 1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
+                            <span>#</span><span>STATE</span><span>HTF ZONE</span><span>MTF ZONE</span>
                             <span class="text-right">LIMIT</span><span>OPENED</span>
                           </div>
                         </template>
                         <template x-for="(s,si) in (_t[side]||{}).setups||[]" :key="si">
-                          <div class="grid items-center pl-3 py-0.5 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
+                          <div class="grid items-center pl-3 py-0.5 text-xs font-mono" style="color:var(--t-muted);grid-template-columns:0.3fr 1.1fr 1.3fr 1.3fr 0.8fr 1fr;gap:0.3rem;border-left:1px solid var(--t-border)">
+                            <span x-text="si+1"></span>
                             <span :style="`color:${['limit_armed','triggered'].includes(s.state)?'var(--t-green)':'var(--t-cyan)'}`" x-text="s.state"></span>
                             <span style="color:var(--t-text)" x-text="s.htf_low!==null ? s.htf_low+' · '+s.htf_high : '—'"></span>
                             <span style="color:var(--t-text)" x-text="s.mtf_low!==null ? s.mtf_low+' · '+s.mtf_high+' ('+s.mtf_timeframe+'m)' : '—'"></span>

@@ -630,9 +630,6 @@ class V4CascadeBook(AbstractStrategyBook):
             events = self._engine.update(ce_bar=bar)
         else:
             events = self._engine.update(pe_bar=bar)
-        self._clog.info("DIAG 5m close side=%s ts=%s low=%.2f high=%.2f setups=%s",
-                        side, bar.timestamp.isoformat(timespec="minutes"), bar.low, bar.high,
-                        _setups_diag(self._engine._scanners.get(side)))
         for ev in events:
             self._emit_order(ev, pos_before=_pos_before)
         self._persist_position()
@@ -948,24 +945,6 @@ class V4CascadeBook(AbstractStrategyBook):
 
 
 # ── module-level bar helpers (shared by ingestion + live bucket close) ──────
-
-def _setups_diag(scanner) -> str:
-    """Temporary diagnostic helper (2026-07-20) — a locked HTF/MTF setup
-    with the tracking LTP well past its zone's far edge isn't getting
-    dropped by PremiumGateScanner._invalidate_broken_setups on live bar
-    closes. Compact per-setup state+zone summary logged on every 5m bucket
-    close to see exactly what bar/zone values the check is evaluating."""
-    if scanner is None:
-        return "no-scanner"
-    parts = []
-    for s in scanner.setups:
-        z = s.htf_zone
-        zl = zh = None
-        if z is not None and z.entry_line is not None and z.sweep_low is not None:
-            zl, zh = min(z.entry_line, z.sweep_low), max(z.entry_line, z.sweep_low)
-        parts.append(f"{s.state.value}[htf={zl}-{zh}]")
-    return "; ".join(parts) if parts else "none"
-
 
 def _to_5m_bars(rows: List[dict], filter_zero_volume: bool) -> List:
     import pandas as pd
