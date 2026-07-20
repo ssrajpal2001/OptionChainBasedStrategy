@@ -8,7 +8,9 @@ position_store persistence).
 
 2026-07-19 go-live requirements implemented here:
   - Deep historical REST re-ingestion on boot (_ingest_history): resolves
-    the monthly expiry, the CURRENT session's 09:15 spot open (via history,
+    the current (nearest) expiry -- monthly-expiry selection was only ever
+    used for backtesting, live trading always trades the nearest active
+    weekly contract -- the CURRENT session's 09:15 spot open (via history,
     never waiting for a live tick — needed for mid-day boots), derives
     CE/PE tracking strikes (ATM-200/ATM+200, 100-pt rounding), then fetches
     ~3 weeks of 1-minute spot+CE+PE history and replays it through the same
@@ -34,7 +36,7 @@ from config.global_config import IST, Topic
 from data_layer import position_store
 from data_layer.base_feeder import CandleEvent
 from data_layer.historical_candles import _http_get_json, _parse_candles, fetch_upstox_range_1m
-from data_layer.instrument_registry import REGISTRY, is_monthly_expiry
+from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.v4_cascade.config import EXECUTION_OFFSET_PTS, V4CascadeConfig
 from strategies.v4_cascade.dataclasses import CascadeEvent, CascadeEventType, CascadePosition
@@ -287,9 +289,9 @@ class V4CascadeBook(AbstractStrategyBook):
         return float(rows[0]["open"])
 
     def _resolve_expiry(self) -> Optional[date]:
-        for exp in REGISTRY.all_expiries(self._underlying):
-            if is_monthly_expiry(exp, self._underlying):
-                return exp
+        """Current (nearest) expiry for live trading — weekly for NIFTY.
+        Monthly-expiry selection was only ever needed for backtesting;
+        live trading always trades the nearest active contract."""
         return REGISTRY.get_active_expiry(self._underlying)
 
     async def _resolve_symbols(self) -> bool:
@@ -321,7 +323,7 @@ class V4CascadeBook(AbstractStrategyBook):
         await asyncio.to_thread(REGISTRY.load_sync, self._underlying, token)
         self._expiry = self._resolve_expiry()
         if self._expiry is None:
-            logger.warning("V4CascadeBook[%s]: no monthly expiry resolvable.", self._underlying)
+            logger.warning("V4CascadeBook[%s]: no active expiry resolvable.", self._underlying)
             return False
         self._ce_symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, self._ce_strike, "CE")
         self._pe_symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, self._pe_strike, "PE")
