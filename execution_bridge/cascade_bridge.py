@@ -308,6 +308,23 @@ class V4CascadeExecutionBridge:
                 f"[LIVE] {ev.action} {ev.underlying} {ev.side} tranche={ev.tranche} "
                 f"filled {fq}/{ev.qty} @ {px:.4f} ({'LIMIT-chase' if use_limit else 'MARKET'}; orders={oids})"
                 + (f" reason={ev.close_reason}" if ev.action == "EXIT" else ""))
+            # Under/zero-fill: pull the exchange's own rejection/cancellation
+            # reason from get_order_status's raw Kite response so a rejected
+            # order is diagnosable (a bare "filled 0/N" doesn't say WHY —
+            # e.g. RMS margin rejection, price band, no liquidity).
+            if fq < ev.qty and oids and hasattr(broker, "get_order_status"):
+                try:
+                    _f = await broker.get_order_status(str(oids[-1]))
+                    _raw = getattr(_f, "raw", {}) or {}
+                    _reason = (f"status={_raw.get('status')} "
+                              f"status_message={_raw.get('status_message') or _raw.get('status_message_raw')}")
+                    logger.warning("[LIVE] V4Cascade %s %s %s UNDER-FILL %d/%d — exchange: %s",
+                                   ev.action, ev.underlying, ev.side, fq, ev.qty, _reason)
+                    self._trade_log.log(ev.client_id, ev.binding_id,
+                        f"{ev.action} {ev.underlying} {ev.side} tranche={ev.tranche} "
+                        f"UNDER-FILL {fq}/{ev.qty} — exchange: {_reason}")
+                except Exception:
+                    pass
         except Exception as exc:
             logger.error("[LIVE] V4Cascade %s %s %s order FAILED: %s — falling back to LTP.",
                         ev.action, ev.underlying, ev.side, exc)
