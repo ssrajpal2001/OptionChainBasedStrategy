@@ -53,7 +53,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Protocol
+from typing import List, Optional, Protocol, Tuple
 
 from strategies.v4_cascade.dataclasses import RollingBaseZone
 
@@ -437,13 +437,11 @@ def find_all_bull_traps_2candle(
     return zones
 
 
-_SESSION_OPEN_HOUR = 9
-_SESSION_OPEN_MINUTE = 15
-
-
-def resample_bars(bars_5m: List[_Bar], multiplier: int) -> List["_ResampledBar"]:
+def resample_bars(
+    bars_5m: List[_Bar], multiplier: int, session_open: Tuple[int, int] = (9, 15),
+) -> List["_ResampledBar"]:
     """Resample a 5-minute bar sequence into ``multiplier``-minute bars,
-    grouping each bar by (calendar day, minutes-since-that-day's-09:15-open
+    grouping each bar by (calendar day, minutes-since-that-day's-session-open
     // multiplier). This is CLOCK-ANCHORED per calendar day — every bar's own
     timestamp determines its bucket, independent of its position in the input
     list. This makes grouping robust to buffer eviction (e.g. a deque(maxlen=N)
@@ -451,16 +449,22 @@ def resample_bars(bars_5m: List[_Bar], multiplier: int) -> List["_ResampledBar"]
     none of which can misalign a purely positional "every 15th bar" grouping
     (which is what this function used to do, and which silently drifted off
     the 09:15 session boundary once an upstream deque eviction removed a
-    partial day's worth of bars — see project memory / 2026-07-18 bugfix)."""
+    partial day's worth of bars — see project memory / 2026-07-18 bugfix).
+
+    ``session_open``: (hour, minute) of the exchange's own session open —
+    defaults to NSE/NIFTY's 09:15. MCX underlyings (CRUDEOIL etc.) open at
+    09:00 and must pass (9, 0) so bucket boundaries land on the real session
+    start instead of NIFTY's."""
     if multiplier % 5 != 0 or multiplier < 5:
         raise ValueError(f"multiplier must be a positive multiple of 5, got {multiplier}")
 
+    open_hour, open_minute = session_open
     buckets: dict = {}
     order: list = []
     for b in bars_5m:
         day = b.timestamp.date()
         open_dt = b.timestamp.replace(
-            hour=_SESSION_OPEN_HOUR, minute=_SESSION_OPEN_MINUTE, second=0, microsecond=0,
+            hour=open_hour, minute=open_minute, second=0, microsecond=0,
         )
         minutes_since_open = int((b.timestamp - open_dt).total_seconds() // 60)
         bucket_idx = minutes_since_open // multiplier
@@ -472,6 +476,10 @@ def resample_bars(bars_5m: List[_Bar], multiplier: int) -> List["_ResampledBar"]
 
     out: List[_ResampledBar] = []
     for key in order:
+        day, bucket_idx = key
+        # Skip pre-session buckets (negative indices)
+        if bucket_idx < 0:
+            continue
         chunk = buckets[key]
         out.append(_ResampledBar(
             timestamp=chunk[0].timestamp,
