@@ -504,6 +504,28 @@ class V4CascadeBook(AbstractStrategyBook):
                 CascadePosition.from_dict(pos_snapshot) if pos_snapshot is not None else None
             )
 
+    async def _fetch_execution_bars_5m(self, symbol: str) -> List["_Bar"]:
+        """Fetch the EXECUTION strike's own historical+intraday 1m bars via
+        the same REST functions _ingest_history already uses for the
+        tracking contract, merged and resampled to 5m the same way. Used
+        once at entry by _open_entry_async to feed
+        execution_risk.compute_execution_native_risk. [] on any failure
+        (no token, fetch error) -- the caller treats an empty list the same
+        as "no zone found" and falls back."""
+        if self._is_crypto:
+            return []
+        token = await asyncio.to_thread(self._access_token)
+        if not token:
+            return []
+        today = datetime.now(IST).date()
+        start = today - timedelta(days=_LOOKBACK_DAYS)
+        range_rows, today_rows = await asyncio.gather(
+            fetch_upstox_range_1m(symbol, token, start, today),
+            fetch_upstox_intraday_1m(symbol, token),
+        )
+        merged = _merge_rows(range_rows, today_rows)
+        return _to_5m_bars(merged, filter_zero_volume=True)
+
     async def _ingest_history(self) -> bool:
         """Public — also called directly by the admin force-ingest endpoint
         on an already-running book. Idempotent: PremiumGateScanner de-dupes
