@@ -822,7 +822,7 @@ class V4CascadeBook(AbstractStrategyBook):
         self._check_daily_boundary(bar.timestamp)
         _current_atm = self._live_spot or self._atm_open or 0.0
         if _current_atm > 0:
-            self._maybe_recenter_tracking_strikes(_current_atm)
+            self._fire(self._maybe_recenter_tracking_strikes(_current_atm))
         self._bars_5m[side].append(bar)
         _pos_before = self._engine.position
         if side == "CE":
@@ -949,7 +949,7 @@ class V4CascadeBook(AbstractStrategyBook):
             for side in ("CE", "PE"):
                 self._engine._scanners[side].setups.clear()
 
-    def _maybe_recenter_tracking_strikes(self, current_atm: float) -> None:
+    async def _maybe_recenter_tracking_strikes(self, current_atm: float) -> None:
         """2026-07-21: re-center the tracking/scanner strikes when the
         underlying has drifted tracking_recenter_pts away from the ATM the
         CURRENT strikes were derived from -- but ONLY while flat. An open
@@ -959,9 +959,19 @@ class V4CascadeBook(AbstractStrategyBook):
         so re-centering never happens mid-trade -- gated at this single
         check site, not scattered across callers.
 
-        Bare ``scanner.reset()`` here is intentional for this task -- no
-        historical re-warm yet (that's the next task's job); a re-centered
-        book simply starts scanning cold from the new strikes."""
+        2026-07-22: upgraded from a bare ``scanner.reset()`` to a real
+        historical+intraday re-warm of the NEW CE/PE tracking symbols --
+        the exact same fetch-and-replay sequence ``_ingest_history`` already
+        performs at boot (fetch_upstox_range_1m + fetch_upstox_intraday_1m +
+        _merge_rows + _to_5m_bars + _replay_through_engine), scoped to ONLY
+        the two per-side scanners. self.position (already confirmed
+        None/closed by the gate below), self._spot_confirm (Gate 1,
+        Index-based, never depended on the tracking option strike -- fed
+        an empty spot-bar list here so replay can never touch it), and
+        self._trackers/_tracking_entry_price (empty while flat) are all
+        left untouched. Without this re-warm, a re-centered book started
+        scanning cold from the new strikes and could sit blind for hours
+        until enough live bars accumulated a fresh pattern from scratch."""
         pos = self._engine.position
         if pos is not None and pos.is_open:
             return
@@ -969,6 +979,7 @@ class V4CascadeBook(AbstractStrategyBook):
             return
         if abs(current_atm - self._tracking_reference_atm) < self._v4cfg.tracking_recenter_pts:
             return
+
         old_ce, old_pe = self._ce_strike, self._pe_strike
         # Same rounding convention as the session-open derivation in
         # _resolve_symbols (round to the DELIBERATELY flat
@@ -976,16 +987,65 @@ class V4CascadeBook(AbstractStrategyBook):
         # constant's module-level docstring), and the same
         # locked-strike-override precedence.
         atm = round(current_atm / _TRACKING_STRIKE_STEP) * _TRACKING_STRIKE_STEP
-        self._ce_strike = self._locked_ce_strike or int(atm - self._tracking_offset)
-        self._pe_strike = self._locked_pe_strike or int(atm + self._tracking_offset)
+        new_ce = self._locked_ce_strike or int(atm - self._tracking_offset)
+        new_pe = self._locked_pe_strike or int(atm + self._tracking_offset)
+
+        token = await asyncio.to_thread(self._access_token)
+        if not token or not self._expiry:
+            logger.warning("V4CascadeBook[%s/%s/%s]: re-center aborted (no token/expiry) — "
+                           "keeping existing tracking strikes CE=%s PE=%s.",
+                           self._underlying, self._client_id, self._binding_id, old_ce, old_pe)
+            return
+
+        new_ce_symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, new_ce, "CE")
+        new_pe_symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, new_pe, "PE")
+        today = datetime.now(IST).date()
+        start = today - timedelta(days=_LOOKBACK_DAYS)
+        (ce_rows, pe_rows, ce_today, pe_today) = await asyncio.gather(
+            fetch_upstox_range_1m(new_ce_symbol, token, start, today),
+            fetch_upstox_range_1m(new_pe_symbol, token, start, today),
+            fetch_upstox_intraday_1m(new_ce_symbol, token),
+            fetch_upstox_intraday_1m(new_pe_symbol, token),
+        )
+        ce_rows = _merge_rows(ce_rows, ce_today)
+        pe_rows = _merge_rows(pe_rows, pe_today)
+        ce_5m = _to_5m_bars(ce_rows, filter_zero_volume=True)
+        pe_5m = _to_5m_bars(pe_rows, filter_zero_volume=True)
+
+        self._ce_strike, self._pe_strike = new_ce, new_pe
+        self._ce_symbol, self._pe_symbol = new_ce_symbol, new_pe_symbol
         self._tracking_reference_atm = current_atm
+        self._bars_5m["CE"], self._bars_5m["PE"] = ce_5m, pe_5m
         for side in ("CE", "PE"):
             self._engine._scanners[side].reset()
+        # [] for the spot-bar list is intentional -- Gate 1/self._spot_confirm
+        # never depended on the tracking option strike, so a re-center must
+        # not re-replay/re-touch it at all. _replay_through_engine treats a
+        # falsy spot_5m as "no 75m spot buckets" (spot_75m_by_key={}), so
+        # every bucket_closing branch resolves sbar75=None and engine.update
+        # is called with spot_bar=None throughout -- _spot_confirm.on_75m_bar
+        # is never invoked, same object/state as before this call.
+        _replay_through_engine(self._engine, [], ce_5m, pe_5m,
+                                on_daily_boundary=self._apply_eod_gate23_rules,
+                                session_open=self._session_open,
+                                eod_square_off=self._eod_hour_min,
+                                gate23_reset=self._gate23_hour_min)
+
+        feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+        if feeder:
+            try:
+                await feeder.subscribe_tokens([new_ce_symbol, new_pe_symbol])
+            except Exception:
+                logger.exception("V4CascadeBook[%s/%s/%s]: re-center subscribe failed for %s/%s.",
+                                 self._underlying, self._client_id, self._binding_id,
+                                 new_ce_symbol, new_pe_symbol)
+
         logger.info("V4CascadeBook[%s/%s/%s]: re-centered tracking strikes CE %s->%s PE %s->%s "
-                   "(atm=%.2f).", self._underlying, self._client_id, self._binding_id,
-                   old_ce, self._ce_strike, old_pe, self._pe_strike, current_atm)
-        self._clog.info("re-centered tracking strikes CE %s->%s PE %s->%s (atm=%.2f).",
-                        old_ce, self._ce_strike, old_pe, self._pe_strike, current_atm)
+                   "(atm=%.2f) — re-warmed from %d/%d 5m bars.", self._underlying, self._client_id,
+                   self._binding_id, old_ce, new_ce, old_pe, new_pe, current_atm, len(ce_5m), len(pe_5m))
+        self._clog.info("re-centered tracking strikes CE %s->%s PE %s->%s (atm=%.2f) — "
+                        "re-warmed from %d/%d 5m bars.", old_ce, new_ce, old_pe, new_pe,
+                        current_atm, len(ce_5m), len(pe_5m))
 
     # ── order emission ───────────────────────────────────────────────────────
     def _resolve_execution_strike(self, side: str) -> float:
