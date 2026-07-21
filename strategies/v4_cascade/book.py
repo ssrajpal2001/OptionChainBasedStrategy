@@ -907,7 +907,12 @@ class V4CascadeBook(AbstractStrategyBook):
         step = self._strike_step
         if spot > 0:
             atm = round(spot / step) * step
-            return atm + self._execution_offset if side == "CE" else atm - self._execution_offset
+            # 2026-07-21: flipped from OTM to ITM (was CE=atm+offset [OTM],
+            # PE=atm-offset [OTM]). ITM: CE strike BELOW spot, PE strike
+            # ABOVE spot -- delta-dominated premium, a cleaner signal for
+            # execution-native SL/target than an OTM strike's theta/low-
+            # delta-dominated premium.
+            return atm - self._execution_offset if side == "CE" else atm + self._execution_offset
         # Defensive fallback — must NEVER silently return 0 (a live trade
         # entering with strike=0 is a real, observed bug this guards
         # against). live_spot and atm_open being simultaneously unavailable
