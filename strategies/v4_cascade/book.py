@@ -836,6 +836,15 @@ class V4CascadeBook(AbstractStrategyBook):
         by the existing tracking-contract bucket-builder)."""
         pos = self._engine.position
         if pos is None or not pos.is_open or pos.side != side or pos.risk_basis != "execution_native":
+            # No matching open execution-native position for this side — any
+            # in-progress bar left in _exec_buckets[side] from a now-closed
+            # position is orphaned (its owning position closed without this
+            # method ever being called again to flush/clear it). Clear it so
+            # the next tick on this side (e.g. a same-day re-entry) starts a
+            # genuinely fresh bucket instead of rolling over stale OHLC from
+            # an unrelated, already-closed position into
+            # check_exits_execution_native.
+            self._exec_buckets[side] = None
             return
         bucket = _bucket_start(ts, 5, self._session_open)
         cur = self._exec_buckets[side]
