@@ -211,6 +211,10 @@ class V4CascadeBook(AbstractStrategyBook):
         # per-side 5m bucket accumulators, fed by live OPTION_TICK
         self._buckets: Dict[str, Optional[_Bar]] = {"CE": None, "PE": None}
         self._bars_5m: Dict[str, List] = {"CE": [], "PE": []}
+        # parallel EXECUTION-contract 5m bucket accumulators (Task 7) — only
+        # driven for a risk_basis=="execution_native" open position; feeds
+        # engine.check_exits_execution_native (Task 6) instead of engine.update.
+        self._exec_buckets: Dict[str, Optional["_Bar"]] = {"CE": None, "PE": None}
 
         # event_id -> the exact CascadePosition (ENTRY) or TrancheLeg (EXIT)
         # object stashed at emission time, so _on_fill reconciles the SAME
@@ -778,6 +782,7 @@ class V4CascadeBook(AbstractStrategyBook):
             for exec_side in ("CE", "PE"):
                 if self._exec_symbol[exec_side] and symbol == self._exec_symbol[exec_side]:
                     self._exec_live_price[exec_side] = float(tick.ltp)
+                    self._on_execution_tick(exec_side, float(tick.ltp), tick.timestamp)
             side = None
             if symbol == self._ce_symbol or (
                     tick.underlying == self._underlying and int(tick.strike) == self._ce_strike and tick.option_type == "CE"):
@@ -823,6 +828,31 @@ class V4CascadeBook(AbstractStrategyBook):
                     self._engine.update(ce_bar=b75)
                 else:
                     self._engine.update(pe_bar=b75)
+
+    def _on_execution_tick(self, side: str, ltp: float, ts: datetime) -> None:
+        """Mirrors _on_option_tick, but for the EXECUTION contract — only
+        matters for a risk_basis=='execution_native' open position; a no-op
+        otherwise (tracking-native positions' exits are driven exclusively
+        by the existing tracking-contract bucket-builder)."""
+        pos = self._engine.position
+        if pos is None or not pos.is_open or pos.side != side or pos.risk_basis != "execution_native":
+            return
+        bucket = _bucket_start(ts, 5, self._session_open)
+        cur = self._exec_buckets[side]
+        if cur is None or cur.timestamp != bucket:
+            if cur is not None:
+                self._close_execution_5m_bucket(side, cur)
+            self._exec_buckets[side] = _Bar(bucket, ltp, ltp, ltp, ltp, tf=5)
+        else:
+            cur.high = max(cur.high, ltp)
+            cur.low = min(cur.low, ltp)
+            cur.close = ltp
+
+    def _close_execution_5m_bucket(self, side: str, bar) -> None:
+        events = self._engine.check_exits_execution_native(side, bar)
+        for ev in events:
+            self._emit_order(ev, pos_before=self._engine.position)
+        self._persist_position()
 
     # ── daily EOD/Gate2-3 rules (mirrors scripts/v4_backtest_july2026.py) ────
     def _check_daily_boundary(self, ts: datetime) -> None:
