@@ -554,9 +554,15 @@ class ExitMixin:
                         await self._single_side_roll(now, "vwap_rise_roll")
                         return
 
-        # 8. ITM PAIR GATE (armed-watching phase: both legs ITM but cumulative below profit threshold)
-        if getattr(self, "_itm_gate_armed", False):
-            await self._check_itm_pair_gate(now)
+        # 8. ITM PAIR GATE. Must run unconditionally every cycle -- _check_itm_pair_gate
+        # is the ONLY place that ever sets _itm_gate_armed=True (on first below-threshold
+        # both-ITM detection). Gating this call on "already armed" (2026-07-21 bug fix)
+        # meant the gate could never arm itself on a session with no rollover: it stayed
+        # permanently unreachable, so the real ₹-threshold close never fired even though
+        # exits.py's separate _build_exit_criteria kept logging "ITMgate ✓HIT" every
+        # cycle for display only. _check_itm_pair_gate itself cheaply no-ops when the
+        # toggle is off or the pair isn't both-ITM, so calling it unconditionally is safe.
+        await self._check_itm_pair_gate(now)
 
     # ── Close / leg helpers ───────────────────────────────────────────────────
 
