@@ -880,6 +880,36 @@ class V4CascadeBook(AbstractStrategyBook):
         offset_sum = self._tracking_offset + self._execution_offset
         return float(tracking_strike + offset_sum) if side == "CE" else float(tracking_strike - offset_sum)
 
+    def _log_entry_audit(self, ev) -> None:
+        """2026-07-21 — full 'why this trade fired' rationale, logged once
+        per ENTRY, so a full day's trades can be audited after market close
+        without guessing whether every gate genuinely fired. Pulled from
+        ev.audit (engine.py._build_entry_audit), which is built from the
+        real setup/zone objects at the exact instant the trade triggered —
+        not reconstructed after the fact from whatever state happens to
+        remain (the setup is popped and its zone discarded immediately
+        after this event is created)."""
+        a = ev.audit or {}
+        if not a:
+            return
+        lines = [
+            f"TRADE RATIONALE side={ev.side}",
+            f"  Gate 1 (Index, 75m): {a.get('index_kind')} — scan window anchored {a.get('index_window_anchor_ts')}",
+            f"  Gate 2 (Demand Block, {a.get('demand_block_timeframe')}m): "
+            f"ref={a.get('demand_block_ref_ts')} locked={a.get('demand_block_lock_ts')} "
+            f"entry_line={a.get('demand_block_entry_line')} sl_level={a.get('demand_block_sl_level')} "
+            f"sweep_low={a.get('demand_block_sweep_low')}",
+            f"  Gate 3 (limit pierce): limit_entry_price={a.get('limit_entry_price')} "
+            f"pierce_price={a.get('pierce_price')} @ {a.get('pierce_bar_ts')}",
+        ]
+        if "htf_zone_ref_ts" in a:
+            lines.append(f"  Gate 1 outer HTF zone (crypto legacy path): ref={a.get('htf_zone_ref_ts')} "
+                        f"locked={a.get('htf_zone_lock_ts')} entry_line={a.get('htf_zone_entry_line')} "
+                        f"sl_level={a.get('htf_zone_sl_level')}")
+        msg = "\n".join(lines)
+        logger.info("V4CascadeBook[%s/%s/%s]: %s", self._underlying, self._client_id, self._binding_id, msg)
+        self._clog.info(msg)
+
     async def _open_entry_async(self, ev, exec_strike: float, qty: int, event_id: str, ts: datetime) -> None:
         """2026-07-21 fix: resolves + subscribes to the EXECUTION contract
         (one strike OTM from live spot — a DIFFERENT instrument than the
@@ -893,6 +923,7 @@ class V4CascadeBook(AbstractStrategyBook):
         the wait window (e.g. a thin/illiquid strike) — never blocks the
         order indefinitely."""
         from execution_bridge.cascade_bridge import CascadeOrderEvent
+        self._log_entry_audit(ev)
         self._exec_symbol[ev.side] = ""
         self._exec_live_price[ev.side] = 0.0
         if not self._is_crypto and exec_strike and self._expiry:
@@ -992,11 +1023,31 @@ class V4CascadeBook(AbstractStrategyBook):
                     logger.warning("V4CascadeBook[%s/%s/%s]: leg had strike=0 at close — "
                                    "re-resolved to %s before emitting EXIT.",
                                    self._underlying, self._client_id, self._binding_id, leg.strike)
+                # 2026-07-21 fix: ev.price_hint here is the TRACKING-contract's
+                # SL/target/trail level (exits.py's check_t1/TrailingBaseTracker
+                # deliberately watch the tracking contract's own bars, by
+                # design -- that governs WHEN to exit). But the FILL price must
+                # be the real EXECUTION contract's own live price at that
+                # moment, same as the entry-side fix -- otherwise P&L is
+                # computed as (tracking-scale exit) - (execution-scale entry),
+                # a scale mismatch that produced a confirmed live ₹11,755
+                # phantom profit on a real ~₹15 premium move. Already
+                # continuously tracked since entry (_option_loop), so no
+                # subscribe/wait needed here, unlike the entry path.
+                _real_exit_price = 0.0 if self._is_crypto else self._exec_live_price.get(ev.side, 0.0)
+                _exit_price_hint = _real_exit_price if _real_exit_price > 0 else ev.price_hint
+                if _real_exit_price <= 0 and not self._is_crypto:
+                    logger.warning("V4CascadeBook[%s/%s/%s]: no execution-contract live price at "
+                                   "EXIT for %s — falling back to tracking-contract price_hint=%.4f.",
+                                   self._underlying, self._client_id, self._binding_id,
+                                   ev.side, ev.price_hint)
+                    self._clog.warning("no execution-contract live price at EXIT for %s — falling "
+                                       "back to tracking-contract price_hint=%.4f.", ev.side, ev.price_hint)
                 event_id = f"{self._persist_key}_{ev.tranche}_{ts.isoformat()}"
                 self._pending_fills[event_id] = leg
                 self._fire(self._bus.publish(Topic.CASCADE_ORDER_REQUEST, CascadeOrderEvent(
                     action="EXIT", underlying=self._underlying, side=ev.side,
-                    strike=leg.strike, qty=leg.qty, price_hint=ev.price_hint,
+                    strike=leg.strike, qty=leg.qty, price_hint=_exit_price_hint,
                     tranche=ev.tranche, close_reason=ev.reason, entry_price=leg.entry_price,
                     is_crypto=self._is_crypto, expiry=self._expiry,
                     client_id=self._client_id, binding_id=self._binding_id,

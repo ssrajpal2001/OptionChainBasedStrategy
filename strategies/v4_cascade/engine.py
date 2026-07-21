@@ -262,12 +262,48 @@ class V4CascadeEngine:
         # never surfaced before crypto's PE-short path existed).
         self._trackers[side] = TrailingBaseTracker(bear=scanner._bear)
 
+        audit = self._build_entry_audit(scanner, setup, zone, bar)
         scanner.pop_setup(setup, bar.timestamp)
         event_type = CascadeEventType.OPEN_LONG_CE if side == "CE" else CascadeEventType.OPEN_LONG_PE
         return CascadeEvent(
             event_type=event_type, side=side, price_hint=entry_price, reason=entry_reason,
-            sl_price=sl_price, target_price=target_price, timestamp=bar.timestamp,
+            sl_price=sl_price, target_price=target_price, timestamp=bar.timestamp, audit=audit,
         )
+
+    def _build_entry_audit(self, scanner: _Scanner, setup, zone, bar) -> dict:
+        """Full gate-by-gate rationale for why this trade fired -- Gate 1
+        (Index) state + which confirmation anchored the scan window, Gate 2
+        (Demand Block) zone geometry + which timeframe it locked on, Gate 3's
+        computed limit price and the actual pierce price/time. book.py logs
+        this verbatim so a full day's trades can be audited after the fact
+        without guessing whether every gate genuinely fired."""
+        is_short = not scanner._bear
+        pierce_price = bar.high if is_short else bar.low
+        anchor_ts = getattr(scanner, "_scan_window_start_ts", None)
+        audit = {
+            "index_kind": getattr(self._spot_confirm.current_kind, "value",
+                                   str(self._spot_confirm.current_kind)),
+            "index_window_anchor_ts": anchor_ts.isoformat() if anchor_ts else None,
+            "demand_block_ref_ts": (zone.reference_low_ts.isoformat()
+                                     if zone and zone.reference_low_ts else None),
+            "demand_block_lock_ts": zone.lock_ts.isoformat() if zone and zone.lock_ts else None,
+            "demand_block_entry_line": zone.entry_line if zone else None,
+            "demand_block_sl_level": zone.sl_level if zone else None,
+            "demand_block_sweep_low": zone.sweep_low if zone else None,
+            "demand_block_timeframe": getattr(setup, "timeframe", None) or getattr(setup, "mtf_timeframe", None),
+            "limit_entry_price": setup.limit_entry_price,
+            "pierce_price": pierce_price,
+            "pierce_bar_ts": bar.timestamp.isoformat() if bar.timestamp else None,
+        }
+        # Legacy (crypto) scanner also has an outer HTF (75m) zone distinct
+        # from the Inner/MTF zone captured above -- surface it too.
+        htf_zone = getattr(setup, "htf_zone", None)
+        if htf_zone is not None:
+            audit["htf_zone_ref_ts"] = htf_zone.reference_low_ts.isoformat() if htf_zone.reference_low_ts else None
+            audit["htf_zone_lock_ts"] = htf_zone.lock_ts.isoformat() if htf_zone.lock_ts else None
+            audit["htf_zone_entry_line"] = htf_zone.entry_line
+            audit["htf_zone_sl_level"] = htf_zone.sl_level
+        return audit
 
     # ── exits (T1/T2 — exits.py logic unchanged, just re-fed the Inner
     #    Zone's risk instead of the old HTF zone's risk) ───────────────────────

@@ -265,3 +265,10 @@ class CascadeEvent:
     target_price: Optional[float] = None
     trail_stop_price: Optional[float] = None
     timestamp: Optional[datetime] = None
+    # 2026-07-21 — full gate-by-gate rationale for an OPEN_LONG_* event, so
+    # book.py can log a complete "why this trade fired" audit trail: Index
+    # gate (Gate 1) state and which confirmation anchored the scan window,
+    # the Demand Block's (Gate 2) own zone geometry + which timeframe it
+    # locked on, and the exact limit price + pierce price/time (Gate 3).
+    # None for CLOSE/TRAIL events — only ever populated by _open_position.
+    audit: Optional[dict] = None

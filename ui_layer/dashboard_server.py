@@ -2741,7 +2741,12 @@ class DashboardServer:
                                         "entry_time": leg.entry_time.isoformat(timespec="seconds")
                                                       if leg.entry_time else None,
                                     })
-                            else:
+                            # 2026-07-21: tracking/scanning info is now ALWAYS built, not just
+                            # when no position is open -- the engine keeps scanning BOTH sides
+                            # continuously even while one side holds a trade (structural flip
+                            # can fire at any time), so hiding it during an open position was
+                            # hiding exactly the info that explains what could flip the trade.
+                            if True:
                                 _bias = "none"
                                 _sc = getattr(book._engine, "_spot_confirm", None)
                                 _index_gate = None

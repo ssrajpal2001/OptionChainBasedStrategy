@@ -2630,11 +2630,19 @@ document.addEventListener('alpine:init', () => {
         if (r && r.ok) {
           const d = await r.json();
           this.csHistory = d.trades || [];
-          // EVENT LEDGER (order-book style): each leg becomes TWO rows —
-          //   a SELL (sold-to-open) row with the OPEN time + entry price, and
-          //   a BUY (bought-to-close) row with the CLOSE time + exit price + P&L.
-          // Per trade we list the open rows, then the close rows. So a CE+PE
+          // EVENT LEDGER (order-book style): each leg becomes TWO rows — an
+          // OPEN-action row with the OPEN time + entry price, and a
+          // CLOSE-action row with the CLOSE time + exit price + P&L. Per
+          // trade we list the open rows, then the close rows. So a CE+PE
           // straddle that opened and closed = 4 rows.
+          //
+          // Open/close action direction is STRATEGY-dependent, not a fixed
+          // SELL-to-open/BUY-to-close pair: sell_straddle SELLS to open
+          // (short premium). v4_cascade BUYS to open (long premium) for
+          // every side EXCEPT crypto's PE (bull-trap -> short), which sells
+          // to open, mirroring the legacy scanner's is_short convention.
+          // 2026-07-21 fix: this used to hardcode SELL/BUY for every
+          // strategy, mislabeling every v4_cascade entry as a SELL.
           const flat = [];
           for (const tr of this.csHistory) {
             const isOpen = tr.exit_reason === 'OPEN';
@@ -2644,7 +2652,13 @@ document.addEventListener('alpine:init', () => {
                             exit_ts: (tr.date || tr.ts || null) }];
             const strat = tr.strategy || '—', inst = tr.instrument || '—';
             const _sk = (lg) => (lg.side ? lg.side + ' ' : '') + (lg.strike || '');
-            // OPEN rows (sold to open). `_ts` = raw timestamp used for chronological sort.
+            const _isCryptoShort = (lg) => strat === 'v4_cascade'
+                && ['BTC', 'ETH'].includes(String(inst).toUpperCase()) && lg.side === 'PE';
+            const _openAction = (lg) => strat === 'v4_cascade'
+                ? (_isCryptoShort(lg) ? 'SELL' : 'BUY') : 'SELL';
+            const _closeAction = (lg) => strat === 'v4_cascade'
+                ? (_isCryptoShort(lg) ? 'BUY' : 'SELL') : 'BUY';
+            // OPEN rows. `_ts` = raw timestamp used for chronological sort.
             // Skip junk rows whose price is 0/missing — these are rejected-order / dry fills
             // (no real broker price was ever captured) and only clutter the ledger.
             for (const lg of legs) {
@@ -2652,7 +2666,7 @@ document.addEventListener('alpine:init', () => {
               flat.push({
                 _ts: lg.entry_ts || '',
                 time: this.fmtHMS(lg.entry_ts),
-                action: 'SELL', side: lg.side || '',
+                action: _openAction(lg), side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
                 price: lg.entry,
                 pnl: null,
@@ -2660,14 +2674,14 @@ document.addEventListener('alpine:init', () => {
                 remark: isOpen ? (tr.exit_remark || 'Live open position') : '',
               });
             }
-            // CLOSE rows (bought to close).
+            // CLOSE rows.
             for (const lg of legs) {
               if (!(lg.exit > 0)) continue;
               const _x = lg.exit_ts || tr.date || tr.ts || '';
               flat.push({
                 _ts: _x,
                 time: this.fmtHMS(_x),
-                action: 'BUY', side: lg.side || '',
+                action: _closeAction(lg), side: lg.side || '',
                 strategy: strat, instrument: inst, strike: _sk(lg),
                 price: lg.exit,
                 // If the leg's entry was lost (<=0) the recorded P&L is a phantom (e.g. -32360) —
@@ -7063,8 +7077,12 @@ function amoTest() {
                     </div>
                   </div>
 
-                  <!-- Trap tracking (day-locked strikes; shown while scanning, no open position) -->
-                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&(csPositions[b.binding_id][dep.deploy_id].legs||[]).length===0">
+                  <!-- Trap tracking (day-locked strikes). 2026-07-21: shown ALWAYS when
+                       present, not just while no position is open -- the engine keeps
+                       scanning BOTH sides continuously even while one side holds a trade
+                       (structural flip can fire any time), so this stays visible alongside
+                       the live legs below instead of being hidden by them. -->
+                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking">
                     <div class="text-xs font-mono py-1" style="color:var(--t-muted)"
                          x-data="{ get _t(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
                       <div class="flex justify-between items-baseline mb-1.5">

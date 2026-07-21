@@ -24,6 +24,7 @@ class _FakeEvent:
     price_hint: float
     sl_price: float = 5.0
     target_price: float = 20.0
+    audit: Optional[dict] = None
 
 
 class _FakeFeeder:
