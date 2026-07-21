@@ -40,6 +40,7 @@ from strategies.core.base_book import AbstractStrategyBook
 from strategies.v4_cascade.config import V4CascadeConfig
 from strategies.v4_cascade.dataclasses import CascadeEvent, CascadeEventType, CascadePosition
 from strategies.v4_cascade.engine import V4CascadeEngine
+from strategies.v4_cascade.execution_risk import compute_execution_native_risk
 from strategies.v4_cascade.exits import TrailingBaseTracker
 from strategies.v4_cascade.rolling_base import resample_bars
 
@@ -1074,6 +1075,39 @@ class V4CascadeBook(AbstractStrategyBook):
                            self._underlying, self._client_id, self._binding_id, ev.side, ev.price_hint)
             self._clog.warning("no execution-contract tick within 3s for %s — falling back to "
                                "tracking-contract price_hint=%.4f.", ev.side, ev.price_hint)
+
+        # 2026-07-21: execution-native risk lookup. Fetch the execution
+        # strike's own bars and wait for the tick CONCURRENTLY (not
+        # serially) so this doesn't add to entry latency beyond what
+        # already existed.
+        pos = self._engine.position
+        if pos is not None and pos.is_open and not self._is_crypto and exec_strike:
+            exec_bars = await self._fetch_execution_bars_5m(self._exec_symbol[ev.side])
+            is_short = self._is_crypto and ev.side == "PE"
+            native = compute_execution_native_risk(
+                exec_bars, exec_entry_price=price_hint, sl_buffer=self._v4cfg.sl_buffer,
+                is_short=is_short, session_open=self._session_open,
+            )
+            if native is not None:
+                sl_price, target_price = native
+                pos.risk_basis = "execution_native"
+                if pos.t1 is not None:
+                    pos.t1.sl_price = sl_price
+                    pos.t1.target_price = target_price
+                if pos.t2 is not None:
+                    pos.t2.sl_price = sl_price
+                logger.info("V4CascadeBook[%s/%s/%s]: execution-native risk found — "
+                           "SL=%.4f target=%.4f (exec strike %s).", self._underlying,
+                           self._client_id, self._binding_id, sl_price, target_price, exec_strike)
+                self._clog.info("execution-native risk found — SL=%.4f target=%.4f (exec strike %s).",
+                                sl_price, target_price, exec_strike)
+            else:
+                logger.warning("V4CascadeBook[%s/%s/%s]: no execution-native zone found for %s — "
+                               "falling back to tracking-scale SL/target.", self._underlying,
+                               self._client_id, self._binding_id, ev.side)
+                self._clog.warning("no execution-native zone found for %s — falling back to "
+                                   "tracking-scale SL/target.", ev.side)
+
         await self._bus.publish(Topic.CASCADE_ORDER_REQUEST, CascadeOrderEvent(
             action="ENTRY", underlying=self._underlying, side=ev.side,
             strike=exec_strike, qty=qty, price_hint=price_hint, tranche="BOTH",
