@@ -457,6 +457,49 @@ class V4CascadeBook(AbstractStrategyBook):
             await feeder.subscribe_tokens(tokens)
 
     # ── deep historical re-ingestion (boot + admin "Force Ingest Zones") ────
+    @staticmethod
+    def _position_snapshot(pos: Optional[CascadePosition]) -> Optional[dict]:
+        return pos.to_dict() if pos is not None else None
+
+    def _guard_replay_position(self, pos_snapshot: Optional[dict]) -> None:
+        """Replay must ONLY rebuild HTF/MTF zone/scanner state — it must
+        NEVER be allowed to open or close the live position. Historical
+        bars can legitimately pierce a Gate-3 limit price during replay
+        (that's real zone data), but a replay-triggered open/close never
+        goes through a real broker order (replay's returned events are
+        intentionally discarded), so any position mutation from replay is
+        pure fabrication: a phantom "open"/"close" the system would then
+        try to reconcile against a live order that never happened.
+
+        2026-07-21 fix: comparing by OBJECT IDENTITY (`is not
+        pos_before_replay`) only catches replay OPENING a brand-new
+        position (self.position pointing at a fresh object) — it silently
+        MISSES replay CLOSING an already-restored position, since
+        _check_exits/_close_for_structural_flip mutate pos.status/
+        leg.status IN PLACE on the SAME object, never replacing it.
+        Confirmed live: a real restored open position vanished from the UI
+        after a routine restart with zero log trace, because replay's
+        historical bars (catching up from the last boot to "now") happened
+        to satisfy a T1/T2 exit condition and silently flipped
+        status="closed" in place — no order, no fill, just gone. Comparing
+        the full VALUE (to_dict()) instead of identity catches both cases
+        uniformly. Call with the pre-replay snapshot (_position_snapshot)
+        immediately after the replay call returns."""
+        after = self._engine.position
+        touched = (
+            (after is None) != (pos_snapshot is None)
+            or (after is not None and pos_snapshot is not None and after.to_dict() != pos_snapshot)
+        )
+        if touched:
+            logger.warning("V4CascadeBook[%s/%s/%s]: historical replay tried to open/close "
+                           "a position — discarding (replay must never touch live position).",
+                           self._underlying, self._client_id, self._binding_id)
+            self._clog.warning("historical replay tried to open/close a position — discarding "
+                               "(replay must never touch live position).")
+            self._engine.position = (
+                CascadePosition.from_dict(pos_snapshot) if pos_snapshot is not None else None
+            )
+
     async def _ingest_history(self) -> bool:
         """Public — also called directly by the admin force-ingest endpoint
         on an already-running book. Idempotent: PremiumGateScanner de-dupes
@@ -506,31 +549,16 @@ class V4CascadeBook(AbstractStrategyBook):
         self._bars_5m["PE"] = pe_5m
 
         # Replay must ONLY rebuild HTF/MTF zone/scanner state -- it must
-        # NEVER be allowed to open or close the live position. Historical
-        # bars can legitimately pierce a Gate-3 limit price during replay
-        # (that's real zone data), but a replay-triggered open/close never
-        # goes through a real broker order (replay's returned events are
-        # intentionally discarded), so any position mutation from replay is
-        # pure fabrication: a phantom "open" the system would then try to
-        # REALLY exit later using live orders, and which gets endlessly
-        # reconstructed from history on every restart. Snapshotting and
-        # restoring engine.position around the replay call means only a
-        # genuinely-restored (from disk, real) position can exist
-        # afterward -- replay's zone-building side effects on the
-        # scanners/spot_confirm are untouched by this, only .position is.
-        _pos_before_replay = self._engine.position
+        # NEVER be allowed to open or close the live position. See
+        # _guard_replay_position's docstring for the full explanation
+        # (including the 2026-07-21 in-place-mutation fix).
+        _pos_snapshot = self._position_snapshot(self._engine.position)
         _replay_through_engine(self._engine, spot_5m, ce_5m, pe_5m,
                                 on_daily_boundary=self._apply_eod_gate23_rules,
                                 session_open=self._session_open,
                                 eod_square_off=self._eod_hour_min,
                                 gate23_reset=self._gate23_hour_min)
-        if self._engine.position is not _pos_before_replay:
-            logger.warning("V4CascadeBook[%s/%s/%s]: historical replay tried to open/close "
-                           "a position — discarding (replay must never touch live position).",
-                           self._underlying, self._client_id, self._binding_id)
-            self._clog.warning("historical replay tried to open/close a position — discarding "
-                               "(replay must never touch live position).")
-            self._engine.position = _pos_before_replay
+        self._guard_replay_position(_pos_snapshot)
         self._history_ingested = True
         self._persist_position()
         logger.info("V4CascadeBook[%s/%s/%s]: history ingested — spot=%d CE=%d PE=%d 5m bars.",
@@ -577,11 +605,9 @@ class V4CascadeBook(AbstractStrategyBook):
                     for b in resample_bars(bars_1m, _CRYPTO_HTF_MINUTES)]
         htf_by_ts = {b.timestamp: b for b in bars_htf}
 
-        # Same guard as the NIFTY path: replay must only rebuild scanner/zone
-        # state, never open or close the live position (a replay-triggered
-        # open never goes through a real order — see the NIFTY path's
-        # identical comment above for the full explanation).
-        _pos_before_replay = self._engine.position
+        # Same guard as the NIFTY path -- see _guard_replay_position's
+        # docstring for the full explanation.
+        _pos_snapshot = self._position_snapshot(self._engine.position)
         for i, bar in enumerate(bars_1m):
             self._engine.update(ce_bar=bar, pe_bar=bar)
             if _bucket_end_1m(bar.timestamp, _CRYPTO_HTF_MINUTES):
@@ -589,13 +615,7 @@ class V4CascadeBook(AbstractStrategyBook):
                 htf_bar = htf_by_ts.get(bstart)
                 if htf_bar is not None:
                     self._engine.update(spot_bar=htf_bar, ce_bar=htf_bar, pe_bar=htf_bar)
-        if self._engine.position is not _pos_before_replay:
-            logger.warning("V4CascadeBook[%s/%s/%s]: historical replay tried to open/close "
-                           "a position — discarding (replay must never touch live position).",
-                           self._underlying, self._client_id, self._binding_id)
-            self._clog.warning("historical replay tried to open/close a position — discarding "
-                               "(replay must never touch live position).")
-            self._engine.position = _pos_before_replay
+        self._guard_replay_position(_pos_snapshot)
         if bars_1m:
             self._live_price["CE"] = self._live_price["PE"] = bars_1m[-1].close
         self._history_ingested = True
