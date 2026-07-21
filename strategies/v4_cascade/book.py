@@ -278,6 +278,7 @@ class V4CascadeBook(AbstractStrategyBook):
         except Exception:
             logger.exception("V4CascadeBook[%s/%s/%s]: boot ingestion failed.",
                               self._client_id, self._binding_id, self._underlying)
+        await self._resubscribe_execution_contract_for_open_position()
         if self._is_crypto:
             self._tasks.append(asyncio.create_task(self._crypto_candle_loop(), name="v4cascade_crypto_candle"))
             self._tasks.append(asyncio.create_task(self._crypto_tick_loop(), name="v4cascade_crypto_tick"))
@@ -929,6 +930,49 @@ class V4CascadeBook(AbstractStrategyBook):
         msg = "\n".join(lines)
         logger.info("V4CascadeBook[%s/%s/%s]: %s", self._underlying, self._client_id, self._binding_id, msg)
         self._clog.info(msg)
+
+    async def _resubscribe_execution_contract_for_open_position(self) -> None:
+        """2026-07-21 fix: execution-contract tracking (_exec_symbol/
+        _exec_live_price) is pure in-memory state, never persisted — it's
+        only ever established inside _open_entry_async, which runs exactly
+        once, at the moment a trade freshly fires. A RESTORED position (from
+        disk, after any restart while a trade was open) never goes through
+        that path at all, so its execution-contract subscription is
+        permanently lost the instant the process restarts — LTP/P&L then
+        silently falls back to the tracking contract's price for the rest
+        of that trade's life (confirmed live: a real 24200 CE @ ~21 showed
+        an LTP of ~181, which was actually the CE tracking contract's
+        price). Called once at boot, after _ingest_history has resolved
+        self._expiry and reconciled self._engine.position — re-establishes
+        the same subscription _open_entry_async would have, for whichever
+        side (if any) is currently open."""
+        if self._is_crypto:
+            return
+        pos = self._engine.position
+        if pos is None or not pos.is_open or not self._expiry:
+            return
+        strike = pos.execution_strike or (pos.t1.strike if pos.t1 else 0) or (pos.t2.strike if pos.t2 else 0)
+        if not strike:
+            return
+        symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, int(strike), pos.side)
+        if not symbol:
+            logger.warning("V4CascadeBook[%s/%s/%s]: could not resolve execution symbol for "
+                           "restored open position (side=%s strike=%s) — LTP/P&L will fall back "
+                           "to the tracking contract until the next fresh entry.",
+                           self._underlying, self._client_id, self._binding_id, pos.side, strike)
+            return
+        self._exec_symbol[pos.side] = symbol
+        feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+        if feeder:
+            try:
+                await feeder.subscribe_tokens([symbol])
+                logger.info("V4CascadeBook[%s/%s/%s]: re-subscribed execution contract %s for "
+                           "restored open position (side=%s).", self._underlying, self._client_id,
+                           self._binding_id, symbol, pos.side)
+            except Exception:
+                logger.exception("V4CascadeBook[%s/%s/%s]: execution-contract re-subscribe failed "
+                                 "for restored position %s.", self._underlying, self._client_id,
+                                 self._binding_id, symbol)
 
     async def _open_entry_async(self, ev, exec_strike: float, qty: int, event_id: str, ts: datetime) -> None:
         """2026-07-21 fix: resolves + subscribes to the EXECUTION contract
