@@ -1,9 +1,12 @@
-"""strategies/v4_cascade/engine.py -- end-to-end coverage of the 2026-07-20
-Index/Premium decoupling via V4CascadeEngine.update(): the Index gate (75m
-spot) hard-gates premium Gate-2 discovery, the full funnel fires an
-OPEN_LONG event, and the "never abort in-flight" decision (a fired setup
-still opens even if the Index later flips away) -- plus a guardrail that
-crypto's construction path is completely unaffected."""
+"""strategies/v4_cascade/engine.py -- end-to-end coverage of the Index/Premium
+decoupling via V4CascadeEngine.update(). 2026-07-21: discovery (Gate 2) runs
+unconditionally on both sides regardless of Index arming -- required for
+structural flip, since PE must be able to independently discover and
+progress its own setup while CE currently holds Index bias. `armed` is
+checked ONLY at trigger time (Gate 3): a pierce on a currently-unarmed side
+is left pending, not fired, until that side becomes armed. Plus a guardrail
+that crypto's construction path is completely unaffected (it already worked
+this exact way)."""
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -52,20 +55,23 @@ def test_index_confirmation_arms_only_the_matching_side():
     assert eng._scanners["PE"].armed is False
 
 
-def test_premium_pattern_before_arming_is_not_discovered_after_arming_it_is():
+def test_premium_pattern_discovered_regardless_of_arming():
+    """2026-07-21: discovery must find a Demand Block on PE even though only
+    CE is armed by the Index -- PE has to be able to build up its own
+    in-flight setup for structural flip to ever be possible."""
     eng = V4CascadeEngine()
-    # Feed a premium trap pattern BEFORE the Index ever confirms -- since
-    # discovery is hard-gated, nothing should be found.
+    # PE is never armed at all in this test.
     for b in _premium_trap_pattern(0):
-        eng.update(ce_bar=b)
-    assert eng._scanners["CE"].setups == []
+        eng.update(pe_bar=b)
+    assert len(eng._scanners["PE"].setups) == 1
+    assert eng._scanners["PE"].armed is False
+    assert eng._scanners["PE"].setups[0].zone.entry_line == 100
 
-    # Now arm CE via the Index chart (confirms at 75m-offset 2 = 150min),
-    # then feed a SECOND, distinct premium pattern (offset 60 = 300min,
-    # well after the confirmation, and price-shifted so it's unambiguously
-    # a different structure) -- this one must be found.
+    # CE, meanwhile, gets armed via the Index chart and independently
+    # discovers its own, distinct pattern too.
     for b in _index_bear_confirm_bars():
         eng.update(spot_bar=b)
+    assert eng._scanners["CE"].armed is True
     second_pattern = [
         _Bar(b.timestamp, b.open + 50, b.high + 50, b.low + 50, b.close + 50, tf=5)
         for b in _premium_trap_pattern(60)
@@ -100,33 +106,39 @@ def test_full_funnel_fires_open_long_event():
     assert eng._scanners["CE"].setups == []  # popped on fire
 
 
-def test_in_flight_setup_still_fires_after_index_flips_away():
-    """The decision-2 regression: once a premium setup is discovered while
-    armed, it must fire even if the Index classification later flips to the
-    OTHER side (or NONE) before the pierce happens -- discovery is
-    hard-gated, but an already-discovered setup's progress to trigger is
-    never re-gated."""
+def test_pierce_on_unarmed_side_does_not_fire_but_fires_once_rearmed():
+    """2026-07-21 (inverted from the earlier same-day 'never abort in-flight
+    even if unarmed at fire time' decision, per explicit later user
+    direction): a fully-formed LIMIT_ARMED setup on a side the Index does
+    NOT currently favor must NOT fire on pierce -- it stays pending
+    (un-popped) and fires the next time that side is armed AND pierced
+    again. This is what makes the trigger-time armed check meaningful now
+    that discovery itself is unconditional."""
     eng = V4CascadeEngine()
-    for b in _index_bear_confirm_bars():
-        eng.update(spot_bar=b)
-    eng._scanners["CE"]._scan_window_start_ts = _BASE
     for b in _premium_trap_pattern(0):
-        eng.update(ce_bar=b)
-    # Re-entry bar (low=99, above the 98.33 limit price) -> LIMIT_ARMED
-    # without also piercing in the same step.
-    eng.update(ce_bar=_bar5(10, 99, 100, 99, 99.5))
+        eng.update(ce_bar=b)  # CE never armed in this test
+    eng.update(ce_bar=_bar5(10, 99, 100, 99, 99.5))  # -> LIMIT_ARMED
     assert eng._scanners["CE"].setups[0].state.value == "limit_armed"
-
-    # Flip the Index gate away from CE -- CE is now explicitly unarmed.
-    eng._scanners["CE"].set_armed(False)
     assert eng._scanners["CE"].armed is False
 
-    # The pierce must still fire and open a position, despite CE being unarmed.
+    # Pierce while unarmed -- must NOT fire, setup stays in place (un-popped).
     events = eng.update(ce_bar=_bar5(11, 98, 99, 97, 97.5))
+    fired = [e for e in events if e.event_type.value == "open_long_ce"]
+    assert len(fired) == 0
+    assert eng.position is None
+    assert len(eng._scanners["CE"].setups) == 1
+    assert eng._scanners["CE"].setups[0].state.value == "limit_armed"
+
+    # Now arm CE via the Index chart and pierce again -- fires this time.
+    for b in _index_bear_confirm_bars():
+        eng.update(spot_bar=b)
+    assert eng._scanners["CE"].armed is True
+    events = eng.update(ce_bar=_bar5(12, 97, 98, 96, 96.5))
     fired = [e for e in events if e.event_type.value == "open_long_ce"]
     assert len(fired) == 1
     assert eng.position is not None
     assert eng.position.side == "CE"
+    assert eng._scanners["CE"].setups == []  # popped on fire
 
 
 def test_crypto_construction_still_uses_legacy_scanner():

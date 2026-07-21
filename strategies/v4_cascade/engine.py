@@ -170,20 +170,16 @@ class V4CascadeEngine:
         return events
 
     def _may_fire(self, scanner: _Scanner) -> bool:
-        """Crypto (legacy PremiumGateScanner): discovery is unconditional, so
-        bias is still checked here, at trigger time (a pierce on an unarmed
-        side is left alone -- not popped, not opened -- so it can still fire
-        later if bias comes back to it). NIFTY/CRUDEOIL
-        (IndexGatedPremiumScanner): discovery is already hard-gated by
-        `armed` at the source (zone_state.py), so every setup in
-        `scanner.setups` was, by construction, discovered while armed --
-        re-checking `armed` again here would wrongly suppress a legitimate
-        in-flight fire the instant the Index flips away mid-flight, which is
-        exactly what the "never abort in-flight" decision says must NOT
-        happen. Always True there."""
-        if self._legacy_scanners:
-            return scanner.armed
-        return True
+        """2026-07-21: discovery is unconditional on BOTH scanner types now
+        (crypto's legacy PremiumGateScanner always was; IndexGatedPremiumScanner
+        reverted to match, per explicit user direction — PE must be allowed to
+        scan even while CE holds Index bias, otherwise it could never
+        independently reach its own trigger and cause a structural flip when
+        the Index bias itself crosses through PE's zone). `armed` is checked
+        ONLY here, at trigger time, uniformly for both: a pierce on an
+        unarmed side is left alone (not popped, not opened) so it can still
+        fire later once that side becomes armed."""
+        return scanner.armed
 
     def _close_for_structural_flip(self, ts) -> List[CascadeEvent]:
         """Closes every still-open leg of the CURRENT position because the

@@ -1,9 +1,12 @@
 """strategies/v4_cascade/zone_state.py's IndexGatedPremiumScanner -- the core
 2026-07-20 Index/Premium decoupling gate machine (NIFTY/CRUDEOIL real-options
-path). Covers: armed hard-gates discovery, the scan-window anchor is
-monotonic, an already-discovered setup is never aborted once unarmed (the
-"never abort in-flight" decision), multi-zone discovery, the 15m fallback,
-close-based invalidation, and pop/invalidate."""
+path). Covers: discovery runs unconditionally regardless of Index arming
+(2026-07-21 revert -- required for structural flip, see
+test_discovery_runs_regardless_of_armed_state), the scan-window anchor is
+monotonic (now telemetry-only, not a discovery bound), an already-discovered
+setup is never aborted once unarmed (the "never abort in-flight" decision),
+multi-zone discovery, the 15m fallback, close-based invalidation, and
+pop/invalidate."""
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -32,39 +35,23 @@ def _trap_pattern(offset0):
     ]
 
 
-def test_discovery_does_not_run_while_unarmed():
+def test_discovery_runs_regardless_of_armed_state():
+    """2026-07-21: discovery is unconditional -- a completely UNARMED
+    scanner (never once called set_armed) must still find a valid Demand
+    Block. Required for structural flip: PE must be able to independently
+    discover and progress a setup even while the Index currently favors CE,
+    so it can fire the instant the Index bias itself crosses into PE's own
+    zone."""
     s = IndexGatedPremiumScanner()
     for b in _trap_pattern(0):
         s.on_5m_bar(b)
-    assert s.setups == []
     assert s.armed is False
-
-
-def test_discovery_runs_once_armed_with_window_anchor():
-    s = IndexGatedPremiumScanner()
-    confirmed_ts = _BASE  # anchor at/before the ref candle -- window includes it
-    s.set_armed(True, confirmed_ts=confirmed_ts)
-    for b in _trap_pattern(0):
-        s.on_5m_bar(b)
     assert len(s.setups) == 1
     setup = s.setups[0]
     assert setup.state == PremiumZoneState.PREMIUM_LOCKED
     assert setup.zone.entry_line == 100
     assert setup.zone.sweep_low == 95
     assert setup.timeframe == 5
-
-
-def test_bars_before_confirmed_ts_are_excluded_from_the_window():
-    s = IndexGatedPremiumScanner()
-    bars = _trap_pattern(0)
-    # Anchor the window at (just after) the reclaim candle's own timestamp --
-    # the ref+sweep candles that formed this exact pattern are now BEFORE the
-    # window, so this specific pattern must not be (re)discovered.
-    late_anchor = bars[-1].timestamp + timedelta(minutes=1)
-    s.set_armed(True, confirmed_ts=late_anchor)
-    for b in bars:
-        s.on_5m_bar(b)
-    assert s.setups == []
 
 
 def test_window_anchor_is_monotonic_never_rewinds():

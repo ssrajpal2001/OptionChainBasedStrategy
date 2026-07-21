@@ -460,10 +460,18 @@ class IndexGatedPremiumScanner:
     only. Bear-trap-only, unconditionally (no ``bear`` parameter) — per spec,
     Gate 2 looks "only and only for a Bear Trap pattern" on BOTH CE and PE
     premium (as option BUYERS, we need sellers trapped out of the premium
-    contract regardless of side). Discovery only runs while ``armed`` (set by
-    engine.py from spot_confirm.py's Index-chart classification); an
-    already-discovered setup is never aborted by a later Index flip — see
-    module docstring above."""
+    contract regardless of side).
+
+    2026-07-21 — Discovery is UNCONDITIONAL, on both sides, regardless of
+    Index arming (reverted from the earlier same-day hard-gate-on-discovery
+    decision, per explicit user direction: "irrespective of bias we are
+    checking both"). ``armed`` (set by engine.py from spot_confirm.py's
+    Index-chart classification) now ONLY gates whether a fully-formed Gate-3
+    trigger is allowed to actually open a trade (checked in
+    engine.py._may_fire) — mirrors the legacy PremiumGateScanner's own
+    "discovery unconditional, armed checked at trigger time" contract
+    exactly. An already-discovered setup is never aborted by a later Index
+    flip regardless."""
 
     def __init__(self, session_open: Tuple[int, int] = (9, 15)) -> None:
         self._bear = True  # hardcoded — see class docstring
@@ -489,12 +497,17 @@ class IndexGatedPremiumScanner:
     # ── engine-driven Index gate control ────────────────────────────────────
     def set_armed(self, armed: bool, confirmed_ts: Optional[datetime] = None) -> None:
         """Called by the engine each time the Index-chart classification is
-        re-evaluated. ``armed`` hard-gates whether a NEW premium Demand Block
-        scan may START (see on_5m_bar) — never aborts a setup already
-        in-flight. The scan window anchor is monotonic: it only ever advances
-        to a LATER confirmation timestamp, never rewinds to an older/stale
-        one, and staying unarmed afterward does not clear it (a later re-arm
-        just resumes/advances from where it left off)."""
+        re-evaluated. 2026-07-21: ``armed`` no longer gates discovery (see
+        on_5m_bar) — it ONLY gates whether a fully-formed Gate-3 trigger may
+        actually open a trade (checked in engine.py._may_fire), same
+        contract as the legacy PremiumGateScanner. This is required for
+        structural flip to work at all: if PE were never allowed to scan
+        while CE holds the Index bias, PE could never independently reach
+        its own trigger and flip the position when the Index bias itself
+        crosses through PE's structural zone. ``confirmed_ts`` is still
+        tracked (monotonic, never rewinds) purely as telemetry/audit context
+        — which Index confirmation was current when this side last armed —
+        not as a scan-window bound."""
         self.armed = armed
         if armed and confirmed_ts is not None:
             if self._scan_window_start_ts is None or confirmed_ts > self._scan_window_start_ts:
@@ -510,15 +523,16 @@ class IndexGatedPremiumScanner:
     # ── Gate 2 (5m, fallback 15m) + Gate-2 zone-entry -> limit calc ─────────
     def on_5m_bar(self, bar) -> None:
         self._bars_5m.append(bar)
-        if self.armed and self._scan_window_start_ts is not None:
-            self._scan_for_new_premium_setups()
+        # 2026-07-21: discovery runs unconditionally, on both CE and PE,
+        # regardless of current Index arming -- see set_armed's docstring.
+        self._scan_for_new_premium_setups()
         for setup in self.setups:
             if setup.state == PremiumZoneState.PREMIUM_LOCKED:
                 self._check_zone_entry(setup, bar)
         self._invalidate_broken_setups(bar)
 
     def _scan_for_new_premium_setups(self) -> None:
-        window = [b for b in self._bars_5m if b.timestamp >= self._scan_window_start_ts]
+        window = list(self._bars_5m)
         if len(window) < 3:
             return
         new_found = False
