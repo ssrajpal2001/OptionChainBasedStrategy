@@ -96,3 +96,23 @@ def test_noop_tracker_when_t2_already_closed():
 
     assert "CE" not in book._engine._trackers
     assert book._engine._tracking_entry_price["CE"] == 719.87
+
+
+def test_restores_tracker_correctly_for_execution_native_position():
+    """risk_basis=='execution_native': the seed value (tracking_current_stop)
+    is used AS-IS with no scale conversion -- since for an execution-native
+    position, tracking_current_stop actually holds an EXECUTION-scale value
+    (set by check_exits_execution_native, which never distinguishes the two
+    scales in its own field names — see Task 6/7). This confirms restore
+    doesn't accidentally apply tracking-to-execution scaling on top of an
+    already-execution-scale seed."""
+    book = _book()
+    pos = _open_position()
+    pos.risk_basis = "execution_native"
+    pos.t2.tracking_current_stop = 18.5   # execution-scale, per Task 6's field reuse
+    book._engine.position = pos
+
+    book._restore_tracker_state_for_open_position()
+
+    tracker = book._engine._trackers["CE"]
+    assert tracker.current_stop == 18.5
