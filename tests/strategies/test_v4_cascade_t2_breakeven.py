@@ -109,6 +109,46 @@ def test_t1_target_hit_moves_t2_trail_to_breakeven():
     assert t2.trail_stop_price == entry_price
 
 
+def test_breakeven_uses_tracking_scale_not_post_fill_execution_price():
+    """The exact live bug: book.py's _on_fill overwrites t1/t2.entry_price
+    with the REAL EXECUTION fill almost immediately after entry -- well
+    before T1 could ever hit target 5+ minutes later. So by the time the
+    breakeven ratchet fires, t2.entry_price is already execution-scale
+    (545.0 in the real trade), NOT the tracking-scale price (719.87) that
+    current_stop must be expressed in (it's compared against TRACKING bars
+    everywhere else). Using t2.entry_price there silently corrupted
+    current_stop onto the wrong scale."""
+    eng = V4CascadeEngine()
+    # Same numbers as the real live CRUDEOIL trade this bug was found in.
+    tracking_entry = 719.8666666666667
+    exec_entry = 545.0   # what t2.entry_price becomes after _on_fill runs
+    t1 = TrancheLeg(tranche="T1", option_type="PE", strike=0.0, qty=100,
+                     entry_price=exec_entry, sl_price=421.0, target_price=722.3, status="open")
+    t2 = TrancheLeg(tranche="T2", option_type="PE", strike=0.0, qty=100,
+                     entry_price=exec_entry, sl_price=421.0, status="open")
+    eng.position = CascadePosition(
+        underlying="CRUDEOIL", side="PE", tracking_strike=0.0, execution_strike=0.0,
+        atm_at_trigger=0.0, entry_spot=0.0, t1=t1, t2=t2, open_time=_BASE,
+    )
+    eng._tracking_entry_price["PE"] = tracking_entry
+    eng._trackers["PE"] = TrailingBaseTracker(bear=True, initial_stop=421.0)
+
+    # Bar's high clears T1's target (722.3, tracking scale); low (720.0)
+    # stays above the NEW breakeven level (719.87) so T2 doesn't also close
+    # in this same bar -- all values on the TRACKING scale, same as every
+    # real bar _check_exits ever receives.
+    events = eng._check_exits("PE", _bar(0, 721, 725, 720.0, 723))
+
+    fired = [e for e in events if e.tranche == "T1"]
+    assert len(fired) == 1 and fired[0].reason == "t1_target_2r"
+    # current_stop must land on the TRACKING scale (719.87), not the
+    # execution-scale entry price (545.0) -- the bug's exact symptom.
+    assert eng._trackers["PE"].current_stop == tracking_entry
+    # Mapped to execution scale, breakeven must equal T2's own real entry
+    # (545.0) -- not some other, nonsensical value.
+    assert abs(t2.trail_stop_price - exec_entry) < 1e-6
+
+
 def test_t1_sl_hit_does_not_move_t2_to_breakeven():
     """Only a TARGET hit (profit) should trigger the breakeven ratchet --
     T1 stopping out at a loss must not also drag T2's floor up. T2's seeded

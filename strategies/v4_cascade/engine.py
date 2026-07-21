@@ -346,7 +346,21 @@ class V4CascadeEngine:
                 # more-favorable trail (e.g. a base already locked above
                 # entry), it only raises a stop still at/below entry.
                 if r.reason == "t1_target_2r" and t2 is not None and t2.status == "open" and trail is not None:
-                    trail.move_to_breakeven(t2.entry_price)
+                    # BUG (2026-07-21, same-day fix): must ratchet using
+                    # tracking_entry, NOT t2.entry_price -- current_stop is
+                    # always a TRACKING-contract price (check_hit/on_5m_bar
+                    # compare it against tracking bars). t2.entry_price starts
+                    # as the tracking-scale price at _open_position time but
+                    # book.py's _on_fill OVERWRITES it with the real EXECUTION
+                    # fill the moment the broker confirms (which happens
+                    # almost immediately after entry, well before T1 could
+                    # ever hit target 5+ minutes later) -- so by the time this
+                    # ever fires, t2.entry_price is already execution-scale.
+                    # Passing it here silently corrupted current_stop onto
+                    # the wrong scale (confirmed live: displayed as a
+                    # nonsensical trail_stop_price until a later, correctly-
+                    # scaled base lock happened to overwrite it).
+                    trail.move_to_breakeven(tracking_entry)
                     if trail.current_stop is not None:
                         t2.trail_stop_price = map_trailing_stop_to_execution(
                             trail.current_stop, tracking_entry, t2.entry_price,
