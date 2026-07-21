@@ -256,7 +256,10 @@ class V4CascadeEngine:
         # (bull-zone, crypto PE) position trails a FALLING ceiling. This was
         # previously hardcoded bear=True regardless of side (latent bug,
         # never surfaced before crypto's PE-short path existed).
-        self._trackers[side] = TrailingBaseTracker(bear=scanner._bear)
+        # initial_stop=sl_price (2026-07-21): T2 shares T1's structural SL as
+        # its own floor from minute one, instead of running with no stop at
+        # all until the tracker's first new base happens to lock.
+        self._trackers[side] = TrailingBaseTracker(bear=scanner._bear, initial_stop=sl_price)
 
         audit = self._build_entry_audit(scanner, setup, zone, bar, sl_price, target_price)
         scanner.pop_setup(setup, bar.timestamp)
@@ -325,6 +328,7 @@ class V4CascadeEngine:
         t1, t2 = pos.t1, pos.t2
         tracking_entry = self._tracking_entry_price.get(side, 0.0)
         is_short = not self._scanners[side]._bear
+        trail = self._trackers.get(side)
 
         if t1 is not None and t1.status == "open":
             r = check_t1(t1, bar, is_short=is_short)
@@ -334,8 +338,20 @@ class V4CascadeEngine:
                 t1.close_reason = r.reason
                 t1.close_time = bar.timestamp
                 events.append(self._close_event(side, "T1", r.reason, r.price, bar.timestamp))
+                # 2026-07-21, per explicit user direction: once T1's target
+                # (not its SL) is hit, ratchet T2's trailing stop up to
+                # breakeven immediately -- guarantees the combined position
+                # can no longer net a loss after T1 has already booked
+                # profit. move_to_breakeven never regresses an already
+                # more-favorable trail (e.g. a base already locked above
+                # entry), it only raises a stop still at/below entry.
+                if r.reason == "t1_target_2r" and t2 is not None and t2.status == "open" and trail is not None:
+                    trail.move_to_breakeven(t2.entry_price)
+                    if trail.current_stop is not None:
+                        t2.trail_stop_price = map_trailing_stop_to_execution(
+                            trail.current_stop, tracking_entry, t2.entry_price,
+                        )
 
-        trail = self._trackers.get(side)
         if t2 is not None and t2.status == "open" and trail is not None:
             moved = trail.on_5m_bar(bar)
             if moved and trail.current_stop is not None:

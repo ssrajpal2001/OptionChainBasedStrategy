@@ -57,13 +57,23 @@ def check_t1(t1: TrancheLeg, bar, is_short: bool = False) -> ExitCheck:
 
 class TrailingBaseTracker:
     """T2's "4x5m Rolling Base" trailing stop. ``bear=True`` for a bought CE
-    position (tracks CE-tracking-style floor bases); ``bear=False`` for PE."""
+    position (tracks CE-tracking-style floor bases); ``bear=False`` for PE.
 
-    def __init__(self, bear: bool, lookback_bases: int = 4) -> None:
+    ``initial_stop`` (2026-07-21): seeds ``current_stop`` with T2's own
+    entry-time structural SL (the same zone_low-buffer level T1 gets) instead
+    of leaving it ``None``. Previously T2 had ZERO stop-loss protection from
+    entry until the scanner's OWN first new base happened to lock -- which
+    could take arbitrarily long (or never, within a session) -- so a fast
+    adverse move right after entry had nothing to check against. The ratchet
+    logic in ``on_5m_bar`` already only ever moves the stop in T2's favor, so
+    seeding it here is safe: a genuinely better (higher, for a long) base
+    will still replace it the moment one locks."""
+
+    def __init__(self, bear: bool, lookback_bases: int = 4, initial_stop: Optional[float] = None) -> None:
         self._bear = bear
         self._scanner = TrackingZoneScanner(bear=bear, ladder=[5])
         self._locked_bases: Deque[float] = deque(maxlen=lookback_bases)
-        self.current_stop: Optional[float] = None
+        self.current_stop: Optional[float] = initial_stop
 
     def on_5m_bar(self, bar) -> bool:
         """Feed one 5m bar. Returns True if the trailing stop moved up this call."""
@@ -92,6 +102,18 @@ class TrailingBaseTracker:
         if not self._bear and bar.high >= self.current_stop:
             return ExitCheck(hit=True, price=self.current_stop, reason="t2_trailing_base_stop")
         return ExitCheck(hit=False)
+
+    def move_to_breakeven(self, entry_price: float) -> None:
+        """Ratchet the stop up to entry (long) / down to entry (short) once
+        T1's target has been hit -- called from engine.py._check_exits.
+        Never regresses an already more-favorable trail: if a locked base has
+        already moved the stop past entry, this is a no-op."""
+        if self._bear:
+            if self.current_stop is None or entry_price > self.current_stop:
+                self.current_stop = entry_price
+        else:
+            if self.current_stop is None or entry_price < self.current_stop:
+                self.current_stop = entry_price
 
     def reset(self) -> None:
         self._scanner.reset()
