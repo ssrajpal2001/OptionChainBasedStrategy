@@ -17,6 +17,18 @@ of execution-strike bars, at the moment of entry. Returns None when no valid
 zone is found on either timeframe, signaling the caller (book.py's
 _open_entry_async) to fall back to today's tracking-scaled approach -- SL/target
 must never be left undefined.
+
+``is_short`` selects find_all_bull_traps_2candle instead (mirroring
+engine.py's Gate 3 `is_short = not scanner._bear` convention, which picks
+which trap-shaped scanner produced a zone before feeding it into
+compute_risk_mapping) -- unlike engine.py, this module has no scanner to
+read that from, since it does its own one-time zone search, so it must
+replicate the same bear/bull selection internally to stay consistent. In
+current wiring this branch is unreachable in production: crypto (the only
+caller that ever passes is_short=True) skips this whole module entirely, so
+only the is_short=False/bear-trap path is exercised on real NIFTY/CRUDEOIL
+trades today. Kept for interface symmetry with compute_risk_mapping, which
+already supports is_short generally.
 """
 from __future__ import annotations
 
@@ -38,6 +50,8 @@ def compute_execution_native_risk(
     if len(execution_bars_5m) < 3:
         return None
 
+    # Bear/bull selection mirrors engine.py's Gate 3 is_short convention --
+    # see module docstring for why this module must replicate it internally.
     finder = find_all_bull_traps_2candle if is_short else find_all_bear_traps_2candle
     zones = finder(execution_bars_5m)
     if not zones:
