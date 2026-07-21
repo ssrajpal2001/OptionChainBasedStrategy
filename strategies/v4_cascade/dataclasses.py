@@ -151,7 +151,17 @@ class TrancheLeg:
     entry_reason: str = ""       # why the trade fired, e.g. "bear_trap_gate3_pierce"
     sl_price: float = 0.0        # premium-mapped SL (proportionally scaled from tracking contract)
     target_price: Optional[float] = None       # T1 only: fixed 2R target; None for T2 (trailing-managed)
-    trail_stop_price: Optional[float] = None    # T2 only: current trailing stop level
+    trail_stop_price: Optional[float] = None    # T2 only: current trailing stop level (execution scale)
+    # T2 only: the SAME trailing stop, but on the TRACKING-contract's own
+    # price scale -- this is the actual value TrailingBaseTracker.current_stop
+    # holds and checks against (tracking bars), unlike trail_stop_price above
+    # (a display-only execution-scale mapping). Persisted so a restart can
+    # reconstruct the tracker with the position's real, current protection
+    # level instead of losing it entirely (2026-07-21 fix -- previously
+    # self._trackers/self._tracking_entry_price were pure in-memory engine
+    # state, never persisted, so ANY restart while a position was open left
+    # T2 with NO trailing-stop enforcement at all for the rest of the trade).
+    tracking_current_stop: Optional[float] = None
     status: str = "open"         # "open" | "closed"
     close_price: float = 0.0
     close_time: Optional[datetime] = None
@@ -166,7 +176,8 @@ class TrancheLeg:
             "entry_time": self.entry_time.isoformat() if self.entry_time else None,
             "entry_reason": self.entry_reason,
             "sl_price": self.sl_price, "target_price": self.target_price,
-            "trail_stop_price": self.trail_stop_price, "status": self.status,
+            "trail_stop_price": self.trail_stop_price,
+            "tracking_current_stop": self.tracking_current_stop, "status": self.status,
             "close_price": self.close_price,
             "close_time": self.close_time.isoformat() if self.close_time else None,
             "close_reason": self.close_reason, "realized_pnl": self.realized_pnl,
@@ -182,7 +193,8 @@ class TrancheLeg:
             entry_price=d.get("entry_price", 0.0), entry_time=_dt(d.get("entry_time")),
             entry_reason=d.get("entry_reason", ""),
             sl_price=d.get("sl_price", 0.0), target_price=d.get("target_price"),
-            trail_stop_price=d.get("trail_stop_price"), status=d.get("status", "open"),
+            trail_stop_price=d.get("trail_stop_price"),
+            tracking_current_stop=d.get("tracking_current_stop"), status=d.get("status", "open"),
             close_price=d.get("close_price", 0.0), close_time=_dt(d.get("close_time")),
             close_reason=d.get("close_reason", ""), realized_pnl=d.get("realized_pnl", 0.0),
         )
@@ -197,6 +209,12 @@ class CascadePosition:
     atm_at_trigger: float        # live spot ATM at trigger time (NOT the 09:15 session-open ATM)
     entry_spot: float
     expiry_date: Optional[date] = None
+    # The tracking-contract's own entry/limit price at trigger time (what
+    # engine.py's self._tracking_entry_price[side] holds in memory) --
+    # persisted so a restart can rebuild that dict entry too; without it,
+    # T2's trailing-stop scale conversion (tracking <-> execution) has no
+    # reference point to rebuild from after a restart.
+    tracking_entry_price: Optional[float] = None
     t1: Optional[TrancheLeg] = None
     t2: Optional[TrancheLeg] = None
     open_time: Optional[datetime] = None
@@ -214,6 +232,7 @@ class CascadePosition:
             "tracking_strike": self.tracking_strike, "execution_strike": self.execution_strike,
             "atm_at_trigger": self.atm_at_trigger, "entry_spot": self.entry_spot,
             "expiry_date": self.expiry_date.isoformat() if self.expiry_date else None,
+            "tracking_entry_price": self.tracking_entry_price,
             "t1": self.t1.to_dict() if self.t1 else None,
             "t2": self.t2.to_dict() if self.t2 else None,
             "open_time": self.open_time.isoformat() if self.open_time else None,
@@ -231,6 +250,7 @@ class CascadePosition:
             tracking_strike=d.get("tracking_strike", 0.0), execution_strike=d.get("execution_strike", 0.0),
             atm_at_trigger=d.get("atm_at_trigger", 0.0), entry_spot=d.get("entry_spot", 0.0),
             expiry_date=_dt(d.get("expiry_date")).date() if d.get("expiry_date") else None,
+            tracking_entry_price=d.get("tracking_entry_price"),
             t1=TrancheLeg.from_dict(d["t1"]) if d.get("t1") else None,
             t2=TrancheLeg.from_dict(d["t2"]) if d.get("t2") else None,
             open_time=_dt(d.get("open_time")), close_time=_dt(d.get("close_time")),

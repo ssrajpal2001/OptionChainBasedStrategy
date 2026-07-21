@@ -40,6 +40,7 @@ from strategies.core.base_book import AbstractStrategyBook
 from strategies.v4_cascade.config import V4CascadeConfig
 from strategies.v4_cascade.dataclasses import CascadeEvent, CascadeEventType, CascadePosition
 from strategies.v4_cascade.engine import V4CascadeEngine
+from strategies.v4_cascade.exits import TrailingBaseTracker
 from strategies.v4_cascade.rolling_base import resample_bars
 
 logger = logging.getLogger(__name__)
@@ -279,6 +280,7 @@ class V4CascadeBook(AbstractStrategyBook):
             logger.exception("V4CascadeBook[%s/%s/%s]: boot ingestion failed.",
                               self._client_id, self._binding_id, self._underlying)
         await self._resubscribe_execution_contract_for_open_position()
+        self._restore_tracker_state_for_open_position()
         if self._is_crypto:
             self._tasks.append(asyncio.create_task(self._crypto_candle_loop(), name="v4cascade_crypto_candle"))
             self._tasks.append(asyncio.create_task(self._crypto_tick_loop(), name="v4cascade_crypto_tick"))
@@ -975,6 +977,38 @@ class V4CascadeBook(AbstractStrategyBook):
                 logger.exception("V4CascadeBook[%s/%s/%s]: execution-contract re-subscribe failed "
                                  "for restored position %s.", self._underlying, self._client_id,
                                  self._binding_id, symbol)
+
+    def _restore_tracker_state_for_open_position(self) -> None:
+        """2026-07-21 fix: self._engine._trackers/_tracking_entry_price are
+        pure in-memory engine state -- _restore_position only ever restores
+        self._engine.position itself, never these two dicts. That meant ANY
+        restart while a position was open left self._engine._trackers EMPTY,
+        so T2's entire exit-check block in engine.py._check_exits
+        (`if t2 is not None and t2.status == "open" and trail is not None:`)
+        was skipped forever after that restart -- T2 ran with ZERO stop-loss
+        enforcement for the rest of the trade's life, no matter what its
+        persisted sl_price/trail_stop_price displayed in the UI. Rebuilds
+        both dicts from the position's now-persisted tracking_entry_price/
+        tracking_current_stop fields (see TrancheLeg/CascadePosition
+        docstrings) -- falls back to T2's structural sl_price for positions
+        persisted before this fix added tracking_current_stop."""
+        pos = self._engine.position
+        if pos is None or not pos.is_open:
+            return
+        if pos.tracking_entry_price:
+            self._engine._tracking_entry_price[pos.side] = pos.tracking_entry_price
+        t2 = pos.t2
+        if t2 is not None and t2.status == "open":
+            scanner = self._engine._scanners.get(pos.side)
+            bear = scanner._bear if scanner is not None else True
+            initial_stop = (t2.tracking_current_stop if t2.tracking_current_stop is not None
+                            else (t2.sl_price or None))
+            self._engine._trackers[pos.side] = TrailingBaseTracker(bear=bear, initial_stop=initial_stop)
+            logger.info("V4CascadeBook[%s/%s/%s]: restored T2 trailing-stop tracker for open "
+                       "position (side=%s, current_stop=%s).", self._underlying, self._client_id,
+                       self._binding_id, pos.side, initial_stop)
+            self._clog.info("restored T2 trailing-stop tracker (side=%s, current_stop=%s).",
+                            pos.side, initial_stop)
 
     async def _open_entry_async(self, ev, exec_strike: float, qty: int, event_id: str, ts: datetime) -> None:
         """2026-07-21 fix: resolves + subscribes to the EXECUTION contract

@@ -243,12 +243,13 @@ class V4CascadeEngine:
                          sl_price=sl_price, target_price=target_price)
         t2 = TrancheLeg(tranche="T2", option_type=side, strike=0.0, qty=qty,
                          entry_price=entry_price, entry_time=bar.timestamp, entry_reason=entry_reason,
-                         sl_price=sl_price, target_price=None)
+                         sl_price=sl_price, target_price=None, tracking_current_stop=sl_price)
         self.position = CascadePosition(
             underlying=self._cfg.underlying, side=side,
             tracking_strike=0.0, execution_strike=0.0,
             atm_at_trigger=0.0, entry_spot=0.0,
             t1=t1, t2=t2, open_time=bar.timestamp,
+            tracking_entry_price=entry_price,
         )
         self._tracking_entry_price[side] = entry_price
         # TrailingBaseTracker's own `bear` flag mirrors the scanner's -- a
@@ -365,6 +366,11 @@ class V4CascadeEngine:
                         t2.trail_stop_price = map_trailing_stop_to_execution(
                             trail.current_stop, tracking_entry, t2.entry_price,
                         )
+                        # Mirror the raw tracking-scale value too (2026-07-21)
+                        # -- persisted so a restart can rebuild the tracker
+                        # with this exact protection level instead of losing
+                        # it (see TrancheLeg.tracking_current_stop docstring).
+                        t2.tracking_current_stop = trail.current_stop
 
         if t2 is not None and t2.status == "open" and trail is not None:
             moved = trail.on_5m_bar(bar)
@@ -372,6 +378,7 @@ class V4CascadeEngine:
                 t2.trail_stop_price = map_trailing_stop_to_execution(
                     trail.current_stop, tracking_entry, t2.entry_price,
                 )
+                t2.tracking_current_stop = trail.current_stop
             r = trail.check_hit(bar)
             if r.hit:
                 t2.status = "closed"
