@@ -90,21 +90,28 @@ def check_limit_pierce(
 
 def compute_risk_mapping(
     zone: RollingBaseZone, tracking_entry_price: float, exec_entry_price: float,
-    target_r: float, sl_buffer: float = 10.0, is_short: bool = False,
+    sl_buffer: float = 10.0, is_short: bool = False,
 ) -> Tuple[float, float]:
     """SL is anchored directly to the Inner Zone's edge plus a buffer (long:
     zone_low - sl_buffer, short: zone_high + sl_buffer), computed in
     TRACKING-contract terms and scaled onto the execution contract the same
-    way the rest of the risk distance already was. For crypto (tracking ==
-    execution price), this reduces to the literal zone_low-buffer /
-    zone_high+buffer formula. Target stays a target_r multiple of that same
-    risk distance. Returns (sl_price, target_price) for the execution
-    contract."""
-    if zone.entry_line is None or zone.sweep_low is None:
+    way the rest of the risk distance already was.
+
+    2026-07-21: target is the zone's OWN ``sl_level`` (long: ref.high, the
+    exact level where the sellers who sold into the sweep got stopped out;
+    short: ref.low, the mirror for a bull-zone) -- a full round-trip back
+    past the original trap-confirmation candle, mapped onto the execution
+    contract by the same tracking-to-execution distance scale as the SL.
+    Replaces the previous fixed target_r-multiple-of-risk formula per user
+    direction: the target should be anchored to the zone's real structure,
+    not an arbitrary R-multiple. For crypto (tracking == execution price),
+    this reduces to the literal zone_low-buffer SL / literal sl_level target.
+    Returns (sl_price, target_price) for the execution contract."""
+    if zone.entry_line is None or zone.sweep_low is None or zone.sl_level is None:
         # Defensive fallback — should not happen for a locked zone.
         if is_short:
-            return exec_entry_price * 1.5, max(0.0, exec_entry_price * (1.0 - target_r * 0.5))
-        return max(0.0, exec_entry_price * 0.5), exec_entry_price * (1.0 + target_r * 0.5)
+            return exec_entry_price * 1.5, max(0.0, exec_entry_price * 0.75)
+        return max(0.0, exec_entry_price * 0.5), exec_entry_price * 1.25
 
     zone_low = min(zone.entry_line, zone.sweep_low)
     zone_high = max(zone.entry_line, zone.sweep_low)
@@ -114,10 +121,12 @@ def compute_risk_mapping(
         tracking_risk = max((zone_high - tracking_entry_price) + sl_buffer, 0.01)
         exec_risk = tracking_risk * scale
         sl_price = exec_entry_price + exec_risk
-        target_price = max(0.0, exec_entry_price - target_r * exec_risk)
+        tracking_target_dist = max(tracking_entry_price - zone.sl_level, 0.0)
+        target_price = max(0.0, exec_entry_price - tracking_target_dist * scale)
     else:
         tracking_risk = max((tracking_entry_price - zone_low) + sl_buffer, 0.01)
         exec_risk = tracking_risk * scale
         sl_price = max(0.0, exec_entry_price - exec_risk)
-        target_price = exec_entry_price + target_r * exec_risk
+        tracking_target_dist = max(zone.sl_level - tracking_entry_price, 0.0)
+        target_price = exec_entry_price + tracking_target_dist * scale
     return sl_price, target_price

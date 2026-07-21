@@ -922,6 +922,8 @@ class V4CascadeBook(AbstractStrategyBook):
             f"sweep_low={a.get('demand_block_sweep_low')}",
             f"  Gate 3 (limit pierce): limit_entry_price={a.get('limit_entry_price')} "
             f"pierce_price={a.get('pierce_price')} @ {a.get('pierce_bar_ts')}",
+            f"  Trade risk (tracking-contract scale, NOT the same as Gate 2's sl_level above): "
+            f"SL={a.get('computed_sl_price')} target={a.get('computed_target_price')}",
         ]
         if "htf_zone_ref_ts" in a:
             lines.append(f"  Gate 1 outer HTF zone (crypto legacy path): ref={a.get('htf_zone_ref_ts')} "

@@ -230,7 +230,7 @@ class V4CascadeEngine:
         # decision time, not the real fill" contract.
         sl_price, target_price = compute_risk_mapping(
             zone, tracking_entry_price=entry_price, exec_entry_price=entry_price,
-            target_r=self._cfg.t1_target_r, sl_buffer=self._cfg.sl_buffer, is_short=is_short,
+            sl_buffer=self._cfg.sl_buffer, is_short=is_short,
         )
         qty = self._cfg.tranche_qty
         # Why this trade fired: a bear trap (sellers trapped, reclaim up) is
@@ -258,7 +258,7 @@ class V4CascadeEngine:
         # never surfaced before crypto's PE-short path existed).
         self._trackers[side] = TrailingBaseTracker(bear=scanner._bear)
 
-        audit = self._build_entry_audit(scanner, setup, zone, bar)
+        audit = self._build_entry_audit(scanner, setup, zone, bar, sl_price, target_price)
         scanner.pop_setup(setup, bar.timestamp)
         event_type = CascadeEventType.OPEN_LONG_CE if side == "CE" else CascadeEventType.OPEN_LONG_PE
         return CascadeEvent(
@@ -266,13 +266,25 @@ class V4CascadeEngine:
             sl_price=sl_price, target_price=target_price, timestamp=bar.timestamp, audit=audit,
         )
 
-    def _build_entry_audit(self, scanner: _Scanner, setup, zone, bar) -> dict:
+    def _build_entry_audit(self, scanner: _Scanner, setup, zone, bar,
+                            sl_price: float, target_price: float) -> dict:
         """Full gate-by-gate rationale for why this trade fired -- Gate 1
         (Index) state + which confirmation anchored the scan window, Gate 2
         (Demand Block) zone geometry + which timeframe it locked on, Gate 3's
         computed limit price and the actual pierce price/time. book.py logs
         this verbatim so a full day's trades can be audited after the fact
-        without guessing whether every gate genuinely fired."""
+        without guessing whether every gate genuinely fired.
+
+        ``demand_block_sl_level`` is the zone's OWN structural attribute
+        (ref.high for a bear zone) -- NOT the trade's real stop-loss, and
+        naturally sits on the opposite side of ``demand_block_entry_line``
+        from where the trade's SL actually is (a repeated source of user
+        confusion). ``computed_sl_price``/``computed_target_price`` (tracking-
+        contract scale, same as every other field here) are the ACTUAL levels
+        this trade manages risk against -- SL = zone_low - buffer, target =
+        zone.sl_level itself (the trap-confirmation candle's opposite
+        extreme) -- included explicitly so the two are never conflated
+        again."""
         is_short = not scanner._bear
         pierce_price = bar.high if is_short else bar.low
         anchor_ts = getattr(scanner, "_scan_window_start_ts", None)
@@ -290,6 +302,8 @@ class V4CascadeEngine:
             "limit_entry_price": setup.limit_entry_price,
             "pierce_price": pierce_price,
             "pierce_bar_ts": bar.timestamp.isoformat() if bar.timestamp else None,
+            "computed_sl_price": sl_price,
+            "computed_target_price": target_price,
         }
         # Legacy (crypto) scanner also has an outer HTF (75m) zone distinct
         # from the Inner/MTF zone captured above -- surface it too.
