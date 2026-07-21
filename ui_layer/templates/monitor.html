@@ -7241,6 +7241,15 @@ function amoTest() {
                         <span class="text-right">P&amp;L</span><span class="text-right">MTM</span>
                       </div>
                       <template x-for="(leg,li) in blendLegs(csPositions[b.binding_id][dep.deploy_id].legs||[])" :key="li">
+                        <!-- 2026-07-21 fix: Alpine's x-for requires the <template> to have
+                             EXACTLY ONE root element -- the leg row and the tracking sub-line
+                             used to be two sibling <div>s directly inside this <template>,
+                             so Alpine only ever rendered the first one and silently dropped
+                             the second, no matter how correct its data was (confirmed live:
+                             sl_price/target_price were present in the raw API response the
+                             whole time, but the line never appeared in the browser). Wrapping
+                             both in one parent <div> fixes it. -->
+                        <div>
                         <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
                           <span style="color:var(--t-text)" x-text="leg.instrument||leg.symbol"></span>
                           <span class="text-center px-1 rounded" style="color:var(--t-muted);border:1px solid var(--t-border)"
@@ -7272,6 +7281,7 @@ function amoTest() {
                           <span x-show="leg.target_price"> · Target <span style="color:var(--t-green)" x-text="leg.target_price"></span></span>
                           <span x-show="leg.trail_stop_price"> · Trail <span style="color:var(--t-cyan)" x-text="leg.trail_stop_price"></span></span>
                           <span x-show="leg.entry_reason"> · <span x-text="leg.entry_reason"></span></span>
+                        </div>
                         </div>
                       </template>
                       <!-- Totals row -->
