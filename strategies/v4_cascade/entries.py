@@ -104,8 +104,20 @@ def compute_risk_mapping(
     contract by the same tracking-to-execution distance scale as the SL.
     Replaces the previous fixed target_r-multiple-of-risk formula per user
     direction: the target should be anchored to the zone's real structure,
-    not an arbitrary R-multiple. For crypto (tracking == execution price),
-    this reduces to the literal zone_low-buffer SL / literal sl_level target.
+    not an arbitrary R-multiple.
+
+    Target distance is floored at ``tracking_risk`` (the same distance used
+    for SL) -- confirmed live: a flat/zero-range reference candle can put
+    ``sl_level`` almost right on top of ``entry_line``, collapsing the raw
+    target distance to nearly nothing (a real CRUDEOIL trade risked ~25
+    tracking points to make ~2.4) while SL still measured out to the full
+    sweep distance. Flooring at 1R guarantees the trade is never worse than
+    1:1 reward:risk, and only ever changes the degenerate flat-candle case --
+    a normal zone (sl_level genuinely far from entry) is unaffected since its
+    natural distance already exceeds 1R.
+
+    For crypto (tracking == execution price), this reduces to the literal
+    zone_low-buffer SL / literal max(sl_level distance, risk) target.
     Returns (sl_price, target_price) for the execution contract."""
     if zone.entry_line is None or zone.sweep_low is None or zone.sl_level is None:
         # Defensive fallback — should not happen for a locked zone.
@@ -121,12 +133,12 @@ def compute_risk_mapping(
         tracking_risk = max((zone_high - tracking_entry_price) + sl_buffer, 0.01)
         exec_risk = tracking_risk * scale
         sl_price = exec_entry_price + exec_risk
-        tracking_target_dist = max(tracking_entry_price - zone.sl_level, 0.0)
+        tracking_target_dist = max(tracking_entry_price - zone.sl_level, tracking_risk)
         target_price = max(0.0, exec_entry_price - tracking_target_dist * scale)
     else:
         tracking_risk = max((tracking_entry_price - zone_low) + sl_buffer, 0.01)
         exec_risk = tracking_risk * scale
         sl_price = max(0.0, exec_entry_price - exec_risk)
-        tracking_target_dist = max(zone.sl_level - tracking_entry_price, 0.0)
+        tracking_target_dist = max(zone.sl_level - tracking_entry_price, tracking_risk)
         target_price = exec_entry_price + tracking_target_dist * scale
     return sl_price, target_price

@@ -95,18 +95,21 @@ def test_t1_target_hit_moves_t2_trail_to_breakeven():
     )
     eng._tracking_entry_price["CE"] = entry_price
     eng._trackers["CE"] = TrailingBaseTracker(bear=True, initial_stop=sl_price)
+    breakeven_buffer = eng._cfg.sl_buffer   # default V4CascadeConfig -- 10.0 (NIFTY)
 
-    # Bar's high clears T1's target (120); low stays well above T2's seeded
-    # floor (80) so T2 itself doesn't also close this same bar.
-    events = eng._check_exits("CE", _bar(0, 115, 125, 110, 118))
+    # Bar's high clears T1's target (120); low stays above T2's new
+    # breakeven+buffer floor (entry_price + breakeven_buffer = 110) so T2
+    # itself doesn't also close this same bar.
+    events = eng._check_exits("CE", _bar(0, 115, 125, 112, 118))
 
     fired = [e for e in events if e.tranche == "T1"]
     assert len(fired) == 1
     assert fired[0].reason == "t1_target_2r"
     assert t1.status == "closed"
     assert t2.status == "open"  # T2 itself did not close
-    assert eng._trackers["CE"].current_stop == entry_price  # ratcheted to breakeven
-    assert t2.trail_stop_price == entry_price
+    expected_breakeven = entry_price + breakeven_buffer
+    assert eng._trackers["CE"].current_stop == expected_breakeven
+    assert t2.trail_stop_price == expected_breakeven
 
 
 def test_breakeven_uses_tracking_scale_not_post_fill_execution_price():
@@ -132,21 +135,25 @@ def test_breakeven_uses_tracking_scale_not_post_fill_execution_price():
     )
     eng._tracking_entry_price["PE"] = tracking_entry
     eng._trackers["PE"] = TrailingBaseTracker(bear=True, initial_stop=421.0)
+    breakeven_buffer = eng._cfg.sl_buffer   # default V4CascadeConfig -- 10.0
 
-    # Bar's high clears T1's target (722.3, tracking scale); low (720.0)
-    # stays above the NEW breakeven level (719.87) so T2 doesn't also close
-    # in this same bar -- all values on the TRACKING scale, same as every
-    # real bar _check_exits ever receives.
-    events = eng._check_exits("PE", _bar(0, 721, 725, 720.0, 723))
+    # Bar's high clears T1's target (722.3, tracking scale); low (730.0)
+    # stays above the NEW breakeven+buffer level (tracking_entry + 10 =
+    # 729.87) so T2 doesn't also close in this same bar -- all values on the
+    # TRACKING scale, same as every real bar _check_exits ever receives.
+    events = eng._check_exits("PE", _bar(0, 731, 735, 730.0, 733))
 
     fired = [e for e in events if e.tranche == "T1"]
     assert len(fired) == 1 and fired[0].reason == "t1_target_2r"
-    # current_stop must land on the TRACKING scale (719.87), not the
-    # execution-scale entry price (545.0) -- the bug's exact symptom.
-    assert eng._trackers["PE"].current_stop == tracking_entry
-    # Mapped to execution scale, breakeven must equal T2's own real entry
-    # (545.0) -- not some other, nonsensical value.
-    assert abs(t2.trail_stop_price - exec_entry) < 1e-6
+    # current_stop must land on the TRACKING scale (719.87 + buffer), not
+    # the execution-scale entry price (545.0) -- the bug's exact symptom.
+    expected_tracking_breakeven = tracking_entry + breakeven_buffer
+    assert eng._trackers["PE"].current_stop == expected_tracking_breakeven
+    # Mapped to execution scale using T2's real entry (545.0) -- not some
+    # other, nonsensical value.
+    scale = exec_entry / tracking_entry
+    expected_exec_breakeven = expected_tracking_breakeven * scale
+    assert abs(t2.trail_stop_price - expected_exec_breakeven) < 1e-6
 
 
 def test_t1_sl_hit_does_not_move_t2_to_breakeven():

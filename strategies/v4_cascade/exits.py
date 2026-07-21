@@ -103,17 +103,23 @@ class TrailingBaseTracker:
             return ExitCheck(hit=True, price=self.current_stop, reason="t2_trailing_base_stop")
         return ExitCheck(hit=False)
 
-    def move_to_breakeven(self, entry_price: float) -> None:
-        """Ratchet the stop up to entry (long) / down to entry (short) once
-        T1's target has been hit -- called from engine.py._check_exits.
-        Never regresses an already more-favorable trail: if a locked base has
-        already moved the stop past entry, this is a no-op."""
+    def move_to_breakeven(self, entry_price: float, buffer: float = 0.0) -> None:
+        """Ratchet the stop up to entry+buffer (long) / down to entry-buffer
+        (short) once T1's target has been hit -- called from
+        engine.py._check_exits. ``buffer`` (2026-07-21, tracking-contract
+        points, same units as sl_buffer): a small cushion PAST raw cost, not
+        exact breakeven, so the ratchet actually protects a sliver of real
+        profit and absorbs slippage/costs instead of scratching the trade at
+        exactly zero. Never regresses an already more-favorable trail: if a
+        locked base has already moved the stop past entry+buffer, this is a
+        no-op."""
+        level = entry_price + buffer if self._bear else entry_price - buffer
         if self._bear:
-            if self.current_stop is None or entry_price > self.current_stop:
-                self.current_stop = entry_price
+            if self.current_stop is None or level > self.current_stop:
+                self.current_stop = level
         else:
-            if self.current_stop is None or entry_price < self.current_stop:
-                self.current_stop = entry_price
+            if self.current_stop is None or level < self.current_stop:
+                self.current_stop = level
 
     def reset(self) -> None:
         self._scanner.reset()

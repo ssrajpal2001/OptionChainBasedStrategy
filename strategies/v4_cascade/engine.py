@@ -381,7 +381,12 @@ class V4CascadeEngine:
                     # the wrong scale (confirmed live: displayed as a
                     # nonsensical trail_stop_price until a later, correctly-
                     # scaled base lock happened to overwrite it).
-                    trail.move_to_breakeven(tracking_entry)
+                    # buffer=self._cfg.sl_buffer (2026-07-21): a small
+                    # cushion past raw cost, same tracking-point units already
+                    # tuned per-underlying for SL -- protects a sliver of
+                    # real profit and absorbs slippage instead of scratching
+                    # T2 at exactly zero.
+                    trail.move_to_breakeven(tracking_entry, buffer=self._cfg.sl_buffer)
                     if trail.current_stop is not None:
                         t2.trail_stop_price = map_trailing_stop_to_execution(
                             trail.current_stop, tracking_entry, t2.entry_price,
