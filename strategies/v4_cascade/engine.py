@@ -69,6 +69,7 @@ class V4CascadeEngine:
     def __init__(
         self, cfg: Optional[V4CascadeConfig] = None, pe_scans_bull: bool = False,
         session_open: Tuple[int, int] = (9, 15),
+        entry_cutoff_hour_min: Optional[Tuple[int, int]] = None,
     ) -> None:
         """``pe_scans_bull``: 2026-07-19, crypto-spot-only path ONLY (see
         strategies/v4_cascade/book.py's _is_crypto branch) — when True, the
@@ -78,8 +79,18 @@ class V4CascadeEngine:
         the exact validated NIFTY behavior (both CE and PE bear-trap-only).
         ``session_open``: forwarded to both scanners' Gate-2 15m fallback
         resample — NIFTY/NSE default (9,15), MCX underlyings (CRUDEOIL) pass
-        (9,0)."""
+        (9,0). ``entry_cutoff_hour_min``: 2026-07-21 fix -- (hour, minute)
+        past which NO new entry may fire (book.py passes its own squareoff
+        time). Confirmed live bug without this: sell_straddle has a distinct
+        EntryEnd separate from SquareOff, but V4 Cascade had no equivalent at
+        all -- Gate 3 kept firing brand-new positions after square-off,
+        each immediately force-closed again on the very next bar, in a
+        repeating loop that only stopped when a human manually stopped the
+        deployment (observed on 0DTE NIFTY expiry: 3 spurious re-entries
+        between 15:25 and 15:44, well past the 15:20 configured square-off,
+        because near-zero decayed premium noise kept re-triggering Gate 3)."""
         self._cfg = cfg or V4CascadeConfig()
+        self._entry_cutoff_hour_min = entry_cutoff_hour_min
         self._spot_confirm = SpotConfirmTracker()
         # pe_scans_bull is already exactly the crypto indicator (see
         # book.py's _is_crypto branch) -- reused here as the router between
@@ -158,18 +169,18 @@ class V4CascadeEngine:
                 return events
             scanner.on_5m_bar(bar)
             trigger = check_limit_pierce(scanner, bar)
-            if trigger.fired and self._may_fire(scanner):
+            if trigger.fired and self._may_fire(scanner, bar):
                 events += self._close_for_structural_flip(bar.timestamp)
                 events.append(self._open_position(side, scanner, trigger.setup, bar))
             return events
 
         scanner.on_5m_bar(bar)
         trigger = check_limit_pierce(scanner, bar)
-        if trigger.fired and self._may_fire(scanner):
+        if trigger.fired and self._may_fire(scanner, bar):
             events.append(self._open_position(side, scanner, trigger.setup, bar))
         return events
 
-    def _may_fire(self, scanner: _Scanner) -> bool:
+    def _may_fire(self, scanner: _Scanner, bar) -> bool:
         """2026-07-21: discovery is unconditional on BOTH scanner types now
         (crypto's legacy PremiumGateScanner always was; IndexGatedPremiumScanner
         reverted to match, per explicit user direction — PE must be allowed to
@@ -178,7 +189,16 @@ class V4CascadeEngine:
         the Index bias itself crosses through PE's zone). `armed` is checked
         ONLY here, at trigger time, uniformly for both: a pierce on an
         unarmed side is left alone (not popped, not opened) so it can still
-        fire later once that side becomes armed."""
+        fire later once that side becomes armed. Also gates on
+        entry_cutoff_hour_min (2026-07-21) -- a pierce at/after the cutoff
+        is likewise left alone, never opened; there is no reason to ever
+        fire again that day once past square-off, so unlike the armed-gate
+        this is effectively terminal for the session, but leaving the setup
+        un-popped (rather than special-casing a hard stop) reuses the exact
+        same safe, already-tested pending-setup mechanics."""
+        if (self._entry_cutoff_hour_min is not None
+                and (bar.timestamp.hour, bar.timestamp.minute) >= self._entry_cutoff_hour_min):
+            return False
         return scanner.armed
 
     def _close_for_structural_flip(self, ts) -> List[CascadeEvent]:

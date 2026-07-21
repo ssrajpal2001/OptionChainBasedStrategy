@@ -173,7 +173,8 @@ class V4CascadeBook(AbstractStrategyBook):
                                        tracking_offset_pts=self._tracking_offset,
                                        execution_offset_pts=self._execution_offset)
         self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto,
-                                        session_open=self._session_open)
+                                        session_open=self._session_open,
+                                        entry_cutoff_hour_min=self._eod_hour_min)
 
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_v4_cascade"
         self._expiry: Optional[date] = None
