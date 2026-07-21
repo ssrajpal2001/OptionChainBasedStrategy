@@ -329,6 +329,36 @@ class V4CascadeBook(AbstractStrategyBook):
         finally:
             self._bus.unsubscribe(Topic.INDEX_TICK, q)
 
+    async def _wait_for_session_open_then_fetch(self, token: str, today: date) -> Optional[float]:
+        """If ``_fetch_session_open`` found nothing because we're booting
+        BEFORE the real session-open time (e.g. started at 09:01 for NIFTY's
+        09:15 open), wait until session_open has actually passed and retry
+        the REAL fetch — never fall straight through to ``_await_first_tick``'s
+        live-tick proxy just because we're early; that tick can be a
+        pre-market/pre-open price, not the genuine session open. Confirmed
+        bug (2026-07-21): a book started at 09:01 for NIFTY resolved its
+        whole day's tracking strikes off a 09:01 live tick instead of the
+        real 09:15 candle. Returns None immediately (no wait) if we're
+        already past session_open — that's a genuine data-source failure,
+        not an early-boot timing issue, and the caller's existing
+        _await_first_tick fallback is the correct last resort for it."""
+        now = datetime.now(IST)
+        session_open_dt = now.replace(
+            hour=self._session_open[0], minute=self._session_open[1], second=0, microsecond=0,
+        )
+        if now >= session_open_dt:
+            return None
+        wait_s = (session_open_dt - now).total_seconds() + 10.0  # buffer for the candle to actually land
+        logger.info("V4CascadeBook[%s]: booted before %02d:%02d session open — waiting ~%.0fs "
+                    "for the real session-open candle instead of using a premature tick.",
+                    self._underlying, self._session_open[0], self._session_open[1], wait_s)
+        deadline = asyncio.get_event_loop().time() + wait_s
+        while self._running and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(min(5.0, max(0.0, deadline - asyncio.get_event_loop().time())))
+        if not self._running:
+            return None
+        return await self._fetch_session_open(token, today)
+
     async def _fetch_session_open(self, token: str, day: date) -> Optional[float]:
         """PRIMARY method — today's real session-open candle open via
         Upstox's INTRADAY endpoint (fetch_upstox_intraday_1m). Uses
@@ -372,6 +402,8 @@ class V4CascadeBook(AbstractStrategyBook):
         # booting in the first few seconds of the session before Upstox has
         # even produced the 09:15 bar).
         atm_open = await self._fetch_session_open(token, today)
+        if atm_open is None:
+            atm_open = await self._wait_for_session_open_then_fetch(token, today)
         if atm_open is None:
             logger.warning("V4CascadeBook[%s]: no %02d:%02d session-open data yet — "
                            "falling back to first live tick.", self._underlying,
