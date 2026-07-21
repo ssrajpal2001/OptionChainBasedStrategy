@@ -15,6 +15,7 @@ DEFAULT_LOT_MULTIPLIER: int = 2
 
 TRACKING_OFFSET_PTS: float = 200.0   # CE tracking = ATM-200, PE tracking = ATM+200
 EXECUTION_OFFSET_PTS: float = 50.0   # CE execution = ATM+50, PE execution = ATM-50
+TRACKING_RECENTER_PTS: float = 100.0   # NIFTY: re-center tracking strikes after this much ATM drift
 
 T2_TRAIL_LOOKBACK_BASES: int = 4     # Tranche 2: last 4 locked 5m Rolling Bases
 T2_TRAIL_TF_MINUTES: int = 5
@@ -51,6 +52,7 @@ class V4CascadeConfig:
 
     tracking_offset_pts: float = TRACKING_OFFSET_PTS
     execution_offset_pts: float = EXECUTION_OFFSET_PTS
+    tracking_recenter_pts: float = TRACKING_RECENTER_PTS
 
     t2_trail_lookback_bases: int = T2_TRAIL_LOOKBACK_BASES
     t2_trail_tf_minutes: int = T2_TRAIL_TF_MINUTES

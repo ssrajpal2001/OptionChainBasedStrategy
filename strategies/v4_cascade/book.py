@@ -138,6 +138,7 @@ class V4CascadeBook(AbstractStrategyBook):
         # after entry on nearly every trade.)
         from strategies.v4_cascade.config import (
             SL_BUFFER_PER_COIN_CRYPTO, SL_BUFFER_PTS_NIFTY, TRACKING_OFFSET_PTS, EXECUTION_OFFSET_PTS,
+            TRACKING_RECENTER_PTS,
         )
         if self._is_crypto:
             _coin_qty = lot_multiplier * _CRYPTO_CONTRACT_VALUE.get(underlying.upper(), 1.0)
@@ -165,14 +166,17 @@ class V4CascadeBook(AbstractStrategyBook):
             # manager's _DEFAULT_SQUAREOFF_TIME dict.
             self._tracking_offset = 400.0
             self._execution_offset = 100.0
+            _recenter_pts = 200.0
         else:
             self._tracking_offset = TRACKING_OFFSET_PTS
             self._execution_offset = EXECUTION_OFFSET_PTS
+            _recenter_pts = TRACKING_RECENTER_PTS
 
         self._v4cfg = V4CascadeConfig(underlying=underlying, lot_multiplier=lot_multiplier,
                                        lot_size=_real_lot_size, sl_buffer=_sl_buffer,
                                        tracking_offset_pts=self._tracking_offset,
-                                       execution_offset_pts=self._execution_offset)
+                                       execution_offset_pts=self._execution_offset,
+                                       tracking_recenter_pts=_recenter_pts)
         self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto,
                                         session_open=self._session_open,
                                         entry_cutoff_hour_min=self._eod_hour_min)
@@ -182,6 +186,12 @@ class V4CascadeBook(AbstractStrategyBook):
         self._atm_open: Optional[float] = None
         self._ce_strike: Optional[int] = None
         self._pe_strike: Optional[int] = None
+        # 2026-07-21: ATM the CURRENT self._ce_strike/self._pe_strike were
+        # last derived from -- set alongside them (session-open in
+        # _resolve_symbols, and again on every _maybe_recenter_tracking_strikes
+        # re-center) so drift can be measured against "where the tracking
+        # strikes actually are" rather than the frozen 09:15 _atm_open.
+        self._tracking_reference_atm: Optional[float] = None
         self._ce_symbol: str = ""
         self._pe_symbol: str = ""
         self._locked_ce_strike: Optional[int] = None   # admin manual override
@@ -439,6 +449,7 @@ class V4CascadeBook(AbstractStrategyBook):
         atm = round(atm_open / _TRACKING_STRIKE_STEP) * _TRACKING_STRIKE_STEP
         self._ce_strike = self._locked_ce_strike or int(atm - self._tracking_offset)
         self._pe_strike = self._locked_pe_strike or int(atm + self._tracking_offset)
+        self._tracking_reference_atm = atm_open
 
         await asyncio.to_thread(REGISTRY.load_sync, self._underlying, token)
         self._expiry = self._resolve_expiry()
@@ -809,6 +820,9 @@ class V4CascadeBook(AbstractStrategyBook):
 
     def _close_5m_bucket(self, side: str, bar) -> None:
         self._check_daily_boundary(bar.timestamp)
+        _current_atm = self._live_spot or self._atm_open or 0.0
+        if _current_atm > 0:
+            self._maybe_recenter_tracking_strikes(_current_atm)
         self._bars_5m[side].append(bar)
         _pos_before = self._engine.position
         if side == "CE":
@@ -934,6 +948,44 @@ class V4CascadeBook(AbstractStrategyBook):
         else:
             for side in ("CE", "PE"):
                 self._engine._scanners[side].setups.clear()
+
+    def _maybe_recenter_tracking_strikes(self, current_atm: float) -> None:
+        """2026-07-21: re-center the tracking/scanner strikes when the
+        underlying has drifted tracking_recenter_pts away from the ATM the
+        CURRENT strikes were derived from -- but ONLY while flat. An open
+        position's SL/target/zone are computed on a SPECIFIC contract's own
+        price structure; there is no valid way to carry that state across a
+        strike change (two different instruments, unrelated price scales),
+        so re-centering never happens mid-trade -- gated at this single
+        check site, not scattered across callers.
+
+        Bare ``scanner.reset()`` here is intentional for this task -- no
+        historical re-warm yet (that's the next task's job); a re-centered
+        book simply starts scanning cold from the new strikes."""
+        pos = self._engine.position
+        if pos is not None and pos.is_open:
+            return
+        if self._tracking_reference_atm is None:
+            return
+        if abs(current_atm - self._tracking_reference_atm) < self._v4cfg.tracking_recenter_pts:
+            return
+        old_ce, old_pe = self._ce_strike, self._pe_strike
+        # Same rounding convention as the session-open derivation in
+        # _resolve_symbols (round to the DELIBERATELY flat
+        # _TRACKING_STRIKE_STEP grid, not self._strike_step -- see that
+        # constant's module-level docstring), and the same
+        # locked-strike-override precedence.
+        atm = round(current_atm / _TRACKING_STRIKE_STEP) * _TRACKING_STRIKE_STEP
+        self._ce_strike = self._locked_ce_strike or int(atm - self._tracking_offset)
+        self._pe_strike = self._locked_pe_strike or int(atm + self._tracking_offset)
+        self._tracking_reference_atm = current_atm
+        for side in ("CE", "PE"):
+            self._engine._scanners[side].reset()
+        logger.info("V4CascadeBook[%s/%s/%s]: re-centered tracking strikes CE %s->%s PE %s->%s "
+                   "(atm=%.2f).", self._underlying, self._client_id, self._binding_id,
+                   old_ce, self._ce_strike, old_pe, self._pe_strike, current_atm)
+        self._clog.info("re-centered tracking strikes CE %s->%s PE %s->%s (atm=%.2f).",
+                        old_ce, self._ce_strike, old_pe, self._pe_strike, current_atm)
 
     # ── order emission ───────────────────────────────────────────────────────
     def _resolve_execution_strike(self, side: str) -> float:
