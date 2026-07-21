@@ -165,7 +165,8 @@ class V4CascadeEngine:
         # at this instant, open it immediately in the same cycle.
         if self.position is not None and self.position.is_open:
             if self.position.side == side:
-                events += self._check_exits(side, bar)
+                if self.position.risk_basis != "execution_native":
+                    events += self._check_exits(side, bar)
                 return events
             scanner.on_5m_bar(bar)
             trigger = check_limit_pierce(scanner, bar)
@@ -415,6 +416,58 @@ class V4CascadeEngine:
         if (t1 is None or t1.status == "closed") and (t2 is None or t2.status == "closed"):
             pos.status = "closed"
             pos.close_time = bar.timestamp
+            self._trackers.pop(side, None)
+            self._tracking_entry_price.pop(side, None)
+        return events
+
+    def check_exits_execution_native(self, side: str, exec_bar) -> List[CascadeEvent]:
+        """2026-07-21: T1/T2 exit-checks for a risk_basis=="execution_native"
+        position, fed EXECUTION-contract bars directly by book.py's parallel
+        execution-bar clock (see book.py's execution-contract 5m bar-builder,
+        Task 7). No scale mapping anywhere here -- t1.sl_price/target_price,
+        t2's tracker current_stop, and exec_bar are all already on the SAME
+        (execution) scale, unlike _check_exits which bridges tracking-scale
+        levels onto execution-scale bars via map_trailing_stop_to_execution.
+        Public (unlike _check_exits) because book.py's bar-builder, not
+        engine.py's own update(), is what drives this clock."""
+        events: List[CascadeEvent] = []
+        pos = self.position
+        if pos is None:
+            return events
+        t1, t2 = pos.t1, pos.t2
+        is_short = not self._scanners[side]._bear
+        trail = self._trackers.get(side)
+
+        if t1 is not None and t1.status == "open":
+            r = check_t1(t1, exec_bar, is_short=is_short)
+            if r.hit:
+                t1.status = "closed"
+                t1.close_price = r.price
+                t1.close_reason = r.reason
+                t1.close_time = exec_bar.timestamp
+                events.append(self._close_event(side, "T1", r.reason, r.price, exec_bar.timestamp))
+                if r.reason == "t1_target_2r" and t2 is not None and t2.status == "open" and trail is not None:
+                    trail.move_to_breakeven(t1.entry_price, buffer=self._cfg.sl_buffer)
+                    if trail.current_stop is not None:
+                        t2.trail_stop_price = trail.current_stop   # already execution-scale, no mapping
+                        t2.tracking_current_stop = trail.current_stop
+
+        if t2 is not None and t2.status == "open" and trail is not None:
+            moved = trail.on_5m_bar(exec_bar)
+            if moved and trail.current_stop is not None:
+                t2.trail_stop_price = trail.current_stop
+                t2.tracking_current_stop = trail.current_stop
+            r = trail.check_hit(exec_bar)
+            if r.hit:
+                t2.status = "closed"
+                t2.close_price = r.price
+                t2.close_reason = r.reason
+                t2.close_time = exec_bar.timestamp
+                events.append(self._close_event(side, "T2", r.reason, r.price, exec_bar.timestamp))
+
+        if (t1 is None or t1.status == "closed") and (t2 is None or t2.status == "closed"):
+            pos.status = "closed"
+            pos.close_time = exec_bar.timestamp
             self._trackers.pop(side, None)
             self._tracking_entry_price.pop(side, None)
         return events
