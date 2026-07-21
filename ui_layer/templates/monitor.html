@@ -785,6 +785,44 @@ document.addEventListener('alpine:init', () => {
         ? { 'Authorization': 'Bearer ' + this.authToken, 'Content-Type': 'application/json' }
         : { 'Content-Type': 'application/json' };
     },
+    // V4 Cascade T1/T2 are the SAME contract/entry, tracked independently
+    // only because they exit at different times/prices (T1 fixed target,
+    // T2 trailing). Per user request: display them as ONE blended row
+    // while BOTH are still open (summed qty/P&L); the moment either closes,
+    // `legs` naturally shrinks to 1 entry and this returns it unblended --
+    // no special-casing needed for the "split back to 2" behavior.
+    blendLegs(legs) {
+      if (!legs || legs.length < 2) return legs || [];
+      const groups = {}, order = [];
+      for (const leg of legs) {
+        const key = (leg.instrument || leg.symbol || '').replace(/ T[12]$/, '');
+        if (!groups[key]) { groups[key] = []; order.push(key); }
+        groups[key].push(leg);
+      }
+      const out = [];
+      for (const key of order) {
+        const g = groups[key];
+        if (g.length === 2) {
+          const t1 = g.find(l => l.type === 'T1') || g[0];
+          const t2 = g.find(l => l.type === 'T2') || g[1];
+          out.push({
+            ...t1,
+            instrument: key, symbol: key, type: 'T1+T2',
+            qty: (t1.qty || 0) + (t2.qty || 0),
+            pnl: (t1.pnl || 0) + (t2.pnl || 0),
+            mtm: (t1.mtm !== undefined ? t1.mtm : t1.pnl || 0) + (t2.mtm !== undefined ? t2.mtm : t2.pnl || 0),
+            // sl_price/tracking_* are identical between T1/T2 (same zone,
+            // computed once at open) -- target_price only exists on T1,
+            // trail_stop_price only ever populates on T2 once it starts trailing.
+            target_price: t1.target_price,
+            trail_stop_price: t2.trail_stop_price,
+          });
+        } else {
+          out.push(...g);
+        }
+      }
+      return out;
+    },
     async forceIngestV4Cascade() {
       if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
       try {
@@ -7184,7 +7222,7 @@ function amoTest() {
                         <span class="text-right">SELL</span><span class="text-right">BUY</span><span class="text-right">LTP</span>
                         <span class="text-right">P&amp;L</span><span class="text-right">MTM</span>
                       </div>
-                      <template x-for="(leg,li) in csPositions[b.binding_id][dep.deploy_id].legs||[]" :key="li">
+                      <template x-for="(leg,li) in blendLegs(csPositions[b.binding_id][dep.deploy_id].legs||[])" :key="li">
                         <div class="grid items-center py-1 border-t text-xs font-mono" style="border-color:var(--t-border);grid-template-columns:1.6fr 0.6fr 0.7fr 0.8fr 0.8fr 0.8fr 0.9fr 0.9fr;gap:0.25rem">
                           <span style="color:var(--t-text)" x-text="leg.instrument||leg.symbol"></span>
                           <span class="text-center px-1 rounded" style="color:var(--t-muted);border:1px solid var(--t-border)"
