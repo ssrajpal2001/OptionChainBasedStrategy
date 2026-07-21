@@ -187,6 +187,17 @@ class V4CascadeBook(AbstractStrategyBook):
         self._session_day: Optional[date] = None
         self._history_ingested = False
         self._live_price: Dict[str, float] = {"CE": 0.0, "PE": 0.0}   # per-side last price — "distance to trap" in the UI
+        # 2026-07-21 fix: the TRACKING contract's price (_live_price above) is
+        # NOT the real traded instrument -- execution trades one strike OTM
+        # from live spot, a DIFFERENT contract than the one being scanned for
+        # traps. Paper fills and ongoing LTP/P&L were silently using the
+        # tracking contract's price the whole time a position was open
+        # (confirmed live bug: a NIFTY 24300 CE position's fill/LTP were both
+        # actually the 24100 CE tracking contract's numbers). These track the
+        # EXECUTION contract's own live price, separately, once resolved at
+        # trigger time -- reset to empty/0 at the start of every new entry.
+        self._exec_symbol: Dict[str, str] = {"CE": "", "PE": ""}
+        self._exec_live_price: Dict[str, float] = {"CE": 0.0, "PE": 0.0}
         # Live NIFTY spot (NOT the 09:15 ATM lock) — needed to resolve the
         # real ATM+-50 EXECUTION strike at Gate-3 trigger time, per the
         # original design ("execution contracts resolved from live spot at
@@ -711,14 +722,23 @@ class V4CascadeBook(AbstractStrategyBook):
                 tick = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            if tick.ltp <= 0:
+                continue
+            symbol = getattr(tick, "symbol", "")
+            # EXECUTION-contract live price -- tracked separately from the
+            # tracking-contract bars/bucket-building below, and never fed
+            # into the scanning engine (that stays tracking-contract-only).
+            for exec_side in ("CE", "PE"):
+                if self._exec_symbol[exec_side] and symbol == self._exec_symbol[exec_side]:
+                    self._exec_live_price[exec_side] = float(tick.ltp)
             side = None
-            if getattr(tick, "symbol", "") == self._ce_symbol or (
+            if symbol == self._ce_symbol or (
                     tick.underlying == self._underlying and int(tick.strike) == self._ce_strike and tick.option_type == "CE"):
                 side = "CE"
-            elif getattr(tick, "symbol", "") == self._pe_symbol or (
+            elif symbol == self._pe_symbol or (
                     tick.underlying == self._underlying and int(tick.strike) == self._pe_strike and tick.option_type == "PE"):
                 side = "PE"
-            if side is None or tick.ltp <= 0:
+            if side is None:
                 continue
             self._on_option_tick(side, float(tick.ltp), tick.timestamp)
 
@@ -860,6 +880,55 @@ class V4CascadeBook(AbstractStrategyBook):
         offset_sum = self._tracking_offset + self._execution_offset
         return float(tracking_strike + offset_sum) if side == "CE" else float(tracking_strike - offset_sum)
 
+    async def _open_entry_async(self, ev, exec_strike: float, qty: int, event_id: str, ts: datetime) -> None:
+        """2026-07-21 fix: resolves + subscribes to the EXECUTION contract
+        (one strike OTM from live spot — a DIFFERENT instrument than the
+        tracking contract being scanned for traps) and waits briefly for its
+        own real tick before publishing the order, so the fill/price_hint
+        reflects the ACTUAL traded contract's premium — not ev.price_hint,
+        which is only ever the tracking contract's price at decision time
+        (confirmed live bug: a NIFTY 24300 CE entry/LTP were both actually
+        the 24100 CE tracking contract's numbers the whole trade). Falls
+        back to ev.price_hint, clearly logged, if no real tick lands within
+        the wait window (e.g. a thin/illiquid strike) — never blocks the
+        order indefinitely."""
+        from execution_bridge.cascade_bridge import CascadeOrderEvent
+        self._exec_symbol[ev.side] = ""
+        self._exec_live_price[ev.side] = 0.0
+        if not self._is_crypto and exec_strike and self._expiry:
+            symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, int(exec_strike), ev.side)
+            self._exec_symbol[ev.side] = symbol
+            feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+            if symbol and feeder:
+                try:
+                    await feeder.subscribe_tokens([symbol])
+                except Exception:
+                    logger.exception("V4CascadeBook[%s/%s/%s]: execution-contract subscribe "
+                                     "failed for %s.", self._underlying, self._client_id,
+                                     self._binding_id, symbol)
+                # _option_loop (already running) populates self._exec_live_price
+                # once the subscribed contract's own tick arrives.
+                deadline = asyncio.get_event_loop().time() + 3.0
+                while (self._running and self._exec_live_price[ev.side] <= 0
+                       and asyncio.get_event_loop().time() < deadline):
+                    await asyncio.sleep(0.2)
+        real_price = self._exec_live_price[ev.side]
+        price_hint = real_price if real_price > 0 else ev.price_hint
+        if real_price <= 0:
+            logger.warning("V4CascadeBook[%s/%s/%s]: no execution-contract tick within 3s for "
+                           "%s — falling back to tracking-contract price_hint=%.4f.",
+                           self._underlying, self._client_id, self._binding_id, ev.side, ev.price_hint)
+            self._clog.warning("no execution-contract tick within 3s for %s — falling back to "
+                               "tracking-contract price_hint=%.4f.", ev.side, ev.price_hint)
+        await self._bus.publish(Topic.CASCADE_ORDER_REQUEST, CascadeOrderEvent(
+            action="ENTRY", underlying=self._underlying, side=ev.side,
+            strike=exec_strike, qty=qty, price_hint=price_hint, tranche="BOTH",
+            sl_price=ev.sl_price or 0.0, target_price=ev.target_price,
+            is_crypto=self._is_crypto, expiry=self._expiry,
+            client_id=self._client_id, binding_id=self._binding_id,
+            event_id=event_id, timestamp=ts,
+        ))
+
     def _emit_order(self, ev, pos_before=None) -> None:
         """Publishes a CascadeOrderEvent to the dedicated per-binding bridge
         (execution_bridge/cascade_bridge.py) for BOTH open and close events —
@@ -899,14 +968,7 @@ class V4CascadeBook(AbstractStrategyBook):
             qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
             event_id = f"{self._persist_key}_{ts.isoformat()}"
             self._pending_fills[event_id] = pos
-            self._fire(self._bus.publish(Topic.CASCADE_ORDER_REQUEST, CascadeOrderEvent(
-                action="ENTRY", underlying=self._underlying, side=ev.side,
-                strike=exec_strike, qty=qty, price_hint=ev.price_hint, tranche="BOTH",
-                sl_price=ev.sl_price or 0.0, target_price=ev.target_price,
-                is_crypto=self._is_crypto, expiry=self._expiry,
-                client_id=self._client_id, binding_id=self._binding_id,
-                event_id=event_id, timestamp=ts,
-            )))
+            self._fire(self._open_entry_async(ev, exec_strike, qty, event_id, ts))
         elif is_close_ev:
             # Normal close: self._engine.position IS the position being
             # closed. Structural-flip close: it's already been replaced by

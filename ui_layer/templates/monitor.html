@@ -7198,10 +7198,20 @@ function amoTest() {
                           <span class="text-right font-bold" :style="`color:${(leg.mtm!==undefined?leg.mtm:leg.pnl)>=0?'var(--t-green)':'var(--t-red)'}`"
                                 x-text="(((leg.mtm!==undefined?leg.mtm:leg.pnl))>=0?'+':'')+(leg.mtm!==undefined?leg.mtm:leg.pnl).toFixed(leg.ccy==='$'?2:0)"></span>
                         </div>
-                        <!-- V4 Cascade only: SL / Target / trail + entry reason. Straddle legs
-                             have none of these fields, so this stays hidden for them. -->
+                        <!-- V4 Cascade only: tracking-contract context. SL/Target/Trail below
+                             are TRACKING-contract-native (the exit logic watches the SCANNED
+                             contract's own price against these levels, by design) -- NOT the
+                             execution contract actually traded above (leg.ltp/entry_price).
+                             Labeled explicitly so the two never get confused for the same
+                             instrument's numbers. Straddle legs have none of these fields, so
+                             this stays hidden for them. -->
                         <div x-show="leg.sl_price||leg.target_price||leg.entry_reason"
                              class="text-xs font-mono pl-1 pb-1" style="color:var(--t-muted)">
+                          <span x-show="leg.tracking_strike||leg.tracking_ltp">
+                            Tracking <span style="color:var(--t-text)"
+                                x-text="(leg.tracking_label||'')+(leg.tracking_strike?' '+leg.tracking_strike:'')"></span>
+                            LTP <span style="color:var(--t-bright)" x-text="leg.tracking_ltp||'—'"></span> ·
+                          </span>
                           <span x-show="leg.sl_price">SL <span style="color:var(--t-red)" x-text="leg.sl_price"></span></span>
                           <span x-show="leg.target_price"> · Target <span style="color:var(--t-green)" x-text="leg.target_price"></span></span>
                           <span x-show="leg.trail_stop_price"> · Trail <span style="color:var(--t-cyan)" x-text="leg.trail_stop_price"></span></span>

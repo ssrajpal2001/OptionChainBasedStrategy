@@ -2271,10 +2271,20 @@ class DashboardServer:
             pos = book._engine.position
             if pos is not None and pos.is_open:
                 live_ltp = 0.0
+                _is_crypto_pos = und.upper() in ("BTC", "ETH")
                 try:
-                    bars = book._bars_5m.get(pos.side) or []
-                    if bars:
-                        live_ltp = float(bars[-1].close)
+                    # 2026-07-21 fix: the EXECUTION contract (one strike OTM
+                    # from live spot) is what's actually traded, a DIFFERENT
+                    # instrument than the tracking contract's 5m bars used
+                    # below. Crypto has no separate execution instrument
+                    # (perpetual is both), so it correctly stays on the
+                    # tracking bars.
+                    if not _is_crypto_pos:
+                        live_ltp = float(getattr(book, "_exec_live_price", {}).get(pos.side) or 0.0)
+                    if live_ltp <= 0:
+                        bars = book._bars_5m.get(pos.side) or []
+                        if bars:
+                            live_ltp = float(bars[-1].close)
                 except Exception:
                     pass
                 # Contract value: BTC=0.001, ETH=0.01 (1 lot = this fraction of
@@ -2674,6 +2684,7 @@ class DashboardServer:
                             from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
                             _is_crypto = str(underlying).upper() in ("BTC", "ETH")
                             live_price = getattr(book, "_live_price", {}) or {}
+                            exec_live_price = getattr(book, "_exec_live_price", {}) or {}
                             pos = book._engine.position
                             if pos is not None and pos.is_open:
                                 # Crypto trades the underlying's own spot/perpetual price directly —
@@ -2687,12 +2698,28 @@ class DashboardServer:
                                 for leg in (pos.t1, pos.t2):
                                     if leg is None or leg.status != "open":
                                         continue
-                                    ltp = float(live_price.get(pos.side) or leg.entry_price)
+                                    # 2026-07-21 fix: while a position is open, the EXECUTION
+                                    # contract (one strike OTM from live spot) is what's actually
+                                    # traded -- a DIFFERENT instrument than the tracking contract
+                                    # (live_price), which is only ever the scanning reference.
+                                    # Crypto has no separate execution instrument (perpetual is
+                                    # both), so it correctly stays on live_price.
+                                    _exec_ltp = exec_live_price.get(pos.side) if not _is_crypto else None
+                                    ltp = float(_exec_ltp or live_price.get(pos.side) or leg.entry_price)
                                     qty = int(leg.qty)
                                     _pnl = round(((leg.entry_price - ltp) if _is_short_pos
                                                   else (ltp - leg.entry_price)) * qty * _cv, 2)
                                     _instr = (f"{underlying} SPOT {leg.tranche}" if _is_crypto
                                               else f"{underlying} {int(leg.strike)} {pos.side} {leg.tranche}")
+                                    # sl_price/target_price below are TRACKING-contract-native
+                                    # (the exit logic in engine.py._check_exits deliberately
+                                    # watches the SCANNED contract's own bars against these
+                                    # levels, by design) -- tracking_ltp/tracking_strike/
+                                    # tracking_label surface that context explicitly next to
+                                    # them, so the UI can label them clearly as belonging to
+                                    # the contract being scanned, not the one actually traded.
+                                    _tracking_strike = 0 if _is_crypto else int(
+                                        getattr(book, f"_{pos.side.lower()}_strike", 0) or 0)
                                     legs.append({
                                         "symbol": _instr, "instrument": _instr,
                                         "type": leg.tranche,
@@ -2706,6 +2733,10 @@ class DashboardServer:
                                         "target_price": round(leg.target_price, 2) if leg.target_price else None,
                                         "trail_stop_price": round(leg.trail_stop_price, 2)
                                                              if leg.trail_stop_price else None,
+                                        "tracking_ltp": round(float(live_price.get(pos.side) or 0.0), 2),
+                                        "tracking_strike": _tracking_strike,
+                                        "tracking_label": ("BEAR" if _is_crypto and pos.side == "CE"
+                                                            else "BULL" if _is_crypto else pos.side),
                                         "entry_reason": leg.entry_reason or "",
                                         "entry_time": leg.entry_time.isoformat(timespec="seconds")
                                                       if leg.entry_time else None,
