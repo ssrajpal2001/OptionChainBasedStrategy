@@ -1076,11 +1076,28 @@ class V4CascadeBook(AbstractStrategyBook):
             self._clog.warning("no execution-contract tick within 3s for %s — falling back to "
                                "tracking-contract price_hint=%.4f.", ev.side, ev.price_hint)
 
-        # 2026-07-21: execution-native risk lookup. Fetch the execution
-        # strike's own bars and wait for the tick CONCURRENTLY (not
-        # serially) so this doesn't add to entry latency beyond what
-        # already existed.
-        pos = self._engine.position
+        # 2026-07-21: execution-native risk lookup. This fetch runs AFTER
+        # the tick-wait above completes (sequential, not concurrent) --
+        # it targets an already-resolved symbol so it doesn't add its own
+        # subscribe/settle latency, but it is not overlapped with the wait.
+        #
+        # Resolve the position via self._pending_fills (populated by
+        # _emit_order BEFORE this coroutine was fired), NOT
+        # self._engine.position. This is a long-running, fire-and-forget
+        # task (tick-wait up to 3s + two unbounded REST calls) with no
+        # cancellation. If a structural flip (CLOSE_old + OPEN_new in the
+        # same engine.update() batch -- see _emit_order's docstring) lands
+        # while this task is still in flight, self._engine.position will
+        # have already moved on to point at the NEW side's position by the
+        # time this resumes -- and pos.is_open won't catch it, since the
+        # new position is open too. Reading self._engine.position directly
+        # would then silently overwrite the NEW, unrelated position's
+        # SL/target with numbers computed for this stale OLD side/strike/
+        # bars. Mirrors the same pattern _on_fill already uses for exactly
+        # this hazard.
+        pos = self._pending_fills.get(event_id)
+        if pos is None:
+            pos = self._engine.position
         if pos is not None and pos.is_open and not self._is_crypto and exec_strike:
             exec_bars = await self._fetch_execution_bars_5m(self._exec_symbol[ev.side])
             is_short = self._is_crypto and ev.side == "PE"

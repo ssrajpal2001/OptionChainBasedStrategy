@@ -97,6 +97,46 @@ async def test_falls_back_to_tracking_scale_when_no_zone_found():
 
 
 @pytest.mark.asyncio
+async def test_stale_task_writes_to_pending_fills_position_not_engine_position():
+    """Regression for the structural-flip race: if _open_entry_async is
+    still mid-flight (tick-wait / bars-fetch) when a CLOSE_old+OPEN_new
+    structural flip lands, self._engine.position will have already moved
+    on to the NEW side's position by the time this coroutine resumes.
+    The execution-native risk write must land on the position stashed in
+    self._pending_fills[event_id] at fire-time (the OLD side this task
+    is actually about), never on whatever self._engine.position currently
+    points at."""
+    book = _book()
+    stale_pos = _fresh_position(side="CE", strike=24200.0)
+    new_pos = _fresh_position(side="PE", strike=24000.0)
+    # Simulate _emit_order having stashed the position at fire-time...
+    book._pending_fills["ev1"] = stale_pos
+    # ...and a structural flip having since moved engine.position on to a
+    # brand-new, unrelated (but also open) position before this stale
+    # task resumes.
+    book._engine.position = new_pos
+    ev = _entry_event(side="CE")
+    with patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|1"), \
+         patch.object(book, "_fetch_execution_bars_5m", new=AsyncMock(return_value=["some_bars"])), \
+         patch("strategies.v4_cascade.book.compute_execution_native_risk", return_value=(21.0, 25.0)), \
+         patch.object(book, "_bus") as mock_bus:
+        mock_bus.publish = AsyncMock()
+        await book._open_entry_async(ev, exec_strike=24200.0, qty=130, event_id="ev1",
+                                     ts=datetime(2026, 7, 21, 12, 0, tzinfo=IST))
+    # The stale (pending_fills-referenced) position got the write...
+    assert stale_pos.risk_basis == "execution_native"
+    assert stale_pos.t1.sl_price == 21.0
+    assert stale_pos.t1.target_price == 25.0
+    assert stale_pos.t2.sl_price == 21.0
+    # ...and the new, unrelated position (self._engine.position) was left
+    # completely untouched.
+    assert new_pos.risk_basis != "execution_native"
+    assert new_pos.t1.sl_price == 80.0
+    assert new_pos.t1.target_price == 130.0
+    assert new_pos.t2.sl_price == 80.0
+
+
+@pytest.mark.asyncio
 async def test_crypto_skips_execution_native_lookup_entirely():
     book = _book()
     book._is_crypto = True
