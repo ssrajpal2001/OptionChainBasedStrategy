@@ -2682,6 +2682,28 @@ class DashboardServer:
                         if book is not None:
                             from strategies.v4_cascade.dataclasses import GateState
                             from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
+                            # Booked = sum of TODAY's closed-tranche P&L from the History ledger
+                            # (mirrors sell_straddle's booked computation above) -- this was
+                            # previously left at the outer default of 0.0 always, never wired up
+                            # for v4_cascade, so a leg that already closed today (e.g. T1 hit its
+                            # SL while T2 is still running) silently vanished from the dashboard's
+                            # Booked P&L instead of being counted. cascade_bridge._record_history
+                            # already writes pnl in real currency units (₹/$, qty-multiplied), so
+                            # unlike sell_straddle's points-based fallback, no lot_size scaling
+                            # is needed here.
+                            try:
+                                from data_layer import trade_history as _th
+                                _today = datetime.now(IST).date().isoformat()
+                                _recs = _th.load(cid, 500)
+                                booked = round(sum(
+                                    float(r.get("pnl", 0) or 0) for r in _recs
+                                    if str(r.get("ts", ""))[:10] == _today
+                                    and r.get("strategy") == "v4_cascade"
+                                    and str(r.get("instrument", "")).upper() == str(underlying).upper()
+                                    and str(r.get("binding_id", "")) == bid
+                                ), 2)
+                            except Exception:
+                                booked = 0.0
                             _is_crypto = str(underlying).upper() in ("BTC", "ETH")
                             live_price = getattr(book, "_live_price", {}) or {}
                             exec_live_price = getattr(book, "_exec_live_price", {}) or {}
