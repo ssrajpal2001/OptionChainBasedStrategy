@@ -215,6 +215,13 @@ class CascadePosition:
     # T2's trailing-stop scale conversion (tracking <-> execution) has no
     # reference point to rebuild from after a restart.
     tracking_entry_price: Optional[float] = None
+    # "tracking" (today's scaled-from-tracking-contract SL/target/trail) or
+    # "execution_native" (2026-07-21: computed from a one-time lookback on
+    # the execution strike's own bars) -- set once at entry, read by
+    # engine.py._check_exits to decide which bars/scale to check T1/T2
+    # against, and by book.py._restore_tracker_state_for_open_position to
+    # rebuild T2's tracker correctly after a restart.
+    risk_basis: str = "tracking"
     t1: Optional[TrancheLeg] = None
     t2: Optional[TrancheLeg] = None
     open_time: Optional[datetime] = None
@@ -233,6 +240,7 @@ class CascadePosition:
             "atm_at_trigger": self.atm_at_trigger, "entry_spot": self.entry_spot,
             "expiry_date": self.expiry_date.isoformat() if self.expiry_date else None,
             "tracking_entry_price": self.tracking_entry_price,
+            "risk_basis": self.risk_basis,
             "t1": self.t1.to_dict() if self.t1 else None,
             "t2": self.t2.to_dict() if self.t2 else None,
             "open_time": self.open_time.isoformat() if self.open_time else None,
@@ -251,6 +259,7 @@ class CascadePosition:
             atm_at_trigger=d.get("atm_at_trigger", 0.0), entry_spot=d.get("entry_spot", 0.0),
             expiry_date=_dt(d.get("expiry_date")).date() if d.get("expiry_date") else None,
             tracking_entry_price=d.get("tracking_entry_price"),
+            risk_basis=d.get("risk_basis", "tracking"),
             t1=TrancheLeg.from_dict(d["t1"]) if d.get("t1") else None,
             t2=TrancheLeg.from_dict(d["t2"]) if d.get("t2") else None,
             open_time=_dt(d.get("open_time")), close_time=_dt(d.get("close_time")),
