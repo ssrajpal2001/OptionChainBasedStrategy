@@ -53,11 +53,10 @@ async def main() -> None:
     best = results[0]
     print(f"\nBest: sl_buffer={best['params']['sl_buffer']} "
           f"target_floor_x={best['params']['target_floor_multiple']} "
-          f"tsl_bases={best['params']['t2_trail_lookback_bases']} "
-          f"tsl_tf={best['params']['t2_trail_tf_minutes']}m")
+          f"tsl_bases={best['params']['t2_trail_lookback_bases']}")
     print(f"  trades={best['metrics']['trades']} win_rate={best['metrics']['win_rate']}% "
-          f"PF={best['metrics']['profit_factor']} max_dd=₹{best['metrics']['max_drawdown']} "
-          f"net_pnl=₹{best['metrics']['net_pnl']}")
+          f"PF={best['metrics']['profit_factor']} max_dd=Rs {best['metrics']['max_drawdown']} "
+          f"net_pnl=Rs {best['metrics']['net_pnl']}")
     print("\nWrote backtest/v4_cascade/results/report.md, trades.csv, best_params.json")
 
 

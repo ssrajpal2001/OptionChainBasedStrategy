@@ -27,12 +27,15 @@ def _bar75(offset_75m, o, h, l, c):
 
 
 def _index_bear_confirm_bars():
-    """3 bars of 75m Index/spot data that confirm a bear trap (arms CE) --
-    same construction as test_v4_cascade_index_trap_kind.py's equivalent."""
+    """4 bars of 75m Index/spot data that confirm a bear trap (arms CE) --
+    ref/sweep-only/reclaim as 3 DISTINCT candles (find_bear_zone requires
+    the reclaim strictly after the sweep candle) -- same construction as
+    test_v4_cascade_index_trap_kind.py's equivalent."""
     return [
         _bar75(0, 200, 210, 200, 205),
         _bar75(1, 105, 110, 100, 105),
-        _bar75(2, 95, 115, 90, 112),
+        _bar75(2, 100, 105, 90, 95),
+        _bar75(3, 96, 115, 95, 112),
     ]
 
 

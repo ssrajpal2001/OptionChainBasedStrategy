@@ -120,7 +120,15 @@ def find_bear_zone(
     Rejects the match if already mitigated and keeps walking backward for an
     older, still-unmitigated ref/trap pair. ``skip_before_ts``: ignore any
     TRAPPED confirmation at or before this timestamp — used to avoid
-    re-triggering on an already-consumed setup."""
+    re-triggering on an already-consumed setup.
+
+    2026-07-22: this is a genuine THREE-candle pattern (ref, sweep, reclaim)
+    -- the reclaim (TRAPPED) must land on a candle STRICTLY AFTER the sweep
+    candle, never the sweep candle itself. Confirmed live: a single unusually
+    wide candle that both broke below ref.low AND above ref.high within its
+    own range was being accepted as a valid trap -- collapsing the pattern
+    to 2 candles and producing a trap off one violent, low-quality bar
+    instead of a genuine multi-candle structure."""
     n = len(bars)
     for i in range(n - 2, -1, -1):
         ref = bars[i]
@@ -136,7 +144,7 @@ def find_bear_zone(
         trapped_idx: Optional[int] = None
         sweep_low = bars[sellers_in_idx].low
         sweep_started_ts = bars[sellers_in_idx].timestamp
-        for k in range(sellers_in_idx, n):
+        for k in range(sellers_in_idx + 1, n):
             sweep_low = min(sweep_low, bars[k].low)
             if bars[k].high > ref.high:
                 trapped_idx = k
@@ -169,7 +177,11 @@ def find_bull_zone(
     """Symmetric BULL-side trap (buyers trapped — bearish read). ref.high is
     the entry_line (resistance break), ref.low is the sl_level (buyers' SL);
     TRAPPED confirms on a later candle's low clearing sl_level, with NO
-    bar-count cap (bounded only by the available history)."""
+    bar-count cap (bounded only by the available history).
+
+    2026-07-22: three-candle pattern (ref, sweep, reclaim) -- see
+    find_bear_zone's docstring; the reclaim must land strictly after the
+    sweep candle, never on it."""
     n = len(bars)
     for i in range(n - 2, -1, -1):
         ref = bars[i]
@@ -185,7 +197,7 @@ def find_bull_zone(
         trapped_idx: Optional[int] = None
         sweep_high = bars[buyers_in_idx].high
         sweep_started_ts = bars[buyers_in_idx].timestamp
-        for k in range(buyers_in_idx, n):
+        for k in range(buyers_in_idx + 1, n):
             sweep_high = max(sweep_high, bars[k].high)
             if bars[k].low < ref.low:
                 trapped_idx = k

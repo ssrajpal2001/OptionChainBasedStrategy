@@ -28,12 +28,15 @@ def test_default_kind_is_none():
 
 def test_bear_trap_confirmed_arms_ce():
     t = SpotConfirmTracker()
-    # bar0: filler. bar1 (ref): low=100 high=110. bar2: lower low (90) AND
-    # higher high (115) than bar1 -- sweep+reclaim on the same candle,
-    # confirming a bear trap (find_bear_zone, unbounded span).
+    # bar0: filler. bar1 (ref): low=100 high=110. bar2 sweeps below the low
+    # (90) WITHOUT reclaiming yet (high=105 <= 110) -- a genuine, separate
+    # sweep candle. bar3 then reclaims above the ref's high (115),
+    # confirming a bear trap (find_bear_zone, unbounded span, 3 distinct
+    # candles: ref/sweep/reclaim).
     t.on_75m_bar(_bar75(0, 200, 210, 200, 205))
     t.on_75m_bar(_bar75(1, 105, 110, 100, 105))
-    kind = t.on_75m_bar(_bar75(2, 95, 115, 90, 112))
+    t.on_75m_bar(_bar75(2, 100, 105, 90, 95))
+    kind = t.on_75m_bar(_bar75(3, 96, 115, 95, 112))
     assert kind == IndexTrapKind.BEAR_TRAP_CONFIRMED
     assert t.current_kind == IndexTrapKind.BEAR_TRAP_CONFIRMED
     assert t.confirms("CE") is True
@@ -64,7 +67,8 @@ def test_reset_clears_current_zone():
     t = SpotConfirmTracker()
     t.on_75m_bar(_bar75(0, 200, 210, 200, 205))
     t.on_75m_bar(_bar75(1, 105, 110, 100, 105))
-    t.on_75m_bar(_bar75(2, 95, 115, 90, 112))
+    t.on_75m_bar(_bar75(2, 100, 105, 90, 95))
+    t.on_75m_bar(_bar75(3, 96, 115, 95, 112))
     assert t.current_zone is not None
     t.reset()
     assert t.current_kind == IndexTrapKind.NONE

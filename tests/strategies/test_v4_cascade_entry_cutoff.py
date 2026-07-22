@@ -25,10 +25,14 @@ def _bar5(offset_5m, o, h, l, c):
 
 
 def _index_bear_confirm_bars():
+    # 3 distinct candles: ref (low=100/high=110), a separate sweep candle
+    # (low=90, no reclaim yet), then a separate reclaim candle (high=115) --
+    # find_bear_zone requires the reclaim strictly after the sweep candle.
     return [
         _Bar(_BASE - timedelta(hours=6), 200, 210, 200, 205, tf=75),
         _Bar(_BASE - timedelta(hours=4, minutes=45), 105, 110, 100, 105, tf=75),
-        _Bar(_BASE - timedelta(hours=3, minutes=30), 95, 115, 90, 112, tf=75),
+        _Bar(_BASE - timedelta(hours=3, minutes=30), 100, 105, 90, 95, tf=75),
+        _Bar(_BASE - timedelta(hours=2, minutes=15), 96, 115, 95, 112, tf=75),
     ]
 
 
