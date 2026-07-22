@@ -1009,6 +1009,7 @@ class V4CascadeBook(AbstractStrategyBook):
         self._recentering = True
         try:
             old_ce, old_pe = self._ce_strike, self._pe_strike
+            old_ce_symbol, old_pe_symbol = self._ce_symbol, self._pe_symbol
             # Same rounding convention as the session-open derivation in
             # _resolve_symbols (round to the DELIBERATELY flat
             # _TRACKING_STRIKE_STEP grid, not self._strike_step -- see that
@@ -1059,6 +1060,18 @@ class V4CascadeBook(AbstractStrategyBook):
             self._ce_symbol, self._pe_symbol = new_ce_symbol, new_pe_symbol
             self._tracking_reference_atm = current_atm
             self._bars_5m["CE"], self._bars_5m["PE"] = ce_5m, pe_5m
+            # 2026-07-22 fix (parallel to Task 7's _exec_buckets fix): clear
+            # any in-progress live tracking bar for the OLD strike still
+            # sitting in _buckets[side]. Left alone, the next tick on this
+            # side (now the NEW strike) would hit _on_option_tick's
+            # `cur.timestamp != bucket` branch (near-certain after the REST
+            # round-trip above) and flush that stale OLD-strike bar --
+            # built from a completely different instrument's price scale --
+            # into the just-rebuilt self._bars_5m[side] and through the
+            # freshly re-warmed scanner, able to manufacture a spurious
+            # sweep/reclaim pattern on the new strike's very first bar.
+            self._buckets["CE"] = None
+            self._buckets["PE"] = None
             for side in ("CE", "PE"):
                 self._engine._scanners[side].reset()
             # [] for the spot-bar list is intentional -- Gate 1/self._spot_confirm
@@ -1090,6 +1103,18 @@ class V4CascadeBook(AbstractStrategyBook):
                     logger.exception("V4CascadeBook[%s/%s/%s]: re-center subscribe failed for %s/%s.",
                                      self._underlying, self._client_id, self._binding_id,
                                      new_ce_symbol, new_pe_symbol)
+                # Unsubscribe the OLD tracking symbols per the design spec --
+                # ticks for them are otherwise silently ignored from here on
+                # (they no longer match self._ce_symbol/self._ce_strike) but
+                # would keep accumulating on the feeder's subscription list
+                # for the rest of the session.
+                if old_ce_symbol and old_pe_symbol:
+                    try:
+                        await feeder.unsubscribe_tokens([old_ce_symbol, old_pe_symbol])
+                    except Exception:
+                        logger.exception("V4CascadeBook[%s/%s/%s]: re-center unsubscribe failed for %s/%s.",
+                                         self._underlying, self._client_id, self._binding_id,
+                                         old_ce_symbol, old_pe_symbol)
 
             logger.info("V4CascadeBook[%s/%s/%s]: re-centered tracking strikes CE %s->%s PE %s->%s "
                        "(atm=%.2f) — re-warmed from %d/%d 5m bars.", self._underlying, self._client_id,

@@ -18,10 +18,27 @@ import pytest
 
 from config.global_config import GlobalConfig
 from data_layer.base_feeder import EventBus
-from strategies.v4_cascade.book import V4CascadeBook
+from strategies.v4_cascade.book import V4CascadeBook, _Bar
 from strategies.v4_cascade.dataclasses import CascadePosition, TrancheLeg
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+class _FakeFeeder:
+    def __init__(self) -> None:
+        self.subscribed = []
+        self.unsubscribed = []
+
+    async def subscribe_tokens(self, tokens) -> None:
+        self.subscribed.extend(tokens)
+
+    async def unsubscribe_tokens(self, tokens) -> None:
+        self.unsubscribed.extend(tokens)
+
+
+class _FakeRebalancer:
+    def __init__(self, feeder) -> None:
+        self._feeder = feeder
 
 
 def _book(underlying="NIFTY"):
@@ -243,3 +260,92 @@ async def test_recentering_flag_cleared_after_exception_mid_fetch():
             await book._maybe_recenter_tracking_strikes(current_atm=24320.0)
 
     assert book._recentering is False   # cleared by the finally block even on failure
+
+
+# ── 2026-07-22 final-review fix: stale _buckets[side] on the tracking side ──
+
+@pytest.mark.asyncio
+async def test_recenter_clears_stale_in_progress_tracking_bucket():
+    """The bug this guards against: _maybe_recenter_tracking_strikes rebuilds
+    self._bars_5m[side] from freshly-fetched history but, before this fix,
+    never touched self._buckets[side] -- the in-progress LIVE bar for the
+    OLD strike that was still accumulating right up until the re-center
+    fired. Because this coroutine is fire-and-forget with two real awaits
+    (token fetch, REST gather), by the time it flips the strikes/symbols the
+    REST round-trip has almost certainly crossed a 5-minute boundary, so the
+    very next tick on the (now new) strike would hit _on_option_tick's
+    `cur.timestamp != bucket` branch and flush that stale OLD-strike bar
+    (built from a totally different instrument's price scale) into the
+    just-rebuilt self._bars_5m[side] and through the freshly re-warmed
+    scanner -- corrupting the new strike's first Gate-2 zone.
+
+    Steps: (a) seed an in-progress OLD-strike bucket bar with prices wildly
+    foreign to the fetched NEW-strike history, (b) trigger a re-center,
+    (c) confirm self._buckets["CE"] is cleared to None, and (d) feed a tick
+    for the new strike and confirm it starts a genuinely fresh bucket at the
+    tick's own price -- not a merge with the stale bar's OHLC."""
+    book = _book("NIFTY")
+    book._engine.position = None
+    book._ce_symbol = "NSE_FO|old_ce"
+    book._pe_symbol = "NSE_FO|old_pe"
+
+    # (a) In-progress OLD-strike bucket bar mid-formation, at a price level
+    # (~9000) wildly foreign to the fetched NEW-strike history (~100-115)
+    # below -- if this leaks into the new strike's bars it would obviously
+    # dominate/skew the high/low range fed to the scanner.
+    stale_old_bar = _Bar(datetime(2026, 7, 21, 10, 5, tzinfo=IST), 9000, 9050, 8950, 9010, tf=5)
+    book._buckets["CE"] = stale_old_bar
+    book._buckets["PE"] = _Bar(datetime(2026, 7, 21, 10, 5, tzinfo=IST), 50, 55, 48, 52, tf=5)
+
+    range_rows = [
+        {"ts": "2026-07-21T09:15:00", "open": 100, "high": 110, "low": 100, "close": 105, "volume": 10},
+        {"ts": "2026-07-21T09:20:00", "open": 98, "high": 105, "low": 95, "close": 100, "volume": 10},
+        {"ts": "2026-07-21T09:25:00", "open": 110, "high": 115, "low": 105, "close": 112, "volume": 10},
+    ]
+    with patch("strategies.v4_cascade.book.fetch_upstox_range_1m", new=AsyncMock(return_value=range_rows)), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
+         patch.object(book, "_access_token", return_value="tok"), \
+         patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|new_ce"):
+        await book._maybe_recenter_tracking_strikes(current_atm=24320.0)   # drift = 103.95 >= 100
+
+    # (c) Both sides' in-progress buckets must be cleared, not carried over.
+    assert book._buckets["CE"] is None
+    assert book._buckets["PE"] is None
+
+    # The rebuilt bars_5m must be the fresh history, not contaminated by the
+    # stale bar's foreign OHLC (which was never appended anywhere).
+    assert all(b.high < 200 for b in book._bars_5m["CE"])
+    assert all(b is not stale_old_bar for b in book._bars_5m["CE"])
+
+    # (d) A tick for the new strike immediately after must start a genuinely
+    # fresh bucket at the tick's own price -- not a merge with the stale
+    # bar's OHLC (which would show high=9050/low=8950 if it had leaked in).
+    tick_ts = datetime(2026, 7, 21, 10, 6, tzinfo=IST)
+    book._on_option_tick("CE", 120.0, tick_ts)
+
+    fresh_bucket = book._buckets["CE"]
+    assert fresh_bucket is not None
+    assert fresh_bucket is not stale_old_bar
+    assert fresh_bucket.open == 120.0
+    assert fresh_bucket.high == 120.0
+    assert fresh_bucket.low == 120.0
+    assert fresh_bucket.close == 120.0
+
+
+@pytest.mark.asyncio
+async def test_recenter_unsubscribes_old_symbols_and_subscribes_new():
+    book = _book("NIFTY")
+    book._engine.position = None
+    book._ce_symbol = "NSE_FO|old_ce"
+    book._pe_symbol = "NSE_FO|old_pe"
+    feeder = _FakeFeeder()
+    book._rebalancer = _FakeRebalancer(feeder)
+
+    with patch("strategies.v4_cascade.book.fetch_upstox_range_1m", new=AsyncMock(return_value=[])), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
+         patch.object(book, "_access_token", return_value="tok"), \
+         patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|new"):
+        await book._maybe_recenter_tracking_strikes(current_atm=24320.0)
+
+    assert feeder.subscribed == ["NSE_FO|new", "NSE_FO|new"]
+    assert feeder.unsubscribed == ["NSE_FO|old_ce", "NSE_FO|old_pe"]
