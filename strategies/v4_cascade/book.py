@@ -801,6 +801,7 @@ class V4CascadeBook(AbstractStrategyBook):
             for exec_side in ("CE", "PE"):
                 if self._exec_symbol[exec_side] and symbol == self._exec_symbol[exec_side]:
                     self._exec_live_price[exec_side] = float(tick.ltp)
+                    self._check_tick_exit(exec_side, tick.timestamp, execution_ltp=float(tick.ltp))
                     self._on_execution_tick(exec_side, float(tick.ltp), tick.timestamp)
             side = None
             if symbol == self._ce_symbol or (
@@ -815,6 +816,24 @@ class V4CascadeBook(AbstractStrategyBook):
 
     def _on_option_tick(self, side: str, ltp: float, ts: datetime) -> None:
         self._live_price[side] = ltp
+        if self._is_crypto:
+            # Crypto trades the perpetual directly -- this tick IS the
+            # traded instrument's own price (no separate tracking/execution
+            # contract split, and crypto positions never reach
+            # risk_basis=="execution_native" -- book.py's native-risk lookup
+            # explicitly excludes crypto). Passed as BOTH tracking_ltp and
+            # execution_ltp so T1 (tracking-scale check) and T2 (always
+            # execution-scale) both get checked off this single feed.
+            self._check_tick_exit(side, ts, tracking_ltp=ltp, execution_ltp=ltp)
+        else:
+            # Real NIFTY/CRUDEOIL: this side's LTP is the TRACKING contract
+            # (a different strike than what's actually traded), so it can
+            # only ever feed T1's tracking-scale SL/target check for a
+            # risk_basis=="tracking" position -- never T2 (always
+            # execution-scale) and never T1 for an execution_native
+            # position (checked separately off the execution-contract feed
+            # in _option_loop instead).
+            self._check_tick_exit(side, ts, tracking_ltp=ltp)
         bucket = _bucket_start(ts, 5, self._session_open)
         cur = self._buckets[side]
         if cur is None or cur.timestamp != bucket:
@@ -883,6 +902,29 @@ class V4CascadeBook(AbstractStrategyBook):
         events = self._engine.check_exits_execution_native(side, bar)
         for ev in events:
             self._emit_order(ev, pos_before=self._engine.position)
+        self._persist_position()
+
+    def _check_tick_exit(self, side: str, ts: datetime, tracking_ltp: Optional[float] = None,
+                          execution_ltp: Optional[float] = None) -> None:
+        """2026-07-22: tick-driven SL/target/trailing-stop enforcement
+        (engine.py's check_exits_tick) -- called on EVERY live tick of
+        either the tracking contract or the execution contract, for an
+        open position of EITHER risk_basis. A no-op (empty events) whenever
+        there's no matching open position, or the tick's scale doesn't
+        match what that position's risk_basis needs -- cheap to call
+        unconditionally on every tick. Independent of, and never replaces,
+        the existing 5m bar-close checks: those still own moving the
+        trailing stop / discovering new bases; this only enforces whatever
+        threshold is CURRENTLY set, without waiting up to 5 minutes for a
+        bar to close first."""
+        events = self._engine.check_exits_tick(
+            side, ts, tracking_ltp=tracking_ltp, execution_ltp=execution_ltp,
+        )
+        if not events:
+            return
+        pos_before = self._engine.position
+        for ev in events:
+            self._emit_order(ev, pos_before=pos_before)
         self._persist_position()
 
     # ── daily EOD/Gate2-3 rules (mirrors scripts/v4_backtest_july2026.py) ────

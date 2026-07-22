@@ -472,6 +472,100 @@ class V4CascadeEngine:
             self._tracking_entry_price.pop(side, None)
         return events
 
+    def check_exits_tick(self, side: str, ts, tracking_ltp: Optional[float] = None,
+                          execution_ltp: Optional[float] = None) -> List[CascadeEvent]:
+        """2026-07-22: tick-driven SL/target/trailing-stop enforcement --
+        fires the INSTANT a live tick crosses t1.sl_price/target_price or
+        t2.trail_stop_price, instead of waiting for the next 5m bar close
+        (_check_exits / check_exits_execution_native). Per explicit user
+        direction: a stop only checked once every 5 minutes leaves real,
+        observed extra bleed between the tick that breaches it and the bar
+        close that finally acts on it.
+
+        SCALE IS NOT UNIFORM -- this is the one thing a caller must get
+        right, and the reason this takes two separate optional LTPs instead
+        of one:
+          - t1.sl_price/target_price are TRACKING-contract scale for a
+            risk_basis=="tracking" position (engine._open_position calls
+            compute_risk_mapping with tracking_entry_price==exec_entry_price,
+            since the pure engine has no real execution fill yet -- scale
+            never gets remapped onto the execution contract afterward
+            either; book.py only ever overwrites these fields for the
+            execution_native case). They are EXECUTION-contract scale for a
+            risk_basis=="execution_native" position (compute_execution_native_risk
+            collapses to the real execution entry price, scale=1). So T1 is
+            only ever checked against the LTP whose scale actually matches
+            the position's risk_basis -- passing the wrong one silently
+            does nothing (the None guard), rather than firing on a bogus
+            cross-scale comparison.
+          - t2.trail_stop_price is ALWAYS execution-contract scale
+            regardless of risk_basis (map_trailing_stop_to_execution for
+            the tracking path, set directly for the execution-native path
+            -- see _check_exits/check_exits_execution_native), so T2 is
+            only ever checked against execution_ltp.
+
+        Deliberately does NOT touch trail.current_stop or move/discover any
+        base -- that stays exclusively on the 5m bar clock (it needs real
+        bar structure). This only asks "has the live tick already crossed
+        the CURRENT threshold." Closes at the live LTP, not the static
+        threshold price -- a real market order fired on breach fills near
+        LTP, which by definition is already at-or-past the threshold, not
+        exactly on it (unlike the bar-close checks, which record
+        price=sl_price/target_price on the assumption the whole bar's
+        low/high touched exactly that level)."""
+        events: List[CascadeEvent] = []
+        pos = self.position
+        if pos is None or pos.side != side or not pos.is_open:
+            return events
+        t1, t2 = pos.t1, pos.t2
+        tracking_entry = self._tracking_entry_price.get(side, 0.0)
+        is_short = not self._scanners[side]._bear
+        trail = self._trackers.get(side)
+
+        t1_ltp = execution_ltp if pos.risk_basis == "execution_native" else tracking_ltp
+        if t1_ltp is not None and t1_ltp > 0 and t1 is not None and t1.status == "open":
+            hit_sl = bool(t1.sl_price) and (t1_ltp >= t1.sl_price if is_short else t1_ltp <= t1.sl_price)
+            hit_target = bool(t1.target_price) and (
+                t1_ltp <= t1.target_price if is_short else t1_ltp >= t1.target_price
+            )
+            if hit_sl or hit_target:
+                reason = "t1_sl_structural_floor" if hit_sl else "t1_target_2r"
+                t1.status = "closed"
+                t1.close_price = t1_ltp
+                t1.close_reason = reason
+                t1.close_time = ts
+                events.append(self._close_event(side, "T1", reason, t1_ltp, ts))
+                if reason == "t1_target_2r" and t2 is not None and t2.status == "open" and trail is not None:
+                    if pos.risk_basis == "execution_native":
+                        trail.move_to_breakeven(t1.entry_price, buffer=self._cfg.sl_buffer)
+                        if trail.current_stop is not None:
+                            t2.trail_stop_price = trail.current_stop
+                            t2.tracking_current_stop = trail.current_stop
+                    else:
+                        trail.move_to_breakeven(tracking_entry, buffer=self._cfg.sl_buffer)
+                        if trail.current_stop is not None:
+                            t2.trail_stop_price = map_trailing_stop_to_execution(
+                                trail.current_stop, tracking_entry, t2.entry_price,
+                            )
+                            t2.tracking_current_stop = trail.current_stop
+
+        if (execution_ltp is not None and execution_ltp > 0
+                and t2 is not None and t2.status == "open" and t2.trail_stop_price is not None):
+            hit = execution_ltp >= t2.trail_stop_price if is_short else execution_ltp <= t2.trail_stop_price
+            if hit:
+                t2.status = "closed"
+                t2.close_price = execution_ltp
+                t2.close_reason = "t2_trailing_base_stop"
+                t2.close_time = ts
+                events.append(self._close_event(side, "T2", "t2_trailing_base_stop", execution_ltp, ts))
+
+        if (t1 is None or t1.status == "closed") and (t2 is None or t2.status == "closed"):
+            pos.status = "closed"
+            pos.close_time = ts
+            self._trackers.pop(side, None)
+            self._tracking_entry_price.pop(side, None)
+        return events
+
     @staticmethod
     def _close_event(side: str, tranche: str, reason: str, price: float, ts) -> CascadeEvent:
         event_type = CascadeEventType.CLOSE_LONG_CE if side == "CE" else CascadeEventType.CLOSE_LONG_PE
