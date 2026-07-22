@@ -90,7 +90,7 @@ def check_limit_pierce(
 
 def compute_risk_mapping(
     zone: RollingBaseZone, tracking_entry_price: float, exec_entry_price: float,
-    sl_buffer: float = 10.0, is_short: bool = False,
+    sl_buffer: float = 10.0, is_short: bool = False, target_floor_multiple: float = 1.0,
 ) -> Tuple[float, float]:
     """SL is anchored directly to the Inner Zone's edge plus a buffer (long:
     zone_low - sl_buffer, short: zone_high + sl_buffer), computed in
@@ -106,8 +106,11 @@ def compute_risk_mapping(
     direction: the target should be anchored to the zone's real structure,
     not an arbitrary R-multiple.
 
-    Target distance is floored at ``tracking_risk`` (the same distance used
-    for SL) -- confirmed live: a flat/zero-range reference candle can put
+    Target distance is floored at ``tracking_risk * target_floor_multiple``
+    (default multiple 1.0, i.e. the same distance used for SL -- unchanged
+    default behavior; a backtest can grid-search other multiples without
+    touching live callers, which never pass this kwarg) -- confirmed live: a
+    flat/zero-range reference candle can put
     ``sl_level`` almost right on top of ``entry_line``, collapsing the raw
     target distance to nearly nothing (a real CRUDEOIL trade risked ~25
     tracking points to make ~2.4) while SL still measured out to the full
@@ -133,12 +136,12 @@ def compute_risk_mapping(
         tracking_risk = max((zone_high - tracking_entry_price) + sl_buffer, 0.01)
         exec_risk = tracking_risk * scale
         sl_price = exec_entry_price + exec_risk
-        tracking_target_dist = max(tracking_entry_price - zone.sl_level, tracking_risk)
+        tracking_target_dist = max(tracking_entry_price - zone.sl_level, tracking_risk * target_floor_multiple)
         target_price = max(0.0, exec_entry_price - tracking_target_dist * scale)
     else:
         tracking_risk = max((tracking_entry_price - zone_low) + sl_buffer, 0.01)
         exec_risk = tracking_risk * scale
         sl_price = max(0.0, exec_entry_price - exec_risk)
-        tracking_target_dist = max(zone.sl_level - tracking_entry_price, tracking_risk)
+        tracking_target_dist = max(zone.sl_level - tracking_entry_price, tracking_risk * target_floor_multiple)
         target_price = exec_entry_price + tracking_target_dist * scale
     return sl_price, target_price

@@ -457,10 +457,20 @@ class _PremiumSetup:
 
 class IndexGatedPremiumScanner:
     """One instance per side (CE or PE tracking contract), NIFTY/CRUDEOIL
-    only. Bear-trap-only, unconditionally (no ``bear`` parameter) — per spec,
-    Gate 2 looks "only and only for a Bear Trap pattern" on BOTH CE and PE
-    premium (as option BUYERS, we need sellers trapped out of the premium
-    contract regardless of side).
+    only. Bear-trap-only BY DEFAULT (``bear=True``) — per spec, live
+    NIFTY/CRUDEOIL Gate 2 looks "only and only for a Bear Trap pattern" on
+    BOTH CE and PE premium (as option BUYERS, we need sellers trapped out of
+    the premium contract regardless of side) — book.py's engine.py
+    construction sites never pass ``bear=False``, so LIVE behavior is
+    unchanged by this parameter's existence.
+
+    2026-07-22: ``bear`` became a real (still-defaulted-True) constructor
+    parameter, purely to let a backtest reuse this exact class against a
+    single NIFTY SPOT series for BOTH directions (scripts/../v4_cascade
+    backtest) -- unlike a real option chain, a raw spot series has no
+    separate PE-premium chart whose OWN geometry is naturally bear-trap-
+    shaped, so a bull-trap finder is needed for the short/PE side there.
+    Never used with bear=False in production.
 
     2026-07-21 — Discovery is UNCONDITIONAL, on both sides, regardless of
     Index arming (reverted from the earlier same-day hard-gate-on-discovery
@@ -473,8 +483,8 @@ class IndexGatedPremiumScanner:
     exactly. An already-discovered setup is never aborted by a later Index
     flip regardless."""
 
-    def __init__(self, session_open: Tuple[int, int] = (9, 15)) -> None:
-        self._bear = True  # hardcoded — see class docstring
+    def __init__(self, session_open: Tuple[int, int] = (9, 15), bear: bool = True) -> None:
+        self._bear = bear
         self._session_open = session_open
 
         self.armed: bool = False
@@ -535,8 +545,9 @@ class IndexGatedPremiumScanner:
         window = list(self._bars_5m)
         if len(window) < 3:
             return
+        finder = find_all_bear_traps_2candle if self._bear else find_all_bull_traps_2candle
         new_found = False
-        for zone in find_all_bear_traps_2candle(window):
+        for zone in finder(window):
             if zone.reference_low_ts in self._known_ref_ts:
                 continue
             self._known_ref_ts.add(zone.reference_low_ts)
@@ -549,14 +560,15 @@ class IndexGatedPremiumScanner:
         resampled = resample_bars(window, 15, session_open=self._session_open)
         if len(resampled) < 3:
             return
-        for zone in find_all_bear_traps_2candle(resampled):
+        for zone in finder(resampled):
             if zone.reference_low_ts in self._known_ref_ts:
                 continue
             self._known_ref_ts.add(zone.reference_low_ts)
             self.setups.append(_PremiumSetup(zone, timeframe=15))
 
     def _zone_overlap(self, bar, entry_line: float, sweep_low: float) -> bool:
-        return bar.low <= entry_line and bar.high >= sweep_low
+        lo, hi = min(entry_line, sweep_low), max(entry_line, sweep_low)
+        return bar.low <= hi and bar.high >= lo
 
     def _check_zone_entry(self, setup: _PremiumSetup, bar) -> None:
         z = setup.zone
@@ -564,8 +576,17 @@ class IndexGatedPremiumScanner:
             return
         if self._zone_overlap(bar, z.entry_line, z.sweep_low):
             setup.state = PremiumZoneState.WAITING_FOR_ZONE_ENTRY  # transient marker
-            inner_high, inner_low = z.entry_line, z.sweep_low
-            setup.limit_entry_price = inner_high - (inner_high - inner_low) / 3.0
+            if self._bear:
+                inner_high, inner_low = z.entry_line, z.sweep_low
+                setup.limit_entry_price = inner_high - (inner_high - inner_low) / 3.0
+            else:
+                # Bull zone (backtest-only, PE/short side scanning a raw spot
+                # series): entry_line is the BOTTOM of the zone, sweep_low
+                # field holds the swept HIGH (the top) -- 1/3 UP from the
+                # bottom, mirroring the bear case's "1/3 DOWN from the top"
+                # (exact match to the legacy scanner's _check_mtf_zone_entry).
+                inner_low, inner_high = z.entry_line, z.sweep_low
+                setup.limit_entry_price = inner_low + (inner_high - inner_low) / 3.0
             setup.state = PremiumZoneState.LIMIT_ARMED
 
     @staticmethod
@@ -580,12 +601,17 @@ class IndexGatedPremiumScanner:
         setup), so this collapses to a single branch versus the legacy
         scanner's two-tier version. Judged on CLOSE, not low/high — a wick
         through the zone is the liquidity-sweep signal itself, not a failure
-        (same rule as rolling_base.py's _is_mitigated_bear)."""
+        (same rule as rolling_base.py's _is_mitigated_bear/_is_mitigated_bull).
+        Bear: a close BELOW zone_low invalidates (continuation down instead
+        of the expected reclaim up). Bull (backtest-only): mirrored -- a
+        close ABOVE zone_high invalidates (continuation up instead of the
+        expected reclaim down)."""
         for setup in list(self.setups):
             zone_low, zone_high = self._zone_span(setup.zone)
             if zone_low is None:
                 continue
-            if bar.close < zone_low:
+            broken = bar.close < zone_low if self._bear else bar.close > zone_high
+            if broken:
                 self.setups.remove(setup)
 
     # ── Gate 3 support ───────────────────────────────────────────────────────

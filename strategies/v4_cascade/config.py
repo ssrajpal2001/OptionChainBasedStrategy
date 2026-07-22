@@ -61,6 +61,13 @@ class V4CascadeConfig:
     pierce_check_tf_minutes: int = PIERCE_CHECK_TF_MINUTES
     spot_confirm_tf_minutes: int = SPOT_CONFIRM_TF_MINUTES
 
+    # 2026-07-22: T1 target-floor multiple (entries.compute_risk_mapping's
+    # target_floor_multiple kwarg) -- default 1.0 preserves today's exact
+    # live behavior (floor = 1R). Exists as a config field purely so a
+    # backtest can grid-search other multiples via V4CascadeConfig alone,
+    # without passing anything special through engine.py's call site.
+    target_floor_multiple: float = 1.0
+
     @property
     def tranche_qty(self) -> int:
         """65 units per tranche at lot_multiplier=2 (2 lots / 2 tranches = 1 lot/tranche)."""

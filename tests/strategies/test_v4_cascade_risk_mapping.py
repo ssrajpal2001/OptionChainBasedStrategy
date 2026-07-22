@@ -92,3 +92,44 @@ def test_defensive_fallback_when_zone_fields_missing():
     )
     assert sl_price == 25.0
     assert target_price == 62.5
+
+
+# ── 2026-07-22: target_floor_multiple (backtest grid-search knob) ──────────
+
+def test_target_floor_multiple_default_matches_prior_1r_behavior():
+    """No target_floor_multiple passed -- must be byte-identical to today's
+    live behavior (floor at exactly 1x tracking_risk)."""
+    zone = _zone(entry_line=737.2, sweep_low=736.5, sl_level=745.6)
+    kwargs = dict(tracking_entry_price=736.9666666666667, exec_entry_price=516.10,
+                  sl_buffer=20.0, is_short=False)
+    sl_a, target_a = compute_risk_mapping(zone, **kwargs)
+    sl_b, target_b = compute_risk_mapping(zone, target_floor_multiple=1.0, **kwargs)
+    assert sl_a == sl_b
+    assert target_a == target_b
+
+
+def test_target_floor_multiple_2x_widens_the_floored_target():
+    # Same degenerate-zone fixture as test_long_sl_below_entry_target_floored_at_1r_scaled_sl_level
+    # (raw sl_level distance 8.63 < tracking_risk 20.47, so the floor governs).
+    zone = _zone(entry_line=737.2, sweep_low=736.5, sl_level=745.6)
+    kwargs = dict(tracking_entry_price=736.9666666666667, exec_entry_price=516.10,
+                  sl_buffer=20.0, is_short=False)
+    sl_1x, target_1x = compute_risk_mapping(zone, target_floor_multiple=1.0, **kwargs)
+    sl_2x, target_2x = compute_risk_mapping(zone, target_floor_multiple=2.0, **kwargs)
+    assert sl_1x == sl_2x  # SL is never affected by the target floor multiple
+    scale = 516.10 / 736.9666666666667
+    tracking_risk = (736.9666666666667 - 736.5) + 20.0
+    expected_target_2x = 516.10 + (tracking_risk * 2.0) * scale
+    assert abs(target_2x - expected_target_2x) < 1e-6
+    assert target_2x > target_1x
+
+
+def test_target_floor_multiple_does_not_shrink_a_naturally_wider_target():
+    # Non-degenerate zone: raw sl_level distance (32) already exceeds
+    # tracking_risk (8) even at floor_multiple=3 (24), so the floor multiple
+    # must be a no-op regardless of its value here.
+    zone = _zone(entry_line=100.0, sweep_low=95.0, sl_level=130.0)
+    kwargs = dict(tracking_entry_price=98.0, exec_entry_price=50.0, sl_buffer=5.0, is_short=False)
+    _, target_1x = compute_risk_mapping(zone, target_floor_multiple=1.0, **kwargs)
+    _, target_3x = compute_risk_mapping(zone, target_floor_multiple=3.0, **kwargs)
+    assert target_1x == target_3x

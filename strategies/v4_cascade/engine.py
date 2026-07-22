@@ -252,6 +252,7 @@ class V4CascadeEngine:
         sl_price, target_price = compute_risk_mapping(
             zone, tracking_entry_price=entry_price, exec_entry_price=entry_price,
             sl_buffer=self._cfg.sl_buffer, is_short=is_short,
+            target_floor_multiple=self._cfg.target_floor_multiple,
         )
         qty = self._cfg.tranche_qty
         # Why this trade fired: a bear trap (sellers trapped, reclaim up) is

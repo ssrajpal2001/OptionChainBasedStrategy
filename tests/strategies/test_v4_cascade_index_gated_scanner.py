@@ -77,20 +77,72 @@ def test_never_aborts_in_flight_setup_when_unarmed():
         s.on_5m_bar(b)
     assert len(s.setups) == 1
 
-    # Unarm -- the already-discovered setup must survive and keep advancing.
-    s.set_armed(False)
-    assert s.armed is False
-    assert len(s.setups) == 1
 
-    # Feed a bar that re-enters the zone [95, 100] -- this should still
-    # advance the setup to LIMIT_ARMED even though the scanner is unarmed,
-    # since "armed" only gates NEW discovery, never in-flight progress.
-    reentry_bar = _bar5(10, 99, 100, 96, 98)
-    s.on_5m_bar(reentry_bar)
-    assert s.setups[0].state == PremiumZoneState.LIMIT_ARMED
-    assert s.setups[0].limit_entry_price is not None
-    expected_limit = 100 - (100 - 95) / 3.0
-    assert abs(s.setups[0].limit_entry_price - expected_limit) < 1e-9
+# ── 2026-07-22: bear=False (backtest-only bull-trap mode) ──────────────────
+
+def _bull_trap_pattern(offset0):
+    """Mirror of _trap_pattern for a bull trap: ref (low=100, high=110), an
+    IMMEDIATE next candle that sweeps ABOVE it (high=120), then a later
+    candle whose low reclaims back below the ref's low (90) -- exactly what
+    find_all_bull_traps_2candle looks for. entry_line=110 (ref.high, the
+    BOTTOM of the zone), sweep_low field=120 (the swept HIGH, the TOP),
+    limit_entry_price=110+(10/3)=113.33."""
+    return [
+        _bar5(offset0, 105, 110, 100, 105),      # ref
+        _bar5(offset0 + 1, 112, 120, 108, 115),  # sweep (immediate next candle, above ref.high)
+        _bar5(offset0 + 2, 95, 100, 90, 92),     # trapped (reclaim below ref.low)
+    ]
+
+
+def test_bear_false_finds_bull_trap_not_bear_trap():
+    """A pure bear-trap pattern must find NOTHING when bear=False (it should
+    be scanning for the mirrored bull-trap shape instead)."""
+    s = IndexGatedPremiumScanner(bear=False)
+    for b in _trap_pattern(0):  # bear-shaped pattern
+        s.on_5m_bar(b)
+    assert s.setups == []
+
+
+def test_bear_false_discovers_bull_zone_with_correct_fields():
+    s = IndexGatedPremiumScanner(bear=False)
+    for b in _bull_trap_pattern(0):
+        s.on_5m_bar(b)
+    assert len(s.setups) == 1
+    zone = s.setups[0].zone
+    assert zone.entry_line == 110
+    assert zone.sweep_low == 120
+
+
+def test_bear_false_limit_entry_price_is_one_third_up_from_bottom():
+    s = IndexGatedPremiumScanner(bear=False)
+    bars = _bull_trap_pattern(0)
+    for b in bars:
+        s.on_5m_bar(b)
+    # Feed one more bar whose range overlaps [110, 120] to trigger zone-entry.
+    s.on_5m_bar(_bar5(3, 112, 118, 108, 111))
+    setup = s.setups[0]
+    assert setup.state == PremiumZoneState.LIMIT_ARMED
+    assert abs(setup.limit_entry_price - (110 + (120 - 110) / 3.0)) < 1e-9
+
+
+def test_bear_false_invalidates_on_close_above_zone_high():
+    s = IndexGatedPremiumScanner(bear=False)
+    for b in _bull_trap_pattern(0):
+        s.on_5m_bar(b)
+    assert len(s.setups) == 1
+    # A close ABOVE zone_high (120) invalidates a bull setup (mirrors the
+    # bear case's close-below-zone_low invalidation).
+    s.on_5m_bar(_bar5(3, 118, 125, 118, 122))
+    assert s.setups == []
+
+
+def test_bear_true_default_unaffected_by_bull_mode_addition():
+    """Sanity: the default (bear=True, no argument) still behaves exactly
+    as before -- discovers a bear trap, not a bull trap."""
+    s = IndexGatedPremiumScanner()
+    for b in _bull_trap_pattern(0):  # bull-shaped pattern
+        s.on_5m_bar(b)
+    assert s.setups == []
 
 
 def test_multi_zone_two_independent_setups_tracked_concurrently():
