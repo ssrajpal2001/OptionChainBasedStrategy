@@ -282,7 +282,10 @@ class V4CascadeEngine:
         # initial_stop=sl_price (2026-07-21): T2 shares T1's structural SL as
         # its own floor from minute one, instead of running with no stop at
         # all until the tracker's first new base happens to lock.
-        self._trackers[side] = TrailingBaseTracker(bear=scanner._bear, initial_stop=sl_price)
+        self._trackers[side] = TrailingBaseTracker(
+            bear=scanner._bear, initial_stop=sl_price,
+            lookback_bases=self._cfg.t2_trail_lookback_bases,
+        )
 
         audit = self._build_entry_audit(scanner, setup, zone, bar, sl_price, target_price)
         scanner.pop_setup(setup, bar.timestamp)
