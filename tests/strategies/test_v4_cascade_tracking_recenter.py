@@ -133,3 +133,113 @@ async def test_recenter_leaves_position_and_spot_confirm_untouched():
 
     assert book._engine._spot_confirm is original_spot_confirm   # untouched, same object
     assert book._engine.position is None
+
+
+# ── 2026-07-22 review fixes: TOCTOU race + reentrancy guard ─────────────────
+
+@pytest.mark.asyncio
+async def test_position_opened_during_await_aborts_recenter_no_corruption():
+    """Critical fix: the flatness gate is checked ONCE at function entry,
+    before two real awaits (the access-token fetch, then the 4-way REST
+    gather). Because _maybe_recenter_tracking_strikes is dispatched
+    fire-and-forget from _close_5m_bucket, a genuine Gate-3 trigger on a
+    SEPARATE _close_5m_bucket call can open a live position while this
+    coroutine is suspended at either await -- simulated here via a side
+    effect on the token fetch (standing in for "a concurrent call opened a
+    position mid-await"). The atomic re-check immediately before the
+    scanner-reset/replay mutations must catch this and abort, leaving the
+    newly-opened position's T1/T2 status completely untouched (no phantom
+    replay-driven close, no tracking-strike change)."""
+    book = _book("NIFTY")
+    book._engine.position = None
+
+    t1 = TrancheLeg(tranche="T1", option_type="CE", strike=24200.0, qty=65,
+                     entry_price=20.0, status="open")
+    t2 = TrancheLeg(tranche="T2", option_type="CE", strike=24200.0, qty=65,
+                     entry_price=20.0, status="open")
+    opened_pos = CascadePosition(
+        underlying="NIFTY", side="CE", tracking_strike=24000.0, execution_strike=24200.0,
+        atm_at_trigger=24216.05, entry_spot=24216.05, t1=t1, t2=t2, status="open",
+        open_time=datetime(2026, 7, 21, 12, 0, tzinfo=IST),
+    )
+
+    def _open_position_during_await():
+        # Stands in for a concurrent _close_5m_bucket call's Gate-3 trigger
+        # opening a real position while this coroutine is suspended at the
+        # asyncio.to_thread(self._access_token) await.
+        book._engine.position = opened_pos
+        return "tok"
+
+    with patch("strategies.v4_cascade.book.fetch_upstox_range_1m", new=AsyncMock(return_value=[])), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
+         patch.object(book, "_access_token", side_effect=_open_position_during_await), \
+         patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|new"):
+        await book._maybe_recenter_tracking_strikes(current_atm=24320.0)   # drift = 103.95 >= 100
+
+    # Recenter must have aborted -- tracking strikes/reference ATM untouched.
+    assert book._ce_strike == 24000
+    assert book._pe_strike == 24400
+    assert book._tracking_reference_atm == 24216.05
+
+    # The genuinely-opened position must be completely uncorrupted -- no
+    # phantom close from replaying foreign historical bars through it.
+    assert book._engine.position is opened_pos
+    assert book._engine.position.status == "open"
+    assert book._engine.position.t1.status == "open"
+    assert book._engine.position.t2.status == "open"
+
+
+@pytest.mark.asyncio
+async def test_recentering_guard_blocks_overlapping_calls():
+    """Important fix: self._recentering is an in-flight guard so two
+    overlapping recenter triggers (e.g. CE's and PE's 5m bucket closes
+    landing close together) can't both run the fetch+reset+replay+subscribe
+    sequence concurrently. A call that finds the guard already set must
+    return immediately without touching the network or any book state."""
+    book = _book("NIFTY")
+    book._engine.position = None
+    book._recentering = True   # simulate an already-in-flight recenter
+
+    fetch_mock = AsyncMock(return_value=[])
+    with patch("strategies.v4_cascade.book.fetch_upstox_range_1m", new=fetch_mock), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
+         patch.object(book, "_access_token", return_value="tok"), \
+         patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|new"):
+        await book._maybe_recenter_tracking_strikes(current_atm=24320.0)
+
+    fetch_mock.assert_not_called()
+    assert book._ce_strike == 24000
+    assert book._pe_strike == 24400
+    assert book._tracking_reference_atm == 24216.05
+    assert book._recentering is True   # untouched -- this call never entered the body
+
+
+@pytest.mark.asyncio
+async def test_recentering_flag_cleared_after_normal_completion():
+    book = _book("NIFTY")
+    book._engine.position = None
+    assert book._recentering is False
+
+    with patch("strategies.v4_cascade.book.fetch_upstox_range_1m", new=AsyncMock(return_value=[])), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
+         patch.object(book, "_access_token", return_value="tok"), \
+         patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|new"):
+        await book._maybe_recenter_tracking_strikes(current_atm=24320.0)
+
+    assert book._recentering is False
+
+
+@pytest.mark.asyncio
+async def test_recentering_flag_cleared_after_exception_mid_fetch():
+    book = _book("NIFTY")
+    book._engine.position = None
+
+    with patch("strategies.v4_cascade.book.fetch_upstox_range_1m",
+               new=AsyncMock(side_effect=RuntimeError("boom"))), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
+         patch.object(book, "_access_token", return_value="tok"), \
+         patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|new"):
+        with pytest.raises(RuntimeError):
+            await book._maybe_recenter_tracking_strikes(current_atm=24320.0)
+
+    assert book._recentering is False   # cleared by the finally block even on failure
