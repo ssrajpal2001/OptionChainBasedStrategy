@@ -865,6 +865,9 @@ class V4CascadeBook(AbstractStrategyBook):
         if _current_atm > 0:
             self._fire(self._maybe_recenter_tracking_strikes(_current_atm))
         self._bars_5m[side].append(bar)
+        if self._use_pool_engine:
+            self._close_5m_bucket_pool_engine(side, bar)
+            return
         _pos_before = self._engine.position
         if side == "CE":
             events = self._engine.update(ce_bar=bar)
@@ -883,6 +886,34 @@ class V4CascadeBook(AbstractStrategyBook):
                     self._engine.update(ce_bar=b75)
                 else:
                     self._engine.update(pe_bar=b75)
+
+    def _close_5m_bucket_pool_engine(self, side: str, bar) -> None:
+        """2026-07-23: pool-engine path -- 75m/15m bars are derived by
+        resampling the FULL self._bars_5m[side] history (already
+        maintained identically for the old engine), not a per-day slice
+        (unlike the old engine's own 75m dispatch above, which is fine for
+        that engine's per-day-scoped Gate 2 but would be wrong for the
+        pool engine's genuinely multi-day HTF zone pool)."""
+        events = self._pool_engine.on_5m_bar(side, bar)
+        for ev in events:
+            self._emit_order(ev, pos_before=None)
+        self._persist_position()
+
+        if _bucket_end(bar.timestamp, 15, self._session_open):
+            r15 = resample_bars(self._bars_5m[side], 15, self._session_open)
+            if r15:
+                last15 = r15[-1]
+                b15 = _Bar(last15.timestamp, last15.close, last15.high, last15.low,
+                           last15.close, tf=15)
+                self._pool_engine.on_15m_bar(side, b15)
+
+        if _bucket_end(bar.timestamp, 75, self._session_open):
+            r75 = resample_bars(self._bars_5m[side], 75, self._session_open)
+            if r75:
+                last75 = r75[-1]
+                b75 = _Bar(last75.timestamp, last75.close, last75.high, last75.low,
+                           last75.close, tf=75)
+                self._pool_engine.on_75m_bar(side, b75)
 
     def _on_execution_tick(self, side: str, ltp: float, ts: datetime) -> None:
         """Mirrors _on_option_tick, but for the EXECUTION contract — only
