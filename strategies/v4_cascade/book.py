@@ -538,9 +538,13 @@ class V4CascadeBook(AbstractStrategyBook):
                            self._underlying, self._client_id, self._binding_id)
             self._clog.warning("historical replay tried to open/close a position — discarding "
                                "(replay must never touch live position).")
-            self._engine.position = (
+            restored = (
                 CascadePosition.from_dict(pos_snapshot) if pos_snapshot is not None else None
             )
+            if self._use_pool_engine:
+                self._pool_engine.position = restored
+            else:
+                self._engine.position = restored
 
     async def _fetch_execution_bars_5m(self, symbol: str) -> List["_Bar"]:
         """Fetch the EXECUTION strike's own historical+intraday 1m bars via
@@ -644,7 +648,16 @@ class V4CascadeBook(AbstractStrategyBook):
         _guard_replay_position pair the old engine's replay already uses
         (both generalized in Task 6 to branch on self._use_pool_engine),
         so a replay-caused phantom open/close is caught by the proven
-        value-comparison guard, not a fresh ad-hoc check."""
+        value-comparison guard, not a fresh ad-hoc check.
+
+        Resample windows below are sliced to the current bar's own
+        calendar day (`bars[:idx+1]` filtered by `.date()`) rather than
+        passed the full accumulated history -- this is a COST optimization
+        (avoids re-resampling ever-growing multi-day history on every single
+        bar), not a correctness requirement: resample_bars groups strictly
+        by (calendar day, bucket_idx), so a day-sliced window and the full
+        history produce identical bars for the current day either way --
+        cross-day contamination cannot happen in this resampling scheme."""
         if self._pool_engine is None:
             return
         _pos_snapshot = self._position_snapshot(self._pool_engine.position)
