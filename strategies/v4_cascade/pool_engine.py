@@ -153,11 +153,12 @@ class PoolCascadeEngine:
             if slot.ltf_zone is None:
                 slot.prev_5m_bar = bar
                 continue
-            prev = slot.prev_5m_bar
-            slot.prev_5m_bar = bar
-            if prev is None:
-                continue
+
             if not slot.pending_entry:
+                prev = slot.prev_5m_bar
+                slot.prev_5m_bar = bar
+                if prev is None:
+                    continue
                 triggered = bar.close > prev.high if bear else bar.close < prev.low
                 if triggered:
                     slot.pending_entry = True
@@ -168,6 +169,20 @@ class PoolCascadeEngine:
                 # candle causing a state transition isn't also the candle
                 # confirming the next stage).
                 continue
+
+            # Already pending entry (armed on a prior bar) -- this is exactly
+            # the kind of mid-tracking state the day-boundary reset above must
+            # NOT touch (design spec: only the trigger's own arm/re-arm check
+            # resets daily). Fall straight through to the limit-pierce check
+            # on ANY bar, including the first bar of a new day right after
+            # prev_5m_bar was just reset to None -- the pierce check below
+            # only needs slot.zone_low/zone_high (static) + this bar's
+            # high/low, never prev_5m_bar, so there is nothing to gate on.
+            # 2026-07-23 fix: previously the unconditional `prev is None ->
+            # continue` above ran before the pending_entry check and silently
+            # skipped this whole block (pierce included) on day 1 of a new
+            # session, delaying fill recognition by one 5m bar.
+            slot.prev_5m_bar = bar
             limit_price = slot.zone_low + self._entry_offset if bear else slot.zone_high - self._entry_offset
             pierced = bar.low <= limit_price if bear else bar.high >= limit_price
             if pierced:
