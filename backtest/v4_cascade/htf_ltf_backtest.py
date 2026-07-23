@@ -44,7 +44,7 @@ from strategies.v4_cascade.book import _Bar, _bucket_key, _to_5m_bars
 from strategies.v4_cascade.dataclasses import RollingBaseZone, TrancheLeg
 from strategies.v4_cascade.exits import ExitCheck, TrailingBaseTracker, check_t1
 from strategies.v4_cascade.rolling_base import (
-    _is_mitigated_bear, _is_mitigated_bull, resample_bars,
+    find_all_bear_zones, find_all_bull_zones, resample_bars,
 )
 
 SESSION_OPEN: Tuple[int, int] = (9, 15)
@@ -54,94 +54,6 @@ EOD_HOUR_MIN: Tuple[int, int] = (15, 15)
 # pool is bounded to match. A zone older than this ages out of the pool for
 # good, whether it ever fired or not.
 HTF_ZONE_MAX_AGE_DAYS = 10
-
-
-def find_all_bear_zones(bars: List["_Bar"], known_ref_ts: Optional[Set[datetime]] = None) -> List[RollingBaseZone]:
-    """Enumerate EVERY confirmed bear-side (sweep+reclaim) zone in ``bars``,
-    not just the newest one -- the multi-zone-pool counterpart to
-    rolling_base.find_bear_zone (which returns on the first newest-first
-    match, by design, for the single-zone HTF use case elsewhere). Same
-    3-candle rule (ref/sweep/reclaim strictly distinct candles) and the same
-    mitigation check, reused directly from rolling_base.py. ``known_ref_ts``:
-    ref timestamps already added to the pool (or already removed from it) --
-    never re-considered, so a zone that ages out or breaks is gone for
-    good, not rediscovered next bar."""
-    known_ref_ts = known_ref_ts or set()
-    n = len(bars)
-    found: List[RollingBaseZone] = []
-    for i in range(n - 2, -1, -1):
-        ref = bars[i]
-        if ref.timestamp in known_ref_ts:
-            continue
-        sellers_in_idx: Optional[int] = None
-        for j in range(i + 1, n):
-            if bars[j].low < ref.low:
-                sellers_in_idx = j
-                break
-        if sellers_in_idx is None:
-            continue
-        trapped_idx: Optional[int] = None
-        sweep_low = bars[sellers_in_idx].low
-        sweep_started_ts = bars[sellers_in_idx].timestamp
-        for k in range(sellers_in_idx + 1, n):
-            sweep_low = min(sweep_low, bars[k].low)
-            if bars[k].high > ref.high:
-                trapped_idx = k
-                break
-        if trapped_idx is None:
-            continue
-        trapped_ts = bars[trapped_idx].timestamp
-        entry_line = ref.low
-        if _is_mitigated_bear(bars, entry_line, sweep_low, trapped_idx=trapped_idx):
-            continue
-        found.append(RollingBaseZone(
-            reference_low=ref.low, reference_low_ts=ref.timestamp, prev_close=ref.close,
-            swept=True, sweep_low=sweep_low, sweep_started_ts=sweep_started_ts,
-            bars_since_sweep=trapped_idx - sellers_in_idx,
-            locked=True, lock_ts=trapped_ts,
-            entry_line=entry_line, sl_level=ref.high,
-        ))
-    return found
-
-
-def find_all_bull_zones(bars: List["_Bar"], known_ref_ts: Optional[Set[datetime]] = None) -> List[RollingBaseZone]:
-    """Symmetric to find_all_bear_zones -- buyers trapped (bearish read)."""
-    known_ref_ts = known_ref_ts or set()
-    n = len(bars)
-    found: List[RollingBaseZone] = []
-    for i in range(n - 2, -1, -1):
-        ref = bars[i]
-        if ref.timestamp in known_ref_ts:
-            continue
-        buyers_in_idx: Optional[int] = None
-        for j in range(i + 1, n):
-            if bars[j].high > ref.high:
-                buyers_in_idx = j
-                break
-        if buyers_in_idx is None:
-            continue
-        trapped_idx: Optional[int] = None
-        sweep_high = bars[buyers_in_idx].high
-        sweep_started_ts = bars[buyers_in_idx].timestamp
-        for k in range(buyers_in_idx + 1, n):
-            sweep_high = max(sweep_high, bars[k].high)
-            if bars[k].low < ref.low:
-                trapped_idx = k
-                break
-        if trapped_idx is None:
-            continue
-        trapped_ts = bars[trapped_idx].timestamp
-        entry_line = ref.high
-        if _is_mitigated_bull(bars, entry_line, sweep_high, trapped_idx=trapped_idx):
-            continue
-        found.append(RollingBaseZone(
-            reference_low=ref.high, reference_low_ts=ref.timestamp, prev_close=ref.close,
-            swept=True, sweep_low=sweep_high, sweep_started_ts=sweep_started_ts,
-            bars_since_sweep=trapped_idx - buyers_in_idx,
-            locked=True, lock_ts=trapped_ts,
-            entry_line=entry_line, sl_level=ref.low,
-        ))
-    return found
 
 
 def _zone_bounds(z: RollingBaseZone) -> Tuple[float, float]:
