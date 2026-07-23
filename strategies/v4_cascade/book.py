@@ -616,13 +616,16 @@ class V4CascadeBook(AbstractStrategyBook):
         # NEVER be allowed to open or close the live position. See
         # _guard_replay_position's docstring for the full explanation
         # (including the 2026-07-21 in-place-mutation fix).
-        _pos_snapshot = self._position_snapshot(self._engine.position)
-        _replay_through_engine(self._engine, spot_5m, ce_5m, pe_5m,
-                                on_daily_boundary=self._apply_eod_gate23_rules,
-                                session_open=self._session_open,
-                                eod_square_off=self._eod_hour_min,
-                                gate23_reset=self._gate23_hour_min)
-        self._guard_replay_position(_pos_snapshot)
+        if self._use_pool_engine:
+            self._replay_pool_engine_history(ce_5m, pe_5m)
+        else:
+            _pos_snapshot = self._position_snapshot(self._engine.position)
+            _replay_through_engine(self._engine, spot_5m, ce_5m, pe_5m,
+                                    on_daily_boundary=self._apply_eod_gate23_rules,
+                                    session_open=self._session_open,
+                                    eod_square_off=self._eod_hour_min,
+                                    gate23_reset=self._gate23_hour_min)
+            self._guard_replay_position(_pos_snapshot)
         self._history_ingested = True
         self._persist_position()
         logger.info("V4CascadeBook[%s/%s/%s]: history ingested — spot=%d CE=%d PE=%d 5m bars.",
@@ -631,6 +634,40 @@ class V4CascadeBook(AbstractStrategyBook):
         self._clog.info("history ingested — spot=%d CE=%d PE=%d 5m bars.",
                         len(spot_5m), len(ce_5m), len(pe_5m))
         return True
+
+    def _replay_pool_engine_history(self, ce_5m, pe_5m) -> None:
+        """Rebuilds the pool engine's HTF/LTF pool state from fetched
+        history -- mirrors _replay_through_engine's shape (chronological
+        5m feed, 75m/15m derived by resampling the growing history at each
+        boundary) but drives PoolCascadeEngine instead. Replay must never
+        touch a live position -- reuses the SAME _position_snapshot/
+        _guard_replay_position pair the old engine's replay already uses
+        (both generalized in Task 6 to branch on self._use_pool_engine),
+        so a replay-caused phantom open/close is caught by the proven
+        value-comparison guard, not a fresh ad-hoc check."""
+        if self._pool_engine is None:
+            return
+        _pos_snapshot = self._position_snapshot(self._pool_engine.position)
+        for side, bars in (("CE", ce_5m), ("PE", pe_5m)):
+            for idx, bar in enumerate(bars):
+                self._pool_engine.on_5m_bar(side, bar)
+                if _bucket_end(bar.timestamp, 15, self._session_open):
+                    window = [b for b in bars[:idx + 1] if b.timestamp.date() == bar.timestamp.date()]
+                    r15 = resample_bars(window, 15, self._session_open)
+                    if r15:
+                        last15 = r15[-1]
+                        self._pool_engine.on_15m_bar(side, _Bar(
+                            last15.timestamp, last15.close, last15.high, last15.low,
+                            last15.close, tf=15))
+                if _bucket_end(bar.timestamp, 75, self._session_open):
+                    window = [b for b in bars[:idx + 1] if b.timestamp.date() == bar.timestamp.date()]
+                    r75 = resample_bars(window, 75, self._session_open)
+                    if r75:
+                        last75 = r75[-1]
+                        self._pool_engine.on_75m_bar(side, _Bar(
+                            last75.timestamp, last75.close, last75.high, last75.low,
+                            last75.close, tf=75))
+        self._guard_replay_position(_pos_snapshot)
 
     # ── crypto (BTC/ETH) spot-only path — 2026-07-19, see module header ─────
     def _delta_symbol(self) -> str:
