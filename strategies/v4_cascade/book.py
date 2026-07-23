@@ -1046,6 +1046,9 @@ class V4CascadeBook(AbstractStrategyBook):
             self._apply_eod_gate23_rules(ts)
 
     def _force_eod_square_off(self, ts: datetime) -> None:
+        if self._use_pool_engine:
+            self._force_eod_square_off_pool_engine(ts)
+            return
         pos = self._engine.position
         if pos is None or not pos.is_open:
             return
@@ -1066,6 +1069,31 @@ class V4CascadeBook(AbstractStrategyBook):
                 side=pos.side, tranche=tranche, reason="eod_force_close",
                 price_hint=leg.entry_price, timestamp=ts,
             ))
+        pos.status = "closed"
+        pos.close_time = ts
+        self._persist_position()
+
+    def _force_eod_square_off_pool_engine(self, ts: datetime) -> None:
+        pos = self._pool_engine.position
+        if pos is None or not pos.is_open:
+            return
+        logger.info("V4CascadeBook[%s/%s/%s]: EOD %02d:%02d force square-off (pool engine).",
+                    self._underlying, self._client_id, self._binding_id,
+                    self._eod_hour_min[0], self._eod_hour_min[1])
+        price = self._live_price.get(pos.side, 0.0) or 0.0
+        for tranche, leg in (("T1", pos.t1), ("T2", pos.t2)):
+            if leg is None or leg.status != "open":
+                continue
+            fill_price = price if price > 0 else leg.entry_price
+            leg.status = "closed"
+            leg.close_price = fill_price
+            leg.close_reason = "eod_force_close"
+            leg.close_time = ts
+            self._emit_order(CascadeEvent(
+                event_type=CascadeEventType.CLOSE_LONG_CE if pos.side == "CE" else CascadeEventType.CLOSE_LONG_PE,
+                side=pos.side, tranche=tranche, reason="eod_force_close",
+                price_hint=fill_price, timestamp=ts,
+            ), pos_before=None)
         pos.status = "closed"
         pos.close_time = ts
         self._persist_position()
@@ -1491,8 +1519,8 @@ class V4CascadeBook(AbstractStrategyBook):
         # this hazard.
         pos = self._pending_fills.get(event_id)
         if pos is None:
-            pos = self._engine.position
-        if pos is not None and pos.is_open and not self._is_crypto and exec_strike:
+            pos = self._pool_engine.position if self._use_pool_engine else self._engine.position
+        if pos is not None and pos.is_open and not self._is_crypto and not self._use_pool_engine and exec_strike:
             exec_bars = await self._fetch_execution_bars_5m(self._exec_symbol[ev.side])
             is_short = self._is_crypto and ev.side == "PE"
             native = compute_execution_native_risk(
@@ -1549,13 +1577,28 @@ class V4CascadeBook(AbstractStrategyBook):
         pos_before, the CLOSE event would incorrectly look up legs on the
         wrong (new) position."""
         from execution_bridge.cascade_bridge import CascadeOrderEvent
-        pos = self._engine.position
+        # 2026-07-23: pool-engine positions live on self._pool_engine.position,
+        # a completely separate object from the old engine's self._engine.
+        # position -- mirrors the identical branch already used by
+        # _persist_position/_restore_position. Without this, pos would stay
+        # None for every pool-engine call, silently skipping BOTH the OPEN
+        # branch below (is_open_ev and pos is not None) and the CLOSE
+        # branch's close_pos lookup (which falls back to pos_before, always
+        # None for pool-engine callers) -- i.e. no order would ever be
+        # emitted at all.
+        pos = self._pool_engine.position if self._use_pool_engine else self._engine.position
         is_open_ev = ev.event_type in (CascadeEventType.OPEN_LONG_CE, CascadeEventType.OPEN_LONG_PE)
         is_close_ev = ev.event_type in (CascadeEventType.CLOSE_LONG_CE, CascadeEventType.CLOSE_LONG_PE)
         ts = ev.timestamp or datetime.now(IST)
 
         if is_open_ev and pos is not None:
-            exec_strike = self._resolve_execution_strike(ev.side)
+            # 2026-07-23: pool-engine positions trade the TRACKING contract
+            # directly (user-confirmed) -- no separate execution strike, no
+            # scale mapping between two different contracts' price levels.
+            if self._use_pool_engine:
+                exec_strike = self._ce_strike if ev.side == "CE" else self._pe_strike
+            else:
+                exec_strike = self._resolve_execution_strike(ev.side)
             if pos.t1 is not None:
                 pos.t1.strike = exec_strike
             if pos.t2 is not None:
