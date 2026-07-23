@@ -527,7 +527,7 @@ class V4CascadeBook(AbstractStrategyBook):
         the full VALUE (to_dict()) instead of identity catches both cases
         uniformly. Call with the pre-replay snapshot (_position_snapshot)
         immediately after the replay call returns."""
-        after = self._engine.position
+        after = self._pool_engine.position if self._use_pool_engine else self._engine.position
         touched = (
             (after is None) != (pos_snapshot is None)
             or (after is not None and pos_snapshot is not None and after.to_dict() != pos_snapshot)
@@ -1337,6 +1337,9 @@ class V4CascadeBook(AbstractStrategyBook):
         tracking_current_stop fields (see TrancheLeg/CascadePosition
         docstrings) -- falls back to T2's structural sl_price for positions
         persisted before this fix added tracking_current_stop."""
+        if self._use_pool_engine:
+            self._restore_pool_engine_tracker_state()
+            return
         pos = self._engine.position
         if pos is None or not pos.is_open:
             return
@@ -1352,6 +1355,26 @@ class V4CascadeBook(AbstractStrategyBook):
             logger.info("V4CascadeBook[%s/%s/%s]: restored T2 trailing-stop tracker for open "
                        "position (side=%s, current_stop=%s).", self._underlying, self._client_id,
                        self._binding_id, pos.side, initial_stop)
+            self._clog.info("restored T2 trailing-stop tracker (side=%s, current_stop=%s).",
+                            pos.side, initial_stop)
+
+    def _restore_pool_engine_tracker_state(self) -> None:
+        """Pool-engine counterpart: no separate _tracking_entry_price dict to
+        rebuild (each TrancheLeg already stores its own entry_price directly,
+        since the pool engine trades the tracking contract with no scale
+        mapping) -- only T2's TrailingBaseTracker needs reconstructing."""
+        pos = self._pool_engine.position
+        if pos is None or not pos.is_open:
+            return
+        t2 = pos.t2
+        if t2 is not None and t2.status == "open":
+            bear = pos.side == "CE"
+            initial_stop = (t2.tracking_current_stop if t2.tracking_current_stop is not None
+                            else (t2.sl_price or None))
+            self._pool_engine._trail[pos.side] = TrailingBaseTracker(bear=bear, initial_stop=initial_stop)
+            logger.info("V4CascadeBook[%s/%s/%s]: restored T2 trailing-stop tracker for open "
+                       "pool-engine position (side=%s, current_stop=%s).", self._underlying,
+                       self._client_id, self._binding_id, pos.side, initial_stop)
             self._clog.info("restored T2 trailing-stop tracker (side=%s, current_stop=%s).",
                             pos.side, initial_stop)
 
@@ -1656,7 +1679,7 @@ class V4CascadeBook(AbstractStrategyBook):
 
     # ── persistence ──────────────────────────────────────────────────────────
     def _persist_position(self) -> None:
-        pos = self._engine.position
+        pos = self._pool_engine.position if self._use_pool_engine else self._engine.position
         if pos is not None:
             position_store.save(self._persist_key, pos.to_dict())
         else:
@@ -1669,12 +1692,14 @@ class V4CascadeBook(AbstractStrategyBook):
             data = None
         if data:
             try:
-                self._engine.position = CascadePosition.from_dict(data)
+                restored = CascadePosition.from_dict(data)
+                if self._use_pool_engine:
+                    self._pool_engine.position = restored
+                else:
+                    self._engine.position = restored
                 logger.info("V4CascadeBook[%s/%s/%s]: restored open position from disk (side=%s).",
-                            self._underlying, self._client_id, self._binding_id,
-                            self._engine.position.side)
-                self._clog.info("restored open position from disk (side=%s).",
-                                self._engine.position.side)
+                            self._underlying, self._client_id, self._binding_id, restored.side)
+                self._clog.info("restored open position from disk (side=%s).", restored.side)
             except Exception:
                 logger.exception("V4CascadeBook[%s]: position restore failed.", self._underlying)
 
