@@ -5,6 +5,25 @@ TRACKING contract's own premium directly (not spot) and trades it directly
 (no execution-strike split) -- see
 docs/superpowers/specs/2026-07-23-v4-cascade-htf-ltf-live-design.md.
 
+2026-07-23 correction: this engine is ALWAYS a buyer -- long CE or long PE,
+never a short. Both sides look for the SAME pattern on their OWN premium
+chart: a bear trap (price sweeps below a demand-zone floor, sellers who
+shorted/sold into the sweep get trapped, price reclaims back up) -> buy.
+There is no bull-trap branch and no CE/PE sign-flip anywhere in this file
+-- that distinction only made sense for the OLD Index/spot-based Gate 1
+(where CE needed an Index bear trap and PE needed an Index bull trap,
+since the index itself only moves one direction at a time). Scanning each
+option's OWN premium directly removes that asymmetry entirely: a demand-
+zone reclaim on the CE premium chart and a demand-zone reclaim on the PE
+premium chart mean exactly the same thing (buy that option), independently.
+
+2026-07-23 correction: the 15m LTF trap is NOT a precondition for the 5m
+entry trigger to arm or fire -- entry is driven by the 75m zone re-entry
+plus the 5m break-of-structure alone. The 15m trap (if one has locked
+inside the zone by fill time) is consulted ONLY inside _open_position, to
+set T1's target; if none has locked yet, T1 falls back to the same target
+as T2 (the 75m zone's own opposite extreme).
+
 Fed incrementally via on_75m_bar/on_15m_bar/on_5m_bar (mirrors
 SpotConfirmTracker/IndexGatedPremiumScanner's existing shape), unlike the
 backtest's whole-array replay loop -- the SAME class serves both the boot-
@@ -21,7 +40,7 @@ from strategies.v4_cascade.dataclasses import (
     CascadeEvent, CascadeEventType, CascadePosition, RollingBaseZone, TrancheLeg,
 )
 from strategies.v4_cascade.exits import ExitCheck, TrailingBaseTracker, check_t1
-from strategies.v4_cascade.rolling_base import find_all_bear_zones, find_all_bull_zones
+from strategies.v4_cascade.rolling_base import find_all_bear_zones
 
 HTF_ZONE_MAX_AGE_DAYS = 10
 
@@ -96,8 +115,6 @@ class PoolCascadeEngine:
     def on_75m_bar(self, side: str, bar) -> None:
         if self.is_open() and self.position.side == side:
             return
-        bear = side == "CE"
-        finder = find_all_bear_zones if bear else find_all_bull_zones
         self._all_75m[side].append(bar)
         pool = self._pool[side]
         known = self._known_ref_ts[side]
@@ -105,7 +122,7 @@ class PoolCascadeEngine:
         for slot in list(pool):
             if slot.tracking:
                 continue
-            broken = bar.close < slot.zone_low if bear else bar.close > slot.zone_high
+            broken = bar.close < slot.zone_low
             aged_out = (bar.timestamp - slot.zone.reference_low_ts) >= timedelta(days=HTF_ZONE_MAX_AGE_DAYS)
             if broken or aged_out:
                 pool.remove(slot)
@@ -123,7 +140,7 @@ class PoolCascadeEngine:
 
         lookback_start = bar.timestamp - timedelta(days=HTF_ZONE_MAX_AGE_DAYS)
         search_bars = [b for b in self._all_75m[side] if b.timestamp >= lookback_start]
-        for z in finder(search_bars, known_ref_ts=known):
+        for z in find_all_bear_zones(search_bars, known_ref_ts=known):
             known.add(z.reference_low_ts)
             pool.append(_ZoneSlot(z))
 
@@ -131,13 +148,11 @@ class PoolCascadeEngine:
     def on_15m_bar(self, side: str, bar) -> None:
         if self.is_open() and self.position.side == side:
             return
-        bear = side == "CE"
-        finder = find_all_bear_zones if bear else find_all_bull_zones
         for slot in self._pool[side]:
             if not slot.tracking:
                 continue
             slot.bars_15m.append(bar)
-            zones = finder(slot.bars_15m)
+            zones = find_all_bear_zones(slot.bars_15m)
             if zones:
                 slot.ltf_zone = zones[0]
 
@@ -146,7 +161,6 @@ class PoolCascadeEngine:
         if self.is_open() and self.position.side == side:
             return self._check_exits(side, bar)
 
-        bear = side == "CE"
         pool = self._pool[side]
 
         # 2026-07-23: intraday-only trigger -- the first 5m candle of a new
@@ -165,21 +179,23 @@ class PoolCascadeEngine:
         for slot in list(pool):
             if not slot.tracking:
                 continue
-            broken = bar.close < slot.zone_low if bear else bar.close > slot.zone_high
+            broken = bar.close < slot.zone_low
             aged_out = (bar.timestamp - slot.zone.reference_low_ts) >= timedelta(days=HTF_ZONE_MAX_AGE_DAYS)
             if broken or aged_out:
                 pool.remove(slot)
                 continue
-            if slot.ltf_zone is None:
-                slot.prev_5m_bar = bar
-                continue
 
+            # 2026-07-23: the trigger arms/fires off the 75m zone + 5m
+            # break-of-structure ALONE -- it does NOT wait for slot.ltf_zone
+            # to exist first. The 15m trap is only ever consulted later,
+            # inside _open_position, to set T1's target at the instant of
+            # fill (falling back to T2's target if none has locked yet).
             if not slot.pending_entry:
                 prev = slot.prev_5m_bar
                 slot.prev_5m_bar = bar
                 if prev is None:
                     continue
-                triggered = bar.close > prev.high if bear else bar.close < prev.low
+                triggered = bar.close > prev.high
                 if triggered:
                     slot.pending_entry = True
                     slot.trigger_ts = bar.timestamp
@@ -196,26 +212,30 @@ class PoolCascadeEngine:
             # resets daily). Fall straight through to the limit-pierce check
             # on ANY bar, including the first bar of a new day right after
             # prev_5m_bar was just reset to None -- the pierce check below
-            # only needs slot.zone_low/zone_high (static) + this bar's
-            # high/low, never prev_5m_bar, so there is nothing to gate on.
+            # only needs slot.zone_low (static) + this bar's low, never
+            # prev_5m_bar, so there is nothing to gate on.
             # 2026-07-23 fix: previously the unconditional `prev is None ->
             # continue` above ran before the pending_entry check and silently
             # skipped this whole block (pierce included) on day 1 of a new
             # session, delaying fill recognition by one 5m bar.
             slot.prev_5m_bar = bar
-            limit_price = slot.zone_low + self._entry_offset if bear else slot.zone_high - self._entry_offset
-            pierced = bar.low <= limit_price if bear else bar.high >= limit_price
+            limit_price = slot.zone_low + self._entry_offset
+            pierced = bar.low <= limit_price
             if pierced:
                 events.append(self._open_position(side, slot, limit_price, bar.timestamp))
                 return events
         return events
 
     def _open_position(self, side: str, slot: _ZoneSlot, fill_price: float, ts) -> CascadeEvent:
-        bear = side == "CE"
         htf, ltf = slot.zone, slot.ltf_zone
-        sl_price = slot.zone_low - self._entry_offset if bear else slot.zone_high + self._entry_offset
-        t1_target = ltf.sl_level
+        sl_price = slot.zone_low - self._entry_offset
         t2_target = htf.sl_level
+        # 2026-07-23: the 15m trap is consulted ONLY here, at the instant of
+        # fill -- if the 15m chart hasn't locked a clean trap inside this
+        # zone yet by the time the trade fires, T1 falls back to the SAME
+        # target as T2 (the 75m zone's own opposite extreme) rather than
+        # blocking entry or going targetless.
+        t1_target = ltf.sl_level if ltf is not None else t2_target
         qty = self._cfg.tranche_qty
         t1 = TrancheLeg(tranche="T1", option_type=side, strike=0.0, qty=qty,
                          entry_price=fill_price, entry_time=ts, entry_reason="htf_ltf_pool_cascade",
@@ -230,23 +250,23 @@ class PoolCascadeEngine:
             t1=t1, t2=t2, open_time=ts,
             tracking_entry_price=fill_price,
         )
-        self._trail[side] = TrailingBaseTracker(bear=bear, initial_stop=sl_price)
+        self._trail[side] = TrailingBaseTracker(bear=True, initial_stop=sl_price)
         # A position just opened -- only one at a time per side. Discard
         # the whole pool; a fresh one builds up again once this closes.
         self._pool[side] = []
-        event_type = CascadeEventType.OPEN_LONG_CE if bear else CascadeEventType.OPEN_LONG_PE
-        entry_reason = "gate3_bear_trap_reclaim" if bear else "gate3_bull_trap_reclaim"
+        event_type = CascadeEventType.OPEN_LONG_CE if side == "CE" else CascadeEventType.OPEN_LONG_PE
         audit = {
             "htf_ref_ts": htf.reference_low_ts.isoformat() if htf.reference_low_ts else None,
             "htf_lock_ts": htf.lock_ts.isoformat() if htf.lock_ts else None,
             "reentry_ts": slot.reentry_ts.isoformat() if slot.reentry_ts else None,
-            "ltf_ref_ts": ltf.reference_low_ts.isoformat() if ltf.reference_low_ts else None,
+            "ltf_ref_ts": ltf.reference_low_ts.isoformat() if ltf is not None and ltf.reference_low_ts else None,
+            "ltf_found_at_fill": ltf is not None,
             "trigger_ts": slot.trigger_ts.isoformat() if slot.trigger_ts else None,
             "zone_low": slot.zone_low, "zone_high": slot.zone_high,
             "computed_sl_price": sl_price, "t1_target": t1_target, "t2_target": t2_target,
         }
         return CascadeEvent(event_type=event_type, side=side, price_hint=fill_price,
-                             reason=entry_reason, sl_price=sl_price, target_price=t1_target,
+                             reason="gate3_bear_trap_reclaim", sl_price=sl_price, target_price=t1_target,
                              timestamp=ts, audit=audit)
 
     def _check_exits(self, side: str, bar) -> List[CascadeEvent]:
@@ -254,13 +274,14 @@ class PoolCascadeEngine:
         pos = self.position
         if pos is None or pos.side != side or not pos.is_open:
             return events
-        bear = side == "CE"
-        is_short = not bear
+        # Always a long buyer -- never short, on either side (see module
+        # docstring). check_t1's is_short branch (SL on the bar's high,
+        # target on the bar's low) never applies here.
         t1, t2 = pos.t1, pos.t2
         trail = self._trail[side]
 
         if t1 is not None and t1.status == "open":
-            r: ExitCheck = check_t1(t1, bar, is_short=is_short)
+            r: ExitCheck = check_t1(t1, bar, is_short=False)
             if r.hit:
                 t1.status = "closed"
                 t1.close_price = r.price

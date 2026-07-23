@@ -2,7 +2,13 @@
 incremental adaptation of the validated multi-zone-pool HTF/LTF cascade
 (backtest/v4_cascade/htf_ltf_backtest.py). Trades the tracking contract
 directly (strike=0.0 here -- book.py fills in the real tracking strike at
-_emit_order time, same convention the pure V4CascadeEngine already uses)."""
+_emit_order time, same convention the pure V4CascadeEngine already uses).
+
+2026-07-23: this engine is ALWAYS a buyer -- both CE and PE look for the
+SAME bear-trap pattern (demand-zone sweep+reclaim) on their OWN premium
+chart, never a bull-trap/short-style mirror. Every test below exercises
+this directly: the PE tests use the identical zone-shape/geometry as the
+CE tests, proving there is no side-flipped branch left anywhere."""
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -50,6 +56,25 @@ def test_htf_zone_added_to_pool_on_reentry():
     assert eng._pool["CE"][0].tracking is True
 
 
+def test_htf_zone_added_to_pool_on_reentry_pe_same_bear_trap_shape():
+    """2026-07-23: PE must find the SAME bear-trap pattern (demand-zone
+    sweep+reclaim) on its OWN premium chart -- there is no bull-trap branch
+    for PE anymore. Identical bars/assertions to the CE test above, just
+    fed to the "PE" side, proving on_75m_bar no longer branches on side."""
+    eng = _engine()
+    eng.on_75m_bar("PE", _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("PE", _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("PE", _bar75(2, 96, 115, 95, 112))
+    assert len(eng._pool["PE"]) == 1
+    slot = eng._pool["PE"][0]
+    assert slot.zone_low == 90 and slot.zone_high == 100
+    assert slot.tracking is False
+    eng.on_75m_bar("PE", _bar75(3, 105, 108, 92, 96))
+    assert eng._pool["PE"][0].tracking is True
+    # CE's pool is completely untouched by feeding PE bars.
+    assert eng._pool["CE"] == []
+
+
 def test_full_chain_produces_open_event():
     eng = _engine()
     eng.on_75m_bar("CE", _bar75(0, 105, 110, 100, 105))
@@ -78,9 +103,37 @@ def test_full_chain_produces_open_event():
     assert eng.position is not None
     assert eng.position.t1.entry_price == 95.0
     assert eng.position.t1.sl_price == 85.0  # zone_low(90) - offset(5)
-    assert eng.position.t1.target_price == 97.0  # ltf_zone.sl_level
+    assert eng.position.t1.target_price == 97.0  # ltf_zone.sl_level (locked before fill)
     assert eng.position.t2.target_price is None  # T2 has no fixed target field set at open (matches V4CascadeEngine convention)
     assert eng._pool["CE"] == []  # pool cleared on fill
+
+
+def test_5m_trigger_fires_without_any_15m_zone_ever_forming():
+    """2026-07-23: the 5m trigger must NOT wait for slot.ltf_zone to exist --
+    entry is driven by the 75m zone re-entry + 5m break-of-structure alone.
+    Here on_15m_bar is never called at all, yet the trade still fires."""
+    eng = _engine()
+    eng.on_75m_bar("CE", _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("CE", _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("CE", _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("CE", _bar75(3, 105, 108, 92, 96))  # re-entry
+    assert eng._pool["CE"][0].tracking is True
+    assert eng._pool["CE"][0].ltf_zone is None  # no 15m data fed at all
+
+    ltf_base = _BASE + timedelta(minutes=75 * 4)
+    events = eng.on_5m_bar("CE", _bar5(ltf_base, 30, 93, 94, 92, 93))
+    assert events == []
+    events = eng.on_5m_bar("CE", _bar5(ltf_base, 35, 93, 95, 92, 94.5))  # arms (94.5 > 94)
+    assert events == []
+    events = eng.on_5m_bar("CE", _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(95)
+    assert len(events) == 1
+    assert events[0].event_type == CascadeEventType.OPEN_LONG_CE
+    assert events[0].audit["ltf_found_at_fill"] is False
+    assert eng.position is not None
+    # No 15m trap ever locked -> T1 falls back to T2's target (htf.sl_level =
+    # 110, the 75m ref candle bar75(0)'s own high).
+    assert eng.position.t1.target_price == 110.0
+    assert eng._pool["CE"] == []
 
 
 def test_intraday_trigger_reset_skips_cross_day_comparison():
@@ -90,8 +143,6 @@ def test_intraday_trigger_reset_skips_cross_day_comparison():
     slot_bar = _Bar(day1, 100, 101, 99, 100, tf=5)
     # Manually seed a tracking, ltf-ready pool slot (bypassing the full
     # 75m/15m chain, which is exercised by the other tests).
-    from strategies.v4_cascade.pool_engine import _ZoneSlot
-    from strategies.v4_cascade.dataclasses import RollingBaseZone
     zone = RollingBaseZone(entry_line=100.0, sweep_low=90.0, sl_level=110.0,
                             reference_low_ts=day1, lock_ts=day1, locked=True)
     slot = _ZoneSlot(zone)
@@ -145,54 +196,32 @@ def test_pending_entry_pierce_fires_on_first_bar_of_new_day():
     assert eng.position.t1.entry_price == 95.0  # limit price = zone_low(90) + offset(5)
 
 
-def _open_ce_position(eng):
-    """Directly builds a CE (bear-side, long) position + T2 trailing tracker,
-    mirroring _open_position's own construction, for exercising _check_exits/
-    force_eod_close without needing the full 75m/15m/5m discovery chain."""
+def _open_position(eng, side):
+    """Builds a long position (always the bear-trap/long geometry: SL below
+    entry, target above entry) on either side, mirroring _open_position's
+    own construction, for exercising _check_exits/force_eod_close without
+    needing the full 75m/15m/5m discovery chain."""
     ts0 = _BASE
     entry, sl, t1_target = 100.0, 90.0, 106.0
     qty = eng._cfg.tranche_qty
-    t1 = TrancheLeg(tranche="T1", option_type="CE", strike=0.0, qty=qty,
+    t1 = TrancheLeg(tranche="T1", option_type=side, strike=0.0, qty=qty,
                      entry_price=entry, entry_time=ts0, entry_reason="test",
                      sl_price=sl, target_price=t1_target)
-    t2 = TrancheLeg(tranche="T2", option_type="CE", strike=0.0, qty=qty,
+    t2 = TrancheLeg(tranche="T2", option_type=side, strike=0.0, qty=qty,
                      entry_price=entry, entry_time=ts0, entry_reason="test",
                      sl_price=sl, target_price=None, tracking_current_stop=sl)
     eng.position = CascadePosition(
-        underlying="NIFTY", side="CE", tracking_strike=0.0, execution_strike=0.0,
+        underlying="NIFTY", side=side, tracking_strike=0.0, execution_strike=0.0,
         atm_at_trigger=0.0, entry_spot=0.0, t1=t1, t2=t2, open_time=ts0,
         tracking_entry_price=entry,
     )
-    eng._trail["CE"] = TrailingBaseTracker(bear=True, initial_stop=sl)
-    return t1, t2
-
-
-def _open_pe_position(eng):
-    """Symmetric PE (bull-side) position -- is_short=not bear=True, so SL
-    sits ABOVE entry and target sits BELOW entry (mirrors _open_position's
-    bull branch: sl_price=zone_high+offset, target=ltf.sl_level which is
-    below the zone)."""
-    ts0 = _BASE
-    entry, sl, t1_target = 100.0, 110.0, 94.0
-    qty = eng._cfg.tranche_qty
-    t1 = TrancheLeg(tranche="T1", option_type="PE", strike=0.0, qty=qty,
-                     entry_price=entry, entry_time=ts0, entry_reason="test",
-                     sl_price=sl, target_price=t1_target)
-    t2 = TrancheLeg(tranche="T2", option_type="PE", strike=0.0, qty=qty,
-                     entry_price=entry, entry_time=ts0, entry_reason="test",
-                     sl_price=sl, target_price=None, tracking_current_stop=sl)
-    eng.position = CascadePosition(
-        underlying="NIFTY", side="PE", tracking_strike=0.0, execution_strike=0.0,
-        atm_at_trigger=0.0, entry_spot=0.0, t1=t1, t2=t2, open_time=ts0,
-        tracking_entry_price=entry,
-    )
-    eng._trail["PE"] = TrailingBaseTracker(bear=False, initial_stop=sl)
+    eng._trail[side] = TrailingBaseTracker(bear=True, initial_stop=sl)
     return t1, t2
 
 
 def test_check_exits_ce_t1_target_then_breakeven_ratchet_then_t2_trailing_stop():
     eng = _engine()
-    t1, t2 = _open_ce_position(eng)
+    t1, t2 = _open_position(eng, "CE")
 
     # Bar 1: T1's fixed 2R target (106) hit on the bar's HIGH (long/not-short
     # branch of check_t1). Bar's low (105) stays above the post-ratchet
@@ -221,28 +250,26 @@ def test_check_exits_ce_t1_target_then_breakeven_ratchet_then_t2_trailing_stop()
     assert eng.position.status == "closed"
 
 
-def test_check_exits_pe_bull_side_is_short_stop_above_target_below():
+def test_check_exits_pe_same_long_geometry_as_ce():
+    """2026-07-23: PE is ALSO a plain long buy (never short-style) -- SL
+    below entry, target above entry, breakeven ratchet moves UP, exactly
+    like CE. Identical bars/assertions to the CE test above, on "PE"."""
     eng = _engine()
-    t1, t2 = _open_pe_position(eng)
+    t1, t2 = _open_position(eng, "PE")
 
-    # Bar 1: T1's target (94, BELOW entry) hit on the bar's LOW -- the
-    # is_short=True branch of check_t1. Bar's high (99) stays below the
-    # post-ratchet stop (100) so T2 does not also close this bar.
-    bar1 = _bar5(_BASE, 5, 97, 99, 93, 94)
+    bar1 = _bar5(_BASE, 5, 104, 107, 105, 106)
     events1 = eng._check_exits("PE", bar1)
     assert len(events1) == 1
     assert events1[0].tranche == "T1"
     assert events1[0].reason == "t1_target_2r"
     assert t1.status == "closed"
     assert t2.status == "open"
-    # Breakeven ratchet moved T2's trailing stop DOWN from the original
-    # structural SL (110, above entry) to entry (100) -- for a short-style
-    # PE position the ratchet tightens downward, not upward.
     assert eng._trail["PE"].current_stop == 100.0
+    assert t2.trail_stop_price == 100.0
     assert t2.tracking_current_stop == 100.0
+    assert eng.position.status == "open"
 
-    # Bar 2: T2's ratcheted trailing stop (100) is hit on the bar's HIGH.
-    bar2 = _bar5(_BASE, 10, 99, 101, 98, 100)
+    bar2 = _bar5(_BASE, 10, 99, 100, 95, 98)
     events2 = eng._check_exits("PE", bar2)
     assert len(events2) == 1
     assert events2[0].tranche == "T2"
@@ -253,7 +280,7 @@ def test_check_exits_pe_bull_side_is_short_stop_above_target_below():
 
 def test_force_eod_close_closes_both_open_legs():
     eng = _engine()
-    t1, t2 = _open_ce_position(eng)
+    t1, t2 = _open_position(eng, "CE")
     assert t1.status == "open" and t2.status == "open"
 
     eod_ts = _BASE + timedelta(hours=6)
