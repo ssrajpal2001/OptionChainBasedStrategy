@@ -273,6 +273,28 @@ class V4CascadeBook(AbstractStrategyBook):
         _date_str = datetime.now(IST).strftime("%Y%m%d")
         self._clog = make_strategy_logger(f"v4_{_tag}_{_date_str}")
 
+    # ── active-engine position accessor ──────────────────────────────────
+    # 2026-07-23 whole-branch review fix: a pool-engine book's real position
+    # lives on self._pool_engine.position, never self._engine.position (the
+    # old engine is still constructed alongside it but never opens/closes a
+    # position for a pool book). Several methods not touched by any of the
+    # 9 pool-engine tasks kept reading self._engine.position unconditionally
+    # and so silently saw "no position" for pool books. The ternary below
+    # was ALREADY the proven-correct pattern in _persist_position/
+    # _restore_position/_guard_replay_position/_emit_order; this property
+    # (+ setter) centralizes it so every other call site routes through one
+    # place instead of re-deriving the same ternary by hand.
+    @property
+    def _active_position(self) -> Optional[CascadePosition]:
+        return self._pool_engine.position if self._use_pool_engine else self._engine.position
+
+    @_active_position.setter
+    def _active_position(self, pos: Optional[CascadePosition]) -> None:
+        if self._use_pool_engine:
+            self._pool_engine.position = pos
+        else:
+            self._engine.position = pos
+
     def _fire(self, coro) -> None:
         """Fire-and-forget an async EventBus.publish() from a sync call
         site, keeping a strong reference until it completes."""
@@ -812,7 +834,11 @@ class V4CascadeBook(AbstractStrategyBook):
         """Client Run-toggle-OFF square-off — routes a real closing order for
         each open leg through the bridge (paper: local sim-fill; live: real
         broker close), same path as a normal T1/T2 exit."""
-        pos = self._engine.position
+        # 2026-07-23 whole-branch review fix (I1): was self._engine.position
+        # (always None for a pool book), so this was a complete no-op for
+        # pool-engine books -- the dashboard's manual/Run-toggle-OFF flatten
+        # path closed 0 legs and returned before emitting anything.
+        pos = self._active_position
         if pos is None or not pos.is_open:
             return 0
         ts = datetime.now(IST)
@@ -1163,7 +1189,7 @@ class V4CascadeBook(AbstractStrategyBook):
         position slips past both checks."""
         if self._recentering:
             return
-        pos = self._engine.position
+        pos = self._active_position
         if pos is not None and pos.is_open:
             return
         if self._tracking_reference_atm is None:
@@ -1210,7 +1236,7 @@ class V4CascadeBook(AbstractStrategyBook):
             # mutations below -- cheap defense-in-depth against a position
             # having opened on a separate _close_5m_bucket call while this
             # coroutine was suspended at either await above.
-            pos = self._engine.position
+            pos = self._active_position
             if pos is not None and pos.is_open:
                 logger.warning("V4CascadeBook[%s/%s/%s]: re-center aborted post-fetch — a "
                                "position opened during the REST round-trip; keeping existing "
@@ -1237,28 +1263,47 @@ class V4CascadeBook(AbstractStrategyBook):
             # sweep/reclaim pattern on the new strike's very first bar.
             self._buckets["CE"] = None
             self._buckets["PE"] = None
-            for side in ("CE", "PE"):
-                self._engine._scanners[side].reset()
-            # [] for the spot-bar list is intentional -- Gate 1/self._spot_confirm
-            # never depended on the tracking option strike, so a re-center must
-            # not re-replay/re-touch it at all. _replay_through_engine treats a
-            # falsy spot_5m as "no 75m spot buckets" (spot_75m_by_key={}), so
-            # every bucket_closing branch resolves sbar75=None and engine.update
-            # is called with spot_bar=None throughout -- _spot_confirm.on_75m_bar
-            # is never invoked, same object/state as before this call.
-            #
-            # Replay must ONLY rebuild HTF/MTF zone/scanner state -- it must
-            # NEVER be allowed to open or close the live position. Same guard
-            # as _ingest_history (see _guard_replay_position's docstring):
-            # last-resort net in case a position slips past both flatness
-            # checks above.
-            _pos_snapshot = self._position_snapshot(self._engine.position)
-            _replay_through_engine(self._engine, [], ce_5m, pe_5m,
-                                    on_daily_boundary=self._apply_eod_gate23_rules,
-                                    session_open=self._session_open,
-                                    eod_square_off=self._eod_hour_min,
-                                    gate23_reset=self._gate23_hour_min)
-            self._guard_replay_position(_pos_snapshot)
+            # 2026-07-23 whole-branch review fix (C1): a pool-engine book
+            # never touches self._engine (it's still constructed but inert
+            # for pool books), so resetting/re-replaying INTO it here was a
+            # complete no-op for the thing that actually matters -- the pool
+            # engine's own per-side zone pool (self._pool_engine._pool,
+            # _all_75m, _known_ref_ts) kept accumulating 75m bars from the
+            # OLD strike forever, and after this swap would start mixing in
+            # the NEW strike's bars into the SAME zone-pool/dedup state --
+            # two different instruments' price scales feeding one HTF zone
+            # search window. reset_side() clears that per-side state (mirrors
+            # the old engine's scanner.reset()) before _replay_pool_engine_
+            # history rebuilds it from the freshly-fetched new-strike bars
+            # (that helper already wraps its own _position_snapshot/
+            # _guard_replay_position pair -- see its docstring).
+            if self._use_pool_engine:
+                for side in ("CE", "PE"):
+                    self._pool_engine.reset_side(side)
+                self._replay_pool_engine_history(ce_5m, pe_5m)
+            else:
+                for side in ("CE", "PE"):
+                    self._engine._scanners[side].reset()
+                # [] for the spot-bar list is intentional -- Gate 1/self._spot_confirm
+                # never depended on the tracking option strike, so a re-center must
+                # not re-replay/re-touch it at all. _replay_through_engine treats a
+                # falsy spot_5m as "no 75m spot buckets" (spot_75m_by_key={}), so
+                # every bucket_closing branch resolves sbar75=None and engine.update
+                # is called with spot_bar=None throughout -- _spot_confirm.on_75m_bar
+                # is never invoked, same object/state as before this call.
+                #
+                # Replay must ONLY rebuild HTF/MTF zone/scanner state -- it must
+                # NEVER be allowed to open or close the live position. Same guard
+                # as _ingest_history (see _guard_replay_position's docstring):
+                # last-resort net in case a position slips past both flatness
+                # checks above.
+                _pos_snapshot = self._position_snapshot(self._engine.position)
+                _replay_through_engine(self._engine, [], ce_5m, pe_5m,
+                                        on_daily_boundary=self._apply_eod_gate23_rules,
+                                        session_open=self._session_open,
+                                        eod_square_off=self._eod_hour_min,
+                                        gate23_reset=self._gate23_hour_min)
+                self._guard_replay_position(_pos_snapshot)
 
             feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
             if feeder:
@@ -1713,13 +1758,30 @@ class V4CascadeBook(AbstractStrategyBook):
                 logger.error("V4CascadeBook[%s/%s/%s]: ENTRY ABORTED (%s) — discarding optimistic position.",
                              self._underlying, self._client_id, self._binding_id, reason)
                 self._clog.error("ENTRY ABORTED (%s) — discarding optimistic position.", reason)
-                if target is None or self._engine.position is target:
-                    self._engine.position = None
-                self._engine._tracking_entry_price.pop(fill.side, None)
-                self._engine._trackers.pop(fill.side, None)
+                # 2026-07-23 whole-branch review fix (C2): for a pool-engine
+                # book `target` is self._pool_engine.position (a real
+                # object, never None) and self._engine.position is always
+                # None -- so `self._engine.position is target` was always
+                # False and this clear NEVER fired, leaving a phantom "open"
+                # position on self._pool_engine.position that _persist_
+                # position then happily wrote to disk, surviving restarts
+                # and blocking all future entries on that side. Route
+                # through _active_position so whichever engine actually
+                # holds `target` gets cleared.
+                if target is None or self._active_position is target:
+                    self._active_position = None
+                # _tracking_entry_price/_trackers are self._engine-only
+                # internal dicts (Task 6: the pool engine has no equivalent
+                # -- its per-side state lives in self._pool_engine._pool/
+                # _trail instead) -- popping them is meaningless for a
+                # pool-engine entry, so skip rather than force a pool-engine
+                # concept onto old-engine-only state.
+                if not self._use_pool_engine:
+                    self._engine._tracking_entry_price.pop(fill.side, None)
+                    self._engine._trackers.pop(fill.side, None)
                 self._persist_position()
                 return
-            pos = target if target is not None else self._engine.position
+            pos = target if target is not None else self._active_position
             if pos is None or not pos.is_open:
                 return
             if pos.t1 is not None:
@@ -1735,7 +1797,12 @@ class V4CascadeBook(AbstractStrategyBook):
         elif fill.action == "EXIT":
             leg = target
             if leg is None:
-                pos = self._engine.position
+                # Same bug class as C2/I2 below (self._engine.position is
+                # always None for a pool book) -- fixed opportunistically
+                # here too since it's the identical one-line pattern and
+                # _active_position is byte-identical to the old ternary for
+                # a non-pool book.
+                pos = self._active_position
                 leg = (pos.t1 if fill.tranche == "T1" else pos.t2) if pos is not None else None
             if leg is None:
                 return
@@ -1753,7 +1820,14 @@ class V4CascadeBook(AbstractStrategyBook):
                 leg.close_price = 0.0
                 leg.close_reason = ""
                 leg.close_time = None
-                pos = self._engine.position
+                # 2026-07-23 whole-branch review fix (I2): was
+                # self._engine.position (always None for a pool book), so
+                # this position-level revert was silently skipped, leaving
+                # a leg marked "open" inside a position whose .status was
+                # already "closed" -- PoolCascadeEngine.is_open() gates on
+                # status=="open", so that reopened leg would never be
+                # re-checked/retried.
+                pos = self._active_position
                 if pos is not None and (pos.t1 is leg or pos.t2 is leg):
                     pos.status = "open"
                     pos.close_time = None

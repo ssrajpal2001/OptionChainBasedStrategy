@@ -72,6 +72,26 @@ class PoolCascadeEngine:
     def is_open(self) -> bool:
         return self.position is not None and self.position.is_open
 
+    def reset_side(self, side: str) -> None:
+        """Clear this side's zone pool, HTF (75m) bar history, and
+        known-ref dedup set -- used by book.py's tracking-strike recenter
+        (V4CascadeBook._maybe_recenter_tracking_strikes) right before it
+        re-warms from the NEW strike's freshly-fetched history. Without
+        this, _all_75m[side]/_known_ref_ts[side] would keep accumulating
+        forever across a strike swap, mixing the OLD strike's 75m bars
+        (different instrument, different price scale) into the SAME HTF
+        zone search window as the NEW strike's bars -- corrupting zone_low/
+        zone_high for any zone discovered afterward. Mirrors the old
+        V4CascadeEngine's per-side `scanner.reset()` called from the same
+        call site. Only ever called while flat (recenter's flatness gate
+        guarantees this side has no open position) -- does not touch
+        self.position."""
+        self._pool[side] = []
+        self._known_ref_ts[side] = set()
+        self._all_75m[side] = []
+        self._last_5m_date[side] = None
+        self._trail[side] = None
+
     # ── HTF (75m) ────────────────────────────────────────────────────────
     def on_75m_bar(self, side: str, bar) -> None:
         if self.is_open() and self.position.side == side:
