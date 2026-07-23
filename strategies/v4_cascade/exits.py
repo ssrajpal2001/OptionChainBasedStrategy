@@ -126,6 +126,25 @@ class TrailingBaseTracker:
         self._locked_bases.clear()
         self.current_stop = None
 
+    def consider_external_level(self, candidate: float) -> bool:
+        """Ratchet the stop toward an externally-sourced candidate level
+        (2026-07-23: V4 Cascade's pool engine feeds in the COUNTER side's
+        own developing 15m structure once it re-enters its 15m sub-zone --
+        real evidence the opposite side may be turning, a better trailing
+        reference than this side's own chart alone) using the SAME
+        monotonic, only-favorable rule on_5m_bar's own base-locking already
+        applies -- never moves the stop against the position. Runs
+        alongside (not instead of) same-side base locking: whichever
+        source is more protective at any moment wins, since both only ever
+        ratchet in the favorable direction. Returns True if the stop moved."""
+        if self.current_stop is None or (
+            (self._bear and candidate > self.current_stop) or
+            (not self._bear and candidate < self.current_stop)
+        ):
+            self.current_stop = candidate
+            return True
+        return False
+
 
 def map_trailing_stop_to_execution(
     tracking_stop: float, tracking_entry_price: float, exec_entry_price: float,

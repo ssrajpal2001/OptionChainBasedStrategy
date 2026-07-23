@@ -278,6 +278,118 @@ def test_check_exits_pe_same_long_geometry_as_ce():
     assert eng.position.status == "closed"
 
 
+def test_counter_side_15m_reentry_trails_open_side_stop():
+    """2026-07-23: while CE is open, PE's OWN 15m sub-zone (the same nested
+    pattern used to set T1's target at entry) re-entering feeds CE's T2
+    trail with PE's subsequent 15m lows -- real structural evidence PE may
+    be turning, ratcheting CE's stop tighter without forcing an early exit
+    on mere proximity. Runs ALONGSIDE (not instead of) CE's own same-side
+    rolling-base trail: whichever source is more protective wins, since
+    both only ever move the stop in the favorable direction."""
+    eng = _engine()
+    t1, t2 = _open_position(eng, "CE")
+    assert eng._trail["CE"].current_stop == 90.0  # CE's own structural SL
+
+    # PE's 75m zone: ref@0 (low=100,high=110), sweep@1 (low=90), reclaim@2
+    # (high=115) -- same shape used throughout this file -- then re-entry.
+    eng.on_75m_bar("PE", _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("PE", _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("PE", _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("PE", _bar75(3, 105, 108, 92, 96))  # re-entry
+    assert eng._pool["PE"][0].tracking is True
+
+    ltf_base = _BASE + timedelta(minutes=75 * 4)
+    # PE's 15m sub-zone: ref(low=93,high=97), sweep(low=91), reclaim(high=99).
+    eng.on_15m_bar("PE", _bar15(ltf_base, 0, 95, 97, 93, 95))
+    eng.on_15m_bar("PE", _bar15(ltf_base, 15, 92, 94, 91, 92))
+    eng.on_15m_bar("PE", _bar15(ltf_base, 30, 93, 99, 92, 97))
+    slot = eng._pool["PE"][0]
+    assert slot.ltf_zone is not None
+    assert slot.ltf_reentered is False  # not re-entered yet -- CE's trail untouched
+    assert eng._trail["CE"].current_stop == 90.0
+
+    # Re-entry bar: overlaps the 15m sub-zone [91, 93]. This bar confirms
+    # re-entry but its OWN low is not yet used as a trailing candidate
+    # (same "state-transition bar isn't also the confirmation bar" rule
+    # used for the 75m re-entry / 5m trigger elsewhere in this engine).
+    eng.on_15m_bar("PE", _bar15(ltf_base, 45, 92, 93, 91.5, 92.2))
+    assert slot.ltf_reentered is True
+    assert eng._trail["CE"].current_stop == 90.0  # still untouched
+
+    # Now every subsequent PE 15m low ratchets CE's stop, only upward.
+    eng.on_15m_bar("PE", _bar15(ltf_base, 60, 92, 92.5, 91.8, 92.0))
+    assert eng._trail["CE"].current_stop == 91.8
+    eng.on_15m_bar("PE", _bar15(ltf_base, 75, 93, 94, 93.5, 93.8))
+    assert eng._trail["CE"].current_stop == 93.5
+    eng.on_15m_bar("PE", _bar15(ltf_base, 90, 92, 92.8, 92.0, 92.3))  # lower low -- no regression
+    assert eng._trail["CE"].current_stop == 93.5
+
+    # CE and its position are otherwise untouched by all of this.
+    assert eng.position.side == "CE"
+    assert eng.position.is_open
+    assert t1.status == "open" and t2.status == "open"
+
+    # The ratcheted level is what CE's OWN chart now checks against --
+    # a bar whose low pierces 93.5 closes T2 at the RATCHETED price, not
+    # the original structural SL (90).
+    bar_ce = _bar5(_BASE, 5, 94.0, 94.5, 93.0, 93.5)
+    events = eng._check_exits("CE", bar_ce)
+    assert len(events) == 1
+    assert events[0].tranche == "T2"
+    assert events[0].reason == "t2_trailing_base_stop"
+    assert events[0].price_hint == 93.5
+    assert t2.status == "closed"
+
+
+def test_structural_flip_closes_open_side_when_counter_side_fires():
+    """2026-07-23: the engine only ever holds ONE position at a time. A
+    pierce firing on the side OPPOSITE an already-open position must force-
+    close the open one first (both legs, whichever are still open, at that
+    side's own last known 5m close) before the new position opens -- not
+    silently overwrite .position and orphan the old trade."""
+    eng = _engine()
+    t1, t2 = _open_position(eng, "CE")
+    # CE's own last known price before the flip (used as the close price).
+    eng.on_5m_bar("CE", _bar5(_BASE, 5, 99, 100, 98, 98.0))
+    assert eng._last_5m_bar["CE"].close == 98.0
+
+    # Drive PE through a full independent 75m -> re-entry -> 5m trigger ->
+    # pierce chain while CE is still open (identical shape to
+    # test_full_chain_produces_open_event, on "PE" instead of "CE").
+    eng.on_75m_bar("PE", _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("PE", _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("PE", _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("PE", _bar75(3, 105, 108, 92, 96))  # re-entry
+    assert eng._pool["PE"][0].tracking is True
+
+    ltf_base = _BASE + timedelta(minutes=75 * 4)
+    events = eng.on_5m_bar("PE", _bar5(ltf_base, 30, 93, 94, 92, 93))
+    assert events == []
+    events = eng.on_5m_bar("PE", _bar5(ltf_base, 35, 93, 95, 92, 94.5))  # arms
+    assert events == []
+    events = eng.on_5m_bar("PE", _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(95)
+
+    # Both CE legs close via structural_flip at CE's last known price (98.0),
+    # THEN PE opens -- in that order.
+    assert len(events) == 3
+    close_events = [e for e in events if e.event_type == CascadeEventType.CLOSE_LONG_CE]
+    open_events = [e for e in events if e.event_type == CascadeEventType.OPEN_LONG_PE]
+    assert len(close_events) == 2
+    assert len(open_events) == 1
+    assert {e.tranche for e in close_events} == {"T1", "T2"}
+    assert all(e.reason == "structural_flip" for e in close_events)
+    assert all(e.price_hint == 98.0 for e in close_events)
+    assert t1.status == "closed" and t1.close_reason == "structural_flip" and t1.close_price == 98.0
+    assert t2.status == "closed" and t2.close_reason == "structural_flip" and t2.close_price == 98.0
+    assert eng._trail["CE"] is None
+
+    # PE is now the live position.
+    assert eng.position is not None
+    assert eng.position.side == "PE"
+    assert eng.position.is_open
+    assert eng.position.t1.entry_price == 95.0
+
+
 def test_force_eod_close_closes_both_open_legs():
     eng = _engine()
     t1, t2 = _open_position(eng, "CE")

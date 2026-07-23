@@ -68,6 +68,12 @@ class _ZoneSlot:
         self.prev_5m_bar: Optional[object] = None
         self.pending_entry = False
         self.trigger_ts: Optional[datetime] = None
+        # 2026-07-23: has price come back inside this slot's 15m sub-zone
+        # since it was found -- used ONLY for counter-side trailing (see
+        # PoolCascadeEngine.on_15m_bar), never for this slot's own entry
+        # (entry fires off the 75m zone + 5m trigger alone, see on_5m_bar).
+        self.ltf_reentered = False
+        self.ltf_reentry_ts: Optional[datetime] = None
 
 
 class PoolCascadeEngine:
@@ -86,6 +92,11 @@ class PoolCascadeEngine:
         self._all_75m: Dict[str, List] = {"CE": [], "PE": []}
         self._last_5m_date: Dict[str, Optional[date]] = {"CE": None, "PE": None}
         self._trail: Dict[str, Optional[TrailingBaseTracker]] = {"CE": None, "PE": None}
+        # 2026-07-23: last 5m bar seen per side, regardless of tracking/open
+        # state -- the only "current price" this engine has any visibility
+        # into for the side that ISN'T being fed the bar that triggers a
+        # structural flip (see _close_for_structural_flip).
+        self._last_5m_bar: Dict[str, Optional[object]] = {"CE": None, "PE": None}
         self.position: Optional[CascadePosition] = None
 
     def is_open(self) -> bool:
@@ -110,6 +121,7 @@ class PoolCascadeEngine:
         self._all_75m[side] = []
         self._last_5m_date[side] = None
         self._trail[side] = None
+        self._last_5m_bar[side] = None
 
     # ── HTF (75m) ────────────────────────────────────────────────────────
     def on_75m_bar(self, side: str, bar) -> None:
@@ -148,19 +160,52 @@ class PoolCascadeEngine:
     def on_15m_bar(self, side: str, bar) -> None:
         if self.is_open() and self.position.side == side:
             return
+        # 2026-07-23: while the OTHER side holds an open position, this
+        # side's own 15m sub-zone re-entry feeds that position's T2 trail
+        # (see exits.TrailingBaseTracker.consider_external_level) -- real
+        # structural evidence the counter side may be turning, ratcheting
+        # the open side's stop tighter without forcing an early exit on
+        # mere proximity (only a genuine re-entry counts, and the stop only
+        # ever moves in the favorable direction).
+        is_counter_side = self.is_open() and self.position.side != side
+        open_side = self.position.side if is_counter_side else None
+
         for slot in self._pool[side]:
             if not slot.tracking:
                 continue
             slot.bars_15m.append(bar)
             zones = find_all_bear_zones(slot.bars_15m)
             if zones:
-                slot.ltf_zone = zones[0]
+                new_ltf = zones[0]
+                if slot.ltf_zone is None or new_ltf.reference_low_ts != slot.ltf_zone.reference_low_ts:
+                    slot.ltf_zone = new_ltf
+                    slot.ltf_reentered = False
+
+            ltf = slot.ltf_zone
+            if ltf is not None and not slot.ltf_reentered and bar.timestamp > ltf.lock_ts:
+                lo, hi = _zone_bounds(ltf)
+                if _overlaps(bar.low, bar.high, lo, hi):
+                    slot.ltf_reentered = True
+                    slot.ltf_reentry_ts = bar.timestamp
+                    # This bar confirms re-entry; its own low is not also
+                    # used as the first trailing candidate (same "the bar
+                    # causing a state transition isn't also the bar
+                    # confirming the next stage" discipline used elsewhere
+                    # in this engine).
+                    continue
+
+            if is_counter_side and slot.ltf_reentered and open_side is not None:
+                trail = self._trail.get(open_side)
+                if trail is not None:
+                    trail.consider_external_level(bar.low)
 
     # ── 5m trigger + limit fill + exits ─────────────────────────────────
     def on_5m_bar(self, side: str, bar) -> List[CascadeEvent]:
         if self.is_open() and self.position.side == side:
+            self._last_5m_bar[side] = bar
             return self._check_exits(side, bar)
 
+        self._last_5m_bar[side] = bar
         pool = self._pool[side]
 
         # 2026-07-23: intraday-only trigger -- the first 5m candle of a new
@@ -222,6 +267,14 @@ class PoolCascadeEngine:
             limit_price = slot.zone_low + self._entry_offset
             pierced = bar.low <= limit_price
             if pierced:
+                # 2026-07-23: a pierce firing HERE (we already returned
+                # early above if `side` were the currently-open side) means
+                # if a position is open at all, it's on the OPPOSITE side --
+                # the engine only ever holds one position at a time, so the
+                # existing one must be force-closed first (structural flip)
+                # before the new one opens.
+                if self.is_open():
+                    events.extend(self._close_for_structural_flip(bar.timestamp))
                 events.append(self._open_position(side, slot, limit_price, bar.timestamp))
                 return events
         return events
@@ -268,6 +321,35 @@ class PoolCascadeEngine:
         return CascadeEvent(event_type=event_type, side=side, price_hint=fill_price,
                              reason="gate3_bear_trap_reclaim", sl_price=sl_price, target_price=t1_target,
                              timestamp=ts, audit=audit)
+
+    def _close_for_structural_flip(self, ts) -> List[CascadeEvent]:
+        """A pierce just fired on the side OPPOSITE the currently open
+        position -- close both legs (whichever are still open) at the open
+        side's own last known 5m close (the best price information
+        available inside this engine; book.py's live tick feed has a more
+        current price but this engine has no visibility into it)."""
+        pos = self.position
+        open_side = pos.side
+        last_bar = self._last_5m_bar.get(open_side)
+        if last_bar is not None:
+            price = last_bar.close
+        elif pos.t1 is not None:
+            price = pos.t1.entry_price
+        else:
+            price = pos.tracking_entry_price or 0.0
+        events: List[CascadeEvent] = []
+        for tranche, leg in (("T1", pos.t1), ("T2", pos.t2)):
+            if leg is None or leg.status != "open":
+                continue
+            leg.status = "closed"
+            leg.close_price = price
+            leg.close_reason = "structural_flip"
+            leg.close_time = ts
+            events.append(self._close_event(open_side, tranche, "structural_flip", price, ts))
+        pos.status = "closed"
+        pos.close_time = ts
+        self._trail[open_side] = None
+        return events
 
     def _check_exits(self, side: str, bar) -> List[CascadeEvent]:
         events: List[CascadeEvent] = []
