@@ -2,7 +2,10 @@
 no execution-strike resolution, no execution-native-risk lookback. Strike
 fields on the opened position match the book's own resolved tracking
 strike for that side."""
-from datetime import datetime
+import asyncio
+from dataclasses import dataclass
+from datetime import date, datetime
+from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,6 +15,28 @@ from data_layer.base_feeder import EventBus
 from strategies.v4_cascade.book import V4CascadeBook
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+@dataclass
+class _FakeEvent:
+    side: str
+    price_hint: float
+    sl_price: float = 5.0
+    target_price: float = 20.0
+    audit: Optional[dict] = None
+
+
+class _FakeFeeder:
+    def __init__(self) -> None:
+        self.subscribed: List[str] = []
+
+    async def subscribe_tokens(self, tokens) -> None:
+        self.subscribed.extend(tokens)
+
+
+class _FakeRebalancer:
+    def __init__(self, feeder) -> None:
+        self._feeder = feeder
 
 
 @pytest.mark.asyncio
@@ -40,3 +65,49 @@ async def test_pool_engine_open_uses_tracking_strike_not_execution_strike():
 
     assert book._pool_engine.position.t1.strike == 23700
     assert book._pool_engine.position.execution_strike == 23700
+
+
+@pytest.mark.asyncio
+async def test_pool_engine_open_entry_async_skips_execution_subscribe_and_wait(monkeypatch):
+    """2026-07-23 reviewer fix: pool-engine entries must never resolve/
+    subscribe to the separate 'execution contract' or wait up to 3s for its
+    tick -- they trade the tracking contract directly and already have a
+    live price for it via self._live_price[side]. Confirms feeder.subscribe_
+    tokens is never called and the coroutine returns immediately (no wait
+    loop), sourcing price_hint straight from self._live_price[side]."""
+    cfg = GlobalConfig()
+    book = V4CascadeBook(EventBus(), cfg, underlying="NIFTY", client_id="C1",
+                          binding_id="B1", lot_multiplier=1, squareoff_time="15:15",
+                          use_pool_engine=True)
+    book._running = True
+    book._expiry = date(2026, 7, 21)
+    feeder = _FakeFeeder()
+    book._rebalancer = _FakeRebalancer(feeder)
+    book._live_price["CE"] = 150.5
+
+    # If REGISTRY.get_upstox_key were ever called for the pool-engine path,
+    # that alone would indicate the (redundant) execution-contract
+    # resolution ran -- fail loudly rather than silently succeeding.
+    def _boom(*a, **kw):
+        raise AssertionError("REGISTRY.get_upstox_key must not be called for pool-engine entries")
+    monkeypatch.setattr("strategies.v4_cascade.book.REGISTRY.get_upstox_key", _boom)
+
+    published = []
+
+    async def fake_publish(topic, event):
+        published.append(event)
+
+    monkeypatch.setattr(book._bus, "publish", fake_publish)
+
+    ev = _FakeEvent(side="CE", price_hint=999.0)  # would be wrong if this leaked through
+    await asyncio.wait_for(
+        book._open_entry_async(ev, exec_strike=23700.0, qty=75, event_id="evt-pool-1",
+                                ts=datetime(2026, 7, 21, 9, 15, tzinfo=IST)),
+        timeout=0.5,  # the old subscribe/wait path could take up to 3s -- this proves it never runs
+    )
+
+    assert feeder.subscribed == []  # never subscribed to a separate execution contract
+    assert book._exec_symbol["CE"] == ""  # untouched
+    assert book._exec_live_price["CE"] == 0.0  # untouched
+    assert len(published) == 1
+    assert published[0].price_hint == 150.5  # sourced from self._live_price[side], not ev.price_hint

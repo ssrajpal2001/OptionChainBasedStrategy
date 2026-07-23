@@ -1470,33 +1470,42 @@ class V4CascadeBook(AbstractStrategyBook):
         order indefinitely."""
         from execution_bridge.cascade_bridge import CascadeOrderEvent
         self._log_entry_audit(ev)
-        self._exec_symbol[ev.side] = ""
-        self._exec_live_price[ev.side] = 0.0
-        if not self._is_crypto and exec_strike and self._expiry:
-            symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, int(exec_strike), ev.side)
-            self._exec_symbol[ev.side] = symbol
-            feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
-            if symbol and feeder:
-                try:
-                    await feeder.subscribe_tokens([symbol])
-                except Exception:
-                    logger.exception("V4CascadeBook[%s/%s/%s]: execution-contract subscribe "
-                                     "failed for %s.", self._underlying, self._client_id,
-                                     self._binding_id, symbol)
-                # _option_loop (already running) populates self._exec_live_price
-                # once the subscribed contract's own tick arrives.
-                deadline = asyncio.get_event_loop().time() + 3.0
-                while (self._running and self._exec_live_price[ev.side] <= 0
-                       and asyncio.get_event_loop().time() < deadline):
-                    await asyncio.sleep(0.2)
-        real_price = self._exec_live_price[ev.side]
-        price_hint = real_price if real_price > 0 else ev.price_hint
-        if real_price <= 0:
-            logger.warning("V4CascadeBook[%s/%s/%s]: no execution-contract tick within 3s for "
-                           "%s — falling back to tracking-contract price_hint=%.4f.",
-                           self._underlying, self._client_id, self._binding_id, ev.side, ev.price_hint)
-            self._clog.warning("no execution-contract tick within 3s for %s — falling back to "
-                               "tracking-contract price_hint=%.4f.", ev.side, ev.price_hint)
+        if self._use_pool_engine:
+            # 2026-07-23: pool-engine positions trade the TRACKING contract
+            # directly -- there is no separate execution contract to resolve/
+            # subscribe/wait for. self._exec_symbol/_exec_live_price are left
+            # untouched (never populated for this side), and price_hint comes
+            # straight from the tracking contract's own already-live price.
+            real_price = self._live_price.get(ev.side, 0.0)
+            price_hint = real_price if real_price > 0 else ev.price_hint
+        else:
+            self._exec_symbol[ev.side] = ""
+            self._exec_live_price[ev.side] = 0.0
+            if not self._is_crypto and exec_strike and self._expiry:
+                symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, int(exec_strike), ev.side)
+                self._exec_symbol[ev.side] = symbol
+                feeder = getattr(self._rebalancer, "_feeder", None) if self._rebalancer else None
+                if symbol and feeder:
+                    try:
+                        await feeder.subscribe_tokens([symbol])
+                    except Exception:
+                        logger.exception("V4CascadeBook[%s/%s/%s]: execution-contract subscribe "
+                                         "failed for %s.", self._underlying, self._client_id,
+                                         self._binding_id, symbol)
+                    # _option_loop (already running) populates self._exec_live_price
+                    # once the subscribed contract's own tick arrives.
+                    deadline = asyncio.get_event_loop().time() + 3.0
+                    while (self._running and self._exec_live_price[ev.side] <= 0
+                           and asyncio.get_event_loop().time() < deadline):
+                        await asyncio.sleep(0.2)
+            real_price = self._exec_live_price[ev.side]
+            price_hint = real_price if real_price > 0 else ev.price_hint
+            if real_price <= 0:
+                logger.warning("V4CascadeBook[%s/%s/%s]: no execution-contract tick within 3s for "
+                               "%s — falling back to tracking-contract price_hint=%.4f.",
+                               self._underlying, self._client_id, self._binding_id, ev.side, ev.price_hint)
+                self._clog.warning("no execution-contract tick within 3s for %s — falling back to "
+                                   "tracking-contract price_hint=%.4f.", ev.side, ev.price_hint)
 
         # 2026-07-21: execution-native risk lookup. This fetch runs AFTER
         # the tick-wait above completes (sequential, not concurrent) --
