@@ -68,6 +68,15 @@ class V4CascadeConfig:
     # without passing anything special through engine.py's call site.
     target_floor_multiple: float = 1.0
 
+    # 2026-07-23: opt-in flag for the new multi-zone-pool HTF/LTF cascade
+    # engine (strategies/v4_cascade/pool_engine.py), validated over 90 days
+    # of real NIFTY data in backtest/v4_cascade/htf_ltf_backtest.py.
+    # Default False preserves today's exact Gate1/Gate2/Gate3 behavior --
+    # this only ever changes anything for a deployment that explicitly
+    # opts in.
+    use_pool_engine: bool = False
+    pool_entry_offset: float = 5.0  # the strongest performer in the 90-day backtest
+
     @property
     def tranche_qty(self) -> int:
         """65 units per tranche at lot_multiplier=2 (2 lots / 2 tranches = 1 lot/tranche)."""
