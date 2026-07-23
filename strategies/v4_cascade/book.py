@@ -94,6 +94,7 @@ class V4CascadeBook(AbstractStrategyBook):
     def __init__(
         self, bus, cfg, underlying: str, client_id: str, binding_id: str,
         lot_multiplier: int = 1, squareoff_time: str = "15:15",
+        use_pool_engine: bool = False,
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._lot_multiplier = lot_multiplier
@@ -180,6 +181,19 @@ class V4CascadeBook(AbstractStrategyBook):
         self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto,
                                         session_open=self._session_open,
                                         entry_cutoff_hour_min=self._eod_hour_min)
+
+        # 2026-07-23: opt-in multi-zone-pool HTF/LTF engine, NIFTY only --
+        # see docs/superpowers/specs/2026-07-23-v4-cascade-htf-ltf-live-design.md.
+        # CRUDEOIL/crypto always stay on the old V4CascadeEngine funnel
+        # above regardless of this flag.
+        self._use_pool_engine = bool(use_pool_engine) and not self._is_crypto and not self._is_mcx
+        self._pool_engine: Optional["PoolCascadeEngine"] = None
+        if self._use_pool_engine:
+            from strategies.v4_cascade.pool_engine import PoolCascadeEngine
+            self._pool_engine = PoolCascadeEngine(
+                self._v4cfg, entry_offset=self._v4cfg.pool_entry_offset,
+                session_open=self._session_open,
+            )
 
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_v4_cascade"
         self._expiry: Optional[date] = None
