@@ -138,8 +138,10 @@ def test_cross_side_structural_flip_still_works_with_multiple_candidates():
 
     eng.on_5m_bar("PE", 23900.0, _bar5(base, 10, 96, 97, 95, 98))
     events = eng.on_5m_bar("PE", 23900.0, _bar5(base, 15, 99, 100, 89, 92))
-    reasons = [e.reason for e in events if e.reason]
-    assert "structural_flip" in [getattr(e, "close_reason_placeholder", None) for e in []] or True  # see close-event check below
+    # _close_for_structural_flip's close events carry reason="structural_flip"
+    # (see _close_event's call site) -- the presence of at least one proves
+    # the CE leg was genuinely force-closed, not silently dropped.
+    assert any(e.reason == "structural_flip" for e in events)
     assert eng.is_open() and eng.position.side == "PE"
     assert eng.position.tracking_strike == 23900.0
 
@@ -496,7 +498,7 @@ open) but cross-side structural flip is unchanged.
 - [ ] **Step 4: Run the new tests to verify they pass**
 
 Run: `python -m pytest tests/strategies/test_v4_cascade_pool_engine_multi_strike.py -v`
-Expected: PASS (6 tests). If `test_cross_side_structural_flip_still_works_with_multiple_candidates` fails on the `reasons`/placeholder assertion line, delete that no-op line (`assert "structural_flip" in ... or True`) — it was left as a comment-only placeholder in this plan and asserts nothing; the two real assertions below it (`eng.is_open() and eng.position.side == "PE"`, `eng.position.tracking_strike == 23900.0`) are what actually verify the flip.
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Mechanically adapt existing pool_engine tests to the new signature**
 
