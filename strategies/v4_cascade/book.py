@@ -1907,8 +1907,16 @@ class V4CascadeBook(AbstractStrategyBook):
             # 2026-07-23: pool-engine positions trade the TRACKING contract
             # directly (user-confirmed) -- no separate execution strike, no
             # scale mapping between two different contracts' price levels.
+            # 2026-07-24 fix: under multi-strike candidate scanning, the
+            # scalar self._ce_strike/self._pe_strike is only ever the FIRST
+            # candidate (_ce_strikes[0]/_pe_strikes[0]), not necessarily the
+            # strike that actually triggered THIS trade. PoolCascadeEngine.
+            # _open_position already stamps ev.execution_strike with the
+            # real triggering strike -- use that; only fall back to the
+            # scalar if it's somehow unset (shouldn't happen, avoids a crash).
             if self._use_pool_engine:
-                exec_strike = self._ce_strike if ev.side == "CE" else self._pe_strike
+                exec_strike = ev.execution_strike if ev.execution_strike is not None else (
+                    self._ce_strike if ev.side == "CE" else self._pe_strike)
             else:
                 exec_strike = self._resolve_execution_strike(ev.side)
             if pos.t1 is not None:
