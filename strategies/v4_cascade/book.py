@@ -263,6 +263,11 @@ class V4CascadeBook(AbstractStrategyBook):
         # per-side 5m bucket accumulators, fed by live OPTION_TICK
         self._buckets: Dict[str, Optional[_Bar]] = {"CE": None, "PE": None}
         self._bars_5m: Dict[str, List] = {"CE": [], "PE": []}
+        # 2026-07-24: per-candidate 5m bar history for the pool engine's
+        # multi-strike scanning, keyed (side, strike). self._bars_5m (side-
+        # keyed) stays exactly as-is for the legacy engine; the pool engine
+        # uses this dict instead once multi-strike is active.
+        self._pool_bars_5m: Dict[Tuple[str, int], List] = {}
         # parallel EXECUTION-contract 5m bucket accumulators (Task 7) — only
         # driven for a risk_basis=="execution_native" open position; feeds
         # engine.check_exits_execution_native (Task 6) instead of engine.update.
@@ -689,6 +694,31 @@ class V4CascadeBook(AbstractStrategyBook):
         # reclaim only confirmed earlier TODAY was invisible after every
         # restart, silently falling back to an older, already-known zone.
         spot_key = REGISTRY.historical_instrument_key(self._underlying)
+
+        if self._use_pool_engine:
+            candidates = [("CE", strike, symbol) for strike, symbol in zip(self._ce_strikes, self._ce_symbols)]
+            candidates += [("PE", strike, symbol) for strike, symbol in zip(self._pe_strikes, self._pe_symbols)]
+            fetches = [fetch_upstox_range_1m(symbol, token, start, today) for _, _, symbol in candidates]
+            fetches += [fetch_upstox_intraday_1m(symbol, token) for _, _, symbol in candidates]
+            results = await asyncio.gather(*fetches)
+            n = len(candidates)
+            range_results, today_results = results[:n], results[n:]
+            self._pool_bars_5m = {}
+            total_bars = 0
+            for (side, strike, _symbol), range_rows, today_rows in zip(candidates, range_results, today_results):
+                merged = _merge_rows(range_rows, today_rows)
+                bars = _to_5m_bars(merged, filter_zero_volume=True)
+                self._pool_bars_5m[(side, strike)] = bars
+                total_bars += len(bars)
+            self._replay_pool_engine_history(self._pool_bars_5m)
+            self._history_ingested = True
+            self._persist_position()
+            logger.info("V4CascadeBook[%s/%s/%s]: history ingested — %d candidates, %d total 5m bars.",
+                        self._underlying, self._client_id, self._binding_id, len(candidates), total_bars)
+            self._clog.info("history ingested — %d candidates, %d total 5m bars.",
+                            len(candidates), total_bars)
+            return True
+
         (spot_rows, ce_rows, pe_rows,
          spot_today, ce_today, pe_today) = await asyncio.gather(
             fetch_upstox_range_1m(spot_key, token, start, today),
@@ -707,20 +737,13 @@ class V4CascadeBook(AbstractStrategyBook):
         self._bars_5m["CE"] = ce_5m
         self._bars_5m["PE"] = pe_5m
 
-        # Replay must ONLY rebuild HTF/MTF zone/scanner state -- it must
-        # NEVER be allowed to open or close the live position. See
-        # _guard_replay_position's docstring for the full explanation
-        # (including the 2026-07-21 in-place-mutation fix).
-        if self._use_pool_engine:
-            self._replay_pool_engine_history(ce_5m, pe_5m)
-        else:
-            _pos_snapshot = self._position_snapshot(self._engine.position)
-            _replay_through_engine(self._engine, spot_5m, ce_5m, pe_5m,
-                                    on_daily_boundary=self._apply_eod_gate23_rules,
-                                    session_open=self._session_open,
-                                    eod_square_off=self._eod_hour_min,
-                                    gate23_reset=self._gate23_hour_min)
-            self._guard_replay_position(_pos_snapshot)
+        _pos_snapshot = self._position_snapshot(self._engine.position)
+        _replay_through_engine(self._engine, spot_5m, ce_5m, pe_5m,
+                                on_daily_boundary=self._apply_eod_gate23_rules,
+                                session_open=self._session_open,
+                                eod_square_off=self._eod_hour_min,
+                                gate23_reset=self._gate23_hour_min)
+        self._guard_replay_position(_pos_snapshot)
         self._history_ingested = True
         self._persist_position()
         logger.info("V4CascadeBook[%s/%s/%s]: history ingested — spot=%d CE=%d PE=%d 5m bars.",
@@ -730,37 +753,29 @@ class V4CascadeBook(AbstractStrategyBook):
                         len(spot_5m), len(ce_5m), len(pe_5m))
         return True
 
-    def _replay_pool_engine_history(self, ce_5m, pe_5m) -> None:
+    def _replay_pool_engine_history(self, bars_by_candidate: Dict[Tuple[str, int], List]) -> None:
         """Rebuilds the pool engine's HTF/LTF pool state from fetched
-        history -- mirrors _replay_through_engine's shape (chronological
-        5m feed, 75m/15m derived by resampling the growing history at each
-        boundary) but drives PoolCascadeEngine instead. Replay must never
-        touch a live position -- reuses the SAME _position_snapshot/
-        _guard_replay_position pair the old engine's replay already uses
-        (both generalized in Task 6 to branch on self._use_pool_engine),
-        so a replay-caused phantom open/close is caught by the proven
-        value-comparison guard, not a fresh ad-hoc check.
-
-        Resample windows below are sliced to the current bar's own
-        calendar day (`bars[:idx+1]` filtered by `.date()`) rather than
-        passed the full accumulated history -- this is a COST optimization
-        (avoids re-resampling ever-growing multi-day history on every single
-        bar), not a correctness requirement: resample_bars groups strictly
-        by (calendar day, bucket_idx), so a day-sliced window and the full
-        history produce identical bars for the current day either way --
-        cross-day contamination cannot happen in this resampling scheme."""
+        history for EVERY resolved candidate (2026-07-24: was exactly two
+        fixed candidates, ce_5m/pe_5m; now iterates however many are in
+        self._ce_strikes/_pe_strikes). Same chronological-replay shape as
+        before -- 75m/15m derived by resampling the growing per-candidate
+        history at each boundary -- just looped once per (side, strike)
+        instead of once per side. Replay must never touch a live position --
+        reuses the SAME _position_snapshot/_guard_replay_position pair as
+        before, checked ONCE after all candidates have replayed (a replay-
+        caused phantom open/close from ANY candidate is still caught)."""
         if self._pool_engine is None:
             return
         _pos_snapshot = self._position_snapshot(self._pool_engine.position)
-        for side, bars in (("CE", ce_5m), ("PE", pe_5m)):
+        for (side, strike), bars in bars_by_candidate.items():
             for idx, bar in enumerate(bars):
-                self._pool_engine.on_5m_bar(side, bar)
+                self._pool_engine.on_5m_bar(side, strike, bar)
                 if _bucket_end(bar.timestamp, 15, self._session_open):
                     window = [b for b in bars[:idx + 1] if b.timestamp.date() == bar.timestamp.date()]
                     r15 = resample_bars(window, 15, self._session_open)
                     if r15:
                         last15 = r15[-1]
-                        self._pool_engine.on_15m_bar(side, _Bar(
+                        self._pool_engine.on_15m_bar(side, strike, _Bar(
                             last15.timestamp, last15.close, last15.high, last15.low,
                             last15.close, tf=15))
                 if _bucket_end(bar.timestamp, 75, self._session_open):
@@ -768,7 +783,7 @@ class V4CascadeBook(AbstractStrategyBook):
                     r75 = resample_bars(window, 75, self._session_open)
                     if r75:
                         last75 = r75[-1]
-                        self._pool_engine.on_75m_bar(side, _Bar(
+                        self._pool_engine.on_75m_bar(side, strike, _Bar(
                             last75.timestamp, last75.close, last75.high, last75.low,
                             last75.close, tf=75))
         self._guard_replay_position(_pos_snapshot)
@@ -1349,7 +1364,7 @@ class V4CascadeBook(AbstractStrategyBook):
             if self._use_pool_engine:
                 for side in ("CE", "PE"):
                     self._pool_engine.reset_side(side)
-                self._replay_pool_engine_history(ce_5m, pe_5m)
+                self._replay_pool_engine_history({("CE", new_ce): ce_5m, ("PE", new_pe): pe_5m})
             else:
                 for side in ("CE", "PE"):
                     self._engine._scanners[side].reset()

@@ -31,6 +31,12 @@ async def test_ingest_history_replays_into_pool_engine_not_old_engine():
     book._expiry = date(2026, 7, 28)
     book._ce_symbol, book._pe_symbol = "NSE_FO|CE", "NSE_FO|PE"
     book._ce_strike, book._pe_strike = 23700, 24100
+    # _resolve_symbols is mocked out below (bypassing _build_candidate_
+    # strikes), so the multi-strike candidate lists must be seeded directly
+    # -- _ingest_history's pool-engine branch now iterates these, not the
+    # scalars above.
+    book._ce_strikes, book._pe_strikes = [23700], [24100]
+    book._ce_symbols, book._pe_symbols = ["NSE_FO|CE"], ["NSE_FO|PE"]
 
     # 100 one-minute rows starting at the 09:15 session open crosses a real
     # 75-minute bucket boundary (09:15 -> 10:30) as well as several 15-minute
@@ -48,7 +54,11 @@ async def test_ingest_history_replays_into_pool_engine_not_old_engine():
 
     assert ok is True
     assert book._engine.position is None  # old engine never touched
-    assert len(book._bars_5m["CE"]) > 0    # SAME bar history still built (both paths need it)
+    # 2026-07-24: the pool-engine path now builds self._pool_bars_5m (per-
+    # candidate, keyed (side, strike)) instead of the side-keyed
+    # self._bars_5m -- that dict stays untouched/empty for a pool-engine
+    # book now that multi-strike history fetch/replay owns this data.
+    assert len(book._pool_bars_5m[("CE", book._ce_strike)]) > 0
     # 100 1m rows from 09:15 cross a real 75m boundary (09:15->10:30), so
     # on_75m_bar must actually have fired and appended a bar -- a genuinely
     # meaningful assertion (the prior `>= 0` was always true regardless of
@@ -95,3 +105,42 @@ async def test_guard_replay_position_restores_into_pool_engine_not_old_engine():
     assert book._pool_engine.position.to_dict() == pos_snapshot
     # ... and must NOT write into the inactive old engine.
     assert book._engine.position is None
+
+
+@pytest.mark.asyncio
+async def test_replay_pool_engine_history_feeds_every_candidate():
+    """_ingest_history's pool-engine path must fetch+replay EVERY resolved
+    candidate (not just one CE + one PE) -- proven by checking two
+    DIFFERENT CE candidates both end up with their own independent 75m bar
+    history after replay."""
+    cfg = GlobalConfig()
+    book = V4CascadeBook(EventBus(), cfg, underlying="NIFTY", client_id="C1",
+                          binding_id="B1", lot_multiplier=1, squareoff_time="15:15",
+                          use_pool_engine=True)
+    book._running = True
+    book._expiry = date(2026, 7, 28)
+    book._ce_strikes = [24000, 23900]
+    book._pe_strikes = [24200]
+    book._ce_symbols = ["NSE_FO|CE24000", "NSE_FO|CE23900"]
+    book._pe_symbols = ["NSE_FO|PE24200"]
+
+    base = datetime(2026, 7, 1, 9, 15, tzinfo=IST)
+    rows = _rows(base, 100)
+
+    with patch.object(book, "_access_token", return_value="tok"), \
+         patch.object(book, "_resolve_symbols", return_value=True), \
+         patch.object(book, "_subscribe_tracking_contracts", return_value=None), \
+         patch("strategies.v4_cascade.book.fetch_upstox_range_1m", return_value=rows), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", return_value=[]):
+        ok = await book._ingest_history()
+
+    assert ok is True
+    assert book._engine.position is None  # old engine never touched
+    assert len(book._pool_bars_5m[("CE", 24000)]) > 0
+    assert len(book._pool_bars_5m[("CE", 23900)]) > 0
+    assert len(book._pool_bars_5m[("PE", 24200)]) > 0
+    # 100 1m rows from 09:15 cross a real 75m boundary (09:15->10:30) for
+    # BOTH CE candidates independently -- proves each candidate's own
+    # replay actually ran, not just that the dict key exists.
+    assert len(book._pool_engine._all_75m[("CE", 24000)]) > 0
+    assert len(book._pool_engine._all_75m[("CE", 23900)]) > 0
