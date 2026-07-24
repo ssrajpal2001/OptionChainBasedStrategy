@@ -2206,6 +2206,70 @@ class DashboardServer:
             from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
             zones = []
             live_price = getattr(book, "_live_price", {}) or {}
+            _use_pool = bool(getattr(book, "_use_pool_engine", False))
+
+            def _zone_dist(ltp, lo, hi):
+                if not ltp or lo is None or hi is None:
+                    return float("inf")
+                if lo <= ltp <= hi:
+                    return 0.0
+                return min(abs(ltp - lo), abs(ltp - hi))
+
+            if _use_pool:
+                # 2026-07-24: full pool dump (every _ZoneSlot, not just one
+                # "selected" summary) -- this is what the client dashboard's
+                # tracking block deliberately does NOT show (it picks one
+                # nearest-to-price slot per side for a compact card); this
+                # admin endpoint is the place to see everything actually in
+                # the pool at once, sorted nearest-to-price first per side.
+                pe = getattr(book, "_pool_engine", None)
+                for side in ("CE", "PE"):
+                    side_ltp = float(live_price.get(side) or 0.0)
+                    pool = list(pe._pool.get(side, [])) if pe is not None else []
+                    pool.sort(key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
+                    for slot in pool:
+                        limit_price = round(slot.zone_low + pe._entry_offset, 2) if pe else None
+                        dist = _zone_dist(side_ltp, slot.zone_low, slot.zone_high)
+                        z = slot.zone
+                        zones.append({
+                            "model": "pool_engine", "side": side,
+                            "state": ("limit_armed" if slot.pending_entry
+                                      else "tracking" if slot.tracking else "zone_found"),
+                            "ref_ts": z.reference_low_ts.isoformat() if z and z.reference_low_ts else None,
+                            "trap_ts": z.lock_ts.isoformat() if z and z.lock_ts else None,
+                            "timeframe": 75,
+                            "zone_low": round(slot.zone_low, 2), "zone_high": round(slot.zone_high, 2),
+                            "limit_entry_price": limit_price,
+                            "live_price": side_ltp or None,
+                            "distance_to_trap": None if dist == float("inf") else round(dist, 2),
+                            "reentry_ts": slot.reentry_ts.isoformat() if slot.reentry_ts else None,
+                            "trigger_ts": slot.trigger_ts.isoformat() if slot.trigger_ts else None,
+                        })
+                index_gate = None
+                pos = book._active_position
+                position = None
+                if pos is not None and pos.is_open:
+                    live_ltp = float(live_price.get(pos.side) or 0.0)
+                    _qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
+                    pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
+                    _dist_sl = (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None
+                    _dist_tgt = (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp and pos.t1.target_price) else None
+                    position = {
+                        "side": pos.side, "status": pos.status,
+                        "entry_price": pos.t1.entry_price if pos.t1 else None,
+                        "sl_price": pos.t1.sl_price if pos.t1 else None,
+                        "target_price": pos.t1.target_price if pos.t1 else None,
+                        "live_ltp": live_ltp,
+                        "distance_to_sl": _dist_sl,
+                        "distance_to_target": _dist_tgt,
+                        "unrealized_pnl": round(pnl_pts * _qty, 4),
+                        "t1_status": pos.t1.status if pos.t1 else None,
+                        "t2_status": pos.t2.status if pos.t2 else None,
+                        "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
+                    }
+                return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position,
+                        "index_gate": index_gate}
+
             for side in ("CE", "PE"):
                 scanner = book._engine._scanners.get(side)
                 if scanner is None:
@@ -2824,23 +2888,30 @@ class DashboardServer:
                                     # 2026-07-24: pool-engine zone pool (strategies/v4_cascade/
                                     # pool_engine.py) has no HTF/MTF gate-state-machine at all --
                                     # each side just has a POOL of concurrently-tracked _ZoneSlot
-                                    # objects. Show the single most-advanced slot: prefer one with
-                                    # a pending limit order, then one already re-entered/tracking,
-                                    # then just the newest zone in the pool.
+                                    # objects. Show whichever zone is CLOSEST to the current live
+                                    # price (0 if price is already inside the zone bounds) -- the
+                                    # zone most likely to actually matter next, regardless of
+                                    # whether it happens to have a pending limit order yet. A
+                                    # zone with a "pending" order that's now far from price (e.g.
+                                    # aged but not yet past the 10-day cutoff) is exactly the
+                                    # stale/misleading case this replaces (confirmed live 2026-07-24
+                                    # -- a ~9-day-old PE zone with limit=58.5 was shown as the
+                                    # headline zone while LTP was 292.2, an ~80% move away and
+                                    # never realistically reachable).
+                                    def _zone_dist(ltp, lo, hi):
+                                        if not ltp or lo is None or hi is None:
+                                            return float("inf")
+                                        if lo <= ltp <= hi:
+                                            return 0.0
+                                        return min(abs(ltp - lo), abs(ltp - hi))
+
                                     pe = getattr(book, "_pool_engine", None)
                                     for side, label in (("CE", "CE"), ("PE", "PE")):
                                         side_ltp = float(live_price.get(side) or 0.0)
                                         pool = list(pe._pool.get(side, [])) if pe is not None else []
                                         slot = None
                                         if pool:
-                                            pending = [s for s in pool if s.pending_entry]
-                                            tracking_slots = [s for s in pool if s.tracking]
-                                            if pending:
-                                                slot = max(pending, key=lambda s: s.trigger_ts or datetime.min.replace(tzinfo=IST))
-                                            elif tracking_slots:
-                                                slot = max(tracking_slots, key=lambda s: s.reentry_ts or datetime.min.replace(tzinfo=IST))
-                                            else:
-                                                slot = max(pool, key=lambda s: s.zone.reference_low_ts or datetime.min.replace(tzinfo=IST))
+                                            slot = min(pool, key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
                                         if slot is not None:
                                             zone_low, zone_high = round(slot.zone_low, 2), round(slot.zone_high, 2)
                                             if slot.pending_entry:
