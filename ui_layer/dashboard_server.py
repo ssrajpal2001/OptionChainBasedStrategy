@@ -1141,6 +1141,36 @@ class DashboardServer:
             logger.critical("Dashboard: KILL SWITCH activated.")
             return {"ok": True, "message": "KILL SWITCH activated — all clients halted immediately."}
 
+        @app.get("/api/admin/strike_rebalancer_status", tags=["Admin"])
+        async def api_strike_rebalancer_status(_: dict = Depends(_require_admin)):
+            """2026-07-24 diagnostic: real, live ground truth for WHY the feeder's
+            total-subscribed-symbol count is whatever it is, per underlying --
+            replaces reconstructing it from startup-log arithmetic (which proved
+            unreliable: dedup between the ATM chain and pinned strikes, plus
+            per-underlying batching, made the log's incremental "+N" lines hard
+            to attribute correctly by inspection alone)."""
+            if _srv._rebalancer is None:
+                return {"ok": True, "underlyings": {}, "note": "StrikeRebalancer not wired."}
+            out = {}
+            total_active = 0
+            for und, state in _srv._rebalancer._state.items():
+                active = sorted(state.active_strikes)
+                pinned = sorted(state.pinned_strikes)
+                total_active += len(active)
+                out[und] = {
+                    "chain_enabled": state.chain_enabled,
+                    "current_atm": state.current_atm,
+                    "open_atm": state.open_atm,
+                    "chain_depth": _srv._cfg.chain_depth if _srv._cfg else None,
+                    "active_strikes_count": len(active),
+                    "active_strikes": active,
+                    "pinned_strikes_count": len(pinned),
+                    "pinned_strikes": pinned,
+                    "rebalance_count": state.rebalance_count,
+                }
+            return {"ok": True, "underlyings": out,
+                    "total_active_strikes_across_all_underlyings": total_active}
+
         @app.post("/api/rebalance/{underlying}", tags=["Admin"])
         async def api_rebalance(underlying: str, _: dict = Depends(_require_admin)):
             underlying = underlying.upper()
