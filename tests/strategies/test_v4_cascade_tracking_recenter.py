@@ -349,3 +349,50 @@ async def test_recenter_unsubscribes_old_symbols_and_subscribes_new():
 
     assert feeder.subscribed == ["NSE_FO|new", "NSE_FO|new"]
     assert feeder.unsubscribed == ["NSE_FO|old_ce", "NSE_FO|old_pe"]
+
+
+@pytest.mark.asyncio
+async def test_recenter_diffs_multi_strike_window_only_touching_changed_strikes():
+    """When ATM drifts, the pool-engine recenter must diff the OLD 5-strike
+    window against the NEW one -- only strikes that fell out of range get
+    unsubscribed+dropped, and only strikes newly in range get subscribed+
+    fetched+reset; strikes that stay in-window (24000/23900/23800 for CE,
+    24400/24500/24600 for PE in this scenario) are left completely alone."""
+    cfg = GlobalConfig()
+    book = V4CascadeBook(
+        EventBus(), cfg, underlying="NIFTY", client_id="C1", binding_id="B1",
+        lot_multiplier=1, squareoff_time="15:15", use_pool_engine=True,
+        tracking_offsets_pts=[100.0, 200.0, 300.0, 400.0, 500.0],
+    )
+    book._running = True
+    book._expiry = date(2026, 7, 21)
+    book._tracking_reference_atm = 24100.0
+    # OLD window: ATM=24100 -> CE [24000,23900,23800,23700,23600], PE [24200,24300,24400,24500,24600]
+    book._ce_strikes = [24000, 23900, 23800, 23700, 23600]
+    book._pe_strikes = [24200, 24300, 24400, 24500, 24600]
+    book._ce_symbols = [f"NSE_FO|CE{s}" for s in book._ce_strikes]
+    book._pe_symbols = [f"NSE_FO|PE{s}" for s in book._pe_strikes]
+    feeder = _FakeFeeder()
+    book._rebalancer = _FakeRebalancer(feeder)
+
+    def _fake_upstox_key(underlying, expiry, strike, opt_type):
+        return f"NSE_FO|{opt_type}{int(strike)}"
+
+    with patch("strategies.v4_cascade.book.fetch_upstox_range_1m", new=AsyncMock(return_value=[])), \
+         patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
+         patch.object(book, "_access_token", return_value="tok"), \
+         patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", side_effect=_fake_upstox_key):
+        # NEW ATM=24300 (drift=200 >= tracking_recenter_pts=100) -> CE
+        # [24200,24100,24000,23900,23800], PE [24400,24500,24600,24700,24800] --
+        # partially overlaps the old window (3 CE + 3 PE strikes unchanged),
+        # so this genuinely tests the diff, not a full-window replacement.
+        await book._maybe_recenter_tracking_strikes(current_atm=24300.0)
+
+    assert book._ce_strikes == [24200, 24100, 24000, 23900, 23800]
+    assert book._pe_strikes == [24400, 24500, 24600, 24700, 24800]
+    assert sorted(feeder.subscribed) == sorted([
+        "NSE_FO|CE24200", "NSE_FO|CE24100", "NSE_FO|PE24700", "NSE_FO|PE24800",
+    ])
+    assert sorted(feeder.unsubscribed) == sorted([
+        "NSE_FO|CE23700", "NSE_FO|CE23600", "NSE_FO|PE24200", "NSE_FO|PE24300",
+    ])

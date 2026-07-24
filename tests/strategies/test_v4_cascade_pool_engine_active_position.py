@@ -101,28 +101,38 @@ async def test_recenter_refused_when_pool_position_open():
 
 
 @pytest.mark.asyncio
-async def test_recenter_rewarms_pool_engine_zone_pool_not_old_engine_scanners():
-    """C1's second half (the re-warm decision): for a pool book, resetting/
-    re-replaying INTO self._engine is meaningless -- it never opens/closes
-    anything for a pool book. The recenter must instead reset+re-warm the
-    POOL engine's own per-side zone-pool state (PoolCascadeEngine.
-    reset_side), or a strike swap would silently keep mixing the OLD
-    strike's 75m bar history into the SAME zone-pool/dedup state as the NEW
-    strike's bars forever (worse than not re-warming at all)."""
+async def test_recenter_rewarms_pool_engine_zone_pool_via_multi_strike_diff():
+    """C1's second half (the re-warm decision), re-targeted 2026-07-24 for
+    Task 6's diff-based multi-strike recenter: the single-strike
+    pool-engine recenter branch this test originally exercised (a bare
+    ``reset_side`` + 2-candidate ``_replay_pool_engine_history`` call
+    living directly inside ``_maybe_recenter_tracking_strikes``) was
+    deleted outright by Task 6 -- a pool-engine book now always goes
+    through ``_recenter_multi_strike``, which diffs the OLD candidate
+    window against the NEW one and only resets the strikes that actually
+    changed (``PoolCascadeEngine.reset_candidate``, not a full
+    ``reset_side`` wipe). The regression this still guards against is
+    unchanged: a strike swap must not silently keep mixing the OLD
+    strike's 75m bar history into the SAME zone-pool/dedup state as the
+    NEW strike's bars forever (worse than not re-warming at all) -- and
+    the old (inert, for a pool book) engine must never be touched."""
     book = _book()
     try:
         book._expiry = date(2026, 7, 21)
         book._tracking_reference_atm = 24216.05
-        book._ce_strike, book._pe_strike = 24000, 24400
+        old_ce, old_pe = 24000, 24400
+        book._ce_strike, book._pe_strike = old_ce, old_pe
+        book._ce_strikes, book._pe_strikes = [old_ce], [old_pe]
+        book._ce_symbols, book._pe_symbols = ["NSE_FO|old_ce"], ["NSE_FO|old_pe"]
         book._pool_engine.position = None
 
         # Poison pre-existing per-side state as if built from the OLD
         # strike's history -- must be CLEARED (not silently appended to)
         # by the recenter, not carried forward mixed with the new bars.
         stale_bar = _Bar(datetime(2026, 6, 1, 10, 30, tzinfo=IST), 9000, 9050, 8950, 9010, tf=75)
-        ce_key = ("CE", book._ce_strike)
-        book._pool_engine._all_75m.setdefault(ce_key, []).append(stale_bar)
-        book._pool_engine._known_ref_ts.setdefault(ce_key, set()).add(datetime(2026, 6, 1, 9, 15, tzinfo=IST))
+        old_ce_key = ("CE", old_ce)
+        book._pool_engine._all_75m.setdefault(old_ce_key, []).append(stale_bar)
+        book._pool_engine._known_ref_ts.setdefault(old_ce_key, set()).add(datetime(2026, 6, 1, 9, 15, tzinfo=IST))
 
         # 100 one-minute rows starting at the 09:15 session open crosses a
         # real 75-minute bucket boundary, so on_75m_bar actually fires
@@ -132,22 +142,34 @@ async def test_recenter_rewarms_pool_engine_zone_pool_not_old_engine_scanners():
         rows = [{"ts": (base + timedelta(minutes=i)).isoformat(), "open": 100, "high": 101,
                  "low": 99, "close": 100, "volume": 10} for i in range(100)]
 
+        def _fake_upstox_key(underlying, expiry, strike, opt_type):
+            return f"NSE_FO|{opt_type}{int(strike)}"
+
         with patch("strategies.v4_cascade.book.fetch_upstox_range_1m", new=AsyncMock(return_value=rows)), \
              patch("strategies.v4_cascade.book.fetch_upstox_intraday_1m", new=AsyncMock(return_value=[])), \
              patch.object(book, "_access_token", return_value="tok"), \
-             patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", return_value="NSE_FO|new"):
+             patch("strategies.v4_cascade.book.REGISTRY.get_upstox_key", side_effect=_fake_upstox_key):
             await book._maybe_recenter_tracking_strikes(current_atm=24320.0)   # drift = 103.95 >= 100
 
         # Old engine must never be touched -- completely inert for a pool book.
         assert book._engine._scanners["CE"].setups == []
         assert book._engine.position is None
 
-        # Pool engine's zone pool must have real state rebuilt from the NEW
+        # The window actually moved (100pt-offset default -> ATM 24300 rounds
+        # to CE=24100/PE=24500), so this genuinely exercises the diff, not a
+        # no-op.
+        new_ce = book._ce_strikes[0]
+        assert new_ce != old_ce
+        new_ce_key = ("CE", new_ce)
+
+        # New candidate's zone pool must have real state rebuilt from the NEW
         # strike's history ...
-        assert len(book._pool_engine._all_75m[ce_key]) > 0
-        # ... and the stale OLD-strike bar must be gone, not mixed in with
-        # the freshly re-warmed one.
-        assert stale_bar not in book._pool_engine._all_75m[ce_key]
+        assert len(book._pool_engine._all_75m[new_ce_key]) > 0
+        # ... and the OLD strike's zone pool must have been reset_candidate-
+        # cleared (it fell out of the window), not left dangling with the
+        # stale bar mixed into whatever else accumulates there.
+        assert book._pool_engine._all_75m.get(old_ce_key, []) == []
+        assert stale_bar not in book._pool_engine._all_75m.get(old_ce_key, [])
     finally:
         _cleanup(book)
 
