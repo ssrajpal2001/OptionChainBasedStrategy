@@ -2769,8 +2769,9 @@ class DashboardServer:
                             # can fire at any time), so hiding it during an open position was
                             # hiding exactly the info that explains what could flip the trade.
                             if True:
+                                _use_pool = bool(getattr(book, "_use_pool_engine", False))
                                 _bias = "none"
-                                _sc = getattr(book._engine, "_spot_confirm", None)
+                                _sc = None if _use_pool else getattr(book._engine, "_spot_confirm", None)
                                 _index_gate = None
                                 if _sc is not None:
                                     _bias = getattr(_sc.current_kind, "value", str(_sc.current_kind))
@@ -2799,13 +2800,15 @@ class DashboardServer:
                                     _expiry_str = book._expiry.isoformat() if book._expiry else None
                                 # "model" discriminator: crypto keeps the legacy two-stage
                                 # HTF(75m premium)+MTF(5m/15m premium) shape byte-for-byte
-                                # (GateState/PremiumGateScanner, untouched); NIFTY/CRUDEOIL gets
-                                # the 2026-07-20 Index/Premium-decoupled shape (PremiumZoneState/
-                                # IndexGatedPremiumScanner) plus the new index_gate block above,
-                                # which is the explicit "which chart/timeframe is Gate 1
-                                # evaluating" telemetry.
+                                # (GateState/PremiumGateScanner, untouched); NIFTY/CRUDEOIL on the
+                                # OLD engine gets the 2026-07-20 Index/Premium-decoupled shape
+                                # (PremiumZoneState/IndexGatedPremiumScanner) plus the index_gate
+                                # block above; NIFTY on the NEW pool engine (2026-07-24) has no
+                                # Index Gate 1 concept at all -- bias/index_gate stay at their
+                                # empty defaults, "pool_engine" tells the frontend not to expect
+                                # them populated.
                                 tracking = {"is_crypto": _is_crypto,
-                                            "model": "legacy" if _is_crypto else "index_gated",
+                                            "model": "pool_engine" if _use_pool else ("legacy" if _is_crypto else "index_gated"),
                                             "atm": _atm, "dte": _dte, "offset": _offset,
                                             "expiry": _expiry_str, "phase": "", "bias": _bias,
                                             "index_gate": _index_gate}
@@ -2817,7 +2820,59 @@ class DashboardServer:
                                     return (round(min(z.entry_line, z.sweep_low), 2),
                                             round(max(z.entry_line, z.sweep_low), 2))
 
-                                if _is_crypto:
+                                if _use_pool:
+                                    # 2026-07-24: pool-engine zone pool (strategies/v4_cascade/
+                                    # pool_engine.py) has no HTF/MTF gate-state-machine at all --
+                                    # each side just has a POOL of concurrently-tracked _ZoneSlot
+                                    # objects. Show the single most-advanced slot: prefer one with
+                                    # a pending limit order, then one already re-entered/tracking,
+                                    # then just the newest zone in the pool.
+                                    pe = getattr(book, "_pool_engine", None)
+                                    for side, label in (("CE", "CE"), ("PE", "PE")):
+                                        side_ltp = float(live_price.get(side) or 0.0)
+                                        pool = list(pe._pool.get(side, [])) if pe is not None else []
+                                        slot = None
+                                        if pool:
+                                            pending = [s for s in pool if s.pending_entry]
+                                            tracking_slots = [s for s in pool if s.tracking]
+                                            if pending:
+                                                slot = max(pending, key=lambda s: s.trigger_ts or datetime.min.replace(tzinfo=IST))
+                                            elif tracking_slots:
+                                                slot = max(tracking_slots, key=lambda s: s.reentry_ts or datetime.min.replace(tzinfo=IST))
+                                            else:
+                                                slot = max(pool, key=lambda s: s.zone.reference_low_ts or datetime.min.replace(tzinfo=IST))
+                                        if slot is not None:
+                                            zone_low, zone_high = round(slot.zone_low, 2), round(slot.zone_high, 2)
+                                            if slot.pending_entry:
+                                                side_state = "limit_armed"
+                                            elif slot.tracking:
+                                                side_state = "tracking"
+                                            else:
+                                                side_state = "zone_found"
+                                            timeframe = 75
+                                            limit_price = round(slot.zone_low + pe._entry_offset, 2)
+                                            _z = slot.zone
+                                            ref_ts = (_z.reference_low_ts.isoformat(timespec="minutes")
+                                                      if _z and _z.reference_low_ts else None)
+                                            trap_ts = (_z.lock_ts.isoformat(timespec="minutes")
+                                                       if _z and _z.lock_ts else None)
+                                        else:
+                                            zone_low = zone_high = limit_price = timeframe = None
+                                            ref_ts = trap_ts = None
+                                            side_state = "—"
+                                        strike = int(getattr(book, f"_{side.lower()}_strike", 0) or 0)
+                                        tracking[f"{side.lower()}_label"] = label
+                                        tracking[f"{side.lower()}_strike"] = strike
+                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+                                        tracking[side.lower()] = {
+                                            "state": side_state, "timeframe": timeframe,
+                                            "traps": len(pool),
+                                            "zone_low": zone_low, "zone_high": zone_high,
+                                            "limit_entry_price": limit_price,
+                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
+                                        }
+                                        _phases.append(side_state)
+                                elif _is_crypto:
                                     _gate_order = list(GateState)
                                     _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
                                     _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
