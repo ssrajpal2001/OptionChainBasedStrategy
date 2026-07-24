@@ -2829,7 +2829,7 @@ class DashboardServer:
                             _is_crypto = str(underlying).upper() in ("BTC", "ETH")
                             live_price = getattr(book, "_live_price", {}) or {}
                             exec_live_price = getattr(book, "_exec_live_price", {}) or {}
-                            pos = book._engine.position
+                            pos = book._active_position
                             if pos is not None and pos.is_open:
                                 # Crypto trades the underlying's own spot/perpetual price directly —
                                 # there is no option chain for BTC/ETH, so CE/PE here are only the
@@ -2862,8 +2862,12 @@ class DashboardServer:
                                     # tracking_label surface that context explicitly next to
                                     # them, so the UI can label them clearly as belonging to
                                     # the contract being scanned, not the one actually traded.
-                                    _tracking_strike = 0 if _is_crypto else int(
-                                        getattr(book, f"_{pos.side.lower()}_strike", 0) or 0)
+                                    # 2026-07-24: was getattr(book, f"_{pos.side.lower()}_strike", 0),
+                                    # which under multi-strike pool-engine scanning is only the
+                                    # FIRST of up to 5 candidates -- if the trade actually fired on
+                                    # candidate #2-5, that read the wrong strike. leg.strike is the
+                                    # TrancheLeg's own real traded strike, always correct.
+                                    _tracking_strike = 0 if _is_crypto else int(leg.strike or 0)
                                     legs.append({
                                         "symbol": _instr, "instrument": _instr,
                                         "type": leg.tranche,
@@ -5889,7 +5893,7 @@ pm2 save
 
             elif sname == "v4_cascade":
                 book = self._find_v4_book(cid, bid, underlying)
-                pos = getattr(book, "_engine", None) and book._engine.position
+                pos = book._active_position if book is not None else None
                 if pos is None or not pos.is_open:
                     continue
                 _is_crypto = str(underlying).upper() in ("BTC", "ETH")
