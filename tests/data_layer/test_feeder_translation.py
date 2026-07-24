@@ -3,6 +3,8 @@ Tests for cross-provider token translation and Fyers access-token normalization.
 No live broker connection is required.
 """
 
+import asyncio
+
 import pytest
 from datetime import date
 
@@ -63,3 +65,23 @@ def test_upstox_converts_fyers_mcx_option_symbol(bus):
 
 def test_mcx_underlyings_include_crudeoil():
     assert "CRUDEOIL" in _MCX_UNDERLYINGS
+
+
+def test_upstox_subscribe_tokens_dedupes_dual_format_same_leg(bus, monkeypatch):
+    """2026-07-24 real production bug: strike_rebalancer._strikes_to_tokens()
+    deliberately sends BOTH a native Upstox instrument_key and a Fyers-format
+    symbol for every leg in a single subscribe_tokens() call (each feeder in a
+    dual-active pair filters to its own format). Converting the Fyers-format
+    token back to Upstox produces the SAME key as the native one -- so the old
+    dedup (checked only against _subscribed_keys from PRIOR calls, never within
+    the current call) appended every leg twice, inflating the ~50/connection WS
+    limit warning 2x on every fresh subscribe. Confirmed live: every option key
+    subscribed exactly twice, 74 "subscribed" vs 38 truly distinct symbols.
+
+    Stubs _to_upstox_key directly (rather than round-tripping through the real
+    registry/date-based symbol parser) to isolate the dedup behavior under test
+    from unrelated expiry-resolution machinery."""
+    u = UpstoxFeeder(bus)
+    monkeypatch.setattr(u, "_to_upstox_key", lambda t: "NSE_FO|63915")
+    asyncio.run(u.subscribe_tokens(["NSE_FO|63915", "NSE:NIFTY26JUL23500CE"]))
+    assert u._subscribed_keys == ["NSE_FO|63915"]

@@ -401,8 +401,16 @@ class UpstoxFeeder(BaseFeeder):
         self._extra_spot_keys.update(mapping)
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
-        # In dual mode the rebalancer may send Fyers-format tokens.  Convert any non-Upstox
-        # token into the matching Upstox instrument key so both feeders subscribe the same leg.
+        # In dual mode _strikes_to_tokens() (strike_rebalancer.py) deliberately sends BOTH
+        # a native Upstox instrument_key AND a Fyers-format symbol for every leg in the same
+        # call, so each feeder in the pair can filter to its own format. Converting the
+        # Fyers-format one back to Upstox here produces the SAME key as the native one for
+        # that leg -- so `mine` can contain true duplicates. The old dedup only checked
+        # against self._subscribed_keys (state from PRIOR calls), never against duplicates
+        # arising within this same call, so every leg got appended (and re-sent to the WS)
+        # twice -- inflating the ~50/connection limit warning 2x on every fresh subscribe
+        # (2026-07-24: confirmed live via /api/admin/subscribed_keys — every option key
+        # appeared exactly twice, 74 "subscribed" vs 38 truly distinct symbols).
         mine: List[str] = []
         for t in tokens:
             if self._is_upstox_key(t):
@@ -413,6 +421,7 @@ class UpstoxFeeder(BaseFeeder):
                     mine.append(ukey)
                 else:
                     logger.debug("UpstoxFeeder: could not convert token %s to Upstox key", t)
+        mine = list(dict.fromkeys(mine))  # de-dupe within this call, preserve order
         new_keys = [t for t in mine if t not in self._subscribed_keys]
         if not new_keys:
             return
@@ -452,6 +461,7 @@ class UpstoxFeeder(BaseFeeder):
                 ukey = self._to_upstox_key(t)
                 if ukey:
                     mine.append(ukey)
+        mine = list(dict.fromkeys(mine))  # de-dupe within this call (see subscribe_tokens)
         if not mine:
             return
         for k in mine:
