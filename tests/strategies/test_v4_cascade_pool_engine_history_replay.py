@@ -53,8 +53,8 @@ async def test_ingest_history_replays_into_pool_engine_not_old_engine():
     # on_75m_bar must actually have fired and appended a bar -- a genuinely
     # meaningful assertion (the prior `>= 0` was always true regardless of
     # correctness and proved nothing about the 75m dispatch path).
-    assert len(book._pool_engine._all_75m["CE"]) > 0
-    assert len(book._pool_engine._all_75m["PE"]) > 0
+    assert len(book._pool_engine._all_75m[("CE", book._ce_strike)]) > 0
+    assert len(book._pool_engine._all_75m[("PE", book._pe_strike)]) > 0
 
 
 @pytest.mark.asyncio

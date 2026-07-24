@@ -120,8 +120,9 @@ async def test_recenter_rewarms_pool_engine_zone_pool_not_old_engine_scanners():
         # strike's history -- must be CLEARED (not silently appended to)
         # by the recenter, not carried forward mixed with the new bars.
         stale_bar = _Bar(datetime(2026, 6, 1, 10, 30, tzinfo=IST), 9000, 9050, 8950, 9010, tf=75)
-        book._pool_engine._all_75m["CE"].append(stale_bar)
-        book._pool_engine._known_ref_ts["CE"].add(datetime(2026, 6, 1, 9, 15, tzinfo=IST))
+        ce_key = ("CE", book._ce_strike)
+        book._pool_engine._all_75m.setdefault(ce_key, []).append(stale_bar)
+        book._pool_engine._known_ref_ts.setdefault(ce_key, set()).add(datetime(2026, 6, 1, 9, 15, tzinfo=IST))
 
         # 100 one-minute rows starting at the 09:15 session open crosses a
         # real 75-minute bucket boundary, so on_75m_bar actually fires
@@ -143,10 +144,10 @@ async def test_recenter_rewarms_pool_engine_zone_pool_not_old_engine_scanners():
 
         # Pool engine's zone pool must have real state rebuilt from the NEW
         # strike's history ...
-        assert len(book._pool_engine._all_75m["CE"]) > 0
+        assert len(book._pool_engine._all_75m[ce_key]) > 0
         # ... and the stale OLD-strike bar must be gone, not mixed in with
         # the freshly re-warmed one.
-        assert stale_bar not in book._pool_engine._all_75m["CE"]
+        assert stale_bar not in book._pool_engine._all_75m[ce_key]
     finally:
         _cleanup(book)
 

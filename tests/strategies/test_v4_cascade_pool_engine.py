@@ -41,19 +41,22 @@ def _engine():
     return PoolCascadeEngine(cfg, entry_offset=5.0, session_open=(9, 15))
 
 
+_STRIKE = 100.0
+
+
 def test_htf_zone_added_to_pool_on_reentry():
     eng = _engine()
     # ref@0 (low=100,high=110), sweep@1 (low=90), reclaim@2 (high=115).
-    eng.on_75m_bar("CE", _bar75(0, 105, 110, 100, 105))
-    eng.on_75m_bar("CE", _bar75(1, 95, 100, 90, 95))
-    eng.on_75m_bar("CE", _bar75(2, 96, 115, 95, 112))
-    assert len(eng._pool["CE"]) == 1
-    slot = eng._pool["CE"][0]
+    eng.on_75m_bar("CE", _STRIKE, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(2, 96, 115, 95, 112))
+    assert len(eng._pool[("CE", _STRIKE)]) == 1
+    slot = eng._pool[("CE", _STRIKE)][0]
     assert slot.zone_low == 90 and slot.zone_high == 100
     assert slot.tracking is False
     # A later bar re-enters [90, 100].
-    eng.on_75m_bar("CE", _bar75(3, 105, 108, 92, 96))
-    assert eng._pool["CE"][0].tracking is True
+    eng.on_75m_bar("CE", _STRIKE, _bar75(3, 105, 108, 92, 96))
+    assert eng._pool[("CE", _STRIKE)][0].tracking is True
 
 
 def test_htf_zone_added_to_pool_on_reentry_pe_same_bear_trap_shape():
@@ -62,42 +65,44 @@ def test_htf_zone_added_to_pool_on_reentry_pe_same_bear_trap_shape():
     for PE anymore. Identical bars/assertions to the CE test above, just
     fed to the "PE" side, proving on_75m_bar no longer branches on side."""
     eng = _engine()
-    eng.on_75m_bar("PE", _bar75(0, 105, 110, 100, 105))
-    eng.on_75m_bar("PE", _bar75(1, 95, 100, 90, 95))
-    eng.on_75m_bar("PE", _bar75(2, 96, 115, 95, 112))
-    assert len(eng._pool["PE"]) == 1
-    slot = eng._pool["PE"][0]
+    eng.on_75m_bar("PE", _STRIKE, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(2, 96, 115, 95, 112))
+    assert len(eng._pool[("PE", _STRIKE)]) == 1
+    slot = eng._pool[("PE", _STRIKE)][0]
     assert slot.zone_low == 90 and slot.zone_high == 100
     assert slot.tracking is False
-    eng.on_75m_bar("PE", _bar75(3, 105, 108, 92, 96))
-    assert eng._pool["PE"][0].tracking is True
-    # CE's pool is completely untouched by feeding PE bars.
-    assert eng._pool["CE"] == []
+    eng.on_75m_bar("PE", _STRIKE, _bar75(3, 105, 108, 92, 96))
+    assert eng._pool[("PE", _STRIKE)][0].tracking is True
+    # CE's pool is completely untouched by feeding PE bars -- never even
+    # gets a dict entry (the pool is now populated lazily via setdefault),
+    # so this must use .get() rather than a direct subscript.
+    assert eng._pool.get(("CE", _STRIKE), []) == []
 
 
 def test_full_chain_produces_open_event():
     eng = _engine()
-    eng.on_75m_bar("CE", _bar75(0, 105, 110, 100, 105))
-    eng.on_75m_bar("CE", _bar75(1, 95, 100, 90, 95))
-    eng.on_75m_bar("CE", _bar75(2, 96, 115, 95, 112))
-    eng.on_75m_bar("CE", _bar75(3, 105, 108, 92, 96))  # re-entry
-    assert eng._pool["CE"][0].tracking is True
+    eng.on_75m_bar("CE", _STRIKE, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(3, 105, 108, 92, 96))  # re-entry
+    assert eng._pool[("CE", _STRIKE)][0].tracking is True
 
     ltf_base = _BASE + timedelta(minutes=75 * 4)
     # 15m nested pattern: ref(low=93,high=97), sweep(low=91), reclaim(high=99).
-    eng.on_15m_bar("CE", _bar15(ltf_base, 0, 95, 97, 93, 95))
-    eng.on_15m_bar("CE", _bar15(ltf_base, 15, 92, 94, 91, 92))
-    eng.on_15m_bar("CE", _bar15(ltf_base, 30, 93, 99, 92, 97))
-    assert eng._pool["CE"][0].ltf_zone is not None
-    assert eng._pool["CE"][0].ltf_zone.sl_level == 97  # ref.high
+    eng.on_15m_bar("CE", _STRIKE, _bar15(ltf_base, 0, 95, 97, 93, 95))
+    eng.on_15m_bar("CE", _STRIKE, _bar15(ltf_base, 15, 92, 94, 91, 92))
+    eng.on_15m_bar("CE", _STRIKE, _bar15(ltf_base, 30, 93, 99, 92, 97))
+    assert eng._pool[("CE", _STRIKE)][0].ltf_zone is not None
+    assert eng._pool[("CE", _STRIKE)][0].ltf_zone.sl_level == 97  # ref.high
 
     # 5m trigger: candle closes above the previous candle's high.
-    events = eng.on_5m_bar("CE", _bar5(ltf_base, 30, 93, 94, 92, 93))
+    events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 30, 93, 94, 92, 93))
     assert events == []
-    events = eng.on_5m_bar("CE", _bar5(ltf_base, 35, 93, 95, 92, 94.5))
+    events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 35, 93, 95, 92, 94.5))
     assert events == []  # trigger armed (94.5 > 94 -- prev bar's high), not pierced yet
     # limit = zone_low(90) + offset(5) = 95 -- a bar whose low pierces down to it fills.
-    events = eng.on_5m_bar("CE", _bar5(ltf_base, 40, 95, 96, 94, 95.5))
+    events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 40, 95, 96, 94, 95.5))
     assert len(events) == 1
     assert events[0].event_type == CascadeEventType.OPEN_LONG_CE
     assert eng.position is not None
@@ -105,7 +110,7 @@ def test_full_chain_produces_open_event():
     assert eng.position.t1.sl_price == 85.0  # zone_low(90) - offset(5)
     assert eng.position.t1.target_price == 97.0  # ltf_zone.sl_level (locked before fill)
     assert eng.position.t2.target_price is None  # T2 has no fixed target field set at open (matches V4CascadeEngine convention)
-    assert eng._pool["CE"] == []  # pool cleared on fill
+    assert eng._pool[("CE", _STRIKE)] == []  # pool cleared on fill
 
 
 def test_5m_trigger_fires_without_any_15m_zone_ever_forming():
@@ -113,19 +118,19 @@ def test_5m_trigger_fires_without_any_15m_zone_ever_forming():
     entry is driven by the 75m zone re-entry + 5m break-of-structure alone.
     Here on_15m_bar is never called at all, yet the trade still fires."""
     eng = _engine()
-    eng.on_75m_bar("CE", _bar75(0, 105, 110, 100, 105))
-    eng.on_75m_bar("CE", _bar75(1, 95, 100, 90, 95))
-    eng.on_75m_bar("CE", _bar75(2, 96, 115, 95, 112))
-    eng.on_75m_bar("CE", _bar75(3, 105, 108, 92, 96))  # re-entry
-    assert eng._pool["CE"][0].tracking is True
-    assert eng._pool["CE"][0].ltf_zone is None  # no 15m data fed at all
+    eng.on_75m_bar("CE", _STRIKE, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("CE", _STRIKE, _bar75(3, 105, 108, 92, 96))  # re-entry
+    assert eng._pool[("CE", _STRIKE)][0].tracking is True
+    assert eng._pool[("CE", _STRIKE)][0].ltf_zone is None  # no 15m data fed at all
 
     ltf_base = _BASE + timedelta(minutes=75 * 4)
-    events = eng.on_5m_bar("CE", _bar5(ltf_base, 30, 93, 94, 92, 93))
+    events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 30, 93, 94, 92, 93))
     assert events == []
-    events = eng.on_5m_bar("CE", _bar5(ltf_base, 35, 93, 95, 92, 94.5))  # arms (94.5 > 94)
+    events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 35, 93, 95, 92, 94.5))  # arms (94.5 > 94)
     assert events == []
-    events = eng.on_5m_bar("CE", _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(95)
+    events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(95)
     assert len(events) == 1
     assert events[0].event_type == CascadeEventType.OPEN_LONG_CE
     assert events[0].audit["ltf_found_at_fill"] is False
@@ -133,7 +138,7 @@ def test_5m_trigger_fires_without_any_15m_zone_ever_forming():
     # No 15m trap ever locked -> T1 falls back to T2's target (htf.sl_level =
     # 110, the 75m ref candle bar75(0)'s own high).
     assert eng.position.t1.target_price == 110.0
-    assert eng._pool["CE"] == []
+    assert eng._pool[("CE", _STRIKE)] == []
 
 
 def test_intraday_trigger_reset_skips_cross_day_comparison():
@@ -150,15 +155,15 @@ def test_intraday_trigger_reset_skips_cross_day_comparison():
     slot.ltf_zone = RollingBaseZone(entry_line=95.0, sweep_low=92.0, sl_level=98.0,
                                      reference_low_ts=day1, lock_ts=day1, locked=True)
     slot.prev_5m_bar = slot_bar  # yesterday's last 5m bar
-    eng._pool["CE"] = [slot]
+    eng._pool[("CE", _STRIKE)] = [slot]
     eng._last_5m_date["CE"] = day1.date()
 
     # First 5m bar of the NEW day -- even though its close (150) is way
     # above yesterday's bar's high (101), it must NOT trigger, since the
     # "previous candle" pointer resets across the day boundary.
-    events = eng.on_5m_bar("CE", _Bar(day2, 140, 150, 139, 150, tf=5))
+    events = eng.on_5m_bar("CE", _STRIKE, _Bar(day2, 140, 150, 139, 150, tf=5))
     assert events == []
-    assert eng._pool["CE"][0].pending_entry is False
+    assert eng._pool[("CE", _STRIKE)][0].pending_entry is False
 
 
 def test_pending_entry_pierce_fires_on_first_bar_of_new_day():
@@ -183,13 +188,13 @@ def test_pending_entry_pierce_fires_on_first_bar_of_new_day():
     slot.pending_entry = True
     slot.trigger_ts = day1
     slot.prev_5m_bar = _Bar(day1, 100, 101, 99, 100, tf=5)  # yesterday's last 5m bar
-    eng._pool["CE"] = [slot]
+    eng._pool[("CE", _STRIKE)] = [slot]
     eng._last_5m_date["CE"] = day1.date()
 
     # First 5m bar of the new day: limit price = zone_low(90) + offset(5) =
     # 95; this bar's low (93) genuinely pierces it. The fill must fire on
     # THIS bar, not the next one.
-    events = eng.on_5m_bar("CE", _Bar(day2, 97, 98, 93, 96, tf=5))
+    events = eng.on_5m_bar("CE", _STRIKE, _Bar(day2, 97, 98, 93, 96, tf=5))
     assert len(events) == 1
     assert events[0].event_type == CascadeEventType.OPEN_LONG_CE
     assert eng.position is not None
@@ -204,14 +209,20 @@ def _open_position(eng, side):
     ts0 = _BASE
     entry, sl, t1_target = 100.0, 90.0, 106.0
     qty = eng._cfg.tranche_qty
-    t1 = TrancheLeg(tranche="T1", option_type=side, strike=0.0, qty=qty,
+    # strike=_STRIKE (not 0.0) -- on_5m_bar's same-candidate check compares
+    # the passed strike arg against position.tracking_strike (see
+    # test_structural_flip_closes_open_side_when_counter_side_fires, which
+    # feeds this position via eng.on_5m_bar(side, _STRIKE, bar)); a mismatch
+    # here would make the engine treat that feed as a DIFFERENT, frozen
+    # candidate instead of the open position's own tick.
+    t1 = TrancheLeg(tranche="T1", option_type=side, strike=_STRIKE, qty=qty,
                      entry_price=entry, entry_time=ts0, entry_reason="test",
                      sl_price=sl, target_price=t1_target)
-    t2 = TrancheLeg(tranche="T2", option_type=side, strike=0.0, qty=qty,
+    t2 = TrancheLeg(tranche="T2", option_type=side, strike=_STRIKE, qty=qty,
                      entry_price=entry, entry_time=ts0, entry_reason="test",
                      sl_price=sl, target_price=None, tracking_current_stop=sl)
     eng.position = CascadePosition(
-        underlying="NIFTY", side=side, tracking_strike=0.0, execution_strike=0.0,
+        underlying="NIFTY", side=side, tracking_strike=_STRIKE, execution_strike=_STRIKE,
         atm_at_trigger=0.0, entry_spot=0.0, t1=t1, t2=t2, open_time=ts0,
         tracking_entry_price=entry,
     )
@@ -292,18 +303,18 @@ def test_counter_side_15m_reentry_trails_open_side_stop():
 
     # PE's 75m zone: ref@0 (low=100,high=110), sweep@1 (low=90), reclaim@2
     # (high=115) -- same shape used throughout this file -- then re-entry.
-    eng.on_75m_bar("PE", _bar75(0, 105, 110, 100, 105))
-    eng.on_75m_bar("PE", _bar75(1, 95, 100, 90, 95))
-    eng.on_75m_bar("PE", _bar75(2, 96, 115, 95, 112))
-    eng.on_75m_bar("PE", _bar75(3, 105, 108, 92, 96))  # re-entry
-    assert eng._pool["PE"][0].tracking is True
+    eng.on_75m_bar("PE", _STRIKE, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(3, 105, 108, 92, 96))  # re-entry
+    assert eng._pool[("PE", _STRIKE)][0].tracking is True
 
     ltf_base = _BASE + timedelta(minutes=75 * 4)
     # PE's 15m sub-zone: ref(low=93,high=97), sweep(low=91), reclaim(high=99).
-    eng.on_15m_bar("PE", _bar15(ltf_base, 0, 95, 97, 93, 95))
-    eng.on_15m_bar("PE", _bar15(ltf_base, 15, 92, 94, 91, 92))
-    eng.on_15m_bar("PE", _bar15(ltf_base, 30, 93, 99, 92, 97))
-    slot = eng._pool["PE"][0]
+    eng.on_15m_bar("PE", _STRIKE, _bar15(ltf_base, 0, 95, 97, 93, 95))
+    eng.on_15m_bar("PE", _STRIKE, _bar15(ltf_base, 15, 92, 94, 91, 92))
+    eng.on_15m_bar("PE", _STRIKE, _bar15(ltf_base, 30, 93, 99, 92, 97))
+    slot = eng._pool[("PE", _STRIKE)][0]
     assert slot.ltf_zone is not None
     assert slot.ltf_reentered is False  # not re-entered yet -- CE's trail untouched
     assert eng._trail["CE"].current_stop == 90.0
@@ -312,16 +323,16 @@ def test_counter_side_15m_reentry_trails_open_side_stop():
     # re-entry but its OWN low is not yet used as a trailing candidate
     # (same "state-transition bar isn't also the confirmation bar" rule
     # used for the 75m re-entry / 5m trigger elsewhere in this engine).
-    eng.on_15m_bar("PE", _bar15(ltf_base, 45, 92, 93, 91.5, 92.2))
+    eng.on_15m_bar("PE", _STRIKE, _bar15(ltf_base, 45, 92, 93, 91.5, 92.2))
     assert slot.ltf_reentered is True
     assert eng._trail["CE"].current_stop == 90.0  # still untouched
 
     # Now every subsequent PE 15m low ratchets CE's stop, only upward.
-    eng.on_15m_bar("PE", _bar15(ltf_base, 60, 92, 92.5, 91.8, 92.0))
+    eng.on_15m_bar("PE", _STRIKE, _bar15(ltf_base, 60, 92, 92.5, 91.8, 92.0))
     assert eng._trail["CE"].current_stop == 91.8
-    eng.on_15m_bar("PE", _bar15(ltf_base, 75, 93, 94, 93.5, 93.8))
+    eng.on_15m_bar("PE", _STRIKE, _bar15(ltf_base, 75, 93, 94, 93.5, 93.8))
     assert eng._trail["CE"].current_stop == 93.5
-    eng.on_15m_bar("PE", _bar15(ltf_base, 90, 92, 92.8, 92.0, 92.3))  # lower low -- no regression
+    eng.on_15m_bar("PE", _STRIKE, _bar15(ltf_base, 90, 92, 92.8, 92.0, 92.3))  # lower low -- no regression
     assert eng._trail["CE"].current_stop == 93.5
 
     # CE and its position are otherwise untouched by all of this.
@@ -350,24 +361,24 @@ def test_structural_flip_closes_open_side_when_counter_side_fires():
     eng = _engine()
     t1, t2 = _open_position(eng, "CE")
     # CE's own last known price before the flip (used as the close price).
-    eng.on_5m_bar("CE", _bar5(_BASE, 5, 99, 100, 98, 98.0))
+    eng.on_5m_bar("CE", _STRIKE, _bar5(_BASE, 5, 99, 100, 98, 98.0))
     assert eng._last_5m_bar["CE"].close == 98.0
 
     # Drive PE through a full independent 75m -> re-entry -> 5m trigger ->
     # pierce chain while CE is still open (identical shape to
     # test_full_chain_produces_open_event, on "PE" instead of "CE").
-    eng.on_75m_bar("PE", _bar75(0, 105, 110, 100, 105))
-    eng.on_75m_bar("PE", _bar75(1, 95, 100, 90, 95))
-    eng.on_75m_bar("PE", _bar75(2, 96, 115, 95, 112))
-    eng.on_75m_bar("PE", _bar75(3, 105, 108, 92, 96))  # re-entry
-    assert eng._pool["PE"][0].tracking is True
+    eng.on_75m_bar("PE", _STRIKE, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("PE", _STRIKE, _bar75(3, 105, 108, 92, 96))  # re-entry
+    assert eng._pool[("PE", _STRIKE)][0].tracking is True
 
     ltf_base = _BASE + timedelta(minutes=75 * 4)
-    events = eng.on_5m_bar("PE", _bar5(ltf_base, 30, 93, 94, 92, 93))
+    events = eng.on_5m_bar("PE", _STRIKE, _bar5(ltf_base, 30, 93, 94, 92, 93))
     assert events == []
-    events = eng.on_5m_bar("PE", _bar5(ltf_base, 35, 93, 95, 92, 94.5))  # arms
+    events = eng.on_5m_bar("PE", _STRIKE, _bar5(ltf_base, 35, 93, 95, 92, 94.5))  # arms
     assert events == []
-    events = eng.on_5m_bar("PE", _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(95)
+    events = eng.on_5m_bar("PE", _STRIKE, _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(95)
 
     # Both CE legs close via structural_flip at CE's last known price (98.0),
     # THEN PE opens -- in that order.

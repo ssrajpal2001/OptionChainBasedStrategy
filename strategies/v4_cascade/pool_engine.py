@@ -17,6 +17,14 @@ option's OWN premium directly removes that asymmetry entirely: a demand-
 zone reclaim on the CE premium chart and a demand-zone reclaim on the PE
 premium chart mean exactly the same thing (buy that option), independently.
 
+2026-07-24: widened to track several candidate strikes per side (was one
+fixed ATM-offset strike per side) -- see
+docs/superpowers/specs/2026-07-24-v4-cascade-multi-strike-scan-design.md.
+The pool dict is now keyed (side, strike) instead of side alone; every
+public method gains a strike parameter. Same-side candidates are mutually
+exclusive (only one can be open at a time, others frozen while one is
+open) but cross-side structural flip is unchanged.
+
 2026-07-23 correction: the 15m LTF trap is NOT a precondition for the 5m
 entry trigger to arm or fire -- entry is driven by the 75m zone re-entry
 plus the 5m break-of-structure alone. The 15m trap (if one has locked
@@ -55,11 +63,12 @@ def _overlaps(bar_low: float, bar_high: float, lo: float, hi: float) -> bool:
 
 class _ZoneSlot:
     """One candidate HTF zone's independent tracking state, living inside a
-    side's pool -- multiple zones progress concurrently, each with its own
-    re-entry/LTF/5m-trigger state."""
+    (side, strike) candidate's pool -- multiple zones progress concurrently,
+    each with its own re-entry/LTF/5m-trigger state."""
 
-    def __init__(self, zone: RollingBaseZone) -> None:
+    def __init__(self, zone: RollingBaseZone, strike: float = 0.0) -> None:
         self.zone = zone
+        self.strike = strike
         self.zone_low, self.zone_high = _zone_bounds(zone)
         self.tracking = False
         self.reentry_ts: Optional[datetime] = None
@@ -80,56 +89,97 @@ class PoolCascadeEngine:
     """One instance per book (NIFTY only). .position mirrors
     V4CascadeEngine's own .position attribute exactly, so book.py's
     persistence/dashboard/EOD code reads it unchanged regardless of which
-    engine produced it."""
+    engine produced it.
+
+    2026-07-24: widened from a side-keyed pool ("CE"/"PE") to a
+    (side, strike)-composite-keyed pool so book.py can track several
+    candidate strikes per side (see
+    docs/superpowers/specs/2026-07-24-v4-cascade-multi-strike-scan-design.md)
+    instead of committing blindly to one fixed ATM-offset. Kept as ONE
+    shared engine instance (not one per candidate) specifically so the
+    existing whole-engine "only one position ever" invariant
+    (self.position/is_open()) and cross-side structural-flip logic in
+    _close_for_structural_flip keep working with zero new coordination
+    code -- they already operate at the whole-engine level, unaware of how
+    many candidates exist per side.
+
+    Same-side exclusivity (new): while a position is open on side X, EVERY
+    other candidate on side X (not just the traded one) is frozen -- no
+    zone-discovery (on_75m_bar/on_15m_bar already returned unconditionally
+    for the whole side before this change, which generalizes correctly:
+    "the side is open" is true regardless of which exact candidate holds
+    the trade) and no new trigger-arming/pierce-checking (on_5m_bar, which
+    DOES need an explicit strike comparison, since unlike 75m/15m it takes
+    an active branch -- feed check_exits -- for the exact open candidate).
+    Cross-side flip is UNCHANGED: a pierce on the opposite side still force-
+    closes whatever's open and flips into the new position, confirmed with
+    the user as a preserved behavior, not a regression, from the commit
+    immediately before this change."""
 
     def __init__(self, cfg: V4CascadeConfig, entry_offset: float,
                  session_open: Tuple[int, int] = (9, 15)) -> None:
         self._cfg = cfg
         self._entry_offset = entry_offset
         self._session_open = session_open
-        self._pool: Dict[str, List[_ZoneSlot]] = {"CE": [], "PE": []}
-        self._known_ref_ts: Dict[str, Set[datetime]] = {"CE": set(), "PE": set()}
-        self._all_75m: Dict[str, List] = {"CE": [], "PE": []}
-        self._last_5m_date: Dict[str, Optional[date]] = {"CE": None, "PE": None}
+        # Per-candidate state -- keyed (side, strike), populated lazily via
+        # .setdefault() as new candidates are first fed a 75m bar. A
+        # candidate with no zones yet simply has no key (equivalent to an
+        # empty pool), matching today's side-keyed dict's own "empty list"
+        # semantics.
+        self._pool: Dict[Tuple[str, float], List[_ZoneSlot]] = {}
+        self._known_ref_ts: Dict[Tuple[str, float], Set[datetime]] = {}
+        self._all_75m: Dict[Tuple[str, float], List] = {}
+        self._last_5m_date: Dict[Tuple[str, float], Optional[date]] = {}
+        # Side-keyed (NOT per-candidate): only the SINGLE traded candidate
+        # on a side ever has an open position, so there is never a need to
+        # track more than one trailing tracker / "last bar seen while open"
+        # per side at once. See _open_position/_close_for_structural_flip.
         self._trail: Dict[str, Optional[TrailingBaseTracker]] = {"CE": None, "PE": None}
-        # 2026-07-23: last 5m bar seen per side, regardless of tracking/open
-        # state -- the only "current price" this engine has any visibility
-        # into for the side that ISN'T being fed the bar that triggers a
-        # structural flip (see _close_for_structural_flip).
+        # 2026-07-23: last 5m bar seen per side. While FLAT, updated by
+        # WHICHEVER candidate on that side ticks most recently (last-write-
+        # wins across all candidates -- mirrors book.py's own _live_price
+        # convention). While a side is OPEN, only the exact traded
+        # candidate's bars reach the line that updates this (siblings
+        # return early in on_5m_bar before touching it) -- so it always
+        # reflects the traded contract's own price once a position exists,
+        # never a sibling's unrelated premium scale.
         self._last_5m_bar: Dict[str, Optional[object]] = {"CE": None, "PE": None}
         self.position: Optional[CascadePosition] = None
 
     def is_open(self) -> bool:
         return self.position is not None and self.position.is_open
 
+    def reset_candidate(self, side: str, strike: float) -> None:
+        """Clear ONE candidate's zone pool, HTF (75m) bar history, and
+        known-ref dedup set -- used by book.py's per-strike recenter diff
+        (only strikes that actually left/entered the ATM window are reset,
+        not the whole side) so a candidate that stays in-window across a
+        recenter keeps its in-progress zone pool instead of re-warming from
+        scratch."""
+        key = (side, strike)
+        self._pool[key] = []
+        self._known_ref_ts[key] = set()
+        self._all_75m[key] = []
+        self._last_5m_date[key] = None
+
     def reset_side(self, side: str) -> None:
-        """Clear this side's zone pool, HTF (75m) bar history, and
-        known-ref dedup set -- used by book.py's tracking-strike recenter
-        (V4CascadeBook._maybe_recenter_tracking_strikes) right before it
-        re-warms from the NEW strike's freshly-fetched history. Without
-        this, _all_75m[side]/_known_ref_ts[side] would keep accumulating
-        forever across a strike swap, mixing the OLD strike's 75m bars
-        (different instrument, different price scale) into the SAME HTF
-        zone search window as the NEW strike's bars -- corrupting zone_low/
-        zone_high for any zone discovered afterward. Mirrors the old
-        V4CascadeEngine's per-side `scanner.reset()` called from the same
-        call site. Only ever called while flat (recenter's flatness gate
-        guarantees this side has no open position) -- does not touch
-        self.position."""
-        self._pool[side] = []
-        self._known_ref_ts[side] = set()
-        self._all_75m[side] = []
-        self._last_5m_date[side] = None
-        self._trail[side] = None
-        self._last_5m_bar[side] = None
+        """Clear every candidate currently tracked on this side. Mirrors
+        the old single-candidate reset_side exactly when there is only one
+        candidate; with multiple candidates this is a full-side wipe (book.py's
+        recenter uses reset_candidate directly per changed strike instead,
+        to avoid re-warming candidates that didn't move -- this stays
+        available for any full-side-wipe caller)."""
+        for (s, k) in [key for key in self._pool.keys() if key[0] == side]:
+            self.reset_candidate(s, k)
 
     # ── HTF (75m) ────────────────────────────────────────────────────────
-    def on_75m_bar(self, side: str, bar) -> None:
+    def on_75m_bar(self, side: str, strike: float, bar) -> None:
         if self.is_open() and self.position.side == side:
             return
-        self._all_75m[side].append(bar)
-        pool = self._pool[side]
-        known = self._known_ref_ts[side]
+        key = (side, strike)
+        self._all_75m.setdefault(key, []).append(bar)
+        pool = self._pool.setdefault(key, [])
+        known = self._known_ref_ts.setdefault(key, set())
 
         for slot in list(pool):
             if slot.tracking:
@@ -151,13 +201,13 @@ class PoolCascadeEngine:
                 slot.reentry_ts = bar.timestamp
 
         lookback_start = bar.timestamp - timedelta(days=HTF_ZONE_MAX_AGE_DAYS)
-        search_bars = [b for b in self._all_75m[side] if b.timestamp >= lookback_start]
+        search_bars = [b for b in self._all_75m[key] if b.timestamp >= lookback_start]
         for z in find_all_bear_zones(search_bars, known_ref_ts=known):
             known.add(z.reference_low_ts)
-            pool.append(_ZoneSlot(z))
+            pool.append(_ZoneSlot(z, strike))
 
     # ── LTF (15m) ────────────────────────────────────────────────────────
-    def on_15m_bar(self, side: str, bar) -> None:
+    def on_15m_bar(self, side: str, strike: float, bar) -> None:
         if self.is_open() and self.position.side == side:
             return
         # 2026-07-23: while the OTHER side holds an open position, this
@@ -170,7 +220,7 @@ class PoolCascadeEngine:
         is_counter_side = self.is_open() and self.position.side != side
         open_side = self.position.side if is_counter_side else None
 
-        for slot in self._pool[side]:
+        for slot in self._pool.get((side, strike), []):
             if not slot.tracking:
                 continue
             slot.bars_15m.append(bar)
@@ -187,11 +237,6 @@ class PoolCascadeEngine:
                 if _overlaps(bar.low, bar.high, lo, hi):
                     slot.ltf_reentered = True
                     slot.ltf_reentry_ts = bar.timestamp
-                    # This bar confirms re-entry; its own low is not also
-                    # used as the first trailing candidate (same "the bar
-                    # causing a state transition isn't also the bar
-                    # confirming the next stage" discipline used elsewhere
-                    # in this engine).
                     continue
 
             if is_counter_side and slot.ltf_reentered and open_side is not None:
@@ -200,25 +245,30 @@ class PoolCascadeEngine:
                     trail.consider_external_level(bar.low)
 
     # ── 5m trigger + limit fill + exits ─────────────────────────────────
-    def on_5m_bar(self, side: str, bar) -> List[CascadeEvent]:
+    def on_5m_bar(self, side: str, strike: float, bar) -> List[CascadeEvent]:
         if self.is_open() and self.position.side == side:
-            self._last_5m_bar[side] = bar
-            return self._check_exits(side, bar)
+            if self.position.tracking_strike == strike:
+                self._last_5m_bar[side] = bar
+                return self._check_exits(side, bar)
+            # A DIFFERENT candidate on the same side as the open position --
+            # frozen (no new scanning/triggering) until that position
+            # closes, per the confirmed same-side-exclusivity rule.
+            return []
 
         self._last_5m_bar[side] = bar
-        pool = self._pool[side]
+        key = (side, strike)
+        pool = self._pool.setdefault(key, [])
 
         # 2026-07-23: intraday-only trigger -- the first 5m candle of a new
-        # session has no legitimate "previous candle" (yesterday's close is
-        # a different session, not a real predecessor for a break-of-
-        # structure comparison). Only the trigger's own prev-candle pointer
-        # resets here -- the HTF pool and any zone's mid-tracking LTF/
-        # pending state both carry across days completely unchanged.
+        # session has no legitimate "previous candle". Only this
+        # candidate's own trigger prev-candle pointer resets here -- the
+        # HTF pool and any zone's mid-tracking LTF/pending state both carry
+        # across days completely unchanged.
         bar_date = bar.timestamp.date()
-        if self._last_5m_date[side] != bar_date:
+        if self._last_5m_date.get(key) != bar_date:
             for slot in pool:
                 slot.prev_5m_bar = None
-            self._last_5m_date[side] = bar_date
+            self._last_5m_date[key] = bar_date
 
         events: List[CascadeEvent] = []
         for slot in list(pool):
@@ -230,11 +280,6 @@ class PoolCascadeEngine:
                 pool.remove(slot)
                 continue
 
-            # 2026-07-23: the trigger arms/fires off the 75m zone + 5m
-            # break-of-structure ALONE -- it does NOT wait for slot.ltf_zone
-            # to exist first. The 15m trap is only ever consulted later,
-            # inside _open_position, to set T1's target at the instant of
-            # fill (falling back to T2's target if none has locked yet).
             if not slot.pending_entry:
                 prev = slot.prev_5m_bar
                 slot.prev_5m_bar = bar
@@ -244,35 +289,17 @@ class PoolCascadeEngine:
                 if triggered:
                     slot.pending_entry = True
                     slot.trigger_ts = bar.timestamp
-                # The bar that just armed the trigger is not itself checked
-                # for a limit pierce -- only a bar strictly after arming can
-                # fill (same principle as the 75m re-entry fix above: the
-                # candle causing a state transition isn't also the candle
-                # confirming the next stage).
                 continue
 
-            # Already pending entry (armed on a prior bar) -- this is exactly
-            # the kind of mid-tracking state the day-boundary reset above must
-            # NOT touch (design spec: only the trigger's own arm/re-arm check
-            # resets daily). Fall straight through to the limit-pierce check
-            # on ANY bar, including the first bar of a new day right after
-            # prev_5m_bar was just reset to None -- the pierce check below
-            # only needs slot.zone_low (static) + this bar's low, never
-            # prev_5m_bar, so there is nothing to gate on.
-            # 2026-07-23 fix: previously the unconditional `prev is None ->
-            # continue` above ran before the pending_entry check and silently
-            # skipped this whole block (pierce included) on day 1 of a new
-            # session, delaying fill recognition by one 5m bar.
             slot.prev_5m_bar = bar
             limit_price = slot.zone_low + self._entry_offset
             pierced = bar.low <= limit_price
             if pierced:
-                # 2026-07-23: a pierce firing HERE (we already returned
-                # early above if `side` were the currently-open side) means
-                # if a position is open at all, it's on the OPPOSITE side --
-                # the engine only ever holds one position at a time, so the
-                # existing one must be force-closed first (structural flip)
-                # before the new one opens.
+                # A pierce firing HERE means if a position is open at all,
+                # it's on the OPPOSITE side (we already returned early above
+                # if `side` were the currently-open side) -- force-close it
+                # (structural flip), preserved exactly as today, then open
+                # this candidate's position.
                 if self.is_open():
                     events.extend(self._close_for_structural_flip(bar.timestamp))
                 events.append(self._open_position(side, slot, limit_price, bar.timestamp))
@@ -283,30 +310,27 @@ class PoolCascadeEngine:
         htf, ltf = slot.zone, slot.ltf_zone
         sl_price = slot.zone_low - self._entry_offset
         t2_target = htf.sl_level
-        # 2026-07-23: the 15m trap is consulted ONLY here, at the instant of
-        # fill -- if the 15m chart hasn't locked a clean trap inside this
-        # zone yet by the time the trade fires, T1 falls back to the SAME
-        # target as T2 (the 75m zone's own opposite extreme) rather than
-        # blocking entry or going targetless.
         t1_target = ltf.sl_level if ltf is not None else t2_target
         qty = self._cfg.tranche_qty
-        t1 = TrancheLeg(tranche="T1", option_type=side, strike=0.0, qty=qty,
+        t1 = TrancheLeg(tranche="T1", option_type=side, strike=slot.strike, qty=qty,
                          entry_price=fill_price, entry_time=ts, entry_reason="htf_ltf_pool_cascade",
                          sl_price=sl_price, target_price=t1_target)
-        t2 = TrancheLeg(tranche="T2", option_type=side, strike=0.0, qty=qty,
+        t2 = TrancheLeg(tranche="T2", option_type=side, strike=slot.strike, qty=qty,
                          entry_price=fill_price, entry_time=ts, entry_reason="htf_ltf_pool_cascade",
                          sl_price=sl_price, target_price=None, tracking_current_stop=sl_price)
         self.position = CascadePosition(
             underlying=self._cfg.underlying, side=side,
-            tracking_strike=0.0, execution_strike=0.0,
+            tracking_strike=slot.strike, execution_strike=slot.strike,
             atm_at_trigger=0.0, entry_spot=0.0,
             t1=t1, t2=t2, open_time=ts,
             tracking_entry_price=fill_price,
         )
         self._trail[side] = TrailingBaseTracker(bear=True, initial_stop=sl_price)
-        # A position just opened -- only one at a time per side. Discard
-        # the whole pool; a fresh one builds up again once this closes.
-        self._pool[side] = []
+        # A position just opened -- only one at a time, engine-wide. Discard
+        # EVERY candidate's pool on this side (was self._pool[side] = []
+        # under the old single-candidate model; now spans every strike).
+        for key in [k for k in self._pool.keys() if k[0] == side]:
+            self._pool[key] = []
         event_type = CascadeEventType.OPEN_LONG_CE if side == "CE" else CascadeEventType.OPEN_LONG_PE
         audit = {
             "htf_ref_ts": htf.reference_low_ts.isoformat() if htf.reference_low_ts else None,
@@ -316,11 +340,12 @@ class PoolCascadeEngine:
             "ltf_found_at_fill": ltf is not None,
             "trigger_ts": slot.trigger_ts.isoformat() if slot.trigger_ts else None,
             "zone_low": slot.zone_low, "zone_high": slot.zone_high,
+            "strike": slot.strike,
             "computed_sl_price": sl_price, "t1_target": t1_target, "t2_target": t2_target,
         }
-        return CascadeEvent(event_type=event_type, side=side, price_hint=fill_price,
-                             reason="gate3_bear_trap_reclaim", sl_price=sl_price, target_price=t1_target,
-                             timestamp=ts, audit=audit)
+        return CascadeEvent(event_type=event_type, side=side, execution_strike=slot.strike,
+                             price_hint=fill_price, reason="gate3_bear_trap_reclaim",
+                             sl_price=sl_price, target_price=t1_target, timestamp=ts, audit=audit)
 
     def _close_for_structural_flip(self, ts) -> List[CascadeEvent]:
         """A pierce just fired on the side OPPOSITE the currently open
