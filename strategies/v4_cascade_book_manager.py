@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict
+from typing import Dict, List, Optional
 
 from strategies.core import StrategyBookManager
 
@@ -50,6 +50,24 @@ def _pool_engine_enabled(underlying: str) -> bool:
     if underlying not in _POOL_ENGINE_UNDERLYINGS:
         return False
     return os.environ.get("V4CASCADE_USE_POOL_ENGINE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _tracking_offsets_from_env() -> Optional[List[float]]:
+    """2026-07-24: comma-separated CE/PE candidate strike offsets for the
+    pool engine's multi-strike scanning (e.g. "100,200,300,400,500"),
+    parsed once at spawn time. Returns None when unset -- V4CascadeBook
+    resolves None -> [self._tracking_offset] itself (today's exact single-
+    offset behavior), keeping "what a missing env var means" defined in
+    exactly one place."""
+    raw = os.environ.get("V4CASCADE_TRACKING_OFFSETS", "").strip()
+    if not raw:
+        return None
+    try:
+        return [float(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        logger.warning("V4CascadeBookManager: could not parse V4CASCADE_TRACKING_OFFSETS=%r "
+                       "-- falling back to single-offset default.", raw)
+        return None
 
 # Default squareoff_time fallback, per underlying -- a deployment row with no
 # configured squareoff_time must not silently fall back to NIFTY's 15:15 for
@@ -117,9 +135,10 @@ class V4CascadeBookManager(StrategyBookManager):
         except Exception:
             pass
         use_pool_engine = _pool_engine_enabled(und)
+        tracking_offsets_pts = _tracking_offsets_from_env() if use_pool_engine else None
         book = cls(self._bus, self._cfg, underlying=und, client_id=cid, binding_id=bid,
                    lot_multiplier=lots, squareoff_time=squareoff_time,
-                   use_pool_engine=use_pool_engine)
+                   use_pool_engine=use_pool_engine, tracking_offsets_pts=tracking_offsets_pts)
         if use_pool_engine:
             logger.info("V4CascadeBookManager: %s/%s/%s starting with use_pool_engine=True "
                        "(HTF/LTF pool engine, dev-phase env toggle).", cid, bid, und)

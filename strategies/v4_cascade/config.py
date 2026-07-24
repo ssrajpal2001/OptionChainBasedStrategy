@@ -4,7 +4,8 @@ V4 Premium Trap Cascade Engine. Pure dataclass, no I/O.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 # Per-deployment default: 2 lots total (130 units) split into two 65-unit
 # tranches for NIFTY (lot_size=65). ``lot_multiplier`` scales this the same
@@ -53,6 +54,15 @@ class V4CascadeConfig:
     tracking_offset_pts: float = TRACKING_OFFSET_PTS
     execution_offset_pts: float = EXECUTION_OFFSET_PTS
     tracking_recenter_pts: float = TRACKING_RECENTER_PTS
+    # 2026-07-24: candidate CE/PE strike offsets for the pool engine's
+    # multi-strike scanning (NIFTY only, gated behind V4CASCADE_TRACKING_
+    # OFFSETS -- see v4_cascade_book_manager.py). Defaults to a single-
+    # element list matching tracking_offset_pts exactly -- unset, this is
+    # byte-identical to today's single fixed-offset behavior. The plural
+    # field is the source of truth ONLY for the pool-engine path; the
+    # legacy Gate1/2/3 engine keeps reading the singular tracking_offset_pts
+    # unchanged.
+    tracking_offsets_pts: List[float] = field(default_factory=lambda: [TRACKING_OFFSET_PTS])
 
     t2_trail_lookback_bases: int = T2_TRAIL_LOOKBACK_BASES
     t2_trail_tf_minutes: int = T2_TRAIL_TF_MINUTES

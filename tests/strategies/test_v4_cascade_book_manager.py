@@ -10,11 +10,13 @@ from strategies.v4_cascade_book_manager import V4CascadeBookManager
 
 class _FakeBook:
     def __init__(self, bus, cfg, underlying="NIFTY", client_id="", binding_id="",
-                 lot_multiplier=1, squareoff_time="15:15", use_pool_engine=False):
+                 lot_multiplier=1, squareoff_time="15:15", use_pool_engine=False,
+                 tracking_offsets_pts=None):
         self._underlying = underlying; self._client_id = client_id; self._binding_id = binding_id
         self._lot_multiplier = lot_multiplier
         self.squareoff_time = squareoff_time
         self.use_pool_engine = use_pool_engine
+        self.tracking_offsets_pts = tracking_offsets_pts
         self.started = False
 
     def set_client_db(self, db):
@@ -106,3 +108,22 @@ def test_pool_engine_still_off_for_crudeoil_even_with_env_var_set(monkeypatch):
     m = V4CascadeBookManager(bus=None, cfg=None, client_db=db, monitored_indices=[])
     m._reconcile()
     assert m.books[0].use_pool_engine is False
+
+
+def test_tracking_offsets_default_when_env_unset(monkeypatch):
+    monkeypatch.delenv("V4CASCADE_TRACKING_OFFSETS", raising=False)
+    monkeypatch.setattr(vm_mod, "V4CascadeBook", _FakeBook)
+    db = _DB({"C1": [_dep("Z1", "NIFTY")]})
+    m = V4CascadeBookManager(bus=None, cfg=None, client_db=db, monitored_indices=[])
+    m._reconcile()
+    assert m.books[0].tracking_offsets_pts is None
+
+
+def test_tracking_offsets_parsed_from_env(monkeypatch):
+    monkeypatch.setenv("V4CASCADE_USE_POOL_ENGINE", "1")
+    monkeypatch.setenv("V4CASCADE_TRACKING_OFFSETS", "100,200,300,400,500")
+    monkeypatch.setattr(vm_mod, "V4CascadeBook", _FakeBook)
+    db = _DB({"C1": [_dep("Z1", "NIFTY")]})
+    m = V4CascadeBookManager(bus=None, cfg=None, client_db=db, monitored_indices=[])
+    m._reconcile()
+    assert m.books[0].tracking_offsets_pts == [100.0, 200.0, 300.0, 400.0, 500.0]
