@@ -2941,6 +2941,26 @@ class DashboardServer:
                                             "zone_low": zone_low, "zone_high": zone_high,
                                             "limit_entry_price": limit_price,
                                             "ref_ts": ref_ts, "trap_ts": trap_ts,
+                                            # 2026-07-24 temporary debug field: every zone
+                                            # currently in this side's pool, not just the
+                                            # selected one, sorted nearest-to-price first --
+                                            # lets the client verify "nearest zone" selection
+                                            # is correct via DevTools without needing a
+                                            # separate admin token. Safe to remove once the
+                                            # nearest-to-price logic is confirmed correct live.
+                                            "all_zones_debug": [
+                                                {
+                                                    "zone_low": round(s.zone_low, 2),
+                                                    "zone_high": round(s.zone_high, 2),
+                                                    "distance": (None if _zone_dist(side_ltp, s.zone_low, s.zone_high) == float("inf")
+                                                                 else round(_zone_dist(side_ltp, s.zone_low, s.zone_high), 2)),
+                                                    "pending_entry": s.pending_entry,
+                                                    "tracking": s.tracking,
+                                                    "ref_ts": (s.zone.reference_low_ts.isoformat(timespec="minutes")
+                                                               if s.zone and s.zone.reference_low_ts else None),
+                                                }
+                                                for s in sorted(pool, key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
+                                            ],
                                         }
                                         _phases.append(side_state)
                                 elif _is_crypto:
