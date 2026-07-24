@@ -317,9 +317,11 @@ class V4CascadeBook(AbstractStrategyBook):
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self) -> None:
         super().start()
-        self._clog.info("=== V4Cascade[%s/%s/%s] started — lot_multiplier=%d sl_buffer=%.2f ===",
+        self._clog.info("=== V4Cascade[%s/%s/%s] started — lot_multiplier=%d sl_buffer=%.2f "
+                        "engine=%s ===",
                         self._underlying, self._client_id, self._binding_id,
-                        self._lot_multiplier, self._v4cfg.sl_buffer)
+                        self._lot_multiplier, self._v4cfg.sl_buffer,
+                        "pool_engine (HTF/LTF)" if self._use_pool_engine else "legacy (Gate1/2/3)")
         self._restore_position()
         self._tasks.append(asyncio.create_task(
             self._boot(), name=f"v4cascade_boot_{self._client_id}_{self._binding_id}"))
