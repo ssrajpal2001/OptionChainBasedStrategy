@@ -268,6 +268,10 @@ class V4CascadeBook(AbstractStrategyBook):
         # keyed) stays exactly as-is for the legacy engine; the pool engine
         # uses this dict instead once multi-strike is active.
         self._pool_bars_5m: Dict[Tuple[str, int], List] = {}
+        # 2026-07-24: per-candidate 5m bucket accumulator for the pool
+        # engine's multi-strike scanning, keyed (side, strike). self._buckets
+        # (side-keyed) stays exactly as-is for the legacy engine.
+        self._pool_buckets: Dict[Tuple[str, int], Optional["_Bar"]] = {}
         # parallel EXECUTION-contract 5m bucket accumulators (Task 7) — only
         # driven for a risk_basis=="execution_native" open position; feeds
         # engine.check_exits_execution_native (Task 6) instead of engine.update.
@@ -977,6 +981,17 @@ class V4CascadeBook(AbstractStrategyBook):
                     self._exec_live_price[exec_side] = float(tick.ltp)
                     self._check_tick_exit(exec_side, tick.timestamp, execution_ltp=float(tick.ltp))
                     self._on_execution_tick(exec_side, float(tick.ltp), tick.timestamp)
+            if self._use_pool_engine:
+                matched_strike = None
+                matched_side = None
+                if tick.underlying == self._underlying and tick.option_type == "CE" and int(tick.strike) in self._ce_strikes:
+                    matched_side, matched_strike = "CE", int(tick.strike)
+                elif tick.underlying == self._underlying and tick.option_type == "PE" and int(tick.strike) in self._pe_strikes:
+                    matched_side, matched_strike = "PE", int(tick.strike)
+                if matched_side is not None:
+                    self._on_option_tick_pool(matched_side, matched_strike, float(tick.ltp), tick.timestamp)
+                continue
+
             side = None
             if symbol == self._ce_symbol or (
                     tick.underlying == self._underlying and int(tick.strike) == self._ce_strike and tick.option_type == "CE"):
@@ -1025,9 +1040,6 @@ class V4CascadeBook(AbstractStrategyBook):
         if _current_atm > 0:
             self._fire(self._maybe_recenter_tracking_strikes(_current_atm))
         self._bars_5m[side].append(bar)
-        if self._use_pool_engine:
-            self._close_5m_bucket_pool_engine(side, bar)
-            return
         _pos_before = self._engine.position
         if side == "CE":
             events = self._engine.update(ce_bar=bar)
@@ -1047,33 +1059,62 @@ class V4CascadeBook(AbstractStrategyBook):
                 else:
                     self._engine.update(pe_bar=b75)
 
-    def _close_5m_bucket_pool_engine(self, side: str, bar) -> None:
-        """2026-07-23: pool-engine path -- 75m/15m bars are derived by
-        resampling the FULL self._bars_5m[side] history (already
-        maintained identically for the old engine), not a per-day slice
-        (unlike the old engine's own 75m dispatch above, which is fine for
-        that engine's per-day-scoped Gate 2 but would be wrong for the
-        pool engine's genuinely multi-day HTF zone pool)."""
-        events = self._pool_engine.on_5m_bar(side, bar)
+    def _close_5m_bucket_pool_engine(self, side: str, strike: int, bar) -> None:
+        """2026-07-24: widened to take an explicit strike (was side-only)
+        -- 75m/15m bars are derived by resampling the FULL
+        self._pool_bars_5m[(side, strike)] history for THIS candidate only
+        (each candidate is an independent instrument/price-scale, never
+        mixed with a sibling's bars), not a per-day slice (matches the
+        pool engine's genuinely multi-day HTF zone pool, same reasoning as
+        the original single-candidate version)."""
+        key = (side, strike)
+        self._pool_bars_5m.setdefault(key, []).append(bar)
+        events = self._pool_engine.on_5m_bar(side, strike, bar)
         for ev in events:
             self._emit_order(ev, pos_before=None)
         self._persist_position()
 
         if _bucket_end(bar.timestamp, 15, self._session_open):
-            r15 = resample_bars(self._bars_5m[side], 15, self._session_open)
+            r15 = resample_bars(self._pool_bars_5m[key], 15, self._session_open)
             if r15:
                 last15 = r15[-1]
                 b15 = _Bar(last15.timestamp, last15.close, last15.high, last15.low,
                            last15.close, tf=15)
-                self._pool_engine.on_15m_bar(side, b15)
+                self._pool_engine.on_15m_bar(side, strike, b15)
 
         if _bucket_end(bar.timestamp, 75, self._session_open):
-            r75 = resample_bars(self._bars_5m[side], 75, self._session_open)
+            r75 = resample_bars(self._pool_bars_5m[key], 75, self._session_open)
             if r75:
                 last75 = r75[-1]
                 b75 = _Bar(last75.timestamp, last75.close, last75.high, last75.low,
                            last75.close, tf=75)
-                self._pool_engine.on_75m_bar(side, b75)
+                self._pool_engine.on_75m_bar(side, strike, b75)
+
+    def _on_option_tick_pool(self, side: str, strike: int, ltp: float, ts: datetime) -> None:
+        """Mirrors _on_option_tick, but per-candidate for the pool engine's
+        multi-strike scanning. 2026-07-24: does NOT call _check_tick_exit --
+        that call is already a no-op for pool-engine positions today (it
+        unconditionally reads self._engine.check_exits_tick, and a pool
+        book's self._engine never holds a position -- see
+        V4CascadeBook._active_position's docstring), so preserving that
+        (currently inert) call here for every one of 10 candidates would
+        add real overhead for zero behavioral effect. Not this plan's job
+        to fix that pre-existing gap -- out of scope, see the design spec."""
+        self._live_price[side] = ltp  # last-write-wins across all candidates on this side
+        _current_atm = self._live_spot or self._atm_open or 0.0
+        if _current_atm > 0:
+            self._fire(self._maybe_recenter_tracking_strikes(_current_atm))
+        bucket = _bucket_start(ts, 5, self._session_open)
+        key = (side, strike)
+        cur = self._pool_buckets.get(key)
+        if cur is None or cur.timestamp != bucket:
+            if cur is not None:
+                self._close_5m_bucket_pool_engine(side, strike, cur)
+            self._pool_buckets[key] = _Bar(bucket, ltp, ltp, ltp, ltp, tf=5)
+        else:
+            cur.high = max(cur.high, ltp)
+            cur.low = min(cur.low, ltp)
+            cur.close = ltp
 
     def _on_execution_tick(self, side: str, ltp: float, ts: datetime) -> None:
         """Mirrors _on_option_tick, but for the EXECUTION contract — only
