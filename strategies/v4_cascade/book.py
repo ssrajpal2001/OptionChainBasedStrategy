@@ -95,6 +95,7 @@ class V4CascadeBook(AbstractStrategyBook):
         self, bus, cfg, underlying: str, client_id: str, binding_id: str,
         lot_multiplier: int = 1, squareoff_time: str = "15:15",
         use_pool_engine: bool = False,
+        tracking_offsets_pts: Optional[List[float]] = None,
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._lot_multiplier = lot_multiplier
@@ -178,6 +179,14 @@ class V4CascadeBook(AbstractStrategyBook):
                                        tracking_offset_pts=self._tracking_offset,
                                        execution_offset_pts=self._execution_offset,
                                        tracking_recenter_pts=_recenter_pts)
+        # 2026-07-24: multi-strike candidate offsets for the pool engine
+        # ONLY -- the legacy Gate1/2/3 engine (use_pool_engine=False) never
+        # reads this, stays on self._tracking_offset (singular) exactly as
+        # today. None (env var unset) -> single-offset list matching
+        # today's exact CE=ATM-200/PE=ATM+200 behavior.
+        self._tracking_offsets: List[float] = (
+            list(tracking_offsets_pts) if tracking_offsets_pts else [self._tracking_offset]
+        )
         self._engine = V4CascadeEngine(self._v4cfg, pe_scans_bull=self._is_crypto,
                                         session_open=self._session_open,
                                         entry_cutoff_hour_min=self._eod_hour_min)
@@ -200,6 +209,17 @@ class V4CascadeBook(AbstractStrategyBook):
         self._atm_open: Optional[float] = None
         self._ce_strike: Optional[int] = None
         self._pe_strike: Optional[int] = None
+        # Multi-strike candidate lists -- populated only for a pool-engine
+        # book (self._use_pool_engine), by _build_candidate_strikes. Stay
+        # empty for the legacy engine, which only ever uses the scalars
+        # above. self._ce_strike/_ce_symbol (scalars) are kept in sync as
+        # the FIRST candidate even in multi-strike mode, so any existing
+        # code reading them (e.g. dashboard_server.py's tracking[f"{side}_
+        # strike"] display field) keeps working without modification.
+        self._ce_strikes: List[int] = []
+        self._pe_strikes: List[int] = []
+        self._ce_symbols: List[str] = []
+        self._pe_symbols: List[str] = []
         # 2026-07-21: ATM the CURRENT self._ce_strike/self._pe_strike were
         # last derived from -- set alongside them (session-open in
         # _resolve_symbols, and again on every _maybe_recenter_tracking_strikes
@@ -463,6 +483,40 @@ class V4CascadeBook(AbstractStrategyBook):
         live trading always trades the nearest active contract."""
         return REGISTRY.get_active_expiry(self._underlying)
 
+    def _build_candidate_strikes(self, atm_open: float) -> None:
+        """Resolve the CE/PE candidate strike lists (and their Upstox
+        symbols) from self._tracking_offsets, rounded to the same flat
+        _TRACKING_STRIKE_STEP grid _resolve_symbols already uses for the
+        single-strike case. Pool-engine only -- the legacy engine never
+        calls this. set_locked_strikes overrides collapse that side's
+        candidate list to exactly the locked strike, same precedence the
+        single-strike path already gives locked strikes."""
+        atm = round(atm_open / _TRACKING_STRIKE_STEP) * _TRACKING_STRIKE_STEP
+        if self._locked_ce_strike is not None:
+            self._ce_strikes = [int(self._locked_ce_strike)]
+        else:
+            self._ce_strikes = [int(atm - off) for off in self._tracking_offsets]
+        if self._locked_pe_strike is not None:
+            self._pe_strikes = [int(self._locked_pe_strike)]
+        else:
+            self._pe_strikes = [int(atm + off) for off in self._tracking_offsets]
+
+        self._ce_symbols = [
+            REGISTRY.get_upstox_key(self._underlying, self._expiry, strike, "CE")
+            for strike in self._ce_strikes
+        ]
+        self._pe_symbols = [
+            REGISTRY.get_upstox_key(self._underlying, self._expiry, strike, "PE")
+            for strike in self._pe_strikes
+        ]
+        # First candidate stays the scalar's value -- dashboard_server.py's
+        # existing getattr(book, f"_{side}_strike", 0) read (client
+        # tracking block) keeps showing a real strike unmodified.
+        self._ce_strike = self._ce_strikes[0]
+        self._pe_strike = self._pe_strikes[0]
+        self._ce_symbol = self._ce_symbols[0]
+        self._pe_symbol = self._pe_symbols[0]
+
     async def _resolve_symbols(self) -> bool:
         token = await asyncio.to_thread(self._access_token)
         if not token:
@@ -492,9 +546,6 @@ class V4CascadeBook(AbstractStrategyBook):
                            "(no live tick, no historical data).", self._underlying, today)
             return False
         self._atm_open = atm_open
-        atm = round(atm_open / _TRACKING_STRIKE_STEP) * _TRACKING_STRIKE_STEP
-        self._ce_strike = self._locked_ce_strike or int(atm - self._tracking_offset)
-        self._pe_strike = self._locked_pe_strike or int(atm + self._tracking_offset)
         self._tracking_reference_atm = atm_open
 
         await asyncio.to_thread(REGISTRY.load_sync, self._underlying, token)
@@ -502,6 +553,19 @@ class V4CascadeBook(AbstractStrategyBook):
         if self._expiry is None:
             logger.warning("V4CascadeBook[%s]: no active expiry resolvable.", self._underlying)
             return False
+
+        if self._use_pool_engine:
+            self._build_candidate_strikes(atm_open)
+            logger.info("V4CascadeBook[%s/%s/%s]: ATM_open=%.2f CE_candidates=%s PE_candidates=%s expiry=%s",
+                        self._underlying, self._client_id, self._binding_id, atm_open,
+                        self._ce_strikes, self._pe_strikes, self._expiry)
+            self._clog.info("ATM_open=%.2f CE_candidates=%s PE_candidates=%s expiry=%s",
+                            atm_open, self._ce_strikes, self._pe_strikes, self._expiry)
+            return bool(self._ce_symbols and self._pe_symbols)
+
+        atm = round(atm_open / _TRACKING_STRIKE_STEP) * _TRACKING_STRIKE_STEP
+        self._ce_strike = self._locked_ce_strike or int(atm - self._tracking_offset)
+        self._pe_strike = self._locked_pe_strike or int(atm + self._tracking_offset)
         self._ce_symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, self._ce_strike, "CE")
         self._pe_symbol = REGISTRY.get_upstox_key(self._underlying, self._expiry, self._pe_strike, "PE")
         logger.info("V4CascadeBook[%s/%s/%s]: ATM_open=%.2f CE=%d(%s) PE=%d(%s) expiry=%s",
@@ -518,7 +582,10 @@ class V4CascadeBook(AbstractStrategyBook):
         feeder = getattr(self._rebalancer, "_feeder", None)
         if not feeder:
             return
-        tokens = [t for t in (self._ce_symbol, self._pe_symbol) if t]
+        if self._use_pool_engine:
+            tokens = [t for t in (self._ce_symbols + self._pe_symbols) if t]
+        else:
+            tokens = [t for t in (self._ce_symbol, self._pe_symbol) if t]
         if tokens:
             await feeder.subscribe_tokens(tokens)
 
