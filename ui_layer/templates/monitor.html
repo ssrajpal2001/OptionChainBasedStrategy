@@ -7219,6 +7219,22 @@ function amoTest() {
                             <span>limit <span style="color:var(--t-green)" x-text="(_t[side]||{}).limit_entry_price"></span></span>
                           </div>
                         </template>
+                        <!-- 2026-07-24: every zone currently in this side's pool (not just the
+                             one nearest-to-price shown above), sorted nearest-first -- the row
+                             already shown above is index 0 here too, highlighted to make that
+                             correspondence obvious rather than looking like a duplicate. -->
+                        <template x-if="((_t[side]||{}).all_zones_debug||[]).length>1">
+                          <div class="pl-4 py-0.5 text-xs font-mono" style="color:var(--t-muted);border-left:1px solid var(--t-border)">
+                            <div class="mb-0.5" x-text="((_t[side]||{}).all_zones_debug||[]).length+' zones in pool (nearest to price first):'"></div>
+                            <template x-for="(z,zi) in (_t[side]||{}).all_zones_debug" :key="zi">
+                              <div class="grid" style="grid-template-columns:1.3fr 0.9fr 1.3fr;gap:0.4rem" :style="zi===0?'color:var(--t-text)':''">
+                                <span x-text="z.zone_low+' · '+z.zone_high"></span>
+                                <span class="text-right" x-text="'dist '+(z.distance!==null?z.distance:'—')"></span>
+                                <span x-text="(z.pending_entry?'armed':(z.tracking?'tracking':'found'))+' · '+z.ref_ts"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
                         </div>
                       </template>
                       </div>
