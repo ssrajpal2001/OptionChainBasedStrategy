@@ -1375,32 +1375,57 @@ class V4CascadeBook(AbstractStrategyBook):
         """2026-07-21 — full 'why this trade fired' rationale, logged once
         per ENTRY, so a full day's trades can be audited after market close
         without guessing whether every gate genuinely fired. Pulled from
-        ev.audit (engine.py._build_entry_audit), which is built from the
-        real setup/zone objects at the exact instant the trade triggered —
-        not reconstructed after the fact from whatever state happens to
-        remain (the setup is popped and its zone discarded immediately
-        after this event is created)."""
+        ev.audit, built from the real setup/zone objects at the exact
+        instant the trade triggered — not reconstructed after the fact.
+
+        2026-07-23 fix: ev.audit has TWO distinct shapes depending on which
+        engine produced it — the old engine's Gate1/2/3 keys
+        (index_kind/demand_block_*/pierce_*, from engine.py's
+        _build_entry_audit) vs. the pool engine's HTF/LTF pool keys
+        (htf_ref_ts/reentry_ts/ltf_ref_ts/trigger_ts/zone_low/zone_high,
+        from pool_engine.py's _open_position). Detect by the presence of
+        'htf_ref_ts' (unique to the pool engine) rather than
+        self._use_pool_engine, so this stays correct even if ev.audit is
+        ever passed through from somewhere other than the book's own live
+        engine. Without this branch, a pool-engine trade logged the OLD
+        engine's field names against the NEW audit dict — every value
+        printed None, and the log gave no way to see which 75m zone was
+        selected, when re-entry happened, or when the 5m trigger fired."""
         a = ev.audit or {}
         if not a:
             return
-        lines = [
-            f"TRADE RATIONALE side={ev.side}",
-            f"  Gate 1 (Index, 75m): {a.get('index_kind')} — scan window anchored {a.get('index_window_anchor_ts')}",
-            f"  Gate 2 (Demand Block, {a.get('demand_block_timeframe')}m): "
-            f"ref={a.get('demand_block_ref_ts')} locked={a.get('demand_block_lock_ts')} "
-            f"entry_line={a.get('demand_block_entry_line')} sl_level={a.get('demand_block_sl_level')} "
-            f"sweep_low={a.get('demand_block_sweep_low')}",
-            f"  Gate 3 (limit pierce): limit_entry_price={a.get('limit_entry_price')} "
-            f"pierce_price={a.get('pierce_price')} @ {a.get('pierce_bar_ts')}",
-            f"  Trade risk (tracking-contract scale, NOT the same as Gate 2's sl_level above): "
-            f"SL={a.get('computed_sl_price')} target={a.get('computed_target_price')}",
-        ]
-        if "htf_zone_ref_ts" in a:
-            lines.append(f"  Gate 1 outer HTF zone (crypto legacy path): ref={a.get('htf_zone_ref_ts')} "
-                        f"locked={a.get('htf_zone_lock_ts')} entry_line={a.get('htf_zone_entry_line')} "
-                        f"sl_level={a.get('htf_zone_sl_level')}")
+        if "htf_ref_ts" in a:
+            lines = [
+                f"TRADE RATIONALE side={ev.side} (pool engine)",
+                f"  75m HTF zone: ref={a.get('htf_ref_ts')} locked={a.get('htf_lock_ts')} "
+                f"zone=[{a.get('zone_low')}, {a.get('zone_high')}]",
+                f"  Re-entry into zone: {a.get('reentry_ts')}",
+                f"  15m LTF trap (T1 target only — never a precondition for entry): "
+                f"ref={a.get('ltf_ref_ts')} found_at_fill={a.get('ltf_found_at_fill')}",
+                f"  5m break-of-structure trigger armed: {a.get('trigger_ts')}",
+                f"  Entry/SL/targets: SL={a.get('computed_sl_price')} "
+                f"T1_target={a.get('t1_target')} T2_target={a.get('t2_target')}",
+            ]
+        else:
+            lines = [
+                f"TRADE RATIONALE side={ev.side}",
+                f"  Gate 1 (Index, 75m): {a.get('index_kind')} — scan window anchored {a.get('index_window_anchor_ts')}",
+                f"  Gate 2 (Demand Block, {a.get('demand_block_timeframe')}m): "
+                f"ref={a.get('demand_block_ref_ts')} locked={a.get('demand_block_lock_ts')} "
+                f"entry_line={a.get('demand_block_entry_line')} sl_level={a.get('demand_block_sl_level')} "
+                f"sweep_low={a.get('demand_block_sweep_low')}",
+                f"  Gate 3 (limit pierce): limit_entry_price={a.get('limit_entry_price')} "
+                f"pierce_price={a.get('pierce_price')} @ {a.get('pierce_bar_ts')}",
+                f"  Trade risk (tracking-contract scale, NOT the same as Gate 2's sl_level above): "
+                f"SL={a.get('computed_sl_price')} target={a.get('computed_target_price')}",
+            ]
+            if "htf_zone_ref_ts" in a:
+                lines.append(f"  Gate 1 outer HTF zone (crypto legacy path): ref={a.get('htf_zone_ref_ts')} "
+                            f"locked={a.get('htf_zone_lock_ts')} entry_line={a.get('htf_zone_entry_line')} "
+                            f"sl_level={a.get('htf_zone_sl_level')}")
         msg = "\n".join(lines)
         logger.info("V4CascadeBook[%s/%s/%s]: %s", self._underlying, self._client_id, self._binding_id, msg)
+        self._clog.info(msg)
         self._clog.info(msg)
 
     async def _resubscribe_execution_contract_for_open_position(self) -> None:
