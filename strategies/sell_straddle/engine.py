@@ -328,6 +328,31 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 for _stk, _side in [(int(pos.ce_leg.strike), "CE"), (int(pos.pe_leg.strike), "PE")]:
                     if (_stk, _side) not in seed_pairs:
                         seed_pairs.append((_stk, _side))
+                # 2026-07-24 fix: StrikeRebalancer only pins a position's
+                # strikes reactively, via the ORDER_FILL event on a fresh
+                # entry -- a position RESTORED from disk after a restart
+                # never re-fires that event, so on a fresh process the
+                # rebalancer's pinned_strikes starts empty and has no idea
+                # this position exists. If ATM has drifted since entry (the
+                # normal case after any real time has passed), the next
+                # ATM-window rebalance silently unsubscribes the position's
+                # own legs -- confirmed live: a real SENSEX position lost
+                # its CE/PE ticks after a restart, indicators went stale,
+                # and P&L was computed from garbage. Re-pin explicitly here,
+                # not just for entries -- restore counts too.
+                if not self._is_crypto and self._rebalancer:
+                    try:
+                        self._rebalancer.pin_strike(self._underlying, float(pos.ce_leg.strike))
+                        self._rebalancer.pin_strike(self._underlying, float(pos.pe_leg.strike))
+                        logger.info(
+                            "SellStraddle[%s]: re-pinned restored position legs CE%d/PE%d "
+                            "in StrikeRebalancer (pinned_strikes now %s).",
+                            self._underlying, int(pos.ce_leg.strike), int(pos.pe_leg.strike),
+                            sorted(self._rebalancer.pinned_strikes(self._underlying)),
+                        )
+                    except Exception as exc:
+                        logger.warning("SellStraddle[%s]: re-pin of restored position legs "
+                                       "failed: %s", self._underlying, exc)
             for stk, side in seed_pairs:
                 ikey = REGISTRY.get_broker_symbol(self._underlying, exp, stk, side, "upstox")
                 if not ikey:
