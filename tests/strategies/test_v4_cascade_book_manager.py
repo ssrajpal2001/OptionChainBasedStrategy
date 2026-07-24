@@ -10,10 +10,11 @@ from strategies.v4_cascade_book_manager import V4CascadeBookManager
 
 class _FakeBook:
     def __init__(self, bus, cfg, underlying="NIFTY", client_id="", binding_id="",
-                 lot_multiplier=1, squareoff_time="15:15"):
+                 lot_multiplier=1, squareoff_time="15:15", use_pool_engine=False):
         self._underlying = underlying; self._client_id = client_id; self._binding_id = binding_id
         self._lot_multiplier = lot_multiplier
         self.squareoff_time = squareoff_time
+        self.use_pool_engine = use_pool_engine
         self.started = False
 
     def set_client_db(self, db):
@@ -73,3 +74,35 @@ def test_unsupported_underlying_still_skipped(monkeypatch):
     m = V4CascadeBookManager(bus=None, cfg=None, client_db=db, monitored_indices=[])
     m._reconcile()
     assert m.books == []
+
+
+def test_pool_engine_off_by_default_for_nifty(monkeypatch):
+    monkeypatch.delenv("V4CASCADE_USE_POOL_ENGINE", raising=False)
+    monkeypatch.setattr(vm_mod, "V4CascadeBook", _FakeBook)
+    db = _DB({"C1": [_dep("Z1", "NIFTY")]})
+    m = V4CascadeBookManager(bus=None, cfg=None, client_db=db, monitored_indices=[])
+    m._reconcile()
+    assert m.books[0].use_pool_engine is False
+
+
+def test_pool_engine_on_for_nifty_when_env_var_set(monkeypatch):
+    monkeypatch.setenv("V4CASCADE_USE_POOL_ENGINE", "1")
+    monkeypatch.setattr(vm_mod, "V4CascadeBook", _FakeBook)
+    db = _DB({"C1": [_dep("Z1", "NIFTY")]})
+    m = V4CascadeBookManager(bus=None, cfg=None, client_db=db, monitored_indices=[])
+    m._reconcile()
+    assert m.books[0].use_pool_engine is True
+
+
+def test_pool_engine_still_off_for_crudeoil_even_with_env_var_set(monkeypatch):
+    """2026-07-24: the pool engine has only ever been validated against
+    NIFTY -- the env toggle must not accidentally activate it for CRUDEOIL,
+    even though book.py's own _is_mcx guard would also block it. Belt and
+    suspenders: the manager should never even pass True for a non-NIFTY
+    underlying in the first place."""
+    monkeypatch.setenv("V4CASCADE_USE_POOL_ENGINE", "1")
+    monkeypatch.setattr(vm_mod, "V4CascadeBook", _FakeBook)
+    db = _DB({"C1": [_dep("Z1", "CRUDEOIL", squareoff_time="23:15")]})
+    m = V4CascadeBookManager(bus=None, cfg=None, client_db=db, monitored_indices=[])
+    m._reconcile()
+    assert m.books[0].use_pool_engine is False

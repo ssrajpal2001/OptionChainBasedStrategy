@@ -20,6 +20,7 @@ global flag — that would just duplicate this existing control.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict
 
 from strategies.core import StrategyBookManager
@@ -31,6 +32,24 @@ logger = logging.getLogger(__name__)
 V4CascadeBook = None
 
 _SUPPORTED_UNDERLYINGS = {"NIFTY", "BTC", "ETH", "CRUDEOIL"}
+
+# 2026-07-24 dev-phase toggle: no dashboard/DB field exists yet for
+# V4CascadeConfig.use_pool_engine (the new HTF/LTF engine, validated via
+# backtest -- see docs/superpowers/specs/2026-07-23-v4-cascade-htf-ltf-live-design.md),
+# so this is a quick env-var switch rather than a proper per-deployment
+# config field. Scoped to NIFTY only -- the pool engine has only ever been
+# validated against NIFTY data; book.py's own self._is_mcx/_is_crypto guard
+# would block it for CRUDEOIL/BTC/ETH anyway, but being explicit here too
+# avoids ever depending on that as the only safeguard. Set
+# V4CASCADE_USE_POOL_ENGINE=1 in the process environment (e.g. pm2 env
+# config) to activate it for every NIFTY v4_cascade deployment.
+_POOL_ENGINE_UNDERLYINGS = {"NIFTY"}
+
+
+def _pool_engine_enabled(underlying: str) -> bool:
+    if underlying not in _POOL_ENGINE_UNDERLYINGS:
+        return False
+    return os.environ.get("V4CASCADE_USE_POOL_ENGINE", "").strip().lower() in ("1", "true", "yes", "on")
 
 # Default squareoff_time fallback, per underlying -- a deployment row with no
 # configured squareoff_time must not silently fall back to NIFTY's 15:15 for
@@ -97,8 +116,13 @@ class V4CascadeBookManager(StrategyBookManager):
                     break
         except Exception:
             pass
+        use_pool_engine = _pool_engine_enabled(und)
         book = cls(self._bus, self._cfg, underlying=und, client_id=cid, binding_id=bid,
-                   lot_multiplier=lots, squareoff_time=squareoff_time)
+                   lot_multiplier=lots, squareoff_time=squareoff_time,
+                   use_pool_engine=use_pool_engine)
+        if use_pool_engine:
+            logger.info("V4CascadeBookManager: %s/%s/%s starting with use_pool_engine=True "
+                       "(HTF/LTF pool engine, dev-phase env toggle).", cid, bid, und)
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
             book.set_rebalancer(self._rebalancer)
