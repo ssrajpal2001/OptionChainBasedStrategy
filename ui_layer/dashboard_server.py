@@ -2279,14 +2279,18 @@ class DashboardServer:
                 pe = getattr(book, "_pool_engine", None)
                 for side in ("CE", "PE"):
                     side_ltp = float(live_price.get(side) or 0.0)
-                    pool = list(pe._pool.get(side, [])) if pe is not None else []
+                    pool = []
+                    if pe is not None:
+                        for _k, _slots in pe._pool.items():
+                            if _k[0] == side:
+                                pool.extend(_slots)
                     pool.sort(key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
                     for slot in pool:
                         limit_price = round(slot.zone_low + pe._entry_offset, 2) if pe else None
                         dist = _zone_dist(side_ltp, slot.zone_low, slot.zone_high)
                         z = slot.zone
                         zones.append({
-                            "model": "pool_engine", "side": side,
+                            "model": "pool_engine", "side": side, "strike": int(slot.strike),
                             "state": ("limit_armed" if slot.pending_entry
                                       else "tracking" if slot.tracking else "zone_found"),
                             "ref_ts": z.reference_low_ts.isoformat() if z and z.reference_low_ts else None,
@@ -2962,7 +2966,11 @@ class DashboardServer:
                                     pe = getattr(book, "_pool_engine", None)
                                     for side, label in (("CE", "CE"), ("PE", "PE")):
                                         side_ltp = float(live_price.get(side) or 0.0)
-                                        pool = list(pe._pool.get(side, [])) if pe is not None else []
+                                        pool = []
+                                        if pe is not None:
+                                            for _k, _slots in pe._pool.items():
+                                                if _k[0] == side:
+                                                    pool.extend(_slots)
                                         slot = None
                                         if pool:
                                             slot = min(pool, key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
@@ -2985,7 +2993,8 @@ class DashboardServer:
                                             zone_low = zone_high = limit_price = timeframe = None
                                             ref_ts = trap_ts = None
                                             side_state = "—"
-                                        strike = int(getattr(book, f"_{side.lower()}_strike", 0) or 0)
+                                        strike = (int(slot.strike) if slot is not None
+                                                  else int(getattr(book, f"_{side.lower()}_strike", 0) or 0))
                                         tracking[f"{side.lower()}_label"] = label
                                         tracking[f"{side.lower()}_strike"] = strike
                                         tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
@@ -3004,6 +3013,7 @@ class DashboardServer:
                                             # nearest-to-price logic is confirmed correct live.
                                             "all_zones_debug": [
                                                 {
+                                                    "strike": int(s.strike),
                                                     "zone_low": round(s.zone_low, 2),
                                                     "zone_high": round(s.zone_high, 2),
                                                     "distance": (None if _zone_dist(side_ltp, s.zone_low, s.zone_high) == float("inf")
