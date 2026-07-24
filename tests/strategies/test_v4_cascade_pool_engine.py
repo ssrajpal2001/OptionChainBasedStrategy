@@ -156,7 +156,7 @@ def test_intraday_trigger_reset_skips_cross_day_comparison():
                                      reference_low_ts=day1, lock_ts=day1, locked=True)
     slot.prev_5m_bar = slot_bar  # yesterday's last 5m bar
     eng._pool[("CE", _STRIKE)] = [slot]
-    eng._last_5m_date["CE"] = day1.date()
+    eng._last_5m_date[("CE", _STRIKE)] = day1.date()
 
     # First 5m bar of the NEW day -- even though its close (150) is way
     # above yesterday's bar's high (101), it must NOT trigger, since the
@@ -189,7 +189,7 @@ def test_pending_entry_pierce_fires_on_first_bar_of_new_day():
     slot.trigger_ts = day1
     slot.prev_5m_bar = _Bar(day1, 100, 101, 99, 100, tf=5)  # yesterday's last 5m bar
     eng._pool[("CE", _STRIKE)] = [slot]
-    eng._last_5m_date["CE"] = day1.date()
+    eng._last_5m_date[("CE", _STRIKE)] = day1.date()
 
     # First 5m bar of the new day: limit price = zone_low(90) + offset(5) =
     # 95; this bar's low (93) genuinely pierces it. The fill must fire on
