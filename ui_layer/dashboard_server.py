@@ -1280,6 +1280,30 @@ class DashboardServer:
                 "providers": providers_status,
             }
 
+        @app.get("/api/admin/subscribed_keys", tags=["Admin"])
+        async def api_subscribed_keys(_: dict = Depends(_require_admin)):
+            """Raw dump of every instrument key each feeder thinks it has subscribed
+            — added 2026-07-24 to chase a real discrepancy: StrikeRebalancer's own
+            active_strikes accounting (NIFTY 9 + SENSEX 9 strikes = 36 option symbols)
+            doesn't match the ~74 total the UpstoxFeeder log reports subscribed.
+            Upstox keys are opaque numeric instrument_keys (e.g. "NSE_FO|63915") with
+            no local reverse-parser (symbol_translator.py only has forward InternalSymbol
+            -> key conversion; InstrumentRegistry has no reverse lookup either) — so this
+            deliberately does NOT try to decode/group them. Fyers keys ARE human-readable
+            (e.g. "NSE:NIFTY26JUL23650CE") and can be cross-referenced by eye against the
+            active_strikes list from /api/admin/strike_rebalancer_status."""
+            feeder = _srv._feeder
+            dual = getattr(feeder, "_dual_feeder", None) if feeder else None
+            out: dict = {}
+            if dual is not None:
+                for provider, f in dual._feeders.items():
+                    keys = list(getattr(f, "_subscribed_keys", []) or [])
+                    out[provider] = {"count": len(keys), "keys": sorted(keys)}
+            else:
+                keys = list(getattr(feeder, "_subscribed_keys", []) or [])
+                out["single"] = {"count": len(keys), "keys": sorted(keys)}
+            return {"ok": True, "by_provider": out}
+
         @app.get("/api/admin/settings", tags=["Admin"])
         async def api_get_settings(_: dict = Depends(_require_admin)):
             """Return persisted system settings (currently only GLOBAL_REDIRECT_BASE)."""
