@@ -4615,7 +4615,7 @@ pm2 save
             # Write strategy assignments and set approved flag
             for binding_id, strategy in body.strategy_assignments.items():
                 await _srv._client_db.set_assigned_strategy(client_id, binding_id, strategy)
-            await _srv._client_db.upsert_client(client_id, is_admin_approved=1)
+            await _srv._client_db.upsert_client(client_id, is_admin_approved=1, is_client_bot_active=1)
 
             # Build ClientProfile and register in registry
             if _srv._registry is not None and _srv._registry.get(client_id) is None:
