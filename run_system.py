@@ -438,6 +438,11 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    from execution_bridge.fno_bridge import FnOExecutionBridge
+    fno_bridge = FnOExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -518,6 +523,7 @@ async def _run_live(
                 straddle_manager=straddle_manager,
                 straddle_bridge=straddle_bridge,
                 v4_cascade_manager=v4_cascade_manager,
+                fno_positional_manager=managers.get("fno_positional"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -604,6 +610,7 @@ async def _run_live(
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
         asyncio.create_task(cascade_bridge.run(),       name="cascade_bridge"),
+        asyncio.create_task(fno_bridge.run(),           name="fno_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),

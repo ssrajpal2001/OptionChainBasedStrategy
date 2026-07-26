@@ -202,6 +202,8 @@ class Topic:
     TRAP_STATE       = "trap_state"   # trap scanner state snapshot — published on every meaningful change
     FNO_STOCK_ALERT  = "fno_stock_alert"   # Stage-2 intraday stock monitor alert
     FNO_STOCK_STATUS = "fno_stock_status"  # live LTP + MTF/LTF state per stock (3s broadcast)
+    FNO_ORDER_REQUEST = "fno_order_request"  # FnO positional option orders (fno_bridge.py)
+    FNO_ORDER_FILL    = "fno_order_fill"     # FnO positional fill confirmations
 
 
 # ─────────────────────────────────────────────────────────────────────────────

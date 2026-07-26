@@ -651,6 +651,7 @@ class DashboardServer:
         straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
         v4_cascade_manager=None, # V4CascadeBookManager — per-binding books (live list + find)
+        fno_positional_manager=None, # FnOPositionalBookManager — stock positional option books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -663,6 +664,7 @@ class DashboardServer:
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
         self._v4_cascade_manager = v4_cascade_manager
+        self._fno_positional_manager = fno_positional_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -2184,6 +2186,20 @@ class DashboardServer:
             logger.info("Dashboard: OI window set to ±%d strikes", int(body.n))
             return {"ok": True, "window": int(max(0, body.n))}
 
+        @app.get("/api/fno/positions", tags=["Admin"])
+        async def api_fno_positions(_: dict = Depends(_require_admin)):
+            """Return all FnO positional book states (open + closed positions)."""
+            mgr = _srv._fno_positional_manager
+            if mgr is None:
+                return {"ok": True, "books": []}
+            books_state = []
+            for book in (mgr.books or []):
+                try:
+                    books_state.append(book.get_state())
+                except Exception:
+                    pass
+            return {"ok": True, "books": books_state}
+
         @app.post("/api/admin/v4_cascade/force_ingest/{deploy_id}", tags=["Admin"])
         async def api_admin_v4_force_ingest(deploy_id: str, _: dict = Depends(_require_admin)):
             """Re-trigger the 3-week deep-history ingestion pipeline on a live
@@ -2479,7 +2495,7 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "v4_cascade"}
+            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional"}
             allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
             import json as _json
             validated = []
@@ -3668,7 +3684,7 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle", "v4_cascade"}
+            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional"}
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 

@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 from strategies.sell_straddle import StraddleBookManager
 from strategies.v4_cascade_book_manager import V4CascadeBookManager
+from strategies.fno_positional import FnOPositionalBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -19,6 +20,10 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "v4_cascade": {
         "manager_class": V4CascadeBookManager,
+        "per_binding": True,
+    },
+    "fno_positional": {
+        "manager_class": FnOPositionalBookManager,
         "per_binding": True,
     },
 }

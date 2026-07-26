@@ -851,6 +851,7 @@ document.addEventListener('alpine:init', () => {
     stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], ce_stocks: [], pe_stocks: [], use_nifty_bias: false, loaded: false, error: '' },
     stockScanBiasToggle: false,
     stockScanRunning: false,
+    fnoBooks: [],           // FnO positional book states [{client_id, binding_id, positions, ...}]
     fnoAlerts: [],          // active un-notified intraday alerts
     fnoStocks: [],          // live LTP + MTF/LTF state per watched stock (3s update)
 
@@ -1158,6 +1159,7 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadStrategyTelemetry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'fno_pos') this.loadFnoPositions(); }, 30000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
       // Background P&L refresh for positions tab. Trade events (entry/exit/roll) are
       // pushed instantly via WebSocket, so this poll only needs to catch P&L drift.
@@ -1631,6 +1633,15 @@ document.addEventListener('alpine:init', () => {
       } catch(e) {
         this.stockScan = { ...this.stockScan, loaded: true, error: String(e) };
       }
+    },
+    /* ── FnO Positional positions ───────────────────────────────────────── */
+    async loadFnoPositions() {
+      try {
+        const r = await this._fetch('/api/fno/positions');
+        if (!r) return;
+        const d = await r.json();
+        if (d && d.ok) this.fnoBooks = d.books || [];
+      } catch(e) { console.warn('loadFnoPositions', e); }
     },
     async runStockScan() {
       if (this.stockScanRunning) return;
@@ -3347,6 +3358,8 @@ function amoTest() {
             @click="adminTab='trap'">&#x1F3AF; TRAP ENGINE</button>
     <button class="admin-tab" :class="{active: adminTab==='stocks'}"
             @click="adminTab='stocks'; loadStockScan()">&#x1F4C8; STOCKS</button>
+    <button class="admin-tab" :class="{active: adminTab==='fno_pos'}"
+            @click="adminTab='fno_pos'; loadFnoPositions()">&#x1F4CA; FNO POSITIONS</button>
     <button class="admin-tab" :class="{active: adminTab==='clients'}"
             @click="adminTab='clients'; loadClientProfiles(); loadRiskSummary()">&#x1F465; CLIENT PROFILES</button>
   </div>
@@ -5514,6 +5527,99 @@ function amoTest() {
     </template>
 
   </div><!-- end stocks tab -->
+
+  <!-- ════════════════════════════════════════════
+       FNO POSITIONS TAB — Positional option trades
+  ════════════════════════════════════════════════ -->
+  <div x-show="adminTab === 'fno_pos'" class="flex flex-col gap-3 p-3">
+
+    <!-- Header -->
+    <div class="flex flex-wrap items-center gap-3 justify-between">
+      <div class="font-mono text-sm font-bold" style="color:var(--t-fg)">FnO POSITIONAL POSITIONS</div>
+      <button @click="loadFnoPositions()" class="font-mono text-xs px-2 py-1 rounded"
+              style="border:1px solid var(--t-border);color:var(--t-muted)">&#x21BB; REFRESH</button>
+    </div>
+
+    <!-- No books -->
+    <div x-show="fnoBooks.length === 0"
+         class="font-mono text-xs p-3 rounded" style="color:var(--t-muted);border:1px solid var(--t-border)">
+      No FnO positional books active. Deploy strategy <strong>fno_positional</strong> on a binding to start.
+    </div>
+
+    <!-- Per-book section -->
+    <template x-for="book in fnoBooks" :key="book.client_id + '_' + book.binding_id">
+      <div class="t-card rounded p-3 flex flex-col gap-2">
+        <!-- Book header -->
+        <div class="flex items-center gap-3 flex-wrap">
+          <span class="font-mono text-xs font-bold" style="color:var(--t-fg)"
+                x-text="book.client_id + ' / ' + book.binding_id"></span>
+          <span class="font-mono text-xs px-2 py-0.5 rounded"
+                :style="book.mode==='live' ? 'color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.4)' : 'color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.4)'"
+                x-text="book.mode.toUpperCase()"></span>
+          <span class="font-mono text-xs" style="color:var(--t-muted)"
+                x-text="'Slots ' + book.open_count + '/' + book.max_slots + '  |  Pending: ' + book.pending_count"></span>
+        </div>
+
+        <!-- No positions -->
+        <div x-show="!book.positions || book.positions.length === 0"
+             class="font-mono text-xs" style="color:var(--t-muted)">No positions yet.</div>
+
+        <!-- Positions table -->
+        <div x-show="book.positions && book.positions.length > 0" class="overflow-x-auto">
+          <table class="font-mono text-xs w-full" style="border-collapse:collapse">
+            <thead>
+              <tr style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
+                <th class="text-left py-1 pr-3">Stock</th>
+                <th class="text-left py-1 pr-3">Type</th>
+                <th class="text-right py-1 pr-3">Strike</th>
+                <th class="text-right py-1 pr-3">Entry</th>
+                <th class="text-right py-1 pr-3">LTP</th>
+                <th class="text-right py-1 pr-3">P&amp;L</th>
+                <th class="text-right py-1 pr-3">Spot</th>
+                <th class="text-right py-1 pr-3">SL</th>
+                <th class="text-right py-1 pr-3">T1</th>
+                <th class="text-left py-1 pr-3">Status</th>
+                <th class="text-left py-1 pr-3">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="pos in book.positions" :key="pos.slot_id">
+                <tr :style="pos.status==='CLOSED' ? 'opacity:0.55' : ''"
+                    style="border-bottom:1px solid rgba(var(--t-border-rgb),0.4)">
+                  <td class="py-1 pr-3 font-bold" x-text="pos.symbol"></td>
+                  <td class="py-1 pr-3"
+                      :style="pos.direction==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                      x-text="pos.direction + ' ' + pos.expiry_str"></td>
+                  <td class="py-1 pr-3 text-right" x-text="pos.strike"></td>
+                  <td class="py-1 pr-3 text-right" x-text="(pos.entry_ltp||0).toFixed(2)"></td>
+                  <td class="py-1 pr-3 text-right" x-text="(pos.current_ltp||0).toFixed(2)"></td>
+                  <td class="py-1 pr-3 text-right font-bold"
+                      :style="(pos.pnl||0) >= 0 ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                      x-text="((pos.pnl||0) >= 0 ? '+' : '') + (pos.pnl||0).toFixed(0)"></td>
+                  <td class="py-1 pr-3 text-right" x-text="(pos.current_spot||0).toFixed(1)"></td>
+                  <td class="py-1 pr-3 text-right" style="color:var(--t-red)"
+                      x-text="(pos.spot_sl||0).toFixed(1)"></td>
+                  <td class="py-1 pr-3 text-right" style="color:var(--t-green)"
+                      x-text="(pos.day_t1||0).toFixed(1)"></td>
+                  <td class="py-1 pr-3" style="color:var(--t-muted)" x-text="pos.status"></td>
+                  <td class="py-1 pr-3" style="color:var(--t-muted)" x-text="pos.close_reason||'-'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- T1 alert banner -->
+        <template x-if="book.positions && book.positions.some(p => p.close_reason === 't1_hit' && p.status === 'OPEN')">
+          <div class="font-mono text-xs px-3 py-2 rounded font-bold"
+               style="background:rgba(var(--t-green-rgb),0.08);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)">
+            &#x1F4A1; T1 HIT on one or more positions — consider adding hedge option (PE/CE of same strike)
+          </div>
+        </template>
+      </div>
+    </template>
+
+  </div><!-- end fno_pos tab -->
 
   <!-- ════════════════════ CLIENT PROFILES TAB ══════════════════════════════ -->
   <div x-show="adminTab === 'clients'" class="flex flex-col gap-3 flex-1">
