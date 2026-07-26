@@ -66,10 +66,10 @@ TOP_30_STOCKS: Dict[str, str] = {
     "SBIN":       "NSE_EQ|INE062A01020",
     "ITC":        "NSE_EQ|INE154A01025",
     "WIPRO":      "NSE_EQ|INE075A01022",
-    "BAJFINANCE": "NSE_EQ|INE296A01024",
+    "BAJFINANCE": "NSE_EQ|INE296A01032",   # face-value split: was INE296A01024
     "LT":         "NSE_EQ|INE018A01030",
     "AXISBANK":   "NSE_EQ|INE238A01034",
-    "KOTAKBANK":  "NSE_EQ|INE237A01028",
+    "KOTAKBANK":  "NSE_EQ|INE237A01036",   # face-value split: was INE237A01028
     "HCLTECH":    "NSE_EQ|INE860A01027",
     "TITAN":      "NSE_EQ|INE280A01028",
     "MARUTI":     "NSE_EQ|INE585B01010",
@@ -79,9 +79,9 @@ TOP_30_STOCKS: Dict[str, str] = {
     "GRASIM":     "NSE_EQ|INE047A01021",
     "ONGC":       "NSE_EQ|INE213A01029",
     "COALINDIA":  "NSE_EQ|INE522F01014",
-    "TATAMOTORS": "NSE_EQ|INE155L01010",
+    "TATAMOTORS": "NSE_EQ|INE155A01022",    # post-demerger: now traded as TMPV
     "SUNPHARMA":  "NSE_EQ|INE044A01036",
-    "DRREDDY":    "NSE_EQ|INE089A01023",
+    "DRREDDY":    "NSE_EQ|INE089A01031",    # face-value split: was INE089A01023
     "CIPLA":      "NSE_EQ|INE059A01026",
     "JSWSTEEL":   "NSE_EQ|INE019A01038",
     "ADANIENT":   "NSE_EQ|INE423A01024",
@@ -726,7 +726,7 @@ def main() -> None:
     # Date range
     end_date   = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=args.months * 31)
-    print(f"\nFnO Scanner Backtest: {start_date} → {end_date} ({args.months} months)")
+    print(f"\nFnO Scanner Backtest: {start_date} to {end_date} ({args.months} months)")
 
     # Stock selection
     if args.stocks:
@@ -745,7 +745,7 @@ def main() -> None:
             print(f"  {symbol}: insufficient data ({len(bars)} bars) — skipping")
             continue
         stock_bars[symbol] = bars
-        print(f"  {symbol}: {len(bars)} bars ({bars[0].timestamp.date()} → {bars[-1].timestamp.date()})")
+        print(f"  {symbol}: {len(bars)} bars ({bars[0].timestamp.date()} to {bars[-1].timestamp.date()})")
 
     if not stock_bars:
         print("No data loaded. Check token and connectivity.")
