@@ -13,11 +13,11 @@ Usage:
 """
 from __future__ import annotations
 
-import os, sys
+import gzip, json, os, sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -25,6 +25,62 @@ sys.path.insert(0, str(ROOT))
 from config.global_config import IST
 from backtest.fno_scanner.backtest import TOP_30_STOCKS, load_or_fetch, Bar
 from strategies.v4_cascade.rolling_base import find_all_bear_zones, find_all_bull_zones
+
+def _fetch_stock_expiries(token: str) -> Dict[str, List[date]]:
+    """Download NSE instrument master and extract all future FnO expiry dates
+    per stock symbol.  Returns {symbol: sorted_list_of_expiry_dates}."""
+    from curl_cffi import requests as cc
+    url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+    try:
+        r = cc.get(url, impersonate="chrome131", timeout=30)
+        instruments = json.loads(gzip.decompress(r.content))
+    except Exception as e:
+        print(f"  [warn] Could not fetch instrument master: {e}")
+        return {}
+
+    today = date.today()
+    result: Dict[str, List[date]] = {}
+
+    # Build reverse map: trading_symbol (NSE_EQ) -> FnO trading_symbol
+    # Upstox uses the stock's underlying name in the FnO contract name
+    # e.g. "RELIANCE 1260 CE 28 JUL 26" -> underlying=RELIANCE
+    for inst in instruments:
+        seg = inst.get("segment", "")
+        if seg != "NSE_FO":
+            continue
+        ts = inst.get("trading_symbol", "")
+        itype = inst.get("instrument_type", "")
+        if itype not in ("CE", "PE"):
+            continue
+        # Parse: "{UNDERLYING} {STRIKE} {TYPE} {DD} {MON} {YY}"
+        parts = ts.split()
+        if len(parts) < 6:
+            continue
+        underlying = parts[0]
+        if underlying not in TOP_30_STOCKS:
+            continue
+        try:
+            exp_str = f"{parts[3]} {parts[4]} {parts[5]}"  # "28 JUL 26"
+            exp_date = datetime.strptime(exp_str, "%d %b %y").date()
+        except ValueError:
+            continue
+        if exp_date < today:
+            continue
+        result.setdefault(underlying, [])
+        if exp_date not in result[underlying]:
+            result[underlying].append(exp_date)
+
+    # Sort each list
+    for sym in result:
+        result[sym].sort()
+    return result
+
+
+def _next_monthly_expiry(expiries: List[date], from_month: int, from_year: int) -> Optional[date]:
+    """Return the last (furthest) expiry in the given calendar month."""
+    candidates = [d for d in expiries if d.month == from_month and d.year == from_year]
+    return max(candidates) if candidates else None
+
 
 # Best config from the parameter sweep
 HARD_SL_BUF   = 0.8    # % beyond zone boundary
@@ -43,9 +99,10 @@ class Signal:
     dist_pct:    float      # % distance of close from entry_line
     hard_sl:     float      # spot SL level
     day_t1:      float      # Day-1 target (Friday high or low)
-    zone_age:    int         # days since zone locked
+    zone_age:    int        # days since zone locked
     rr:          float
-    suggested_strike: int   # nearest 100-round to entry_line
+    suggested_strike: int   # nearest round-step to entry_line
+    expiry:      str = ""   # actual contract expiry from registry e.g. "28 AUG 26"
 
 
 def _nearest_strike(price: float, step: int = 50) -> int:
@@ -56,9 +113,24 @@ def scan(token: str) -> List[Signal]:
     end_date   = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=6 * 31)
 
+    # Determine which month to target for positional trading.
+    # If we're in the last week of current month (expiry within 7 days),
+    # target NEXT month; otherwise target current month.
+    today = date.today()
+    # Find next month's expiry target: use 2 months ahead if within last week
+    target_month = today.month + 1 if today.day >= 24 else today.month
+    target_year  = today.year
+    if target_month > 12:
+        target_month = 1
+        target_year += 1
+
+    print(f"\nFetching real expiry dates from Upstox instrument master...")
+    stock_expiries = _fetch_stock_expiries(token)
+    print(f"  Found expiry data for {len(stock_expiries)} stocks")
+
     signals: List[Signal] = []
 
-    print(f"\nFnO Live Scanner  —  data up to {end_date}")
+    print(f"\nFnO Live Scanner  --  data up to {end_date}  |  target expiry month: {target_month}/{target_year}")
     print(f"{'─'*70}")
 
     for symbol, key in TOP_30_STOCKS.items():
@@ -140,11 +212,20 @@ def scan(token: str) -> List[Signal]:
                 step = 10
             strike = _nearest_strike(entry_line, step)
 
+            # Real expiry from instrument master
+            sym_expiries = stock_expiries.get(symbol, [])
+            exp_date = _next_monthly_expiry(sym_expiries, target_month, target_year)
+            if exp_date:
+                expiry_str = f"{exp_date.day} {exp_date.strftime('%b %y').upper()}"
+            else:
+                expiry_str = f"? {target_month}/{target_year}"
+
             sig = Signal(
                 symbol=symbol, direction=direction, status=status,
                 entry_line=entry_line, current=last_bar.close,
                 dist_pct=dist_pct, hard_sl=hard_sl, day_t1=day_t1,
                 zone_age=age_days, rr=rr, suggested_strike=strike,
+                expiry=expiry_str,
             )
 
             # Keep the signal with best R:R per stock (TRIGGERED beats APPROACHING)
@@ -169,53 +250,51 @@ def print_report(signals: List[Signal]) -> None:
     triggered.sort(key=lambda s: s.rr, reverse=True)
     approaching.sort(key=lambda s: abs(s.dist_pct))  # closest first
 
-    aug_expiry = "25 AUG 26"
-
     print(f"\n{'='*70}")
-    print(f"  FnO LIVE SIGNALS  —  August Expiry ({aug_expiry})")
+    print(f"  FnO LIVE SIGNALS  --  positional option picks")
     print(f"{'='*70}")
 
     if triggered:
-        print(f"\n  ** TRIGGERED (enter at Monday open) **\n")
-        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'SL':>7} {'T1':>7} {'R:R':>5}  {'Strike'}")
-        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*5}  {'-'*12}")
+        print(f"\n  ** TRIGGERED (enter at next open) **\n")
+        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'SL':>7} {'T1':>7} {'R:R':>5}  Contract")
+        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*5}  {'-'*20}")
         for s in triggered:
             print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>7.1f} {s.current:>7.1f} "
                   f"{s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.rr:>5.2f}  "
-                  f"{s.suggested_strike} {s.direction} {aug_expiry}")
+                  f"{s.suggested_strike} {s.direction} {s.expiry}")
     else:
         print("\n  No TRIGGERED signals on last bar.")
 
     if approaching:
-        print(f"\n  -- APPROACHING (watch Monday — zone within {APPROACH_PCT}%) --\n")
-        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'Dist%':>6} {'SL':>7} {'R:R':>5}  {'Strike'}")
-        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*6} {'-'*7} {'-'*5}  {'-'*12}")
+        print(f"\n  -- APPROACHING (watch next session — zone within {APPROACH_PCT}%) --\n")
+        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'Dist%':>6} {'SL':>7} {'R:R':>5}  Contract")
+        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*6} {'-'*7} {'-'*5}  {'-'*20}")
         for s in approaching:
             arrow = "v" if s.direction == "CE" else "^"
             print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>7.1f} {s.current:>7.1f} "
                   f"{arrow}{abs(s.dist_pct):>5.2f}% {s.hard_sl:>7.1f} {s.rr:>5.2f}  "
-                  f"{s.suggested_strike} {s.direction} {aug_expiry}")
+                  f"{s.suggested_strike} {s.direction} {s.expiry}")
 
     all_sigs = triggered + approaching
     if not all_sigs:
-        print("\n  No signals found. Check back Monday after open.")
+        print("\n  No signals found. Check back after next session.")
         return
 
     print(f"\n{'='*70}")
-    print(f"  TOP 2 PICKS FOR PAPER TRADING (August expiry)")
+    print(f"  TOP 2 PICKS FOR PAPER TRADING")
     print(f"{'='*70}")
 
     # Pick top 2: prefer TRIGGERED, then best R:R
     top2 = (triggered + approaching)[:2]
     for i, s in enumerate(top2, 1):
         print(f"\n  Pick {i}: {s.symbol} {s.direction}  [{s.status}]")
-        print(f"    Option  : {s.suggested_strike} {s.direction} {aug_expiry}")
-        print(f"    Entry   : buy near spot {s.entry_line:.1f} (buy option at market open Monday)")
-        print(f"    Spot SL : {s.hard_sl:.1f}  ({HARD_SL_BUF}% below/above zone)")
-        print(f"    Day T1  : {s.day_t1:.1f}  (Friday's {'high' if s.direction=='CE' else 'low'} — recheck Monday high/low)")
+        print(f"    Contract: {s.suggested_strike} {s.direction} {s.expiry}")
+        print(f"    Entry   : buy near spot {s.entry_line:.1f} (buy option at market open)")
+        print(f"    Spot SL : {s.hard_sl:.1f}  ({HARD_SL_BUF}% beyond zone boundary)")
+        print(f"    Day T1  : {s.day_t1:.1f}  (last session's {'high' if s.direction=='CE' else 'low'} — update intraday)")
         print(f"    R:R     : {s.rr:.2f}")
         print(f"    Zone age: {s.zone_age} days since lock")
-        print(f"    Exit    : Day T1 hit -> add hedge ({s.suggested_strike} {'PE' if s.direction=='CE' else 'CE'})")
+        print(f"    Exit    : Day T1 hit -> add hedge ({s.suggested_strike} {'PE' if s.direction=='CE' else 'CE'} {s.expiry})")
         print(f"              Weekly T1 hit -> close both legs")
 
     print(f"\n{'='*70}\n")
