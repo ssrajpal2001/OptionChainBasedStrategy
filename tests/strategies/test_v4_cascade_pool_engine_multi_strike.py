@@ -65,12 +65,12 @@ def test_only_first_pierce_opens_second_candidate_ignored():
     # session only ever establishes prev_5m_bar (no legitimate predecessor
     # yet, per the "intraday-only trigger" rule), the second arms the
     # break-of-structure trigger (close > prev.high), and the third pierces
-    # the entry limit (low <= zone_low + entry_offset); the arming bar
+    # the entry limit (low <= zone_high - depth/3 = 96.67); the arming bar
     # itself never checks for a pierce (see on_5m_bar's `continue` right
     # after setting pending_entry), so this cannot collapse to two bars.
     eng.on_5m_bar("CE", 24000.0, _bar5(base, 0, 96, 97, 95, 96))
     eng.on_5m_bar("CE", 24000.0, _bar5(base, 5, 98, 99, 97, 99))    # arms (99 > prev.high 97)
-    events = eng.on_5m_bar("CE", 24000.0, _bar5(base, 10, 99, 100, 89, 92))  # pierces (low 89 <= limit 95)
+    events = eng.on_5m_bar("CE", 24000.0, _bar5(base, 10, 99, 100, 89, 92))  # pierces (low 89 <= limit 96.67)
     assert eng.is_open()
     assert eng.position.side == "CE"
     assert eng.position.tracking_strike == 24000.0

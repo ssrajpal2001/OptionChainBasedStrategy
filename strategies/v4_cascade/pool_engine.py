@@ -117,10 +117,45 @@ class PoolCascadeEngine:
     immediately before this change."""
 
     def __init__(self, cfg: V4CascadeConfig, entry_offset: float,
-                 session_open: Tuple[int, int] = (9, 15)) -> None:
+                 session_open: Tuple[int, int] = (9, 15),
+                 sl_buffer: Optional[float] = None,
+                 min_rr: float = 0.0,
+                 max_sl_distance: float = float("inf"),
+                 max_zone_depth: float = 90.0,
+                 entry_rsi_max: float = float("inf"),
+                 rsi_period: int = 14,
+                 entry_cutoff: Tuple[int, int] = (15, 0)) -> None:
         self._cfg = cfg
         self._entry_offset = entry_offset
+        # SL = zone_low - sl_buffer. Defaults to entry_offset (legacy behavior:
+        # entry at zone_low+offset, SL at zone_low-offset = 2*offset risk).
+        self._sl_buffer = sl_buffer if sl_buffer is not None else entry_offset
+        # min_rr=0 disables the gate (default / tests); set >0 to reject fills
+        # where reward/risk < this threshold before opening a position.
+        self._min_rr = min_rr
+        # max_sl_distance: optional hard cap on SL distance; float("inf") =
+        # disabled (structural SL used as-is). Kept for future experimentation.
+        self._max_sl_distance = max_sl_distance
+        # Zones wider than this threshold are discarded at discovery time --
+        # wide zones produce poor R:R and noisy entries. Default 90 pts is
+        # validated against July 2026 NIFTY premium data; set float("inf")
+        # to disable (equivalent to legacy behaviour before this filter).
+        self._max_zone_depth = max_zone_depth
+        # RSI oversold gate at entry: pierce fires but position is NOT opened
+        # if the 5m Wilder RSI-14 at that moment is ABOVE entry_rsi_max. The
+        # slot stays armed (pending_entry remains True) so a later bar that
+        # enters oversold territory can still fill. float("inf") disables.
+        self._entry_rsi_max = entry_rsi_max
+        self._rsi_period = rsi_period
+        # Per-candidate 5m close series for RSI computation (keyed (side, strike)).
+        self._rsi_closes: Dict[Tuple[str, float], List[float]] = {}
         self._session_open = session_open
+        # No new position opens at or after this intraday time (HH, MM). Prevents
+        # entering trades 30 minutes before close where overnight carry risk is
+        # high and volume thins. Default (15, 0) = no entries from 15:00 onward.
+        # Set to (23, 59) to disable. Does NOT suppress exit events (the open-
+        # position early-return path is unaffected and runs before this check).
+        self._entry_cutoff = entry_cutoff
         # Per-candidate state -- keyed (side, strike), populated lazily via
         # .setdefault() as new candidates are first fed a 75m bar. A
         # candidate with no zones yet simply has no key (equivalent to an
@@ -161,6 +196,7 @@ class PoolCascadeEngine:
         self._known_ref_ts[key] = set()
         self._all_75m[key] = []
         self._last_5m_date[key] = None
+        self._rsi_closes[key] = []
 
     def reset_side(self, side: str) -> None:
         """Clear every candidate currently tracked on this side. Mirrors
@@ -204,7 +240,14 @@ class PoolCascadeEngine:
         search_bars = [b for b in self._all_75m[key] if b.timestamp >= lookback_start]
         for z in find_all_bear_zones(search_bars, known_ref_ts=known):
             known.add(z.reference_low_ts)
-            pool.append(_ZoneSlot(z, strike))
+            slot = _ZoneSlot(z, strike)
+            # Depth guardrail: wide structural zones produce compressed R:R and
+            # noisy entries (price sweeps through the entire zone before
+            # reaching the structural SL). Discard at discovery so they never
+            # arm, trigger, or clear the pool.
+            if slot.zone_high - slot.zone_low > self._max_zone_depth:
+                continue
+            pool.append(slot)
 
     # ── LTF (15m) ────────────────────────────────────────────────────────
     def on_15m_bar(self, side: str, strike: float, bar) -> None:
@@ -258,6 +301,7 @@ class PoolCascadeEngine:
         self._last_5m_bar[side] = bar
         key = (side, strike)
         pool = self._pool.setdefault(key, [])
+        self._rsi_closes.setdefault(key, []).append(bar.close)
 
         # 2026-07-23: intraday-only trigger -- the first 5m candle of a new
         # session has no legitimate "previous candle". Only this
@@ -292,9 +336,60 @@ class PoolCascadeEngine:
                 continue
 
             slot.prev_5m_bar = bar
-            limit_price = slot.zone_low + self._entry_offset
+            # Adaptive-depth retest trigger:
+            #   Standard zone (depth <= 60 pts): 1/3 depth from zone_high --
+            #     matches zone_state.py's limit_entry_price formula.
+            #   Large/wide zone (depth > 60 pts): cap the pull-back at
+            #     min(depth/2, 30) pts below zone_high so the entry stays
+            #     close to the demand boundary and preserves R:R on fat zones.
+            _zone_depth = slot.zone_high - slot.zone_low
+            if _zone_depth <= 0:
+                limit_price = slot.zone_low + self._entry_offset
+            elif _zone_depth <= 60.0:
+                limit_price = slot.zone_high - _zone_depth / 3.0
+            else:
+                limit_price = slot.zone_high - min(_zone_depth / 2.0, 30.0)
             pierced = bar.low <= limit_price
             if pierced:
+                # Same-session freshness gate: permanently discard zones whose
+                # HTF lock fired in a prior trading session. Stale carry-over
+                # zones lose their supply/demand context after overnight price
+                # action resets the intraday order book. Removal is permanent
+                # because staleness only worsens across sessions.
+                if (slot.zone.lock_ts is not None
+                        and slot.zone.lock_ts.date() != bar.timestamp.date()):
+                    pool.remove(slot)
+                    continue
+                # Late-day entry cutoff: skip new position opens at or after
+                # entry_cutoff (default 15:00 IST). Slot stays armed so it
+                # can fire next session — but the same-session gate above will
+                # then remove it, effectively preventing any cross-session fill.
+                # Exit events are unaffected (open-position path returns early
+                # via _check_exits before this block is ever reached).
+                _t = (bar.timestamp.hour, bar.timestamp.minute)
+                if _t >= self._entry_cutoff:
+                    continue
+                # Minimum R:R pre-execution gate (disabled when min_rr=0).
+                # Risk uses the CAPPED SL distance (same cap applied in
+                # _open_position) so R:R reflects actual capital at risk, not
+                # the raw structural zone depth which can exceed 150 pts.
+                # R:R is fixed by zone geometry so a rejection here is
+                # permanent -- remove the slot to avoid repeated checks.
+                if self._min_rr > 0:
+                    _sl_raw = slot.zone_low - self._sl_buffer
+                    _effective_risk = min(limit_price - _sl_raw, self._max_sl_distance)
+                    _t1 = slot.ltf_zone.sl_level if slot.ltf_zone is not None else slot.zone.sl_level
+                    _reward = _t1 - limit_price
+                    if _effective_risk <= 0 or (_reward / _effective_risk) < self._min_rr:
+                        pool.remove(slot)
+                        continue
+                # RSI oversold gate: reject this pierce if the 5m Wilder RSI-14
+                # is above the threshold. Slot stays armed (pending_entry=True)
+                # so a later bar that reaches oversold territory can still fill.
+                if self._entry_rsi_max < float("inf"):
+                    _rsi = self._compute_rsi_val(self._rsi_closes.get(key, []), self._rsi_period)
+                    if _rsi is not None and _rsi > self._entry_rsi_max:
+                        continue
                 # A pierce firing HERE means if a position is open at all,
                 # it's on the OPPOSITE side (we already returned early above
                 # if `side` were the currently-open side) -- force-close it
@@ -306,11 +401,42 @@ class PoolCascadeEngine:
                 return events
         return events
 
+    @staticmethod
+    def _compute_rsi_val(closes: List[float], period: int = 14) -> Optional[float]:
+        """Wilder RSI on the buffered 5m closes. Mirrors the backtest's own
+        _compute_rsi() formula exactly (seed = simple mean, then EMA-style
+        Wilder smoothing) so gate values match what the report prints."""
+        n = len(closes)
+        if n < period + 1:
+            return None
+        deltas = [closes[i] - closes[i - 1] for i in range(1, n)]
+        gains = [max(d, 0.0) for d in deltas]
+        losses = [max(-d, 0.0) for d in deltas]
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        for i in range(period, len(deltas)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - 100.0 / (1.0 + rs)
+
     def _open_position(self, side: str, slot: _ZoneSlot, fill_price: float, ts) -> CascadeEvent:
         htf, ltf = slot.zone, slot.ltf_zone
-        sl_price = slot.zone_low - self._entry_offset
+        _sl_raw = slot.zone_low - self._sl_buffer
+        # Apply max-risk cap: if the structural SL is further than max_sl_distance
+        # pts below entry, tighten it to entry - max_sl_distance. This caps Rs
+        # exposure on entries into wide zones without invalidating the zone itself.
+        sl_price = max(_sl_raw, fill_price - self._max_sl_distance)
         t2_target = htf.sl_level
         t1_target = ltf.sl_level if ltf is not None else t2_target
+        # Large-zone protection: when the 1/3-depth entry sits AT or ABOVE the
+        # LTF sub-zone target the trade would immediately be at-loss vs T1.
+        # Fall back to the HTF sl_level (T2) as the T1 target so the trade
+        # still has positive expected value.
+        if t1_target is not None and t1_target <= fill_price:
+            t1_target = t2_target
         qty = self._cfg.tranche_qty
         t1 = TrancheLeg(tranche="T1", option_type=side, strike=slot.strike, qty=qty,
                          entry_price=fill_price, entry_time=ts, entry_reason="htf_ltf_pool_cascade",

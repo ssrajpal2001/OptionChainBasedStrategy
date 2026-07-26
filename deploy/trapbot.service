@@ -1,0 +1,60 @@
+# deploy/trapbot.service — systemd fallback if PM2 is unavailable.
+#
+# Copy to /etc/systemd/system/trapbot.service, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now trapbot
+#   sudo systemctl status trapbot
+#   journalctl -u trapbot -f
+#
+# NOTE: PM2 (via scripts/setup_ec2.sh) is the preferred process manager
+# because it handles log rotation, online restarts, and per-process
+# resource limits without root. Use this service only as a fallback
+# or on hardened instances where npm/Node.js is not permitted.
+#
+# Assumes:
+#   - Repo cloned to /home/ec2-user/OptionChainBasedStrategy
+#   - venv at /home/ec2-user/OptionChainBasedStrategy/.venv
+#   - App user: ec2-user (adjust User= and paths for Ubuntu/ubuntu)
+
+[Unit]
+Description=V4 Cascade AlgoTrader (trapbot)
+Documentation=https://github.com/ssrajpal2001/OptionChainBasedStrategy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/OptionChainBasedStrategy
+
+# Activate venv inline
+ExecStart=/home/ec2-user/OptionChainBasedStrategy/.venv/bin/python3 \
+    run_system.py \
+    --mode live \
+    --ui \
+    --index NIFTY \
+    --strategies v4_cascade \
+    --port 5000
+
+# V4 Cascade pool engine env vars
+Environment=V4CASCADE_USE_POOL_ENGINE=1
+Environment=V4CASCADE_TRACKING_OFFSETS=100,200,300
+Environment=LOG_LEVEL=INFO
+
+# Auto-restart on crash, back-off to avoid restart storms
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=120
+StartLimitBurst=5
+
+# Graceful stop: sends SIGTERM; the process has 30s to close positions gracefully
+TimeoutStopSec=30
+
+# Log to systemd journal (no separate log file needed — read with journalctl -u trapbot -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trapbot
+
+[Install]
+WantedBy=multi-user.target

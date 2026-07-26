@@ -12,6 +12,8 @@ CE tests, proving there is no side-flipped branch left anywhere."""
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from strategies.v4_cascade.book import _Bar
 from strategies.v4_cascade.config import V4CascadeConfig
 from strategies.v4_cascade.dataclasses import (
@@ -101,12 +103,12 @@ def test_full_chain_produces_open_event():
     assert events == []
     events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 35, 93, 95, 92, 94.5))
     assert events == []  # trigger armed (94.5 > 94 -- prev bar's high), not pierced yet
-    # limit = zone_low(90) + offset(5) = 95 -- a bar whose low pierces down to it fills.
+    # limit = zone_high(100) - depth(10)/3 = 96.67 -- a bar whose low reaches it fills.
     events = eng.on_5m_bar("CE", _STRIKE, _bar5(ltf_base, 40, 95, 96, 94, 95.5))
     assert len(events) == 1
     assert events[0].event_type == CascadeEventType.OPEN_LONG_CE
     assert eng.position is not None
-    assert eng.position.t1.entry_price == 95.0
+    assert eng.position.t1.entry_price == pytest.approx(100 - 10 / 3, rel=1e-5)
     assert eng.position.t1.sl_price == 85.0  # zone_low(90) - offset(5)
     assert eng.position.t1.target_price == 97.0  # ltf_zone.sl_level (locked before fill)
     assert eng.position.t2.target_price is None  # T2 has no fixed target field set at open (matches V4CascadeEngine convention)
@@ -167,15 +169,16 @@ def test_intraday_trigger_reset_skips_cross_day_comparison():
 
 
 def test_pending_entry_pierce_fires_on_first_bar_of_new_day():
-    """Reviewer's Finding 1 repro: a slot already `pending_entry=True` going
-    into a day boundary must still get its limit-pierce checked on the VERY
-    FIRST 5m bar of the new day -- the day-boundary reset only clears
-    prev_5m_bar (the trigger-arm pointer), never pending_entry itself, which
-    is exactly the kind of mid-tracking state the design spec says carries
-    across days unchanged. Before the fix, the unconditional
-    `if prev is None: continue` ran ahead of the pending_entry check and
-    swallowed the whole per-slot body (pierce check included) on this bar,
-    silently delaying the fill by one whole 5m bar."""
+    """Same-session gate: a slot locked on day 0 that reaches pending_entry=True
+    must be PERMANENTLY REMOVED (not filled) when the pierce bar arrives on day 1.
+    Cross-session zones are stale by definition — the zone's lock_ts.date() must
+    equal the entry bar's date, otherwise the slot is discarded so it can never
+    fire on a subsequent same-day retrace either.
+
+    Historical note: this test was originally written to verify Reviewer's Finding 1
+    (a `prev is None: continue` bug that delayed cross-session fills by one bar).
+    The same-session guard introduced later intentionally prevents such fills
+    entirely — the "fix" and the "block" now coexist, the block takes precedence."""
     eng = _engine()
     day1 = datetime(2026, 7, 1, 14, 45, tzinfo=IST)
     day2 = datetime(2026, 7, 2, 9, 15, tzinfo=IST)
@@ -191,14 +194,13 @@ def test_pending_entry_pierce_fires_on_first_bar_of_new_day():
     eng._pool[("CE", _STRIKE)] = [slot]
     eng._last_5m_date[("CE", _STRIKE)] = day1.date()
 
-    # First 5m bar of the new day: limit price = zone_low(90) + offset(5) =
-    # 95; this bar's low (93) genuinely pierces it. The fill must fire on
-    # THIS bar, not the next one.
+    # First 5m bar of day 2: the limit price (96.67) would be pierced, but
+    # the same-session gate fires first — lock_ts.date() (Jul 1) != bar.date()
+    # (Jul 2) → slot is permanently removed, no position opens.
     events = eng.on_5m_bar("CE", _STRIKE, _Bar(day2, 97, 98, 93, 96, tf=5))
-    assert len(events) == 1
-    assert events[0].event_type == CascadeEventType.OPEN_LONG_CE
-    assert eng.position is not None
-    assert eng.position.t1.entry_price == 95.0  # limit price = zone_low(90) + offset(5)
+    assert len(events) == 0
+    assert eng.position is None
+    assert eng._pool[("CE", _STRIKE)] == []  # slot permanently removed
 
 
 def _open_position(eng, side):
@@ -378,7 +380,7 @@ def test_structural_flip_closes_open_side_when_counter_side_fires():
     assert events == []
     events = eng.on_5m_bar("PE", _STRIKE, _bar5(ltf_base, 35, 93, 95, 92, 94.5))  # arms
     assert events == []
-    events = eng.on_5m_bar("PE", _STRIKE, _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(95)
+    events = eng.on_5m_bar("PE", _STRIKE, _bar5(ltf_base, 40, 95, 96, 94, 95.5))  # pierces limit(96.67)
 
     # Both CE legs close via structural_flip at CE's last known price (98.0),
     # THEN PE opens -- in that order.
@@ -398,7 +400,7 @@ def test_structural_flip_closes_open_side_when_counter_side_fires():
     assert eng.position is not None
     assert eng.position.side == "PE"
     assert eng.position.is_open
-    assert eng.position.t1.entry_price == 95.0
+    assert eng.position.t1.entry_price == pytest.approx(100 - 10 / 3, rel=1e-5)
 
 
 def test_force_eod_close_closes_both_open_legs():
@@ -415,3 +417,67 @@ def test_force_eod_close_closes_both_open_legs():
     assert t2.status == "closed" and t2.close_reason == "eod_force_close"
     assert eng.position.status == "closed"
     assert eng._trail["CE"] is None
+
+
+def test_same_session_gate_removes_stale_cross_session_zone():
+    """A zone whose HTF lock fired on day N must be permanently removed when a
+    5m pierce bar arrives on day N+1. This is the same-session freshness guard
+    that eliminated all three cross-session losers from the July 2026 audit."""
+    eng = _engine()
+    # Arm a zone on day 0 (lock_ts = 09:15 on Jul 1).
+    eng.on_75m_bar("CE", 24000.0, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("CE", 24000.0, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("CE", 24000.0, _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("CE", 24000.0, _bar75(3, 105, 108, 92, 96))  # tracking = True
+    assert len(eng._pool[("CE", 24000.0)]) == 1
+    slot = eng._pool[("CE", 24000.0)][0]
+    assert slot.tracking
+
+    # Prime pending_entry on day 0.
+    base_d0 = _BASE + timedelta(minutes=75 * 4)
+    eng.on_5m_bar("CE", 24000.0, _bar5(base_d0, 0, 96, 97, 95, 96))
+    eng.on_5m_bar("CE", 24000.0, _bar5(base_d0, 5, 98, 99, 97, 99))  # arms trigger
+
+    # Day 1: pierce bar arrives the NEXT calendar day -- same-session gate must
+    # remove the slot permanently and return no open event.
+    base_d1 = _BASE + timedelta(days=1, hours=4)  # next day, different .date()
+    events = eng.on_5m_bar("CE", 24000.0, _bar5(base_d1, 0, 99, 100, 89, 92))
+    assert not any(e.event_type.name.startswith("OPEN_") for e in events)
+    assert eng._pool[("CE", 24000.0)] == []  # slot permanently removed
+    assert not eng.is_open()
+
+
+def test_late_day_entry_cutoff_blocks_post_1500_pierce():
+    """A pierce bar arriving at or after the entry_cutoff (15:00 IST by default)
+    must be skipped -- the slot stays armed but no position opens. This is the
+    late-day guard that eliminated the Jul-07 CE 24300 overnight carry loss."""
+    # Build engine with explicit entry_cutoff; use a 15:00 session time.
+    cfg = V4CascadeConfig(underlying="NIFTY", lot_multiplier=2, lot_size=65)
+    # entry_cutoff at (15, 0): no new opens at 15:00 or later.
+    eng = PoolCascadeEngine(cfg, entry_offset=5.0, session_open=(9, 15),
+                            entry_cutoff=(15, 0))
+
+    # Arm a zone using the same day as _BASE (2026-07-01, 09:15).
+    eng.on_75m_bar("CE", 24000.0, _bar75(0, 105, 110, 100, 105))
+    eng.on_75m_bar("CE", 24000.0, _bar75(1, 95, 100, 90, 95))
+    eng.on_75m_bar("CE", 24000.0, _bar75(2, 96, 115, 95, 112))
+    eng.on_75m_bar("CE", 24000.0, _bar75(3, 105, 108, 92, 96))
+
+    base_d0 = _BASE + timedelta(minutes=75 * 4)
+    eng.on_5m_bar("CE", 24000.0, _bar5(base_d0, 0, 96, 97, 95, 96))
+    eng.on_5m_bar("CE", 24000.0, _bar5(base_d0, 5, 98, 99, 97, 99))  # arms trigger
+
+    # 15:05 bar: same calendar day, lock_ts same day -> passes same-session gate,
+    # but fails the 15:00 entry cutoff -> no open.
+    ts_1505 = datetime(2026, 7, 1, 15, 5, tzinfo=IST)
+    events_late = eng.on_5m_bar("CE", 24000.0, _Bar(ts_1505, 99, 100, 89, 92, tf=5))
+    assert not any(e.event_type.name.startswith("OPEN_") for e in events_late)
+    assert not eng.is_open()
+    # slot still armed (not removed by late-day skip)
+    assert len(eng._pool[("CE", 24000.0)]) == 1
+
+    # 14:55 bar: before cutoff -- should open normally.
+    ts_1455 = datetime(2026, 7, 1, 14, 55, tzinfo=IST)
+    events_ok = eng.on_5m_bar("CE", 24000.0, _Bar(ts_1455, 99, 100, 89, 92, tf=5))
+    assert any(e.event_type.name.startswith("OPEN_") for e in events_ok)
+    assert eng.is_open()
