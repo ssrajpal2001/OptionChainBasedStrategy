@@ -854,6 +854,7 @@ document.addEventListener('alpine:init', () => {
     stockScanBiasToggle: false,
     stockScanRunning: false,
     fnoBooks: [],           // FnO positional book states [{client_id, binding_id, positions, ...}]
+    csFnoPositions: [],     // client-scoped FnO books (positions tab)
     fnoAlerts: [],          // active un-notified intraday alerts
     fnoStocks: [],          // live LTP + MTF/LTF state per watched stock (3s update)
 
@@ -1166,6 +1167,7 @@ document.addEventListener('alpine:init', () => {
       // Background P&L refresh for positions tab. Trade events (entry/exit/roll) are
       // pushed instantly via WebSocket, so this poll only needs to catch P&L drift.
       setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 2000);
+      setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientFnoPositions(); }, 5000);
     },
 
     /* Hydrate all admin panels — called right after login or session restore */
@@ -1360,6 +1362,7 @@ document.addEventListener('alpine:init', () => {
         // Strategy book position changed (entry / exit / roll) — refresh positions panel.
         if (this.screen === 'client' && (this.clientMenu === 'positions' || this.clientMenu === 'dashboard')) {
           this.loadClientPositions();
+          this.loadClientFnoPositions();
         }
       }
     },
@@ -1644,6 +1647,14 @@ document.addEventListener('alpine:init', () => {
         const d = await r.json();
         if (d && d.ok) this.fnoBooks = d.books || [];
       } catch(e) { console.warn('loadFnoPositions', e); }
+    },
+    async loadClientFnoPositions() {
+      try {
+        const r = await this._fetch('/api/client/fno_positions');
+        if (!r) return;
+        const d = await r.json();
+        if (d && d.ok) this.csFnoPositions = d.books || [];
+      } catch(e) { console.warn('loadClientFnoPositions', e); }
     },
     async runStockScan() {
       if (this.stockScanRunning) return;
@@ -7092,7 +7103,7 @@ function amoTest() {
     </div>
 
     <!-- ════ MENU: POSITIONS ══════════════════════════════════════════════════ -->
-    <div x-show="clientMenu === 'positions'" class="space-y-4" x-init="if(clientMenu==='positions') loadClientPositions()">
+    <div x-show="clientMenu === 'positions'" class="space-y-4" x-init="if(clientMenu==='positions'){ loadClientPositions(); loadClientFnoPositions(); }">
 
       <!-- Market strip -->
       <div class="t-card rounded p-4">
@@ -7692,6 +7703,74 @@ function amoTest() {
           </div>
         </template>
       </div>
+
+      <!-- ════ FnO POSITIONAL POSITIONS ════ -->
+      <template x-if="csFnoPositions.length > 0">
+        <div class="t-card rounded">
+          <div class="flex items-center justify-between px-5 py-3 border-b" style="border-color:var(--t-border)">
+            <div class="font-ui font-bold text-base" style="color:var(--t-bright)">FnO Positional Positions</div>
+            <button class="text-xs px-3 py-1 rounded border font-mono" style="border-color:var(--t-border);color:var(--t-muted)"
+                    @click="loadClientFnoPositions()">↻ Refresh</button>
+          </div>
+          <template x-for="book in csFnoPositions" :key="book.client_id+'_'+book.binding_id">
+            <div class="px-4 py-3 border-b last:border-0" style="border-color:var(--t-border)">
+              <!-- Book meta -->
+              <div class="flex items-center gap-3 mb-2 flex-wrap">
+                <span class="font-mono text-xs font-bold" style="color:var(--t-fg)" x-text="book.binding_id"></span>
+                <span class="font-mono text-xs px-2 py-0.5 rounded"
+                      :style="book.mode==='live' ? 'color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.4)' : 'color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.4)'"
+                      x-text="book.mode.toUpperCase()"></span>
+                <span class="font-mono text-xs" style="color:var(--t-muted)"
+                      x-text="book.open_count + ' open / ' + book.max_slots + ' slots'"></span>
+              </div>
+              <!-- No positions -->
+              <div x-show="!book.positions || book.positions.length === 0"
+                   class="font-mono text-xs py-2" style="color:var(--t-muted)">No positions yet.</div>
+              <!-- Positions table -->
+              <div x-show="book.positions && book.positions.length > 0" class="overflow-x-auto">
+                <table class="font-mono text-xs w-full" style="border-collapse:collapse">
+                  <thead>
+                    <tr class="text-right" style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
+                      <th class="text-left py-1 pr-3 font-normal">Stock</th>
+                      <th class="text-left py-1 pr-3 font-normal">Type / Expiry</th>
+                      <th class="py-1 pr-3 font-normal">Strike</th>
+                      <th class="py-1 pr-3 font-normal">Entry</th>
+                      <th class="py-1 pr-3 font-normal">LTP</th>
+                      <th class="py-1 pr-3 font-normal">P&amp;L</th>
+                      <th class="py-1 pr-3 font-normal">Spot</th>
+                      <th class="py-1 pr-3 font-normal">SL</th>
+                      <th class="py-1 pr-3 font-normal">T1</th>
+                      <th class="text-left py-1 font-normal">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="pos in book.positions" :key="pos.slot_id">
+                      <tr :style="pos.status==='CLOSED' ? 'opacity:0.5' : ''"
+                          style="border-bottom:1px solid rgba(var(--t-border-rgb),0.3)">
+                        <td class="py-1 pr-3 font-bold" style="color:var(--t-bright)" x-text="pos.symbol"></td>
+                        <td class="py-1 pr-3" :style="pos.direction==='CE'?'color:var(--t-green)':'color:var(--t-red)'"
+                            x-text="pos.direction + ' ' + (pos.expiry_str||'')"></td>
+                        <td class="py-1 pr-3 text-right" x-text="pos.strike"></td>
+                        <td class="py-1 pr-3 text-right" x-text="(pos.entry_ltp||0).toFixed(2)"></td>
+                        <td class="py-1 pr-3 text-right price-live" style="color:var(--t-bright)"
+                            x-text="(pos.current_ltp||0).toFixed(2)"></td>
+                        <td class="py-1 pr-3 text-right font-bold"
+                            :style="(pos.pnl||0)>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                            x-text="((pos.pnl||0)>=0?'+':'')+'₹'+(pos.pnl||0).toFixed(0)"></td>
+                        <td class="py-1 pr-3 text-right" x-text="(pos.current_spot||0).toFixed(1)"></td>
+                        <td class="py-1 pr-3 text-right" style="color:var(--t-red)" x-text="(pos.spot_sl||0).toFixed(1)"></td>
+                        <td class="py-1 pr-3 text-right" style="color:var(--t-green)" x-text="(pos.day_t1||0).toFixed(1)"></td>
+                        <td class="py-1 font-mono text-xs" style="color:var(--t-muted)"
+                            x-text="pos.status + (pos.close_reason ? ' · '+pos.close_reason : '')"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
 
       <!-- Refresh -->
       <div class="flex justify-end">

@@ -473,6 +473,26 @@ class FnOPositionalBook:
             if pos.entry_ltp > 0 and opt > 0:
                 pos.pnl = (opt - pos.entry_ltp) * pos.qty
 
+            # Breakeven trail: once spot has moved ≥50% of entry→T1, protect at entry.
+            if spot > 0 and pos.spot_entry > 0 and pos.day_t1 > 0:
+                _range = abs(pos.day_t1 - pos.spot_entry)
+                _progress = abs(spot - pos.spot_entry)
+                if _range > 0 and _progress >= 0.5 * _range:
+                    if pos.direction == "CE" and pos.spot_sl < pos.spot_entry:
+                        pos.spot_sl = pos.spot_entry
+                        self._log.info(
+                            "FnOBook[%s/%s]: TRAIL→BREAKEVEN %s  sl=%.1f (was below entry=%.1f)",
+                            self._client_id, self._binding_id, pos.symbol,
+                            pos.spot_sl, pos.spot_entry,
+                        )
+                    elif pos.direction == "PE" and pos.spot_sl > pos.spot_entry:
+                        pos.spot_sl = pos.spot_entry
+                        self._log.info(
+                            "FnOBook[%s/%s]: TRAIL→BREAKEVEN %s  sl=%.1f (was above entry=%.1f)",
+                            self._client_id, self._binding_id, pos.symbol,
+                            pos.spot_sl, pos.spot_entry,
+                        )
+
             sl_hit = (
                 (pos.direction == "CE" and spot > 0 and spot <= pos.spot_sl) or
                 (pos.direction == "PE" and spot > 0 and spot >= pos.spot_sl)
@@ -519,6 +539,22 @@ class FnOPositionalBook:
             pos.pnl = (pos.current_ltp - pos.entry_ltp) * pos.qty
         self._log.info("FnOBook[%s/%s]: EXIT %s reason=%s pnl=%.2f",
                        self._client_id, self._binding_id, pos.symbol, reason, pos.pnl)
+        try:
+            from data_layer import trade_history as _th
+            instrument = f"{pos.symbol} {pos.strike} {pos.direction}"
+            _th.record(
+                client_id=   self._client_id,
+                strategy=    "fno_positional",
+                instrument=  instrument,
+                entry_price= pos.entry_ltp,
+                exit_price=  pos.current_ltp,
+                exit_reason= reason,
+                pnl=         pos.pnl,
+                binding_id=  self._binding_id,
+                ts=          pos.close_time,
+            )
+        except Exception as _he:
+            self._log.warning("FnOBook: history record failed: %s", _he)
         await self._bus.publish(Topic.SYSTEM_EVENT, {
             "type":       "fno_exit",
             "client_id":  self._client_id,

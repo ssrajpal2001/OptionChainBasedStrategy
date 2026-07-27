@@ -2201,6 +2201,23 @@ class DashboardServer:
                     pass
             return {"ok": True, "books": books_state}
 
+        @app.get("/api/client/fno_positions", tags=["Client"])
+        async def api_client_fno_positions(user: dict = Depends(_require_client)):
+            """Return FnO positional book states for the requesting client."""
+            cid = user.get("client_id", "")
+            mgr = _srv._fno_positional_manager
+            if mgr is None:
+                return {"ok": True, "books": []}
+            books_state = []
+            for book in (mgr.books or []):
+                try:
+                    state = book.get_state()
+                    if state.get("client_id") == cid:
+                        books_state.append(state)
+                except Exception:
+                    pass
+            return {"ok": True, "books": books_state}
+
         @app.post("/api/admin/v4_cascade/force_ingest/{deploy_id}", tags=["Admin"])
         async def api_admin_v4_force_ingest(deploy_id: str, _: dict = Depends(_require_admin)):
             """Re-trigger the 3-week deep-history ingestion pipeline on a live

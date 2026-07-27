@@ -84,7 +84,7 @@ def _next_monthly_expiry(expiries: List[date], from_month: int, from_year: int) 
 
 # Best config from the parameter sweep
 HARD_SL_BUF   = 0.8    # % beyond zone boundary
-MIN_RR        = 1.0    # minimum R:R
+MIN_RR        = 1.5    # minimum R:R
 APPROACH_PCT  = 1.5    # % distance to call a zone "approaching"
 MAX_ZONE_AGE  = 60     # days
 
@@ -190,6 +190,16 @@ def scan(token: str) -> List[Signal]:
 
             rr = reward / risk
             if rr < MIN_RR:
+                continue
+
+            # Skip if last bar's close has already consumed >80% of entry→T1 headroom.
+            # This prevents "stale T1" signals where the stock already ran most of the
+            # trade in a previous session and has almost no upside left.
+            if direction == "CE":
+                t1_room_consumed = (last_bar.close - entry_line) / (day_t1 - entry_line) if (day_t1 - entry_line) > 0 else 1.0
+            else:
+                t1_room_consumed = (entry_line - last_bar.close) / (entry_line - day_t1) if (entry_line - day_t1) > 0 else 1.0
+            if t1_room_consumed > 0.8:
                 continue
 
             # Classify status
