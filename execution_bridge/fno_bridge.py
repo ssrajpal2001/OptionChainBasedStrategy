@@ -177,7 +177,7 @@ class FnOExecutionBridge:
             f"fill={fill_price:.2f}  id={order_id}  paper={is_paper}  failed={failed}",
         )
 
-        self._bus.publish(Topic.FNO_ORDER_FILL, FnOFillEvent(
+        await self._bus.publish(Topic.FNO_ORDER_FILL, FnOFillEvent(
             event_id=ev.event_id, action=ev.action, symbol=ev.symbol,
             fill_price=fill_price, qty=ev.qty,
             client_id=ev.client_id, binding_id=ev.binding_id,
