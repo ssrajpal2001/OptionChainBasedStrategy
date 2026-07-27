@@ -458,7 +458,7 @@ class FnOPositionalBook:
 
         self._positions.append(pos)
         self._save_positions()
-        self._bus.publish(Topic.SYSTEM_EVENT, {"type": "fno_entry", "pos": asdict(pos)})
+        await self._bus.publish(Topic.SYSTEM_EVENT, {"type": "fno_entry", "pos": asdict(pos)})
 
     # ── Monitor ───────────────────────────────────────────────────────────────
 
@@ -493,7 +493,7 @@ class FnOPositionalBook:
                 self._log.info("FnOBook[%s/%s]: T1 HIT %s  spot=%.1f >= t1=%.1f",
                                self._client_id, self._binding_id, pos.symbol, spot, pos.day_t1)
                 pos.close_reason = "t1_hit"
-                self._bus.publish(Topic.SYSTEM_EVENT, {
+                await self._bus.publish(Topic.SYSTEM_EVENT, {
                     "type":      "fno_t1_alert",
                     "client_id": self._client_id,
                     "binding_id":self._binding_id,
@@ -520,7 +520,7 @@ class FnOPositionalBook:
             pos.pnl = (pos.current_ltp - pos.entry_ltp) * pos.qty
         self._log.info("FnOBook[%s/%s]: EXIT %s reason=%s pnl=%.2f",
                        self._client_id, self._binding_id, pos.symbol, reason, pos.pnl)
-        self._bus.publish(Topic.SYSTEM_EVENT, {
+        await self._bus.publish(Topic.SYSTEM_EVENT, {
             "type":       "fno_exit",
             "client_id":  self._client_id,
             "binding_id": self._binding_id,
@@ -562,7 +562,7 @@ class FnOPositionalBook:
         )
         # Subscribe a per-event reply queue BEFORE publishing to avoid race
         fill_q = self._bus.subscribe(Topic.FNO_ORDER_FILL)
-        self._bus.publish(Topic.FNO_ORDER_REQUEST, ev)
+        await self._bus.publish(Topic.FNO_ORDER_REQUEST, ev)
         try:
             deadline = 15.0
             while deadline > 0:
