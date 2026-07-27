@@ -6422,7 +6422,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':'SS')+' · '+dep.underlying"></span>
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':'SS')+' · '+dep.underlying"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -6640,7 +6640,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':'SS')+' · '+dep.underlying"></span>
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':'SS')+' · '+dep.underlying"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -6733,7 +6733,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':'Sell Straddle')+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':'Sell Straddle')+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -7182,11 +7182,13 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="dep.strategy_name==='v4_cascade'?'V4 Cascade':'Sell Straddle'"></div>
+                           x-text="dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':'Sell Straddle'"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
-                              x-text="dep.lot_multiplier+'L · SQ '+(dep.squareoff_time||'—')"></span>
+                              x-text="dep.strategy_name==='fno_positional'
+                                ? dep.lot_multiplier+'L · '+(dep.product_type||'NRML')
+                                : dep.lot_multiplier+'L · SQ '+(dep.squareoff_time||'—')"></span>
                       </div>
                       <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">
                         Entry <span style="color:var(--t-text)"
