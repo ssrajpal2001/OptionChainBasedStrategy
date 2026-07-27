@@ -87,7 +87,18 @@ class V4CascadeConfig:
     use_pool_engine: bool = False
     pool_entry_offset: float = 5.0  # the strongest performer in the 90-day backtest
 
+    # 2026-07-27: single-tranche mode. When True, the full position (lot_size
+    # * lot_multiplier) is put into ONE leg (T1) and exited entirely at the T1
+    # target/SL/structural flip. T2 trailing tranche is disabled. Backtests
+    # showed this beats dual-tranche for NIFTY option premiums after brokerage.
+    single_tranche: bool = False
+
     @property
     def tranche_qty(self) -> int:
-        """65 units per tranche at lot_multiplier=2 (2 lots / 2 tranches = 1 lot/tranche)."""
-        return (self.lot_size * self.lot_multiplier) // 2
+        """Position quantity. Single-tranche mode returns the full lot_size *
+        lot_multiplier in one leg; dual-tranche splits it evenly between T1
+        and T2 (legacy behavior)."""
+        total = self.lot_size * self.lot_multiplier
+        if self.single_tranche:
+            return total
+        return total // 2

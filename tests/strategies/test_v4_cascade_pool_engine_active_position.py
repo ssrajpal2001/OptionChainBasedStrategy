@@ -230,8 +230,10 @@ async def test_square_off_closes_pool_engine_position_legs(monkeypatch):
         assert book._engine.position is None   # old (unused) engine untouched
 
         await asyncio.sleep(0)   # let the fire-and-forget CASCADE_ORDER_REQUEST publishes run
-        assert len(published) == 2
-        assert {getattr(p, "tranche", None) for p in published} == {"T1", "T2"}
+        assert len(published) == 1
+        assert published[0].tranche == "BOTH"
+        assert published[0].qty == 130
+        assert published[0].close_reason == "manual"
     finally:
         _cleanup(book)
 

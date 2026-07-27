@@ -263,9 +263,11 @@ class V4CascadeEngine:
         t1 = TrancheLeg(tranche="T1", option_type=side, strike=0.0, qty=qty,
                          entry_price=entry_price, entry_time=bar.timestamp, entry_reason=entry_reason,
                          sl_price=sl_price, target_price=target_price)
-        t2 = TrancheLeg(tranche="T2", option_type=side, strike=0.0, qty=qty,
-                         entry_price=entry_price, entry_time=bar.timestamp, entry_reason=entry_reason,
-                         sl_price=sl_price, target_price=None, tracking_current_stop=sl_price)
+        t2 = None
+        if not self._cfg.single_tranche:
+            t2 = TrancheLeg(tranche="T2", option_type=side, strike=0.0, qty=qty,
+                             entry_price=entry_price, entry_time=bar.timestamp, entry_reason=entry_reason,
+                             sl_price=sl_price, target_price=None, tracking_current_stop=sl_price)
         self.position = CascadePosition(
             underlying=self._cfg.underlying, side=side,
             tracking_strike=0.0, execution_strike=0.0,
@@ -274,18 +276,21 @@ class V4CascadeEngine:
             tracking_entry_price=entry_price,
         )
         self._tracking_entry_price[side] = entry_price
-        # TrailingBaseTracker's own `bear` flag mirrors the scanner's -- a
-        # long (bear-zone) position trails a RISING floor, a short
-        # (bull-zone, crypto PE) position trails a FALLING ceiling. This was
-        # previously hardcoded bear=True regardless of side (latent bug,
-        # never surfaced before crypto's PE-short path existed).
-        # initial_stop=sl_price (2026-07-21): T2 shares T1's structural SL as
-        # its own floor from minute one, instead of running with no stop at
-        # all until the tracker's first new base happens to lock.
-        self._trackers[side] = TrailingBaseTracker(
-            bear=scanner._bear, initial_stop=sl_price,
-            lookback_bases=self._cfg.t2_trail_lookback_bases,
-        )
+        if t2 is None:
+            self._trackers.pop(side, None)
+        else:
+            # TrailingBaseTracker's own `bear` flag mirrors the scanner's -- a
+            # long (bear-zone) position trails a RISING floor, a short
+            # (bull-zone, crypto PE) position trails a FALLING ceiling. This was
+            # previously hardcoded bear=True regardless of side (latent bug,
+            # never surfaced before crypto's PE-short path existed).
+            # initial_stop=sl_price (2026-07-21): T2 shares T1's structural SL as
+            # its own floor from minute one, instead of running with no stop at
+            # all until the tracker's first new base happens to lock.
+            self._trackers[side] = TrailingBaseTracker(
+                bear=scanner._bear, initial_stop=sl_price,
+                lookback_bases=self._cfg.t2_trail_lookback_bases,
+            )
 
         audit = self._build_entry_audit(scanner, setup, zone, bar, sl_price, target_price)
         scanner.pop_setup(setup, bar.timestamp)

@@ -184,6 +184,8 @@ def _fetch_all_data(token: str, start: date, end: date) -> dict:
 # ── Single engine replay ──────────────────────────────────────────────────────
 
 def _run_once(data: dict, min_rr: float, max_sl_distance: float,
+              sl_buffer: float = _SL_BUFFER,
+              single_tranche: bool = False,
               quiet: bool = True) -> dict:
     """Replay bars through a fresh PoolCascadeEngine with the given parameters.
     Returns a stats dict; when quiet=False also prints the full event log and
@@ -193,10 +195,17 @@ def _run_once(data: dict, min_rr: float, max_sl_distance: float,
     day_pe_strikes = data["day_pe_strikes"]
     fetched_cache = data["fetched_cache"]
 
+    # User's live sizing: 2 lots NIFTY, 65 units per lot.
+    lot_size = 65
+    lot_mult = 2
+    cfg = V4CascadeConfig(underlying="NIFTY", lot_multiplier=lot_mult, lot_size=lot_size,
+                          single_tranche=single_tranche)
+    tranche_qty = cfg.tranche_qty
+
     eng = PoolCascadeEngine(
-        V4CascadeConfig(underlying="NIFTY", lot_multiplier=2, lot_size=75),
+        cfg,
         entry_offset=_ENTRY_OFFSET, session_open=_SESSION_OPEN,
-        sl_buffer=_SL_BUFFER, min_rr=min_rr, max_zone_depth=_MAX_ZONE_DEPTH,
+        sl_buffer=sl_buffer, min_rr=min_rr, max_zone_depth=_MAX_ZONE_DEPTH,
         entry_rsi_max=_ENTRY_RSI_MAX, rsi_period=_RSI_PERIOD,
     )
     all_events: List[dict] = []
@@ -284,17 +293,13 @@ def _run_once(data: dict, min_rr: float, max_sl_distance: float,
                         _snapshot_zones(side, strike, bar.timestamp)
 
     # ── Build leg-level trade records ─────────────────────────────────────────
-    lot_size = 75
-    lot_mult = 2
-    tranche_qty = (lot_size * lot_mult) // 2
-
     legs: List[dict] = []
     current_entry: Optional[dict] = None
-    open_count = 0
+    open_count = 1 if single_tranche else 2
     for e in all_events:
         if e["event"].startswith("open_long"):
             current_entry = e
-            open_count = 2
+            open_count = 1 if single_tranche else 2
         elif e["event"].startswith("close_long") and current_entry:
             entry_p = current_entry["price"] or 0.0
             exit_p = e["price"] or 0.0
@@ -334,6 +339,29 @@ def _run_once(data: dict, min_rr: float, max_sl_distance: float,
     n_trades = len(trade_groups)
     wins_trade = sum(1 for v in trade_nets.values() if v > 0)
     losses_trade = sum(1 for v in trade_nets.values() if v <= 0)
+
+    # ── Single-tranche full-exit-at-T1 simulation ───────────────────────────────
+    # What if we put both lots on the T1 leg and exited at the same T1 exit?
+    single_trades: Dict[tuple, List[dict]] = {
+        k: [t for t in v if t["tranche"] == "T1"] for k, v in trade_groups.items()
+    }
+    single_nets = {k: (v[0]["pnl"] * 2 if v else 0.0) for k, v in single_trades.items()}
+    single_gross_win = sum(v for v in single_nets.values() if v > 0)
+    single_gross_loss = abs(sum(v for v in single_nets.values() if v < 0))
+    single_net = sum(single_nets.values())
+    single_wins = sum(1 for v in single_nets.values() if v > 0)
+    single_losses = sum(1 for v in single_nets.values() if v <= 0)
+    single_pf = single_gross_win / single_gross_loss if single_gross_loss > 0 else float("inf")
+    n_single_trades = single_wins + single_losses
+    if single_tranche:
+        # In single-tranche mode the live run IS the simulation; align labels.
+        n_single_trades = n_trades
+        single_net = net_pnl
+        single_wins = wins_trade
+        single_losses = losses_trade
+        single_gross_win = gross_win
+        single_gross_loss = gross_loss
+        single_pf = pf
 
     # ── Track specific dates for regression visibility ────────────────────────
     def _trade_summary(d: date, side: str) -> str:
@@ -408,10 +436,18 @@ def _run_once(data: dict, min_rr: float, max_sl_distance: float,
             f"Profit Factor: {pf:.2f}  "
             f"Gross Win: Rs {gross_win:,.0f}  Gross Loss: Rs {gross_loss:,.0f}"
         )
+        print(
+            f"Single-tranche (full 2 lots at T1 exit): Trades: {n_single_trades}  "
+            f"Wins: {single_wins}  Losses: {single_losses}  "
+            f"Net P&L: Rs {single_net:+,.0f}  PF: {single_pf:.2f}  "
+            f"Gross Win: Rs {single_gross_win:,.0f}  Gross Loss: Rs {single_gross_loss:,.0f}"
+        )
 
     return {
+        "sl_buffer": sl_buffer,
         "min_rr": min_rr,
         "max_sl_distance": max_sl_distance,
+        "tranche_qty": tranche_qty,
         "n_trades": n_trades,
         "n_legs": n_legs,
         "wins_leg": wins_leg,
@@ -427,6 +463,13 @@ def _run_once(data: dict, min_rr: float, max_sl_distance: float,
         "max_sl_pts": max_sl_distance,
         "max_sl_rs": max_sl_distance * tranche_qty,
         "tracked": tracked,
+        "single_net": single_net,
+        "single_gross_win": single_gross_win,
+        "single_gross_loss": single_gross_loss,
+        "single_pf": single_pf,
+        "single_wins": single_wins,
+        "single_losses": single_losses,
+        "n_single_trades": n_single_trades,
         "_legs": legs,
         "_zones": zones,
         "_all_events": all_events,
@@ -435,44 +478,51 @@ def _run_once(data: dict, min_rr: float, max_sl_distance: float,
 
 # ── Parameter sweep ───────────────────────────────────────────────────────────
 
-def sweep(data: dict) -> None:
-    """Run all min_rr thresholds against the same pre-fetched data and print
+def sweep(data: dict, single_tranche: bool = False) -> None:
+    """Run sl_buffer x min_rr grid against the same pre-fetched data and print
     the performance matrix."""
-    min_rr_values = [0.0, 0.5, 0.7, 0.8, 1.0, 1.5]
+    sl_buffer_values = [5.0, 10.0, 15.0, 20.0]
+    min_rr_values = [0.0, 0.5, 1.0, 1.5]
     results = []
-    for mrr in min_rr_values:
-        print(f"  Replaying: min_rr={mrr:.1f} ...", end="", flush=True)
-        r = _run_once(data, min_rr=mrr, max_sl_distance=float("inf"), quiet=True)
-        results.append(r)
-        print(f"  {r['n_trades']} trades  Net {r['net_pnl']:+,.0f}  PF={r['profit_factor']:.2f}")
+    for slb in sl_buffer_values:
+        for mrr in min_rr_values:
+            tag = " (single-tranche)" if single_tranche else ""
+            print(f"  Replaying: sl_buffer={slb:.0f} min_rr={mrr:.1f}{tag} ...", end="", flush=True)
+            r = _run_once(data, min_rr=mrr, max_sl_distance=float("inf"), sl_buffer=slb,
+                            single_tranche=single_tranche, quiet=True)
+            results.append(r)
+            print(f"  {r['n_trades']} trades  Net {r['net_pnl']:+,.0f}  PF={r['profit_factor']:.2f}")
 
     # ── Print matrix ─────────────────────────────────────────────────────────
     track_labels = list(_TRACK_DATE_CE.keys())
     col_w = 28
 
-    sep = "=" * (78 + col_w * len(track_labels))
-    print(f"\n{sep}")
-    print(f"PARAMETER SWEEP — Adaptive Depth Clamp + Max SL = {_MAX_SL_DISTANCE:.0f} pts "
-          f"({_MAX_SL_DISTANCE:.0f} pts x 75 qty = Rs {_MAX_SL_DISTANCE*75:,.0f}/leg max risk)")
-    print(sep)
-
-    hdr = (f"{'min_rr':>6} | {'Trades':>6} | {'Win%(leg)':>9} | {'Win%(trd)':>9} | "
-           f"{'MaxRisk(Rs)':>11} | {'GrossWin':>9} | {'GrossLoss':>9} | "
-           f"{'PF':>5} | {'Net P&L':>10}")
+    hdr = (f"{'sl_buf':>6} | {'min_rr':>6} | {'Trades':>6} | {'Win%(leg)':>9} | {'Win%(trd)':>9} | "
+           f"{'SLBuf(Rs)':>11} | {'GrossWin':>9} | {'GrossLoss':>9} | "
+           f"{'PF':>5} | {'Net P&L':>10} | {'SingleNet':>10} | {'SinglePF':>8} | {'SingleTrd':>9}")
     for lbl in track_labels:
         hdr += f" | {lbl:^{col_w}}"
+
+    sep = "=" * len(hdr)
+    mode = "SINGLE-TRANCHE" if single_tranche else "DUAL-TRANCHE"
+    print(f"\n{sep}")
+    print(f"PARAMETER SWEEP — {mode} — lot_size=65, lot_multiplier=2, max_zone_depth={_MAX_ZONE_DEPTH:.0f} pts")
+    print(sep)
     print(hdr)
     print("-" * len(hdr))
 
     for r in results:
+        slb_str = f"{r['sl_buffer']:.0f}"
         mrr_str = f"{r['min_rr']:.1f}"
         pf_str = f"{r['profit_factor']:.2f}" if r["profit_factor"] != float("inf") else "inf"
+        single_pf_str = f"{r['single_pf']:.2f}" if r["single_pf"] != float("inf") else "inf"
         row = (
-            f"{mrr_str:>6} | {r['n_trades']:>6} | "
+            f"{slb_str:>6} | {mrr_str:>6} | {r['n_trades']:>6} | "
             f"{r['win_pct_leg']:>8.0f}% | {r['win_pct_trade']:>8.0f}% | "
-            f"{r['max_sl_rs']:>11,.0f} | "
+            f"{int(r['sl_buffer'] * r['tranche_qty']):>11,} | "
             f"{r['gross_win']:>9,.0f} | {r['gross_loss']:>9,.0f} | "
-            f"{pf_str:>5} | {r['net_pnl']:>+10,.0f}"
+            f"{pf_str:>5} | {r['net_pnl']:>+10,.0f} | "
+            f"{r['single_net']:>+10,.0f} | {single_pf_str:>8} | {r['n_single_trades']:>9}"
         )
         for lbl in track_labels:
             cell = r["tracked"].get(lbl, "n/a")
@@ -481,16 +531,18 @@ def sweep(data: dict) -> None:
 
     print(sep)
     print("\nNote: Win%(leg) = winning tranche legs / total legs.  "
-          "Win%(trd) = winning trades (T1+T2 net) / total trades.")
+          "Win%(trd) = winning trades (T1+T2 net) / total trades.  "
+          "Single-tranche = full 2-lot position exits at the T1 exit.")
 
 
 # ── Legacy single-run entry point (kept for dump-json / detailed inspection) ──
 
 def run(start: date, end: date, dump_json: Optional[str] = None,
-        min_rr: float = _MIN_RR) -> None:
+        min_rr: float = _MIN_RR, single_tranche: bool = False) -> None:
     token = os.environ["UPSTOX_TOKEN"]
     data = _fetch_all_data(token, start, end)
-    r = _run_once(data, min_rr=min_rr, max_sl_distance=float("inf"), quiet=False)
+    r = _run_once(data, min_rr=min_rr, max_sl_distance=float("inf"),
+                    single_tranche=single_tranche, quiet=False)
 
     if dump_json:
         expiry = data["expiry"]
@@ -498,6 +550,7 @@ def run(start: date, end: date, dump_json: Optional[str] = None,
         zones = r["_zones"]
         out = {
             "start": str(start), "end": str(end), "expiry": str(expiry),
+            "single_tranche": single_tranche,
             "offsets": _TRACKING_OFFSETS,
             "zones": [dict(v, ref_ts=v["ref_ts"]) for v in zones.values()],
             "events": [
@@ -525,6 +578,8 @@ if __name__ == "__main__":
                     help="min_rr for --single mode (default %(default)s)")
     ap.add_argument("--dump-json", type=str, default=None,
                     help="(--single only) write zone/event ledger to JSON file")
+    ap.add_argument("--single-tranche", action="store_true",
+                    help="Run engine in single-tranche mode (full position in T1, no T2 trail)")
     args = ap.parse_args()
 
     start_d = date.fromisoformat(args.start)
@@ -535,7 +590,8 @@ if __name__ == "__main__":
         # Single detailed run (legacy sweep mode)
         data = _fetch_all_data(token, start_d, end_d)
         print(f"\nRunning parameter sweep (max_zone_depth={_MAX_ZONE_DEPTH} pts fixed)...")
-        sweep(data)
+        sweep(data, single_tranche=args.single_tranche)
     else:
         # Default: full detailed single run with configured params
-        run(start_d, end_d, dump_json=args.dump_json, min_rr=args.min_rr)
+        run(start_d, end_d, dump_json=args.dump_json, min_rr=args.min_rr,
+            single_tranche=args.single_tranche)

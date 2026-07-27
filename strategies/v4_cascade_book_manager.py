@@ -46,6 +46,13 @@ _SUPPORTED_UNDERLYINGS = {"NIFTY", "BTC", "ETH", "CRUDEOIL"}
 _POOL_ENGINE_UNDERLYINGS = {"NIFTY"}
 
 
+def _single_tranche_enabled() -> bool:
+    """2026-07-27: dev-phase toggle for single-tranche mode. Set
+    V4CASCADE_SINGLE_TRANCHE=1 to put the full position into one leg and
+    exit entirely at the T1 target/SL/structural flip (no T2 trail)."""
+    return os.environ.get("V4CASCADE_SINGLE_TRANCHE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _pool_engine_enabled(underlying: str) -> bool:
     if underlying not in _POOL_ENGINE_UNDERLYINGS:
         return False
@@ -136,12 +143,17 @@ class V4CascadeBookManager(StrategyBookManager):
             pass
         use_pool_engine = _pool_engine_enabled(und)
         tracking_offsets_pts = _tracking_offsets_from_env() if use_pool_engine else None
+        single_tranche = _single_tranche_enabled()
         book = cls(self._bus, self._cfg, underlying=und, client_id=cid, binding_id=bid,
                    lot_multiplier=lots, squareoff_time=squareoff_time,
-                   use_pool_engine=use_pool_engine, tracking_offsets_pts=tracking_offsets_pts)
+                   use_pool_engine=use_pool_engine, tracking_offsets_pts=tracking_offsets_pts,
+                   single_tranche=single_tranche)
         if use_pool_engine:
             logger.info("V4CascadeBookManager: %s/%s/%s starting with use_pool_engine=True "
                        "(HTF/LTF pool engine, dev-phase env toggle).", cid, bid, und)
+        if single_tranche:
+            logger.info("V4CascadeBookManager: %s/%s/%s starting with single_tranche=True "
+                       "(one leg, exit at T1).", cid, bid, und)
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
             book.set_rebalancer(self._rebalancer)

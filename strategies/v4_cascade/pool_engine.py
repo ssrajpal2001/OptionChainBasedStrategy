@@ -441,9 +441,11 @@ class PoolCascadeEngine:
         t1 = TrancheLeg(tranche="T1", option_type=side, strike=slot.strike, qty=qty,
                          entry_price=fill_price, entry_time=ts, entry_reason="htf_ltf_pool_cascade",
                          sl_price=sl_price, target_price=t1_target)
-        t2 = TrancheLeg(tranche="T2", option_type=side, strike=slot.strike, qty=qty,
-                         entry_price=fill_price, entry_time=ts, entry_reason="htf_ltf_pool_cascade",
-                         sl_price=sl_price, target_price=None, tracking_current_stop=sl_price)
+        t2 = None
+        if not self._cfg.single_tranche:
+            t2 = TrancheLeg(tranche="T2", option_type=side, strike=slot.strike, qty=qty,
+                             entry_price=fill_price, entry_time=ts, entry_reason="htf_ltf_pool_cascade",
+                             sl_price=sl_price, target_price=None, tracking_current_stop=sl_price)
         self.position = CascadePosition(
             underlying=self._cfg.underlying, side=side,
             tracking_strike=slot.strike, execution_strike=slot.strike,
@@ -451,7 +453,10 @@ class PoolCascadeEngine:
             t1=t1, t2=t2, open_time=ts,
             tracking_entry_price=fill_price,
         )
-        self._trail[side] = TrailingBaseTracker(bear=True, initial_stop=sl_price)
+        if t2 is None:
+            self._trail[side] = None
+        else:
+            self._trail[side] = TrailingBaseTracker(bear=True, initial_stop=sl_price)
         # A position just opened -- only one at a time, engine-wide. Discard
         # EVERY candidate's pool on this side (was self._pool[side] = []
         # under the old single-candidate model; now spans every strike).

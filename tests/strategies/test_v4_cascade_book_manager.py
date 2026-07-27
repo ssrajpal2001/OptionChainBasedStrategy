@@ -11,12 +11,13 @@ from strategies.v4_cascade_book_manager import V4CascadeBookManager
 class _FakeBook:
     def __init__(self, bus, cfg, underlying="NIFTY", client_id="", binding_id="",
                  lot_multiplier=1, squareoff_time="15:15", use_pool_engine=False,
-                 tracking_offsets_pts=None):
+                 tracking_offsets_pts=None, single_tranche=False):
         self._underlying = underlying; self._client_id = client_id; self._binding_id = binding_id
         self._lot_multiplier = lot_multiplier
         self.squareoff_time = squareoff_time
         self.use_pool_engine = use_pool_engine
         self.tracking_offsets_pts = tracking_offsets_pts
+        self.single_tranche = single_tranche
         self.started = False
 
     def set_client_db(self, db):
