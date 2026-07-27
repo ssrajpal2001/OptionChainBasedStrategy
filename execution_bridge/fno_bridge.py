@@ -125,7 +125,7 @@ class FnOExecutionBridge:
         if not broker:
             logger.error("FnOBridge: no broker for %s/%s — cannot route order",
                          ev.client_id, ev.binding_id)
-            self._bus.publish(Topic.FNO_ORDER_FILL, FnOFillEvent(
+            await self._bus.publish(Topic.FNO_ORDER_FILL, FnOFillEvent(
                 event_id=ev.event_id, action=ev.action, symbol=ev.symbol,
                 fill_price=0.0, qty=ev.qty,
                 client_id=ev.client_id, binding_id=ev.binding_id,
@@ -152,11 +152,17 @@ class FnOExecutionBridge:
 
         try:
             if is_paper:
-                # Paper: route for verification; local sim-fill at price_hint
-                order_id = await broker.place_order(req)
-                logger.info("FnOBridge[%s/%s]: PAPER order_id=%s %s %s x %d @ %.2f",
-                            ev.client_id, ev.binding_id, order_id,
-                            ev.action, ev.broker_symbol, ev.qty, fill_price)
+                # Paper: attempt real order for routing verification, but broker rejection
+                # is non-fatal — sim-fill at price_hint regardless of outcome.
+                try:
+                    order_id = await broker.place_order(req)
+                    logger.info("FnOBridge[%s/%s]: PAPER order_id=%s %s %s x %d @ %.2f",
+                                ev.client_id, ev.binding_id, order_id,
+                                ev.action, ev.broker_symbol, ev.qty, fill_price)
+                except Exception as broker_exc:
+                    logger.warning("FnOBridge[%s/%s]: PAPER broker rejected %s %s: %s — using sim-fill",
+                                   ev.client_id, ev.binding_id, ev.action, ev.broker_symbol, broker_exc)
+                    order_id = f"SIM_{ev.event_id}"
             else:
                 # Live: real order + poll for fill
                 order_id = await broker.place_order(req)
