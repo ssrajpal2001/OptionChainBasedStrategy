@@ -46,9 +46,12 @@ POSITIONS_PATH = ROOT / "data" / "fno_positions.json"
 
 MAX_SLOTS        = 2
 POLL_INTERVAL    = 30          # seconds between REST LTP polls
-ENTRY_TIME_START = time(9, 15)
-ENTRY_TIME_END   = time(9, 30)
-FORCE_EXIT_TIME  = time(15, 20)
+ENTRY_TIME_START   = time(9, 15)
+ENTRY_TIME_END     = time(9, 30)
+MARKET_OPEN        = time(9, 15)
+MARKET_CLOSE       = time(15, 30)
+EXPIRY_WEEK_DAYS   = 7   # close position when ≤7 days left on expiry
+GAP_SKIP_PCT       = 2.5 # skip entry if spot gapped >2.5% from entry_line
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,35 +281,38 @@ class FnOPositionalBook:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def _main_loop(self) -> None:
+        _last_reset_date = None
         while self._running:
-            now = datetime.now(IST)
-            t   = now.time()
+            now        = datetime.now(IST)
+            t          = now.time()
+            today_date = now.date()
 
-            # Run scan once before entry window
+            # Daily reset — once per day after market close
+            if t >= MARKET_CLOSE and _last_reset_date != today_date:
+                self._scan_done     = False
+                self._pending       = []
+                _last_reset_date    = today_date
+
+            # Run scan once per day before entry window
             if not self._scan_done and t >= time(9, 0):
                 await self._run_scan()
                 self._scan_done = True
 
-            # Entry window: place TRIGGERED orders
+            # Entry window: place TRIGGERED orders (gap-filtered inside)
             if ENTRY_TIME_START <= t <= ENTRY_TIME_END:
                 await self._try_enter_triggered()
 
             # Intraday: promote APPROACHING signals that touch entry_line
-            if time(9, 15) <= t <= time(14, 30):
+            if MARKET_OPEN <= t <= time(14, 30):
                 await self._try_enter_approaching()
 
-            # Monitor open positions
-            if self._open_positions:
+            # Monitor open positions during market hours
+            if self._open_positions and MARKET_OPEN <= t <= MARKET_CLOSE:
                 await self._poll_and_monitor()
 
-            # Force-close at EOD
-            if t >= FORCE_EXIT_TIME and self._open_positions:
-                await self._force_close_all()
-                break
-
-            # Reset scan_done flag at end of session so next day re-scans
-            if t >= time(15, 30):
-                self._scan_done = False
+            # Positional exit: close positions in last week of expiry
+            if self._open_positions and MARKET_OPEN <= t <= time(15, 15):
+                await self._check_expiry_exit()
 
             await asyncio.sleep(POLL_INTERVAL)
 
@@ -337,10 +343,25 @@ class FnOPositionalBook:
         for sig in list(self._pending):
             if free <= 0:
                 break
-            if sig.status == "TRIGGERED":
-                self._pending.remove(sig)
-                await self._open_position(sig)
-                free -= 1
+            if sig.status != "TRIGGERED":
+                continue
+            # Gap filter: if spot has moved >GAP_SKIP_PCT% from entry_line since
+            # yesterday's close, the zone is blown — skip this signal entirely.
+            spot_key = self._spot_key(sig.symbol)
+            if spot_key:
+                spot = await self._fetch_ltp(spot_key)
+                if spot > 0:
+                    gap_pct = abs(spot - sig.entry_line) / sig.entry_line * 100
+                    if gap_pct > GAP_SKIP_PCT:
+                        self._log.warning(
+                            "FnOBook: SKIP %s %s — gap %.1f%% from zone %.1f (spot=%.1f) > %.1f%% threshold",
+                            sig.symbol, sig.direction, gap_pct, sig.entry_line, spot, GAP_SKIP_PCT,
+                        )
+                        self._pending.remove(sig)
+                        continue
+            self._pending.remove(sig)
+            await self._open_position(sig)
+            free -= 1
 
     async def _try_enter_approaching(self) -> None:
         free = self._max_slots - len(self._open_positions)
@@ -575,6 +596,28 @@ class FnOPositionalBook:
     def _spot_key(self, symbol: str) -> str:
         from backtest.fno_scanner.backtest import TOP_30_STOCKS
         return TOP_30_STOCKS.get(symbol, "")
+
+    # ── Expiry-week exit ──────────────────────────────────────────────────────
+
+    async def _check_expiry_exit(self) -> None:
+        """Close positions that are within EXPIRY_WEEK_DAYS of their expiry."""
+        today = datetime.now(IST).date()
+        closed_any = False
+        for pos in list(self._open_positions):
+            try:
+                exp_date = datetime.strptime(pos.expiry_str, "%d %b %y").date()
+                days_left = (exp_date - today).days
+                if days_left <= EXPIRY_WEEK_DAYS:
+                    self._log.info(
+                        "FnOBook[%s/%s]: EXPIRY WEEK exit %s  days_left=%d  expiry=%s",
+                        self._client_id, self._binding_id, pos.symbol, days_left, pos.expiry_str,
+                    )
+                    await self._close_position(pos, "expiry_week")
+                    closed_any = True
+            except Exception as exc:
+                self._log.warning("FnOBook: expiry check error for %s: %s", pos.symbol, exc)
+        if closed_any:
+            self._save_positions()
 
     # ── Accessors ─────────────────────────────────────────────────────────────
 
