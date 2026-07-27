@@ -221,14 +221,24 @@ class FnOPositionalBook:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    async def start(self) -> None:
+    def start(self) -> None:
         self._running = True
         self._load_positions()
-        # Pre-fetch instrument master so it's warm before market open
-        self._instruments = await asyncio.to_thread(_get_master, self._token)
-        self._task = asyncio.create_task(self._main_loop(), name=f"fno_{self._client_id}_{self._binding_id}")
+        # Kick off the main loop as an asyncio task; instrument master fetch happens
+        # inside _main_loop before the first scan so start() stays synchronous (the
+        # base class _reconcile() calls book.start() without await).
+        self._task = asyncio.create_task(self._startup_and_loop(), name=f"fno_{self._client_id}_{self._binding_id}")
         self._log.info("FnOBook[%s/%s]: started (mode=%s, max_slots=%d)",
                        self._client_id, self._binding_id, self._mode, self._max_slots)
+
+    async def _startup_and_loop(self) -> None:
+        """Fetch instrument master then run the main loop. Called as a task by start()."""
+        try:
+            self._instruments = await asyncio.to_thread(_get_master, self._token)
+        except Exception as exc:
+            self._log.warning("FnOBook[%s/%s]: instrument master fetch failed: %s — proceeding without pre-warm",
+                              self._client_id, self._binding_id, exc)
+        await self._main_loop()
 
     async def stop(self) -> None:
         self._running = False
