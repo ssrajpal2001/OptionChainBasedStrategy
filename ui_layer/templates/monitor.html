@@ -924,7 +924,7 @@ document.addEventListener('alpine:init', () => {
     showDeployModal: false,
     deployBindingId: '',           // which broker the modal is open for
     deployExisting:  [],           // active deployments for that broker (loaded on open)
-    deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:20' },
+    deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:20', product_type:'MIS' },
     deployMsg: '', deployOk: null, deployLoading: false,
     deployDeleteLoading: {},       // deploy_id -> bool
     deployDeleteId: '',            // set before calling deleteDeploy to avoid x-for scope issues
@@ -2434,6 +2434,7 @@ document.addEventListener('alpine:init', () => {
         max_profit_rs:  0,
         max_sl_rs:      0,
         squareoff_time: this.strategyConfig.ss_squareoff_time || '15:20',
+        product_type:   'MIS',
       };
       this.deployMsg = ''; this.deployOk = null;
       this.deployDeleteLoading = {};
@@ -6854,12 +6855,14 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="dep.strategy_name==='v4_cascade'?'V4':'SS'"></span>
+                        x-text="dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':'SS'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':'Sell Straddle')+' · '+dep.underlying"></div>
+                         x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':'Sell Straddle')+' · '+dep.underlying"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
-                         x-text="'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
+                         x-text="dep.strategy_name==='fno_positional'
+                           ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
+                           : 'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
                   </div>
                 </div>
                 <button class="text-xs px-3 py-1 rounded font-mono"
@@ -6881,7 +6884,9 @@ function amoTest() {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="sec-label mb-1">STRATEGY</label>
-              <select x-model="deployForm.strategy_name" class="t-input">
+              <select x-model="deployForm.strategy_name" class="t-input"
+                      @change="deployForm.product_type = deployForm.strategy_name==='fno_positional' ? 'NRML' : 'MIS';
+                               if(deployForm.strategy_name==='fno_positional') deployForm.underlying='FNO_STOCKS';">
                 <option value="sell_straddle">Sell Straddle (SS)</option>
                 <option value="v4_cascade">V4 Cascade (Premium Trap)</option>
                 <option value="fno_positional">FnO Positional (Stock Options)</option>
@@ -6902,10 +6907,24 @@ function amoTest() {
               <p class="text-[10px] mt-0.5" style="color:var(--t-muted)" x-show="_crypto"
                  x-text="'1 contract = '+((deployForm.underlying||'').toUpperCase()==='ETH'?'0.01 ETH':'0.001 BTC')+'  →  '+((deployForm.lot_multiplier||0)*((deployForm.underlying||'').toUpperCase()==='ETH'?0.01:0.001)).toFixed(3)+' '+((deployForm.underlying||'').toUpperCase()||'BTC')"></p>
             </div>
-            <div>
+            <div x-show="deployForm.strategy_name !== 'fno_positional'">
               <label class="sec-label mb-1">SQUARE-OFF TIME</label>
               <input type="text" class="t-input font-mono" x-model="deployForm.squareoff_time"
                      placeholder="15:15"/>
+            </div>
+            <div>
+              <label class="sec-label mb-1">PRODUCT TYPE</label>
+              <div class="flex gap-2 mt-1">
+                <template x-for="opt in ['MIS','NRML']" :key="opt">
+                  <button type="button"
+                    class="px-3 py-1 rounded text-xs font-mono font-bold transition-colors"
+                    :style="(deployForm.product_type||'MIS')===opt
+                      ? 'background:rgba(var(--t-cyan-rgb),0.15);border:1px solid var(--t-cyan);color:var(--t-cyan)'
+                      : 'background:transparent;border:1px solid var(--t-border);color:var(--t-muted)'"
+                    @click="deployForm.product_type=opt"
+                    x-text="opt"></button>
+                </template>
+              </div>
             </div>
             <div>
               <label class="sec-label mb-1">MAX PROFIT TARGET (₹)</label>

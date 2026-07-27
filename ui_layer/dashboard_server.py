@@ -384,6 +384,7 @@ try:
         max_profit_rs:  float = 0.0
         max_sl_rs:      float = 0.0
         squareoff_time: str   = "15:20"
+        product_type:   str   = "MIS"   # "MIS" intraday | "NRML" carry-forward
 
 
     class _TrapHistoricalReplaySchema(_PydanticBase):
@@ -3688,6 +3689,10 @@ class DashboardServer:
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 
+            pt = (body.product_type or "MIS").upper()
+            if pt not in ("MIS", "NRML"):
+                pt = "MIS"
+
             deploy_id = await _srv._client_db.save_deployment(
                 client_id      = cid,
                 binding_id     = body.binding_id,
@@ -3697,6 +3702,7 @@ class DashboardServer:
                 max_profit_rs  = body.max_profit_rs,
                 max_sl_rs      = body.max_sl_rs,
                 squareoff_time = sq,
+                product_type   = pt,
             )
 
             from data_layer.deployment_store import save_deployment_json, apply_deployment_to_runtime_config
@@ -3710,6 +3716,7 @@ class DashboardServer:
                 max_profit_rs  = body.max_profit_rs,
                 max_sl_rs      = body.max_sl_rs,
                 squareoff_time = sq,
+                product_type   = pt,
             )
 
             # If engine is already active for this broker, hot-apply immediately

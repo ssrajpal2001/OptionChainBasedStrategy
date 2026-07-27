@@ -48,6 +48,7 @@ def save_deployment_json(
     max_profit_rs:  float,
     max_sl_rs:      float,
     squareoff_time: str,
+    product_type:   str = "MIS",
 ) -> None:
     """Write deployment config to JSON file alongside the SQLite record."""
     _ensure_dir()
@@ -61,6 +62,7 @@ def save_deployment_json(
         "max_profit_rs":  max_profit_rs,
         "max_sl_rs":      max_sl_rs,
         "squareoff_time": squareoff_time,
+        "product_type":   product_type,
         "is_active":      True,
         "saved_at":       datetime.now(IST).isoformat(),
     }

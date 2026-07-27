@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS strategy_deployments (
     max_profit_rs      REAL NOT NULL DEFAULT 0.0,
     max_sl_rs          REAL NOT NULL DEFAULT 0.0,
     squareoff_time     TEXT NOT NULL DEFAULT '15:20',
+    product_type       TEXT NOT NULL DEFAULT 'MIS',      -- "MIS" intraday | "NRML" carry-forward
     is_active          INTEGER DEFAULT 1,
     is_running         INTEGER DEFAULT 0,   -- per-strategy Start/Stop toggle (0 = deployed but stopped)
     expiry_mode        TEXT NOT NULL DEFAULT 'current',  -- current|next_week|monthly|<date YYYY-MM-DD>
@@ -560,6 +561,7 @@ class ClientDB:
         max_profit_rs:  float,
         max_sl_rs:      float,
         squareoff_time: str,
+        product_type:   str = "MIS",
     ) -> str:
         """Upsert a strategy deployment config. Returns the deploy_id."""
         deploy_id = f"{client_id}_{binding_id}_{strategy_name}_{underlying}"
@@ -568,19 +570,20 @@ class ClientDB:
             self._exec,
             """INSERT INTO strategy_deployments
                (deploy_id, client_id, binding_id, strategy_name, underlying,
-                lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time,
+                lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type,
                 is_active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)
                ON CONFLICT(deploy_id) DO UPDATE SET
                  underlying=excluded.underlying,
                  lot_multiplier=excluded.lot_multiplier,
                  max_profit_rs=excluded.max_profit_rs,
                  max_sl_rs=excluded.max_sl_rs,
                  squareoff_time=excluded.squareoff_time,
+                 product_type=excluded.product_type,
                  is_active=1,
                  updated_at=excluded.updated_at""",
             (deploy_id, client_id, binding_id, strategy_name, underlying,
-             lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, now, now),
+             lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type, now, now),
         )
         logger.info(
             "ClientDB: deployment saved — %s [%s/%s %s %s lots=%.1f]",
@@ -1230,6 +1233,7 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN password_enc TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN totp_secret_enc TEXT DEFAULT ''",
             "ALTER TABLE strategy_deployments ADD COLUMN expiry_mode TEXT DEFAULT 'current'",
+            "ALTER TABLE strategy_deployments ADD COLUMN product_type TEXT DEFAULT 'MIS'",
         ):
             try:
                 con.execute(migration)
