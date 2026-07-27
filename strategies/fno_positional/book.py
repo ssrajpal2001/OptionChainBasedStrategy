@@ -47,7 +47,7 @@ POSITIONS_PATH = ROOT / "data" / "fno_positions.json"
 MAX_SLOTS        = 2
 POLL_INTERVAL    = 30          # seconds between REST LTP polls
 ENTRY_TIME_START   = time(9, 15)
-ENTRY_TIME_END     = time(9, 30)
+ENTRY_TIME_END     = time(14, 30)   # positional — enter any time a zone fires during the day
 MARKET_OPEN        = time(9, 15)
 MARKET_CLOSE       = time(15, 30)
 EXPIRY_WEEK_DAYS   = 7   # close position when ≤7 days left on expiry
@@ -308,12 +308,11 @@ class FnOPositionalBook:
                 await self._run_scan()
                 self._scan_done = True
 
-            # Entry window: place TRIGGERED orders (gap-filtered inside)
+            # Entry window: check both TRIGGERED and APPROACHING signals all day.
+            # TRIGGERED = zone broken on D1 (enter with gap filter).
+            # APPROACHING = zone not yet hit, enter when intraday price reaches entry_line.
             if ENTRY_TIME_START <= t <= ENTRY_TIME_END:
                 await self._try_enter_triggered()
-
-            # Intraday: promote APPROACHING signals that touch entry_line
-            if MARKET_OPEN <= t <= time(14, 30):
                 await self._try_enter_approaching()
 
             # Monitor open positions during market hours
