@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config.global_config import IST, Topic
+from utils.logging_utils import make_strategy_logger
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ POSITIONS_PATH = ROOT / "data" / "fno_positions.json"
 
 MAX_SLOTS        = 2
 POLL_INTERVAL    = 30          # seconds between REST LTP polls
-ENTRY_TIME_START = time(9, 16)
+ENTRY_TIME_START = time(9, 15)
 ENTRY_TIME_END   = time(9, 30)
 FORCE_EXIT_TIME  = time(15, 20)
 
@@ -209,6 +210,12 @@ class FnOPositionalBook:
         self._task: Optional[asyncio.Task] = None
         self._instruments: list            = []    # cached NSE master
 
+        date_str = datetime.now(IST).strftime("%Y%m%d")
+        self._log = make_strategy_logger(
+            f"fno_{client_id}_{binding_id}_{date_str}",
+            log_dir="logs/clients",
+        )
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -217,8 +224,8 @@ class FnOPositionalBook:
         # Pre-fetch instrument master so it's warm before market open
         self._instruments = await asyncio.to_thread(_get_master, self._token)
         self._task = asyncio.create_task(self._main_loop(), name=f"fno_{self._client_id}_{self._binding_id}")
-        logger.info("FnOBook[%s/%s]: started (mode=%s, max_slots=%d)",
-                    self._client_id, self._binding_id, self._mode, self._max_slots)
+        self._log.info("FnOBook[%s/%s]: started (mode=%s, max_slots=%d)",
+                       self._client_id, self._binding_id, self._mode, self._max_slots)
 
     async def stop(self) -> None:
         self._running = False
@@ -244,10 +251,10 @@ class FnOPositionalBook:
                 and p.binding_id == self._binding_id
                 and p.status not in ("CLOSED",)
             ]
-            logger.info("FnOBook[%s/%s]: restored %d positions",
-                        self._client_id, self._binding_id, len(self._positions))
+            self._log.info("FnOBook[%s/%s]: restored %d positions",
+                           self._client_id, self._binding_id, len(self._positions))
         except Exception as exc:
-            logger.warning("FnOBook: restore failed: %s", exc)
+            self._log.warning("FnOBook: restore failed: %s", exc)
 
     def _save_positions(self) -> None:
         try:
@@ -266,7 +273,7 @@ class FnOPositionalBook:
                 "updated_at": datetime.now(IST).isoformat(),
             }, indent=2), encoding="utf-8")
         except Exception as exc:
-            logger.warning("FnOBook: save failed: %s", exc)
+            self._log.warning("FnOBook: save failed: %s", exc)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -306,20 +313,20 @@ class FnOPositionalBook:
     # ── Scan ─────────────────────────────────────────────────────────────────
 
     async def _run_scan(self) -> None:
-        logger.info("FnOBook[%s/%s]: running zone scan...", self._client_id, self._binding_id)
+        self._log.info("FnOBook[%s/%s]: running zone scan...", self._client_id, self._binding_id)
         try:
             from backtest.fno_scanner.scan_live import scan as _scan
             signals = await asyncio.to_thread(_scan, self._token)
         except Exception as exc:
-            logger.error("FnOBook: scan failed: %s", exc)
+            self._log.error("FnOBook: scan failed: %s", exc)
             return
         triggered   = sorted([s for s in signals if s.status == "TRIGGERED"],
                               key=lambda s: s.rr, reverse=True)
         approaching = sorted([s for s in signals if s.status == "APPROACHING"],
                               key=lambda s: abs(s.dist_pct))
         self._pending = triggered + approaching
-        logger.info("FnOBook[%s/%s]: %d triggered, %d approaching",
-                    self._client_id, self._binding_id, len(triggered), len(approaching))
+        self._log.info("FnOBook[%s/%s]: %d triggered, %d approaching",
+                       self._client_id, self._binding_id, len(triggered), len(approaching))
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
@@ -362,7 +369,7 @@ class FnOPositionalBook:
 
         spot_key = TOP_30_STOCKS.get(sig.symbol, "")
         if not spot_key:
-            logger.warning("FnOBook: unknown symbol %s — skip", sig.symbol)
+            self._log.warning("FnOBook: unknown symbol %s — skip", sig.symbol)
             return
 
         # Resolve option instrument key and broker symbol
@@ -371,8 +378,8 @@ class FnOPositionalBook:
             self._instruments, sig.symbol, sig.suggested_strike, sig.direction, sig.expiry,
         )
         if not opt_key:
-            logger.warning("FnOBook: could not resolve option key for %s %d %s %s",
-                           sig.symbol, sig.suggested_strike, sig.direction, sig.expiry)
+            self._log.warning("FnOBook: could not resolve option key for %s %d %s %s",
+                              sig.symbol, sig.suggested_strike, sig.direction, sig.expiry)
             return
 
         lot_size  = await asyncio.to_thread(resolve_lot_size, self._instruments, opt_key)
@@ -410,10 +417,10 @@ class FnOPositionalBook:
             pos.entry_order_id = order_id
             pos.entry_ltp      = opt_ltp
             pos.status         = "OPEN"
-            logger.info("FnOBook[%s/%s]: ENTRY %s %s %d %s  ltp=%.2f  sl=%.1f  t1=%.1f",
-                        self._client_id, self._binding_id,
-                        sig.symbol, sig.direction, sig.suggested_strike, sig.expiry,
-                        opt_ltp, sig.hard_sl, sig.day_t1)
+            self._log.info("FnOBook[%s/%s]: ENTRY %s %s %d %s  ltp=%.2f  sl=%.1f  t1=%.1f",
+                           self._client_id, self._binding_id,
+                           sig.symbol, sig.direction, sig.suggested_strike, sig.expiry,
+                           opt_ltp, sig.hard_sl, sig.day_t1)
         else:
             pos.status       = "CLOSED"
             pos.close_reason = "entry_failed"
@@ -446,14 +453,14 @@ class FnOPositionalBook:
             )
 
             if sl_hit:
-                logger.warning("FnOBook[%s/%s]: SL HIT %s  spot=%.1f <= sl=%.1f",
-                               self._client_id, self._binding_id, pos.symbol, spot, pos.spot_sl)
+                self._log.warning("FnOBook[%s/%s]: SL HIT %s  spot=%.1f <= sl=%.1f",
+                                  self._client_id, self._binding_id, pos.symbol, spot, pos.spot_sl)
                 await self._close_position(pos, "sl_hit")
                 await self._rescan_and_refill()
 
             elif t1_hit and pos.close_reason != "t1_hit":
-                logger.info("FnOBook[%s/%s]: T1 HIT %s  spot=%.1f >= t1=%.1f",
-                            self._client_id, self._binding_id, pos.symbol, spot, pos.day_t1)
+                self._log.info("FnOBook[%s/%s]: T1 HIT %s  spot=%.1f >= t1=%.1f",
+                               self._client_id, self._binding_id, pos.symbol, spot, pos.day_t1)
                 pos.close_reason = "t1_hit"
                 self._bus.publish(Topic.SYSTEM_EVENT, {
                     "type":      "fno_t1_alert",
@@ -480,8 +487,8 @@ class FnOPositionalBook:
         pos.close_time    = datetime.now(IST).isoformat()
         if pos.entry_ltp > 0 and pos.current_ltp > 0:
             pos.pnl = (pos.current_ltp - pos.entry_ltp) * pos.qty
-        logger.info("FnOBook[%s/%s]: EXIT %s reason=%s pnl=%.2f",
-                    self._client_id, self._binding_id, pos.symbol, reason, pos.pnl)
+        self._log.info("FnOBook[%s/%s]: EXIT %s reason=%s pnl=%.2f",
+                       self._client_id, self._binding_id, pos.symbol, reason, pos.pnl)
         self._bus.publish(Topic.SYSTEM_EVENT, {
             "type":       "fno_exit",
             "client_id":  self._client_id,
@@ -493,7 +500,7 @@ class FnOPositionalBook:
         })
 
     async def _force_close_all(self) -> None:
-        logger.info("FnOBook[%s/%s]: EOD force-close", self._client_id, self._binding_id)
+        self._log.info("FnOBook[%s/%s]: EOD force-close", self._client_id, self._binding_id)
         for pos in list(self._open_positions):
             await self._close_position(pos, "eod")
         self._save_positions()
@@ -539,7 +546,7 @@ class FnOPositionalBook:
                 except asyncio.TimeoutError:
                     deadline -= 2.0
         except Exception as exc:
-            logger.error("FnOBook: order wait error: %s", exc)
+            self._log.error("FnOBook: order wait error: %s", exc)
         return None
 
     # ── Upstox REST LTP poll ──────────────────────────────────────────────────
@@ -562,7 +569,7 @@ class FnOPositionalBook:
                 for v in quotes.values():
                     return float(v.get("last_price", 0) or 0)
         except Exception as exc:
-            logger.debug("FnOBook: LTP poll error %s: %s", instrument_key, exc)
+            self._log.debug("FnOBook: LTP poll error %s: %s", instrument_key, exc)
         return 0.0
 
     def _spot_key(self, symbol: str) -> str:
