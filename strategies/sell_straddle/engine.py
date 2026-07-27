@@ -280,6 +280,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 logger.info("SellStraddle[%s]: pool seed skipped for crypto (relying on live Delta ticks).",
                             self._underlying)
                 return
+            # Resolve entry expiry NOW — before token check — because this only needs
+            # the REGISTRY (loaded at run_system.py startup), not the Upstox feeder token.
+            # Without this, a book started after startup (new client deploy) that uses a
+            # shared feed (no local Upstox creds) would keep _entry_expiry_date = None
+            # and abort every entry attempt.
+            self._entry_expiry_date = self._effective_entry_expiry()
+            if self._entry_expiry_date:
+                logger.info("SellStraddle[%s]: entry_expiry resolved = %s",
+                            self._underlying, self._entry_expiry_date.isoformat())
+            else:
+                logger.warning("SellStraddle[%s]: entry_expiry not yet resolvable — registry may not be loaded.",
+                               self._underlying)
+
             for _ in range(30):
                 if self._spot > 0:
                     break
@@ -287,7 +300,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             creds = await _aio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
             token = (creds or {}).get("access_token", "")
             if not token or self._spot <= 0:
-                logger.info("SellStraddle[%s]: pool seed skipped (no token/spot).", self._underlying)
+                logger.info("SellStraddle[%s]: pool warm seed skipped (no token/spot). entry_expiry=%s",
+                            self._underlying,
+                            self._entry_expiry_date.isoformat() if self._entry_expiry_date else None)
                 return
 
             step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
@@ -295,6 +310,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             itm = int(ss.get("pool_itm_depth", 4))
             otm = int(ss.get("pool_otm_depth", 4))
 
+            # Re-confirm expiry (may have changed if token arrived after registry was re-loaded)
             self._entry_expiry_date = self._effective_entry_expiry()
             exp = self._entry_expiry_date
             if not exp:

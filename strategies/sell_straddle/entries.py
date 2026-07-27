@@ -365,6 +365,10 @@ class EntryMixin:
             ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
         )
         if not self._entry_expiry_date:
+            # Lazy fallback: registry may have been loaded after _seed_pool ran (e.g. new client
+            # deployed on a system using shared feed that skipped the warm seed early).
+            self._entry_expiry_date = self._effective_entry_expiry()
+        if not self._entry_expiry_date:
             self._clog.warning("ENTRY abort — no effective entry expiry resolved yet")
             return
         await self._open_position(now, ce_strike, pe_strike, ce_ltp, pe_ltp, rule_key, reason,
