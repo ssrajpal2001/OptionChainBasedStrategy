@@ -12,6 +12,7 @@ from strategies.sell_straddle import StraddleBookManager
 from strategies.v4_cascade_book_manager import V4CascadeBookManager
 from strategies.fno_positional import FnOPositionalBookManager
 from strategies.hourly_breakout import HourlyBreakoutBookManager
+from strategies.d1_trap_option import D1TrapOptionBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -29,6 +30,10 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "hourly_breakout": {
         "manager_class": HourlyBreakoutBookManager,
+        "per_binding": True,
+    },
+    "d1_trap_option": {
+        "manager_class": D1TrapOptionBookManager,
         "per_binding": True,
     },
 }

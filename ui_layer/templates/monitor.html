@@ -689,6 +689,7 @@ document.addEventListener('alpine:init', () => {
       { id: 'v4_cascade',      name: 'V4 Cascade',      desc: 'Multi-zone HTF/LTF pool cascade' },
       { id: 'fno_positional',  name: 'FnO Positional',  desc: 'Stock zone-retest — positional option buying' },
       { id: 'hourly_breakout', name: 'Hourly Breakout', desc: '1H trap + 5M retest — intraday option buying' },
+      { id: 'd1_trap_option',  name: 'D1 Trap Option',  desc: 'D1 3-candle trap + 1H C2/TWEAK — 2-ITM option buying' },
     ],
     availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH','FNO_STOCKS'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
@@ -2133,7 +2134,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':dep.strategy_name==='hourly_breakout'?'Hourly Breakout':dep.strategy_name)+' · '+dep.underlying;
+      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':dep.strategy_name==='hourly_breakout'?'Hourly Breakout':dep.strategy_name==='d1_trap_option'?'D1 Trap Option':dep.strategy_name)+' · '+dep.underlying;
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
         : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
@@ -6434,7 +6435,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':'SS')+' · '+dep.underlying"></span>
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+dep.underlying"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -6652,7 +6653,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':'SS')+' · '+dep.underlying"></span>
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+dep.underlying"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
