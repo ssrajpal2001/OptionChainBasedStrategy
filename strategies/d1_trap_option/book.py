@@ -88,7 +88,7 @@ class _TweakSetup:
 
 @dataclass
 class D1TrapOrderEvent:
-    """Order event published on Topic.ORDER_REQUEST."""
+    """Order event published on Topic.D1_TRAP_ORDER_REQUEST."""
     client_id: str
     binding_id: str
     strategy: str
@@ -131,8 +131,8 @@ class D1TrapOptionBook(AbstractStrategyBook):
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._lot_multiplier = max(1, lot_multiplier)
-        self._lot_size = cfg.exchange_config.lot_sizes.get(underlying, 75)
-        self._strike_step = int(cfg.exchange_config.strike_steps.get(underlying, 50))
+        self._lot_size = cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75
+        self._strike_step = int(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
         self._feeder_token = feeder_token
         self._emitter = OrderEmitter(bus, client_id, binding_id) if bus is not None else None
 
@@ -606,7 +606,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
             order_type="MARKET",
         )
         if self._emitter is not None:
-            await self._emitter.emit(Topic.ORDER_REQUEST, ev)
+            await self._emitter.emit(Topic.D1_TRAP_ORDER_REQUEST, ev)
         logger.info(
             "D1TrapOptionBook[%s]: BUY %s %d%s exp=%s qty=%d spot=%.2f SL=%.2f source=%s",
             self._underlying, opt_type, strike, self._underlying,
@@ -641,7 +641,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
             order_type="MARKET",
         )
         if self._emitter is not None:
-            await self._emitter.emit(Topic.ORDER_REQUEST, ev)
+            await self._emitter.emit(Topic.D1_TRAP_ORDER_REQUEST, ev)
         logger.info(
             "D1TrapOptionBook[%s]: SELL %s strike=%d reason=%s spot=%.2f",
             self._underlying, pos["option_type"], pos["strike"], reason, spot,

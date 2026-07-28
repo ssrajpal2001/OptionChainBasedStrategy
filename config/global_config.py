@@ -204,6 +204,8 @@ class Topic:
     FNO_STOCK_STATUS = "fno_stock_status"  # live LTP + MTF/LTF state per stock (3s broadcast)
     FNO_ORDER_REQUEST = "fno_order_request"  # FnO positional option orders (fno_bridge.py)
     FNO_ORDER_FILL    = "fno_order_fill"     # FnO positional fill confirmations
+    D1_TRAP_ORDER_REQUEST = "d1_trap_order_request"  # D1 Trap + Option orders (d1_trap_bridge.py)
+    D1_TRAP_ORDER_FILL    = "d1_trap_order_fill"     # D1 Trap fill confirmations
 
 
 # ─────────────────────────────────────────────────────────────────────────────

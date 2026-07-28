@@ -443,6 +443,11 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge
+    d1_trap_bridge = D1TrapExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -612,6 +617,7 @@ async def _run_live(
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
         asyncio.create_task(cascade_bridge.run(),       name="cascade_bridge"),
         asyncio.create_task(fno_bridge.run(),           name="fno_bridge"),
+        asyncio.create_task(d1_trap_bridge.run(),       name="d1_trap_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -647,6 +653,8 @@ async def _run_live(
     gap_handler.stop()
     straddle_bridge.stop()
     cascade_bridge.stop()
+    fno_bridge.stop()
+    d1_trap_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task
