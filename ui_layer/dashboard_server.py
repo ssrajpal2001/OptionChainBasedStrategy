@@ -653,6 +653,7 @@ class DashboardServer:
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
         v4_cascade_manager=None, # V4CascadeBookManager — per-binding books (live list + find)
         fno_positional_manager=None, # FnOPositionalBookManager — stock positional option books
+        hourly_breakout_manager=None, # HourlyBreakoutBookManager — 1H trap + 5M retest books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -666,6 +667,7 @@ class DashboardServer:
         self._straddle_bridge = straddle_bridge
         self._v4_cascade_manager = v4_cascade_manager
         self._fno_positional_manager = fno_positional_manager
+        self._hourly_breakout_manager = hourly_breakout_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -2513,7 +2515,7 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional"}
+            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout"}
             allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
             import json as _json
             validated = []
@@ -3702,7 +3704,7 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional"}
+            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout"}
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 

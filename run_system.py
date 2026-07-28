@@ -524,6 +524,7 @@ async def _run_live(
                 straddle_bridge=straddle_bridge,
                 v4_cascade_manager=v4_cascade_manager,
                 fno_positional_manager=managers.get("fno_positional"),
+                hourly_breakout_manager=managers.get("hourly_breakout"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)

@@ -688,6 +688,7 @@ document.addEventListener('alpine:init', () => {
       { id: 'sell_straddle',   name: 'Sell Straddle',   desc: 'ATM straddle — premium decay (theta)' },
       { id: 'v4_cascade',      name: 'V4 Cascade',      desc: 'Multi-zone HTF/LTF pool cascade' },
       { id: 'fno_positional',  name: 'FnO Positional',  desc: 'Stock zone-retest — positional option buying' },
+      { id: 'hourly_breakout', name: 'Hourly Breakout', desc: '1H trap + 5M retest — intraday option buying' },
     ],
     availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH','FNO_STOCKS'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
@@ -2132,7 +2133,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':dep.strategy_name)+' · '+dep.underlying;
+      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':dep.strategy_name==='hourly_breakout'?'Hourly Breakout':dep.strategy_name)+' · '+dep.underlying;
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
         : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
@@ -6901,6 +6902,7 @@ function amoTest() {
                 <option value="sell_straddle">Sell Straddle (SS)</option>
                 <option value="v4_cascade">V4 Cascade (Premium Trap)</option>
                 <option value="fno_positional">FnO Positional (Stock Options)</option>
+                <option value="hourly_breakout">Hourly Breakout (1H Trap)</option>
               </select>
             </div>
             <div>
