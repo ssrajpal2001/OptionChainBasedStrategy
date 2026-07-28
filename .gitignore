@@ -57,6 +57,7 @@ data/nse_option_cache/
 data/trap_scanner_*.json
 data/btc_*.csv
 data/btc_*.txt
+data/hourly_breakout/
 
 # Ad-hoc / temporary scripts
 scan_js.sh

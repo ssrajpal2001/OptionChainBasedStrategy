@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from strategies.sell_straddle import StraddleBookManager
 from strategies.v4_cascade_book_manager import V4CascadeBookManager
 from strategies.fno_positional import FnOPositionalBookManager
+from strategies.hourly_breakout import HourlyBreakoutBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -24,6 +25,10 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "fno_positional": {
         "manager_class": FnOPositionalBookManager,
+        "per_binding": True,
+    },
+    "hourly_breakout": {
+        "manager_class": HourlyBreakoutBookManager,
         "per_binding": True,
     },
 }
