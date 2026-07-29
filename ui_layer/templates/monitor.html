@@ -2136,7 +2136,8 @@ document.addEventListener('alpine:init', () => {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
       const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'};
-      const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying);
+      const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
+      const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
         : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
@@ -6905,7 +6906,7 @@ function amoTest() {
                       @change="
                         if(deployForm.strategy_name==='d1_trap_fno'){
                           deployForm.product_type='NRML';
-                          deployForm._htf='D1'; deployForm._mtf='1H'; deployForm._itm=1;
+                          deployForm._htf='D1'; deployForm._mtf='75min'; deployForm._itm=1;
                           deployForm.squareoff_time='23:59';
                         } else if(deployForm.strategy_name==='d1_trap_index'){
                           deployForm.product_type='MIS';
@@ -6923,14 +6924,13 @@ function amoTest() {
             </div>
             <div>
               <label class="sec-label mb-1">INSTRUMENT</label>
-              <!-- FnO: fixed to all 30 stocks — no manual selection -->
+              <!-- FnO: select WATCHLIST (nightly scan top-5) or ALL_FNO (all 30 stocks) -->
               <template x-if="deployForm.strategy_name === 'd1_trap_fno'">
-                <div class="t-input flex items-center gap-2" style="cursor:default;opacity:0.85"
-                     x-init="deployForm.underlying='ALL_FNO'">
-                  <span style="color:var(--t-green);font-size:10px">●</span>
-                  <span class="font-mono text-xs" style="color:var(--t-bright)">All 30 FnO Stocks</span>
-                  <span class="text-[10px]" style="color:var(--t-muted)">(auto)</span>
-                </div>
+                <select class="t-input" x-model="deployForm.underlying"
+                        x-init="if(!deployForm.underlying||deployForm.underlying==='')deployForm.underlying='WATCHLIST'">
+                  <option value="WATCHLIST">Watchlist (nightly scan top-5)</option>
+                  <option value="ALL_FNO">All 30 FnO Stocks</option>
+                </select>
               </template>
               <template x-if="deployForm.strategy_name !== 'd1_trap_fno'">
                 <select x-model="deployForm.underlying" class="t-input">
@@ -6957,6 +6957,7 @@ function amoTest() {
                   <label class="sec-label mb-1">MTF (MONITOR)</label>
                   <select class="t-input" x-model="deployForm._mtf"
                           @change="deployForm.strategy_params=JSON.stringify({htf:deployForm._htf,mtf:deployForm._mtf,itm:deployForm._itm||1})">
+                    <option value="75min">75 min</option>
                     <option value="1H">1H (60 min)</option>
                     <option value="15min">15 min</option>
                     <option value="5min">5 min</option>
@@ -7254,7 +7255,7 @@ function amoTest() {
                    ALL_FNO sentinel: always show as the single aggregated FnO card. -->
               <template x-for="dep in (clientDeployments||[]).filter(d=>
                 d.binding_id===b.binding_id &&
-                (d.strategy_name!=='d1_trap_fno' || d.underlying==='ALL_FNO' ||
+                (d.strategy_name!=='d1_trap_fno' || d.underlying==='ALL_FNO' || d.underlying==='WATCHLIST' ||
                  ((csPositions[b.binding_id]||{})[d.deploy_id]||{legs:[]}).legs.length>0)
               )" :key="dep.deploy_id">
                 <div class="t-card rounded p-4">
@@ -7264,7 +7265,7 @@ function amoTest() {
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
                            x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
-                        <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying"></span>
+                        <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
                               x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                                 ? dep.lot_multiplier+'L · '+(dep.product_type||'NRML')
