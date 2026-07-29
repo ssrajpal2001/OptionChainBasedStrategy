@@ -6923,11 +6923,22 @@ function amoTest() {
             </div>
             <div>
               <label class="sec-label mb-1">INSTRUMENT</label>
-              <select x-model="deployForm.underlying" class="t-input">
-                <template x-for="idx in availableInstruments" :key="idx">
-                  <option :value="idx" x-text="idx"></option>
-                </template>
-              </select>
+              <!-- FnO: fixed to all 30 stocks — no manual selection -->
+              <template x-if="deployForm.strategy_name === 'd1_trap_fno'">
+                <div class="t-input flex items-center gap-2" style="cursor:default;opacity:0.85"
+                     x-init="deployForm.underlying='ALL_FNO'">
+                  <span style="color:var(--t-green);font-size:10px">●</span>
+                  <span class="font-mono text-xs" style="color:var(--t-bright)">All 30 FnO Stocks</span>
+                  <span class="text-[10px]" style="color:var(--t-muted)">(auto)</span>
+                </div>
+              </template>
+              <template x-if="deployForm.strategy_name !== 'd1_trap_fno'">
+                <select x-model="deployForm.underlying" class="t-input">
+                  <template x-for="idx in availableInstruments.filter(i => i !== 'FNO_STOCKS')" :key="idx">
+                    <option :value="idx" x-text="idx"></option>
+                  </template>
+                </select>
+              </template>
             </div>
             <!-- HTF / MTF / ITM — shown only for Trap Scanner strategies -->
             <template x-if="deployForm.strategy_name==='d1_trap_index'||deployForm.strategy_name==='d1_trap_fno'">

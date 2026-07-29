@@ -3725,60 +3725,97 @@ class DashboardServer:
             except Exception:
                 sp = "{}"
 
-            deploy_id = await _srv._client_db.save_deployment(
-                client_id       = cid,
-                binding_id      = body.binding_id,
-                strategy_name   = body.strategy_name,
-                underlying      = body.underlying,
-                lot_multiplier  = body.lot_multiplier,
-                max_profit_rs   = body.max_profit_rs,
-                max_sl_rs       = body.max_sl_rs,
-                squareoff_time  = sq,
-                product_type    = pt,
-                strategy_params = sp,
-            )
-
             from data_layer.deployment_store import save_deployment_json, apply_deployment_to_runtime_config
-            save_deployment_json(
-                deploy_id       = deploy_id,
-                client_id       = cid,
-                binding_id      = body.binding_id,
-                strategy_name   = body.strategy_name,
-                underlying      = body.underlying,
-                lot_multiplier  = body.lot_multiplier,
-                max_profit_rs   = body.max_profit_rs,
-                max_sl_rs       = body.max_sl_rs,
-                squareoff_time  = sq,
-                product_type    = pt,
-                strategy_params = sp,
-            )
+
+            # Trap Scanner - FnO with ALL_FNO: create one deployment per FnO stock
+            if body.strategy_name == "d1_trap_fno" and body.underlying.upper() in ("ALL_FNO", "FNO_STOCKS", "ALL"):
+                from config.global_config import FNO_STOCK_CONFIG
+                deploy_id = f"{cid}_{body.binding_id}_{body.strategy_name}_ALL_FNO"
+                deploy_ids = []
+                for stock_sym in FNO_STOCK_CONFIG:
+                    did = await _srv._client_db.save_deployment(
+                        client_id       = cid,
+                        binding_id      = body.binding_id,
+                        strategy_name   = "d1_trap_fno",
+                        underlying      = stock_sym,
+                        lot_multiplier  = body.lot_multiplier,
+                        max_profit_rs   = body.max_profit_rs,
+                        max_sl_rs       = body.max_sl_rs,
+                        squareoff_time  = "23:59",
+                        product_type    = "NRML",
+                        strategy_params = sp,
+                    )
+                    save_deployment_json(
+                        deploy_id       = did,
+                        client_id       = cid,
+                        binding_id      = body.binding_id,
+                        strategy_name   = "d1_trap_fno",
+                        underlying      = stock_sym,
+                        lot_multiplier  = body.lot_multiplier,
+                        max_profit_rs   = body.max_profit_rs,
+                        max_sl_rs       = body.max_sl_rs,
+                        squareoff_time  = "23:59",
+                        product_type    = "NRML",
+                        strategy_params = sp,
+                    )
+                    deploy_ids.append(did)
+                logger.info("Deploy FnO: created %d stock deployments for %s/%s", len(deploy_ids), cid, body.binding_id)
+                return {"ok": True, "deploy_id": deploy_id, "count": len(deploy_ids),
+                        "strategy_name": "d1_trap_fno", "underlying": "ALL_FNO"}
+            else:
+                deploy_id = await _srv._client_db.save_deployment(
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = body.strategy_name,
+                    underlying      = body.underlying,
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = sq,
+                    product_type    = pt,
+                    strategy_params = sp,
+                )
+                save_deployment_json(
+                    deploy_id       = deploy_id,
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = body.strategy_name,
+                    underlying      = body.underlying,
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = sq,
+                    product_type    = pt,
+                    strategy_params = sp,
+                )
 
             # If engine is already active for this broker, hot-apply immediately
-            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_safe_sync, cid)
-            b = next((x for x in bindings if x["binding_id"] == body.binding_id), None)
-            hot_applied = False
-            if b and b.get("engine_active"):
-                try:
-                    apply_deployment_to_runtime_config({
-                        "strategy_name": body.strategy_name, "underlying": body.underlying,
-                        "lot_multiplier": body.lot_multiplier, "max_profit_rs": body.max_profit_rs,
-                        "max_sl_rs": body.max_sl_rs, "squareoff_time": sq,
-                    })
-                    hot_applied = True
-                except Exception as exc:
-                    logger.warning("Deploy hot-apply failed: %s", exc)
+                # If engine is already active for this broker, hot-apply immediately
+                bindings = await asyncio.to_thread(_srv._client_db.get_bindings_safe_sync, cid)
+                b = next((x for x in bindings if x["binding_id"] == body.binding_id), None)
+                hot_applied = False
+                if b and b.get("engine_active"):
+                    try:
+                        apply_deployment_to_runtime_config({
+                            "strategy_name": body.strategy_name, "underlying": body.underlying,
+                            "lot_multiplier": body.lot_multiplier, "max_profit_rs": body.max_profit_rs,
+                            "max_sl_rs": body.max_sl_rs, "squareoff_time": sq,
+                        })
+                        hot_applied = True
+                    except Exception as exc:
+                        logger.warning("Deploy hot-apply failed: %s", exc)
 
-            logger.info(
-                "Deploy saved: %s [lots=%.1f profit=%.0f sl=%.0f sq=%s hot=%s]",
-                deploy_id, body.lot_multiplier, body.max_profit_rs,
-                body.max_sl_rs, sq, hot_applied,
-            )
-            return {
-                "ok": True,
-                "deploy_id": deploy_id,
-                "hot_applied": hot_applied,
-                "message": f"Deployment saved{' and hot-applied' if hot_applied else ''}.",
-            }
+                logger.info(
+                    "Deploy saved: %s [lots=%.1f profit=%.0f sl=%.0f sq=%s hot=%s]",
+                    deploy_id, body.lot_multiplier, body.max_profit_rs,
+                    body.max_sl_rs, sq, hot_applied,
+                )
+                return {
+                    "ok": True,
+                    "deploy_id": deploy_id,
+                    "hot_applied": hot_applied,
+                    "message": f"Deployment saved{' and hot-applied' if hot_applied else ''}.",
+                }
 
         @app.get("/api/client/strategy/deployments", tags=["Client"])
         async def api_client_get_deployments(user: dict = Depends(_require_client)):
