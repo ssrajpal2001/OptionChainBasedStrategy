@@ -855,9 +855,6 @@ class D1TrapOptionBook(AbstractStrategyBook):
     async def liquidate(self, reason: str = "kill_switch") -> None:
         await self._square_off(reason)
 
-    async def _tick_loop(self) -> None:
-        pass
-
     async def _option_loop(self) -> None:
         pass
 
