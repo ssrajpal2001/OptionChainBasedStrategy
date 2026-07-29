@@ -134,7 +134,7 @@ def _next_monthly_expiry(expiries: List[date], from_month: int, from_year: int) 
 HARD_SL_BUF   = 0.8    # % beyond zone boundary
 MIN_RR        = 1.5    # minimum R:R
 APPROACH_PCT  = 1.5    # % distance to call a zone "approaching"
-MAX_ZONE_AGE  = 60     # days
+MAX_ZONE_AGE  = 30     # days — 1-month lookback; zones older than this are stale
 
 
 EARNINGS_MOVE_PCT = 4.5   # single D1 bar move above this % = likely earnings event
@@ -189,7 +189,7 @@ def _has_recent_earnings(bars: list, lookback: int = EARNINGS_LOOKBACK,
 
 def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
     end_date   = date.today() - timedelta(days=1)
-    start_date = end_date - timedelta(days=6 * 31)
+    start_date = end_date - timedelta(days=31)   # 1-month D1 lookback
 
     # Determine which month to target for positional trading.
     # If we're in the last week of current month (expiry within 7 days),
