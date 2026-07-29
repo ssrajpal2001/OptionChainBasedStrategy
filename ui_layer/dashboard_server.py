@@ -3182,17 +3182,12 @@ class DashboardServer:
                                     tracking["atm"] = round(
                                         float(live_price.get("CE") or live_price.get("PE") or 0.0), 2)
                     elif sname in ("d1_trap_index", "d1_trap_fno", "d1_trap_option"):
-                        # Resolve books: ALL_FNO sentinel → all books for this binding;
-                        # single underlying → one book.
-                        if underlying == "ALL_FNO":
-                            trap_books = _srv._find_trap_books_for_binding(cid, bid)
-                        else:
-                            b = _srv._find_trap_book(cid, bid, underlying)
-                            trap_books = [b] if b is not None else []
-                        for tb in trap_books:
+
+                        def _trap_leg_from_book(tb, dep_product):
+                            """Build a position leg dict from a D1TrapOptionBook with an open position."""
                             tp = getattr(tb, "_position", None)
                             if tp is None:
-                                continue
+                                return None, None
                             _und = getattr(tb, "_underlying", underlying)
                             _ot = tp.get("option_type", "CE")
                             _strike = int(tp.get("strike", 0))
@@ -3205,19 +3200,99 @@ class DashboardServer:
                             _ts = tp.get("entry_ts")
                             _ts_str = _ts.isoformat(timespec="seconds") if hasattr(_ts, "isoformat") else None
                             _instr = f"{_und} {_strike} {_ot} {_exp_str[:10] if _exp_str else ''}"
-                            legs.append({
+                            leg = {
                                 "symbol": _instr, "instrument": _instr,
-                                "type": dep.get("product_type") or "MIS",
+                                "type": dep_product or "MIS",
                                 "side": "BUY", "ccy": "₹",
                                 "qty": _qty, "lot_size": _qty, "lots": 1,
                                 "entry_price": round(_ep, 2),
                                 "sell_avg": 0.0, "buy_avg": round(_ep, 2),
                                 "ltp": round(_ltp, 2), "pnl": _pnl, "mtm": _pnl,
                                 "sl_price": round(float(tp.get("sl", 0)), 2),
+                                "tsl_level": round(float(tp.get("tsl_level", tp.get("sl", 0))), 2),
+                                "direction": tp.get("direction", ""),
                                 "entry_time": _ts_str,
-                            })
-                            if pos is None:
-                                pos = type("_P", (), {"open_time": _ts, "expiry_date": _exp})()
+                                "underlying": _und,
+                            }
+                            _pos_obj = type("_P", (), {"open_time": _ts, "expiry_date": _exp})()
+                            return leg, _pos_obj
+
+                        def _trap_zone_tracking(tb):
+                            """Build zone-tracking dict from a D1TrapOptionBook's scanner state."""
+                            _spot = float(getattr(tb, "_last_spot", 0.0) or 0.0)
+                            _htf_mins = getattr(tb, "_htf_mins", 0)
+                            _mtf_mins = getattr(tb, "_mtf_mins", 60)
+                            _htf_label = "D1" if _htf_mins == 0 else f"{_htf_mins}min"
+                            _mtf_label = f"{_mtf_mins}min"
+                            _monitors_active = [m for m in getattr(tb, "_monitors", [])
+                                                if not m.done and not m.invalid]
+                            _monitoring = [m for m in _monitors_active if m.state == "MONITORING"]
+                            _waiting    = [m for m in _monitors_active if m.state == "WAITING"]
+                            # latest trap = MONITORING first, then most-recent WAITING by htf_ref_ts
+                            _latest = (max(_monitoring, key=lambda m: m.htf_ref_ts) if _monitoring
+                                       else max(_waiting, key=lambda m: m.htf_ref_ts) if _waiting
+                                       else None)
+                            _pending = getattr(tb, "_pending_5m", None)
+                            _tp = getattr(tb, "_position", None)
+
+                            if _tp:
+                                _phase = "IN_TRADE"
+                            elif _pending:
+                                _phase = "PENDING_TRIGGER"
+                            elif _latest and _latest.state == "MONITORING":
+                                _phase = "MONITORING"
+                            elif _latest:
+                                _phase = "WAITING"
+                            else:
+                                _phase = "IDLE"
+
+                            def _ts(dt):
+                                return dt.isoformat(timespec="minutes") if dt and hasattr(dt, "isoformat") else None
+
+                            return {
+                                "htf_tf": _htf_label,
+                                "mtf_tf": _mtf_label,
+                                "spot": round(_spot, 2),
+                                "phase": _phase,
+                                "zones_active": len(_monitoring) + len(_waiting),
+                                "latest_zone": {
+                                    "direction": _latest.direction,
+                                    "zone_lo": round(_latest.zone_lo, 2),
+                                    "zone_hi": round(_latest.zone_hi, 2),
+                                    "state": _latest.state,
+                                    "htf_ref_ts": _ts(_latest.htf_ref_ts),
+                                    "zone_entry_ts": _ts(_latest.zone_entry_ts),
+                                } if _latest else None,
+                                "pending": {
+                                    "direction": _pending.get("direction"),
+                                    "trigger": round(_pending.get("trigger", 0), 2),
+                                    "sl": round(_pending.get("sl", 0), 2),
+                                    "source": _pending.get("source", "C2"),
+                                    "zone_lo": round(_pending.get("zone_lo", 0), 2),
+                                    "zone_hi": round(_pending.get("zone_hi", 0), 2),
+                                } if _pending else None,
+                            }
+
+                        _dep_product = dep.get("product_type") or "MIS"
+                        if underlying == "ALL_FNO":
+                            # FnO: aggregate legs from all active books; no zone tracking panel
+                            trap_books = _srv._find_trap_books_for_binding(cid, bid)
+                            for tb in trap_books:
+                                leg, _pos_obj = _trap_leg_from_book(tb, _dep_product)
+                                if leg is None:
+                                    continue
+                                legs.append(leg)
+                                if pos is None:
+                                    pos = _pos_obj
+                        else:
+                            # Single underlying: build legs + rich zone tracking
+                            tb = _srv._find_trap_book(cid, bid, underlying)
+                            if tb is not None:
+                                leg, _pos_obj = _trap_leg_from_book(tb, _dep_product)
+                                if leg is not None:
+                                    legs.append(leg)
+                                    pos = _pos_obj
+                                tracking = _trap_zone_tracking(tb)
                 except Exception as exc:
                     logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
                 _entry_time = (getattr(pos, "open_time", None).isoformat(timespec="seconds")

@@ -7249,14 +7249,17 @@ function amoTest() {
               No strategies deployed to this broker. Use ⚡ Deploy on the Brokers tab.
             </div>
             <div class="flex flex-col gap-3">
-              <!-- Trap scanner cards only appear when there's an active position;
-                   straddle + other strategies always show so the IDLE state is visible. -->
+              <!-- Index traps always show (zone tracking is the main view).
+                   FnO trap (ALL_FNO) only shows when a stock has an active position.
+                   Straddle + other strategies always show (IDLE state is useful). -->
               <template x-for="dep in (clientDeployments||[]).filter(d=>{
                 if(d.binding_id!==b.binding_id) return false;
-                const isTrap=d.strategy_name==='d1_trap_index'||d.strategy_name==='d1_trap_fno'||d.strategy_name==='d1_trap_option';
-                if(!isTrap) return true;
-                const pos=csPositions[b.binding_id]&&csPositions[b.binding_id][d.deploy_id];
-                return pos&&(pos.legs||[]).length>0;
+                if(d.strategy_name==='d1_trap_index'||d.strategy_name==='d1_trap_option') return true;
+                if(d.strategy_name==='d1_trap_fno') {
+                  const pos=csPositions[b.binding_id]&&csPositions[b.binding_id][d.deploy_id];
+                  return pos&&(pos.legs||[]).length>0;
+                }
+                return true;
               })" :key="dep.deploy_id">
                 <div class="t-card rounded p-4">
                   <!-- Header: strategy name + instrument + SQ time -->
@@ -7288,12 +7291,117 @@ function amoTest() {
                     </div>
                   </div>
 
+                  <!-- D1 Trap zone tracking panel (d1_trap_index / d1_trap_fno with single underlying).
+                       Shows: latest HTF zone → MTF monitoring → pending 5M trigger → trade active.
+                       Always visible for index trap (zone scanning is the main display even when IDLE). -->
+                  <template x-if="(dep.strategy_name==='d1_trap_index'||dep.strategy_name==='d1_trap_option')&&csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{ get _tr(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
+
+                      <!-- Header row: timeframes + spot + phase badge -->
+                      <div class="flex items-center justify-between mb-2">
+                        <span style="color:var(--t-muted)">HTF <span style="color:var(--t-cyan)" x-text="_tr.htf_tf"></span>
+                          · MTF <span style="color:var(--t-cyan)" x-text="_tr.mtf_tf"></span>
+                          · SPOT <span style="color:var(--t-text);font-weight:600" x-text="fmt(_tr.spot||0)"></span>
+                        </span>
+                        <span class="px-2 py-0.5 rounded text-xs font-mono font-bold"
+                              :style="{
+                                'IN_TRADE':        'background:rgba(16,185,129,0.15);color:var(--t-green)',
+                                'PENDING_TRIGGER': 'background:rgba(251,191,36,0.15);color:var(--t-amber)',
+                                'MONITORING':      'background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)',
+                                'WAITING':         'background:rgba(100,116,139,0.1);color:var(--t-muted)',
+                                'IDLE':            'background:rgba(100,116,139,0.08);color:var(--t-dim)',
+                              }[_tr.phase]||'color:var(--t-muted)'"
+                              x-text="_tr.phase||'IDLE'"></span>
+                      </div>
+
+                      <!-- Latest zone block -->
+                      <template x-if="_tr.latest_zone">
+                        <div class="mb-1.5 pb-1.5" style="border-bottom:1px solid var(--t-border)"
+                             x-data="{ get _z(){ return _tr.latest_zone; } }">
+                          <div class="flex items-center gap-2 mb-1">
+                            <span class="px-1.5 py-0.5 rounded font-bold"
+                                  :style="_z.direction==='LONG'?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
+                                  x-text="_z.direction==='LONG'?'▲ LONG (buy CE)':'▼ SHORT (buy PE)'"></span>
+                            <span :style="_z.state==='MONITORING'?'color:var(--t-cyan)':'color:var(--t-muted)'"
+                                  x-text="_z.state"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Zone</span>
+                            <span style="color:var(--t-text)" x-text="fmt(_z.zone_lo)+' – '+fmt(_z.zone_hi)"></span>
+                          </div>
+                          <div x-show="_z.zone_entry_ts" class="flex justify-between">
+                            <span style="color:var(--t-muted)">Entered zone</span>
+                            <span style="color:var(--t-cyan)" x-text="fmtHMS(_z.zone_entry_ts)"></span>
+                          </div>
+                          <div x-show="!_z.zone_entry_ts" class="flex justify-between">
+                            <span style="color:var(--t-muted)">Ref candle</span>
+                            <span style="color:var(--t-dim)" x-text="fmtHMS(_z.htf_ref_ts)"></span>
+                          </div>
+                        </div>
+                      </template>
+                      <template x-if="!_tr.latest_zone">
+                        <div class="mb-1.5 pb-1.5 text-center" style="color:var(--t-dim);border-bottom:1px solid var(--t-border)">
+                          No HTF zone detected yet — scanning <span x-text="_tr.htf_tf"></span> bars
+                        </div>
+                      </template>
+
+                      <!-- Pending 5M trigger -->
+                      <template x-if="_tr.pending">
+                        <div class="mb-1.5 pb-1.5" style="border-bottom:1px solid var(--t-border);background:rgba(251,191,36,0.04);border-radius:4px;padding:4px 6px"
+                             x-data="{ get _p(){ return _tr.pending; } }">
+                          <div class="flex items-center gap-1 mb-1" style="color:var(--t-amber);font-weight:600">
+                            ⚡ PENDING 5M TRIGGER
+                            <span style="color:var(--t-dim);font-weight:400;font-size:10px" x-text="'('+_p.source+')'"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Entry if 5M closes</span>
+                            <span style="color:var(--t-amber);font-weight:600" x-text="fmt(_p.trigger)"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">SL</span>
+                            <span style="color:var(--t-red)" x-text="fmt(_p.sl)"></span>
+                          </div>
+                        </div>
+                      </template>
+
+                      <!-- Active trade summary (from the position leg) -->
+                      <template x-if="_tr.phase==='IN_TRADE'&&(csPositions[b.binding_id][dep.deploy_id].legs||[]).length>0">
+                        <div x-data="{ get _leg(){ return (csPositions[b.binding_id][dep.deploy_id].legs||[])[0]||{}; } }">
+                          <div class="flex items-center gap-1 mb-1" style="color:var(--t-green);font-weight:600">
+                            ● TRADE ACTIVE
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Instrument</span>
+                            <span style="color:var(--t-cyan)" x-text="_leg.instrument||'—'"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Entry / LTP / SL</span>
+                            <span x-text="fmt(_leg.entry_price)+' / '+fmt(_leg.ltp)+' / '+fmt(_leg.sl_price)"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">TSL</span>
+                            <span style="color:var(--t-amber)" x-text="fmt(_leg.tsl_level||_leg.sl_price)"></span>
+                          </div>
+                          <div class="flex justify-between border-t mt-0.5 pt-0.5" style="border-color:var(--t-border)">
+                            <span style="color:var(--t-muted)">P&L</span>
+                            <span :style="`color:${(_leg.pnl||0)>=0?'var(--t-green)':'var(--t-red)'};font-weight:600`"
+                                  x-text="'₹ '+(_leg.pnl||0).toFixed(0)"></span>
+                          </div>
+                        </div>
+                      </template>
+
+                      <div x-show="_tr.zones_active>1" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
+                           x-text="'+ '+(_tr.zones_active-1)+' more zone(s) scanning'"></div>
+                    </div>
+                  </template>
+
                   <!-- Trap tracking (day-locked strikes). 2026-07-21: shown ALWAYS when
                        present, not just while no position is open -- the engine keeps
                        scanning BOTH sides continuously even while one side holds a trade
                        (structural flip can fire any time), so this stays visible alongside
                        the live legs below instead of being hidden by them. -->
-                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking">
+                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&!csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
                     <div class="text-xs font-mono py-1" style="color:var(--t-muted)"
                          x-data="{ get _t(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
                       <div class="flex justify-between items-baseline mb-1.5">
