@@ -31,7 +31,7 @@ def _parse_params(raw: str, strategy_name: str) -> dict:
         params = {}
 
     if strategy_name == "d1_trap_fno":
-        defaults = {"htf": "D1", "mtf": "75min", "ltf": "5min", "itm": 1}
+        defaults = {"htf": "D1", "mtf": "75min", "ltf": "5min", "itm": 1, "top_n": 5}
     else:
         defaults = {"htf": "75min", "mtf": "15min", "ltf": "5min", "itm": 1}
 
@@ -73,7 +73,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                     "product_type": product,
                 }
 
-                # ALL_FNO sentinel: one deployment record → 30 per-stock books.
+                # ALL_FNO sentinel: one deployment record → all stocks in FNO_STOCK_CONFIG.
                 if underlying == "ALL_FNO" and strategy_name == "d1_trap_fno":
                     try:
                         from config.global_config import FNO_STOCK_CONFIG
@@ -81,6 +81,37 @@ class D1TrapOptionBookManager(StrategyBookManager):
                             wanted[(cid, bid, stock_sym.upper())] = cfg.copy()
                     except Exception:
                         logger.warning("TrapBookManager: FNO_STOCK_CONFIG not available")
+                    continue
+
+                # WATCHLIST sentinel: reads data/fno_watchlist.json (written by nightly scan).
+                # top_n stocks (default 5, override via strategy_params {"top_n": N}) are
+                # subscribed — only APPROACHING status entries, sorted by btst_rr descending.
+                if underlying == "WATCHLIST" and strategy_name == "d1_trap_fno":
+                    try:
+                        import json as _json
+                        from pathlib import Path as _Path
+                        wl_path = _Path(__file__).resolve().parents[2] / "data" / "fno_watchlist.json"
+                        with open(wl_path) as _f:
+                            wl = _json.load(_f)
+                        top_n = int(params.get("top_n", 5))
+                        stocks = wl.get("stocks", [])
+                        # Filter APPROACHING, take top_n (JSON already sorted APPROACHING first)
+                        approaching = [s for s in stocks if s.get("status") == "APPROACHING"]
+                        for entry in approaching[:top_n]:
+                            sym = entry.get("symbol", "").upper()
+                            if sym:
+                                wanted[(cid, bid, sym)] = cfg.copy()
+                        logger.info(
+                            "TrapBookManager: WATCHLIST loaded %d/%d stocks from %s",
+                            min(top_n, len(approaching)), len(stocks), wl_path,
+                        )
+                    except FileNotFoundError:
+                        logger.warning(
+                            "TrapBookManager: data/fno_watchlist.json not found — "
+                            "run backtest/fno_scanner/scan_live.py --save first"
+                        )
+                    except Exception as exc:
+                        logger.warning("TrapBookManager: WATCHLIST load failed: %s", exc)
                     continue
 
                 wanted[(cid, bid, underlying)] = cfg
