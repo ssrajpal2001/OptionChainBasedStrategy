@@ -144,16 +144,16 @@ EARNINGS_LOOKBACK = 5    # check last N bars for earnings spikes
 class Signal:
     symbol:      str
     direction:   str        # "CE" (bear trap -> long) or "PE" (bull trap -> short)
-    status:      str        # "TRIGGERED" | "APPROACHING"
+    status:      str        # "TRIGGERED" | "APPROACHING" | "FLIP"
     entry_line:  float      # zone level to buy at
     current:     float      # last close
     dist_pct:    float      # % distance of close from entry_line
     hard_sl:     float      # spot SL level
-    day_t1:      float      # Day-1 target (last bar high or low — still a forward level since close ≠ T1)
+    day_t1:      float      # Day-1 target
     zone_age:    int        # days since zone locked
     lock_date:   str        # date zone was locked e.g. "24 Jul"
-    rr:          float      # zone R:R (entry_line → T1 / entry_line → SL) — historical quality metric
-    btst_rr:     float      # BTST R:R (current close → T1 / current close → SL) — realistic next-day entry
+    rr:          float      # zone R:R (entry_line → T1 / entry_line → SL)
+    btst_rr:     float      # BTST R:R (current close → T1 / current close → SL)
     suggested_strike: int   # nearest round-step to entry_line
     expiry:      str = ""   # actual contract expiry from registry e.g. "28 AUG 26"
 
@@ -186,6 +186,109 @@ def _has_recent_earnings(bars: list, lookback: int = EARNINGS_LOOKBACK,
     if base_c > 0 and abs((last_c - base_c) / base_c * 100) >= EARNINGS_CUMULATIVE_PCT:
         return True
     return False
+
+
+def _check_flip(
+    symbol: str,
+    last_bar,
+    bear_zones: list,
+    bull_zones: list,
+    today,
+    universe: "_FnoUniverse",
+    target_month: int,
+    target_year: int,
+) -> "Optional[Signal]":
+    """Check if any zone was broken in the wrong direction, generating a flip signal.
+
+    Bear zone (CE) broken DOWNWARD → zone_lo now resistance → PE flip
+    Bull zone (PE) broken UPWARD   → zone_hi now support    → CE flip
+
+    Only the best flip (by btst_rr, must be >= MIN_RR) within APPROACH_PCT is returned.
+    """
+    best_flip: Optional[Signal] = None
+
+    all_zones = [(z, "CE") for z in bear_zones] + [(z, "PE") for z in bull_zones]
+    for zone, original_dir in all_zones:
+        if zone.entry_line is None or zone.sweep_low is None or zone.lock_ts is None:
+            continue
+        age_days = (today - zone.lock_ts.date()).days
+        if age_days > MAX_ZONE_AGE:
+            continue
+
+        entry_line = zone.entry_line
+        sweep_ref  = zone.sweep_low
+        zone_lo = min(entry_line, sweep_ref)
+        zone_hi = max(entry_line, sweep_ref)
+        if zone_lo <= 0 or zone_hi <= 0:
+            continue
+
+        lock_date_str = zone.lock_ts.strftime("%d %b").lstrip("0")
+
+        if original_dir == "CE":
+            # Bear zone (CE) broken downward: close < zone_lo → zone_lo = new resistance → PE flip
+            if last_bar.close >= zone_lo:
+                continue  # not broken
+            flip_dir    = "PE"
+            flip_entry  = zone_lo          # old support = new resistance
+            flip_sl     = zone_lo * (1 + HARD_SL_BUF / 100)
+            flip_t1     = last_bar.low     # intraday low as forward target
+            dist_pct    = (flip_entry - last_bar.close) / flip_entry * 100  # positive = below resistance
+            flip_reward = flip_entry - flip_t1
+            flip_risk   = flip_sl - flip_entry
+        else:
+            # Bull zone (PE) broken upward: close > zone_hi → zone_hi = new support → CE flip
+            if last_bar.close <= zone_hi:
+                continue  # not broken
+            flip_dir    = "CE"
+            flip_entry  = zone_hi          # old resistance = new support
+            flip_sl     = zone_hi * (1 - HARD_SL_BUF / 100)
+            flip_t1     = last_bar.high    # intraday high as forward target
+            dist_pct    = (last_bar.close - flip_entry) / flip_entry * 100  # positive = above support
+            flip_reward = flip_t1 - flip_entry
+            flip_risk   = flip_entry - flip_sl
+
+        if flip_risk <= 0 or flip_reward <= 0:
+            continue
+        rr = flip_reward / flip_risk
+        if rr < MIN_RR:
+            continue
+
+        # Only show as APPROACHING if within APPROACH_PCT of the flip level
+        if dist_pct > APPROACH_PCT:
+            continue
+
+        btst_reward = (last_bar.close - flip_t1) if flip_dir == "PE" else (flip_t1 - last_bar.close)
+        btst_risk   = (flip_sl - last_bar.close) if flip_dir == "PE" else (last_bar.close - flip_sl)
+        btst_rr     = (btst_reward / btst_risk) if btst_risk > 0 else 0.0
+
+        if flip_entry > 5000:
+            step = 100
+        elif flip_entry > 2000:
+            step = 50
+        elif flip_entry > 500:
+            step = 20
+        else:
+            step = 10
+        strike = _nearest_strike(flip_entry, step)
+
+        sym_expiries = universe.expiries.get(symbol, [])
+        exp_date = _next_monthly_expiry(sym_expiries, target_month, target_year)
+        expiry_str = (f"{exp_date.day} {exp_date.strftime('%b %y').upper()}"
+                      if exp_date else f"? {target_month}/{target_year}")
+
+        sig = Signal(
+            symbol=symbol, direction=flip_dir, status="FLIP",
+            entry_line=flip_entry, current=last_bar.close,
+            dist_pct=dist_pct, hard_sl=flip_sl, day_t1=flip_t1,
+            zone_age=age_days, lock_date=lock_date_str, rr=rr,
+            btst_rr=btst_rr,
+            suggested_strike=strike, expiry=expiry_str,
+        )
+
+        if best_flip is None or sig.btst_rr > best_flip.btst_rr:
+            best_flip = sig
+
+    return best_flip
 
 
 def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
@@ -348,13 +451,28 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
                 suggested_strike=strike, expiry=expiry_str,
             )
 
-            # Keep the signal with best R:R per stock (TRIGGERED beats APPROACHING)
+            # Keep the signal with best R:R per stock
+            # Priority: TRIGGERED > APPROACHING > FLIP
             if best is None:
                 best = sig
             elif sig.status == "TRIGGERED" and best.status != "TRIGGERED":
                 best = sig
             elif sig.status == best.status and sig.rr > best.rr:
                 best = sig
+
+        # ── FLIP detection: zones broken in wrong direction → role-reverse ────
+        # When a bear zone (CE setup) is broken DOWNWARD (close < zone_lo):
+        #   zone_lo was support → now becomes RESISTANCE → flip to PE
+        # When a bull zone (PE setup) is broken UPWARD (close > zone_hi):
+        #   zone_hi was resistance → now becomes SUPPORT → flip to CE
+        # Only generate a flip if no primary signal was found for this stock.
+        if best is None:
+            flip_sig = _check_flip(
+                symbol, last_bar, bear_zones, bull_zones, today,
+                universe, target_month, target_year,
+            )
+            if flip_sig:
+                best = flip_sig
 
         if best:
             signals.append(best)
@@ -368,11 +486,11 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
 def print_report(signals: List[Signal]) -> None:
     triggered   = [s for s in signals if s.status == "TRIGGERED"]
     approaching = [s for s in signals if s.status == "APPROACHING"]
+    flipped     = [s for s in signals if s.status == "FLIP"]
 
-    # APPROACHING sorted by BTST R:R descending (realistic next-day entry quality)
     approaching.sort(key=lambda s: s.btst_rr, reverse=True)
-    # TRIGGERED sorted by BTST R:R descending (not zone R:R — that's already achieved)
     triggered.sort(key=lambda s: s.btst_rr, reverse=True)
+    flipped.sort(key=lambda s: s.btst_rr, reverse=True)
 
     print(f"\n{'='*70}")
     print(f"  FnO LIVE SIGNALS  --  positional option picks")
@@ -407,32 +525,48 @@ def print_report(signals: List[Signal]) -> None:
     else:
         print("\n  No TRIGGERED signals on last bar.")
 
-    if not approaching and not triggered:
+    # ── FLIP signals ──────────────────────────────────────────────────────────
+    if flipped:
+        print(f"\n  ~~ FLIP (zone broken → role-reversed, retest from opposite side) ~~\n")
+        print(f"  {'Stock':<12} {'Dir':<4} {'FlipLevel':>9} {'Close':>7} {'Dist%':>6} {'SL':>7} {'T1':>7} {'B-R:R':>6} {'ZoneLock':<9}  Contract")
+        print(f"  {'-'*12} {'-'*4} {'-'*9} {'-'*7} {'-'*6} {'-'*7} {'-'*7} {'-'*6} {'-'*9}  {'-'*20}")
+        for s in flipped:
+            arrow = "v" if s.direction == "CE" else "^"
+            print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>9.1f} {s.current:>7.1f} "
+                  f"{arrow}{s.dist_pct:>5.2f}% {s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.btst_rr:>6.2f} {s.lock_date:<9}  "
+                  f"{s.suggested_strike} {s.direction} {s.expiry}")
+
+    if not approaching and not triggered and not flipped:
         print("\n  No signals found. Check back after next session.")
         return
 
     print(f"\n{'='*70}")
     print(f"  TOP 2 PICKS FOR PAPER TRADING")
     print(f"{'='*70}")
-    print(f"  NOTE: APPROACHING = enter at zone price today (full R:R).")
+    print(f"  NOTE: APPROACHING = enter at zone price (full R:R).")
+    print(f"        FLIP        = broken zone role-reversed; wait for retest of flip level.")
     print(f"        TRIGGERED   = zone fired yesterday; only trade if BTST R:R >= {MIN_RR}.")
 
-    # Pick top 2: APPROACHING with best BTST R:R first; fall back to TRIGGERED if BTST R:R >= MIN_RR
+    # Pick top 2: APPROACHING > FLIP (btst_rr >= MIN_RR) > TRIGGERED (btst_rr >= MIN_RR)
     top_approaching = approaching[:2]
+    top_flipped     = [s for s in flipped if s.btst_rr >= MIN_RR][:2]
     top_triggered   = [s for s in triggered if s.btst_rr >= MIN_RR][:2]
-    top2 = (top_approaching + top_triggered)[:2]
+    top2 = (top_approaching + top_flipped + top_triggered)[:2]
 
     if not top2:
-        print("\n  No picks meet quality bar (BTST R:R >= {MIN_RR}). Watch APPROACHING list for entries.")
+        print(f"\n  No picks meet quality bar (BTST R:R >= {MIN_RR}). Watch APPROACHING list for entries.")
         print(f"\n{'='*70}\n")
         return
 
     for i, s in enumerate(top2, 1):
-        is_approaching = s.status == "APPROACHING"
+        is_approaching = s.status in ("APPROACHING", "FLIP")
         print(f"\n  Pick {i}: {s.symbol} {s.direction}  [{s.status}]")
         print(f"    Contract : {s.suggested_strike} {s.direction} {s.expiry}")
-        if is_approaching:
-            print(f"    Entry    : stock spot ≤ {s.entry_line:.1f} (zone retest — buy option at that level)")
+        if s.status == "FLIP":
+            opp = "support" if s.direction == "CE" else "resistance"
+            print(f"    Entry    : wait for pullback to {s.entry_line:.1f} (old zone now {opp} — buy option on retest)")
+        elif s.status == "APPROACHING":
+            print(f"    Entry    : stock spot at {s.entry_line:.1f} (zone retest — buy option at that level)")
         else:
             print(f"    Entry    : momentum continuation from {s.current:.1f} (zone fired yesterday at {s.entry_line:.1f})")
         print(f"    Spot SL  : {s.hard_sl:.1f}  ({HARD_SL_BUF}% beyond zone boundary)")
@@ -458,10 +592,12 @@ def save_watchlist(
     """
     from config.global_config import FNO_STOCK_CONFIG
 
-    # APPROACHING first (best BTST R:R), then TRIGGERED with good BTST R:R
+    # Priority: APPROACHING (full R:R) → FLIP (role-reversed) → TRIGGERED (already fired)
+    # Within each group, sort by btst_rr descending
+    _order = {"APPROACHING": 0, "FLIP": 1, "TRIGGERED": 2}
     ranked = sorted(
         signals,
-        key=lambda s: (0 if s.status == "APPROACHING" else 1, -s.btst_rr),
+        key=lambda s: (_order.get(s.status, 3), -s.btst_rr),
     )[:top_n]
 
     records = []
