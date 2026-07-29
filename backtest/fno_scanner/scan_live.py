@@ -306,9 +306,13 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
                 continue
 
             # Classify status
+            # dist_pct is always POSITIVE when stock is approaching from the correct side:
+            #   CE: dist_pct = (close - entry_line)/entry_line → positive = close ABOVE entry (bear zone support, approaching from above) ✓
+            #   PE: dist_pct = (entry_line - close)/entry_line → positive = close BELOW entry (bull zone resistance, approaching from below) ✓
+            # Negative dist_pct means stock already moved PAST the zone in the wrong direction → skip.
             if retest:
                 status = "TRIGGERED"
-            elif abs(dist_pct) <= APPROACH_PCT:
+            elif 0 < dist_pct <= APPROACH_PCT:
                 status = "APPROACHING"
             else:
                 continue
@@ -383,7 +387,7 @@ def print_report(signals: List[Signal]) -> None:
         for s in approaching:
             arrow = "v" if s.direction == "CE" else "^"
             print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>7.1f} {s.current:>7.1f} "
-                  f"{arrow}{abs(s.dist_pct):>5.2f}% {s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.btst_rr:>6.2f} {s.lock_date:<9}  "
+                  f"{arrow}{s.dist_pct:>5.2f}% {s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.btst_rr:>6.2f} {s.lock_date:<9}  "
                   f"{s.suggested_strike} {s.direction} {s.expiry}")
     else:
         print(f"\n  No APPROACHING signals (no stock within {APPROACH_PCT}% of a zone).")
