@@ -534,6 +534,7 @@ async def _run_live(
                 v4_cascade_manager=v4_cascade_manager,
                 fno_positional_manager=managers.get("fno_positional"),
                 hourly_breakout_manager=managers.get("hourly_breakout"),
+                d1_trap_manager=managers.get("d1_trap_option"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)

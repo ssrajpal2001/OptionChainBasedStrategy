@@ -64,7 +64,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 product = d.get("product_type") or (
                     "NRML" if strategy_name == "d1_trap_fno" else "MIS"
                 )
-                wanted[(cid, bid, underlying)] = {
+                cfg = {
                     "lots": lots,
                     "strategy_name": strategy_name,
                     "htf_tf": params["htf"],
@@ -72,6 +72,18 @@ class D1TrapOptionBookManager(StrategyBookManager):
                     "itm_offset": int(params.get("itm", 1)),
                     "product_type": product,
                 }
+
+                # ALL_FNO sentinel: one deployment record → 30 per-stock books.
+                if underlying == "ALL_FNO" and strategy_name == "d1_trap_fno":
+                    try:
+                        from config.global_config import FNO_STOCK_CONFIG
+                        for stock_sym in FNO_STOCK_CONFIG:
+                            wanted[(cid, bid, stock_sym.upper())] = cfg.copy()
+                    except Exception:
+                        logger.warning("TrapBookManager: FNO_STOCK_CONFIG not available")
+                    continue
+
+                wanted[(cid, bid, underlying)] = cfg
         return wanted
 
     def _should_respawn(self, book, value) -> bool:

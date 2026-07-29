@@ -655,6 +655,7 @@ class DashboardServer:
         v4_cascade_manager=None, # V4CascadeBookManager — per-binding books (live list + find)
         fno_positional_manager=None, # FnOPositionalBookManager — stock positional option books
         hourly_breakout_manager=None, # HourlyBreakoutBookManager — 1H trap + 5M retest books
+        d1_trap_manager=None,  # D1TrapOptionBookManager — trap scanner (index + FnO)
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -669,6 +670,7 @@ class DashboardServer:
         self._v4_cascade_manager = v4_cascade_manager
         self._fno_positional_manager = fno_positional_manager
         self._hourly_breakout_manager = hourly_breakout_manager
+        self._d1_trap_manager = d1_trap_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -3179,11 +3181,51 @@ class DashboardServer:
                                 if _is_crypto:
                                     tracking["atm"] = round(
                                         float(live_price.get("CE") or live_price.get("PE") or 0.0), 2)
+                    elif sname in ("d1_trap_index", "d1_trap_fno", "d1_trap_option"):
+                        # Resolve books: ALL_FNO sentinel → all books for this binding;
+                        # single underlying → one book.
+                        if underlying == "ALL_FNO":
+                            trap_books = _srv._find_trap_books_for_binding(cid, bid)
+                        else:
+                            b = _srv._find_trap_book(cid, bid, underlying)
+                            trap_books = [b] if b is not None else []
+                        for tb in trap_books:
+                            tp = getattr(tb, "_position", None)
+                            if tp is None:
+                                continue
+                            _und = getattr(tb, "_underlying", underlying)
+                            _ot = tp.get("option_type", "CE")
+                            _strike = int(tp.get("strike", 0))
+                            _ep = float(tp.get("entry", 0.0))
+                            _ltp = float(getattr(tb, "_last_ltp", _ep) or _ep)
+                            _qty = int(tp.get("qty", 0))
+                            _exp = tp.get("expiry")
+                            _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else str(_exp or "")
+                            _pnl = round((_ltp - _ep) * _qty, 2)
+                            _ts = tp.get("entry_ts")
+                            _ts_str = _ts.isoformat(timespec="seconds") if hasattr(_ts, "isoformat") else None
+                            _instr = f"{_und} {_strike} {_ot} {_exp_str[:10] if _exp_str else ''}"
+                            legs.append({
+                                "symbol": _instr, "instrument": _instr,
+                                "type": dep.get("product_type") or "MIS",
+                                "side": "BUY", "ccy": "₹",
+                                "qty": _qty, "lot_size": _qty, "lots": 1,
+                                "entry_price": round(_ep, 2),
+                                "sell_avg": 0.0, "buy_avg": round(_ep, 2),
+                                "ltp": round(_ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                "sl_price": round(float(tp.get("sl", 0)), 2),
+                                "entry_time": _ts_str,
+                            })
+                            if pos is None:
+                                pos = type("_P", (), {"open_time": _ts, "expiry_date": _exp})()
                 except Exception as exc:
                     logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
-                _entry_time = (pos.open_time.isoformat(timespec="seconds") if pos and getattr(pos, "open_time", None)
+                _entry_time = (getattr(pos, "open_time", None).isoformat(timespec="seconds")
+                               if pos and getattr(pos, "open_time", None) and hasattr(getattr(pos, "open_time", None), "isoformat")
                                else (legs[0].get("entry_time") if legs else None))
-                _expiry_date = pos.expiry_date.isoformat() if pos and getattr(pos, "expiry_date", None) else None
+                _expiry_date = (getattr(pos, "expiry_date", None).isoformat()
+                                if pos and getattr(pos, "expiry_date", None) and hasattr(getattr(pos, "expiry_date", None), "isoformat")
+                                else None)
                 # Key by deploy_id so multiple deployments of the same strategy on the
                 # same broker (e.g. NIFTY + CRUDEOIL sell_straddle) do not overwrite each other.
                 _deploy_id = dep.get("deploy_id") or f"{cid}_{bid}_{sname}_{underlying}"
@@ -3727,40 +3769,36 @@ class DashboardServer:
 
             from data_layer.deployment_store import save_deployment_json, apply_deployment_to_runtime_config
 
-            # Trap Scanner - FnO with ALL_FNO: create one deployment per FnO stock
+            # Trap Scanner - FnO with ALL_FNO: save ONE sentinel deployment; the book
+            # manager expands it to 30 individual stock books internally when is_running=1.
             if body.strategy_name == "d1_trap_fno" and body.underlying.upper() in ("ALL_FNO", "FNO_STOCKS", "ALL"):
-                from config.global_config import FNO_STOCK_CONFIG
-                deploy_id = f"{cid}_{body.binding_id}_{body.strategy_name}_ALL_FNO"
-                deploy_ids = []
-                for stock_sym in FNO_STOCK_CONFIG:
-                    did = await _srv._client_db.save_deployment(
-                        client_id       = cid,
-                        binding_id      = body.binding_id,
-                        strategy_name   = "d1_trap_fno",
-                        underlying      = stock_sym,
-                        lot_multiplier  = body.lot_multiplier,
-                        max_profit_rs   = body.max_profit_rs,
-                        max_sl_rs       = body.max_sl_rs,
-                        squareoff_time  = "23:59",
-                        product_type    = "NRML",
-                        strategy_params = sp,
-                    )
-                    save_deployment_json(
-                        deploy_id       = did,
-                        client_id       = cid,
-                        binding_id      = body.binding_id,
-                        strategy_name   = "d1_trap_fno",
-                        underlying      = stock_sym,
-                        lot_multiplier  = body.lot_multiplier,
-                        max_profit_rs   = body.max_profit_rs,
-                        max_sl_rs       = body.max_sl_rs,
-                        squareoff_time  = "23:59",
-                        product_type    = "NRML",
-                        strategy_params = sp,
-                    )
-                    deploy_ids.append(did)
-                logger.info("Deploy FnO: created %d stock deployments for %s/%s", len(deploy_ids), cid, body.binding_id)
-                return {"ok": True, "deploy_id": deploy_id, "count": len(deploy_ids),
+                deploy_id = await _srv._client_db.save_deployment(
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = "d1_trap_fno",
+                    underlying      = "ALL_FNO",
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = "23:59",
+                    product_type    = "NRML",
+                    strategy_params = sp,
+                )
+                save_deployment_json(
+                    deploy_id       = deploy_id,
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = "d1_trap_fno",
+                    underlying      = "ALL_FNO",
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = "23:59",
+                    product_type    = "NRML",
+                    strategy_params = sp,
+                )
+                logger.info("Deploy FnO: saved ALL_FNO sentinel for %s/%s (manager expands to 30 books)", cid, body.binding_id)
+                return {"ok": True, "deploy_id": deploy_id,
                         "strategy_name": "d1_trap_fno", "underlying": "ALL_FNO"}
             else:
                 deploy_id = await _srv._client_db.save_deployment(
@@ -5922,6 +5960,20 @@ pm2 save
         if self._v4_cascade_manager is not None:
             return self._v4_cascade_manager.find(client_id, binding_id, underlying)
         return None
+
+    def _find_trap_book(self, client_id: str, binding_id: str, underlying: str):
+        """Find a single D1TrapOptionBook by (client, binding, underlying)."""
+        if self._d1_trap_manager is not None:
+            return self._d1_trap_manager.find(client_id, binding_id, underlying)
+        return None
+
+    def _find_trap_books_for_binding(self, client_id: str, binding_id: str):
+        """Return all D1Trap books for a given (client, binding) — used for ALL_FNO aggregation."""
+        if self._d1_trap_manager is None:
+            return []
+        return [b for b in self._d1_trap_manager.books
+                if getattr(b, "_client_id", "") == client_id
+                and getattr(b, "_binding_id", "") == binding_id]
 
     def _open_history_rows(self, cid: str) -> list:
         """
