@@ -287,7 +287,7 @@ FNO_STOCK_CONFIG: Dict[str, dict] = {
     "GRASIM":     {"upstox_key": "NSE_EQ|INE047A01021", "fyers": "NSE:GRASIM-EQ",      "lot": 250,  "step": 50},
     "ONGC":       {"upstox_key": "NSE_EQ|INE213A01029", "fyers": "NSE:ONGC-EQ",        "lot": 2250, "step": 5},
     "COALINDIA":  {"upstox_key": "NSE_EQ|INE522F01014", "fyers": "NSE:COALINDIA-EQ",  "lot": 1350, "step": 5},
-    "TATAMOTOR":  {"upstox_key": "NSE_EQ|INE155A01022", "fyers": "NSE:TATAMOTOR-EQ",  "lot": 1600, "step": 10},
+    "TMPV":        {"upstox_key": "NSE_EQ|INE155A01022", "fyers": "NSE:TMPV-EQ",         "lot": 1600, "step": 10},
     "SUNPHARMA":  {"upstox_key": "NSE_EQ|INE044A01036", "fyers": "NSE:SUNPHARMA-EQ",  "lot": 350,  "step": 20},
     "DRREDDY":    {"upstox_key": "NSE_EQ|INE089A01031", "fyers": "NSE:DRREDDY-EQ",    "lot": 625,  "step": 20},
     "CIPLA":      {"upstox_key": "NSE_EQ|INE059A01026", "fyers": "NSE:CIPLA-EQ",       "lot": 425,  "step": 20},

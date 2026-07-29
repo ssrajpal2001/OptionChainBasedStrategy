@@ -79,7 +79,7 @@ TOP_30_STOCKS: Dict[str, str] = {
     "GRASIM":     "NSE_EQ|INE047A01021",
     "ONGC":       "NSE_EQ|INE213A01029",
     "COALINDIA":  "NSE_EQ|INE522F01014",
-    "TATAMOTORS": "NSE_EQ|INE155A01022",    # post-demerger: now traded as TMPV
+    "TMPV":       "NSE_EQ|INE155A01022",     # post-demerger: was TATAMOTORS
     "SUNPHARMA":  "NSE_EQ|INE044A01036",
     "DRREDDY":    "NSE_EQ|INE089A01031",    # face-value split: was INE089A01023
     "CIPLA":      "NSE_EQ|INE059A01026",
