@@ -1,15 +1,18 @@
 """
 backtest/fno_scanner/scan_live.py  —  FnO Live Zone Scanner
 =============================================================
-Scans all 30 FnO stocks for active trap zones as of the last trading day.
-Reports:
-  - TRIGGERED  : last bar already retested the zone (enter at Monday open)
-  - APPROACHING: zone entry_line within 1.5% of Friday close (watch Monday)
+Dynamically discovers all NSE FnO stocks (~200) from the Upstox instrument
+master, fetches their D1 history, and scans for active trap zones.
 
-Output: ranked list + suggested August expiry option entry for each signal.
+Reports:
+  - TRIGGERED  : last bar already retested the zone (enter at next open)
+  - APPROACHING: zone entry_line within 1.5% of last close (watch next session)
+
+Output: ranked list + suggested monthly expiry option entry for each signal.
 
 Usage:
-    UPSTOX_TOKEN=<token> python backtest/fno_scanner/scan_live.py
+    python backtest/fno_scanner/scan_live.py [--save] [--top-n 30]
+    (token auto-loaded from data/clients.db — no env var needed)
 """
 from __future__ import annotations
 
@@ -17,18 +20,38 @@ import gzip, json, os, sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from config.global_config import IST
-from backtest.fno_scanner.backtest import TOP_30_STOCKS, load_or_fetch, Bar
+from backtest.fno_scanner.backtest import load_or_fetch, Bar
 from strategies.v4_cascade.rolling_base import find_all_bear_zones, find_all_bull_zones
 
-def _fetch_stock_expiries(token: str) -> Dict[str, List[date]]:
-    """Download NSE instrument master and extract all future FnO expiry dates
-    per stock symbol.  Returns {symbol: sorted_list_of_expiry_dates}."""
+# NSE index underlyings that appear in NSE_FO but are NOT stocks.
+# We skip these — they have no NSE_EQ entry and we don't trade index options here.
+_INDEX_UNDERLYINGS: Set[str] = {
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX",
+    "BANKEX", "NIFTY50", "NIFTYBANK", "NIFTYFIN", "NIFTYMID",
+    "NIFTYNXT50", "NIFTYNXT", "NIFTYIT",
+}
+
+
+@dataclass
+class _FnoUniverse:
+    stocks:   Dict[str, str]       # symbol → NSE_EQ instrument_key
+    expiries: Dict[str, List[date]] # symbol → sorted future expiry dates
+    lot_sizes: Dict[str, int]       # symbol → lot size
+
+
+def _fetch_fno_universe(token: str) -> _FnoUniverse:
+    """Download NSE instrument master once and extract the full FnO stock universe.
+
+    Returns all stocks (not indices) that have active CE/PE contracts, together
+    with their NSE_EQ instrument key (needed for D1 data), lot sizes, and expiry dates.
+    Stocks with no NSE_EQ entry are skipped (they are indices or delisted).
+    """
     from curl_cffi import requests as cc
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
     try:
@@ -36,44 +59,69 @@ def _fetch_stock_expiries(token: str) -> Dict[str, List[date]]:
         instruments = json.loads(gzip.decompress(r.content))
     except Exception as e:
         print(f"  [warn] Could not fetch instrument master: {e}")
-        return {}
+        return _FnoUniverse({}, {}, {})
 
     today = date.today()
-    result: Dict[str, List[date]] = {}
 
-    # Build reverse map: trading_symbol (NSE_EQ) -> FnO trading_symbol
-    # Upstox uses the stock's underlying name in the FnO contract name
-    # e.g. "RELIANCE 1260 CE 28 JUL 26" -> underlying=RELIANCE
+    # ── Step 1: build NSE_EQ map  symbol → instrument_key ──────────────────
+    eq_map: Dict[str, str] = {}
     for inst in instruments:
-        seg = inst.get("segment", "")
-        if seg != "NSE_FO":
+        if inst.get("segment") != "NSE_EQ":
+            continue
+        key = inst.get("instrument_key", "")
+        sym = (inst.get("trading_symbol") or inst.get("short_name") or "").strip().upper()
+        if sym and key:
+            eq_map[sym] = key
+
+    # ── Step 2: scan NSE_FO CE/PE contracts for underlyings, lots, expiries ─
+    fno_underlyings: Set[str] = set()
+    lot_sizes: Dict[str, int] = {}
+    expiries: Dict[str, List[date]] = {}
+
+    for inst in instruments:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        if inst.get("instrument_type") not in ("CE", "PE"):
             continue
         ts = inst.get("trading_symbol", "")
-        itype = inst.get("instrument_type", "")
-        if itype not in ("CE", "PE"):
-            continue
-        # Parse: "{UNDERLYING} {STRIKE} {TYPE} {DD} {MON} {YY}"
         parts = ts.split()
         if len(parts) < 6:
             continue
-        underlying = parts[0]
-        if underlying not in TOP_30_STOCKS:
+        underlying = parts[0].upper()
+        if underlying in _INDEX_UNDERLYINGS:
             continue
+
+        # Lot size
+        ls = int(inst.get("lot_size") or 0)
+        if ls > 0:
+            # Keep the minimum seen (all series for same underlying should match)
+            if underlying not in lot_sizes or ls < lot_sizes[underlying]:
+                lot_sizes[underlying] = ls
+
+        # Expiry date
         try:
-            exp_str = f"{parts[3]} {parts[4]} {parts[5]}"  # "28 JUL 26"
-            exp_date = datetime.strptime(exp_str, "%d %b %y").date()
+            exp_date = datetime.strptime(f"{parts[3]} {parts[4]} {parts[5]}", "%d %b %y").date()
         except ValueError:
             continue
         if exp_date < today:
             continue
-        result.setdefault(underlying, [])
-        if exp_date not in result[underlying]:
-            result[underlying].append(exp_date)
 
-    # Sort each list
-    for sym in result:
-        result[sym].sort()
-    return result
+        fno_underlyings.add(underlying)
+        expiries.setdefault(underlying, [])
+        if exp_date not in expiries[underlying]:
+            expiries[underlying].append(exp_date)
+
+    # ── Step 3: keep only stocks that have an NSE_EQ entry ─────────────────
+    stocks: Dict[str, str] = {}
+    for sym in fno_underlyings:
+        eq_key = eq_map.get(sym)
+        if eq_key:
+            stocks[sym] = eq_key
+
+    for sym in expiries:
+        expiries[sym].sort()
+
+    return _FnoUniverse(stocks=stocks, expiries=expiries, lot_sizes=lot_sizes)
 
 
 def _next_monthly_expiry(expiries: List[date], from_month: int, from_year: int) -> Optional[date]:
@@ -139,7 +187,7 @@ def _has_recent_earnings(bars: list, lookback: int = EARNINGS_LOOKBACK,
     return False
 
 
-def scan(token: str) -> List[Signal]:
+def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
     end_date   = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=6 * 31)
 
@@ -154,9 +202,9 @@ def scan(token: str) -> List[Signal]:
         target_month = 1
         target_year += 1
 
-    print(f"\nFetching real expiry dates from Upstox instrument master...")
-    stock_expiries = _fetch_stock_expiries(token)
-    print(f"  Found expiry data for {len(stock_expiries)} stocks")
+    print(f"\nFetching NSE FnO universe from Upstox instrument master...")
+    universe = _fetch_fno_universe(token)
+    print(f"  {len(universe.stocks)} FnO stocks discovered (with NSE_EQ data key)")
 
     signals: List[Signal] = []
 
@@ -165,7 +213,7 @@ def scan(token: str) -> List[Signal]:
 
     earnings_skipped: List[str] = []
 
-    for symbol, key in TOP_30_STOCKS.items():
+    for symbol, key in sorted(universe.stocks.items()):
         bars = load_or_fetch(symbol, key, token, start_date, end_date)
         if len(bars) < 20:
             print(f"  {symbol:<14} insufficient data — skip")
@@ -262,7 +310,7 @@ def scan(token: str) -> List[Signal]:
             strike = _nearest_strike(entry_line, step)
 
             # Real expiry from instrument master
-            sym_expiries = stock_expiries.get(symbol, [])
+            sym_expiries = universe.expiries.get(symbol, [])
             exp_date = _next_monthly_expiry(sym_expiries, target_month, target_year)
             if exp_date:
                 expiry_str = f"{exp_date.day} {exp_date.strftime('%b %y').upper()}"
@@ -293,7 +341,7 @@ def scan(token: str) -> List[Signal]:
     if earnings_skipped:
         print(f"\n  Earnings-excluded (zone invalidated by recent >{EARNINGS_MOVE_PCT}% move): {', '.join(earnings_skipped)}")
 
-    return signals
+    return signals, universe
 
 
 def print_report(signals: List[Signal]) -> None:
@@ -354,11 +402,18 @@ def print_report(signals: List[Signal]) -> None:
     print(f"\n{'='*70}\n")
 
 
-def save_watchlist(signals: List[Signal], top_n: int = 30, out_path: Optional[str] = None) -> str:
+def save_watchlist(
+    signals: List[Signal],
+    universe: Optional[_FnoUniverse] = None,
+    top_n: int = 30,
+    out_path: Optional[str] = None,
+) -> str:
     """Save top-N signals (by status then R:R) to data/fno_watchlist.json.
 
     Returns the file path written.  Only TRIGGERED + APPROACHING signals are saved.
     Consumers (live trading system) read this at startup to know which stocks to subscribe.
+    Lot sizes come from FNO_STOCK_CONFIG first (curated), then from the instrument master
+    universe (for stocks outside the hardcoded 30).
     """
     from config.global_config import FNO_STOCK_CONFIG
 
@@ -370,11 +425,14 @@ def save_watchlist(signals: List[Signal], top_n: int = 30, out_path: Optional[st
     records = []
     for s in ranked:
         cfg = FNO_STOCK_CONFIG.get(s.symbol, {})
+        # Lot: prefer curated FNO_STOCK_CONFIG, fall back to instrument master
+        lot = cfg.get("lot") or (universe.lot_sizes.get(s.symbol, 0) if universe else 0)
+        upstox_key = cfg.get("upstox_key") or (universe.stocks.get(s.symbol, "") if universe else "")
         records.append({
             "symbol":           s.symbol,
-            "upstox_key":       cfg.get("upstox_key", ""),
+            "upstox_key":       upstox_key,
             "fyers":            cfg.get("fyers", ""),
-            "lot":              cfg.get("lot", 0),
+            "lot":              lot,
             "step":             cfg.get("step", 10),
             "direction":        s.direction,
             "status":           s.status,
@@ -431,11 +489,11 @@ if __name__ == "__main__":
         print("ERROR: Set UPSTOX_TOKEN environment variable (or ensure upstox creds in DB).")
         sys.exit(1)
 
-    signals = scan(token)
+    signals, universe = scan(token)
     print_report(signals)
 
     if args.save:
-        path = save_watchlist(signals, top_n=args.top_n, out_path=args.out)
+        path = save_watchlist(signals, universe=universe, top_n=args.top_n, out_path=args.out)
         triggered_n   = sum(1 for s in signals if s.status == "TRIGGERED")
         approaching_n = sum(1 for s in signals if s.status == "APPROACHING")
         print(f"\n  Watchlist saved → {path}")
