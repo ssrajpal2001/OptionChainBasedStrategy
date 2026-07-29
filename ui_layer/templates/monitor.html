@@ -6868,10 +6868,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':'SS'"></span>
+                        x-text="dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':'SS'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':'Sell Straddle')+' · '+dep.underlying"></div>
+                         x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':dep.strategy_name==='hourly_breakout'?'Hourly Breakout':dep.strategy_name==='d1_trap_option'?'D1 Trap Option':'Sell Straddle')+' · '+dep.underlying"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="dep.strategy_name==='fno_positional'
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -6904,6 +6904,7 @@ function amoTest() {
                 <option value="v4_cascade">V4 Cascade (Premium Trap)</option>
                 <option value="fno_positional">FnO Positional (Stock Options)</option>
                 <option value="hourly_breakout">Hourly Breakout (1H Trap)</option>
+                <option value="d1_trap_option">D1 Trap Option (2-ITM Buyer)</option>
               </select>
             </div>
             <div>
