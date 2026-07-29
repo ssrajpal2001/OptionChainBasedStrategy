@@ -89,6 +89,9 @@ APPROACH_PCT  = 1.5    # % distance to call a zone "approaching"
 MAX_ZONE_AGE  = 60     # days
 
 
+EARNINGS_MOVE_PCT = 4.5   # single D1 bar move above this % = likely earnings event
+EARNINGS_LOOKBACK = 5    # check last N bars for earnings spikes
+
 @dataclass
 class Signal:
     symbol:      str
@@ -100,6 +103,7 @@ class Signal:
     hard_sl:     float      # spot SL level
     day_t1:      float      # Day-1 target (Friday high or low)
     zone_age:    int        # days since zone locked
+    lock_date:   str        # date zone was locked e.g. "24 Jul"
     rr:          float
     suggested_strike: int   # nearest round-step to entry_line
     expiry:      str = ""   # actual contract expiry from registry e.g. "28 AUG 26"
@@ -107,6 +111,32 @@ class Signal:
 
 def _nearest_strike(price: float, step: int = 50) -> int:
     return round(price / step) * step
+
+
+EARNINGS_CUMULATIVE_PCT = 8.0  # 5-day cumulative move above this % = likely earnings rally
+
+def _has_recent_earnings(bars: list, lookback: int = EARNINGS_LOOKBACK,
+                         threshold_pct: float = EARNINGS_MOVE_PCT) -> bool:
+    """True if recent bars show signs of an earnings-driven move:
+    1. Any single D1 bar with close-to-close move > threshold_pct% (gap-style earnings), OR
+    2. Cumulative 5-day close-to-close move > EARNINGS_CUMULATIVE_PCT% (gradual earnings rally).
+    """
+    tail = bars[-lookback:] if len(bars) >= lookback else bars
+    if len(tail) < 2:
+        return False
+    # Check 1: single-bar spike
+    for i in range(1, len(tail)):
+        prev_c = tail[i - 1].close
+        if prev_c <= 0:
+            continue
+        if abs((tail[i].close - prev_c) / prev_c * 100) >= threshold_pct:
+            return True
+    # Check 2: cumulative multi-day drift (earnings beat spread over several sessions)
+    base_c = tail[0].close
+    last_c = tail[-1].close
+    if base_c > 0 and abs((last_c - base_c) / base_c * 100) >= EARNINGS_CUMULATIVE_PCT:
+        return True
+    return False
 
 
 def scan(token: str) -> List[Signal]:
@@ -133,10 +163,19 @@ def scan(token: str) -> List[Signal]:
     print(f"\nFnO Live Scanner  --  data up to {end_date}  |  target expiry month: {target_month}/{target_year}")
     print(f"{'─'*70}")
 
+    earnings_skipped: List[str] = []
+
     for symbol, key in TOP_30_STOCKS.items():
         bars = load_or_fetch(symbol, key, token, start_date, end_date)
         if len(bars) < 20:
             print(f"  {symbol:<14} insufficient data — skip")
+            continue
+
+        # Earnings filter: if any recent bar had a >4.5% single-day move, skip.
+        # These stocks have zone logic invalidated by earnings surprises (e.g. INFY +4.5%).
+        if _has_recent_earnings(bars):
+            earnings_skipped.append(symbol)
+            print(f"  {symbol:<14} SKIP — recent earnings move >={EARNINGS_MOVE_PCT}%")
             continue
 
         last_bar = bars[-1]
@@ -230,12 +269,14 @@ def scan(token: str) -> List[Signal]:
             else:
                 expiry_str = f"? {target_month}/{target_year}"
 
+            lock_date_str = (zone.lock_ts.strftime("%d %b").lstrip("0") if zone.lock_ts else "?")
+
             sig = Signal(
                 symbol=symbol, direction=direction, status=status,
                 entry_line=entry_line, current=last_bar.close,
                 dist_pct=dist_pct, hard_sl=hard_sl, day_t1=day_t1,
-                zone_age=age_days, rr=rr, suggested_strike=strike,
-                expiry=expiry_str,
+                zone_age=age_days, lock_date=lock_date_str, rr=rr,
+                suggested_strike=strike, expiry=expiry_str,
             )
 
             # Keep the signal with best R:R per stock (TRIGGERED beats APPROACHING)
@@ -248,6 +289,9 @@ def scan(token: str) -> List[Signal]:
 
         if best:
             signals.append(best)
+
+    if earnings_skipped:
+        print(f"\n  Earnings-excluded (zone invalidated by recent >{EARNINGS_MOVE_PCT}% move): {', '.join(earnings_skipped)}")
 
     return signals
 
@@ -266,23 +310,23 @@ def print_report(signals: List[Signal]) -> None:
 
     if triggered:
         print(f"\n  ** TRIGGERED (enter at next open) **\n")
-        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'SL':>7} {'T1':>7} {'R:R':>5}  Contract")
-        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*5}  {'-'*20}")
+        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'SL':>7} {'T1':>7} {'R:R':>5} {'ZoneLock':<9}  Contract")
+        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*5} {'-'*9}  {'-'*20}")
         for s in triggered:
             print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>7.1f} {s.current:>7.1f} "
-                  f"{s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.rr:>5.2f}  "
+                  f"{s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.rr:>5.2f} {s.lock_date:<9}  "
                   f"{s.suggested_strike} {s.direction} {s.expiry}")
     else:
         print("\n  No TRIGGERED signals on last bar.")
 
     if approaching:
         print(f"\n  -- APPROACHING (watch next session — zone within {APPROACH_PCT}%) --\n")
-        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'Dist%':>6} {'SL':>7} {'R:R':>5}  Contract")
-        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*6} {'-'*7} {'-'*5}  {'-'*20}")
+        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'Dist%':>6} {'SL':>7} {'R:R':>5} {'ZoneLock':<9}  Contract")
+        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*6} {'-'*7} {'-'*5} {'-'*9}  {'-'*20}")
         for s in approaching:
             arrow = "v" if s.direction == "CE" else "^"
             print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>7.1f} {s.current:>7.1f} "
-                  f"{arrow}{abs(s.dist_pct):>5.2f}% {s.hard_sl:>7.1f} {s.rr:>5.2f}  "
+                  f"{arrow}{abs(s.dist_pct):>5.2f}% {s.hard_sl:>7.1f} {s.rr:>5.2f} {s.lock_date:<9}  "
                   f"{s.suggested_strike} {s.direction} {s.expiry}")
 
     all_sigs = triggered + approaching
@@ -303,7 +347,7 @@ def print_report(signals: List[Signal]) -> None:
         print(f"    Spot SL : {s.hard_sl:.1f}  ({HARD_SL_BUF}% beyond zone boundary)")
         print(f"    Day T1  : {s.day_t1:.1f}  (last session's {'high' if s.direction=='CE' else 'low'} — update intraday)")
         print(f"    R:R     : {s.rr:.2f}")
-        print(f"    Zone age: {s.zone_age} days since lock")
+        print(f"    Zone age: {s.zone_age} days since lock ({s.lock_date})")
         print(f"    Exit    : Day T1 hit -> add hedge ({s.suggested_strike} {'PE' if s.direction=='CE' else 'CE'} {s.expiry})")
         print(f"              Weekly T1 hit -> close both legs")
 

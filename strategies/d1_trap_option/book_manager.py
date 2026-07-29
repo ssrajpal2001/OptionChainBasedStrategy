@@ -31,7 +31,7 @@ def _parse_params(raw: str, strategy_name: str) -> dict:
         params = {}
 
     if strategy_name == "d1_trap_fno":
-        defaults = {"htf": "D1", "mtf": "1H", "ltf": "5min", "itm": 1}
+        defaults = {"htf": "D1", "mtf": "75min", "ltf": "5min", "itm": 1}
     else:
         defaults = {"htf": "75min", "mtf": "15min", "ltf": "5min", "itm": 1}
 

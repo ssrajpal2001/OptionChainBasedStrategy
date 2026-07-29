@@ -7290,7 +7290,7 @@ function amoTest() {
                   <!-- D1 Trap zone tracking panel (d1_trap_index / d1_trap_fno with single underlying).
                        Shows: latest HTF zone → MTF monitoring → pending 5M trigger → trade active.
                        Always visible for index trap (zone scanning is the main display even when IDLE). -->
-                  <template x-if="(dep.strategy_name==='d1_trap_index'||dep.strategy_name==='d1_trap_option')&&csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
+                  <template x-if="(dep.strategy_name==='d1_trap_index'||dep.strategy_name==='d1_trap_option'||dep.strategy_name==='d1_trap_fno')&&dep.underlying!=='ALL_FNO'&&csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
                     <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
                          x-data="{ get _tr(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
 
