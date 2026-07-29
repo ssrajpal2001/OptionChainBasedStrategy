@@ -67,6 +67,8 @@ def debug_stock(symbol: str, token: str) -> None:
             reward   = day_t1 - entry_line
             retest   = last_bar.low <= entry_line and last_bar.close >= zone_lo
             dist_pct = (last_bar.close - entry_line) / entry_line * 100
+            btst_reward = day_t1 - last_bar.close
+            btst_risk   = last_bar.close - hard_sl
         else:
             hard_sl  = zone_hi * (1 + HARD_SL_BUF / 100)
             day_t1   = last_bar.low
@@ -74,18 +76,29 @@ def debug_stock(symbol: str, token: str) -> None:
             reward   = entry_line - day_t1
             retest   = last_bar.high >= entry_line and last_bar.close <= zone_hi
             dist_pct = (entry_line - last_bar.close) / entry_line * 100
+            btst_reward = last_bar.close - day_t1
+            btst_risk   = hard_sl - last_bar.close
 
         if risk <= 0 or reward < 0:
             continue
         rr = reward / risk
+        btst_rr = (btst_reward / btst_risk) if btst_risk > 0 else 0.0
         if rr < MIN_RR:
             continue
+
+        # T1 consumption: how much of entry→T1 headroom has close already used?
+        if direction == "CE":
+            t1_consumed = (last_bar.close - entry_line) / (day_t1 - entry_line) if (day_t1 - entry_line) > 0 else 1.0
+        else:
+            t1_consumed = (entry_line - last_bar.close) / (entry_line - day_t1) if (entry_line - day_t1) > 0 else 1.0
 
         status = "TRIGGERED" if retest else ("APPROACHING" if abs(dist_pct) <= APPROACH_PCT else "FAR")
 
         print(f"\n  [{direction}]  lock={zone.lock_ts.date()}  age={age_days}d  entry={entry_line:.1f}  "
               f"sweep={sweep_ref:.1f}  zone=[{zone_lo:.1f}–{zone_hi:.1f}]")
-        print(f"         sl={hard_sl:.1f}  t1={day_t1:.1f}  risk={risk:.1f}  reward={reward:.1f}  rr={rr:.2f}")
+        print(f"         sl={hard_sl:.1f}  t1={day_t1:.1f}  risk={risk:.1f}  reward={reward:.1f}  zone_rr={rr:.2f}")
+        print(f"         BTST (from close={last_bar.close:.1f}): reward={btst_reward:.1f}  risk={btst_risk:.1f}  btst_rr={btst_rr:.2f}")
+        print(f"         t1_consumed={t1_consumed:.0%}  (>80% → would be filtered out)")
         print(f"         last.H={last_bar.high:.1f} >= entry({entry_line:.1f})? {last_bar.high >= entry_line}  "
               f"last.L={last_bar.low:.1f} <= entry({entry_line:.1f})? {last_bar.low <= entry_line}")
         print(f"         last.C={last_bar.close:.1f} <= zone_hi({zone_hi:.1f})? {last_bar.close <= zone_hi}  "

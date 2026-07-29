@@ -146,13 +146,14 @@ class Signal:
     direction:   str        # "CE" (bear trap -> long) or "PE" (bull trap -> short)
     status:      str        # "TRIGGERED" | "APPROACHING"
     entry_line:  float      # zone level to buy at
-    current:     float      # Friday close
+    current:     float      # last close
     dist_pct:    float      # % distance of close from entry_line
     hard_sl:     float      # spot SL level
-    day_t1:      float      # Day-1 target (Friday high or low)
+    day_t1:      float      # Day-1 target (last bar high or low — still a forward level since close ≠ T1)
     zone_age:    int        # days since zone locked
     lock_date:   str        # date zone was locked e.g. "24 Jul"
-    rr:          float
+    rr:          float      # zone R:R (entry_line → T1 / entry_line → SL) — historical quality metric
+    btst_rr:     float      # BTST R:R (current close → T1 / current close → SL) — realistic next-day entry
     suggested_strike: int   # nearest round-step to entry_line
     expiry:      str = ""   # actual contract expiry from registry e.g. "28 AUG 26"
 
@@ -264,6 +265,9 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
                 reward    = day_t1 - entry_line
                 retest    = last_bar.low <= entry_line and last_bar.close >= zone_lo
                 dist_pct  = (last_bar.close - entry_line) / entry_line * 100  # positive = above
+                # BTST R:R: enter at current close, target same T1, SL same hard_sl
+                btst_reward = day_t1 - last_bar.close
+                btst_risk   = last_bar.close - hard_sl
             else:                          # bull trap -> short
                 hard_sl   = zone_hi * (1 + HARD_SL_BUF / 100)
                 day_t1    = last_bar.low
@@ -271,6 +275,9 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
                 reward    = entry_line - day_t1
                 retest    = last_bar.high >= entry_line and last_bar.close <= zone_hi
                 dist_pct  = (entry_line - last_bar.close) / entry_line * 100  # positive = below
+                # BTST R:R: enter at current close, target same T1, SL same hard_sl
+                btst_reward = last_bar.close - day_t1
+                btst_risk   = hard_sl - last_bar.close
 
             if risk <= 0 or reward < 0:
                 continue
@@ -278,6 +285,9 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
             rr = reward / risk
             if rr < MIN_RR:
                 continue
+
+            # BTST R:R from current close (realistic next-day entry price, not zone entry)
+            btst_rr = (btst_reward / btst_risk) if btst_risk > 0 else 0.0
 
             # Skip if last bar's close has already consumed >80% of entry→T1 headroom.
             # This prevents "stale T1" signals where the stock already ran most of the
@@ -324,6 +334,7 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
                 entry_line=entry_line, current=last_bar.close,
                 dist_pct=dist_pct, hard_sl=hard_sl, day_t1=day_t1,
                 zone_age=age_days, lock_date=lock_date_str, rr=rr,
+                btst_rr=btst_rr,
                 suggested_strike=strike, expiry=expiry_str,
             )
 
@@ -348,56 +359,76 @@ def print_report(signals: List[Signal]) -> None:
     triggered   = [s for s in signals if s.status == "TRIGGERED"]
     approaching = [s for s in signals if s.status == "APPROACHING"]
 
-    # Sort each group by R:R descending
-    triggered.sort(key=lambda s: s.rr, reverse=True)
-    approaching.sort(key=lambda s: abs(s.dist_pct))  # closest first
+    # APPROACHING sorted by BTST R:R descending (realistic next-day entry quality)
+    approaching.sort(key=lambda s: s.btst_rr, reverse=True)
+    # TRIGGERED sorted by BTST R:R descending (not zone R:R — that's already achieved)
+    triggered.sort(key=lambda s: s.btst_rr, reverse=True)
 
     print(f"\n{'='*70}")
     print(f"  FnO LIVE SIGNALS  --  positional option picks")
     print(f"{'='*70}")
 
-    if triggered:
-        print(f"\n  ** TRIGGERED (enter at next open) **\n")
-        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'SL':>7} {'T1':>7} {'R:R':>5} {'ZoneLock':<9}  Contract")
-        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*7} {'-'*7} {'-'*5} {'-'*9}  {'-'*20}")
-        for s in triggered:
-            print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>7.1f} {s.current:>7.1f} "
-                  f"{s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.rr:>5.2f} {s.lock_date:<9}  "
-                  f"{s.suggested_strike} {s.direction} {s.expiry}")
-    else:
-        print("\n  No TRIGGERED signals on last bar.")
-
+    # ── APPROACHING = primary BTST picks ──────────────────────────────────────
+    # Entry price ≈ zone entry price → realistic R:R for next-day position.
     if approaching:
-        print(f"\n  -- APPROACHING (watch next session — zone within {APPROACH_PCT}%) --\n")
-        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'Dist%':>6} {'SL':>7} {'R:R':>5} {'ZoneLock':<9}  Contract")
-        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*6} {'-'*7} {'-'*5} {'-'*9}  {'-'*20}")
+        print(f"\n  *** APPROACHING — BTST PICKS (zone within {APPROACH_PCT}%, enter at/near zone) ***\n")
+        print(f"  {'Stock':<12} {'Dir':<4} {'Entry':>7} {'Close':>7} {'Dist%':>6} {'SL':>7} {'T1':>7} {'B-R:R':>6} {'ZoneLock':<9}  Contract")
+        print(f"  {'-'*12} {'-'*4} {'-'*7} {'-'*7} {'-'*6} {'-'*7} {'-'*7} {'-'*6} {'-'*9}  {'-'*20}")
         for s in approaching:
             arrow = "v" if s.direction == "CE" else "^"
             print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>7.1f} {s.current:>7.1f} "
-                  f"{arrow}{abs(s.dist_pct):>5.2f}% {s.hard_sl:>7.1f} {s.rr:>5.2f} {s.lock_date:<9}  "
+                  f"{arrow}{abs(s.dist_pct):>5.2f}% {s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.btst_rr:>6.2f} {s.lock_date:<9}  "
                   f"{s.suggested_strike} {s.direction} {s.expiry}")
+    else:
+        print(f"\n  No APPROACHING signals (no stock within {APPROACH_PCT}% of a zone).")
 
-    all_sigs = triggered + approaching
-    if not all_sigs:
+    # ── TRIGGERED = already fired yesterday ────────────────────────────────────
+    # Trap fired on last bar. Close ≠ zone entry → BTST R:R from close shown.
+    # Good for momentum continuation if BTST R:R is still > 1.5.
+    if triggered:
+        print(f"\n  -- TRIGGERED yesterday (zone already retested — BTST R:R from close) --\n")
+        print(f"  {'Stock':<12} {'Dir':<4} {'ZoneEntry':>9} {'Close':>7} {'SL':>7} {'T1':>7} {'ZnR:R':>6} {'B-R:R':>6} {'ZoneLock':<9}  Contract")
+        print(f"  {'-'*12} {'-'*4} {'-'*9} {'-'*7} {'-'*7} {'-'*7} {'-'*6} {'-'*6} {'-'*9}  {'-'*20}")
+        for s in triggered:
+            btst_flag = "" if s.btst_rr >= MIN_RR else "  [low]"
+            print(f"  {s.symbol:<12} {s.direction:<4} {s.entry_line:>9.1f} {s.current:>7.1f} "
+                  f"{s.hard_sl:>7.1f} {s.day_t1:>7.1f} {s.rr:>6.2f} {s.btst_rr:>6.2f} {s.lock_date:<9}  "
+                  f"{s.suggested_strike} {s.direction} {s.expiry}{btst_flag}")
+    else:
+        print("\n  No TRIGGERED signals on last bar.")
+
+    if not approaching and not triggered:
         print("\n  No signals found. Check back after next session.")
         return
 
     print(f"\n{'='*70}")
     print(f"  TOP 2 PICKS FOR PAPER TRADING")
     print(f"{'='*70}")
+    print(f"  NOTE: APPROACHING = enter at zone price today (full R:R).")
+    print(f"        TRIGGERED   = zone fired yesterday; only trade if BTST R:R >= {MIN_RR}.")
 
-    # Pick top 2: prefer TRIGGERED, then best R:R
-    top2 = (triggered + approaching)[:2]
+    # Pick top 2: APPROACHING with best BTST R:R first; fall back to TRIGGERED if BTST R:R >= MIN_RR
+    top_approaching = approaching[:2]
+    top_triggered   = [s for s in triggered if s.btst_rr >= MIN_RR][:2]
+    top2 = (top_approaching + top_triggered)[:2]
+
+    if not top2:
+        print("\n  No picks meet quality bar (BTST R:R >= {MIN_RR}). Watch APPROACHING list for entries.")
+        print(f"\n{'='*70}\n")
+        return
+
     for i, s in enumerate(top2, 1):
+        is_approaching = s.status == "APPROACHING"
         print(f"\n  Pick {i}: {s.symbol} {s.direction}  [{s.status}]")
-        print(f"    Contract: {s.suggested_strike} {s.direction} {s.expiry}")
-        print(f"    Entry   : buy near spot {s.entry_line:.1f} (buy option at market open)")
-        print(f"    Spot SL : {s.hard_sl:.1f}  ({HARD_SL_BUF}% beyond zone boundary)")
-        print(f"    Day T1  : {s.day_t1:.1f}  (last session's {'high' if s.direction=='CE' else 'low'} — update intraday)")
-        print(f"    R:R     : {s.rr:.2f}")
-        print(f"    Zone age: {s.zone_age} days since lock ({s.lock_date})")
-        print(f"    Exit    : Day T1 hit -> add hedge ({s.suggested_strike} {'PE' if s.direction=='CE' else 'CE'} {s.expiry})")
-        print(f"              Weekly T1 hit -> close both legs")
+        print(f"    Contract : {s.suggested_strike} {s.direction} {s.expiry}")
+        if is_approaching:
+            print(f"    Entry    : stock spot ≤ {s.entry_line:.1f} (zone retest — buy option at that level)")
+        else:
+            print(f"    Entry    : momentum continuation from {s.current:.1f} (zone fired yesterday at {s.entry_line:.1f})")
+        print(f"    Spot SL  : {s.hard_sl:.1f}  ({HARD_SL_BUF}% beyond zone boundary)")
+        print(f"    Day T1   : {s.day_t1:.1f}")
+        print(f"    Zone R:R : {s.rr:.2f}  |  BTST R:R (from close): {s.btst_rr:.2f}")
+        print(f"    Zone age : {s.zone_age} days since lock ({s.lock_date})")
 
     print(f"\n{'='*70}\n")
 
@@ -408,7 +439,7 @@ def save_watchlist(
     top_n: int = 30,
     out_path: Optional[str] = None,
 ) -> str:
-    """Save top-N signals (by status then R:R) to data/fno_watchlist.json.
+    """Save top-N signals (APPROACHING first, then TRIGGERED with good BTST R:R) to data/fno_watchlist.json.
 
     Returns the file path written.  Only TRIGGERED + APPROACHING signals are saved.
     Consumers (live trading system) read this at startup to know which stocks to subscribe.
@@ -417,9 +448,10 @@ def save_watchlist(
     """
     from config.global_config import FNO_STOCK_CONFIG
 
+    # APPROACHING first (best BTST R:R), then TRIGGERED with good BTST R:R
     ranked = sorted(
         signals,
-        key=lambda s: (0 if s.status == "TRIGGERED" else 1, -s.rr),
+        key=lambda s: (0 if s.status == "APPROACHING" else 1, -s.btst_rr),
     )[:top_n]
 
     records = []
@@ -443,6 +475,7 @@ def save_watchlist(
             "hard_sl":          round(s.hard_sl, 2),
             "day_t1":           round(s.day_t1, 2),
             "rr":               round(s.rr, 2),
+            "btst_rr":          round(s.btst_rr, 2),
             "dist_pct":         round(s.dist_pct, 2),
             "zone_age":         s.zone_age,
             "lock_date":        s.lock_date,
