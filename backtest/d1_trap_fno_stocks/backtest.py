@@ -1,20 +1,21 @@
 """
-backtest/d1_trap_fno_stocks/backtest.py — D1 Trap + 1H C2/TWEAK on FnO stocks (spot)
+backtest/d1_trap_fno_stocks/backtest.py — D1 Trap + 75M C2/TWEAK on FnO stocks (spot)
 
-Applies the same D1 3-candle trap detection + 1H entry strategy used for NIFTY
+Applies the same D1 3-candle trap detection + MTF entry strategy used for NIFTY
 to the top 30 NSE FnO stocks using spot (equity) price data.
 
 Strategy:
-  D1 zones — bear trap (sellers swept → reclaim → LONG) / bull trap (buyers swept → reclaim → SHORT)
-  1H monitoring — price enters zone → next 1H breach of ref candle = ENTRY (C2)
-  TWEAK — zone fails WHILE monitoring (1H closes through far boundary) → counter-direction on next 1H breach
-  Exit — TSL (1H low/high ratchet), hard SL (original ref-candle extreme), or EOD 15:15 IST
+  D1 zones  — bear trap (sellers swept → reclaim → LONG) / bull trap (buyers swept → reclaim → SHORT)
+  75M MTF   — price enters zone → next 75M breach of ref candle = ENTRY (C2)   [--mtf to change]
+  TWEAK     — zone fails WHILE monitoring (MTF closes through far boundary) → counter-direction on next MTF breach
+  Exit      — TSL (MTF low/high ratchet), hard SL (original ref-candle extreme), or EOD 15:15 IST
 
 P&L is in spot points. Multiply by per-stock lot size for rupee value.
 
 Usage:
   python backtest/d1_trap_fno_stocks/backtest.py
   python backtest/d1_trap_fno_stocks/backtest.py --months 3
+  python backtest/d1_trap_fno_stocks/backtest.py --months 3 --mtf 75
   python backtest/d1_trap_fno_stocks/backtest.py --stocks RELIANCE,HDFCBANK
   UPSTOX_TOKEN=<token> python backtest/d1_trap_fno_stocks/backtest.py --months 3
 """
@@ -225,14 +226,14 @@ def fetch_intraday(symbol: str, start: date, end: date, token: str,
 
 # ── Resample 30m → 1H ────────────────────────────────────────────────────────
 
-def resample_to_60m(bars_30m: List[_Bar]) -> List[_Bar]:
-    """Clock-anchor at 09:15; pair consecutive 30-min bars into 60-min bars."""
+def resample_to_Nm(bars_30m: List[_Bar], mins: int) -> List[_Bar]:
+    """Resample 30-min bars to N-min bars, clock-anchored at 09:15 IST."""
     buckets: Dict = {}
     order: List = []
     for b in bars_30m:
         open_dt = b.timestamp.replace(hour=9, minute=15, second=0, microsecond=0)
-        mins = max(0, int((b.timestamp - open_dt).total_seconds() // 60))
-        bucket = (b.timestamp.date(), mins // 60)
+        elapsed = max(0, int((b.timestamp - open_dt).total_seconds() // 60))
+        bucket = (b.timestamp.date(), elapsed // mins)
         if bucket not in buckets:
             buckets[bucket] = []
             order.append(bucket)
@@ -624,10 +625,11 @@ def _summary_row(symbol: str, trades: List[Trade]) -> dict:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="D1 Trap + 1H C2/TWEAK backtest on FnO stocks")
+    ap = argparse.ArgumentParser(description="D1 Trap + MTF C2/TWEAK backtest on FnO stocks")
     ap.add_argument("--months", type=int, default=3, help="Months of simulation (default 3)")
     ap.add_argument("--stocks", default="", help="Comma-separated symbols (default: all 30)")
     ap.add_argument("--token", default="", help="Upstox access token (or set UPSTOX_TOKEN env)")
+    ap.add_argument("--mtf", type=int, default=75, help="MTF minutes: 60=1H, 75=75min (default 75)")
     args = ap.parse_args()
 
     token = args.token or os.environ.get("UPSTOX_TOKEN", "")
@@ -655,7 +657,8 @@ def main() -> None:
     sim_start = today - timedelta(days=args.months * 31)
     d1_start  = sim_start - timedelta(days=200)   # need historical context for D1 zones
 
-    print(f"\nD1 Trap FnO Stocks Backtest")
+    mtf_mins = args.mtf
+    print(f"\nD1 Trap FnO Stocks Backtest  (D1 zones + {mtf_mins}M MTF C2/TWEAK)")
     print(f"Simulation: {sim_start} to {today}  ({args.months} months)")
     print(f"Stocks: {len(symbols)}")
     print(f"D1 zone context from: {d1_start}\n")
@@ -685,13 +688,13 @@ def main() -> None:
             summaries.append({"Symbol": sym, "Trades": 0, "Note": "no intraday data"})
             continue
 
-        # Resample to 1H
-        h1_bars = resample_to_60m(m30_bars)
+        # Resample to MTF (75min by default)
+        mtf_bars = resample_to_Nm(m30_bars, mtf_mins)
         # Only simulate from sim_start onwards
-        h1_bars = [b for b in h1_bars if b.timestamp.date() >= sim_start]
-        print(f"  D1 bars: {len(d1_bars)}, 30m bars: {len(m30_bars)}, 1H bars (sim): {len(h1_bars)}")
+        mtf_bars = [b for b in mtf_bars if b.timestamp.date() >= sim_start]
+        print(f"  D1 bars: {len(d1_bars)}, 30m bars: {len(m30_bars)}, {mtf_mins}M bars (sim): {len(mtf_bars)}")
 
-        trades = run_c2_tweak_tsl(sym, d1_bars, h1_bars)
+        trades = run_c2_tweak_tsl(sym, d1_bars, mtf_bars)
         all_trades.extend(trades)
 
         row = _summary_row(sym, trades)
@@ -719,7 +722,7 @@ def main() -> None:
 
     # ── Print summary table ────────────────────────────────────────────────────
     print(f"\n{'='*80}")
-    print(f"D1 Trap C2+TWEAK -- {args.months}-Month Backtest Summary ({sim_start} to {today})")
+    print(f"D1 Trap C2+TWEAK ({mtf_mins}M MTF) -- {args.months}-Month Backtest Summary ({sim_start} to {today})")
     print(f"{'='*80}")
     hdr = f"{'Symbol':<12} {'T':>4} {'W':>4} {'L':>4} {'WR':>6} {'PnL_pts':>9} {'PnL_Rs':>11} {'Avg':>7} {'Best':>7} {'Worst':>7} {'C2':>4} {'TW':>4}"
     print(hdr)
