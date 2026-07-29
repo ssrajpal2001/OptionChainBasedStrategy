@@ -769,6 +769,8 @@ class FyersFeeder(BaseFeeder):
         self._socket = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._subscribed_tokens: List[str] = []  # option tokens to re-subscribe on reconnect
+        # FnO equity spot routing: "NSE:RELIANCE-EQ" → "RELIANCE"
+        self._fno_equity_map: Dict[str, str] = {}
         try:
             import fyers_apiv3  # noqa: F401
             self._sdk_available = True
@@ -776,6 +778,22 @@ class FyersFeeder(BaseFeeder):
             self._sdk_available = False
         # Fyers SDK reconnect is disabled; DualFeeder manages reconnect with backoff.
         self._uses_sdk_reconnect = False
+
+    def subscribe_fno_equity(self, fyers_sym: str, underlying: str) -> None:
+        """
+        Register a Fyers equity symbol (e.g. 'NSE:RELIANCE-EQ') to emit EQUITY_TICK
+        events carrying the normalized underlying name ('RELIANCE') for Trap Scanner FnO books.
+        Also subscribes the symbol on the live WebSocket if connected.
+        """
+        self._fno_equity_map[fyers_sym] = underlying.upper()
+        if fyers_sym not in self._subscribed_tokens:
+            self._subscribed_tokens.append(fyers_sym)
+        if self._socket:
+            try:
+                self._socket.subscribe(symbols=[fyers_sym], data_type="SymbolUpdate")
+            except Exception as exc:
+                logger.debug("FyersFeeder.subscribe_fno_equity: socket subscribe failed: %s", exc)
+        logger.info("FyersFeeder: registered FnO equity %s → %s", fyers_sym, underlying)
 
     def set_credentials(self, creds: Dict[str, str]) -> None:
         self._creds = creds
@@ -1065,6 +1083,20 @@ class FyersFeeder(BaseFeeder):
             await self._publish_index(tick)
             if hasattr(self, "_latency_dict"):
                 self._latency_dict[self._latency_provider] = (time.monotonic() - t0) * 1000.0
+        elif symbol_fyers in self._fno_equity_map:
+            # FnO equity spot tick (e.g. NSE:RELIANCE-EQ) → EQUITY_TICK for Trap Scanner FnO
+            underlying_name = self._fno_equity_map[symbol_fyers]
+            equity_tick = IndexTick(
+                symbol=underlying_name,
+                ltp=float(ltp),
+                open=float(raw.get("open_price") or ltp),
+                high=float(raw.get("high_price") or ltp),
+                low=float(raw.get("low_price") or ltp),
+                close=float(raw.get("prev_close_price") or ltp),
+                volume=int(raw.get("vol_traded_today") or 0),
+                timestamp=datetime.now(IST),
+            )
+            await self._bus.publish(Topic.EQUITY_TICK, equity_tick)
         else:
             # Option tick — parse Fyers symbol (NSE or MCX) and publish OptionTick
             try:
@@ -1460,6 +1492,18 @@ class GlobalFeeder:
         elif self._feeder is not None:
             if hasattr(self._feeder, "set_rebalancer"):
                 self._feeder.set_rebalancer(rebalancer)
+
+    def subscribe_fno_equity(self, fyers_sym: str, underlying: str) -> None:
+        """
+        Register a Fyers equity symbol ('NSE:RELIANCE-EQ') to route EQUITY_TICK
+        events for Trap Scanner FnO books. Delegates to FyersFeeder only (not Upstox).
+        """
+        if self._dual_feeder is not None:
+            fyers_f = self._dual_feeder._feeders.get("fyers")
+            if fyers_f and hasattr(fyers_f, "subscribe_fno_equity"):
+                fyers_f.subscribe_fno_equity(fyers_sym, underlying)
+        elif self._feeder is not None and hasattr(self._feeder, "subscribe_fno_equity"):
+            self._feeder.subscribe_fno_equity(fyers_sym, underlying)
 
     def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
         """Register NSE_EQ instrument keys → ticker names so FnoStockMonitor spot ticks flow as INDEX_TICK."""

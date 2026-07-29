@@ -204,8 +204,9 @@ class Topic:
     FNO_STOCK_STATUS = "fno_stock_status"  # live LTP + MTF/LTF state per stock (3s broadcast)
     FNO_ORDER_REQUEST = "fno_order_request"  # FnO positional option orders (fno_bridge.py)
     FNO_ORDER_FILL    = "fno_order_fill"     # FnO positional fill confirmations
-    D1_TRAP_ORDER_REQUEST = "d1_trap_order_request"  # D1 Trap + Option orders (d1_trap_bridge.py)
-    D1_TRAP_ORDER_FILL    = "d1_trap_order_fill"     # D1 Trap fill confirmations
+    D1_TRAP_ORDER_REQUEST = "d1_trap_order_request"  # Trap Scanner orders (d1_trap_bridge.py)
+    D1_TRAP_ORDER_FILL    = "d1_trap_order_fill"     # Trap Scanner fill confirmations
+    EQUITY_TICK           = "equity_tick"            # FnO stock equity spot ticks (Fyers feed)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -255,6 +256,58 @@ class StrategyParams:
     min_risk_reward: float = 2.0
     min_confidence: float = 0.50
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FnO Stock Config — for Trap Scanner - FnO strategy
+# Upstox keys, Fyers equity symbols, lot sizes, option strike steps
+# ─────────────────────────────────────────────────────────────────────────────
+
+FNO_STOCK_CONFIG: Dict[str, dict] = {
+    # symbol → {upstox_key, fyers, lot, step}
+    "RELIANCE":   {"upstox_key": "NSE_EQ|INE002A01018", "fyers": "NSE:RELIANCE-EQ",   "lot": 250,  "step": 20},
+    "HDFCBANK":   {"upstox_key": "NSE_EQ|INE040A01034", "fyers": "NSE:HDFCBANK-EQ",   "lot": 550,  "step": 20},
+    "ICICIBANK":  {"upstox_key": "NSE_EQ|INE090A01021", "fyers": "NSE:ICICIBANK-EQ",  "lot": 700,  "step": 20},
+    "INFY":       {"upstox_key": "NSE_EQ|INE009A01021", "fyers": "NSE:INFY-EQ",        "lot": 400,  "step": 40},
+    "TCS":        {"upstox_key": "NSE_EQ|INE467B01029", "fyers": "NSE:TCS-EQ",         "lot": 175,  "step": 50},
+    "BHARTIARTL": {"upstox_key": "NSE_EQ|INE397D01024", "fyers": "NSE:BHARTIARTL-EQ", "lot": 475,  "step": 20},
+    "SBIN":       {"upstox_key": "NSE_EQ|INE062A01020", "fyers": "NSE:SBIN-EQ",        "lot": 1500, "step": 10},
+    "ITC":        {"upstox_key": "NSE_EQ|INE154A01025", "fyers": "NSE:ITC-EQ",         "lot": 2400, "step": 5},
+    "WIPRO":      {"upstox_key": "NSE_EQ|INE075A01022", "fyers": "NSE:WIPRO-EQ",       "lot": 1500, "step": 5},
+    "BAJFINANCE": {"upstox_key": "NSE_EQ|INE296A01032", "fyers": "NSE:BAJFINANCE-EQ",  "lot": 125,  "step": 100},
+    "LT":         {"upstox_key": "NSE_EQ|INE018A01030", "fyers": "NSE:LT-EQ",          "lot": 150,  "step": 50},
+    "AXISBANK":   {"upstox_key": "NSE_EQ|INE238A01034", "fyers": "NSE:AXISBANK-EQ",   "lot": 1200, "step": 20},
+    "KOTAKBANK":  {"upstox_key": "NSE_EQ|INE237A01036", "fyers": "NSE:KOTAKBANK-EQ",  "lot": 400,  "step": 20},
+    "HCLTECH":    {"upstox_key": "NSE_EQ|INE860A01027", "fyers": "NSE:HCLTECH-EQ",    "lot": 350,  "step": 20},
+    "TITAN":      {"upstox_key": "NSE_EQ|INE280A01028", "fyers": "NSE:TITAN-EQ",       "lot": 175,  "step": 50},
+    "MARUTI":     {"upstox_key": "NSE_EQ|INE585B01010", "fyers": "NSE:MARUTI-EQ",      "lot": 75,   "step": 200},
+    "NTPC":       {"upstox_key": "NSE_EQ|INE733E01010", "fyers": "NSE:NTPC-EQ",        "lot": 4500, "step": 5},
+    "TATASTEEL":  {"upstox_key": "NSE_EQ|INE081A01020", "fyers": "NSE:TATASTEEL-EQ",  "lot": 5500, "step": 5},
+    "HINDALCO":   {"upstox_key": "NSE_EQ|INE038A01020", "fyers": "NSE:HINDALCO-EQ",   "lot": 2150, "step": 10},
+    "GRASIM":     {"upstox_key": "NSE_EQ|INE047A01021", "fyers": "NSE:GRASIM-EQ",      "lot": 475,  "step": 50},
+    "ONGC":       {"upstox_key": "NSE_EQ|INE213A01029", "fyers": "NSE:ONGC-EQ",        "lot": 3850, "step": 5},
+    "COALINDIA":  {"upstox_key": "NSE_EQ|INE522F01014", "fyers": "NSE:COALINDIA-EQ",  "lot": 4200, "step": 5},
+    "TATAMOTORS": {"upstox_key": "NSE_EQ|INE155A01022", "fyers": "NSE:TATAMOTORS-EQ", "lot": 2150, "step": 10},
+    "SUNPHARMA":  {"upstox_key": "NSE_EQ|INE044A01036", "fyers": "NSE:SUNPHARMA-EQ",  "lot": 350,  "step": 20},
+    "DRREDDY":    {"upstox_key": "NSE_EQ|INE089A01031", "fyers": "NSE:DRREDDY-EQ",    "lot": 125,  "step": 20},
+    "CIPLA":      {"upstox_key": "NSE_EQ|INE059A01026", "fyers": "NSE:CIPLA-EQ",       "lot": 650,  "step": 20},
+    "JSWSTEEL":   {"upstox_key": "NSE_EQ|INE019A01038", "fyers": "NSE:JSWSTEEL-EQ",   "lot": 1800, "step": 20},
+    "ADANIENT":   {"upstox_key": "NSE_EQ|INE423A01024", "fyers": "NSE:ADANIENT-EQ",   "lot": 625,  "step": 50},
+    "TATACONSUM": {"upstox_key": "NSE_EQ|INE192A01025", "fyers": "NSE:TATACONSUM-EQ", "lot": 1350, "step": 20},
+    "BAJAJFINSV": {"upstox_key": "NSE_EQ|INE918I01026", "fyers": "NSE:BAJAJFINSV-EQ", "lot": 500,  "step": 20},
+}
+
+
+def is_fno_stock(underlying: str) -> bool:
+    """True if the underlying is a tracked FnO stock (not an index)."""
+    return underlying.upper() in FNO_STOCK_CONFIG
+
+
+def fno_stock_lot(underlying: str) -> int:
+    return FNO_STOCK_CONFIG.get(underlying.upper(), {}).get("lot", 1)
+
+
+def fno_stock_step(underlying: str) -> int:
+    return FNO_STOCK_CONFIG.get(underlying.upper(), {}).get("step", 50)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

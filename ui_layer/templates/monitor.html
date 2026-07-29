@@ -685,11 +685,12 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Client strategy selections ─────────────────────────────────── */
     availableStrategies: [
-      { id: 'sell_straddle',   name: 'Sell Straddle',   desc: 'ATM straddle — premium decay (theta)' },
-      { id: 'v4_cascade',      name: 'V4 Cascade',      desc: 'Multi-zone HTF/LTF pool cascade' },
-      { id: 'fno_positional',  name: 'FnO Positional',  desc: 'Stock zone-retest — positional option buying' },
-      { id: 'hourly_breakout', name: 'Hourly Breakout', desc: '1H trap + 5M retest — intraday option buying' },
-      { id: 'd1_trap_option',  name: 'D1 Trap Option',  desc: 'D1 3-candle trap + 1H C2/TWEAK — 2-ITM option buying' },
+      { id: 'sell_straddle',   name: 'Sell Straddle',       desc: 'ATM straddle — premium decay (theta)' },
+      { id: 'd1_trap_index',   name: 'Trap Scanner - Index', desc: 'Index intraday trap — configurable HTF/MTF, MIS, EOD close' },
+      { id: 'd1_trap_fno',     name: 'Trap Scanner - FnO',  desc: 'FnO stock positional trap — D1 zones, 1H entry, NRML' },
+      // disabled temporarily: { id: 'v4_cascade', name: 'V4 Cascade', ... }
+      // disabled temporarily: { id: 'fno_positional', name: 'FnO Positional', ... }
+      // disabled temporarily: { id: 'hourly_breakout', name: 'Hourly Breakout', ... }
     ],
     availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH','FNO_STOCKS'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
@@ -927,7 +928,7 @@ document.addEventListener('alpine:init', () => {
     showDeployModal: false,
     deployBindingId: '',           // which broker the modal is open for
     deployExisting:  [],           // active deployments for that broker (loaded on open)
-    deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:20', product_type:'MIS' },
+    deployForm: { binding_id:'', strategy_name:'sell_straddle', underlying:'NIFTY', lot_multiplier:1, max_profit_rs:0, max_sl_rs:0, squareoff_time:'15:20', product_type:'MIS', strategy_params:'{}' },
     deployMsg: '', deployOk: null, deployLoading: false,
     deployDeleteLoading: {},       // deploy_id -> bool
     deployDeleteId: '',            // set before calling deleteDeploy to avoid x-for scope issues
@@ -2134,7 +2135,8 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const label = (dep.strategy_name==='sell_straddle'?'Sell Straddle':dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':dep.strategy_name==='hourly_breakout'?'Hourly Breakout':dep.strategy_name==='d1_trap_option'?'D1 Trap Option':dep.strategy_name)+' · '+dep.underlying;
+      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'};
+      const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+dep.underlying;
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
         : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
@@ -2440,14 +2442,16 @@ document.addEventListener('alpine:init', () => {
     async openDeployModal(b) {
       this.deployBindingId = b.binding_id;
       this.deployForm = {
-        binding_id:     b.binding_id,
-        strategy_name:  'sell_straddle',
-        underlying:     'NIFTY',
-        lot_multiplier: b.lot_multiplier || 1,
-        max_profit_rs:  0,
-        max_sl_rs:      0,
-        squareoff_time: this.strategyConfig.ss_squareoff_time || '15:20',
-        product_type:   'MIS',
+        binding_id:      b.binding_id,
+        strategy_name:   'sell_straddle',
+        underlying:      'NIFTY',
+        lot_multiplier:  b.lot_multiplier || 1,
+        max_profit_rs:   0,
+        max_sl_rs:       0,
+        squareoff_time:  this.strategyConfig.ss_squareoff_time || '15:20',
+        product_type:    'MIS',
+        strategy_params: '{}',
+        _htf: '75min', _mtf: '15min', _itm: 1,
       };
       this.deployMsg = ''; this.deployOk = null;
       this.deployDeleteLoading = {};
@@ -6868,12 +6872,12 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':'SS'"></span>
+                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':dep.strategy_name==='hourly_breakout'?'Hourly Breakout':dep.strategy_name==='d1_trap_option'?'D1 Trap Option':'Sell Straddle')+' · '+dep.underlying"></div>
+                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'})[dep.strategy_name]||dep.strategy_name)+' · '+dep.underlying"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
-                         x-text="dep.strategy_name==='fno_positional'
+                         x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
                            : 'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
                   </div>
@@ -6898,13 +6902,23 @@ function amoTest() {
             <div>
               <label class="sec-label mb-1">STRATEGY</label>
               <select x-model="deployForm.strategy_name" class="t-input"
-                      @change="deployForm.product_type = deployForm.strategy_name==='fno_positional' ? 'NRML' : 'MIS';
-                               if(deployForm.strategy_name==='fno_positional') deployForm.underlying='FNO_STOCKS';">
-                <option value="sell_straddle">Sell Straddle (SS)</option>
-                <option value="v4_cascade">V4 Cascade (Premium Trap)</option>
-                <option value="fno_positional">FnO Positional (Stock Options)</option>
-                <option value="hourly_breakout">Hourly Breakout (1H Trap)</option>
-                <option value="d1_trap_option">D1 Trap Option (2-ITM Buyer)</option>
+                      @change="
+                        if(deployForm.strategy_name==='d1_trap_fno'){
+                          deployForm.product_type='NRML';
+                          deployForm._htf='D1'; deployForm._mtf='1H'; deployForm._itm=1;
+                          deployForm.squareoff_time='23:59';
+                        } else if(deployForm.strategy_name==='d1_trap_index'){
+                          deployForm.product_type='MIS';
+                          deployForm._htf='75min'; deployForm._mtf='15min'; deployForm._itm=1;
+                          deployForm.squareoff_time='15:15';
+                        } else {
+                          deployForm.product_type='MIS';
+                        }
+                        deployForm.strategy_params = JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
+                      ">
+                <option value="sell_straddle">Sell Straddle</option>
+                <option value="d1_trap_index">Trap Scanner - Index (Intraday)</option>
+                <option value="d1_trap_fno">Trap Scanner - FnO (Positional)</option>
               </select>
             </div>
             <div>
@@ -6915,6 +6929,39 @@ function amoTest() {
                 </template>
               </select>
             </div>
+            <!-- HTF / MTF / ITM — shown only for Trap Scanner strategies -->
+            <template x-if="deployForm.strategy_name==='d1_trap_index'||deployForm.strategy_name==='d1_trap_fno'">
+              <div class="col-span-2 grid grid-cols-3 gap-3"
+                   x-init="deployForm._htf=deployForm._htf||'D1';deployForm._mtf=deployForm._mtf||'1H';deployForm._itm=deployForm._itm||1;">
+                <div>
+                  <label class="sec-label mb-1">HTF (ZONE)</label>
+                  <select class="t-input" x-model="deployForm._htf"
+                          @change="deployForm.strategy_params=JSON.stringify({htf:deployForm._htf,mtf:deployForm._mtf,itm:deployForm._itm||1})">
+                    <option value="D1">D1 (Daily)</option>
+                    <option value="75min">75 min</option>
+                    <option value="1H">1H (60 min)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">MTF (MONITOR)</label>
+                  <select class="t-input" x-model="deployForm._mtf"
+                          @change="deployForm.strategy_params=JSON.stringify({htf:deployForm._htf,mtf:deployForm._mtf,itm:deployForm._itm||1})">
+                    <option value="1H">1H (60 min)</option>
+                    <option value="15min">15 min</option>
+                    <option value="5min">5 min</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">ITM OFFSET</label>
+                  <select class="t-input" x-model.number="deployForm._itm"
+                          @change="deployForm.strategy_params=JSON.stringify({htf:deployForm._htf,mtf:deployForm._mtf,itm:deployForm._itm||1})">
+                    <option value="1">1-ITM</option>
+                    <option value="2">2-ITM</option>
+                    <option value="0">ATM</option>
+                  </select>
+                </div>
+              </div>
+            </template>
             <div x-data="{ get _crypto(){ return ['BTC','ETH'].includes((deployForm.underlying||'').toUpperCase()); } }">
               <label class="sec-label mb-1" x-text="_crypto ? 'CONTRACTS' : 'LOT MULTIPLIER'"></label>
               <input type="number" class="t-input" x-model.number="deployForm.lot_multiplier"
@@ -6922,7 +6969,7 @@ function amoTest() {
               <p class="text-[10px] mt-0.5" style="color:var(--t-muted)" x-show="_crypto"
                  x-text="'1 contract = '+((deployForm.underlying||'').toUpperCase()==='ETH'?'0.01 ETH':'0.001 BTC')+'  →  '+((deployForm.lot_multiplier||0)*((deployForm.underlying||'').toUpperCase()==='ETH'?0.01:0.001)).toFixed(3)+' '+((deployForm.underlying||'').toUpperCase()||'BTC')"></p>
             </div>
-            <div x-show="deployForm.strategy_name !== 'fno_positional'">
+            <div x-show="deployForm.strategy_name !== 'fno_positional' && deployForm.strategy_name !== 'd1_trap_fno'">
               <label class="sec-label mb-1">SQUARE-OFF TIME</label>
               <input type="text" class="t-input font-mono" x-model="deployForm.squareoff_time"
                      placeholder="15:15"/>

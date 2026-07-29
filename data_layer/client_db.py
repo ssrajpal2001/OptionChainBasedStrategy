@@ -553,15 +553,16 @@ class ClientDB:
 
     async def save_deployment(
         self,
-        client_id:      str,
-        binding_id:     str,
-        strategy_name:  str,
-        underlying:     str,
-        lot_multiplier: float,
-        max_profit_rs:  float,
-        max_sl_rs:      float,
-        squareoff_time: str,
-        product_type:   str = "MIS",
+        client_id:       str,
+        binding_id:      str,
+        strategy_name:   str,
+        underlying:      str,
+        lot_multiplier:  float,
+        max_profit_rs:   float,
+        max_sl_rs:       float,
+        squareoff_time:  str,
+        product_type:    str = "MIS",
+        strategy_params: str = "{}",
     ) -> str:
         """Upsert a strategy deployment config. Returns the deploy_id."""
         deploy_id = f"{client_id}_{binding_id}_{strategy_name}_{underlying}"
@@ -571,8 +572,8 @@ class ClientDB:
             """INSERT INTO strategy_deployments
                (deploy_id, client_id, binding_id, strategy_name, underlying,
                 lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type,
-                is_active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?)
+                strategy_params, is_active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)
                ON CONFLICT(deploy_id) DO UPDATE SET
                  underlying=excluded.underlying,
                  lot_multiplier=excluded.lot_multiplier,
@@ -580,10 +581,12 @@ class ClientDB:
                  max_sl_rs=excluded.max_sl_rs,
                  squareoff_time=excluded.squareoff_time,
                  product_type=excluded.product_type,
+                 strategy_params=excluded.strategy_params,
                  is_active=1,
                  updated_at=excluded.updated_at""",
             (deploy_id, client_id, binding_id, strategy_name, underlying,
-             lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type, now, now),
+             lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type,
+             strategy_params, now, now),
         )
         logger.info(
             "ClientDB: deployment saved — %s [%s/%s %s %s lots=%.1f]",
@@ -1009,7 +1012,8 @@ class ClientDB:
             rows = con.execute(
                 """
                 SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
-                       d.strategy_name, d.is_running
+                       d.strategy_name, d.is_running, d.product_type,
+                       COALESCE(d.strategy_params, '{}') AS strategy_params
                 FROM clients c
                 JOIN strategy_deployments d ON c.client_id = d.client_id
                 WHERE c.is_active = 1
@@ -1234,6 +1238,7 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN totp_secret_enc TEXT DEFAULT ''",
             "ALTER TABLE strategy_deployments ADD COLUMN expiry_mode TEXT DEFAULT 'current'",
             "ALTER TABLE strategy_deployments ADD COLUMN product_type TEXT DEFAULT 'MIS'",
+            "ALTER TABLE strategy_deployments ADD COLUMN strategy_params TEXT DEFAULT '{}'",
         ):
             try:
                 con.execute(migration)

@@ -128,16 +128,17 @@ class D1TrapExecutionBridge:
                 deployments = db.get_deployments_sync(ev.client_id)
             except Exception:
                 deployments = []
+            _trap_names = {"d1_trap_option", "d1_trap_index", "d1_trap_fno"}
             matching = [
                 d for d in deployments
                 if d.get("binding_id") == ev.binding_id
-                and d.get("strategy_name") == "d1_trap_option"
+                and d.get("strategy_name") in _trap_names
                 and str(d.get("underlying", "")).upper() == ev.underlying.upper()
                 and int(d.get("is_running", 0) or 0) == 1
             ]
             if not matching:
                 logger.warning(
-                    "D1TrapExecutionBridge: BUY %s — [%s/%s] no running d1_trap_option deployment.",
+                    "D1TrapExecutionBridge: BUY %s — [%s/%s] no running trap deployment.",
                     ev.underlying, ev.client_id, ev.binding_id,
                 )
                 return
@@ -187,13 +188,14 @@ class D1TrapExecutionBridge:
         side = OrderSide.BUY if ev.action == "BUY" else OrderSide.SELL
         exchange = order_exchange(ev.underlying)
 
+        product = getattr(ev, "product_type", None) or "MIS"
         req = OrderRequest(
             symbol=symbol,
             exchange=exchange,
             side=side,
             qty=ev.quantity,
             order_type=OrderType.MARKET,
-            product="MIS",
+            product=product,
             price=ev.entry_price,  # ignored for MARKET; MockBroker uses as fill
             tag=f"D1T_{ev.underlying}_{ev.action}"[:20],
         )
@@ -246,8 +248,9 @@ class D1TrapExecutionBridge:
         try:
             from data_layer import trade_history as _th
             pnl = 0.0  # bridge doesn't know entry fill price for options; book logs spot P&L
+            strategy_name = getattr(ev, "strategy", "d1_trap_option") or "d1_trap_option"
             _th.record(
-                ev.client_id, "d1_trap_option", ev.underlying,
+                ev.client_id, strategy_name, ev.underlying,
                 ev.entry_price, fill_price, ev.reason, pnl,
                 binding_id=ev.binding_id,
                 legs=[{

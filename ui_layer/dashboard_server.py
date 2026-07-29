@@ -377,14 +377,15 @@ try:
         dry_run:    bool = False
 
     class _DeploymentSchema(_PydanticBase):
-        binding_id:     str
-        strategy_name:  str
-        underlying:     str   = "NIFTY"
-        lot_multiplier: float = 1.0
-        max_profit_rs:  float = 0.0
-        max_sl_rs:      float = 0.0
-        squareoff_time: str   = "15:20"
-        product_type:   str   = "MIS"   # "MIS" intraday | "NRML" carry-forward
+        binding_id:       str
+        strategy_name:    str
+        underlying:       str   = "NIFTY"
+        lot_multiplier:   float = 1.0
+        max_profit_rs:    float = 0.0
+        max_sl_rs:        float = 0.0
+        squareoff_time:   str   = "15:20"
+        product_type:     str   = "MIS"   # "MIS" intraday | "NRML" carry-forward
+        strategy_params:  str   = "{}"    # JSON — htf/mtf/ltf/itm for Trap Scanner
 
 
     class _TrapHistoricalReplaySchema(_PydanticBase):
@@ -3704,38 +3705,52 @@ class DashboardServer:
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout"}
+            allowed_strategies = {
+                "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
+                "d1_trap_option", "d1_trap_index", "d1_trap_fno",
+            }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 
             pt = (body.product_type or "MIS").upper()
             if pt not in ("MIS", "NRML"):
-                pt = "MIS"
+                # Default product_type by strategy
+                pt = "NRML" if body.strategy_name == "d1_trap_fno" else "MIS"
+
+            # Validate strategy_params JSON
+            import json as _json
+            try:
+                _json.loads(body.strategy_params or "{}")
+                sp = body.strategy_params or "{}"
+            except Exception:
+                sp = "{}"
 
             deploy_id = await _srv._client_db.save_deployment(
-                client_id      = cid,
-                binding_id     = body.binding_id,
-                strategy_name  = body.strategy_name,
-                underlying     = body.underlying,
-                lot_multiplier = body.lot_multiplier,
-                max_profit_rs  = body.max_profit_rs,
-                max_sl_rs      = body.max_sl_rs,
-                squareoff_time = sq,
-                product_type   = pt,
+                client_id       = cid,
+                binding_id      = body.binding_id,
+                strategy_name   = body.strategy_name,
+                underlying      = body.underlying,
+                lot_multiplier  = body.lot_multiplier,
+                max_profit_rs   = body.max_profit_rs,
+                max_sl_rs       = body.max_sl_rs,
+                squareoff_time  = sq,
+                product_type    = pt,
+                strategy_params = sp,
             )
 
             from data_layer.deployment_store import save_deployment_json, apply_deployment_to_runtime_config
             save_deployment_json(
-                deploy_id      = deploy_id,
-                client_id      = cid,
-                binding_id     = body.binding_id,
-                strategy_name  = body.strategy_name,
-                underlying     = body.underlying,
-                lot_multiplier = body.lot_multiplier,
-                max_profit_rs  = body.max_profit_rs,
-                max_sl_rs      = body.max_sl_rs,
-                squareoff_time = sq,
-                product_type   = pt,
+                deploy_id       = deploy_id,
+                client_id       = cid,
+                binding_id      = body.binding_id,
+                strategy_name   = body.strategy_name,
+                underlying      = body.underlying,
+                lot_multiplier  = body.lot_multiplier,
+                max_profit_rs   = body.max_profit_rs,
+                max_sl_rs       = body.max_sl_rs,
+                squareoff_time  = sq,
+                product_type    = pt,
+                strategy_params = sp,
             )
 
             # If engine is already active for this broker, hot-apply immediately

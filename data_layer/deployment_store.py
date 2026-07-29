@@ -39,32 +39,34 @@ def _json_path(deploy_id: str) -> Path:
 # ── Save ─────────────────────────────────────────────────────────────────────
 
 def save_deployment_json(
-    deploy_id:      str,
-    client_id:      str,
-    binding_id:     str,
-    strategy_name:  str,
-    underlying:     str,
-    lot_multiplier: float,
-    max_profit_rs:  float,
-    max_sl_rs:      float,
-    squareoff_time: str,
-    product_type:   str = "MIS",
+    deploy_id:       str,
+    client_id:       str,
+    binding_id:      str,
+    strategy_name:   str,
+    underlying:      str,
+    lot_multiplier:  float,
+    max_profit_rs:   float,
+    max_sl_rs:       float,
+    squareoff_time:  str,
+    product_type:    str = "MIS",
+    strategy_params: str = "{}",
 ) -> None:
     """Write deployment config to JSON file alongside the SQLite record."""
     _ensure_dir()
     payload = {
-        "deploy_id":      deploy_id,
-        "client_id":      client_id,
-        "binding_id":     binding_id,
-        "strategy_name":  strategy_name,
-        "underlying":     underlying,
-        "lot_multiplier": lot_multiplier,
-        "max_profit_rs":  max_profit_rs,
-        "max_sl_rs":      max_sl_rs,
-        "squareoff_time": squareoff_time,
-        "product_type":   product_type,
-        "is_active":      True,
-        "saved_at":       datetime.now(IST).isoformat(),
+        "deploy_id":       deploy_id,
+        "client_id":       client_id,
+        "binding_id":      binding_id,
+        "strategy_name":   strategy_name,
+        "underlying":      underlying,
+        "lot_multiplier":  lot_multiplier,
+        "max_profit_rs":   max_profit_rs,
+        "max_sl_rs":       max_sl_rs,
+        "squareoff_time":  squareoff_time,
+        "product_type":    product_type,
+        "strategy_params": strategy_params,
+        "is_active":       True,
+        "saved_at":        datetime.now(IST).isoformat(),
     }
     path = _json_path(deploy_id)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
