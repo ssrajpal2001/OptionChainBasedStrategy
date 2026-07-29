@@ -16,7 +16,13 @@ from strategies.v4_cascade.rolling_base import find_all_bear_zones, find_all_bul
 
 
 def debug_stock(symbol: str, token: str) -> None:
-    end_date   = date.today() - timedelta(days=1)
+    from datetime import datetime as _dt
+    from config.global_config import IST
+    _now_ist = _dt.now(IST)
+    if _now_ist.hour > 15 or (_now_ist.hour == 15 and _now_ist.minute >= 31):
+        end_date = date.today()
+    else:
+        end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=31)
 
     print(f"\n{'='*70}")

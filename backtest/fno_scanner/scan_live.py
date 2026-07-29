@@ -189,7 +189,13 @@ def _has_recent_earnings(bars: list, lookback: int = EARNINGS_LOOKBACK,
 
 
 def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
-    end_date   = date.today() - timedelta(days=1)
+    # Include today's bar if market has closed (after 15:31 IST), else use yesterday.
+    from datetime import datetime as _dt
+    _now_ist = _dt.now(IST)
+    if _now_ist.hour > 15 or (_now_ist.hour == 15 and _now_ist.minute >= 31):
+        end_date = date.today()
+    else:
+        end_date = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=31)   # 1-month D1 lookback
 
     # Determine which month to target for positional trading.
