@@ -2136,7 +2136,7 @@ document.addEventListener('alpine:init', () => {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
       const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'};
-      const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+dep.underlying;
+      const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying);
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
         : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
@@ -6439,7 +6439,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+dep.underlying"></span>
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -6657,7 +6657,7 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+dep.underlying"></span>
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -6750,7 +6750,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -6875,7 +6875,7 @@ function amoTest() {
                         x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'})[dep.strategy_name]||dep.strategy_name)+' · '+dep.underlying"></div>
+                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -7249,18 +7249,9 @@ function amoTest() {
               No strategies deployed to this broker. Use ⚡ Deploy on the Brokers tab.
             </div>
             <div class="flex flex-col gap-3">
-              <!-- Index traps always show (zone tracking is the main view).
-                   FnO trap (ALL_FNO) only shows when a stock has an active position.
+              <!-- Trap strategies always show (zone tracking is the main view).
                    Straddle + other strategies always show (IDLE state is useful). -->
-              <template x-for="dep in (clientDeployments||[]).filter(d=>{
-                if(d.binding_id!==b.binding_id) return false;
-                if(d.strategy_name==='d1_trap_index'||d.strategy_name==='d1_trap_option') return true;
-                if(d.strategy_name==='d1_trap_fno') {
-                  const pos=csPositions[b.binding_id]&&csPositions[b.binding_id][d.deploy_id];
-                  return pos&&(pos.legs||[]).length>0;
-                }
-                return true;
-              })" :key="dep.deploy_id">
+              <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                 <div class="t-card rounded p-4">
                   <!-- Header: strategy name + instrument + SQ time -->
                   <div class="flex items-center justify-between mb-3">
@@ -7268,7 +7259,7 @@ function amoTest() {
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
                            x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
-                        <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
+                        <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
                               x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                                 ? dep.lot_multiplier+'L · '+(dep.product_type||'NRML')
