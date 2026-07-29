@@ -3891,7 +3891,7 @@ function amoTest() {
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-2">
               <span class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                    x-text="'SELL STRADDLE · '+s.underlying"></span>
+                    x-text="({sell_straddle:'SELL STRADDLE',d1_trap_index:'TRAP SCANNER (INDEX)',d1_trap_option:'TRAP SCANNER',d1_trap_fno:'TRAP SCANNER (FnO)'}[s.type]||s.type.toUpperCase().replace(/_/g,' '))+' · '+s.underlying"></span>
               <span class="font-mono text-xs px-1.5 py-0.5 rounded"
                     :style="`background:${s.has_position?'rgba(16,185,129,0.15)':'rgba(100,116,139,0.12)'};color:${s.has_position?'var(--t-green)':'var(--t-muted)'}`"
                     x-text="s.has_position ? 'IN TRADE' : 'IDLE'"></span>
@@ -7255,11 +7255,11 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':'Sell Straddle'"></div>
+                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
-                              x-text="dep.strategy_name==='fno_positional'
+                              x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                                 ? dep.lot_multiplier+'L · '+(dep.product_type||'NRML')
                                 : dep.lot_multiplier+'L · SQ '+(dep.squareoff_time||'—')"></span>
                       </div>
