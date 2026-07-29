@@ -219,8 +219,11 @@ class D1TrapOptionBook(AbstractStrategyBook):
     def start(self) -> None:
         super().start()
         self._subscribe(Topic.CANDLE_CLOSE)
+        self._subscribe(Topic.INDEX_TICK)   # for real-time _last_spot update
         self._tasks.append(asyncio.create_task(
             self._candle_loop(), name=f"trap_candle_{self._underlying}"))
+        self._tasks.append(asyncio.create_task(
+            self._tick_loop(), name=f"trap_tick_{self._underlying}"))
         if not self._positional:
             self._tasks.append(asyncio.create_task(
                 self._eod_loop(), name=f"trap_eod_{self._underlying}"))
@@ -364,6 +367,36 @@ class D1TrapOptionBook(AbstractStrategyBook):
 
     # ── feed loops ────────────────────────────────────────────────────────────
 
+    async def _tick_loop(self) -> None:
+        """Update _last_spot from live INDEX_TICK so SPOT shows real price immediately
+        (not just from 5M candle closes, which lag by up to 5 minutes at startup)."""
+        from data_layer.base_feeder import IndexTick
+        q = self._loop_queues.get(Topic.INDEX_TICK)
+        if q is None:
+            return
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                if not isinstance(ev, IndexTick):
+                    continue
+                is_spot = (
+                    ev.symbol == self._spot_symbol
+                    or ev.symbol == self._underlying
+                    or (self._underlying == "NIFTY"
+                        and ev.symbol in ("NSE_INDEX|Nifty 50", "NIFTY", "NSE:NIFTY50-INDEX"))
+                    or (self._underlying == "SENSEX"
+                        and ev.symbol in ("BSE_INDEX|SENSEX", "SENSEX"))
+                    or (self._underlying == "BANKNIFTY"
+                        and ev.symbol in ("NSE_INDEX|Nifty Bank", "BANKNIFTY"))
+                )
+                if is_spot and ev.ltp and ev.ltp > 0:
+                    self._last_spot = float(ev.ltp)
+            except Exception:
+                pass
+
     async def _candle_loop(self) -> None:
         q = self._loop_queues.get(Topic.CANDLE_CLOSE)
         if q is None:
@@ -502,11 +535,43 @@ class D1TrapOptionBook(AbstractStrategyBook):
             self._current_htf_5m.append(bar)
 
         # ── Every-5M checks ───────────────────────────────────────────────────
+        self._check_zone_contact(bar)  # WAITING → MONITORING as soon as price touches zone
         self._check_pending_trigger(bar)
         self._check_exit(bar)
 
+    def _check_zone_contact(self, bar: _Bar) -> None:
+        """Per-5M: flip WAITING → MONITORING as soon as price enters a zone.
+        ref_bar is left None here — the FIRST MTF close after contact sets it,
+        and the SECOND MTF close checks for the C2 trigger (avoids premature entry)."""
+        today = bar.timestamp.date()
+        age_cutoff = (
+            datetime.combine(today, datetime.min.time()).replace(tzinfo=IST)
+            - timedelta(days=_MAX_ZONE_AGE_DAYS)
+        )
+        for m in self._monitors:
+            if m.done or m.invalid or m.state != "WAITING":
+                continue
+            if m.htf_reclaim_ts < age_cutoff:
+                continue
+            if m.direction == "LONG" and bar.low <= m.zone_hi:
+                m.state = "MONITORING"
+                m.zone_entry_ts = bar.timestamp
+                m.ref_bar = None   # first MTF close will set the proper ref bar
+                logger.info(
+                    "TrapBook[%s]: LONG zone %.2f-%.2f → MONITORING at 5M close (spot=%.2f)",
+                    self._underlying, m.zone_lo, m.zone_hi, bar.close,
+                )
+            elif m.direction == "SHORT" and bar.high >= m.zone_lo:
+                m.state = "MONITORING"
+                m.zone_entry_ts = bar.timestamp
+                m.ref_bar = None
+                logger.info(
+                    "TrapBook[%s]: SHORT zone %.2f-%.2f → MONITORING at 5M close (spot=%.2f)",
+                    self._underlying, m.zone_lo, m.zone_hi, bar.close,
+                )
+
     def _on_mtf_close(self, bar: _Bar) -> None:
-        """Zone monitoring, C2/TWEAK entry detection, and TSL ratchet (for intraday mode)."""
+        """C2/TWEAK entry detection, zone invalidation, and TSL ratchet."""
 
         # Intraday TSL: ratchet after each MTF close (positional TSL done in D1 loop)
         if not self._positional and self._position is not None and self._prev_mtf_bar is not None:
@@ -531,23 +596,17 @@ class D1TrapOptionBook(AbstractStrategyBook):
             if not t.done and t.htf_reclaim_ts >= age_cutoff
         ]
 
-        # ── Zone state machine (WAITING → MONITORING / invalidation / TWEAK) ─
+        # ── Zone invalidation / TWEAK (no WAITING→MONITORING here; done per 5M) ─
         for m in self._monitors:
             if m.done or m.invalid:
                 continue
             was_monitoring = (m.state == "MONITORING")
 
-            if m.state == "WAITING":
-                if m.direction == "LONG" and bar.low <= m.zone_hi:
-                    m.state = "MONITORING"
-                    m.zone_entry_ts = bar.timestamp
-                    m.ref_bar = bar
-                    was_monitoring = False
-                elif m.direction == "SHORT" and bar.high >= m.zone_lo:
-                    m.state = "MONITORING"
-                    m.zone_entry_ts = bar.timestamp
-                    m.ref_bar = bar
-                    was_monitoring = False
+            # If zone is MONITORING but ref_bar not yet set: this MTF bar becomes the ref.
+            # Don't trigger yet — wait for the NEXT MTF bar to confirm the C2 breach.
+            if m.state == "MONITORING" and m.ref_bar is None:
+                m.ref_bar = bar
+                continue
 
             # Zone failure → TWEAK
             if m.direction == "LONG" and bar.close < m.zone_lo:
