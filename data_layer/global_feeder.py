@@ -1097,6 +1097,9 @@ class FyersFeeder(BaseFeeder):
                 timestamp=datetime.now(IST),
             )
             await self._bus.publish(Topic.EQUITY_TICK, equity_tick)
+            # Also publish as INDEX_TICK so CandleCache builds 5M/75M candles for this
+            # stock (drives d1_trap_fno C2 state machine via CANDLE_CLOSE events).
+            await self._bus.publish(Topic.INDEX_TICK, equity_tick)
         else:
             # Option tick — parse Fyers symbol (NSE or MCX) and publish OptionTick
             try:

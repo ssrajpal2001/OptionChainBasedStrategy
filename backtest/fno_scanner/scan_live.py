@@ -354,10 +354,89 @@ def print_report(signals: List[Signal]) -> None:
     print(f"\n{'='*70}\n")
 
 
+def save_watchlist(signals: List[Signal], top_n: int = 30, out_path: Optional[str] = None) -> str:
+    """Save top-N signals (by status then R:R) to data/fno_watchlist.json.
+
+    Returns the file path written.  Only TRIGGERED + APPROACHING signals are saved.
+    Consumers (live trading system) read this at startup to know which stocks to subscribe.
+    """
+    from config.global_config import FNO_STOCK_CONFIG
+
+    ranked = sorted(
+        signals,
+        key=lambda s: (0 if s.status == "TRIGGERED" else 1, -s.rr),
+    )[:top_n]
+
+    records = []
+    for s in ranked:
+        cfg = FNO_STOCK_CONFIG.get(s.symbol, {})
+        records.append({
+            "symbol":           s.symbol,
+            "upstox_key":       cfg.get("upstox_key", ""),
+            "fyers":            cfg.get("fyers", ""),
+            "lot":              cfg.get("lot", 0),
+            "step":             cfg.get("step", 10),
+            "direction":        s.direction,
+            "status":           s.status,
+            "entry_line":       round(s.entry_line, 2),
+            # zone_lo / zone_hi: reconstruct from SL which already includes the buffer
+            "zone_lo":          round(s.hard_sl / (1 - HARD_SL_BUF / 100) if s.direction == "CE" else s.entry_line, 2),
+            "zone_hi":          round(s.entry_line if s.direction == "CE" else s.hard_sl / (1 + HARD_SL_BUF / 100), 2),
+            "hard_sl":          round(s.hard_sl, 2),
+            "day_t1":           round(s.day_t1, 2),
+            "rr":               round(s.rr, 2),
+            "dist_pct":         round(s.dist_pct, 2),
+            "zone_age":         s.zone_age,
+            "lock_date":        s.lock_date,
+            "suggested_strike": s.suggested_strike,
+            "expiry":           s.expiry,
+            "scanned_at":       datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+
+    if out_path is None:
+        out_path = str(ROOT / "data" / "fno_watchlist.json")
+
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump({"generated": datetime.now().strftime("%Y-%m-%d %H:%M"), "stocks": records}, f, indent=2)
+
+    return out_path
+
+
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="FnO Live Zone Scanner")
+    parser.add_argument("--save", action="store_true",
+                        help="Save top signals to data/fno_watchlist.json after scan")
+    parser.add_argument("--top-n", type=int, default=30,
+                        help="Max stocks to save to watchlist (default 30)")
+    parser.add_argument("--out", default=None,
+                        help="Override watchlist output path")
+    args = parser.parse_args()
+
     token = os.environ.get("UPSTOX_TOKEN", "").strip()
     if not token:
-        print("ERROR: Set UPSTOX_TOKEN environment variable.")
+        # Try loading from DB
+        try:
+            import asyncio as _asyncio
+            from data_layer.client_db import ClientDB as _CDB
+            async def _get_token():
+                db = _CDB(); await db.initialise()
+                creds = db.get_feeder_creds_sync("upstox") or {}
+                return creds.get("access_token", "")
+            token = _asyncio.run(_get_token())
+        except Exception:
+            pass
+    if not token:
+        print("ERROR: Set UPSTOX_TOKEN environment variable (or ensure upstox creds in DB).")
         sys.exit(1)
+
     signals = scan(token)
     print_report(signals)
+
+    if args.save:
+        path = save_watchlist(signals, top_n=args.top_n, out_path=args.out)
+        triggered_n   = sum(1 for s in signals if s.status == "TRIGGERED")
+        approaching_n = sum(1 for s in signals if s.status == "APPROACHING")
+        print(f"\n  Watchlist saved → {path}")
+        print(f"  {triggered_n} TRIGGERED  +  {approaching_n} APPROACHING  →  {min(len(signals), args.top_n)} stocks written")

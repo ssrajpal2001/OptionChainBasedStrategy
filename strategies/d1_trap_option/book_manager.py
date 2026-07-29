@@ -132,16 +132,27 @@ class D1TrapOptionBookManager(StrategyBookManager):
         return book
 
     def _register_fno_equity(self, underlying: str) -> None:
-        """Tell FyersFeeder to emit EQUITY_TICK for this FnO stock symbol."""
+        """Register equity spot ticks for FnO D1Trap books via both feeders.
+
+        Fyers path  → subscribe_fno_equity → EQUITY_TICK + INDEX_TICK
+        Upstox path → register_extra_spot_keys → INDEX_TICK natively
+        Both paths feed CandleCache → CANDLE_CLOSE events → d1_trap_fno C2 logic.
+        """
         try:
             from config.global_config import FNO_STOCK_CONFIG
             stock = FNO_STOCK_CONFIG.get(underlying.upper())
             if not stock:
                 return
-            fyers_sym = stock["fyers"]   # e.g. "NSE:RELIANCE-EQ"
-            # Access the feeder through the bus's global feeder reference
             gf = getattr(self._bus, "_global_feeder", None)
-            if gf is not None and hasattr(gf, "subscribe_fno_equity"):
+            if gf is None:
+                return
+            fyers_sym  = stock.get("fyers", "")       # "NSE:RELIANCE-EQ"
+            upstox_key = stock.get("upstox_key", "")  # "NSE_EQ|INE002A01018"
+            # Fyers: subscribe equity symbol → EQUITY_TICK (+INDEX_TICK from feeder fix)
+            if fyers_sym and hasattr(gf, "subscribe_fno_equity"):
                 gf.subscribe_fno_equity(fyers_sym, underlying)
+            # Upstox (primary): map NSE_EQ key → symbol name so ticks flow as INDEX_TICK
+            if upstox_key and hasattr(gf, "register_extra_spot_keys"):
+                gf.register_extra_spot_keys({upstox_key: underlying})
         except Exception:
             logger.debug("TrapBookManager: FnO equity registration skipped for %s", underlying)
