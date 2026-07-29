@@ -32,6 +32,11 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "manager_class": HourlyBreakoutBookManager,
         "per_binding": True,
     },
+    # d1_trap_option is the canonical launch key for ALL trap scanner variants.
+    # d1_trap_index and d1_trap_fno are deployment-level names stored in the DB;
+    # the single D1TrapOptionBookManager._wanted() scans all three names and
+    # spawns one book per (client, binding, underlying) regardless of which
+    # variant the deployment was saved as.
     "d1_trap_option": {
         "manager_class": D1TrapOptionBookManager,
         "per_binding": True,
