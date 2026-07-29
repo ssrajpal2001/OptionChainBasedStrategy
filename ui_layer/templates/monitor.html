@@ -6750,7 +6750,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="(dep.strategy_name==='v4_cascade'?'V4 Cascade':dep.strategy_name==='fno_positional'?'FnO Positional':'Sell Straddle')+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)+' · '+dep.underlying+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
