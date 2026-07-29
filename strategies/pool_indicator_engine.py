@@ -17,6 +17,11 @@ _log = logging.getLogger(__name__)
 
 Key = Tuple[int, str]
 
+# First minute of the regular NSE/BSE session (09:15 IST). Pre-open option ticks
+# (09:00–09:14) are committed with positive minute indices (540–554) and must NOT
+# count as live bars for SLOPE — that would give a false pre-open→session delta.
+_SESSION_START_MIN: int = 9 * 60 + 15  # 555
+
 
 class PoolIndicatorEngine:
     def __init__(self, rsi_len: int = 14, roc_len: int = 10, maxlen: int = 240) -> None:
@@ -125,14 +130,16 @@ class PoolIndicatorEngine:
         ind: Dict[str, float] = {"close": ce_ltp + pe_ltp, "vwap": ce_atp + pe_atp}
         # Freshness flag for callers/logs (diagnoses TF1/TF2 divergence & frozen illiquid legs).
         ind["stale_atp"] = 0.0 if self.pair_atp_fresh(ce_strike, pe_strike, stale_sec) else 1.0
-        # SLOPE (VWAP delta) is INTRADAY — it must use LIVE bars only. Seed bars carry prev-day
-        # ATP; mixing seed→live makes the first live slope a huge jump across the day boundary
-        # (a false SLOPE, and a contaminated session_min_vwap → false vwap_rise_sl). Seeds are for
-        # RSI/ROC closes only. Live bars have minute index >= 0; seeds use negative indices.
+        # SLOPE (VWAP delta) is INTRADAY — it must use POST-SESSION bars only.
+        # Seeds (negative minute index) and PRE-OPEN bars (9:10–9:14, minute < 555) are excluded.
+        # Pre-open bars have positive minute indices so `m >= 0` incorrectly included them, causing
+        # SLOPE to compare pre-open ATP vs the 9:15 bar → false SLOPE at 9:16:05 → early trade.
+        # With session start at minute=555 (09:15 IST), SLOPE requires the 9:15 bar + 9:16 bar
+        # (both committed), so the first valid SLOPE evaluation is at 09:17:05 as expected.
         ca, pa = self._atps.get(ce), self._atps.get(pe)
         cm, pm = self._mins.get(ce), self._mins.get(pe)
-        ca_live = [a for a, m in zip(ca, cm) if m >= 0] if (ca and cm) else []
-        pa_live = [a for a, m in zip(pa, pm) if m >= 0] if (pa and pm) else []
+        ca_live = [a for a, m in zip(ca, cm) if m >= _SESSION_START_MIN] if (ca and cm) else []
+        pa_live = [a for a, m in zip(pa, pm) if m >= _SESSION_START_MIN] if (pa and pm) else []
         if len(ca_live) >= 2 and len(pa_live) >= 2:
             _curr = ca_live[-1] + pa_live[-1]
             _prev = ca_live[-2] + pa_live[-2]
