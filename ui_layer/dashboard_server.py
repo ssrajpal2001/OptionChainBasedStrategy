@@ -3228,10 +3228,15 @@ class DashboardServer:
                                                 if not m.done and not m.invalid]
                             _monitoring = [m for m in _monitors_active if m.state == "MONITORING"]
                             _waiting    = [m for m in _monitors_active if m.state == "WAITING"]
-                            # latest trap = MONITORING first, then most-recent WAITING by htf_ref_ts
-                            _latest = (max(_monitoring, key=lambda m: m.htf_ref_ts) if _monitoring
-                                       else max(_waiting, key=lambda m: m.htf_ref_ts) if _waiting
-                                       else None)
+                            # latest trap = MONITORING zone closest to current spot (most actionable);
+                            # fallback to WAITING zone closest to spot; final fallback = most recent by htf_ref_ts
+                            def _pick_zone(monitors):
+                                if not monitors:
+                                    return None
+                                if _spot > 0:
+                                    return min(monitors, key=lambda m: abs((m.zone_lo + m.zone_hi) / 2 - _spot))
+                                return max(monitors, key=lambda m: m.htf_ref_ts)
+                            _latest = _pick_zone(_monitoring) if _monitoring else _pick_zone(_waiting)
                             _pending = getattr(tb, "_pending_5m", None)
                             _tp = getattr(tb, "_position", None)
 

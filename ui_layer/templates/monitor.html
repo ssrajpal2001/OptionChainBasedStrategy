@@ -7249,9 +7249,14 @@ function amoTest() {
               No strategies deployed to this broker. Use ⚡ Deploy on the Brokers tab.
             </div>
             <div class="flex flex-col gap-3">
-              <!-- Trap strategies always show (zone tracking is the main view).
-                   Straddle + other strategies always show (IDLE state is useful). -->
-              <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
+              <!-- Index/option trap + straddle + others: always show (zone tracking / IDLE state is useful).
+                   FnO trap (individual stocks): only show when a position is open to avoid 30-card clutter.
+                   ALL_FNO sentinel: always show as the single aggregated FnO card. -->
+              <template x-for="dep in (clientDeployments||[]).filter(d=>
+                d.binding_id===b.binding_id &&
+                (d.strategy_name!=='d1_trap_fno' || d.underlying==='ALL_FNO' ||
+                 ((csPositions[b.binding_id]||{})[d.deploy_id]||{legs:[]}).legs.length>0)
+              )" :key="dep.deploy_id">
                 <div class="t-card rounded p-4">
                   <!-- Header: strategy name + instrument + SQ time -->
                   <div class="flex items-center justify-between mb-3">
