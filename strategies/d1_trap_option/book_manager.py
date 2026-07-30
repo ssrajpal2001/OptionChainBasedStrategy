@@ -111,7 +111,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                                 if entry.get("step", 0) > 0:
                                     book_cfg["step_override"] = int(entry["step"])
                                 wanted[(cid, bid, sym)] = book_cfg
-                        logger.info(
+                        logger.debug(
                             "TrapBookManager: WATCHLIST loaded %d/%d stocks from %s",
                             min(top_n, len(approaching)), len(stocks), wl_path,
                         )
