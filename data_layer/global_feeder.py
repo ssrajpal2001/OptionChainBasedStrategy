@@ -397,8 +397,23 @@ class UpstoxFeeder(BaseFeeder):
         self._rebalancer = rebalancer
 
     def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
-        """Register NSE_EQ instrument keys → ticker names so stock ticks flow as INDEX_TICK."""
+        """Register NSE_EQ instrument keys → ticker names so stock ticks flow as INDEX_TICK.
+        Also subscribes the keys on the active WebSocket streamer so Upstox actually sends them."""
         self._extra_spot_keys.update(mapping)
+        new_keys = [k for k in mapping if k not in self._subscribed_keys]
+        if not new_keys:
+            return
+        for k in new_keys:
+            self._subscribed_keys.append(k)
+        if self._streamer:
+            try:
+                try:
+                    self._streamer.subscribe(new_keys, "full")
+                except TypeError:
+                    self._streamer.subscribe(new_keys)
+                logger.info("UpstoxFeeder: subscribed %d equity spot keys: %s", len(new_keys), new_keys)
+            except Exception as exc:
+                logger.warning("UpstoxFeeder: equity spot subscribe error: %s", exc)
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode _strikes_to_tokens() (strike_rebalancer.py) deliberately sends BOTH

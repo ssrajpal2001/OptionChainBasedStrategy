@@ -3279,8 +3279,8 @@ class DashboardServer:
                             }
 
                         _dep_product = dep.get("product_type") or "MIS"
-                        if underlying == "ALL_FNO":
-                            # FnO: aggregate legs from all active books; no zone tracking panel
+                        if underlying in ("ALL_FNO", "WATCHLIST"):
+                            # FnO multi-stock: aggregate legs from all active books for this binding
                             trap_books = _srv._find_trap_books_for_binding(cid, bid)
                             for tb in trap_books:
                                 leg, _pos_obj = _trap_leg_from_book(tb, _dep_product)
