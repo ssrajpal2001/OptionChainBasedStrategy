@@ -347,7 +347,7 @@ async def _run_live(
 
     # Normalise trap variant names → canonical registry key so any of
     # "d1_trap_index" / "d1_trap_fno" passed on the CLI still boots the manager.
-    _TRAP_ALIASES = {"d1_trap_index", "d1_trap_fno"}
+    _TRAP_ALIASES = {"d1_trap_index", "d1_trap_fno", "d1_trap_bear_only"}
     _raw_strats = {s.strip().lower() for s in (strategies or "").split(",") if s.strip()}
     _enabled_strats = {("d1_trap_option" if s in _TRAP_ALIASES else s) for s in _raw_strats}
     logger.info("run_system: enabled strategies = %s", sorted(_enabled_strats) or "ALL")

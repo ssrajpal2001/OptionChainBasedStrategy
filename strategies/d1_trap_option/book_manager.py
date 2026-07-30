@@ -18,9 +18,10 @@ from strategies.core import StrategyBookManager
 
 logger = logging.getLogger(__name__)
 
-_STRATEGY_NAMES = {"d1_trap_index", "d1_trap_fno", "d1_trap_option"}
+_STRATEGY_NAMES = {"d1_trap_index", "d1_trap_fno", "d1_trap_option", "d1_trap_bear_only"}
 
 _D1TrapOptionBook = None  # lazy-imported
+_D1TrapBearOnlyBook = None  # lazy-imported
 
 
 def _parse_params(raw: str, strategy_name: str) -> dict:
@@ -70,6 +71,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                     "htf_tf": params["htf"],
                     "mtf_tf": params["mtf"],
                     "itm_offset": int(params.get("itm", 1)),
+                    "itm_offset_pts": int(params.get("itm_offset_pts", 200)),
                     "product_type": product,
                 }
 
@@ -167,10 +169,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                     logger.debug("TrapBookManager: equity feed retry failed for %s: %s", underlying, exc)
 
     def _spawn_book(self, key, cfg):
-        global _D1TrapOptionBook
-        if _D1TrapOptionBook is None:
-            from strategies.d1_trap_option.book import D1TrapOptionBook as _cls
-            _D1TrapOptionBook = _cls
+        global _D1TrapOptionBook, _D1TrapBearOnlyBook
 
         cid, bid, underlying = key
 
@@ -182,6 +181,26 @@ class D1TrapOptionBookManager(StrategyBookManager):
             pass
 
         strategy_name = cfg.get("strategy_name", "d1_trap_index")
+
+        if strategy_name == "d1_trap_bear_only":
+            if _D1TrapBearOnlyBook is None:
+                from strategies.d1_trap_option.bear_only_book import D1TrapBearOnlyBook as _cls
+                _D1TrapBearOnlyBook = _cls
+            return _D1TrapBearOnlyBook(
+                bus=self._bus,
+                cfg=self._cfg,
+                underlying=underlying,
+                client_id=cid,
+                binding_id=bid,
+                lot_multiplier=cfg.get("lots", 1),
+                feeder_token=feeder_token,
+                itm_offset_pts=int(cfg.get("itm_offset_pts", 200)),
+                product_type=cfg.get("product_type", "MIS"),
+            )
+
+        if _D1TrapOptionBook is None:
+            from strategies.d1_trap_option.book import D1TrapOptionBook as _cls
+            _D1TrapOptionBook = _cls
 
         book = _D1TrapOptionBook(
             bus=self._bus,

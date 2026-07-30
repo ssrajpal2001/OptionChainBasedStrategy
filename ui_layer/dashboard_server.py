@@ -3181,10 +3181,31 @@ class DashboardServer:
                                 if _is_crypto:
                                     tracking["atm"] = round(
                                         float(live_price.get("CE") or live_price.get("PE") or 0.0), 2)
-                    elif sname in ("d1_trap_index", "d1_trap_fno", "d1_trap_option"):
+                    elif sname in ("d1_trap_index", "d1_trap_fno", "d1_trap_option", "d1_trap_bear_only"):
 
                         def _trap_leg_from_book(tb, dep_product):
                             """Build a position leg dict from a D1TrapOptionBook with an open position."""
+                            if getattr(tb, "_strategy_name", "") == "d1_trap_bear_only":
+                                st = tb.status()
+                                tp = st.get("position")
+                                if tp is None:
+                                    return None, None
+                                _und = getattr(tb, "_underlying", underlying)
+                                _ep = float(tp.get("entry", 0.0))
+                                _ltp = float(tp.get("ltp") or _ep)
+                                _qty = int(tp.get("qty", 0))
+                                _pnl = round((_ltp - _ep) * _qty, 2)
+                                _instr = f"{_und} {tp.get('strike')} {tp.get('side')}"
+                                leg = {
+                                    "symbol": _instr, "instrument": _instr, "type": dep_product or "MIS",
+                                    "side": "BUY", "ccy": "₹", "qty": _qty, "lot_size": _qty, "lots": 1,
+                                    "entry_price": round(_ep, 2), "sell_avg": 0.0, "buy_avg": round(_ep, 2),
+                                    "ltp": round(_ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                    "sl_price": round(float(tp.get("sl", 0)), 2),
+                                    "tsl_locked_pct": tp.get("locked_pct", 0.0),
+                                    "direction": "LONG", "underlying": _und,
+                                }
+                                return leg, None
                             tp = getattr(tb, "_position", None)
                             if tp is None:
                                 return None, None
@@ -3219,6 +3240,20 @@ class DashboardServer:
 
                         def _trap_zone_tracking(tb):
                             """Build zone-tracking dict from a D1TrapOptionBook's scanner state."""
+                            if getattr(tb, "_strategy_name", "") == "d1_trap_bear_only":
+                                st = tb.status()
+                                mz = tb.monitoring_zones()
+                                tp = st.get("position")
+                                phase = "IN_TRADE" if tp else "SCANNING"
+                                return {
+                                    "strategy": "d1_trap_bear_only",
+                                    "ce_strike": st.get("ce_strike"), "pe_strike": st.get("pe_strike"),
+                                    "spot_open": st.get("spot_open"),
+                                    "selection_reason": st.get("selection_reason"),
+                                    "phase": phase,
+                                    "ce": mz.get("ce"), "pe": mz.get("pe"),
+                                    "position": tp,
+                                }
                             _spot = float(getattr(tb, "_last_spot", 0.0) or 0.0)
                             _htf_mins = getattr(tb, "_htf_mins", 0)
                             _mtf_mins = getattr(tb, "_mtf_mins", 60)
@@ -3837,7 +3872,7 @@ class DashboardServer:
 
             allowed_strategies = {
                 "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
-                "d1_trap_option", "d1_trap_index", "d1_trap_fno",
+                "d1_trap_option", "d1_trap_index", "d1_trap_fno", "d1_trap_bear_only",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}

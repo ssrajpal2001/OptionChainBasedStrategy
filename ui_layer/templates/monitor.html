@@ -2136,7 +2136,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -6875,7 +6875,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -6997,10 +6997,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
+                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -7037,14 +7037,22 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm._htf='75min'; deployForm._mtf='15min'; deployForm._itm=1;
                           deployForm.squareoff_time='15:15';
+                        } else if(deployForm.strategy_name==='d1_trap_bear_only'){
+                          deployForm.product_type='MIS';
+                          deployForm.underlying='NIFTY';
+                          deployForm._itm_offset_pts=200;
+                          deployForm.squareoff_time='15:15';
                         } else {
                           deployForm.product_type='MIS';
                         }
-                        deployForm.strategy_params = JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
+                        deployForm.strategy_params = deployForm.strategy_name==='d1_trap_bear_only'
+                          ? JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||200})
+                          : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
                 <option value="d1_trap_index">Trap Scanner - Index (Intraday)</option>
                 <option value="d1_trap_fno">Trap Scanner - FnO (Positional)</option>
+                <option value="d1_trap_bear_only">Bear Trap Only (Option-Native, NIFTY)</option>
               </select>
             </div>
             <div>
@@ -7097,6 +7105,18 @@ function amoTest() {
                     <option value="0">ATM</option>
                   </select>
                 </div>
+              </div>
+            </template>
+            <!-- ITM offset (points) — shown only for Bear Trap Only -->
+            <template x-if="deployForm.strategy_name==='d1_trap_bear_only'">
+              <div>
+                <label class="sec-label mb-1">ITM OFFSET (POINTS)</label>
+                <input type="number" class="t-input" x-model.number="deployForm._itm_offset_pts"
+                       min="50" step="50" placeholder="200"
+                       @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||200})"/>
+                <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+                  CE = ATM − offset, PE = ATM + offset. Recomputed daily from NIFTY's open.
+                </p>
               </div>
             </template>
             <div x-data="{ get _crypto(){ return ['BTC','ETH'].includes((deployForm.underlying||'').toUpperCase()); } }">
@@ -7388,7 +7408,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -7610,7 +7630,69 @@ function amoTest() {
                        scanning BOTH sides continuously even while one side holds a trade
                        (structural flip can fire any time), so this stays visible alongside
                        the live legs below instead of being hidden by them. -->
-                  <template x-if="csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&!csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
+                  <!-- Bear-trap-only (option-chart-native) tracking panel. New 2026-07-30 --
+                       shows the daily-selected 200-ITM CE/PE strikes + reason, each side's own
+                       zone-scan stage, and the live tick-by-tick position. -->
+                  <template x-if="dep.strategy_name==='d1_trap_bear_only'&&csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{ get _tr(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
+                      <div class="mb-2" style="color:var(--t-muted)">
+                        <span x-text="_tr.selection_reason || 'Waiting for NIFTY open (09:16 IST) to select strikes...'"></span>
+                      </div>
+                      <div class="grid grid-cols-2 gap-2 mb-2">
+                        <template x-for="side in ['ce','pe']" :key="side">
+                          <div class="rounded p-2" style="background:rgba(0,0,0,0.15)"
+                               x-data="{ get _s(){ return _tr[side]||{}; } }">
+                            <div class="flex justify-between mb-1">
+                              <span style="font-weight:600" x-text="side.toUpperCase()+' '+(_s.strike||'—')"></span>
+                              <span class="px-1.5 rounded" :style="{
+                                  'ZONE_ENTERED':'background:rgba(100,116,139,0.15);color:var(--t-muted)',
+                                  '15M_TRACKING':'background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)',
+                                  '15M_BREACHED':'background:rgba(251,191,36,0.15);color:var(--t-amber)',
+                                  '5M_TRACKING':'background:rgba(251,191,36,0.15);color:var(--t-amber)',
+                                  'ARMED_5M':'background:rgba(16,185,129,0.15);color:var(--t-green)',
+                                  'IDLE':'background:rgba(100,116,139,0.08);color:var(--t-dim)',
+                                  'NO_DATA':'background:rgba(239,68,68,0.1);color:var(--t-red)',
+                                }[_s.stage]||''" x-text="_s.stage||'IDLE'"></span>
+                            </div>
+                            <div class="flex justify-between" x-show="_s.current_zone">
+                              <span style="color:var(--t-muted)">Zone</span>
+                              <span x-text="_s.current_zone?fmt(_s.current_zone.zone_lo)+'–'+fmt(_s.current_zone.zone_hi):'—'"></span>
+                            </div>
+                            <div class="flex justify-between">
+                              <span style="color:var(--t-muted)">LTP</span>
+                              <span style="color:var(--t-cyan)" x-text="fmt(_s.last_ltp)"></span>
+                            </div>
+                            <div class="text-center mt-1" style="color:var(--t-dim)" x-show="_s.zones_total===0">
+                              no zones yet
+                            </div>
+                          </div>
+                        </template>
+                      </div>
+                      <template x-if="_tr.position">
+                        <div x-data="{ get _p(){ return _tr.position; } }">
+                          <div class="flex items-center gap-1 mb-1" style="color:var(--t-green);font-weight:600">
+                            ● TRADE ACTIVE — <span x-text="_p.side"></span> <span x-text="_p.strike"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Entry / LTP / SL</span>
+                            <span x-text="fmt(_p.entry)+' / '+fmt(_p.ltp)+' / '+fmt(_p.sl)"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">TSL locked</span>
+                            <span style="color:var(--t-amber)" x-text="(_p.locked_pct||0)+'%'"></span>
+                          </div>
+                          <div class="flex justify-between border-t mt-0.5 pt-0.5" style="border-color:var(--t-border)">
+                            <span style="color:var(--t-muted)">P&L (tick)</span>
+                            <span :style="`color:${((_p.ltp-_p.entry)*_p.qty)>=0?'var(--t-green)':'var(--t-red)'};font-weight:600`"
+                                  x-text="'₹ '+(((_p.ltp||_p.entry)-_p.entry)*_p.qty).toFixed(0)"></span>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <template x-if="dep.strategy_name!=='d1_trap_bear_only'&&csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&!csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
                     <div class="text-xs font-mono py-1" style="color:var(--t-muted)"
                          x-data="{ get _t(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
                       <div class="flex justify-between items-baseline mb-1.5">
