@@ -75,6 +75,9 @@ _SESSION_CLOSE = time(15, 30)   # upper bound so an off-hours/heartbeat tick can
 _ENTRY_CUTOFF = time(14, 30)
 _EOD_TIME = time(15, 15)
 _STRIKE_STEP = 50
+_ATM_ROUND_STEP = 100   # ATM rounds to nearest 100 (2026-07-30 change); option
+                        # strikes themselves stay on the normal 50pt grid --
+                        # CE/PE = ATM +/- itm_offset_pts still land on valid strikes.
 _MAX_ZONE_AGE_DAYS = 20
 _ZONE_SIZE_THRESHOLD_PCT = 0.20
 _SL_BUFFER_PTS = 20.0
@@ -221,6 +224,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._position: Optional[dict] = None
         self._day_done = False
         self._selecting_strikes = False
+        self._warming_up = False
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -313,7 +317,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
     async def _select_strikes_for_today(self, spot_open: float) -> None:
         try:
-            atm = round(spot_open / self._strike_step) * self._strike_step
+            atm = round(spot_open / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
             ce_strike = int(atm - self._itm_offset_pts)
             pe_strike = int(atm + self._itm_offset_pts)
             logger.info(
@@ -348,6 +352,38 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     logger.info("BearTrap[%s]: %s %d warmed %d 1m bars -> %d bear zones",
                                 self._underlying, side, strike, len(series.bars_1m), len(series.zones))
                 self._series[side] = series
+
+            # Replay TODAY's own intraday bars (if the market has already opened) so
+            # zone/stage state catches up to "now" before live ticks arrive -- fixes
+            # 2026-07-30 finding: starting mid-day otherwise misses any zone that
+            # already reached MONITORING/ARMED/entered+exited earlier today.
+            # _warming_up suppresses real order placement (mirrors
+            # D1TrapOptionBook._warmup_intraday's _warming_up guard).
+            self._warming_up = True
+            try:
+                for side, strike in (("CE", ce_strike), ("PE", pe_strike)):
+                    series = self._series.get(side)
+                    if series is None:
+                        continue
+                    key = REGISTRY.get_upstox_key(self._underlying, expiry, strike, side)
+                    if not key:
+                        continue
+                    from data_layer.historical_candles import fetch_upstox_intraday_1m
+                    today_rows = await fetch_upstox_intraday_1m(key, self._feeder_token)
+                    replayed = 0
+                    for r in today_rows:
+                        ts = pd.Timestamp(r["ts"])
+                        ts = ts.tz_convert(IST) if ts.tzinfo else ts.tz_localize(IST)
+                        series.bars_1m.append(_Bar(ts, r["open"], r["high"], r["low"], r["close"]))
+                        series.last_ltp = r["close"]
+                        self._process_new_bar(side)
+                        replayed += 1
+                    if replayed:
+                        logger.info("BearTrap[%s]: %s replayed %d intraday bars (market already open) "
+                                    "-- zone/stage state caught up to now.",
+                                    self._underlying, side, replayed)
+            finally:
+                self._warming_up = False
         except Exception:
             logger.exception("BearTrap[%s]: strike selection failed.", self._underlying)
         finally:
@@ -403,7 +439,14 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         m15 = _resample(df_1m, 15)
         m5 = _resample(df_1m, 5)
         bars_60 = _to_bars(m60)
-        series.zones = _detect_bear_zones(bars_60)
+        # MERGE, don't replace: a fresh detect_bear_zones() returns brand-new WAITING
+        # zone dicts every call. Replacing series.zones wholesale (as this did before
+        # 2026-07-30) would wipe every zone's accumulated stage progress -- MONITORING,
+        # ref-candle, breach_ts, sub-zone, armed -- on every single bar close, meaning
+        # no zone could ever survive past Stage 1. Only append genuinely new zones.
+        existing_lock_ts = {z["lock_ts"] for z in series.zones}
+        new_zones = [z for z in _detect_bear_zones(bars_60) if z["lock_ts"] not in existing_lock_ts]
+        series.zones.extend(new_zones)
 
         known_from_cutoff = datetime.now(IST) - timedelta(days=_MAX_ZONE_AGE_DAYS)
         last_bar = df_1m.iloc[-1]
@@ -484,6 +527,15 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
     # ── entry / exit ─────────────────────────────────────────────────────────
 
     def _enter(self, side: str, zone: dict, entry_price: float, sl: float) -> None:
+        if self._warming_up:
+            # Replaying today's already-elapsed bars at startup -- this zone's
+            # opportunity already came and went before we were watching live.
+            # Skip the real order; the caller still marks the zone done so it
+            # won't re-fire once live ticks resume.
+            logger.info("BearTrap[%s]: %s would have ENTERED @ %.2f during replay "
+                        "(warmup, no order placed) — zone already resolved earlier today.",
+                        self._underlying, side, entry_price)
+            return
         sl_buffered = sl - _SL_BUFFER_PTS
         max_risk_pts = _MAX_RISK_RS_PER_LOT / self._lot_size
         sl_final = max(sl_buffered, entry_price - max_risk_pts)
