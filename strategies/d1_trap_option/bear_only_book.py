@@ -61,7 +61,7 @@ from data_layer.historical_candles import fetch_upstox_range_1m
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.v4_cascade.rolling_base import find_all_bear_zones
-from strategies.d1_trap_option.book import D1TrapOrderEvent
+from strategies.d1_trap_option.book import D1TrapOrderEvent, _upstox_key_for
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +234,45 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             self._option_tick_loop(), name=f"beartrap_opt_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
             self._eod_loop(), name=f"beartrap_eod_{self._underlying}"))
+        self._tasks.append(asyncio.create_task(
+            self._startup_open_fetch(), name=f"beartrap_openfetch_{self._underlying}"))
+
+    async def _startup_open_fetch(self) -> None:
+        """Get TODAY's real 09:15 open via REST the moment the book starts, regardless
+        of wall-clock time -- fixes 2026-07-30 finding: waiting for "the next live tick"
+        as a proxy for "today's open" is wrong whenever the app starts after the open
+        already happened (mid-day, after close, or on a restart) -- it picks up
+        whatever price is ticking NOW, not the actual 09:15 open. If the market
+        genuinely hasn't opened yet (no bars available), this is a no-op and the
+        live-tick fallback in _index_tick_loop handles it once the open actually prints."""
+        if not self._feeder_token:
+            return
+        today = datetime.now(IST).date()
+        if today.weekday() >= 5:   # weekend -- nothing to fetch
+            return
+        try:
+            key = _upstox_key_for(self._underlying)
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            rows = await fetch_upstox_intraday_1m(key, self._feeder_token)
+            if not rows:
+                logger.info("BearTrap[%s]: no intraday bars yet for %s (pre-market) — "
+                            "will select strikes off the first live tick after 09:16.",
+                            self._underlying, today)
+                return
+            open_px = float(rows[0]["open"])
+            if self._today != today:
+                self.reset_session()
+                self._today = today
+            if self._last_spot_open is None and not self._selecting_strikes:
+                self._last_spot_open = open_px
+                self._selecting_strikes = True
+                logger.info("BearTrap[%s]: fetched TODAY's real open=%.2f via REST (bar ts=%s) "
+                            "-- selecting strikes now regardless of current time.",
+                            self._underlying, open_px, rows[0].get("ts"))
+                asyncio.create_task(self._select_strikes_for_today(open_px))
+        except Exception:
+            logger.exception("BearTrap[%s]: startup open-fetch failed — falling back to live tick.",
+                              self._underlying)
 
     def reset_session(self) -> None:
         self._today = None
