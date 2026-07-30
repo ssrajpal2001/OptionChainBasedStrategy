@@ -100,7 +100,17 @@ class D1TrapOptionBookManager(StrategyBookManager):
                         for entry in approaching[:top_n]:
                             sym = entry.get("symbol", "").upper()
                             if sym:
-                                wanted[(cid, bid, sym)] = cfg.copy()
+                                book_cfg = cfg.copy()
+                                # Thread upstox_key / lot / step from watchlist JSON
+                                # so WATCHLIST stocks not in FNO_STOCK_CONFIG get correct
+                                # instrument key, lot size, and strike step.
+                                if entry.get("upstox_key"):
+                                    book_cfg["upstox_key"] = entry["upstox_key"]
+                                if entry.get("lot", 0) > 0:
+                                    book_cfg["lot_override"] = int(entry["lot"])
+                                if entry.get("step", 0) > 0:
+                                    book_cfg["step_override"] = int(entry["step"])
+                                wanted[(cid, bid, sym)] = book_cfg
                         logger.info(
                             "TrapBookManager: WATCHLIST loaded %d/%d stocks from %s",
                             min(top_n, len(approaching)), len(stocks), wl_path,
@@ -154,6 +164,9 @@ class D1TrapOptionBookManager(StrategyBookManager):
             mtf_tf=cfg.get("mtf_tf", "1H"),
             itm_offset=cfg.get("itm_offset", 1),
             product_type=cfg.get("product_type", "MIS"),
+            upstox_key=cfg.get("upstox_key", ""),
+            lot_override=cfg.get("lot_override", 0),
+            step_override=cfg.get("step_override", 0),
         )
 
         # Register FnO equity subscriptions on Fyers feeder

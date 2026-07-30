@@ -155,6 +155,9 @@ class D1TrapOptionBook(AbstractStrategyBook):
         mtf_tf: str = "1H",      # "1H" | "15min"
         itm_offset: int = 1,     # 1-ITM default
         product_type: str = "MIS",
+        upstox_key: str = "",    # override instrument key (for WATCHLIST stocks not in FNO_STOCK_CONFIG)
+        lot_override: int = 0,   # override lot size (from watchlist JSON)
+        step_override: int = 0,  # override strike step (from watchlist JSON)
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._strategy_name = strategy_name
@@ -162,13 +165,21 @@ class D1TrapOptionBook(AbstractStrategyBook):
         self._lot_multiplier = max(1, lot_multiplier)
         self._feeder_token = feeder_token
         self._product_type = product_type
+        self._upstox_key_override = upstox_key  # used in _load_htf_bars if set
 
-        # Lot size and strike step — index from ExchangeConfig, FnO stocks from FNO_STOCK_CONFIG
-        if self._positional:
+        # Lot size and strike step — explicit override (WATCHLIST) > FNO_STOCK_CONFIG > index config
+        if lot_override > 0:
+            self._lot_size = lot_override
+        elif self._positional:
             self._lot_size = fno_stock_lot(underlying)
-            self._strike_step = fno_stock_step(underlying)
         else:
             self._lot_size = (cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
+
+        if step_override > 0:
+            self._strike_step = step_override
+        elif self._positional:
+            self._strike_step = fno_stock_step(underlying)
+        else:
             self._strike_step = int(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
 
         self._itm_offset = max(1, itm_offset)
@@ -267,7 +278,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
             today = datetime.now(IST).date()
             if self._htf_mins == 0:
                 # D1 mode — fetch daily bars
-                key = _upstox_key_for(self._underlying)
+                key = self._upstox_key_override or _upstox_key_for(self._underlying)
                 start = today - timedelta(days=_HTF_WARMUP_DAYS)
                 bars = await asyncio.to_thread(
                     _fetch_bars, key, "day", start, today, self._feeder_token
@@ -275,7 +286,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
                 self._htf_bars = bars
             else:
                 # Sub-daily HTF (75min / 60min) — fetch 1M bars and resample
-                key = _upstox_key_for(self._underlying)
+                key = self._upstox_key_override or _upstox_key_for(self._underlying)
                 start = today - timedelta(days=_HTF_WARMUP_1M_DAYS)
                 bars_1m = await asyncio.to_thread(
                     _fetch_1m_bars, key, start, today, self._feeder_token
@@ -450,7 +461,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
                 continue
             try:
                 today = now.date()
-                key = _upstox_key_for(self._underlying)
+                key = self._upstox_key_override or _upstox_key_for(self._underlying)
                 bars = await asyncio.to_thread(
                     _fetch_bars, key, "day", today, today, self._feeder_token
                 )
