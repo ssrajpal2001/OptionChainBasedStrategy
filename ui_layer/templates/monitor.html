@@ -7412,10 +7412,66 @@ function amoTest() {
                     </div>
                   </div>
 
+                  <!-- WATCHLIST / ALL_FNO: show monitoring table for all tracked stocks -->
+                  <template x-if="dep.underlying==='WATCHLIST'||dep.underlying==='ALL_FNO'">
+                    <div class="rounded mb-2 overflow-hidden" style="border:1px solid var(--t-border)"
+                         x-data="{ get _mbooks(){ return ((csPositions[b.binding_id]||{})[dep.deploy_id]||{tracking:{}}).tracking.monitoring_books || []; } }">
+                      <div class="flex items-center px-3 py-1.5" style="background:var(--t-surface);border-bottom:1px solid var(--t-border)">
+                        <span class="font-mono text-xs font-bold" style="color:var(--t-cyan)">WATCHLIST TRACKER</span>
+                        <span class="ml-2 font-mono text-xs" style="color:var(--t-muted)" x-text="_mbooks.length+' stocks'"></span>
+                      </div>
+                      <div x-show="_mbooks.length===0" class="px-3 py-2 font-mono text-xs" style="color:var(--t-muted)">
+                        No books yet — loading…
+                      </div>
+                      <table x-show="_mbooks.length>0" class="w-full font-mono text-xs border-collapse">
+                        <thead>
+                          <tr style="background:var(--t-surface);color:var(--t-muted)">
+                            <th class="text-left px-2 py-1">Symbol</th>
+                            <th class="text-right px-2">Spot</th>
+                            <th class="text-left px-2">Phase</th>
+                            <th class="text-left px-2">Dir</th>
+                            <th class="text-right px-2">Zone Lo</th>
+                            <th class="text-right px-2">Zone Hi</th>
+                            <th class="text-left px-2 hidden sm:table-cell">Zone Date</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <template x-for="(bk,i) in _mbooks" :key="bk.underlying||i">
+                            <tr :style="bk.phase==='IN_TRADE'?'background:rgba(16,185,129,0.06)':bk.phase==='PENDING_TRIGGER'?'background:rgba(251,191,36,0.06)':bk.phase==='MONITORING'?'background:rgba(var(--t-cyan-rgb),0.04)':''">
+                              <td class="px-2 py-1 font-bold" style="color:var(--t-text)" x-text="bk.underlying||'—'"></td>
+                              <td class="text-right px-2 font-mono" style="color:var(--t-cyan)"
+                                  x-text="bk.spot ? bk.spot.toLocaleString('en-IN') : '—'"></td>
+                              <td class="px-2">
+                                <span class="px-1 rounded text-xs font-bold"
+                                      :style="{
+                                        'IN_TRADE':        'background:rgba(16,185,129,0.18);color:var(--t-green)',
+                                        'PENDING_TRIGGER': 'background:rgba(251,191,36,0.18);color:var(--t-amber)',
+                                        'MONITORING':      'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)',
+                                        'WAITING':         'background:rgba(100,116,139,0.1);color:var(--t-muted)',
+                                        'IDLE':            'color:var(--t-dim)',
+                                      }[bk.phase]||'color:var(--t-dim)'"
+                                      x-text="bk.phase||'IDLE'"></span>
+                              </td>
+                              <td class="px-2"
+                                  :style="bk.latest_zone&&bk.latest_zone.direction==='LONG'?'color:var(--t-green)':'color:var(--t-red)'"
+                                  x-text="bk.latest_zone ? (bk.latest_zone.direction==='LONG'?'▲ L':'▼ S') : '—'"></td>
+                              <td class="text-right px-2" style="color:var(--t-text)"
+                                  x-text="bk.latest_zone ? bk.latest_zone.zone_lo.toLocaleString('en-IN') : '—'"></td>
+                              <td class="text-right px-2" style="color:var(--t-text)"
+                                  x-text="bk.latest_zone ? bk.latest_zone.zone_hi.toLocaleString('en-IN') : '—'"></td>
+                              <td class="px-2 hidden sm:table-cell" style="color:var(--t-muted)"
+                                  x-text="bk.latest_zone && bk.latest_zone.htf_ref_ts ? bk.latest_zone.htf_ref_ts.slice(0,10) : '—'"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+
                   <!-- D1 Trap zone tracking panel (d1_trap_index / d1_trap_fno with single underlying).
                        Shows: latest HTF zone → MTF monitoring → pending 5M trigger → trade active.
                        Always visible for index trap (zone scanning is the main display even when IDLE). -->
-                  <template x-if="(dep.strategy_name==='d1_trap_index'||dep.strategy_name==='d1_trap_option'||dep.strategy_name==='d1_trap_fno')&&dep.underlying!=='ALL_FNO'&&csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
+                  <template x-if="(dep.strategy_name==='d1_trap_index'||dep.strategy_name==='d1_trap_option'||dep.strategy_name==='d1_trap_fno')&&dep.underlying!=='ALL_FNO'&&dep.underlying!=='WATCHLIST'&&csPositions[b.binding_id]&&csPositions[b.binding_id][dep.deploy_id]&&csPositions[b.binding_id][dep.deploy_id].tracking&&csPositions[b.binding_id][dep.deploy_id].tracking.htf_tf">
                     <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
                          x-data="{ get _tr(){ return csPositions[b.binding_id][dep.deploy_id].tracking; } }">
 

@@ -3280,15 +3280,23 @@ class DashboardServer:
 
                         _dep_product = dep.get("product_type") or "MIS"
                         if underlying in ("ALL_FNO", "WATCHLIST"):
-                            # FnO multi-stock: aggregate legs from all active books for this binding
+                            # FnO multi-stock: aggregate legs from all active books for this binding.
+                            # Also build monitoring_books so the UI can show all tracked stocks
+                            # even when no trade is open.
                             trap_books = _srv._find_trap_books_for_binding(cid, bid)
+                            _monitoring_books = []
                             for tb in trap_books:
                                 leg, _pos_obj = _trap_leg_from_book(tb, _dep_product)
-                                if leg is None:
-                                    continue
-                                legs.append(leg)
-                                if pos is None:
-                                    pos = _pos_obj
+                                if leg is not None:
+                                    legs.append(leg)
+                                    if pos is None:
+                                        pos = _pos_obj
+                                _monitoring_books.append(_trap_zone_tracking(tb))
+                            # Sort: IN_TRADE/PENDING first, then MONITORING, then WAITING/IDLE
+                            _phase_order = {"IN_TRADE": 0, "PENDING_TRIGGER": 1, "MONITORING": 2, "WAITING": 3, "IDLE": 4}
+                            _monitoring_books.sort(key=lambda b: (_phase_order.get(b.get("phase", "IDLE"), 5),
+                                                                   b.get("underlying", "")))
+                            tracking["monitoring_books"] = _monitoring_books
                         else:
                             # Single underlying: build legs + rich zone tracking
                             tb = _srv._find_trap_book(cid, bid, underlying)
