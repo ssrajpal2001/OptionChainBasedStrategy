@@ -6908,6 +6908,7 @@ function amoTest() {
                           deployForm.product_type='NRML';
                           deployForm._htf='D1'; deployForm._mtf='75min'; deployForm._itm=1;
                           deployForm.squareoff_time='23:59';
+                          deployForm.underlying='WATCHLIST';
                         } else if(deployForm.strategy_name==='d1_trap_index'){
                           deployForm.product_type='MIS';
                           deployForm._htf='75min'; deployForm._mtf='15min'; deployForm._itm=1;
@@ -6927,7 +6928,7 @@ function amoTest() {
               <!-- FnO: select WATCHLIST (nightly scan top-5) or ALL_FNO (all 30 stocks) -->
               <template x-if="deployForm.strategy_name === 'd1_trap_fno'">
                 <select class="t-input" x-model="deployForm.underlying"
-                        x-init="if(!deployForm.underlying||deployForm.underlying==='')deployForm.underlying='WATCHLIST'">
+                        x-init="if(!['WATCHLIST','ALL_FNO'].includes(deployForm.underlying))deployForm.underlying='WATCHLIST'">
                   <option value="WATCHLIST">Watchlist (nightly scan top-5)</option>
                   <option value="ALL_FNO">All 30 FnO Stocks</option>
                 </select>
