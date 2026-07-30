@@ -1328,6 +1328,7 @@ document.addEventListener('alpine:init', () => {
     _handle(msg) {
       if (msg.type === 'tick') {
         this.spots = { ...this.spots, [msg.sym]: { ltp: msg.ltp, atm: msg.atm, ts: msg.ts } };
+        window.dispatchEvent(new CustomEvent('spot-tick', { detail: { sym: msg.sym, ltp: msg.ltp } }));
       } else if (msg.type === 'snapshot') {
         this.snapshots = { ...this.snapshots, [msg.sym]: msg };
       } else if (msg.type === 'fill') {
@@ -7417,20 +7418,27 @@ function amoTest() {
                     <div class="rounded mb-2 overflow-hidden" style="border:1px solid var(--t-border)"
                          x-data="{
                            _mbooks: [],
+                           _liveSpots: {},
                            async _load() {
                              try {
                                const tok = localStorage.getItem('terminus_token') || (authToken||'');
                                const r = await fetch('/api/d1trap/zones', {headers:{'Authorization':'Bearer '+tok}});
                                const d = await r.json();
                                if (d.ok) {
-                                 // Filter to only books belonging to THIS deployment's binding
                                  const all = d.books || [];
                                  this._mbooks = all.filter(bk => bk.binding_id === b.binding_id);
                                }
                              } catch(e) {}
+                           },
+                           _onSpotTick(e) {
+                             this._liveSpots[e.detail.sym] = e.detail.ltp;
+                           },
+                           _spot(bk) {
+                             const live = this._liveSpots[bk.underlying];
+                             return live !== undefined ? live : bk.spot;
                            }
                          }"
-                         x-init="_load(); setInterval(()=>_load(), 30000)">
+                         x-init="_load(); setInterval(()=>_load(), 30000); window.addEventListener('spot-tick', e => _onSpotTick(e))">
                       <div class="flex items-center px-3 py-1.5" style="background:var(--t-surface);border-bottom:1px solid var(--t-border)">
                         <span class="font-mono text-xs font-bold" style="color:var(--t-cyan)">WATCHLIST TRACKER</span>
                         <span class="ml-2 font-mono text-xs" style="color:var(--t-muted)" x-text="_mbooks.length+' stocks'"></span>
@@ -7461,7 +7469,7 @@ function amoTest() {
                             :style="_phase==='IN_TRADE'?'background:rgba(16,185,129,0.06)':_phase==='PENDING_TRIGGER'?'background:rgba(251,191,36,0.06)':_phase==='MONITORING'?'background:rgba(var(--t-cyan-rgb),0.04)':''">
                               <td class="px-2 py-1 font-bold" style="color:var(--t-text)" x-text="bk.underlying||'—'"></td>
                               <td class="text-right px-2 font-mono" style="color:var(--t-cyan)"
-                                  x-text="bk.spot ? bk.spot.toLocaleString('en-IN') : '—'"></td>
+                                  x-text="_spot(bk) ? _spot(bk).toLocaleString('en-IN') : '—'"></td>
                               <td class="px-2">
                                 <span class="px-1 rounded text-xs font-bold"
                                       :style="{
