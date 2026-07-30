@@ -7415,13 +7415,25 @@ function amoTest() {
                   <!-- WATCHLIST / ALL_FNO: show monitoring table for all tracked stocks -->
                   <template x-if="dep.underlying==='WATCHLIST'||dep.underlying==='ALL_FNO'">
                     <div class="rounded mb-2 overflow-hidden" style="border:1px solid var(--t-border)"
-                         x-data="{ get _mbooks(){ return ((csPositions[b.binding_id]||{})[dep.deploy_id]||{tracking:{}}).tracking.monitoring_books || []; } }">
+                         x-data="{
+                           _mbooks: [],
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/d1trap/zones', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) this._mbooks = d.books || [];
+                             } catch(e) {}
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 30000)">
                       <div class="flex items-center px-3 py-1.5" style="background:var(--t-surface);border-bottom:1px solid var(--t-border)">
                         <span class="font-mono text-xs font-bold" style="color:var(--t-cyan)">WATCHLIST TRACKER</span>
                         <span class="ml-2 font-mono text-xs" style="color:var(--t-muted)" x-text="_mbooks.length+' stocks'"></span>
+                        <button @click="_load()" class="ml-auto font-mono text-xs px-2" style="color:var(--t-muted)">⟳</button>
                       </div>
                       <div x-show="_mbooks.length===0" class="px-3 py-2 font-mono text-xs" style="color:var(--t-muted)">
-                        No books yet — loading…
+                        Loading…
                       </div>
                       <table x-show="_mbooks.length>0" class="w-full font-mono text-xs border-collapse">
                         <thead>
@@ -7432,12 +7444,17 @@ function amoTest() {
                             <th class="text-left px-2">Dir</th>
                             <th class="text-right px-2">Zone Lo</th>
                             <th class="text-right px-2">Zone Hi</th>
+                            <th class="text-right px-2">Dist%</th>
                             <th class="text-left px-2 hidden sm:table-cell">Zone Date</th>
                           </tr>
                         </thead>
                         <tbody>
                           <template x-for="(bk,i) in _mbooks" :key="bk.underlying||i">
-                            <tr :style="bk.phase==='IN_TRADE'?'background:rgba(16,185,129,0.06)':bk.phase==='PENDING_TRIGGER'?'background:rgba(251,191,36,0.06)':bk.phase==='MONITORING'?'background:rgba(var(--t-cyan-rgb),0.04)':''">
+                            <tr x-data="{
+                              get _phase(){ return bk.position ? 'IN_TRADE' : bk.pending ? 'PENDING_TRIGGER' : (bk.zones||[]).some(z=>z.state==='MONITORING') ? 'MONITORING' : (bk.zones||[]).length ? 'WAITING' : 'IDLE'; },
+                              get _z(){ return (bk.zones||[])[0] || null; }
+                            }"
+                            :style="_phase==='IN_TRADE'?'background:rgba(16,185,129,0.06)':_phase==='PENDING_TRIGGER'?'background:rgba(251,191,36,0.06)':_phase==='MONITORING'?'background:rgba(var(--t-cyan-rgb),0.04)':''">
                               <td class="px-2 py-1 font-bold" style="color:var(--t-text)" x-text="bk.underlying||'—'"></td>
                               <td class="text-right px-2 font-mono" style="color:var(--t-cyan)"
                                   x-text="bk.spot ? bk.spot.toLocaleString('en-IN') : '—'"></td>
@@ -7449,18 +7466,21 @@ function amoTest() {
                                         'MONITORING':      'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)',
                                         'WAITING':         'background:rgba(100,116,139,0.1);color:var(--t-muted)',
                                         'IDLE':            'color:var(--t-dim)',
-                                      }[bk.phase]||'color:var(--t-dim)'"
-                                      x-text="bk.phase||'IDLE'"></span>
+                                      }[_phase]||'color:var(--t-dim)'"
+                                      x-text="_phase"></span>
                               </td>
                               <td class="px-2"
-                                  :style="bk.latest_zone&&bk.latest_zone.direction==='LONG'?'color:var(--t-green)':'color:var(--t-red)'"
-                                  x-text="bk.latest_zone ? (bk.latest_zone.direction==='LONG'?'▲ L':'▼ S') : '—'"></td>
+                                  :style="_z&&_z.direction==='LONG'?'color:var(--t-green)':'color:var(--t-red)'"
+                                  x-text="_z ? (_z.direction==='LONG'?'▲ L':'▼ S') : '—'"></td>
                               <td class="text-right px-2" style="color:var(--t-text)"
-                                  x-text="bk.latest_zone ? bk.latest_zone.zone_lo.toLocaleString('en-IN') : '—'"></td>
+                                  x-text="_z ? _z.zone_lo.toLocaleString('en-IN') : '—'"></td>
                               <td class="text-right px-2" style="color:var(--t-text)"
-                                  x-text="bk.latest_zone ? bk.latest_zone.zone_hi.toLocaleString('en-IN') : '—'"></td>
+                                  x-text="_z ? _z.zone_hi.toLocaleString('en-IN') : '—'"></td>
+                              <td class="text-right px-2 font-mono"
+                                  :style="_z&&_z.dist_pct!==null ? (Math.abs(_z.dist_pct)<2?'color:var(--t-amber)':'color:var(--t-muted)') : 'color:var(--t-dim)'"
+                                  x-text="_z&&_z.dist_pct!==null ? (_z.dist_pct>0?'+':'')+_z.dist_pct.toFixed(1)+'%' : '—'"></td>
                               <td class="px-2 hidden sm:table-cell" style="color:var(--t-muted)"
-                                  x-text="bk.latest_zone && bk.latest_zone.htf_ref_ts ? bk.latest_zone.htf_ref_ts.slice(0,10) : '—'"></td>
+                                  x-text="_z && _z.ref_ts ? _z.ref_ts.slice(0,10) : '—'"></td>
                             </tr>
                           </template>
                         </tbody>
