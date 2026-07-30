@@ -2,6 +2,13 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
+> **CURRENT FOCUS (2026-07-30):** This project is **ONLY** working on two strategies:
+> 1. **SellStraddle** — theta-decay option seller (mature, live in production)
+> 2. **D1 Trap FnO/Index** — zone-based option buyer (active development, next session continues here)
+>
+> Do NOT suggest, implement, or discuss any other strategies. All new work belongs to
+> one of these two. When starting a new session, read the D1 Trap section below first.
+
 ---
 
 ## Project Overview
@@ -10,7 +17,7 @@ NSE/BSE options algorithmic trading system with:
 - Multi-tenant client lifecycle management
 - Real-time option chain ingestion (Upstox + Fyers dual-feed)
 - Shared global data feed server (TCP broadcast hub)
-- SellStraddle strategy engine (only strategy currently live — see note below)
+- SellStraddle strategy engine + D1 Trap FnO/Index option buyer (both live)
 - Risk management with circuit breakers
 - Live FastAPI dashboard with WebSocket telemetry
 - Headless TOTP authentication for all supported brokers
@@ -66,7 +73,10 @@ OptionChainBasedStrategy/
 │   └── gap_handler.py         Gap-open detector; publishes GAP_EVENT to EventBus
 │
 ├── strategies/
-│   └── sell_straddle.py       SellStraddleStrategy — ATM straddle/strangle premium decay
+│   ├── sell_straddle.py       SellStraddleStrategy — ATM straddle/strangle premium decay
+│   └── d1_trap_option/
+│       ├── book.py            D1TrapOptionBook — per-(client,binding,underlying) zone engine
+│       └── book_manager.py    D1TrapOptionBookManager — spawns books; WATCHLIST + ALL_FNO sentinels
 │
 ├── management/
 │   ├── __init__.py            Exports ClientManager, AdminConsole, RiskManager
@@ -163,17 +173,15 @@ EC2 instance
 
 ## Strategy Reference
 
-> **2026-07-18: TrapTradingEngine, TrapScanner (`strategies/trap_scanner/`), and
-> IronCondorStrategy were removed entirely** — code, tests, backtest/research scripts,
-> registry entries, and all `run_system.py`/dashboard wiring. **SellStraddle is now the
-> only live strategy**, running across NIFTY, SENSEX, other NSE indices, BFO, MCX, and
-> crypto (BTC/ETH via Delta Exchange). Iron Condor and a fresh TrapScanner design are
-> planned to be rebuilt from scratch later — do not resurrect the deleted v1/v2 trap
-> code or `iron_condor.py` as a starting point; treat that history as reference only
-> (recoverable via `git log` on this repo pre-2026-07-18 if ever needed).
+> **2026-07-18:** TrapTradingEngine, TrapScanner (`strategies/trap_scanner/`), and
+> IronCondorStrategy were removed entirely — code, tests, backtest/research scripts,
+> registry entries, and all `run_system.py`/dashboard wiring. Iron Condor and the old
+> TrapScanner are gone; do not resurrect deleted v1/v2 trap code as a starting point
+> (recoverable via `git log` pre-2026-07-18 if ever needed).
 >
-> `strategies/fno_stock_monitor.py` (nightly FnO stock scanner alert feature) was also
-> removed in the same pass — it depended on TrapScanner's zone-detection primitives.
+> **2026-07-23+:** D1 Trap (`d1_trap_fno` / `d1_trap_index`) rebuilt from scratch as a
+> zone-based option BUYER strategy in `strategies/d1_trap_option/`. This is NOT related
+> to the deleted TrapScanner. Both **SellStraddle and D1 Trap are now live**.
 
 ### SellStraddleStrategy (`strategies/sell_straddle.py`)
 ATM straddle/strangle selling for theta decay. Ported from Option_Selling_May_2026.
@@ -217,6 +225,56 @@ ATM straddle/strangle selling for theta decay. Ported from Option_Selling_May_20
   - **Theta ENTRY basis** (`entry_basis`=ltp|theta + `theta_target`): MIN floor on raw LTP or per-leg TIME VALUE (`straddle_selection.leg_entry_value`); threaded into beginning/re-entry/roll; balance stays on LTP; `ltp` basis byte-identical to legacy. **Theta TSL basis** (`tsl_scalable.basis`=ltp|theta): staircase trails time-value decay vs LTP P&L. Theta = `theta_calc.py` intrinsic/time-value, never Black-Scholes.
   - **UI**: PRODUCT TYPE → MIS/NRML toggle (native `<select>` was dark-on-dark); rule rows wrap below `xl` (was `md`) → no 100%-zoom overflow, ✕ reachable; broker-specific **⊗ Square Off** + `/api/client/broker/{id}/squareoff`; ENTRY/TSL basis selectors; positions panel = broker-style ledger (Instrument·Type·Qty·Sell·Buy·LTP·P&L·MTM + TOTAL).
 - **Ops**: `python run_system.py --mode live --ui --index <IDX> --strategies sell_straddle`. `scripts/fresh_start.sh <IDX>` pulls + WIPES positions/history/logs + restarts (skip if preserving data; plain `git reset --hard` never touches gitignored `data/`). `pm2 restart` reuses old args — use fresh_start / explicit `pm2 start` to change `--index`/`--strategies`. HTTPS broker callbacks on a raw EC2 IP: `scripts/setup_https.sh` (Caddy + sslip.io). **Footguns**: MCX `squareoff_time` must be ~23:25 (15:15 default instantly EOD-exits MCX); NIFTY lot=75 (65 rejected); MCX needs Zerodha single-ledger activation.
+
+### D1 Trap FnO / Index (`strategies/d1_trap_option/`)
+
+Option **buyer** strategy — detects D1 supply/demand zones on the UNDERLYING spot price,
+enters intraday option (CE for LONG, PE for SHORT) on a multi-timeframe cascade:
+HTF zone → MTF C2 confirmation → LTF 5M trigger entry.
+
+**Files:** `strategies/d1_trap_option/book.py` (engine), `book_manager.py` (lifecycle)
+
+**Strategy names in DB:** `d1_trap_fno` (FnO stocks, positional NRML) | `d1_trap_index` (indices, intraday MIS)
+
+**Default timeframes per strategy:**
+- `d1_trap_fno`: HTF=D1, MTF=75min, LTF=5min — overridable via `strategy_params` JSON
+- `d1_trap_index`: HTF=75min, MTF=15min, LTF=5min
+
+**Zone state machine (per `_ZoneMonitor`):**
+- `WAITING` — zone detected on HTF; watching for price to enter zone
+- `MONITORING` — price bar touched zone (`LONG: bar.low ≤ zone_hi`; `SHORT: bar.high ≥ zone_lo`); first MTF bar after contact becomes `ref_bar`
+- C2 trigger — next MTF bar breaks ref bar (`LONG: bar.high > ref.high`; `SHORT: bar.low < ref.low`) → sets `_pending_5m`; LTF 5M entry fires on next 5M confirmation
+- `invalid` — MTF bar closes THROUGH zone (`LONG: close < zone_lo`; `SHORT: close > zone_hi`) → zone failed; TWEAK counter-direction setup queued if zone had been MONITORING
+- `done` — position entered; monitor consumed
+
+**TWEAK setup:** after zone failure, counter-direction 5M breach of the failure bar triggers entry (SHORT zone failure → LONG TWEAK if next bar's `high > failure_bar.high`).
+
+**Intraday warmup on startup (`_warmup_intraday`):**
+Fetches today's 1M bars via Upstox, replays through `_check_zone_contact` + `_on_mtf_close`
+so zone states (MONITORING / invalid) are correct on mid-day restart. Gate: `self._warming_up = True`
+suppresses C2 triggers and order placement during replay — only zone contact + invalidation run.
+- ⚠️ **Upstox intraday API for NSE_EQ stocks only accepts `1minute` or `30minute`** — NOT `5minute` (error UDAPI1076). The warmup fetches `1minute` bars and aggregates into MTF buckets internally.
+
+**WATCHLIST sentinel** (`underlying=WATCHLIST`, `strategy_name=d1_trap_fno`):
+- Reads `data/fno_watchlist.json` written by nightly scan
+- Nightly command (run after 15:30 IST): `python backtest/fno_scanner/scan_live.py --save --top-n 5`
+- Takes `stocks[:top_n]` from pre-sorted file (sorted by `btst_rr` descending) — hard cap of 5 books
+- Each JSON entry carries `upstox_key`, `lot`, `step` so stocks not in `FNO_STOCK_CONFIG` work correctly
+- Old individual stock deployments in `strategy_deployments` (e.g. AXISBANK with `is_running=1`) will spawn extra books — delete them, keep only the WATCHLIST row
+
+**Dashboard endpoint:** `GET /api/d1trap/zones` → all books' `monitoring_zones()` dict
+Fields per book: `underlying`, `client_id`, `binding_id`, `spot`, `zones[]` (each: `direction`,
+`zone_lo`, `zone_hi`, `state`, `dist_pct`, `ref_ts`), `pending`, `position`, `total_zones`
+
+**WATCHLIST TRACKER UI (`monitor.html`):**
+- Fetches `/api/d1trap/zones` on init + every 30s; filters by `bk.binding_id === b.binding_id`
+- Real-time spot via WS: `window.dispatchEvent(new CustomEvent('spot-tick', {detail:{sym,ltp}}))` in `_handle()`; component listens via `window.addEventListener('spot-tick', ...)` → `_liveSpots{}` dict
+- Phase derived from `bk.position` / `bk.pending` / `bk.zones[0].state`; Dist% column (amber ≤ 2%)
+
+**Ops / deployment:**
+- One `strategy_deployments` row per (client, binding): `underlying=WATCHLIST`, `strategy_name=d1_trap_fno`, `product_type=NRML`, `strategy_params={"htf":"D1","mtf":"75min","top_n":5}`
+- `lot_multiplier` sets quantity; book auto-spawns on reconcile when `is_running=1`
+- `pm2 restart terminus` after code changes; `git pull` before restart on EC2
 
 ---
 
