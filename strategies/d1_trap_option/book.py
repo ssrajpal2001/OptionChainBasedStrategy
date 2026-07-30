@@ -211,6 +211,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
         self._last_spot: Optional[float] = None
         self._day_done = False
         self._d1_fetched_today = False   # guard against re-fetching D1 bar same day
+        self._warming_up = False         # True while replaying intraday history at startup
 
         # Candle symbol filter — index vs equity
         if self._positional:
@@ -294,14 +295,85 @@ class D1TrapOptionBook(AbstractStrategyBook):
                 self._htf_bars = _resample(bars_1m, self._htf_mins)
 
             self._rebuild_monitors(today)
-            self._htf_loaded = True
             logger.info(
                 "TrapBook[%s]: %d HTF bars → %d zone monitors.",
                 self._underlying, len(self._htf_bars), len(self._monitors),
             )
+            # Replay today's intraday bars so zone states reflect current market
+            await self._warmup_intraday(today)
+            self._htf_loaded = True
         except Exception:
             logger.exception("TrapBook[%s]: startup load failed.", self._underlying)
             self._htf_loaded = True
+
+    async def _warmup_intraday(self, today: date) -> None:
+        """Fetch today's 5M bars and replay through zone logic to seed correct state.
+
+        Zone contact (WAITING→MONITORING) and zone failure (invalid) are applied.
+        C2 trigger and order placement are suppressed via self._warming_up flag
+        so no phantom trades fire from historical intraday data.
+        """
+        now = datetime.now(IST)
+        if now.time() < _SESSION_OPEN:
+            return  # pre-market, nothing to replay
+
+        key = self._upstox_key_override or _upstox_key_for(self._underlying)
+        try:
+            bars_5m = await asyncio.to_thread(
+                _fetch_intraday_5m, key, self._feeder_token
+            )
+        except Exception as exc:
+            logger.warning("TrapBook[%s]: intraday warmup fetch failed: %s", self._underlying, exc)
+            return
+
+        if not bars_5m:
+            logger.debug("TrapBook[%s]: no intraday bars yet for warmup.", self._underlying)
+            return
+
+        self._warming_up = True
+        try:
+            mtf_bucket_bars: List[_Bar] = []
+            current_bucket: Optional[datetime] = None
+
+            for bar in bars_5m:
+                if bar.timestamp.time() < _SESSION_OPEN:
+                    continue
+                self._last_spot = bar.close
+
+                # Zone contact: WAITING → MONITORING
+                self._check_zone_contact(bar)
+
+                # Accumulate into MTF bucket
+                bucket_open = _mtf_bucket(bar.timestamp, self._mtf_mins)
+                if current_bucket is None:
+                    current_bucket = bucket_open
+
+                if bucket_open != current_bucket:
+                    # MTF bar just closed — build synthetic bar and process
+                    if mtf_bucket_bars:
+                        mtf_bar = _Bar(
+                            timestamp=current_bucket + timedelta(minutes=self._mtf_mins),
+                            open=mtf_bucket_bars[0].open,
+                            high=max(b.high for b in mtf_bucket_bars),
+                            low=min(b.low for b in mtf_bucket_bars),
+                            close=mtf_bucket_bars[-1].close,
+                        )
+                        self._on_mtf_close(mtf_bar)
+                    current_bucket = bucket_open
+                    mtf_bucket_bars = []
+
+                mtf_bucket_bars.append(bar)
+
+            active = sum(1 for m in self._monitors if not m.done and not m.invalid)
+            monitoring = sum(1 for m in self._monitors
+                             if not m.done and not m.invalid and m.state == "MONITORING")
+            logger.info(
+                "TrapBook[%s]: intraday warmup complete — %d 5M bars replayed, "
+                "%d monitors active (%d MONITORING).",
+                self._underlying, len(bars_5m), active, monitoring,
+            )
+        finally:
+            self._warming_up = False
 
     def _rebuild_monitors(self, as_of: date) -> None:
         """Rebuild zone monitors from self._htf_bars."""
@@ -649,8 +721,9 @@ class D1TrapOptionBook(AbstractStrategyBook):
 
         self._prev_mtf_bar = bar
 
-        # Gate: no new entry at cutoff, if position already open, or day done
-        if (bar.timestamp.time() >= _ENTRY_CUTOFF
+        # Gate: no new entry during warmup replay, at cutoff, or if position/pending open
+        if (self._warming_up
+                or bar.timestamp.time() >= _ENTRY_CUTOFF
                 or self._position is not None
                 or self._pending_5m is not None
                 or (not self._positional and self._day_done)):
@@ -1056,6 +1129,41 @@ def _fetch_bars(
             with open(tmp, "w") as f:
                 json.dump(raw, f)
             os.replace(tmp, cache_file)
+
+    bars: List[_Bar] = []
+    for c in reversed((raw.get("data") or {}).get("candles") or []):
+        try:
+            ts = datetime.fromisoformat(c[0]).astimezone(IST)
+            bars.append(_Bar(timestamp=ts, open=float(c[1]), high=float(c[2]),
+                             low=float(c[3]), close=float(c[4])))
+        except Exception:
+            pass
+    return bars
+
+
+def _fetch_intraday_5m(instrument_key: str, token: str) -> List[_Bar]:
+    """Fetch today's intraday 5M bars from Upstox (no cache — always live data)."""
+    from urllib.parse import quote as _q
+    try:
+        from curl_cffi import requests as _cc
+        def _get(url, hdrs): return _cc.get(url, headers=hdrs, impersonate="chrome131", timeout=30).json()
+    except ImportError:
+        import urllib.request as _ureq, json as _json
+        def _get(url, hdrs):
+            req = _ureq.Request(url, headers=hdrs)
+            with _ureq.urlopen(req, timeout=30) as r:
+                return _json.loads(r.read())
+
+    url = (
+        f"https://api.upstox.com/v2/historical-candle/intraday/"
+        f"{_q(instrument_key, safe='')}/5minute"
+    )
+    hdrs = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
+    try:
+        raw = _get(url, hdrs)
+    except Exception as exc:
+        logger.warning("TrapBook intraday 5M fetch failed for %s: %s", instrument_key, exc)
+        return []
 
     bars: List[_Bar] = []
     for c in reversed((raw.get("data") or {}).get("candles") or []):
