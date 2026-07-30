@@ -7050,8 +7050,12 @@ function amoTest() {
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
+                <!-- disabled 2026-07-30: focusing on Sell Straddle + Bear Trap Only.
+                     Not deleted -- existing deployments keep running; re-enable by
+                     uncommenting if needed.
                 <option value="d1_trap_index">Trap Scanner - Index (Intraday)</option>
                 <option value="d1_trap_fno">Trap Scanner - FnO (Positional)</option>
+                -->
                 <option value="d1_trap_bear_only">Bear Trap Only (Option-Native, NIFTY)</option>
               </select>
             </div>
