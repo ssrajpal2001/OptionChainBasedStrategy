@@ -894,6 +894,42 @@ class D1TrapOptionBook(AbstractStrategyBook):
             "pending_5m": bool(self._pending_5m),
         }
 
+    def monitoring_zones(self) -> dict:
+        """Return live monitoring state for the dashboard zone tracker."""
+        spot = self._last_spot
+        zones = []
+        for m in self._monitors:
+            if m.done or m.invalid:
+                continue
+            dist = None
+            if spot:
+                mid = (m.zone_lo + m.zone_hi) / 2
+                dist = round((spot - mid) / mid * 100, 2)  # % from zone midpoint
+            zones.append({
+                "direction": m.direction,
+                "zone_lo": round(m.zone_lo, 2),
+                "zone_hi": round(m.zone_hi, 2),
+                "state": m.state,          # "WAITING" | "MONITORING"
+                "dist_pct": dist,          # +ve = spot above zone, -ve = below
+                "ref_ts": m.htf_reclaim_ts.strftime("%Y-%m-%d") if m.htf_reclaim_ts else None,
+            })
+        # Sort: MONITORING first, then by abs distance ascending
+        zones.sort(key=lambda z: (0 if z["state"] == "MONITORING" else 1,
+                                  abs(z["dist_pct"]) if z["dist_pct"] is not None else 999))
+        pending = self._pending_5m
+        return {
+            "underlying": self._underlying,
+            "spot": round(spot, 2) if spot else None,
+            "zones": zones[:10],   # top 10 closest/active
+            "total_zones": len([m for m in self._monitors if not m.done and not m.invalid]),
+            "pending": {
+                "direction": pending["direction"],
+                "trigger": pending["trigger"],
+                "sl": pending["sl"],
+            } if pending else None,
+            "position": bool(self._position),
+        }
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

@@ -4003,6 +4003,13 @@ function amoTest() {
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           V4 CASCADE
         </button>
+        <button @click="adminStrategyTab='d1_trap'"
+                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
+                :style="adminStrategyTab==='d1_trap'
+                  ? 'color:var(--t-green);background:rgba(var(--t-green-rgb,34,197,94),0.08);border-bottom:2px solid var(--t-green)'
+                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
+          D1 TRAP ZONES
+        </button>
         <div class="ml-auto flex items-center px-3">
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
         </div>
@@ -4121,6 +4128,122 @@ function amoTest() {
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- ══ D1 TRAP ZONES live monitor ═══════════════════════════════════ -->
+      <div x-show="adminStrategyTab==='d1_trap'" class="p-3 flex flex-col gap-2"
+           x-data="{
+             books: [],
+             loading: false,
+             lastTs: '',
+             expanded: {},
+             async refresh() {
+               this.loading = true;
+               try {
+                 const r = await fetch('/api/d1trap/zones', {headers: {'Authorization':'Bearer '+localStorage.getItem('terminus_token')}});
+                 const d = await r.json();
+                 if (d.ok) { this.books = d.books; this.lastTs = new Date().toLocaleTimeString(); }
+               } catch(e) {}
+               this.loading = false;
+             },
+             toggle(sym) { this.expanded[sym] = !this.expanded[sym]; },
+             zoneColor(z) {
+               if (z.state === 'MONITORING') return 'var(--t-yellow, #facc15)';
+               if (z.dist_pct !== null && Math.abs(z.dist_pct) < 1) return 'var(--t-orange, #fb923c)';
+               return 'var(--t-muted)';
+             }
+           }"
+           x-init="refresh(); setInterval(()=>{ if(adminStrategyTab==='d1_trap') refresh(); }, 15000)">
+        <div class="flex items-center justify-between mb-1">
+          <span class="font-display font-bold text-xs" style="color:var(--t-green)">D1 Trap — Live Zone Monitor</span>
+          <div class="flex items-center gap-2">
+            <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="lastTs ? 'Updated '+lastTs : ''"></span>
+            <button @click="refresh()" class="t-btn font-mono text-xs px-2 py-0.5 rounded" :disabled="loading">
+              <span x-text="loading ? '…' : '⟳'"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- No books -->
+        <div x-show="!loading && books.length === 0" class="text-center py-4 font-mono text-xs" style="color:var(--t-muted)">
+          No active D1 trap books — deploy a d1_trap_index or d1_trap_fno strategy first.
+        </div>
+
+        <!-- One card per book -->
+        <template x-for="b in books" :key="b.underlying">
+          <div class="rounded p-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
+            <!-- Header row -->
+            <div class="flex items-center gap-2 cursor-pointer" @click="toggle(b.underlying)">
+              <!-- Status dot -->
+              <span class="w-2 h-2 rounded-full flex-shrink-0"
+                    :style="'background:'+(b.pending?'var(--t-green)':b.zones.some(z=>z.state==='MONITORING')?'var(--t-yellow,#facc15)':'var(--t-muted)')"></span>
+              <!-- Symbol -->
+              <span class="font-display font-bold text-xs" style="color:var(--t-text)" x-text="b.underlying"></span>
+              <!-- Spot -->
+              <span class="font-mono text-xs ml-1" style="color:var(--t-cyan)"
+                    x-text="b.spot ? b.spot.toLocaleString('en-IN') : '—'"></span>
+              <!-- Status badge -->
+              <span x-show="b.pending" class="font-mono text-xs px-1 rounded"
+                    style="background:rgba(34,197,94,0.15);color:var(--t-green)">
+                ⚡ PENDING <span x-text="b.pending && b.pending.direction"></span>
+              </span>
+              <span x-show="!b.pending && b.zones.some(z=>z.state==='MONITORING')" class="font-mono text-xs px-1 rounded"
+                    style="background:rgba(250,204,21,0.12);color:var(--t-yellow,#facc15)">
+                👁 MONITORING
+              </span>
+              <span x-show="b.position" class="font-mono text-xs px-1 rounded"
+                    style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)">IN TRADE</span>
+              <!-- Zone count -->
+              <span class="ml-auto font-mono text-xs" style="color:var(--t-muted)"
+                    x-text="b.total_zones + ' zones'"></span>
+              <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="expanded[b.underlying] ? '▲' : '▼'"></span>
+            </div>
+
+            <!-- Pending trigger detail -->
+            <div x-show="b.pending" class="mt-1 ml-4 font-mono text-xs" style="color:var(--t-green)">
+              Trigger <span x-text="b.pending && b.pending.trigger"></span>
+              · SL <span style="color:var(--t-red)" x-text="b.pending && b.pending.sl"></span>
+            </div>
+
+            <!-- Zone table (collapsed by default) -->
+            <div x-show="expanded[b.underlying]" class="mt-2 overflow-x-auto">
+              <table class="w-full font-mono text-xs border-collapse">
+                <thead>
+                  <tr style="color:var(--t-muted)">
+                    <th class="text-left py-0.5 pr-2">Dir</th>
+                    <th class="text-right pr-2">Lo</th>
+                    <th class="text-right pr-2">Hi</th>
+                    <th class="text-right pr-2">Dist%</th>
+                    <th class="text-left pr-2">State</th>
+                    <th class="text-left">Zone Date</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="(z,i) in b.zones" :key="i">
+                    <tr :style="'color:'+zoneColor(z)">
+                      <td class="py-0.5 pr-2 font-bold"
+                          :style="'color:'+(z.direction==='LONG'?'var(--t-green)':'var(--t-red)')"
+                          x-text="z.direction==='LONG'?'▲ L':'▼ S'"></td>
+                      <td class="text-right pr-2" x-text="z.zone_lo.toLocaleString('en-IN')"></td>
+                      <td class="text-right pr-2" x-text="z.zone_hi.toLocaleString('en-IN')"></td>
+                      <td class="text-right pr-2"
+                          :style="'color:'+(z.dist_pct!==null&&Math.abs(z.dist_pct)<1?'var(--t-orange,#fb923c)':z.dist_pct!==null&&z.dist_pct<0?'var(--t-green)':'var(--t-muted)')"
+                          x-text="z.dist_pct !== null ? z.dist_pct.toFixed(1)+'%' : '—'"></td>
+                      <td class="pr-2">
+                        <span x-show="z.state==='MONITORING'" style="color:var(--t-yellow,#facc15)">● MONITORING</span>
+                        <span x-show="z.state!=='MONITORING'" style="color:var(--t-muted)">○ waiting</span>
+                      </td>
+                      <td x-text="z.ref_ts || '—'" style="color:var(--t-muted)"></td>
+                    </tr>
+                  </template>
+                  <tr x-show="b.zones.length===0">
+                    <td colspan="6" class="py-1 text-center" style="color:var(--t-muted)">No active zones</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </template>
       </div>
 
       <!-- ══ SELL STRADDLE config ══════════════════════════════════════════ -->

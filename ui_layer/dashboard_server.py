@@ -5869,6 +5869,7 @@ pm2 save
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
+        self._register_d1trap_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6054,6 +6055,32 @@ pm2 save
         return [b for b in self._d1_trap_manager.books
                 if getattr(b, "_client_id", "") == client_id
                 and getattr(b, "_binding_id", "") == binding_id]
+
+    # ── D1 Trap zone monitoring endpoint ──────────────────────────────────────
+
+    def _register_d1trap_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/d1trap/zones")
+        async def d1trap_zones():
+            """Return live monitoring state for all active D1 trap books."""
+            if _srv._d1_trap_manager is None:
+                return {"ok": True, "books": []}
+            books = _srv._d1_trap_manager.books
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_zones"):
+                    continue
+                try:
+                    result.append(b.monitoring_zones())
+                except Exception:
+                    pass
+            # Sort: books with MONITORING zones or pending first, then by symbol
+            result.sort(key=lambda r: (
+                0 if (r.get("pending") or any(z["state"] == "MONITORING" for z in r.get("zones", []))) else 1,
+                r.get("underlying", "")
+            ))
+            return {"ok": True, "books": result}
 
     def _open_history_rows(self, cid: str) -> list:
         """
