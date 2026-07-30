@@ -93,11 +93,12 @@ class D1TrapOptionBookManager(StrategyBookManager):
                         wl_path = _Path(__file__).resolve().parents[2] / "data" / "fno_watchlist.json"
                         with open(wl_path) as _f:
                             wl = _json.load(_f)
-                        top_n = int(params.get("top_n", 5))
+                        # Hard cap: WATCHLIST always spawns at most top_n books.
+                        # The file is pre-sorted by the scan (APPROACHING first, by btst_rr),
+                        # so taking stocks[:top_n] gives the best picks regardless of status.
+                        top_n = min(int(params.get("top_n", 5)), 5)  # never exceed 5
                         stocks = wl.get("stocks", [])
-                        # Filter APPROACHING, take top_n (JSON already sorted APPROACHING first)
-                        approaching = [s for s in stocks if s.get("status") == "APPROACHING"]
-                        for entry in approaching[:top_n]:
+                        for entry in stocks[:top_n]:
                             sym = entry.get("symbol", "").upper()
                             if sym:
                                 book_cfg = cfg.copy()
@@ -111,9 +112,9 @@ class D1TrapOptionBookManager(StrategyBookManager):
                                 if entry.get("step", 0) > 0:
                                     book_cfg["step_override"] = int(entry["step"])
                                 wanted[(cid, bid, sym)] = book_cfg
-                        logger.debug(
-                            "TrapBookManager: WATCHLIST loaded %d/%d stocks from %s",
-                            min(top_n, len(approaching)), len(stocks), wl_path,
+                        logger.info(
+                            "TrapBookManager: WATCHLIST loaded %d stocks (top_n=%d) from %s",
+                            min(top_n, len(stocks)), top_n, wl_path,
                         )
                     except FileNotFoundError:
                         logger.warning(

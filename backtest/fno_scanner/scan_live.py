@@ -11,7 +11,7 @@ Reports:
 Output: ranked list + suggested monthly expiry option entry for each signal.
 
 Usage:
-    python backtest/fno_scanner/scan_live.py [--save] [--top-n 30]
+    python backtest/fno_scanner/scan_live.py [--save] [--top-n 5]
     (token auto-loaded from data/clients.db — no env var needed)
 """
 from __future__ import annotations
@@ -645,7 +645,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FnO Live Zone Scanner")
     parser.add_argument("--save", action="store_true",
                         help="Save top signals to data/fno_watchlist.json after scan")
-    parser.add_argument("--top-n", type=int, default=30,
+    parser.add_argument("--top-n", type=int, default=5,
                         help="Max stocks to save to watchlist (default 30)")
     parser.add_argument("--out", default=None,
                         help="Override watchlist output path")
