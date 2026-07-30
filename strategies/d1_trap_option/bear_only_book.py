@@ -73,6 +73,14 @@ _SESSION_CLOSE = time(15, 30)   # upper bound so an off-hours/heartbeat tick can
                                 # close, and an unbounded "now >= 09:16" check fired
                                 # off one at 20:56 IST with the market shut).
 _ENTRY_CUTOFF = time(14, 30)
+_EARLY_SESSION_CUTOFF = time(9, 35)   # 2026-07-30 tweak: today's real 24000CE Trade 1
+                                       # used the very first ref candle (09:15-09:30) --
+                                       # opening-range volatility, wide/gap-driven, not
+                                       # genuine intraday structure -- and whipsawed
+                                       # within 9 minutes. Ref candles can't be assigned
+                                       # until after this cutoff; a zone in MONITORING
+                                       # during the excluded window just waits for a
+                                       # later, more settled 15-min candle instead.
 _EOD_TIME = time(15, 15)
 _STRIKE_STEP = 50
 _ATM_ROUND_STEP = 100   # ATM rounds to nearest 100 (2026-07-30 change); option
@@ -82,10 +90,13 @@ _MAX_ZONE_AGE_DAYS = 20
 _ZONE_SIZE_THRESHOLD_PCT = 0.20
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
-_TSL_BASE_PCT = 0.20
-_TSL_BASE_LOCK_PCT = 0.125
-_TSL_STEP_PCT = 0.20
-_TSL_STEP_LOCK_PCT = 0.125
+_TSL_BASE_PCT = 0.10        # 2026-07-30 tweak (was 0.20/0.125): today's 24000CE Trade 2
+_TSL_BASE_LOCK_PCT = 0.07   # peaked at +21.3% profit, just past the old +20% tier, but
+_TSL_STEP_PCT = 0.10        # the lock stayed flat at 12.5% the whole time (next tier
+_TSL_STEP_LOCK_PCT = 0.07   # needed +40%) -- gave back ~9 points of a real move purely
+                             # from step-size coarseness. Tighter 10%/7% steps let the
+                             # floor climb within a single strong move instead of
+                             # waiting for the next round-number tier.
 _HIST_WARMUP_DAYS = 25
 
 
@@ -471,8 +482,11 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
             # Stage 2: 15m ref-candle assignment + tick-wise breach
             if zone["ref_open"] is None:
+                if last_ts.time() < _EARLY_SESSION_CUTOFF:
+                    continue   # too early -- wait for a more settled candle, see 2026-07-30 note
                 ref = self._find_ref_bar(last_ts, m15)
-                if ref is not None and (ref.timestamp + timedelta(minutes=15)) <= last_ts:
+                if ref is not None and (ref.timestamp + timedelta(minutes=15)) <= last_ts \
+                        and ref.timestamp.time() >= _EARLY_SESSION_CUTOFF:
                     zone["ref_open"] = ref.timestamp
                     zone["ref_close_time"] = ref.timestamp + timedelta(minutes=15)
                     zone["ref_high"], zone["ref_low"] = ref.high, ref.low
