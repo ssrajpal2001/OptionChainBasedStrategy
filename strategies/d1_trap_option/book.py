@@ -327,7 +327,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
             return
 
         if not bars_5m:
-            logger.debug("TrapBook[%s]: no intraday bars yet for warmup.", self._underlying)
+            logger.warning("TrapBook[%s]: intraday warmup — 0 bars returned (API empty or key mismatch).", self._underlying)
             return
 
         self._warming_up = True
@@ -1165,8 +1165,14 @@ def _fetch_intraday_5m(instrument_key: str, token: str) -> List[_Bar]:
         logger.warning("TrapBook intraday 5M fetch failed for %s: %s", instrument_key, exc)
         return []
 
+    candles = (raw.get("data") or {}).get("candles") or []
+    if not candles:
+        logger.warning(
+            "TrapBook intraday 5M: 0 candles for %s — API status=%s errors=%s",
+            instrument_key, raw.get("status"), raw.get("errors"),
+        )
     bars: List[_Bar] = []
-    for c in reversed((raw.get("data") or {}).get("candles") or []):
+    for c in reversed(candles):
         try:
             ts = datetime.fromisoformat(c[0]).astimezone(IST)
             bars.append(_Bar(timestamp=ts, open=float(c[1]), high=float(c[2]),
