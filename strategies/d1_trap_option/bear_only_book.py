@@ -67,6 +67,11 @@ logger = logging.getLogger(__name__)
 
 _SESSION_OPEN = time(9, 15)
 _STRIKE_SELECT_TIME = time(9, 16)
+_SESSION_CLOSE = time(15, 30)   # upper bound so an off-hours/heartbeat tick can't
+                                # trigger strike selection (found live 2026-07-30:
+                                # feed still publishes last-known-price ticks after
+                                # close, and an unbounded "now >= 09:16" check fired
+                                # off one at 20:56 IST with the market shut).
 _ENTRY_CUTOFF = time(14, 30)
 _EOD_TIME = time(15, 15)
 _STRIKE_STEP = 50
@@ -261,7 +266,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 self.reset_session()
                 self._today = today
             now_t = datetime.now(IST).time()
-            if (self._last_spot_open is None and now_t >= _STRIKE_SELECT_TIME
+            if (self._last_spot_open is None and _STRIKE_SELECT_TIME <= now_t <= _SESSION_CLOSE
                     and not self._selecting_strikes):
                 self._last_spot_open = ev.ltp
                 self._selecting_strikes = True
