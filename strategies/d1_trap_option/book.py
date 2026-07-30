@@ -152,7 +152,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
         lot_multiplier: int = 1,
         feeder_token: str = "",
         htf_tf: str = "D1",      # "D1" | "75min" | "1H"
-        mtf_tf: str = "1H",      # "1H" | "15min"
+        mtf_tf: str = "75min",   # "75min" | "1H" | "15min"
         itm_offset: int = 1,     # 1-ITM default
         product_type: str = "MIS",
         upstox_key: str = "",    # override instrument key (for WATCHLIST stocks not in FNO_STOCK_CONFIG)
@@ -186,7 +186,7 @@ class D1TrapOptionBook(AbstractStrategyBook):
 
         # Timeframe parameters
         self._htf_mins = _parse_tf(htf_tf, 0)   # 0 = D1/daily
-        self._mtf_mins = _parse_tf(mtf_tf, 60)  # 60 = 1H
+        self._mtf_mins = _parse_tf(mtf_tf, 75)  # 75 = 75min default
 
         # HTF zone state
         self._htf_bars: List[_Bar] = []          # accumulated HTF bars (D1 or 75M etc.)

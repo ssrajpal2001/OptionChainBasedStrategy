@@ -171,32 +171,34 @@ class D1TrapOptionBookManager(StrategyBookManager):
 
         # Register FnO equity subscriptions on Fyers feeder
         if strategy_name == "d1_trap_fno":
-            self._register_fno_equity(underlying)
+            self._register_fno_equity(underlying, cfg.get("upstox_key", ""))
 
         return book
 
-    def _register_fno_equity(self, underlying: str) -> None:
+    def _register_fno_equity(self, underlying: str, upstox_key_override: str = "") -> None:
         """Register equity spot ticks for FnO D1Trap books via both feeders.
 
         Fyers path  → subscribe_fno_equity → EQUITY_TICK + INDEX_TICK
         Upstox path → register_extra_spot_keys → INDEX_TICK natively
         Both paths feed CandleCache → CANDLE_CLOSE events → d1_trap_fno C2 logic.
+        upstox_key_override: used for WATCHLIST stocks not in FNO_STOCK_CONFIG.
         """
         try:
             from config.global_config import FNO_STOCK_CONFIG
-            stock = FNO_STOCK_CONFIG.get(underlying.upper())
-            if not stock:
-                return
             gf = getattr(self._bus, "_global_feeder", None)
             if gf is None:
                 return
-            fyers_sym  = stock.get("fyers", "")       # "NSE:RELIANCE-EQ"
-            upstox_key = stock.get("upstox_key", "")  # "NSE_EQ|INE002A01018"
+            stock = FNO_STOCK_CONFIG.get(underlying.upper()) or {}
+            fyers_sym  = stock.get("fyers", "")
+            upstox_key = stock.get("upstox_key", "") or upstox_key_override
             # Fyers: subscribe equity symbol → EQUITY_TICK (+INDEX_TICK from feeder fix)
             if fyers_sym and hasattr(gf, "subscribe_fno_equity"):
                 gf.subscribe_fno_equity(fyers_sym, underlying)
             # Upstox (primary): map NSE_EQ key → symbol name so ticks flow as INDEX_TICK
             if upstox_key and hasattr(gf, "register_extra_spot_keys"):
                 gf.register_extra_spot_keys({upstox_key: underlying})
+                logger.info("TrapBookManager: registered equity feed for %s (%s)", underlying, upstox_key)
+            elif not upstox_key:
+                logger.warning("TrapBookManager: no upstox_key for %s — spot ticks won't arrive", underlying)
         except Exception:
             logger.debug("TrapBookManager: FnO equity registration skipped for %s", underlying)
