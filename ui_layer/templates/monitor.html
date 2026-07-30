@@ -7422,7 +7422,11 @@ function amoTest() {
                                const tok = localStorage.getItem('terminus_token') || (authToken||'');
                                const r = await fetch('/api/d1trap/zones', {headers:{'Authorization':'Bearer '+tok}});
                                const d = await r.json();
-                               if (d.ok) this._mbooks = d.books || [];
+                               if (d.ok) {
+                                 // Filter to only books belonging to THIS deployment's binding
+                                 const all = d.books || [];
+                                 this._mbooks = all.filter(bk => bk.binding_id === b.binding_id);
+                               }
                              } catch(e) {}
                            }
                          }"

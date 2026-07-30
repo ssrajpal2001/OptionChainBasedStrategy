@@ -919,6 +919,8 @@ class D1TrapOptionBook(AbstractStrategyBook):
         pending = self._pending_5m
         return {
             "underlying": self._underlying,
+            "client_id": self._client_id,
+            "binding_id": self._binding_id,
             "spot": round(spot, 2) if spot else None,
             "zones": zones[:10],   # top 10 closest/active
             "total_zones": len([m for m in self._monitors if not m.done and not m.invalid]),
