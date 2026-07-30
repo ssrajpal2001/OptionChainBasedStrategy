@@ -131,8 +131,39 @@ class D1TrapOptionBookManager(StrategyBookManager):
         """Re-spawn when lot_multiplier changes while the book is flat."""
         return getattr(book, "_lot_multiplier", None) != value.get("lots", 1)
 
-    # The base _reconcile() handles spawn/stop/respawn logic using _wanted(), _spawn_book(),
-    # _should_respawn(), and _is_flat(). No need to override it — just supply the right values.
+    def _reconcile(self) -> None:
+        """Run base reconcile then retry equity feed registration for any FnO books
+        whose GlobalFeeder was not yet ready at spawn time (gf was None)."""
+        super()._reconcile()
+        self._retry_fno_equity_registration()
+
+    def _retry_fno_equity_registration(self) -> None:
+        """After each reconcile, ensure all live d1_trap_fno books have their equity
+        symbol subscribed on the GlobalFeeder. Safe to call repeatedly — idempotent."""
+        gf = getattr(self._bus, "_global_feeder", None)
+        if gf is None:
+            return
+        if not hasattr(gf, "register_extra_spot_keys"):
+            return
+        for key, book in list(self._books.items()):
+            if getattr(book, "_strategy_name", "") != "d1_trap_fno":
+                continue
+            upstox_key = getattr(book, "_upstox_key_override", "")
+            underlying  = book._underlying
+            if not upstox_key:
+                from config.global_config import FNO_STOCK_CONFIG
+                stock = FNO_STOCK_CONFIG.get(underlying.upper()) or {}
+                upstox_key = stock.get("upstox_key", "")
+            if upstox_key and not getattr(book, "_equity_feed_registered", False):
+                try:
+                    gf.register_extra_spot_keys({upstox_key: underlying})
+                    book._equity_feed_registered = True
+                    logger.info(
+                        "TrapBookManager: equity feed registered for %s (%s)",
+                        underlying, upstox_key,
+                    )
+                except Exception as exc:
+                    logger.debug("TrapBookManager: equity feed retry failed for %s: %s", underlying, exc)
 
     def _spawn_book(self, key, cfg):
         global _D1TrapOptionBook
