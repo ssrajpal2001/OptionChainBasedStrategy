@@ -364,6 +364,7 @@ async def _run_live(
     # Share the same DB instance across bridge + dashboard so engine_active state is consistent
     router._client_db = _shared_client_db
     feeder        = GlobalFeeder(bus, cfg, _shared_client_db)
+    bus._global_feeder = feeder  # allows book managers to call register_extra_spot_keys
     # Build all enabled strategy managers from the registry.
     managers: dict = {}
     for name in _enabled_strats:
