@@ -1156,7 +1156,7 @@ def _fetch_intraday_5m(instrument_key: str, token: str) -> List[_Bar]:
 
     url = (
         f"https://api.upstox.com/v2/historical-candle/intraday/"
-        f"{_q(instrument_key, safe='')}/5minute"
+        f"{_q(instrument_key, safe='')}/1minute"
     )
     hdrs = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
     try:
