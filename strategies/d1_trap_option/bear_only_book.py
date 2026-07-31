@@ -112,6 +112,20 @@ _ZONE_MERGE_MAX_WIDTH_PTS = 60.0   # 2026-08-01 fix: without a cap on the merged
                                    # trade. This caps the merge so genuine near-duplicates (the
                                    # original intent) still collapse, but distinct patterns at
                                    # drifting price levels can't.
+_ZONE_MAX_RAW_WIDTH_PTS = 30.0     # 2026-08-01 fix: the merge-width cap above only bounds what
+                                   # MERGING can add -- it does nothing about a SINGLE raw zone
+                                   # that's already too wide on its own (the uncapped-sweep-phase
+                                   # detector can anchor many different reclaim candles to the
+                                   # same distant sweep low, each individually valid-looking but
+                                   # up to 100+pts wide). Confirmed live: PE24100 2026-07-09 had
+                                   # 28 raw zones sharing sweep_low=131.9 with zone_hi drifting
+                                   # from 140 to 392 -- most already >60pts wide BEFORE any
+                                   # merging, which the width-cap couldn't touch, and which fired
+                                   # the same near-duplicate trade repeatedly. Discarding any
+                                   # individual raw zone above this width before merging even
+                                   # starts (validated: 28 raw -> 7 tight, meaningful survivors)
+                                   # fixes both the oversized-trade-entry problem and this
+                                   # duplicate-firing problem at the same root cause.
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
 _TSL_BASE_PCT = 0.10        # 2026-07-30 tweak (was 0.20/0.125): today's 24000CE Trade 2
@@ -214,6 +228,8 @@ def _detect_bear_zones(bars_60m) -> List[dict]:
     out = []
     for z in find_all_bear_zones(bars_60m):
         lo, hi = min(z.entry_line, z.sweep_low), max(z.entry_line, z.sweep_low)
+        if hi - lo > _ZONE_MAX_RAW_WIDTH_PTS:
+            continue   # discard before it ever enters the pool -- see constant comment
         out.append(dict(zone_lo=lo, zone_hi=hi, entry_line=z.entry_line, lock_ts=z.lock_ts,
                          state="WAITING", ref_bar=None, done=False, invalid=False,
                          contact_ts=None, ref_open=None, ref_close_time=None,
@@ -243,7 +259,17 @@ def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE
     # the merged group's TOTAL width so genuinely near-duplicate detections
     # (the original intent) still merge, but a long chain of distinct patterns
     # at drifting price levels can't collapse into one unbounded band.
-    ordered = sorted(zones, key=lambda z: z["zone_lo"])
+    # Secondary sort by zone_hi (2026-08-01 fix): many zones can share the
+    # exact same zone_lo (a common sweep-low anchor) with only zone_hi
+    # drifting -- sorting by zone_lo alone leaves those ties in arbitrary
+    # original-detection order, so the width-capped greedy grouping below
+    # partitions them unpredictably into many overlapping near-duplicate
+    # groups instead of a few clean, meaningfully-distinct bands (confirmed:
+    # 28 raw zones sharing zone_lo=131.9 collapsed into 23 near-identical
+    # ~same-anchor groups instead of a handful of real ones, and each fired
+    # its own near-identical trade). Sorting ties by zone_hi too makes the
+    # cap-then-start-new-group logic partition monotonically and cleanly.
+    ordered = sorted(zones, key=lambda z: (z["zone_lo"], z["zone_hi"]))
     groups = [[ordered[0]]]
     for z in ordered[1:]:
         group_lo = min(g["zone_lo"] for g in groups[-1])
