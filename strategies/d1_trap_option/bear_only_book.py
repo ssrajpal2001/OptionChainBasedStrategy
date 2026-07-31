@@ -383,6 +383,17 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     series.zones = _detect_bear_zones(_to_bars(m60))
                     logger.info("BearTrap[%s]: %s %d warmed %d 1m bars -> %d bear zones",
                                 self._underlying, side, strike, len(series.bars_1m), len(series.zones))
+                    if series.zones:
+                        his = [z["zone_hi"] for z in series.zones]
+                        los = [z["zone_lo"] for z in series.zones]
+                        logger.info("BearTrap[%s]: %s %d zone_hi range=[%.2f, %.2f]  "
+                                    "zone_lo range=[%.2f, %.2f]",
+                                    self._underlying, side, strike, min(his), max(his),
+                                    min(los), max(los))
+                        for z in sorted(series.zones, key=lambda z: z["zone_hi"], reverse=True)[:30]:
+                            logger.info("BearTrap[%s]: %s zonebound [%.2f,%.2f] entry_line=%.2f lock=%s",
+                                        self._underlying, side, z["zone_lo"], z["zone_hi"],
+                                        z["entry_line"], z["lock_ts"])
                 self._series[side] = series
 
             # Replay TODAY's own intraday bars (if the market has already opened) so
