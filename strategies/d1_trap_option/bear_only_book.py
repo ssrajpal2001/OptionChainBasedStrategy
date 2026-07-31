@@ -408,14 +408,34 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
     async def _option_tick_loop(self) -> None:
         q = self._loop_queues.get(Topic.OPTION_TICK)
         if q is None:
+            logger.warning("BearTrap[%s]: OPTION_TICK queue is None -- subscribe() failed at start().",
+                            self._underlying)
             return
+        _diag_total = 0
+        _diag_strikes_seen = set()
+        _diag_last_log = datetime.now(IST)
         while self._running:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
+                now = datetime.now(IST)
+                if (now - _diag_last_log).total_seconds() >= 60 and self._ce_strike is not None:
+                    logger.info("BearTrap[%s]: no OPTION_TICK in the last check window. "
+                                "Total seen so far=%d. Distinct strikes seen so far=%s "
+                                "(watching for CE=%s PE=%s)",
+                                self._underlying, _diag_total, sorted(_diag_strikes_seen)[:20],
+                                self._ce_strike, self._pe_strike)
+                    _diag_last_log = now
                 continue
             if not isinstance(ev, OptionTick) or not ev.ltp:
                 continue
+            _diag_total += 1
+            _diag_strikes_seen.add((int(ev.strike), ev.option_type))
+            if _diag_total % 200 == 1:
+                logger.info("BearTrap[%s]: OPTION_TICK diag -- total=%d distinct=%d sample=%s%.0f LTP=%.2f "
+                            "(watching CE=%s PE=%s)",
+                            self._underlying, _diag_total, len(_diag_strikes_seen),
+                            ev.option_type, ev.strike, ev.ltp, self._ce_strike, self._pe_strike)
             side = self._match_side(ev)
             if side is None:
                 continue
