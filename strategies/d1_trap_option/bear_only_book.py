@@ -565,9 +565,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             if zone["ref_open"] is None:
                 if last_ts.time() < _EARLY_SESSION_CUTOFF:
                     continue   # too early -- wait for a more settled candle, see 2026-07-30 note
-                ref = self._find_ref_bar(last_ts, m15)
-                if ref is not None and (ref.timestamp + timedelta(minutes=15)) <= last_ts \
-                        and ref.timestamp.time() >= _EARLY_SESSION_CUTOFF:
+                ref = self._find_latest_closed_ref_bar(m15, last_ts)
+                if ref is not None:
                     zone["ref_open"] = ref.timestamp
                     zone["ref_close_time"] = ref.timestamp + timedelta(minutes=15)
                     zone["ref_high"], zone["ref_low"] = ref.high, ref.low
@@ -587,9 +586,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 # becomes the new ref -- otherwise a zone gets permanently stuck on
                 # whatever candle it first attached to, even if that candle's high was
                 # an outlier never matched by later, more relevant price action.
-                new_ref = self._find_ref_bar(last_ts, m15)
-                if new_ref is not None and new_ref.timestamp > zone["ref_open"] \
-                        and (new_ref.timestamp + timedelta(minutes=15)) <= last_ts:
+                new_ref = self._find_latest_closed_ref_bar(m15, last_ts)
+                if new_ref is not None and new_ref.timestamp > zone["ref_open"]:
                     logger.info("BearTrap[%s]: %s ref candle rolled forward %s -> %s "
                                 "(old H=%.2f -> new H=%.2f, no breach yet)",
                                 self._underlying, side, zone["ref_open"], new_ref.timestamp,
@@ -631,12 +629,32 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
     @staticmethod
     def _find_ref_bar(anchor_ts, m15: pd.DataFrame):
+        """Used for REPLAY/BACKTEST-style lookups where anchor_ts is a point in the
+        past relative to data that already fully exists -- returns the bucket
+        containing anchor_ts, or the first one starting after it."""
         for row in m15.itertuples(index=False):
             bar_open = row.timestamp
             bar_close = bar_open + timedelta(minutes=15)
             if bar_open <= anchor_ts < bar_close or bar_open >= anchor_ts:
                 return row
         return None
+
+    @staticmethod
+    def _find_latest_closed_ref_bar(m15: pd.DataFrame, last_ts):
+        """2026-07-31 fix: for LIVE ref-candle assignment, "now" (last_ts) always
+        falls inside the currently-forming, not-yet-closed bucket -- _find_ref_bar
+        would keep returning that same open bucket forever, which then always fails
+        the "must be closed" check downstream. This instead finds the MOST RECENTLY
+        CLOSED same-day 15-min bucket at/after the early-session cutoff -- the
+        correct notion of "ref candle" when running live, not against historical
+        data that already has a known future."""
+        candidates = [
+            row for row in m15.itertuples(index=False)
+            if row.timestamp.date() == last_ts.date()
+            and row.timestamp.time() >= _EARLY_SESSION_CUTOFF
+            and (row.timestamp + timedelta(minutes=15)) <= last_ts
+        ]
+        return candidates[-1] if candidates else None
 
     # ── entry / exit ─────────────────────────────────────────────────────────
 
