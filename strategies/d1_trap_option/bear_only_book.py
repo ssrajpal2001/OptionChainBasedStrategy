@@ -86,7 +86,9 @@ _STRIKE_STEP = 50
 _ATM_ROUND_STEP = 100   # ATM rounds to nearest 100 (2026-07-30 change); option
                         # strikes themselves stay on the normal 50pt grid --
                         # CE/PE = ATM +/- itm_offset_pts still land on valid strikes.
-_MAX_ZONE_AGE_DAYS = 20
+_MAX_ZONE_AGE_DAYS = 14   # 2026-07-31 tweak (was 20): matches _HIST_WARMUP_DAYS below --
+                          # no point allowing zones up to 20 days old when only 14 days
+                          # of history are ever fetched to find them in.
 _ZONE_SIZE_THRESHOLD_PCT = 0.20
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
@@ -97,7 +99,8 @@ _TSL_STEP_LOCK_PCT = 0.07   # needed +40%) -- gave back ~9 points of a real move
                              # from step-size coarseness. Tighter 10%/7% steps let the
                              # floor climb within a single strong move instead of
                              # waiting for the next round-number tier.
-_HIST_WARMUP_DAYS = 25
+_HIST_WARMUP_DAYS = 14   # 2026-07-31 tweak (was 25): current week + previous week
+                         # is enough history to seed the 60m bear-trap zone pool.
 
 
 @dataclass(frozen=True)
