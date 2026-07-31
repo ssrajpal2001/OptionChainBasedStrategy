@@ -705,7 +705,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             strategy="d1_trap_bear_only", underlying=self._underlying,
             ce_strike=self._ce_strike, pe_strike=self._pe_strike,
             spot_open=self._last_spot_open,
-            selection_reason=(f"ATM={round((self._last_spot_open or 0)/self._strike_step)*self._strike_step} "
+            selection_reason=(f"ATM={round((self._last_spot_open or 0)/_ATM_ROUND_STEP)*_ATM_ROUND_STEP} "
                                f"(spot_open={self._last_spot_open}) -> CE=ATM-{self._itm_offset_pts}, "
                                f"PE=ATM+{self._itm_offset_pts}") if self._last_spot_open else None,
             position=dict(
