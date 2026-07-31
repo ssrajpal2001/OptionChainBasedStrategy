@@ -42,8 +42,15 @@ for the required CE/PE actually arrive -- this book does not force-subscribe
 new strikes itself; if ticks aren't flowing for the needed strike it will
 report "no data" for that side rather than trade blind.
 
-Status: NEW as of 2026-07-30, built and wired but NOT yet run against a live
-feed. Verify once in `--mode demo` before trusting live broker orders.
+Status: live-paper deployed 2026-07-30/31. 2026-08-01: zone invalidation
+(_prevalidate_zones + ongoing per-15m-close check) and the flip concept
+(_create_flip_candidate / _process_flip_cancellation / _process_flip_entry)
+rewritten to match the final corrected spec and validated via a 1-month
+backtest against real Aug-4-expiry option data before going live again
+(scripts/d1trap_month_backtest_v2.py -- 27 trades, win% 25.9, PF 0.53, net
+Rs-15,658 over 2026-06-29..07-31; the flip concept itself fired once and
+lost Rs2,000 -- inconclusive on this one month, going live-paper for 2 weeks
+per explicit direction to get a larger sample before judging it).
 """
 from __future__ import annotations
 
@@ -93,8 +100,12 @@ _ZONE_SIZE_THRESHOLD_PCT = 0.20
 _ZONE_MERGE_THRESHOLD_PTS = 20.0   # 2026-07-31: collapse 60m zones within 20 option-pts of
                                    # each other into one (max/min), same principle as the
                                    # 5m sub-zone collapse -- cuts down near-duplicate zones.
-                                   # NOT backtested yet -- implemented live per explicit
-                                   # direction; treat today's results with that in mind.
+                                   # Validated 2026-08-01 via a 1-month backtest against real
+                                   # option data with the correct rolling _HIST_WARMUP_DAYS
+                                   # window (scripts/d1trap_month_backtest_v2.py) -- collapsing
+                                   # over the FULL month instead of the 14-day window it
+                                   # actually runs on chains distant zones into one mega-band;
+                                   # scoped correctly to 14 days it behaves sanely.
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
 _TSL_BASE_PCT = 0.10        # 2026-07-30 tweak (was 0.20/0.125): today's 24000CE Trade 2
@@ -124,6 +135,7 @@ class _OptionSeries:
     side: str          # "CE" | "PE"
     bars_1m: List[_Bar] = field(default_factory=list)
     zones: List[dict] = field(default_factory=list)
+    flip_candidates: List[dict] = field(default_factory=list)   # 2026-07-31 flip concept
     _cur_open: Optional[datetime] = None
     _cur_o: float = 0.0
     _cur_h: float = 0.0
@@ -219,6 +231,20 @@ def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE
     return collapsed
 
 
+def _prevalidate_zones(zones: List[dict], m15: pd.DataFrame) -> List[dict]:
+    """2026-07-31: if a 15m candle has ALREADY closed below a zone's own zone_lo
+    at any point since it locked, the reclaim that originally formed this zone
+    has already failed -- mark invalid immediately rather than let it sit in the
+    pool looking tradeable when the underlying has already moved decisively
+    past it (confirmed live: PE24600's zone locked at zone_lo=289.35 while PE
+    later fell to the 250s with no invalidation catching it)."""
+    for z in zones:
+        later = m15[(m15["timestamp"] > z["lock_ts"]) & (m15["close"] < z["zone_lo"])]
+        if not later.empty:
+            z["invalid"] = True
+    return zones
+
+
 def _collapse_subzones(bars_5m_window) -> Optional[tuple]:
     if len(bars_5m_window) < 3:
         return None
@@ -230,10 +256,13 @@ def _collapse_subzones(bars_5m_window) -> Optional[tuple]:
     return min(los), max(his)
 
 
-def _arm_level(zone_lo: float, zone_hi: float, threshold_pts: float) -> float:
+def _arm_level(zone_lo: float, zone_hi: float, threshold_pts: float, direction: str = "LONG") -> float:
     size = zone_hi - zone_lo
     large = size > threshold_pts
-    return zone_hi - size / 3.0 if large else zone_lo + size / 3.0
+    if direction == "LONG":   # approaching from above (bear-trap, main pipeline)
+        return zone_hi - size / 3.0 if large else zone_lo + size / 3.0
+    else:                     # SHORT -- approaching from below (bull-trap flip check)
+        return zone_lo + size / 3.0 if large else zone_hi - size / 3.0
 
 
 class D1TrapBearOnlyBook(AbstractStrategyBook):
@@ -414,7 +443,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                         for r in rows
                     ]
                     m60 = _resample(series.to_df(), 60)
-                    series.zones = _detect_bear_zones(_to_bars(m60))
+                    m15_hist = _resample(series.to_df(), 15)
+                    series.zones = _prevalidate_zones(_detect_bear_zones(_to_bars(m60)), m15_hist)
                     logger.info("BearTrap[%s]: %s %d warmed %d 1m bars -> %d bear zones",
                                 self._underlying, side, strike, len(series.bars_1m), len(series.zones))
                     if series.zones:
@@ -438,27 +468,48 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             # D1TrapOptionBook._warmup_intraday's _warming_up guard).
             self._warming_up = True
             try:
+                from data_layer.historical_candles import fetch_upstox_intraday_1m
+                # Fetch BOTH sides' today bars first, then replay INTERLEAVED by
+                # timestamp (not one side fully, then the other) -- the flip concept
+                # needs CE to see PE's TODAY invalidation state (and vice versa) at
+                # the correct point in time; replaying CE's whole day before PE has
+                # even started would make CE blind to any flip candidate PE created
+                # earlier today, since flip_candidates only exist once that side's
+                # own intraday bars have actually been processed.
+                today_rows_by_side: Dict[str, list] = {}
                 for side, strike in (("CE", ce_strike), ("PE", pe_strike)):
-                    series = self._series.get(side)
-                    if series is None:
+                    if self._series.get(side) is None:
                         continue
                     key = REGISTRY.get_upstox_key(self._underlying, expiry, strike, side)
                     if not key:
                         continue
-                    from data_layer.historical_candles import fetch_upstox_intraday_1m
-                    today_rows = await fetch_upstox_intraday_1m(key, self._feeder_token)
-                    replayed = 0
-                    for r in today_rows:
+                    rows = await fetch_upstox_intraday_1m(key, self._feeder_token)
+                    parsed = []
+                    for r in rows:
                         ts = pd.Timestamp(r["ts"])
                         ts = ts.tz_convert(IST) if ts.tzinfo else ts.tz_localize(IST)
-                        series.bars_1m.append(_Bar(ts, r["open"], r["high"], r["low"], r["close"]))
-                        series.last_ltp = r["close"]
-                        self._process_new_bar(side)
-                        replayed += 1
-                    if replayed:
-                        logger.info("BearTrap[%s]: %s replayed %d intraday bars (market already open) "
-                                    "-- zone/stage state caught up to now.",
-                                    self._underlying, side, replayed)
+                        parsed.append((ts, r["open"], r["high"], r["low"], r["close"]))
+                    today_rows_by_side[side] = parsed
+
+                merged = sorted(
+                    ((ts, side, o, h, l, c) for side, rows in today_rows_by_side.items()
+                     for ts, o, h, l, c in rows),
+                    key=lambda row: row[0],
+                )
+                replayed_counts = {"CE": 0, "PE": 0}
+                for ts, side, o, h, l, c in merged:
+                    series = self._series.get(side)
+                    if series is None:
+                        continue
+                    series.bars_1m.append(_Bar(ts, o, h, l, c))
+                    series.last_ltp = c
+                    self._process_new_bar(side)
+                    replayed_counts[side] += 1
+                for side, n in replayed_counts.items():
+                    if n:
+                        logger.info("BearTrap[%s]: %s replayed %d intraday bars (market already open, "
+                                    "interleaved with other side) -- zone/stage state caught up to now.",
+                                    self._underlying, side, n)
             finally:
                 self._warming_up = False
         except Exception:
@@ -538,12 +589,31 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         # no zone could ever survive past Stage 1. Only append genuinely new zones.
         existing_lock_ts = {z["lock_ts"] for z in series.zones}
         new_zones = [z for z in _detect_bear_zones(bars_60) if z["lock_ts"] not in existing_lock_ts]
+        new_zones = _prevalidate_zones(new_zones, m15)
         series.zones.extend(new_zones)
 
         known_from_cutoff = datetime.now(IST) - timedelta(days=_MAX_ZONE_AGE_DAYS)
         last_bar = df_1m.iloc[-1]
         last_ts = last_bar["datetime"]
         last_low, last_high = last_bar["low"], last_bar["high"]
+
+        # ONGOING invalidation (2026-07-31): a zone already in the pool (WAITING or
+        # MONITORING) whose zone_lo gets closed below by a 15m candle AFTER it was
+        # added -- the reclaim has failed since we started watching it. Check every
+        # call against the latest closed 15m candle.
+        latest15 = self._find_latest_closed_ref_bar(m15, last_ts)
+        if latest15 is not None:
+            for z in series.zones:
+                if not z["done"] and not z["invalid"] and latest15.close < z["zone_lo"]:
+                    z["invalid"] = True
+                    z["invalid_ts"] = latest15.timestamp + timedelta(minutes=15)
+                    logger.info("BearTrap[%s]: %s zone [%.2f,%.2f] INVALIDATED -- 15m close %.2f "
+                                "< zone_lo %.2f @ %s",
+                                self._underlying, side, z["zone_lo"], z["zone_hi"],
+                                latest15.close, z["zone_lo"], latest15.timestamp)
+                    self._create_flip_candidate(side, z, latest15)
+            self._process_flip_cancellation(side, latest15)
+            self._process_flip_entry(side, latest15, m15, m5)
 
         for zone in series.zones:
             if zone["done"] or zone["invalid"] or zone["lock_ts"] < known_from_cutoff:
@@ -626,6 +696,100 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 self._enter(side, zone, entry_price=zone["sub_hi"], sl=zone["ref_low"])
                 zone["done"] = True
                 return
+
+    # ── flip concept (2026-08-01, final corrected design, validated via a
+    # 1-month backtest against real Aug-4-expiry option data before going
+    # live -- scripts/d1trap_month_backtest_v2.py) ──────────────────────────
+    # When a zone on one side (say PE) gets invalidated (15m close below its
+    # zone_lo), candle A = that invalidating 15m candle -- FIXED forever,
+    # never rolls forward. On each subsequent 15m close on PE's own chart:
+    #   Check 1 (evaluated first): new low below candle A's low? -> no
+    #       cancellation, PE stays invalid, flip candidate stays active.
+    #   Check 2 (only if Check 1 is false): closed back inside PE's own
+    #       zone band [zone_lo, zone_hi]? -> cancel the flip candidate AND
+    #       re-validate PE's zone (people came back to defend it).
+    # Independently, on CE's own chart: CE's own 60-min zone requirement is
+    # SKIPPED entirely while a PE flip candidate is active -- CE watches only
+    # for its current 15m candle to break the PREVIOUS 15m candle's high,
+    # with a 5-min subzone found inside that same breakout candle (CE's own
+    # chart, normal bear-trap _collapse_subzones -- not the bull variant).
+    # That directly triggers an entry: price=breakout high, SL=breakout low.
+    # Same logic applies symmetrically PE-flipped-by-CE.
+
+    def _create_flip_candidate(self, side: str, zone: dict, candleA) -> None:
+        series = self._series.get(side)
+        if series is None:
+            return
+        series.flip_candidates.append(dict(
+            candleA_low=candleA.low, candleA_high=candleA.high, candleA_ts=candleA.timestamp,
+            zone_lo=zone["zone_lo"], zone_hi=zone["zone_hi"], zone_lock_ts=zone["lock_ts"],
+            parent_zone=zone, confirmed=False, cancelled=False,
+        ))
+        logger.info("BearTrap[%s]: %s FLIP CANDIDATE created -- candle A @ %s low=%.2f, zone=[%.2f,%.2f]. "
+                    "Other side may fast-track entry (skipping its own 60m zone) if it breaks its own "
+                    "prev-15m high with a 5m subzone.",
+                    self._underlying, side, candleA.timestamp, candleA.low, zone["zone_lo"], zone["zone_hi"])
+
+    def _process_flip_cancellation(self, side: str, m15_bar) -> None:
+        """Candle A is fixed and never rolls forward. Check 1 (new low below
+        candle A) is evaluated BEFORE Check 2 (close back inside the zone) --
+        Check 2 only applies when Check 1 is false."""
+        series = self._series.get(side)
+        if series is None:
+            return
+        for fc in series.flip_candidates:
+            if fc["confirmed"] or fc["cancelled"]:
+                continue
+            if m15_bar.timestamp <= fc["candleA_ts"]:
+                continue
+            if m15_bar.low < fc["candleA_low"]:
+                continue   # reconfirms breakdown -- no cancellation, flip stays active
+            if fc["zone_lo"] <= m15_bar.close <= fc["zone_hi"]:
+                fc["cancelled"] = True
+                fc["parent_zone"]["invalid"] = False
+                logger.info("BearTrap[%s]: %s FLIP CANDIDATE cancelled -- 15m closed back inside "
+                            "zone @ %.2f, zone [%.2f,%.2f] RE-VALIDATED.",
+                            self._underlying, side, m15_bar.close, fc["zone_lo"], fc["zone_hi"])
+
+    def _process_flip_entry(self, side: str, m15_bar, m15: pd.DataFrame, m5: pd.DataFrame) -> None:
+        """side = the side possibly being fast-tracked by the OTHER side's
+        invalidation. Skips side's own 60m zone requirement entirely --
+        simplified trigger only: current 15m high > previous 15m high (own
+        chart) + 5m subzone found in that breakout candle (own chart)."""
+        if self._position is not None:
+            return
+        flip_source_side = "PE" if side == "CE" else "CE"
+        flip_source = self._series.get(flip_source_side)
+        if flip_source is None or not flip_source.flip_candidates:
+            return
+        idx = m15.index[m15["timestamp"] == m15_bar.timestamp]
+        if not len(idx) or idx[0] == 0:
+            return
+        prev15 = m15.iloc[idx[0] - 1]
+        if m15_bar.high <= prev15["high"]:
+            return
+        for fc in flip_source.flip_candidates:
+            if fc["confirmed"] or fc["cancelled"]:
+                continue
+            if m15_bar.timestamp <= fc["candleA_ts"]:
+                continue
+            if m15_bar.low < fc["candleA_low"]:
+                continue
+            if fc["zone_lo"] <= m15_bar.close <= fc["zone_hi"]:
+                continue
+            window_5m = m5[(m5["timestamp"] >= m15_bar.timestamp) &
+                            (m5["timestamp"] < m15_bar.timestamp + timedelta(minutes=15))]
+            collapse = _collapse_subzones(_to_bars(window_5m))
+            if collapse is None:
+                continue
+            fc["confirmed"] = True
+            logger.info("BearTrap[%s]: %s FLIP ENTRY -- breakout 15m %s high=%.2f > prev high=%.2f, "
+                        "5m subzone [%.2f,%.2f] found. Triggered by %s candle-A @ %s (zone locked %s).",
+                        self._underlying, side, m15_bar.timestamp, m15_bar.high, prev15["high"],
+                        collapse[0], collapse[1], flip_source_side, fc["candleA_ts"], fc["zone_lock_ts"])
+            pseudo_zone = dict(lock_ts=fc["zone_lock_ts"])
+            self._enter(side, pseudo_zone, entry_price=m15_bar.high, sl=m15_bar.low)
+            return
 
     @staticmethod
     def _find_ref_bar(anchor_ts, m15: pd.DataFrame):
