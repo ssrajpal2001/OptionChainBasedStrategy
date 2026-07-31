@@ -104,10 +104,19 @@ def refresh_intraday_zones(state, ts, data, day, mode):
     m60, m15 = bb._resample(window, 60), bb._resample(window, 15)
     existing = {z["lock_ts"] for z in state.zones}
 
-    def overlaps(z):
-        return any(abs(z["zone_lo"] - e["zone_lo"]) <= 5.0 and abs(z["zone_hi"] - e["zone_hi"]) <= 5.0
+    # 2026-08-01 fix (mirrors the live bear_only_book.py fix): a merged
+    # zone's lock_ts isn't stable identity, since it's inherited from
+    # whichever raw member is newest and group membership can shift as more
+    # bars close -- dedupe by bounds overlap too, same tolerance the 60m
+    # zone-pool collapse itself uses (_ZONE_MERGE_THRESHOLD_PTS), not a
+    # separate hardcoded value.
+    def already_known(z):
+        if z["lock_ts"] in existing:
+            return True
+        return any(abs(z["zone_lo"] - e["zone_lo"]) <= bb._ZONE_MERGE_THRESHOLD_PTS
+                   and abs(z["zone_hi"] - e["zone_hi"]) <= bb._ZONE_MERGE_THRESHOLD_PTS
                    for e in state.zones)
-    new_zones = [z for z in detect_zones(bb._to_bars(m60), mode) if z["lock_ts"] not in existing and not overlaps(z)]
+    new_zones = [z for z in detect_zones(bb._to_bars(m60), mode) if not already_known(z)]
     if new_zones:
         state.zones.extend(bb._prevalidate_zones(new_zones, m15))
 

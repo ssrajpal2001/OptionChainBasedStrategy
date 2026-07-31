@@ -269,13 +269,27 @@ def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE
     # ~same-anchor groups instead of a handful of real ones, and each fired
     # its own near-identical trade). Sorting ties by zone_hi too makes the
     # cap-then-start-new-group logic partition monotonically and cleanly.
+    # 2026-08-01 fix: a width cap that applies even to zones that TRULY
+    # OVERLAP in price can split one real, contiguous band into two separate
+    # zone objects right at the boundary (confirmed: [363.75,407.45] and
+    # [405.50,425.00] overlap 405-407, but merging them would be 61.25pts --
+    # just over the 60pt cap -- so they stayed separate, and because both
+    # trace their "newest member" back to the same raw pattern, ended up with
+    # the IDENTICAL lock_ts, which let one real signal fire the same trade
+    # twice under two different-looking-but-not zone objects). True overlap
+    # (z's lo falls inside the group's existing band) always merges
+    # regardless of the width cap -- it's not chaining through a gap, it's
+    # the same price territory by definition. The cap still applies to the
+    # proximity case (z is merely NEAR the group, within threshold_pts, but
+    # doesn't actually overlap it) -- that's the actual chaining pathology.
     ordered = sorted(zones, key=lambda z: (z["zone_lo"], z["zone_hi"]))
     groups = [[ordered[0]]]
     for z in ordered[1:]:
         group_lo = min(g["zone_lo"] for g in groups[-1])
         group_hi = max(g["zone_hi"] for g in groups[-1])
+        truly_overlaps = z["zone_lo"] <= group_hi
         merged_width = max(group_hi, z["zone_hi"]) - min(group_lo, z["zone_lo"])
-        if z["zone_lo"] <= group_hi + threshold_pts and merged_width <= _ZONE_MERGE_MAX_WIDTH_PTS:
+        if truly_overlaps or (z["zone_lo"] <= group_hi + threshold_pts and merged_width <= _ZONE_MERGE_MAX_WIDTH_PTS):
             groups[-1].append(z)
         else:
             groups.append([z])
@@ -681,8 +695,27 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         # 2026-07-30) would wipe every zone's accumulated stage progress -- MONITORING,
         # ref-candle, breach_ts, sub-zone, armed -- on every single bar close, meaning
         # no zone could ever survive past Stage 1. Only append genuinely new zones.
+        #
+        # 2026-08-01 fix: lock_ts alone is not a stable identity for a MERGED
+        # zone -- it's inherited from whichever raw member has the newest
+        # lock_ts within its group, and group membership can shift as new raw
+        # candidates join over successive bar closes, changing the merged
+        # zone's lock_ts even though it represents the same real level.
+        # Exact-lock_ts dedup then treats it as new and re-adds a near-
+        # duplicate. Confirmed in a full-month backtest: the same trade fired
+        # repeatedly from zones that were geometrically identical but had
+        # drifted lock_ts. Also dedupe by bounds overlap, same tolerance the
+        # 60m-zone-pool collapse itself uses.
         existing_lock_ts = {z["lock_ts"] for z in series.zones}
-        new_zones = [z for z in _detect_bear_zones(bars_60) if z["lock_ts"] not in existing_lock_ts]
+
+        def _already_known(z):
+            if z["lock_ts"] in existing_lock_ts:
+                return True
+            return any(abs(z["zone_lo"] - e["zone_lo"]) <= _ZONE_MERGE_THRESHOLD_PTS
+                       and abs(z["zone_hi"] - e["zone_hi"]) <= _ZONE_MERGE_THRESHOLD_PTS
+                       for e in series.zones)
+
+        new_zones = [z for z in _detect_bear_zones(bars_60) if not _already_known(z)]
         new_zones = _prevalidate_zones(new_zones, m15)
         series.zones.extend(new_zones)
 
