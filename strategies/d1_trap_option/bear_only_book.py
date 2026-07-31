@@ -90,6 +90,11 @@ _MAX_ZONE_AGE_DAYS = 14   # 2026-07-31 tweak (was 20): matches _HIST_WARMUP_DAYS
                           # no point allowing zones up to 20 days old when only 14 days
                           # of history are ever fetched to find them in.
 _ZONE_SIZE_THRESHOLD_PCT = 0.20
+_ZONE_MERGE_THRESHOLD_PTS = 20.0   # 2026-07-31: collapse 60m zones within 20 option-pts of
+                                   # each other into one (max/min), same principle as the
+                                   # 5m sub-zone collapse -- cuts down near-duplicate zones.
+                                   # NOT backtested yet -- implemented live per explicit
+                                   # direction; treat today's results with that in mind.
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
 _TSL_BASE_PCT = 0.10        # 2026-07-30 tweak (was 0.20/0.125): today's 24000CE Trade 2
@@ -182,7 +187,36 @@ def _detect_bear_zones(bars_60m) -> List[dict]:
                          state="WAITING", ref_bar=None, done=False, invalid=False,
                          contact_ts=None, ref_open=None, ref_close_time=None,
                          breach_ts=None, sub_lo=None, sub_hi=None))
-    return out
+    return _collapse_nearby_zones(out)
+
+
+def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE_THRESHOLD_PTS) -> List[dict]:
+    """Merge zones whose bands are within threshold_pts of each other into one,
+    taking max(zone_hi)/min(zone_lo) across the group -- same collapse principle
+    as the 5-min sub-zone decomposition, applied to the 60-min zone pool itself.
+    The merged zone's entry_line/lock_ts come from whichever member zone has the
+    MOST RECENT lock_ts (the most current reference level in the group)."""
+    if not zones:
+        return []
+    ordered = sorted(zones, key=lambda z: z["zone_lo"])
+    groups = [[ordered[0]]]
+    for z in ordered[1:]:
+        group_hi = max(g["zone_hi"] for g in groups[-1])
+        if z["zone_lo"] <= group_hi + threshold_pts:
+            groups[-1].append(z)
+        else:
+            groups.append([z])
+    collapsed = []
+    for group in groups:
+        newest = max(group, key=lambda g: g["lock_ts"])
+        collapsed.append(dict(
+            zone_lo=min(g["zone_lo"] for g in group), zone_hi=max(g["zone_hi"] for g in group),
+            entry_line=newest["entry_line"], lock_ts=newest["lock_ts"],
+            state="WAITING", ref_bar=None, done=False, invalid=False,
+            contact_ts=None, ref_open=None, ref_close_time=None,
+            breach_ts=None, sub_lo=None, sub_hi=None,
+        ))
+    return collapsed
 
 
 def _collapse_subzones(bars_5m_window) -> Optional[tuple]:
