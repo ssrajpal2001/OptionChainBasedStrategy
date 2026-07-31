@@ -101,12 +101,17 @@ _ZONE_SIZE_THRESHOLD_PCT = 0.20
 _ZONE_MERGE_THRESHOLD_PTS = 20.0   # 2026-07-31: collapse 60m zones within 20 option-pts of
                                    # each other into one (max/min), same principle as the
                                    # 5m sub-zone collapse -- cuts down near-duplicate zones.
-                                   # Validated 2026-08-01 via a 1-month backtest against real
-                                   # option data with the correct rolling _HIST_WARMUP_DAYS
-                                   # window (scripts/d1trap_month_backtest_v2.py) -- collapsing
-                                   # over the FULL month instead of the 14-day window it
-                                   # actually runs on chains distant zones into one mega-band;
-                                   # scoped correctly to 14 days it behaves sanely.
+_ZONE_MERGE_MAX_WIDTH_PTS = 60.0   # 2026-08-01 fix: without a cap on the merged group's TOTAL
+                                   # width, the threshold-based chaining (does z's lo fall
+                                   # within threshold_pts of the group's current running max?)
+                                   # lets a long chain of small, genuinely-DIFFERENT bear-trap
+                                   # patterns collapse into one unbounded mega-band -- confirmed
+                                   # live: 39 raw zones detected over just 5 days (price trended
+                                   # ~68 -> ~220) chained into a single [46.80,224.00] band, 177pts
+                                   # wide and structurally meaningless, which fed a real losing
+                                   # trade. This caps the merge so genuine near-duplicates (the
+                                   # original intent) still collapse, but distinct patterns at
+                                   # drifting price levels can't.
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
 _TSL_BASE_PCT = 0.10        # 2026-07-30 tweak (was 0.20/0.125): today's 24000CE Trade 2
@@ -224,11 +229,27 @@ def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE
     MOST RECENT lock_ts (the most current reference level in the group)."""
     if not zones:
         return []
+    # 2026-08-01 fix: the old rule ("does z's lo fall within threshold_pts of
+    # the group's current running max hi?") lets the group's reach grow every
+    # time a member is added, so a long chain of small, genuinely-DIFFERENT
+    # bear-trap patterns (each only ~20pts from its immediate neighbor, but
+    # spanning a huge combined range) all get pulled into ONE mega-zone.
+    # Confirmed live: 39 raw zones detected 2026-07-27..07-31 (CE24200, price
+    # having trended from ~68 up to ~220 over those days) chained via this
+    # exact bug into a single [46.80,224.00] band -- 177pts wide, structurally
+    # meaningless as a "zone" (a bear-trap contact/breach against a band that
+    # wide is just "price touched somewhere below 224"), which fed a real
+    # losing trade (raw_breakout @ 241.50 -> sl_hit -Rs2000). Now also caps
+    # the merged group's TOTAL width so genuinely near-duplicate detections
+    # (the original intent) still merge, but a long chain of distinct patterns
+    # at drifting price levels can't collapse into one unbounded band.
     ordered = sorted(zones, key=lambda z: z["zone_lo"])
     groups = [[ordered[0]]]
     for z in ordered[1:]:
+        group_lo = min(g["zone_lo"] for g in groups[-1])
         group_hi = max(g["zone_hi"] for g in groups[-1])
-        if z["zone_lo"] <= group_hi + threshold_pts:
+        merged_width = max(group_hi, z["zone_hi"]) - min(group_lo, z["zone_lo"])
+        if z["zone_lo"] <= group_hi + threshold_pts and merged_width <= _ZONE_MERGE_MAX_WIDTH_PTS:
             groups[-1].append(z)
         else:
             groups.append([z])
@@ -663,16 +684,26 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             self._process_flip_cancellation(side, latest15)
             self._process_flip_entry(side, latest15, m15, m5)   # T2 (confirmed) tranche
 
-        # Regular zone-stage pipeline (raw_breakout/swing_breach) only runs
-        # while the book is completely flat -- unchanged from before. The flip
-        # concept's T1/T2 tranches are handled separately above/in
-        # _check_fast_flip_tranche1 and are NOT gated by this, so they can
-        # still fire (or add a second lot) even once one tranche leg is open.
-        if self._positions:
-            return
+        # 2026-08-01: regular (non-flip) zones now use the SAME T1(fast)/
+        # T2(confirmed) tranche split as the flip concept, instead of the old
+        # either/or raw_breakout-OR-swing_breach single shot. T1 fires the
+        # instant the zone's own ref-candle high is breached (no waiting for
+        # a subzone); T2 adds a second lot later ONLY if a genuine retracement
+        # (5m subzone -> arm -> swing-break) subsequently completes on that
+        # SAME zone. If no subzone ever forms, T1 alone stands -- identical
+        # dollar outcome to the old raw_breakout path in that case.
+        #
+        # A zone can still only be worked while the book is flat OR already
+        # holding a leg tied to THIS specific zone (its own T1, waiting for
+        # T2) -- a different zone, or a flip-sourced position, still blocks
+        # everything else, preserving the one-trade-sequence-at-a-time
+        # invariant while letting a zone's own T1->T2 progression continue.
+        active_zone_locks = {p["zone_lock_ts"] for p in self._positions}
 
         for zone in series.zones:
             if zone["done"] or zone["invalid"] or zone["lock_ts"] < known_from_cutoff:
+                continue
+            if self._positions and zone["lock_ts"] not in active_zone_locks:
                 continue
 
             # Stage 1: contact
@@ -705,6 +736,15 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     zone["breach_ts"] = last_ts
                     logger.info("BearTrap[%s]: %s ref-candle breach @ %s (high=%.2f)",
                                 self._underlying, side, last_ts, zone["ref_high"])
+                    # T1 (fast tranche, 2026-08-01): fire immediately on breach --
+                    # no waiting for a 5m subzone. If one later forms and price
+                    # retraces into it, T2 adds a second lot below. If not, T1
+                    # alone stands (identical dollar outcome to the old
+                    # raw_breakout single-shot in that case).
+                    self._enter_leg(side, tranche="T1", entry_price=zone["ref_high"], sl=zone["ref_low"],
+                                     zone_lock_ts=zone["lock_ts"], order_reason="bear_trap_ref_breach_t1",
+                                     use_tranche_tsl=True)
+                    active_zone_locks.add(zone["lock_ts"])
                     continue
                 # ROLL FORWARD (2026-07-31 fix, matches D1TrapOptionBook's existing
                 # roll-ref-forward-on-no-trigger mechanic): if a NEWER 15m candle has
@@ -723,15 +763,14 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     zone["ref_high"], zone["ref_low"] = new_ref.high, new_ref.low
                 continue
 
-            # Stage 3: 5m sub-zone decomposition (once, right after breach)
+            # Stage 3: 5m sub-zone decomposition (once, right after breach) --
+            # feeds T2 only now; T1 already fired at breach above.
             if zone["sub_lo"] is None:
                 window_5m = m5[(m5["timestamp"] >= zone["ref_open"]) &
                                 (m5["timestamp"] < zone["ref_close_time"])]
                 collapse = _collapse_subzones(_to_bars(window_5m))
                 if collapse is None:
-                    # raw_breakout fallback -- enter immediately at ref_high
-                    self._enter_leg(side, tranche="single", entry_price=zone["ref_high"], sl=zone["ref_low"],
-                                     zone_lock_ts=zone["lock_ts"], order_reason="bear_trap_raw_breakout")
+                    # no subzone -> no T2 possible, T1 alone stands
                     zone["done"] = True
                     return
                 zone["sub_lo"], zone["sub_hi"] = collapse
@@ -748,10 +787,14 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                                 self._underlying, side, last_ts, zone["arm_level"])
                 continue
 
-            # Stage 5: swing breach = entry
+            # Stage 5: swing breach -- T2 (confirmed) tranche, adds on top of
+            # T1 if it's still open, or fires standalone if T1 already closed.
             if last_high >= zone["sub_hi"]:
-                self._enter_leg(side, tranche="single", entry_price=zone["sub_hi"], sl=zone["ref_low"],
-                                 zone_lock_ts=zone["lock_ts"], order_reason="bear_trap_swing_breach")
+                if not any(p["zone_lock_ts"] == zone["lock_ts"] and p["tranche"] == "T2"
+                           for p in self._positions):
+                    self._enter_leg(side, tranche="T2", entry_price=zone["sub_hi"], sl=zone["ref_low"],
+                                     zone_lock_ts=zone["lock_ts"], order_reason="bear_trap_swing_breach_t2",
+                                     use_tranche_tsl=True)
                 zone["done"] = True
                 return
 
