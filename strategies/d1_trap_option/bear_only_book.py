@@ -384,16 +384,16 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     logger.info("BearTrap[%s]: %s %d warmed %d 1m bars -> %d bear zones",
                                 self._underlying, side, strike, len(series.bars_1m), len(series.zones))
                     if series.zones:
+                        # Summary only (2026-07-31: dialed back from a full per-zone dump --
+                        # that was a one-time diagnostic need, not needed every restart, and
+                        # heavy synchronous logging was a plausible contributor to reported
+                        # UI/dashboard slowness on this same event loop).
                         his = [z["zone_hi"] for z in series.zones]
                         los = [z["zone_lo"] for z in series.zones]
                         logger.info("BearTrap[%s]: %s %d zone_hi range=[%.2f, %.2f]  "
                                     "zone_lo range=[%.2f, %.2f]",
                                     self._underlying, side, strike, min(his), max(his),
                                     min(los), max(los))
-                        for z in sorted(series.zones, key=lambda z: z["zone_hi"], reverse=True)[:30]:
-                            logger.info("BearTrap[%s]: %s zonebound [%.2f,%.2f] entry_line=%.2f lock=%s",
-                                        self._underlying, side, z["zone_lo"], z["zone_hi"],
-                                        z["entry_line"], z["lock_ts"])
                 self._series[side] = series
 
             # Replay TODAY's own intraday bars (if the market has already opened) so
@@ -440,31 +440,26 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             logger.warning("BearTrap[%s]: OPTION_TICK queue is None -- subscribe() failed at start().",
                             self._underlying)
             return
+        # 2026-07-31: dialed back from a per-200-ticks diagnostic (was logging
+        # continuously for hours -- confirmed useful once, but heavy synchronous
+        # logging on this same asyncio event loop was a plausible contributor to
+        # reported UI/dashboard slowness). Keep only a low-frequency idle check.
         _diag_total = 0
-        _diag_strikes_seen = set()
         _diag_last_log = datetime.now(IST)
         while self._running:
             try:
                 ev = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 now = datetime.now(IST)
-                if (now - _diag_last_log).total_seconds() >= 60 and self._ce_strike is not None:
-                    logger.info("BearTrap[%s]: no OPTION_TICK in the last check window. "
-                                "Total seen so far=%d. Distinct strikes seen so far=%s "
-                                "(watching for CE=%s PE=%s)",
-                                self._underlying, _diag_total, sorted(_diag_strikes_seen)[:20],
-                                self._ce_strike, self._pe_strike)
+                if (now - _diag_last_log).total_seconds() >= 300 and self._ce_strike is not None:
+                    logger.info("BearTrap[%s]: no OPTION_TICK in the last 5 min. "
+                                "Total seen so far=%d (watching CE=%s PE=%s)",
+                                self._underlying, _diag_total, self._ce_strike, self._pe_strike)
                     _diag_last_log = now
                 continue
             if not isinstance(ev, OptionTick) or not ev.ltp:
                 continue
             _diag_total += 1
-            _diag_strikes_seen.add((int(ev.strike), ev.option_type))
-            if _diag_total % 200 == 1:
-                logger.info("BearTrap[%s]: OPTION_TICK diag -- total=%d distinct=%d sample=%s%.0f LTP=%.2f "
-                            "(watching CE=%s PE=%s)",
-                            self._underlying, _diag_total, len(_diag_strikes_seen),
-                            ev.option_type, ev.strike, ev.ltp, self._ce_strike, self._pe_strike)
             side = self._match_side(ev)
             if side is None:
                 continue
