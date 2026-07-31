@@ -520,6 +520,23 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     zone["breach_ts"] = last_ts
                     logger.info("BearTrap[%s]: %s ref-candle breach @ %s (high=%.2f)",
                                 self._underlying, side, last_ts, zone["ref_high"])
+                    continue
+                # ROLL FORWARD (2026-07-31 fix, matches D1TrapOptionBook's existing
+                # roll-ref-forward-on-no-trigger mechanic): if a NEWER 15m candle has
+                # fully closed since the current ref without breaching it, that candle
+                # becomes the new ref -- otherwise a zone gets permanently stuck on
+                # whatever candle it first attached to, even if that candle's high was
+                # an outlier never matched by later, more relevant price action.
+                new_ref = self._find_ref_bar(last_ts, m15)
+                if new_ref is not None and new_ref.timestamp > zone["ref_open"] \
+                        and (new_ref.timestamp + timedelta(minutes=15)) <= last_ts:
+                    logger.info("BearTrap[%s]: %s ref candle rolled forward %s -> %s "
+                                "(old H=%.2f -> new H=%.2f, no breach yet)",
+                                self._underlying, side, zone["ref_open"], new_ref.timestamp,
+                                zone["ref_high"], new_ref.high)
+                    zone["ref_open"] = new_ref.timestamp
+                    zone["ref_close_time"] = new_ref.timestamp + timedelta(minutes=15)
+                    zone["ref_high"], zone["ref_low"] = new_ref.high, new_ref.low
                 continue
 
             # Stage 3: 5m sub-zone decomposition (once, right after breach)
