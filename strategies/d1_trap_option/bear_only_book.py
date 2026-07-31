@@ -66,6 +66,7 @@ from config.global_config import IST, Topic
 from data_layer.base_feeder import OptionTick, IndexTick
 from data_layer.historical_candles import fetch_upstox_range_1m
 from data_layer.instrument_registry import REGISTRY
+from data_layer import position_store
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.v4_cascade.rolling_base import find_all_bear_zones
 from strategies.d1_trap_option.book import D1TrapOrderEvent, _upstox_key_for
@@ -305,6 +306,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._product_type = product_type
         self._lot_size = (cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
         self._strike_step = int(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
+        self._persist_key = f"{client_id}_{binding_id}_{underlying}_d1_trap_bear_only"
 
         self._today: Optional[date] = None
         self._ce_strike: Optional[int] = None
@@ -440,6 +442,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 self._underlying, spot_open, atm, ce_strike, pe_strike,
             )
             self._ce_strike, self._pe_strike = ce_strike, pe_strike
+            self._restore_positions()   # a real running trade must survive a restart
 
             today = self._today or datetime.now(IST).date()
             expiry = REGISTRY.get_active_expiry(self._underlying, today)
@@ -972,6 +975,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             tsl_step_pct=step_pct, tsl_step_lock_pct=step_lock,
         )
         self._positions.append(pos)
+        self._persist_positions()
         logger.info("BearTrap[%s]: ENTER BUY %s %d [%s] entry=%.2f sl=%.2f (risk=Rs%.0f/lot) reason=%s",
                     self._underlying, side, pos["strike"], tranche, entry_price, sl_final,
                     (entry_price - sl_final) * self._lot_size, order_reason)
@@ -1004,7 +1008,11 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             if profit_pct >= pos["tsl_base_pct"]:
                 num_steps = int((profit_pct - pos["tsl_base_pct"]) // pos["tsl_step_pct"])
                 calc_lock = pos["tsl_base_lock_pct"] + num_steps * pos["tsl_step_lock_pct"]
-                pos["high_lock_pct"] = max(pos["high_lock_pct"], calc_lock)
+                if calc_lock > pos["high_lock_pct"]:
+                    pos["high_lock_pct"] = calc_lock
+                    self._persist_positions()   # persist the new locked-in TSL level immediately --
+                                                 # a restart before this is saved must never give back
+                                                 # profit already locked in by resetting the trail to 0.
 
             stop_price = entry * (1 + pos["high_lock_pct"]) if pos["high_lock_pct"] > 0 else pos["sl"]
 
@@ -1034,6 +1042,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         if not any(p is pos for p in self._positions):
             return   # already closed by a concurrent check (e.g. tsl + eod racing)
         self._positions = [p for p in self._positions if p is not pos]
+        self._persist_positions()
         expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
         ev = D1TrapOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id,
@@ -1054,6 +1063,66 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             series = self._series.get(pos["side"])
             ltp = series.last_ltp if series else pos["entry_price"]
             await self._square_off_leg(pos, reason, ltp)
+
+    # ── position persistence (2026-08-01) ────────────────────────────────────
+    # A real open position previously vanished from memory on every restart --
+    # __init__ always starts self._positions = [] fresh, and nothing ever
+    # reconstructed a genuinely running trade, unlike SellStraddle/V4Cascade
+    # which both persist to disk. For a book meant to run live-paper for two
+    # weeks with restarts happening routinely, that's a real gap: a restart
+    # mid-trade would silently forget the leg entirely -- no more exit checks,
+    # no more TSL tracking, and it could even open a conflicting fresh entry
+    # on the same side thinking the book was flat.
+
+    def _persist_positions(self) -> None:
+        if self._positions:
+            legs = []
+            for pos in self._positions:
+                d = dict(pos)
+                d["entry_ts"] = pos["entry_ts"].isoformat() if pos.get("entry_ts") else None
+                d["zone_lock_ts"] = pos["zone_lock_ts"].isoformat() if pos.get("zone_lock_ts") else None
+                legs.append(d)
+            position_store.save(self._persist_key, {"legs": legs}, product_type=self._product_type)
+        else:
+            position_store.clear(self._persist_key)
+
+    def _restore_positions(self) -> None:
+        """Called once strikes are selected for today -- MIS-day-aware (a prior
+        day's stored position is discarded by position_store itself, since the
+        broker already auto-squared it at EOD); restored legs are also
+        sanity-checked against TODAY's freshly selected strikes (deterministic
+        from the real 09:15 open, so should always match within the same day --
+        a mismatch means something changed and the stale leg is dropped rather
+        than trusted)."""
+        data = position_store.load(self._persist_key)
+        if not data:
+            return
+        restored = []
+        for d in (data.get("legs") or []):
+            side = d.get("side")
+            expected_strike = self._ce_strike if side == "CE" else self._pe_strike
+            if d.get("strike") != expected_strike:
+                logger.warning("BearTrap[%s]: discarding stored %s leg -- strike %s doesn't match "
+                                "today's selected %s (data drift or stale file).",
+                                self._underlying, side, d.get("strike"), expected_strike)
+                continue
+            try:
+                d["entry_ts"] = (pd.Timestamp(d["entry_ts"]).to_pydatetime()
+                                  if d.get("entry_ts") else datetime.now(IST))
+                d["zone_lock_ts"] = (pd.Timestamp(d["zone_lock_ts"]).to_pydatetime()
+                                      if d.get("zone_lock_ts") else None)
+            except Exception:
+                logger.exception("BearTrap[%s]: failed to parse stored leg timestamps -- discarding.",
+                                  self._underlying)
+                continue
+            restored.append(d)
+        if restored:
+            self._positions = restored
+            logger.info("BearTrap[%s]: RESTORED %d open leg(s) from disk on restart -- %s",
+                        self._underlying, len(restored),
+                        ", ".join(f"{p['side']}{p['strike']}[{p.get('tranche','single')}]"
+                                  f"@{p['entry_price']:.2f} lock={p['high_lock_pct']*100:.1f}%"
+                                  for p in restored))
 
     # ── status / UI ──────────────────────────────────────────────────────────
 
