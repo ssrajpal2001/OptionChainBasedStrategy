@@ -970,10 +970,31 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 ltp = series.last_ltp or 0
                 top = min(waiting, key=lambda z: abs(z["zone_hi"] - ltp)) if ltp else waiting[0]
                 stage = "WAITING"
+
+            # 2026-08-01 fix: once a side's only zone(s) invalidate, `active` goes
+            # empty and this fell through to blank "NO_ZONES" (shown as "idle" in
+            # the dashboard) even though the flip concept keeps real, live state
+            # going for that side -- watching for either a cancellation (close back
+            # inside its own zone, re-validating it) or feeding the other side's
+            # fast-tracked entry. Surface the most recently created live (not yet
+            # confirmed/cancelled) flip candidate so the UI reflects what's actually
+            # being tracked instead of looking dead.
+            live_flips = [fc for fc in series.flip_candidates if not fc["confirmed"] and not fc["cancelled"]]
+            flip_view = None
+            if live_flips:
+                fc = max(live_flips, key=lambda f: f["candleA_ts"])
+                flip_view = dict(
+                    candleA_ts=fc["candleA_ts"].isoformat(), candleA_low=round(fc["candleA_low"], 2),
+                    zone_lo=round(fc["zone_lo"], 2), zone_hi=round(fc["zone_hi"], 2),
+                )
+                if not active:
+                    stage = "INVALID_FLIP_WATCH"
+
             return dict(
                 strike=series.strike, zones_total=len(active), stage=stage,
                 current_zone=dict(zone_lo=round(top["zone_lo"], 2), zone_hi=round(top["zone_hi"], 2),
                                    entry_line=round(top["entry_line"], 2)) if top else None,
+                flip=flip_view,
                 last_ltp=series.last_ltp,
             )
 

@@ -7658,6 +7658,7 @@ function amoTest() {
                                   'ARMED_5M':'background:rgba(16,185,129,0.15);color:var(--t-green)',
                                   'NO_ZONES':'background:rgba(100,116,139,0.08);color:var(--t-dim)',
                                   'NO_DATA':'background:rgba(239,68,68,0.1);color:var(--t-red)',
+                                  'INVALID_FLIP_WATCH':'background:rgba(167,139,250,0.15);color:#a78bfa',
                                 }[_s.stage]||''" x-text="_s.stage||'NO_ZONES'"></span>
                             </div>
                             <div class="flex justify-between" x-show="_s.current_zone">
@@ -7668,8 +7669,18 @@ function amoTest() {
                               <span style="color:var(--t-muted)">LTP</span>
                               <span style="color:var(--t-cyan)" x-text="fmt(_s.last_ltp)"></span>
                             </div>
-                            <div class="text-center mt-1" style="color:var(--t-dim)" x-show="_s.zones_total===0">
+                            <div class="text-center mt-1" style="color:var(--t-dim)" x-show="_s.zones_total===0 && !_s.flip">
                               no zones yet
+                            </div>
+                            <div class="mt-1" style="color:#a78bfa" x-show="_s.flip">
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Flip candle A</span>
+                                <span x-text="_s.flip?fmt(_s.flip.candleA_low):'—'"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Invalid zone</span>
+                                <span x-text="_s.flip?fmt(_s.flip.zone_lo)+'–'+fmt(_s.flip.zone_hi):'—'"></span>
+                              </div>
                             </div>
                           </div>
                         </template>
