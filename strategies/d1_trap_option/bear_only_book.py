@@ -117,6 +117,13 @@ _TSL_STEP_LOCK_PCT = 0.07   # needed +40%) -- gave back ~9 points of a real move
                              # waiting for the next round-number tier.
 _HIST_WARMUP_DAYS = 14   # 2026-07-31 tweak (was 25): current week + previous week
                          # is enough history to seed the 60m bear-trap zone pool.
+_TSL_TRANCHE_BASE_PCT = 0.20        # 2026-08-01: per-lot staircase for the flip
+_TSL_TRANCHE_BASE_LOCK_PCT = 0.125  # concept's T1/T2 tranches specifically --
+_TSL_TRANCHE_STEP_PCT = 0.20        # deliberately the OLDER 20%/12.5% shape, NOT
+_TSL_TRANCHE_STEP_LOCK_PCT = 0.125  # the tightened 10%/7% used for regular single-
+                                     # shot entries elsewhere in this book. Each
+                                     # tranche leg is tracked and exited fully
+                                     # independently off its OWN entry price.
 
 
 @dataclass(frozen=True)
@@ -136,6 +143,12 @@ class _OptionSeries:
     bars_1m: List[_Bar] = field(default_factory=list)
     zones: List[dict] = field(default_factory=list)
     flip_candidates: List[dict] = field(default_factory=list)   # 2026-07-31 flip concept
+    prev15_high: Optional[float] = None   # 2026-08-01: cached most-recently-CLOSED
+    prev15_low: Optional[float] = None    # 15m candle's H/L, refreshed once per bar-
+                                           # close in _process_new_bar -- lets the
+                                           # tick-level T1 fast-breach check compare
+                                           # every tick against a cheap O(1) value
+                                           # instead of resampling on every tick.
     _cur_open: Optional[datetime] = None
     _cur_o: float = 0.0
     _cur_h: float = 0.0
@@ -298,7 +311,14 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._pe_strike: Optional[int] = None
         self._series: Dict[str, _OptionSeries] = {}   # "CE" | "PE" -> _OptionSeries
         self._last_spot_open: Optional[float] = None
-        self._position: Optional[dict] = None
+        # 2026-08-01: list of open legs, not a single position -- the flip
+        # concept's T1 (fast tick-level breach) and T2 (confirmed retracement)
+        # tranches are independent legs that can both be open on the SAME side
+        # at once, each with its own entry/SL/staircase-TSL state. Regular
+        # single-shot entries (raw_breakout/swing_breach) still only ever
+        # produce one leg. Invariant: every leg in this list shares the same
+        # `side` -- the book never holds CE and PE simultaneously.
+        self._positions: List[dict] = []
         self._day_done = False
         self._selecting_strikes = False
         self._warming_up = False
@@ -375,7 +395,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._series = {}
         self._last_spot_open = None
         self._day_done = False
-        if self._position is None:
+        if not self._positions:
             pass  # nothing open, clean reset
 
     # ── daily strike selection ──────────────────────────────────────────────
@@ -504,6 +524,12 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     series.bars_1m.append(_Bar(ts, o, h, l, c))
                     series.last_ltp = c
                     self._process_new_bar(side)
+                    # T1's fast tick-level breach check normally runs off raw ticks
+                    # (_option_tick_loop), which replay doesn't have -- approximate
+                    # with the bar's own high so a restart still reconstructs a T1
+                    # that would have fired earlier today instead of silently
+                    # missing it (would-have-entered logging only during warmup).
+                    self._check_fast_flip_tranche1(side, h, ts)
                     replayed_counts[side] += 1
                 for side, n in replayed_counts.items():
                     if n:
@@ -554,9 +580,14 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             ts = getattr(ev, "timestamp", None) or datetime.now(IST)
             closed = series.on_tick(ts, ev.ltp)
 
-            if self._position is not None and self._position["side"] == side:
-                self._check_exit(side, ev.ltp, ts)
-            elif closed and self._position is None:
+            # 2026-08-01: exits + the flip's fast T1 breach check run on EVERY
+            # tick (not gated to bar-close) -- T1 exists specifically to catch a
+            # hard trending move that never waits for a candle to close. The
+            # heavier per-minute pipeline (zone stages, flip candidate create/
+            # cancel, T2 confirmation) still only runs once a 1-min bar closes.
+            self._check_exit(side, ev.ltp, ts)
+            self._check_fast_flip_tranche1(side, ev.ltp, ts)
+            if closed:
                 self._process_new_bar(side)
 
     def _match_side(self, ev: OptionTick) -> Optional[str]:
@@ -603,6 +634,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         # call against the latest closed 15m candle.
         latest15 = self._find_latest_closed_ref_bar(m15, last_ts)
         if latest15 is not None:
+            series.prev15_high, series.prev15_low = latest15.high, latest15.low
             for z in series.zones:
                 if not z["done"] and not z["invalid"] and latest15.close < z["zone_lo"]:
                     z["invalid"] = True
@@ -613,7 +645,15 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                                 latest15.close, z["zone_lo"], latest15.timestamp)
                     self._create_flip_candidate(side, z, latest15)
             self._process_flip_cancellation(side, latest15)
-            self._process_flip_entry(side, latest15, m15, m5)
+            self._process_flip_entry(side, latest15, m15, m5)   # T2 (confirmed) tranche
+
+        # Regular zone-stage pipeline (raw_breakout/swing_breach) only runs
+        # while the book is completely flat -- unchanged from before. The flip
+        # concept's T1/T2 tranches are handled separately above/in
+        # _check_fast_flip_tranche1 and are NOT gated by this, so they can
+        # still fire (or add a second lot) even once one tranche leg is open.
+        if self._positions:
+            return
 
         for zone in series.zones:
             if zone["done"] or zone["invalid"] or zone["lock_ts"] < known_from_cutoff:
@@ -674,7 +714,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 collapse = _collapse_subzones(_to_bars(window_5m))
                 if collapse is None:
                     # raw_breakout fallback -- enter immediately at ref_high
-                    self._enter(side, zone, entry_price=zone["ref_high"], sl=zone["ref_low"])
+                    self._enter_leg(side, tranche="single", entry_price=zone["ref_high"], sl=zone["ref_low"],
+                                     zone_lock_ts=zone["lock_ts"], order_reason="bear_trap_raw_breakout")
                     zone["done"] = True
                     return
                 zone["sub_lo"], zone["sub_hi"] = collapse
@@ -693,7 +734,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
             # Stage 5: swing breach = entry
             if last_high >= zone["sub_hi"]:
-                self._enter(side, zone, entry_price=zone["sub_hi"], sl=zone["ref_low"])
+                self._enter_leg(side, tranche="single", entry_price=zone["sub_hi"], sl=zone["ref_low"],
+                                 zone_lock_ts=zone["lock_ts"], order_reason="bear_trap_swing_breach")
                 zone["done"] = True
                 return
 
@@ -723,7 +765,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         series.flip_candidates.append(dict(
             candleA_low=candleA.low, candleA_high=candleA.high, candleA_ts=candleA.timestamp,
             zone_lo=zone["zone_lo"], zone_hi=zone["zone_hi"], zone_lock_ts=zone["lock_ts"],
-            parent_zone=zone, confirmed=False, cancelled=False,
+            parent_zone=zone, confirmed=False, cancelled=False, t1_taken=False,
         ))
         logger.info("BearTrap[%s]: %s FLIP CANDIDATE created -- candle A @ %s low=%.2f, zone=[%.2f,%.2f]. "
                     "Other side may fast-track entry (skipping its own 60m zone) if it breaks its own "
@@ -752,12 +794,19 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                             self._underlying, side, m15_bar.close, fc["zone_lo"], fc["zone_hi"])
 
     def _process_flip_entry(self, side: str, m15_bar, m15: pd.DataFrame, m5: pd.DataFrame) -> None:
-        """side = the side possibly being fast-tracked by the OTHER side's
-        invalidation. Skips side's own 60m zone requirement entirely --
-        simplified trigger only: current 15m high > previous 15m high (own
-        chart) + 5m subzone found in that breakout candle (own chart)."""
-        if self._position is not None:
-            return
+        """T2 (confirmed) tranche -- side possibly being fast-tracked by the
+        OTHER side's invalidation. Skips side's own 60m zone requirement
+        entirely -- simplified trigger only: current 15m high > previous 15m
+        high (own chart) + 5m subzone found in that breakout candle (own
+        chart). 2026-08-01: fires independently of T1 (the fast tick-level
+        tranche) -- if T1 is still open this ADDS a second lot on top of it;
+        if T1 was never taken or already stopped out, this becomes a normal
+        standalone confirmed entry (same mechanics as before this tranche
+        split existed)."""
+        if self._positions and self._positions[0]["side"] != side:
+            return   # book already committed to the OTHER side
+        if any(p["side"] == side and p["tranche"] == "T2" for p in self._positions):
+            return   # T2 already taken for this side
         flip_source_side = "PE" if side == "CE" else "CE"
         flip_source = self._series.get(flip_source_side)
         if flip_source is None or not flip_source.flip_candidates:
@@ -772,23 +821,68 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             if fc["confirmed"] or fc["cancelled"]:
                 continue
             if m15_bar.timestamp <= fc["candleA_ts"]:
-                continue
-            if m15_bar.low < fc["candleA_low"]:
-                continue
-            if fc["zone_lo"] <= m15_bar.close <= fc["zone_hi"]:
-                continue
+                continue   # timestamps only -- a shared timeline, valid to compare
+            # 2026-08-01 fix: candleA_low/zone_lo/zone_hi live on the FLIP-SOURCE
+            # side's (e.g. PE's) own premium scale, but m15_bar here is THIS
+            # side's (e.g. CE's) own bar -- comparing CE's price against PE's
+            # reference levels is a cross-instrument scale mismatch (those
+            # Check-1/Check-2 price comparisons belong only in
+            # _process_flip_cancellation, which correctly uses the flip
+            # SOURCE's own bar). This side's entry gating is price-scale-free:
+            # only its own prev-15m-high breakout + its own 5m subzone.
             window_5m = m5[(m5["timestamp"] >= m15_bar.timestamp) &
                             (m5["timestamp"] < m15_bar.timestamp + timedelta(minutes=15))]
             collapse = _collapse_subzones(_to_bars(window_5m))
             if collapse is None:
                 continue
             fc["confirmed"] = True
-            logger.info("BearTrap[%s]: %s FLIP ENTRY -- breakout 15m %s high=%.2f > prev high=%.2f, "
+            has_t1 = any(p["side"] == side and p["tranche"] == "T1" for p in self._positions)
+            logger.info("BearTrap[%s]: %s FLIP T2 ENTRY (%s) -- breakout 15m %s high=%.2f > prev high=%.2f, "
                         "5m subzone [%.2f,%.2f] found. Triggered by %s candle-A @ %s (zone locked %s).",
-                        self._underlying, side, m15_bar.timestamp, m15_bar.high, prev15["high"],
+                        self._underlying, side, "adding to open T1" if has_t1 else "standalone, T1 not open",
+                        m15_bar.timestamp, m15_bar.high, prev15["high"],
                         collapse[0], collapse[1], flip_source_side, fc["candleA_ts"], fc["zone_lock_ts"])
-            pseudo_zone = dict(lock_ts=fc["zone_lock_ts"])
-            self._enter(side, pseudo_zone, entry_price=m15_bar.high, sl=m15_bar.low)
+            self._enter_leg(side, tranche="T2", entry_price=m15_bar.high, sl=m15_bar.low,
+                             zone_lock_ts=fc["zone_lock_ts"], order_reason="bear_trap_flip_t2",
+                             use_tranche_tsl=True)
+            return
+
+    def _check_fast_flip_tranche1(self, side: str, ltp: float, ts: datetime) -> None:
+        """T1 (2026-08-01): the flip's fast, unconfirmed tranche -- checked on
+        EVERY tick (not gated to a 15m close) so a hard trending move that
+        never retraces into a clean 5m subzone still gets caught, instead of
+        only ever depending on T2's slower, candle-close-gated confirmation.
+        SL = the prev-15m reference candle's own low -- the same structural
+        level the entry trigger (breaking that candle's high) is measured
+        against -- buffered/capped exactly like every other entry in this book."""
+        if self._day_done or ts.time() >= _ENTRY_CUTOFF:
+            return
+        if self._positions and self._positions[0]["side"] != side:
+            return
+        if any(p["side"] == side for p in self._positions):
+            return   # this side already has a leg open (T1 and/or T2) -- no re-firing T1
+        series = self._series.get(side)
+        if series is None or series.prev15_high is None:
+            return
+        flip_source_side = "PE" if side == "CE" else "CE"
+        flip_source = self._series.get(flip_source_side)
+        if flip_source is None:
+            return
+        for fc in flip_source.flip_candidates:
+            if fc["confirmed"] or fc["cancelled"] or fc.get("t1_taken"):
+                continue
+            if ts <= fc["candleA_ts"] + timedelta(minutes=15):
+                continue   # candle A itself must have fully closed already
+            if ltp <= series.prev15_high:
+                continue
+            fc["t1_taken"] = True
+            logger.info("BearTrap[%s]: %s FLIP T1 ENTRY (fast) -- tick ltp=%.2f > prev15_high=%.2f. "
+                        "Triggered by %s candle-A @ %s (zone locked %s).",
+                        self._underlying, side, ltp, series.prev15_high,
+                        flip_source_side, fc["candleA_ts"], fc["zone_lock_ts"])
+            self._enter_leg(side, tranche="T1", entry_price=ltp, sl=series.prev15_low,
+                             zone_lock_ts=fc["zone_lock_ts"], order_reason="bear_trap_flip_t1",
+                             use_tranche_tsl=True)
             return
 
     @staticmethod
@@ -822,65 +916,92 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
     # ── entry / exit ─────────────────────────────────────────────────────────
 
-    def _enter(self, side: str, zone: dict, entry_price: float, sl: float) -> None:
+    def _enter_leg(self, side: str, tranche: str, entry_price: float, sl: float,
+                    zone_lock_ts, order_reason: str, use_tranche_tsl: bool = False) -> None:
+        """tranche: 'single' (regular raw_breakout/swing_breach, one-shot, never
+        coexists with anything else) | 'T1' (flip fast/unconfirmed) | 'T2' (flip
+        confirmed retracement, may stack on top of an open T1 on the same side)."""
         if self._warming_up:
             # Replaying today's already-elapsed bars at startup -- this zone's
             # opportunity already came and went before we were watching live.
             # Skip the real order; the caller still marks the zone done so it
             # won't re-fire once live ticks resume.
-            logger.info("BearTrap[%s]: %s would have ENTERED @ %.2f during replay "
-                        "(warmup, no order placed) — zone already resolved earlier today.",
-                        self._underlying, side, entry_price)
+            logger.info("BearTrap[%s]: %s would have ENTERED [%s] @ %.2f during replay "
+                        "(warmup, no order placed) — already resolved earlier today.",
+                        self._underlying, side, tranche, entry_price)
             return
+        if tranche == "single" and self._positions:
+            logger.info("BearTrap[%s]: skip %s single entry -- book already has open leg(s).",
+                        self._underlying, side)
+            return
+        if self._positions and self._positions[0]["side"] != side:
+            logger.warning("BearTrap[%s]: refusing %s [%s] entry -- book already holding %s leg(s).",
+                           self._underlying, side, tranche, self._positions[0]["side"])
+            return
+
         sl_buffered = sl - _SL_BUFFER_PTS
         max_risk_pts = _MAX_RISK_RS_PER_LOT / self._lot_size
         sl_final = max(sl_buffered, entry_price - max_risk_pts)
-
         qty = self._lot_size * self._lot_multiplier
-        self._position = dict(
+
+        if use_tranche_tsl:
+            base_pct, base_lock = _TSL_TRANCHE_BASE_PCT, _TSL_TRANCHE_BASE_LOCK_PCT
+            step_pct, step_lock = _TSL_TRANCHE_STEP_PCT, _TSL_TRANCHE_STEP_LOCK_PCT
+        else:
+            base_pct, base_lock = _TSL_BASE_PCT, _TSL_BASE_LOCK_PCT
+            step_pct, step_lock = _TSL_STEP_PCT, _TSL_STEP_LOCK_PCT
+
+        pos = dict(
             side=side, strike=self._ce_strike if side == "CE" else self._pe_strike,
             entry_price=entry_price, sl=sl_final, entry_ts=datetime.now(IST),
-            high_lock_pct=0.0, qty=qty, zone_lock_ts=zone["lock_ts"],
+            high_lock_pct=0.0, qty=qty, zone_lock_ts=zone_lock_ts, tranche=tranche,
+            tsl_base_pct=base_pct, tsl_base_lock_pct=base_lock,
+            tsl_step_pct=step_pct, tsl_step_lock_pct=step_lock,
         )
-        logger.info("BearTrap[%s]: ENTER BUY %s %d entry=%.2f sl=%.2f (risk=Rs%.0f/lot)",
-                    self._underlying, side, self._position["strike"], entry_price, sl_final,
-                    (entry_price - sl_final) * self._lot_size)
+        self._positions.append(pos)
+        logger.info("BearTrap[%s]: ENTER BUY %s %d [%s] entry=%.2f sl=%.2f (risk=Rs%.0f/lot) reason=%s",
+                    self._underlying, side, pos["strike"], tranche, entry_price, sl_final,
+                    (entry_price - sl_final) * self._lot_size, order_reason)
 
         expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
         ev = D1TrapOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id,
             strategy="d1_trap_bear_only", direction="LONG", action="BUY",
             quantity=qty, entry_price=entry_price, sl_price=sl_final, tsl_level=sl_final,
-            trigger_ts=datetime.now(IST), reason="bear_trap_swing_breach",
+            trigger_ts=datetime.now(IST), reason=order_reason,
             underlying=self._underlying, option_type=side,
-            strike=self._position["strike"], expiry=expiry,
+            strike=pos["strike"], expiry=expiry,
             product_type=self._product_type,
         )
         if self._bus is not None:
             asyncio.create_task(self._bus.publish(Topic.D1_TRAP_ORDER_REQUEST, ev))
 
     def _check_exit(self, side: str, ltp: float, ts: datetime) -> None:
-        pos = self._position
-        if pos is None or pos["side"] != side:
-            return
-        entry = pos["entry_price"]
-        profit_pct = (ltp - entry) / entry
-
-        if profit_pct >= _TSL_BASE_PCT:
-            num_steps = int((profit_pct - _TSL_BASE_PCT) // _TSL_STEP_PCT)
-            calc_lock = _TSL_BASE_LOCK_PCT + num_steps * _TSL_STEP_LOCK_PCT
-            pos["high_lock_pct"] = max(pos["high_lock_pct"], calc_lock)
-
-        stop_price = entry * (1 + pos["high_lock_pct"]) if pos["high_lock_pct"] > 0 else pos["sl"]
-
-        if ltp <= stop_price:
-            reason = "tsl_hit" if pos["high_lock_pct"] > 0 else "sl_hit"
-            asyncio.create_task(self._square_off(reason, stop_price))
-            return
-
+        """Each leg (single/T1/T2) is checked and exited fully independently --
+        no averaging, no combined exit. A leg's own staircase-TSL profile
+        (tranche legs use 20%/12.5%, regular entries use 10%/7%) is stored on
+        the leg itself at entry time."""
         now_t = ts.time() if hasattr(ts, "time") else datetime.now(IST).time()
-        if now_t >= _EOD_TIME:
-            asyncio.create_task(self._square_off("eod", ltp))
+        for pos in list(self._positions):
+            if pos["side"] != side:
+                continue
+            entry = pos["entry_price"]
+            profit_pct = (ltp - entry) / entry
+
+            if profit_pct >= pos["tsl_base_pct"]:
+                num_steps = int((profit_pct - pos["tsl_base_pct"]) // pos["tsl_step_pct"])
+                calc_lock = pos["tsl_base_lock_pct"] + num_steps * pos["tsl_step_lock_pct"]
+                pos["high_lock_pct"] = max(pos["high_lock_pct"], calc_lock)
+
+            stop_price = entry * (1 + pos["high_lock_pct"]) if pos["high_lock_pct"] > 0 else pos["sl"]
+
+            if ltp <= stop_price:
+                reason = "tsl_hit" if pos["high_lock_pct"] > 0 else "sl_hit"
+                asyncio.create_task(self._square_off_leg(pos, reason, stop_price))
+                continue
+
+            if now_t >= _EOD_TIME:
+                asyncio.create_task(self._square_off_leg(pos, "eod", ltp))
 
     async def _eod_loop(self) -> None:
         while self._running:
@@ -890,17 +1011,16 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 break
             now = datetime.now(IST)
             if now.time() >= _EOD_TIME and not self._day_done:
-                if self._position is not None:
-                    series = self._series.get(self._position["side"])
-                    ltp = series.last_ltp if series else self._position["entry_price"]
-                    await self._square_off("eod", ltp)
+                for pos in list(self._positions):
+                    series = self._series.get(pos["side"])
+                    ltp = series.last_ltp if series else pos["entry_price"]
+                    await self._square_off_leg(pos, "eod", ltp)
                 self._day_done = True
 
-    async def _square_off(self, reason: str, exit_price: float) -> None:
-        pos = self._position
-        if pos is None:
-            return
-        self._position = None
+    async def _square_off_leg(self, pos: dict, reason: str, exit_price: float) -> None:
+        if not any(p is pos for p in self._positions):
+            return   # already closed by a concurrent check (e.g. tsl + eod racing)
+        self._positions = [p for p in self._positions if p is not pos]
         expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
         ev = D1TrapOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id,
@@ -912,19 +1032,29 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         )
         if self._bus is not None:
             await self._bus.publish(Topic.D1_TRAP_ORDER_REQUEST, ev)
-        logger.info("BearTrap[%s]: SELL %s %d reason=%s exit=%.2f",
-                    self._underlying, pos["side"], pos["strike"], reason, exit_price)
+        logger.info("BearTrap[%s]: SELL %s %d [%s] reason=%s exit=%.2f",
+                    self._underlying, pos["side"], pos["strike"], pos.get("tranche", "single"),
+                    reason, exit_price)
 
     async def liquidate(self, reason: str = "kill_switch") -> None:
-        if self._position is not None:
-            series = self._series.get(self._position["side"])
-            ltp = series.last_ltp if series else self._position["entry_price"]
-            await self._square_off(reason, ltp)
+        for pos in list(self._positions):
+            series = self._series.get(pos["side"])
+            ltp = series.last_ltp if series else pos["entry_price"]
+            await self._square_off_leg(pos, reason, ltp)
 
     # ── status / UI ──────────────────────────────────────────────────────────
 
+    def _leg_view(self, pos: dict) -> dict:
+        series = self._series.get(pos["side"])
+        return dict(
+            side=pos["side"], strike=pos["strike"], entry=pos["entry_price"], sl=pos["sl"],
+            locked_pct=round(pos["high_lock_pct"] * 100, 1), qty=pos["qty"],
+            tranche=pos.get("tranche", "single"),
+            ltp=series.last_ltp if series else None,
+        )
+
     def status(self) -> dict:
-        pos = self._position
+        legs = [self._leg_view(p) for p in self._positions]
         return dict(
             strategy="d1_trap_bear_only", underlying=self._underlying,
             ce_strike=self._ce_strike, pe_strike=self._pe_strike,
@@ -932,11 +1062,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             selection_reason=(f"ATM={round((self._last_spot_open or 0)/_ATM_ROUND_STEP)*_ATM_ROUND_STEP} "
                                f"(spot_open={self._last_spot_open}) -> CE=ATM-{self._itm_offset_pts}, "
                                f"PE=ATM+{self._itm_offset_pts}") if self._last_spot_open else None,
-            position=dict(
-                side=pos["side"], strike=pos["strike"], entry=pos["entry_price"], sl=pos["sl"],
-                locked_pct=round(pos["high_lock_pct"] * 100, 1), qty=pos["qty"],
-                ltp=self._series[pos["side"]].last_ltp if pos["side"] in self._series else None,
-            ) if pos else None,
+            position=legs[0] if legs else None,   # backward-compat: first open leg (or None)
+            positions=legs,                        # full list -- may hold both T1 and T2
         )
 
     def monitoring_zones(self) -> dict:
@@ -998,10 +1125,12 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 last_ltp=series.last_ltp,
             )
 
+        st = self.status()
         return dict(
             underlying=self._underlying, client_id=self._client_id, binding_id=self._binding_id,
             ce=_zone_view("CE"), pe=_zone_view("PE"),
-            position=self.status()["position"],
+            position=st["position"],
+            positions=st["positions"],
         )
 
     async def _option_loop(self) -> None:

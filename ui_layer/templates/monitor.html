@@ -7685,24 +7685,30 @@ function amoTest() {
                           </div>
                         </template>
                       </div>
-                      <template x-if="_tr.position">
-                        <div x-data="{ get _p(){ return _tr.position; } }">
-                          <div class="flex items-center gap-1 mb-1" style="color:var(--t-green);font-weight:600">
-                            ● TRADE ACTIVE — <span x-text="_p.side"></span> <span x-text="_p.strike"></span>
-                          </div>
-                          <div class="flex justify-between">
-                            <span style="color:var(--t-muted)">Entry / LTP / SL</span>
-                            <span x-text="fmt(_p.entry)+' / '+fmt(_p.ltp)+' / '+fmt(_p.sl)"></span>
-                          </div>
-                          <div class="flex justify-between">
-                            <span style="color:var(--t-muted)">TSL locked</span>
-                            <span style="color:var(--t-amber)" x-text="(_p.locked_pct||0)+'%'"></span>
-                          </div>
-                          <div class="flex justify-between border-t mt-0.5 pt-0.5" style="border-color:var(--t-border)">
-                            <span style="color:var(--t-muted)">P&L (tick)</span>
-                            <span :style="`color:${((_p.ltp-_p.entry)*_p.qty)>=0?'var(--t-green)':'var(--t-red)'};font-weight:600`"
-                                  x-text="'₹ '+(((_p.ltp||_p.entry)-_p.entry)*_p.qty).toFixed(0)"></span>
-                          </div>
+                      <template x-if="(_tr.positions||[]).length">
+                        <div>
+                          <template x-for="_p in _tr.positions" :key="_p.side+'_'+_p.tranche+'_'+_p.entry">
+                            <div class="mb-1.5 pb-1.5" style="border-bottom:1px dashed rgba(255,255,255,0.08)">
+                              <div class="flex items-center gap-1 mb-1" style="color:var(--t-green);font-weight:600">
+                                ● TRADE ACTIVE — <span x-text="_p.side"></span> <span x-text="_p.strike"></span>
+                                <span class="px-1 rounded text-xs" style="background:rgba(167,139,250,0.15);color:#a78bfa"
+                                      x-text="_p.tranche"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Entry / LTP / SL</span>
+                                <span x-text="fmt(_p.entry)+' / '+fmt(_p.ltp)+' / '+fmt(_p.sl)"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">TSL locked</span>
+                                <span style="color:var(--t-amber)" x-text="(_p.locked_pct||0)+'%'"></span>
+                              </div>
+                              <div class="flex justify-between border-t mt-0.5 pt-0.5" style="border-color:var(--t-border)">
+                                <span style="color:var(--t-muted)">P&L (tick)</span>
+                                <span :style="`color:${((_p.ltp-_p.entry)*_p.qty)>=0?'var(--t-green)':'var(--t-red)'};font-weight:600`"
+                                      x-text="'₹ '+(((_p.ltp||_p.entry)-_p.entry)*_p.qty).toFixed(0)"></span>
+                              </div>
+                            </div>
+                          </template>
                         </div>
                       </template>
                     </div>

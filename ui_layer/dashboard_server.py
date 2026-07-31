@@ -3253,6 +3253,7 @@ class DashboardServer:
                                     "phase": phase,
                                     "ce": mz.get("ce"), "pe": mz.get("pe"),
                                     "position": tp,
+                                    "positions": st.get("positions", []),
                                 }
                             _spot = float(getattr(tb, "_last_spot", 0.0) or 0.0)
                             _htf_mins = getattr(tb, "_htf_mins", 0)
