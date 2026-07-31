@@ -239,6 +239,9 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._day_done = False
         self._selecting_strikes = False
         self._warming_up = False
+        self._rest_open_attempted = False   # 2026-07-31 fix: REST-open must always get
+                                             # first attempt before the live-tick fallback
+                                             # is allowed to fire -- see _startup_open_fetch.
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -264,9 +267,11 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         genuinely hasn't opened yet (no bars available), this is a no-op and the
         live-tick fallback in _index_tick_loop handles it once the open actually prints."""
         if not self._feeder_token:
+            self._rest_open_attempted = True
             return
         today = datetime.now(IST).date()
         if today.weekday() >= 5:   # weekend -- nothing to fetch
+            self._rest_open_attempted = True
             return
         try:
             key = _upstox_key_for(self._underlying)
@@ -291,6 +296,14 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         except Exception:
             logger.exception("BearTrap[%s]: startup open-fetch failed — falling back to live tick.",
                               self._underlying)
+        finally:
+            # ALWAYS mark the REST attempt done, whether it found bars or not -- this is
+            # the gate that stops the live-tick path in _index_tick_loop from racing ahead
+            # of this REST call and picking up "whatever price is ticking right now"
+            # instead of the true 09:15 open. Fixes 2026-07-31 finding: on every mid-day
+            # restart, the live tick (already flowing continuously from other strategies)
+            # was winning the race against this REST call almost every time, silently.
+            self._rest_open_attempted = True
 
     def reset_session(self) -> None:
         self._today = None
@@ -324,7 +337,12 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 self._today = today
             now_t = datetime.now(IST).time()
             if (self._last_spot_open is None and _STRIKE_SELECT_TIME <= now_t <= _SESSION_CLOSE
-                    and not self._selecting_strikes):
+                    and not self._selecting_strikes and self._rest_open_attempted):
+                # Gated on _rest_open_attempted so this can never race ahead of
+                # _startup_open_fetch -- REST always gets first crack at the real
+                # 09:15 open; this path only engages once that attempt has finished
+                # (found nothing = genuine pre-market cold start) or, mid-day, would
+                # already have been satisfied by REST before any tick reaches here.
                 self._last_spot_open = ev.ltp
                 self._selecting_strikes = True
                 asyncio.create_task(self._select_strikes_for_today(ev.ltp))
