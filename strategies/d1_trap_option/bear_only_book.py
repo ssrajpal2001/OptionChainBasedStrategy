@@ -602,11 +602,24 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
     # ── per-bar fractal stage processing ────────────────────────────────────
 
     def _process_new_bar(self, side: str) -> None:
-        if self._day_done or datetime.now(IST).time() >= _ENTRY_CUTOFF:
+        # 2026-08-01 fix: the entry-cutoff gate must be checked against the BAR'S
+        # OWN timestamp, not wall-clock "now" -- live these are effectively the
+        # same thing (a bar closes right when it closes), but during a restart's
+        # intraday replay this function gets called once per REPLAYED historical
+        # bar while wall-clock time is the actual (much later) restart time. A
+        # restart after 14:30 IST was hitting `now() >= _ENTRY_CUTOFF` on the
+        # very first call and returning immediately for every single replayed
+        # bar -- silently skipping the entire day's zone/invalidation/flip
+        # reconstruction (confirmed live: a 15:20 restart reproduced NONE of an
+        # earlier restart's MONITORING/INVALIDATED/FLIP CANDIDATE sequence for
+        # the exact same day's data).
+        if self._day_done:
             return
         series = self._series[side]
         df_1m = series.to_df()
         if len(df_1m) < 30:
+            return
+        if df_1m.iloc[-1]["datetime"].time() >= _ENTRY_CUTOFF:
             return
 
         m60 = _resample(df_1m, 60)
