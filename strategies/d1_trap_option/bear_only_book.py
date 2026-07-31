@@ -571,6 +571,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     zone["ref_open"] = ref.timestamp
                     zone["ref_close_time"] = ref.timestamp + timedelta(minutes=15)
                     zone["ref_high"], zone["ref_low"] = ref.high, ref.low
+                    logger.info("BearTrap[%s]: %s ref candle ASSIGNED %s (H=%.2f L=%.2f) @ processing_ts=%s",
+                                self._underlying, side, ref.timestamp, ref.high, ref.low, last_ts)
                 continue
 
             if zone["breach_ts"] is None:
@@ -762,7 +764,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 return dict(strike=None, zones=[], stage="NO_DATA")
             active = [z for z in series.zones if not z["done"] and not z["invalid"]]
             monitoring = [z for z in active if z["state"] == "MONITORING"]
-            stage = "IDLE"
+            waiting = [z for z in active if z["state"] == "WAITING"]
+            stage = "NO_ZONES"
             top = None
             if monitoring:
                 z = monitoring[0]
@@ -777,6 +780,14 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     stage = "15M_TRACKING"
                 else:
                     stage = "ZONE_ENTERED"
+            elif waiting:
+                # 2026-07-31 fix: a WAITING zone (real zone, not yet touched) was
+                # previously invisible in the UI -- showed as blank "IDLE" with no
+                # bounds at all, indistinguishable from "no zones exist". Surface the
+                # nearest one (closest zone_hi to current LTP) so it's visible.
+                ltp = series.last_ltp or 0
+                top = min(waiting, key=lambda z: abs(z["zone_hi"] - ltp)) if ltp else waiting[0]
+                stage = "WAITING"
             return dict(
                 strike=series.strike, zones_total=len(active), stage=stage,
                 current_zone=dict(zone_lo=round(top["zone_lo"], 2), zone_hi=round(top["zone_hi"], 2),

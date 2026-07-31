@@ -7650,14 +7650,15 @@ function amoTest() {
                             <div class="flex justify-between mb-1">
                               <span style="font-weight:600" x-text="side.toUpperCase()+' '+(_s.strike||'—')"></span>
                               <span class="px-1.5 rounded" :style="{
+                                  'WAITING':'background:rgba(100,116,139,0.08);color:var(--t-dim)',
                                   'ZONE_ENTERED':'background:rgba(100,116,139,0.15);color:var(--t-muted)',
                                   '15M_TRACKING':'background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)',
                                   '15M_BREACHED':'background:rgba(251,191,36,0.15);color:var(--t-amber)',
                                   '5M_TRACKING':'background:rgba(251,191,36,0.15);color:var(--t-amber)',
                                   'ARMED_5M':'background:rgba(16,185,129,0.15);color:var(--t-green)',
-                                  'IDLE':'background:rgba(100,116,139,0.08);color:var(--t-dim)',
+                                  'NO_ZONES':'background:rgba(100,116,139,0.08);color:var(--t-dim)',
                                   'NO_DATA':'background:rgba(239,68,68,0.1);color:var(--t-red)',
-                                }[_s.stage]||''" x-text="_s.stage||'IDLE'"></span>
+                                }[_s.stage]||''" x-text="_s.stage||'NO_ZONES'"></span>
                             </div>
                             <div class="flex justify-between" x-show="_s.current_zone">
                               <span style="color:var(--t-muted)">Zone</span>
