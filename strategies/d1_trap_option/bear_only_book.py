@@ -51,6 +51,32 @@ backtest against real Aug-4-expiry option data before going live again
 Rs-15,658 over 2026-06-29..07-31; the flip concept itself fired once and
 lost Rs2,000 -- inconclusive on this one month, going live-paper for 2 weeks
 per explicit direction to get a larger sample before judging it).
+
+2026-08-01 (later same day) — 60-MINUTE ZONE ALGORITHM REWRITE (direct user
+spec, verified candle-by-candle against real TradingView charts): a zone's
+price range is now the tight two-candle footprint [ref.low,
+sellers_in_candle.low], NOT find_all_bear_zones' own unbounded sweep_low
+(which tracks a bear trade's worst excursion across however many days it
+takes to get stopped out -- a true fact about that trade's lifetime, but
+the wrong thing to use as a zone BOUNDARY: it let one ref candle silently
+swallow 100+pts of unrelated later price action, e.g. a real CE24200 zone
+that should have been [154.20,224.00] came out as [46.80,224.00], spanning
+10 unrelated trading days). Zone MERGING (_collapse_nearby_zones) now also
+requires ref candles to be within 2 60m bars of each other in TIME, not
+just close in price ("2 candle neighbour will be merged") -- price
+proximity alone let unrelated trades a week apart chain into one mega-
+zone even with tight per-zone boundaries. This replaces the old
+raw-width-discard approach (_ZONE_MAX_RAW_WIDTH_PTS) entirely -- zones are
+tight and meaningfully time-local by construction now, nothing needs
+discarding after the fact. Re-validated on 2026-07-31 (n=3, +Rs1,260,
+identical trades to the pre-rewrite run but with defensible tight zone
+boundaries this time) and a true daily-ATM-rolling 1-month NIFTY backtest
+(scripts/d1trap_month_rolling_backtest.py -- n=58, win% 37.9, PF 1.03, net
++Rs1,431 over 2026-06-29..07-31; a SENSEX comparison run the same day was
+net -Rs5,934 over a thinner, gappier 17-trade sample -- 7 of 25 days had no
+tradeable SENSEX data that far back on the current weekly contract -- so
+NIFTY stays the only index this book trades). Going into paper trading
+2026-08-03 (Monday) on this corrected algorithm.
 """
 from __future__ import annotations
 
@@ -101,31 +127,15 @@ _ZONE_SIZE_THRESHOLD_PCT = 0.20
 _ZONE_MERGE_THRESHOLD_PTS = 20.0   # 2026-07-31: collapse 60m zones within 20 option-pts of
                                    # each other into one (max/min), same principle as the
                                    # 5m sub-zone collapse -- cuts down near-duplicate zones.
-_ZONE_MERGE_MAX_WIDTH_PTS = 60.0   # 2026-08-01 fix: without a cap on the merged group's TOTAL
-                                   # width, the threshold-based chaining (does z's lo fall
-                                   # within threshold_pts of the group's current running max?)
-                                   # lets a long chain of small, genuinely-DIFFERENT bear-trap
-                                   # patterns collapse into one unbounded mega-band -- confirmed
-                                   # live: 39 raw zones detected over just 5 days (price trended
-                                   # ~68 -> ~220) chained into a single [46.80,224.00] band, 177pts
-                                   # wide and structurally meaningless, which fed a real losing
-                                   # trade. This caps the merge so genuine near-duplicates (the
-                                   # original intent) still collapse, but distinct patterns at
-                                   # drifting price levels can't.
-_ZONE_MAX_RAW_WIDTH_PTS = 30.0     # 2026-08-01 fix: the merge-width cap above only bounds what
-                                   # MERGING can add -- it does nothing about a SINGLE raw zone
-                                   # that's already too wide on its own (the uncapped-sweep-phase
-                                   # detector can anchor many different reclaim candles to the
-                                   # same distant sweep low, each individually valid-looking but
-                                   # up to 100+pts wide). Confirmed live: PE24100 2026-07-09 had
-                                   # 28 raw zones sharing sweep_low=131.9 with zone_hi drifting
-                                   # from 140 to 392 -- most already >60pts wide BEFORE any
-                                   # merging, which the width-cap couldn't touch, and which fired
-                                   # the same near-duplicate trade repeatedly. Discarding any
-                                   # individual raw zone above this width before merging even
-                                   # starts (validated: 28 raw -> 7 tight, meaningful survivors)
-                                   # fixes both the oversized-trade-entry problem and this
-                                   # duplicate-firing problem at the same root cause.
+_ZONE_MAX_REF_GAP_BARS = 2         # 2026-08-01 rewrite: a merge candidate must ALSO be within
+                                   # this many 60m bars (ref-candle index distance) of the group
+                                   # it's joining -- "2 candle neighbour" per direct spec. Without
+                                   # a time gate, price-only proximity chains unrelated trades a
+                                   # week apart into one mega-zone (confirmed: CE24200 zones from
+                                   # 07-22 and 07-29 merged into one band purely because their
+                                   # price ranges touched, even though nothing connects them in
+                                   # time). Paired with the corrected zone_lo/zone_hi below, this
+                                   # replaces the old raw-width-discard approach entirely.
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
 _TSL_BASE_PCT = 0.10        # 2026-07-30 tweak (was 0.20/0.125): today's 24000CE Trade 2
@@ -225,72 +235,65 @@ def _to_bars(df: pd.DataFrame):
 
 
 def _detect_bear_zones(bars_60m) -> List[dict]:
+    """2026-08-01 rewrite (direct user spec, verified candle-by-candle against
+    real charts): a zone's PRICE RANGE is the tight two-candle footprint
+    [ref.low, sellers_in_candle.low] -- NOT find_all_bear_zones' own
+    unbounded sweep_low (which tracks the bears' worst excursion across
+    however many days it takes them to get stopped out -- a true fact about
+    that ONE trade's lifetime, but the wrong thing to use as a zone
+    BOUNDARY, since it lets one ref candle's zone silently swallow up to
+    100+ pts of unrelated later price action). A ref candle whose own high
+    never gets reclaimed within the lookback window produces NO zone at all
+    (find_all_bear_zones already only returns reclaimed candidates -- that
+    part is unchanged and correct). Step 2 (_collapse_nearby_zones) then
+    merges these tight zones that are close in BOTH price and time."""
+    n = len(bars_60m)
+    idx_by_ts = {b.timestamp: i for i, b in enumerate(bars_60m)}
     out = []
     for z in find_all_bear_zones(bars_60m):
-        lo, hi = min(z.entry_line, z.sweep_low), max(z.entry_line, z.sweep_low)
-        if hi - lo > _ZONE_MAX_RAW_WIDTH_PTS:
-            continue   # discard before it ever enters the pool -- see constant comment
-        out.append(dict(zone_lo=lo, zone_hi=hi, entry_line=z.entry_line, lock_ts=z.lock_ts,
+        ref_i = idx_by_ts[z.reference_low_ts]
+        ref = bars_60m[ref_i]
+        sellers_in = None
+        for j in range(ref_i + 1, n):
+            if bars_60m[j].low < ref.low:
+                sellers_in = bars_60m[j]
+                break
+        if sellers_in is None:
+            continue   # shouldn't happen (find_all_bear_zones required one to lock), defensive
+        lo, hi = min(ref.low, sellers_in.low), max(ref.low, sellers_in.low)
+        out.append(dict(zone_lo=lo, zone_hi=hi, entry_line=ref.low, lock_ts=z.lock_ts,
+                         ref_ts=ref.timestamp, ref_idx=ref_i,
                          state="WAITING", ref_bar=None, done=False, invalid=False,
                          contact_ts=None, ref_open=None, ref_close_time=None,
                          breach_ts=None, sub_lo=None, sub_hi=None))
     return _collapse_nearby_zones(out)
 
 
-def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE_THRESHOLD_PTS) -> List[dict]:
-    """Merge zones whose bands are within threshold_pts of each other into one,
-    taking max(zone_hi)/min(zone_lo) across the group -- same collapse principle
-    as the 5-min sub-zone decomposition, applied to the 60-min zone pool itself.
-    The merged zone's entry_line/lock_ts come from whichever member zone has the
-    MOST RECENT lock_ts (the most current reference level in the group)."""
+def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE_THRESHOLD_PTS,
+                            max_ref_gap: int = _ZONE_MAX_REF_GAP_BARS) -> List[dict]:
+    """Merge zones whose bands are within threshold_pts of each other AND
+    whose ref candles are within max_ref_gap 60m bars of each other ("2
+    candle neighbour will be merged" -- direct spec) into one, taking
+    max(zone_hi)/min(zone_lo) across the group -- same collapse principle
+    as the 5-min sub-zone decomposition, applied to the 60-min zone pool.
+    The merged zone's entry_line/lock_ts/ref_ts come from whichever member
+    has the MOST RECENT lock_ts (the most current reference level in the
+    group). 2026-08-01: the time gate is the fix -- price proximity alone
+    let unrelated trades a week apart (each hop individually close in
+    price) chain into one mega-zone; requiring ref candles to also be
+    near each other in TIME stops that while still merging genuine same-
+    session near-duplicates (the original intent)."""
     if not zones:
         return []
-    # 2026-08-01 fix: the old rule ("does z's lo fall within threshold_pts of
-    # the group's current running max hi?") lets the group's reach grow every
-    # time a member is added, so a long chain of small, genuinely-DIFFERENT
-    # bear-trap patterns (each only ~20pts from its immediate neighbor, but
-    # spanning a huge combined range) all get pulled into ONE mega-zone.
-    # Confirmed live: 39 raw zones detected 2026-07-27..07-31 (CE24200, price
-    # having trended from ~68 up to ~220 over those days) chained via this
-    # exact bug into a single [46.80,224.00] band -- 177pts wide, structurally
-    # meaningless as a "zone" (a bear-trap contact/breach against a band that
-    # wide is just "price touched somewhere below 224"), which fed a real
-    # losing trade (raw_breakout @ 241.50 -> sl_hit -Rs2000). Now also caps
-    # the merged group's TOTAL width so genuinely near-duplicate detections
-    # (the original intent) still merge, but a long chain of distinct patterns
-    # at drifting price levels can't collapse into one unbounded band.
-    # Secondary sort by zone_hi (2026-08-01 fix): many zones can share the
-    # exact same zone_lo (a common sweep-low anchor) with only zone_hi
-    # drifting -- sorting by zone_lo alone leaves those ties in arbitrary
-    # original-detection order, so the width-capped greedy grouping below
-    # partitions them unpredictably into many overlapping near-duplicate
-    # groups instead of a few clean, meaningfully-distinct bands (confirmed:
-    # 28 raw zones sharing zone_lo=131.9 collapsed into 23 near-identical
-    # ~same-anchor groups instead of a handful of real ones, and each fired
-    # its own near-identical trade). Sorting ties by zone_hi too makes the
-    # cap-then-start-new-group logic partition monotonically and cleanly.
-    # 2026-08-01 fix: a width cap that applies even to zones that TRULY
-    # OVERLAP in price can split one real, contiguous band into two separate
-    # zone objects right at the boundary (confirmed: [363.75,407.45] and
-    # [405.50,425.00] overlap 405-407, but merging them would be 61.25pts --
-    # just over the 60pt cap -- so they stayed separate, and because both
-    # trace their "newest member" back to the same raw pattern, ended up with
-    # the IDENTICAL lock_ts, which let one real signal fire the same trade
-    # twice under two different-looking-but-not zone objects). True overlap
-    # (z's lo falls inside the group's existing band) always merges
-    # regardless of the width cap -- it's not chaining through a gap, it's
-    # the same price territory by definition. The cap still applies to the
-    # proximity case (z is merely NEAR the group, within threshold_pts, but
-    # doesn't actually overlap it) -- that's the actual chaining pathology.
     ordered = sorted(zones, key=lambda z: (z["zone_lo"], z["zone_hi"]))
     groups = [[ordered[0]]]
     for z in ordered[1:]:
-        group_lo = min(g["zone_lo"] for g in groups[-1])
-        group_hi = max(g["zone_hi"] for g in groups[-1])
+        grp = groups[-1]
+        group_hi = max(g["zone_hi"] for g in grp)
+        near_in_time = any(abs(z["ref_idx"] - g["ref_idx"]) <= max_ref_gap for g in grp)
         truly_overlaps = z["zone_lo"] <= group_hi
-        merged_width = max(group_hi, z["zone_hi"]) - min(group_lo, z["zone_lo"])
-        if truly_overlaps or (z["zone_lo"] <= group_hi + threshold_pts and merged_width <= _ZONE_MERGE_MAX_WIDTH_PTS):
-            groups[-1].append(z)
+        if near_in_time and (truly_overlaps or z["zone_lo"] <= group_hi + threshold_pts):
+            grp.append(z)
         else:
             groups.append([z])
     collapsed = []
@@ -299,6 +302,7 @@ def _collapse_nearby_zones(zones: List[dict], threshold_pts: float = _ZONE_MERGE
         collapsed.append(dict(
             zone_lo=min(g["zone_lo"] for g in group), zone_hi=max(g["zone_hi"] for g in group),
             entry_line=newest["entry_line"], lock_ts=newest["lock_ts"],
+            ref_ts=newest["ref_ts"], ref_idx=newest["ref_idx"],
             state="WAITING", ref_bar=None, done=False, invalid=False,
             contact_ts=None, ref_open=None, ref_close_time=None,
             breach_ts=None, sub_lo=None, sub_hi=None,
@@ -696,26 +700,15 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         # ref-candle, breach_ts, sub-zone, armed -- on every single bar close, meaning
         # no zone could ever survive past Stage 1. Only append genuinely new zones.
         #
-        # 2026-08-01 fix: lock_ts alone is not a stable identity for a MERGED
-        # zone -- it's inherited from whichever raw member has the newest
-        # lock_ts within its group, and group membership can shift as new raw
-        # candidates join over successive bar closes, changing the merged
-        # zone's lock_ts even though it represents the same real level.
-        # Exact-lock_ts dedup then treats it as new and re-adds a near-
-        # duplicate. Confirmed in a full-month backtest: the same trade fired
-        # repeatedly from zones that were geometrically identical but had
-        # drifted lock_ts. Also dedupe by bounds overlap, same tolerance the
-        # 60m-zone-pool collapse itself uses.
-        existing_lock_ts = {z["lock_ts"] for z in series.zones}
-
-        def _already_known(z):
-            if z["lock_ts"] in existing_lock_ts:
-                return True
-            return any(abs(z["zone_lo"] - e["zone_lo"]) <= _ZONE_MERGE_THRESHOLD_PTS
-                       and abs(z["zone_hi"] - e["zone_hi"]) <= _ZONE_MERGE_THRESHOLD_PTS
-                       for e in series.zones)
-
-        new_zones = [z for z in _detect_bear_zones(bars_60) if not _already_known(z)]
+        # 2026-08-01 rewrite: with the corrected [ref.low, sellers_in.low]
+        # boundary, each merged zone carries a stable ref_ts (the newest
+        # member's OWN ref candle) that identifies it far more precisely
+        # than lock_ts ever could (lock_ts drifts as group membership
+        # shifts across bar closes -- ref_ts of the newest member is far
+        # more stable since a merge group's newest member rarely changes
+        # once locked). Dedup on that directly.
+        existing_refs = {z["ref_ts"] for z in series.zones}
+        new_zones = [z for z in _detect_bear_zones(bars_60) if z["ref_ts"] not in existing_refs]
         new_zones = _prevalidate_zones(new_zones, m15)
         series.zones.extend(new_zones)
 
