@@ -2,12 +2,13 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-07-30):** This project is **ONLY** working on two strategies:
+> **CURRENT FOCUS (2026-08-03):** This project is **ONLY** working on three strategies:
 > 1. **SellStraddle** — theta-decay option seller (mature, live in production)
-> 2. **D1 Trap FnO/Index** — zone-based option buyer (active development, next session continues here)
+> 2. **D1 Trap FnO/Index** — zone-based option buyer (active development)
+> 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, entering paper trading; see "FVG Strategy" section below)
 >
 > Do NOT suggest, implement, or discuss any other strategies. All new work belongs to
-> one of these two. When starting a new session, read the D1 Trap section below first.
+> one of these three. When starting a new session, read the D1 Trap and FVG sections below first.
 
 ---
 
@@ -32,6 +33,13 @@ python run_system.py --mode live --ui --port 5000 --index NIFTY
 
 # Paper trading
 python run_system.py --mode paper --ui --port 5000
+
+# All three strategies together (SellStraddle + D1 Trap + FVG) --
+# per-client paper vs live is controlled by each broker binding's own
+# "Trading Mode" toggle in the dashboard (data_layer/client_db.py), NOT
+# by this flag -- --mode/--strategies just decide what's constructed and
+# started at the process level.
+python run_system.py --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle,d1_trap_option,fvg
 
 # Demo mode (synthetic ticks, no broker)
 python run_system.py --mode demo
@@ -275,6 +283,148 @@ Fields per book: `underlying`, `client_id`, `binding_id`, `spot`, `zones[]` (eac
 - One `strategy_deployments` row per (client, binding): `underlying=WATCHLIST`, `strategy_name=d1_trap_fno`, `product_type=NRML`, `strategy_params={"htf":"D1","mtf":"75min","top_n":5}`
 - `lot_multiplier` sets quantity; book auto-spawns on reconcile when `is_running=1`
 - `pm2 restart terminus` after code changes; `git pull` before restart on EC2
+
+---
+
+### FVG — Fair Value Gap (`strategies/fvg/`)
+
+Smart Money Concepts option **buyer** strategy. Detection runs on the underlying
+**spot/index chart** (matches D1TrapOptionBook's design, not D1TrapBearOnlyBook's
+option-native one) — then buys CE on a bullish setup, PE on a bearish one.
+**No indicators** (no RSI/VWAP/ADX/ATR) — pure price action only, per direct spec.
+Intraday only: MIS, EOD square-off at 15:15 IST, no overnight carry.
+
+**Files:** `strategies/fvg/detector.py` (pure, unit-tested functions — swing points,
+liquidity sweep, MSS, FVG detection, CE, state machine), `strategies/fvg/engine.py`
+(`FVGStrategy` — the live per-binding book), `strategies/fvg/book_manager.py`
+(`FVGBookManager`). Execution: `execution_bridge/fvg_bridge.py` (modeled directly on
+`d1_trap_bridge.py`), `Topic.FVG_ORDER_REQUEST`/`FVG_ORDER_FILL`.
+
+**Strategy name in DB:** `fvg`. Registered in `strategies/registry.py`; run with
+`--strategies fvg`. `strategy_params` JSON (all keys optional, shown with their
+validated-baseline defaults): `{"itm_offset_pts": 50, "htf_tf": 10, "ltf_tf": 3,
+"direction_mode": "BOTH", "initial_sl_pct": 0.20, "trail_trigger_pct": 0.15,
+"first_lock_pct": 0.08, "step_pct": 0.10, "step_lock_pct": 0.05}`. `direction_mode`
+∈ `{"BOTH", "CE_ONLY", "PE_ONLY"}` restricts entries to one side (filtered in
+`_check_retest_entry`, called from the `_candle_loop`→`_process_ltf_bar` chain).
+
+**Timeframes (validated baseline, `scripts/fvg_tf_sweep.py`):** HTF = 10min (swing
+structure, liquidity sweep, MSS), LTF = 3min (FVG detection + retest entry) — both
+fully configurable per deployment. The engine builds BOTH from the always-available
+1-minute `CANDLE_CLOSE` stream via its own bucket accumulation (`_on_candle`), not by
+relying on `CandleCache` already publishing the exact configured timeframe —
+`GlobalConfig.candle_timeframes` defaults to `[1, 2, 5, 15, 75]`, which does not
+include arbitrary values like 3 or 10.
+
+**Mechanic:**
+1. **Swing points** — 5-bar fractal pivot on HTF bars (`find_swing_points`).
+2. **Liquidity sweep** — a wick beyond PDH/PDL or an equal-highs/lows pool
+   (`group_equal_levels`, 5pt NIFTY-scale tolerance) that closes back inside
+   (`detect_liquidity_sweep`).
+3. **MSS (Market Structure Shift)** — a later HTF bar's CLOSE breaks the most recent
+   opposing swing point (`detect_mss`).
+4. **FVG (Fair Value Gap)** — classic 3-candle imbalance on LTF bars
+   (`detect_fvg`): bullish `candle1.high < candle3.low`, bearish
+   `candle1.low > candle3.high`. candle2 must be a displacement candle (body ≥ 50% of
+   its own H-L range — pure price action, not an indicator).
+5. **High-liquidity tagging** (`tag_high_liquidity`) — an FVG is only tradeable if it
+   forms after a confirmed HTF liquidity sweep followed by an MSS in the FVG's own
+   direction; isolated/internal FVGs are recorded but never traded.
+5b. **Intraday-only pool (2026-08-03 correction)** — the FVG pool is wiped at the
+    start of every trading day (`reset_session()`) and `_rebuild_fvg_pool`/
+    `detect_fvg` only ever scan **today's** LTF bars, never the multi-day history.
+    A gap that formed on an earlier day and never got retested is NOT still
+    tradeable today. This was a real, confirmed bug: a backtest trade fired off an
+    FVG whose reference candles were 24 days old, using today's ATM strike against a
+    price structure from three weeks earlier. HTF structure (`self._htf_bars`/
+    `_htf_swings`, PDH/PDL) legitimately stays multi-day — swing points and
+    yesterday's high/low are supposed to carry over, same as any real SMC read.
+    Only the FVG gap itself and its retest are same-session-only, unlike
+    D1TrapOptionBook's zones which are deliberately multi-day (D1Trap watches zones
+    for up to 14 days by design — FVG does not).
+6. **State machine** (`update_fvg_state`): `UNMITIGATED` → `PARTIALLY_FILLED` (price
+   touched the gap but not the 50% Consequent Encroachment level) → `MITIGATED`
+   (reached CE — tradeable retest) / `INVALIDATED` (closed all the way through the far
+   boundary instead of retesting). Mitigation-touch is always checked BEFORE
+   invalidation-close on a given bar so a gap-through candle is never misread as a
+   valid retest.
+7. **Entry**: a `high_liquidity` + `MITIGATED` FVG triggers a retest entry — CE for
+   bullish, PE for bearish, at ATM ± `itm_offset_pts` (default 50 = 1-strike ITM on
+   NIFTY's 50pt grid). `direction_mode` can restrict this to CE-only or PE-only.
+   **Expiry = NEXT-WEEK, not current-week** (`_next_week_expiry()` in engine.py):
+   `current_week = REGISTRY.get_active_expiry("NIFTY", from_date=today)`, then
+   `next_week = REGISTRY.get_active_expiry("NIFTY", from_date=current_week+1day)` —
+   both resolved through the registry function, never a hardcoded calendar date. A
+   real-premium comparison on the identical 13 signals (only the contract changed)
+   showed next-week clearly outperforms current-week: PF 1.50 vs 1.43, Net +Rs2,762
+   vs +Rs1,979, smaller Max DD -Rs3,010 vs -Rs3,520 — slower theta decay per minute
+   of holding time is the mechanism (`scripts/fvg_next_week_expiry_test.py`).
+8. **Option-native exits (2026-08-03 rewrite)** — a real-premium backtest of the
+   original spot-based SL/TP showed it desynchronizes from actual option P&L (theta
+   decay, delta/IV shifts let a spot "stop" fire with premium unmoved, or premium bleed
+   while spot sat inside its band; PF 0.75, net -Rs5,723 real vs -Rs907 naive-estimate
+   over the same 28 trades). SL/exit now trigger off the position's OWN live premium
+   (`Topic.OPTION_TICK`, tracked per-strike in `self._option_ltp` regardless of whether
+   a position is open yet, so a freshly-computed entry strike already has a usable
+   premium at the moment of entry):
+   - **SL** = whichever is TIGHTER of `entry_premium * (1 - initial_sl_pct)` and the
+     hard Rs/lot risk cap (`_MAX_RISK_RS_PER_LOT` = Rs2000, same constant as
+     `bear_only_book.py`).
+   - **No fixed take-profit.** A step-locked trailing stop takes over: once profit
+     reaches `trail_trigger_pct`, the stop locks to `first_lock_pct`; every further
+     `step_pct` of additional gain locks another `step_lock_pct` (repeating) — lets a
+     strong move keep running instead of capping it at a fixed R:R.
+   - **Stagnation exit**: a position whose TSL has never activated within
+     `~40 real minutes` (bar count = `max(1, 40 // ltf_mins)`) is closed at market to
+     cap theta bleed on a rangebound spot. Once the TSL DOES activate, stagnation no
+     longer applies — the trade runs under trailing-stop management instead.
+
+**LOCKED baseline (2026-08-03, real option premium, NIFTY, last-7-trading-days
+window 2026-07-23..07-31 — the literally-requested 07-25/08-01 bookends are both
+Saturdays) — FINAL, after intraday-only fix + TSL re-tune + next-week-expiry switch:**
+- Timeframe: **HTF=10m / LTF=3m** (`scripts/fvg_tf_sweep.py`, 8-combo sweep — PF 1.79,
+  win% 56.2%, balanced 8 CE / 8 PE on the current-week contract; faster combos like
+  5m/1m or 3m/1m picked up noise and underperformed, both PF<0.9).
+- Execution: 1-strike ITM option (`itm_offset_pts = 50`), **NEXT-WEEK expiry** (see
+  mechanic 7 above — this was the last optimization pass and the single biggest
+  improvement of the whole tuning series).
+- FVG pool: **intraday-only** (see mechanic 5b above) — this alone removed 3 of the
+  original 16 backtest trades that had fired off stale, prior-day (in one case
+  24-day-old) FVGs.
+- Risk: step-locked TSL, re-tuned tier — `initial_sl_pct=0.20`,
+  `trail_trigger_pct=0.15`, `first_lock_pct=0.08`, `step_pct=0.10`,
+  `step_lock_pct=0.05`. The originally-optimized "Wider Runner" tier (trigger 25%)
+  only ever activated on 1 of 16 trades — 14 exited via the 40min stagnation timer
+  before the premium ever swung 25%. Lowering the trigger to 15% roughly doubled TSL
+  engagement without materially hurting the SL side.
+- Stagnation exit: **~40 minutes** (`max(1, 40 // ltf_mins)` bars — 13 bars at the
+  default 3m LTF). Confirmed load-bearing, not just upside-capping — tested and
+  rejected 3 separate times this session (removing it entirely, shortening it to
+  21min, and an MFE-driven fixed-TP/hybrid sweep): every alternative underperformed
+  because most trades' true peak gain never reaches a fixed target, so removing the
+  time cutoff just leaves losers exposed to the hard SL for longer, not "letting
+  winners run." Entry-side filters (time-of-day, absolute displacement, ADX>20) were
+  also tested and rejected — none improved on the no-filter baseline on this sample.
+- **Final result: n=13, win% 53.8% (7W/6L), PF 1.50, Net +Rs2,762, Max DD -Rs3,010.**
+  GO for paper trading (PF>1.3, win%>45%). Improved from the pre-next-week-expiry
+  result (PF 1.43, Net +Rs1,979, Max DD -Rs3,520) purely by trading a farther-dated
+  contract with slower theta decay — same signals, same exit rules.
+
+**Files:** `scripts/fvg_backtest.py` (3-phase walk-forward backtest against real spot +
+real option premium — signal discovery → fetch only the strikes needed → resolve
+option-native exits; also the intraday-only FVG-pool fix), `scripts/fvg_tf_sweep.py`
+(timeframe optimization), `scripts/fvg_tsl_sweep.py` (TSL parameter optimization),
+`scripts/fvg_mfe_exit_sweep.py` (MFE analysis + exit-style sweep, all rejected),
+`scripts/fvg_next_week_expiry_test.py` (the winning next-week-expiry comparison).
+
+**Status:** implemented 2026-08-01/03, unit-tested (`tests/strategies/test_fvg_detector.py`,
+19 tests), backtested against real NIFTY spot + real option premium history —
+including an intraday-only FVG bug found and fixed via manual trade-by-trade review
+against real chart data, and a full exit/entry/expiry optimization pass (timeframe,
+TSL tiers, stagnation window, entry filters, expiry selection) before paper
+deployment. Dashboard deploy form (`monitor.html`) exposes HTF/LTF/direction_mode;
+TSL/expiry params are code-defaulted (override via raw `strategy_params` JSON if
+needed). Ready for paper trading — see "Launch Commands" at the top of this file.
 
 ---
 

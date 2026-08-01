@@ -207,6 +207,8 @@ class Topic:
     D1_TRAP_ORDER_REQUEST = "d1_trap_order_request"  # Trap Scanner orders (d1_trap_bridge.py)
     D1_TRAP_ORDER_FILL    = "d1_trap_order_fill"     # Trap Scanner fill confirmations
     EQUITY_TICK           = "equity_tick"            # FnO stock equity spot ticks (Fyers feed)
+    FVG_ORDER_REQUEST     = "fvg_order_request"      # Fair Value Gap strategy orders (fvg_bridge.py)
+    FVG_ORDER_FILL        = "fvg_order_fill"         # Fair Value Gap fill confirmations
 
 
 # ─────────────────────────────────────────────────────────────────────────────

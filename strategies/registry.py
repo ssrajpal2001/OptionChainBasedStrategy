@@ -13,6 +13,7 @@ from strategies.v4_cascade_book_manager import V4CascadeBookManager
 from strategies.fno_positional import FnOPositionalBookManager
 from strategies.hourly_breakout import HourlyBreakoutBookManager
 from strategies.d1_trap_option import D1TrapOptionBookManager
+from strategies.fvg import FVGBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -39,6 +40,10 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # variant the deployment was saved as.
     "d1_trap_option": {
         "manager_class": D1TrapOptionBookManager,
+        "per_binding": True,
+    },
+    "fvg": {
+        "manager_class": FVGBookManager,
         "per_binding": True,
     },
 }

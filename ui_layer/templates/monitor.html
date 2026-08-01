@@ -2136,7 +2136,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -6875,7 +6875,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -6997,10 +6997,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',fvg:'FVG'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
+                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -7042,11 +7042,18 @@ function amoTest() {
                           deployForm.underlying='NIFTY';
                           deployForm._itm_offset_pts=200;
                           deployForm.squareoff_time='15:15';
+                        } else if(deployForm.strategy_name==='fvg'){
+                          deployForm.product_type='MIS';
+                          deployForm.underlying='NIFTY';
+                          deployForm._fvg_htf=10; deployForm._fvg_ltf=3; deployForm._fvg_direction='BOTH';
+                          deployForm.squareoff_time='15:15';
                         } else {
                           deployForm.product_type='MIS';
                         }
                         deployForm.strategy_params = deployForm.strategy_name==='d1_trap_bear_only'
                           ? JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||200})
+                          : deployForm.strategy_name==='fvg'
+                          ? JSON.stringify({htf_tf:deployForm._fvg_htf||10,ltf_tf:deployForm._fvg_ltf||3,direction_mode:deployForm._fvg_direction||'BOTH'})
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
@@ -7057,6 +7064,7 @@ function amoTest() {
                 <option value="d1_trap_fno">Trap Scanner - FnO (Positional)</option>
                 -->
                 <option value="d1_trap_bear_only">Bear Trap Only (Option-Native, NIFTY)</option>
+                <option value="fvg">FVG (Fair Value Gap, NIFTY)</option>
               </select>
             </div>
             <div>
@@ -7120,6 +7128,45 @@ function amoTest() {
                        @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||200})"/>
                 <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
                   CE = ATM − offset, PE = ATM + offset. Recomputed daily from NIFTY's open.
+                </p>
+              </div>
+            </template>
+            <!-- HTF / LTF / Direction Mode — shown only for FVG -->
+            <template x-if="deployForm.strategy_name==='fvg'">
+              <div class="col-span-2 grid grid-cols-3 gap-3"
+                   x-init="deployForm._fvg_htf=deployForm._fvg_htf||10;deployForm._fvg_ltf=deployForm._fvg_ltf||3;deployForm._fvg_direction=deployForm._fvg_direction||'BOTH';">
+                <div>
+                  <label class="sec-label mb-1">HTF (STRUCTURE, MIN)</label>
+                  <select class="t-input" x-model.number="deployForm._fvg_htf"
+                          @change="deployForm.strategy_params=JSON.stringify({htf_tf:deployForm._fvg_htf,ltf_tf:deployForm._fvg_ltf,direction_mode:deployForm._fvg_direction})">
+                    <option value="15">15 min</option>
+                    <option value="10">10 min (validated default)</option>
+                    <option value="5">5 min</option>
+                    <option value="3">3 min</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">LTF (FVG/ENTRY, MIN)</label>
+                  <select class="t-input" x-model.number="deployForm._fvg_ltf"
+                          @change="deployForm.strategy_params=JSON.stringify({htf_tf:deployForm._fvg_htf,ltf_tf:deployForm._fvg_ltf,direction_mode:deployForm._fvg_direction})">
+                    <option value="5">5 min</option>
+                    <option value="3">3 min (validated default)</option>
+                    <option value="1">1 min</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">DIRECTION MODE</label>
+                  <select class="t-input" x-model="deployForm._fvg_direction"
+                          @change="deployForm.strategy_params=JSON.stringify({htf_tf:deployForm._fvg_htf,ltf_tf:deployForm._fvg_ltf,direction_mode:deployForm._fvg_direction})">
+                    <option value="BOTH">Both (CE + PE)</option>
+                    <option value="CE_ONLY">CE Only (bullish)</option>
+                    <option value="PE_ONLY">PE Only (bearish)</option>
+                  </select>
+                </div>
+                <p class="text-[10px] col-span-3" style="color:var(--t-muted)">
+                  Validated baseline (PF 1.77, 56.2% win) is HTF=10m/LTF=3m/BOTH. Step-locked TSL
+                  (trigger 25% → lock 15%, then every +15% → +7.5%) and SL/risk-cap use their own
+                  code defaults — override via the raw strategy_params JSON if needed.
                 </p>
               </div>
             </template>
@@ -7412,7 +7459,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"

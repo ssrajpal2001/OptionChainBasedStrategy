@@ -3874,6 +3874,7 @@ class DashboardServer:
             allowed_strategies = {
                 "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
                 "d1_trap_option", "d1_trap_index", "d1_trap_fno", "d1_trap_bear_only",
+                "fvg",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
