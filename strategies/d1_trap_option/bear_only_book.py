@@ -96,6 +96,7 @@ from data_layer import position_store
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.v4_cascade.rolling_base import find_all_bear_zones
 from strategies.d1_trap_option.book import D1TrapOrderEvent, _upstox_key_for
+from matrix_engine.option_matrix import ChainSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,34 @@ _ZONE_MAX_REF_GAP_BARS = 2         # 2026-08-01 rewrite: a merge candidate must 
                                    # replaces the old raw-width-discard approach entirely.
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
+_STRUCTURE_GATED_SL_ENABLED = False  # 2026-08-02: DEFAULT OFF -- backtested via
+                                     # scripts/d1trap_structure_sl_test.py against the
+                                     # validated 1-month NIFTY dataset and came out WORSE
+                                     # (PF 0.98 vs 1.03, net -Rs1,256 vs +Rs1,431, n=58).
+                                     # On this sample the zone almost always went genuinely
+                                     # invalid within the same/next 15m candle as the tick
+                                     # SL touch anyway -- waiting for confirmation didn't
+                                     # rescue any trades, it just let losses run to the
+                                     # harder Rs2000/lot cap before recognizing what tick-
+                                     # level SL already knew. Left in as an opt-in toggle
+                                     # for further investigation (e.g. only gating on
+                                     # SPECIFIC zone widths, or a time-boxed grace window
+                                     # instead of full structural confirmation) -- do not
+                                     # flip this on for live/paper without a fresh backtest
+                                     # showing real improvement first.
+                                     # The soft/zone SL (sl_buffered, before TSL locks in),
+                                     # when enabled, no longer fires on a single tick touch --
+                                     # it waits for the SAME structural invalidation the zone
+                                     # engine already computes (a 15m candle CLOSING below the
+                                     # zone's own zone_lo, see _process_new_bar's ongoing
+                                     # invalidation check) before exiting. This gives a trade
+                                     # room to breathe through normal premium noise while spot
+                                     # consolidates at the zone -- previously a tick-level wick
+                                     # through the tight ref_low-derived SL cut trades that then
+                                     # reversed in the intended direction. The Rs2000/lot hard
+                                     # risk cap and the profit-locking TSL are both UNCHANGED --
+                                     # still tick-level and immediate; only the initial loss-side
+                                     # stop would be gated if this were flipped True.
 _TSL_BASE_PCT = 0.10        # 2026-07-30 tweak (was 0.20/0.125): today's 24000CE Trade 2
 _TSL_BASE_LOCK_PCT = 0.07   # peaked at +21.3% profit, just past the old +20% tier, but
 _TSL_STEP_PCT = 0.10        # the lock stayed flat at 12.5% the whole time (next tier
@@ -147,6 +176,16 @@ _TSL_STEP_LOCK_PCT = 0.07   # needed +40%) -- gave back ~9 points of a real move
                              # waiting for the next round-number tier.
 _HIST_WARMUP_DAYS = 14   # 2026-07-31 tweak (was 25): current week + previous week
                          # is enough history to seed the 60m bear-trap zone pool.
+_OI_WALL_STRIKE_SELECTION_ENABLED = True   # 2026-08-02: replaces the fixed ATM+/-
+                        # itm_offset_pts strike picker with an OI-wall-derived one.
+                        # PE writers' max-OI strike = the support level they're
+                        # defending -> trade CE there; CE writers' max-OI strike =
+                        # the resistance level they're defending -> trade PE there
+                        # (direct user spec). Falls back to the fixed-offset picker
+                        # if no ChainSnapshot has published yet, or if the wall
+                        # strike would land OTM for the side being traded (should be
+                        # rare -- OI walls normally build OTM on their OWN side, so
+                        # the swap naturally lands ITM -- but never trade OTM blind).
 _TSL_TRANCHE_BASE_PCT = 0.20        # 2026-08-01: per-lot staircase for the flip
 _TSL_TRANCHE_BASE_LOCK_PCT = 0.125  # concept's T1/T2 tranches specifically --
 _TSL_TRANCHE_STEP_PCT = 0.20        # deliberately the OLDER 20%/12.5% shape, NOT
@@ -154,6 +193,26 @@ _TSL_TRANCHE_STEP_LOCK_PCT = 0.125  # the tightened 10%/7% used for regular sing
                                      # shot entries elsewhere in this book. Each
                                      # tranche leg is tracked and exited fully
                                      # independently off its OWN entry price.
+_HTF_MINUTES_DEFAULT_BY_UNDERLYING = {"NIFTY": 60, "SENSEX": 15}   # 2026-08-02:
+                        # index-specific zone timeframe, backtested via
+                        # scripts/d1trap_zone_definition_sweep.py against a real
+                        # month of premium (both under the new ref.close boundary
+                        # above). NIFTY: 60m PF=1.93 vs 15m PF=0.89 -- 15m is
+                        # clearly wrong for NIFTY (too much noise). SENSEX: 15m
+                        # PF=1.71 (nearly 2x the trade count) vs 60m PF=1.17 --
+                        # SENSEX moves faster and needs the finer HTF to catch
+                        # structure the 60m frame just misses. Falls back to 60m
+                        # for any other underlying. Overridable per-deployment via
+                        # the constructor's htf_minutes param / strategy_params.
+_ITM_OFFSET_DEFAULT_BY_UNDERLYING = {"NIFTY": 150, "SENSEX": 300}   # 2026-08-02:
+                        # 3-ITM strike depth, backtested via
+                        # scripts/d1trap_strike_ladder_backtest.py against a real
+                        # month of 0/1/2/3-ITM premium on both indices -- 3-ITM was
+                        # the best PF on BOTH (NIFTY 1.86, SENSEX 1.60) of the
+                        # tested range, clearly ahead of ATM and 2-ITM (which was a
+                        # real dead zone on both indices). NOT tested beyond 3-ITM
+                        # (the old 200/500pt defaults are ~4/5-ITM) -- flagged as a
+                        # follow-up, not assumed superseded.
 
 
 @dataclass(frozen=True)
@@ -235,18 +294,28 @@ def _to_bars(df: pd.DataFrame):
 
 
 def _detect_bear_zones(bars_60m) -> List[dict]:
-    """2026-08-01 rewrite (direct user spec, verified candle-by-candle against
-    real charts): a zone's PRICE RANGE is the tight two-candle footprint
-    [ref.low, sellers_in_candle.low] -- NOT find_all_bear_zones' own
-    unbounded sweep_low (which tracks the bears' worst excursion across
-    however many days it takes them to get stopped out -- a true fact about
-    that ONE trade's lifetime, but the wrong thing to use as a zone
-    BOUNDARY, since it lets one ref candle's zone silently swallow up to
-    100+ pts of unrelated later price action). A ref candle whose own high
-    never gets reclaimed within the lookback window produces NO zone at all
+    """2026-08-02 boundary correction (direct user spec, verified against the
+    user's own real manual trading method on a live SENSEX 78000CE chart --
+    zone_hi=412.35=ref candle CLOSE, zone_lo=204.35=next/wick candle's LOW):
+    a zone's PRICE RANGE is [sellers_in_candle.low, ref.close] -- the
+    reference candle's CLOSE (not its low) as the top boundary, and the very
+    next candle's low (the one that wicked through, "sellers_in") as the
+    bottom. Backtested via scripts/d1trap_zone_definition_sweep.py against a
+    real month of NIFTY+SENSEX premium: this ref.close boundary tied or beat
+    the previous ref.low boundary everywhere it mattered (NIFTY 60m: PF 1.93
+    vs 1.86; SENSEX 15m: PF 1.71 vs the old default's 1.60, nearly 2x the
+    trade count) -- the one exception (SENSEX at 60m specifically) isn't the
+    winning SENSEX config anyway (15m is). A ref candle whose own high never
+    gets reclaimed within the lookback window produces NO zone at all
     (find_all_bear_zones already only returns reclaimed candidates -- that
     part is unchanged and correct). Step 2 (_collapse_nearby_zones) then
-    merges these tight zones that are close in BOTH price and time."""
+    merges these tight zones that are close in BOTH price and time.
+
+    NOTE: despite the `bars_60m` parameter name (kept for historical/backtest-
+    script continuity), this function is timeframe-agnostic -- the caller
+    passes whatever HTF bars are configured (self._htf_minutes), 60m for
+    NIFTY / 15m for SENSEX by default post-2026-08-02 optimization, see
+    _HTF_MINUTES_DEFAULT_BY_UNDERLYING."""
     n = len(bars_60m)
     idx_by_ts = {b.timestamp: i for i, b in enumerate(bars_60m)}
     out = []
@@ -260,7 +329,7 @@ def _detect_bear_zones(bars_60m) -> List[dict]:
                 break
         if sellers_in is None:
             continue   # shouldn't happen (find_all_bear_zones required one to lock), defensive
-        lo, hi = min(ref.low, sellers_in.low), max(ref.low, sellers_in.low)
+        lo, hi = sellers_in.low, ref.close
         out.append(dict(zone_lo=lo, zone_hi=hi, entry_line=ref.low, lock_ts=z.lock_ts,
                          ref_ts=ref.timestamp, ref_idx=ref_i,
                          state="WAITING", ref_bar=None, done=False, invalid=False,
@@ -360,14 +429,22 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         binding_id: str,
         lot_multiplier: int = 1,
         feeder_token: str = "",
-        itm_offset_pts: int = 200,
+        itm_offset_pts: Optional[int] = None,
+        htf_minutes: Optional[int] = None,
         product_type: str = "MIS",
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._strategy_name = "d1_trap_bear_only"
         self._lot_multiplier = max(1, lot_multiplier)
         self._feeder_token = feeder_token
-        self._itm_offset_pts = itm_offset_pts
+        self._itm_offset_pts = (
+            itm_offset_pts if itm_offset_pts is not None
+            else _ITM_OFFSET_DEFAULT_BY_UNDERLYING.get(underlying.upper(), 200)
+        )
+        self._htf_minutes = (
+            htf_minutes if htf_minutes is not None
+            else _HTF_MINUTES_DEFAULT_BY_UNDERLYING.get(underlying.upper(), 60)
+        )
         self._product_type = product_type
         self._lot_size = (cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
         self._strike_step = int(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
@@ -378,6 +455,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._pe_strike: Optional[int] = None
         self._series: Dict[str, _OptionSeries] = {}   # "CE" | "PE" -> _OptionSeries
         self._last_spot_open: Optional[float] = None
+        self._latest_chain_snapshot: Optional[ChainSnapshot] = None
         # 2026-08-01: list of open legs, not a single position -- the flip
         # concept's T1 (fast tick-level breach) and T2 (confirmed retracement)
         # tranches are independent legs that can both be open on the SAME side
@@ -399,14 +477,32 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         super().start()
         self._subscribe(Topic.INDEX_TICK)
         self._subscribe(Topic.OPTION_TICK)
+        self._subscribe(Topic.MATRIX_SNAPSHOT)
         self._tasks.append(asyncio.create_task(
             self._index_tick_loop(), name=f"beartrap_idx_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
             self._option_tick_loop(), name=f"beartrap_opt_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
+            self._matrix_snapshot_loop(), name=f"beartrap_matrix_{self._underlying}"))
+        self._tasks.append(asyncio.create_task(
             self._eod_loop(), name=f"beartrap_eod_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
             self._startup_open_fetch(), name=f"beartrap_openfetch_{self._underlying}"))
+
+    async def _matrix_snapshot_loop(self) -> None:
+        """Track the latest OI ChainSnapshot for this underlying -- MATRIX_SNAPSHOT is
+        shared with CandleCache's TechSnapshot, so filter by type + underlying."""
+        q = self._loop_queues.get(Topic.MATRIX_SNAPSHOT)
+        if q is None:
+            return
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if not isinstance(ev, ChainSnapshot) or ev.underlying != self._underlying:
+                continue
+            self._latest_chain_snapshot = ev
 
     async def _startup_open_fetch(self) -> None:
         """Get TODAY's real 09:15 open via REST the moment the book starts, regardless
@@ -497,14 +593,53 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 self._selecting_strikes = True
                 asyncio.create_task(self._select_strikes_for_today(ev.ltp))
 
+    def _fixed_offset_strikes(self, spot_open: float) -> tuple[int, int]:
+        atm = round(spot_open / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
+        return int(atm - self._itm_offset_pts), int(atm + self._itm_offset_pts)
+
+    def _oi_wall_strikes(self, spot_open: float) -> Optional[tuple[int, int]]:
+        """PE writers' max-OI strike = the support they're defending -> trade CE
+        there; CE writers' max-OI strike = the resistance they're defending ->
+        trade PE there. Returns None (caller falls back to the fixed-offset
+        picker) if no snapshot has published yet, the walls aren't populated,
+        or a wall would land the traded strike OTM for its side (should be rare
+        -- OI walls normally build up OTM on their OWN side, so the swap
+        naturally lands ITM, per the direct worked example: spot=77000,
+        PE max OI@76500 -> trade CE@76500 (ITM), CE max OI@77500 -> trade
+        PE@77500 (ITM))."""
+        snap = self._latest_chain_snapshot
+        if snap is None or not snap.max_call_oi_strike or not snap.max_put_oi_strike:
+            return None
+        ce_strike = int(snap.max_put_oi_strike)
+        pe_strike = int(snap.max_call_oi_strike)
+        if ce_strike > spot_open:   # would be OTM for CE -- never trade blind
+            logger.warning("BearTrap[%s]: OI wall CE candidate %d is OTM vs spot_open=%.2f "
+                            "-- falling back to fixed-offset picker.",
+                            self._underlying, ce_strike, spot_open)
+            return None
+        if pe_strike < spot_open:   # would be OTM for PE
+            logger.warning("BearTrap[%s]: OI wall PE candidate %d is OTM vs spot_open=%.2f "
+                            "-- falling back to fixed-offset picker.",
+                            self._underlying, pe_strike, spot_open)
+            return None
+        return ce_strike, pe_strike
+
     async def _select_strikes_for_today(self, spot_open: float) -> None:
         try:
+            ce_strike, pe_strike = self._fixed_offset_strikes(spot_open)
             atm = round(spot_open / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
-            ce_strike = int(atm - self._itm_offset_pts)
-            pe_strike = int(atm + self._itm_offset_pts)
+            strike_source = "fixed_offset"
+            if _OI_WALL_STRIKE_SELECTION_ENABLED:
+                oi_pair = self._oi_wall_strikes(spot_open)
+                if oi_pair is not None:
+                    ce_strike, pe_strike = oi_pair
+                    strike_source = "oi_wall"
+                else:
+                    logger.info("BearTrap[%s]: no usable OI-wall snapshot yet -- "
+                                "using fixed-offset strikes for today.", self._underlying)
             logger.info(
-                "BearTrap[%s]: spot_open=%.2f ATM=%d -> CE=%d PE=%d",
-                self._underlying, spot_open, atm, ce_strike, pe_strike,
+                "BearTrap[%s]: spot_open=%.2f ATM=%d -> CE=%d PE=%d (source=%s)",
+                self._underlying, spot_open, atm, ce_strike, pe_strike, strike_source,
             )
             self._ce_strike, self._pe_strike = ce_strike, pe_strike
             self._restore_positions()   # a real running trade must survive a restart
@@ -530,9 +665,9 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                              r["open"], r["high"], r["low"], r["close"])
                         for r in rows
                     ]
-                    m60 = _resample(series.to_df(), 60)
+                    m_htf = _resample(series.to_df(), self._htf_minutes)
                     m15_hist = _resample(series.to_df(), 15)
-                    series.zones = _prevalidate_zones(_detect_bear_zones(_to_bars(m60)), m15_hist)
+                    series.zones = _prevalidate_zones(_detect_bear_zones(_to_bars(m_htf)), m15_hist)
                     logger.info("BearTrap[%s]: %s %d warmed %d 1m bars -> %d bear zones",
                                 self._underlying, side, strike, len(series.bars_1m), len(series.zones))
                     if series.zones:
@@ -690,10 +825,10 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         if df_1m.iloc[-1]["datetime"].time() >= _ENTRY_CUTOFF:
             return
 
-        m60 = _resample(df_1m, 60)
+        m_htf = _resample(df_1m, self._htf_minutes)
         m15 = _resample(df_1m, 15)
         m5 = _resample(df_1m, 5)
-        bars_60 = _to_bars(m60)
+        bars_htf = _to_bars(m_htf)
         # MERGE, don't replace: a fresh detect_bear_zones() returns brand-new WAITING
         # zone dicts every call. Replacing series.zones wholesale (as this did before
         # 2026-07-30) would wipe every zone's accumulated stage progress -- MONITORING,
@@ -708,7 +843,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         # more stable since a merge group's newest member rarely changes
         # once locked). Dedup on that directly.
         existing_refs = {z["ref_ts"] for z in series.zones}
-        new_zones = [z for z in _detect_bear_zones(bars_60) if z["ref_ts"] not in existing_refs]
+        new_zones = [z for z in _detect_bear_zones(bars_htf) if z["ref_ts"] not in existing_refs]
         new_zones = _prevalidate_zones(new_zones, m15)
         series.zones.extend(new_zones)
 
@@ -1052,7 +1187,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
         sl_buffered = sl - _SL_BUFFER_PTS
         max_risk_pts = _MAX_RISK_RS_PER_LOT / self._lot_size
-        sl_final = max(sl_buffered, entry_price - max_risk_pts)
+        hard_sl = entry_price - max_risk_pts
+        sl_final = max(sl_buffered, hard_sl)
         qty = self._lot_size * self._lot_multiplier
 
         if use_tranche_tsl:
@@ -1064,7 +1200,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
         pos = dict(
             side=side, strike=self._ce_strike if side == "CE" else self._pe_strike,
-            entry_price=entry_price, sl=sl_final, entry_ts=datetime.now(IST),
+            entry_price=entry_price, sl=sl_final, hard_sl=hard_sl, entry_ts=datetime.now(IST),
             high_lock_pct=0.0, qty=qty, zone_lock_ts=zone_lock_ts, tranche=tranche,
             tsl_base_pct=base_pct, tsl_base_lock_pct=base_lock,
             tsl_step_pct=step_pct, tsl_step_lock_pct=step_lock,
@@ -1088,11 +1224,37 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         if self._bus is not None:
             asyncio.create_task(self._bus.publish(Topic.D1_TRAP_ORDER_REQUEST, ev))
 
+    def _zone_for_position(self, pos: dict) -> Optional[dict]:
+        """Look up the live zone dict that produced this position, keyed by the
+        zone_lock_ts stamped on the leg at entry. Reuses series.zones directly --
+        no separate persisted zone state -- so this always reflects the zone's
+        CURRENT invalid flag as maintained live by _process_new_bar's ongoing
+        15m-close invalidation check."""
+        series = self._series.get(pos["side"])
+        if series is None:
+            return None
+        lock_ts = pos.get("zone_lock_ts")
+        return next((z for z in series.zones if z["lock_ts"] == lock_ts), None)
+
     def _check_exit(self, side: str, ltp: float, ts: datetime) -> None:
         """Each leg (single/T1/T2) is checked and exited fully independently --
         no averaging, no combined exit. A leg's own staircase-TSL profile
         (tranche legs use 20%/12.5%, regular entries use 10%/7%) is stored on
-        the leg itself at entry time."""
+        the leg itself at entry time.
+
+        Three-tier stop, all evaluated tick-by-tick, but only the first two
+        fire on a bare tick touch:
+          1. TSL lock (profit already booked) -- unchanged, tick-level, immediate.
+          2. Hard Rs2000/lot risk-cap floor -- unchanged, tick-level, unconditional
+             capital-protection circuit breaker, independent of zone structure.
+          3. Soft/zone SL (pos["sl"], before TSL activates) -- gated on
+             _STRUCTURE_GATED_SL_ENABLED: only fires once the OWNING zone's
+             `invalid` flag is True (a 15m candle already closed below zone_lo,
+             i.e. genuine structural failure), not on a single tick wick through
+             the tight ref_low-derived level. If the zone can't be found or has
+             no invalid flag set yet, falls back to the old tick-level behavior
+             rather than silently disabling the stop.
+        """
         now_t = ts.time() if hasattr(ts, "time") else datetime.now(IST).time()
         for pos in list(self._positions):
             if pos["side"] != side:
@@ -1109,12 +1271,32 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                                                  # a restart before this is saved must never give back
                                                  # profit already locked in by resetting the trail to 0.
 
-            stop_price = entry * (1 + pos["high_lock_pct"]) if pos["high_lock_pct"] > 0 else pos["sl"]
+            if pos["high_lock_pct"] > 0:
+                # Tier 1: TSL already locked in profit -- tick-level, immediate.
+                tsl_price = entry * (1 + pos["high_lock_pct"])
+                if ltp <= tsl_price:
+                    asyncio.create_task(self._square_off_leg(pos, "tsl_hit", tsl_price))
+                    continue
+            else:
+                # Tier 2: hard risk-cap floor -- tick-level, unconditional, never gated.
+                hard_sl = pos.get("hard_sl", pos["sl"])
+                if ltp <= hard_sl:
+                    asyncio.create_task(self._square_off_leg(pos, "sl_hit_hard_cap", hard_sl))
+                    continue
 
-            if ltp <= stop_price:
-                reason = "tsl_hit" if pos["high_lock_pct"] > 0 else "sl_hit"
-                asyncio.create_task(self._square_off_leg(pos, reason, stop_price))
-                continue
+                # Tier 3: soft/zone SL -- gated on structural invalidation.
+                if ltp <= pos["sl"]:
+                    if not _STRUCTURE_GATED_SL_ENABLED:
+                        asyncio.create_task(self._square_off_leg(pos, "sl_hit", pos["sl"]))
+                        continue
+                    zone = self._zone_for_position(pos)
+                    if zone is None or zone.get("invalid"):
+                        reason = "sl_hit_structure" if zone is not None else "sl_hit"
+                        asyncio.create_task(self._square_off_leg(pos, reason, pos["sl"]))
+                        continue
+                    # Zone still structurally intact -- price is sitting/consolidating
+                    # at the level, not confirmed broken. Let it breathe; the hard
+                    # risk cap above remains the worst-case floor.
 
             if now_t >= _EOD_TIME:
                 asyncio.create_task(self._square_off_leg(pos, "eod", ltp))

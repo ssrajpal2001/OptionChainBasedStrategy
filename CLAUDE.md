@@ -286,6 +286,73 @@ Fields per book: `underlying`, `client_id`, `binding_id`, `spot`, `zones[]` (eac
 
 ---
 
+### D1 Trap BearTrap — `D1TrapBearOnlyBook` (`strategies/d1_trap_option/bear_only_book.py`)
+
+The **actively-developed, live-traded** D1 Trap engine (`strategy_name="d1_trap_bear_only"`)
+— distinct from `D1TrapOptionBook` (`book.py`) above, which is frozen/legacy. Runs zone
+detection on the OPTION'S OWN premium chart (not spot), buyer-only (CE or PE, never
+shorts), tranche T1 (fast breach)/T2 (confirmed retracement) entries, per-lot ₹2000 hard
+risk cap + staircase TSL. See the module docstring in `bear_only_book.py` for the full
+mechanic (zone contact → 15m ref-candle → breach → 5m subzone → arm → swing-breach, flip
+concept on zone invalidation).
+
+**2026-08-02 optimization pass** (real premium, month window 06-29..07-31, single
+consistent weekly contract per underlying — both NIFTY and SENSEX's currently-active
+weekly happened to have real history back through the whole prior month, so no rollover
+contamination):
+
+- **Zone boundary**: `_detect_bear_zones` changed from `[min(ref.low,sellers_in.low),
+  max(...)]` to `[sellers_in.low, ref.close]` — matches the user's own real manual
+  trading method exactly (verified candle-by-candle against a live SENSEX 78000CE chart:
+  zone_hi=ref candle's CLOSE, zone_lo=next/wick candle's LOW). Backtested via
+  `scripts/d1trap_zone_definition_sweep.py`: ties or beats the old `ref.low` boundary
+  everywhere it mattered (NIFTY 60m: PF 1.93 vs 1.86; SENSEX 15m: PF 1.71 vs the old
+  live default's 1.60, ~2x the trade count).
+- **Zone timeframe now per-underlying** (`_HTF_MINUTES_DEFAULT_BY_UNDERLYING`): NIFTY
+  stays **60m** (15m collapses to PF 0.89 — far too noisy), SENSEX moves to **15m**
+  (60m only gets PF 1.17; SENSEX needs the finer HTF to catch its faster structure).
+  Overridable per-deployment via `strategy_params.htf_minutes`.
+- **Strike depth now 3-ITM by default** (`_ITM_OFFSET_DEFAULT_BY_UNDERLYING`: NIFTY
+  150pts, SENSEX 300pts) — replaces the old flat 200pt/500pt offsets. Backtested via
+  `scripts/d1trap_strike_ladder_backtest.py` across 0/1/2/3-ITM on real premium: 3-ITM
+  was the best PF on BOTH indices (NIFTY 1.86, SENSEX 1.60) of the tested range; 2-ITM
+  was a real dead zone on both (PF 0.87 / 0.98). **Not tested beyond 3-ITM** — the old
+  200/500pt defaults were ~4/5-ITM, so whether depth 4+ beats 3-ITM is still open.
+  Overridable via `strategy_params.itm_offset_pts`.
+- **ATM rounding stays 100** (`_ATM_ROUND_STEP`) — tested round-to-500 as an alternative
+  anchor (`scripts/d1trap_round500_test.py`) and it was clearly worse on both indices
+  (NIFTY PF 1.93→1.20, SENSEX PF 1.71→1.12). Not adopted.
+- **OI-wall strike selection** (`_oi_wall_strikes`, `_OI_WALL_STRIKE_SELECTION_ENABLED
+  = True` by default): daily strike choice reads the live `OptionMatrixEngine`
+  `ChainSnapshot` (`Topic.MATRIX_SNAPSHOT`, already running via `run_system.py`,
+  previously only fed the dashboard) and picks `CE = max_put_oi_strike` (the strike PE
+  writers are defending = support), `PE = max_call_oi_strike` (the strike CE writers are
+  defending = resistance) — the exact wall-swap the user described, verified against
+  their worked example (spot 77000 → CE@76500/PE@77500). Falls back to the fixed-offset
+  strike if no snapshot has published yet or a wall would land the traded strike OTM.
+  **Cannot be backtested** — Upstox's historical candle API has no OI field
+  (`data_layer/historical_candles.py` only parses OHLCV) — this is live/paper-only until
+  proven forward.
+- **Structure-gated SL** (`_STRUCTURE_GATED_SL_ENABLED = False` by default): built but
+  NOT adopted — backtested worse on the NIFTY month baseline (PF 0.98 vs 1.03, net
+  -₹1,256 vs +₹1,431) via `scripts/d1trap_structure_sl_test.py`. The idea (don't let the
+  soft/zone SL fire on a tick touch while the zone is still structurally intact, only
+  once a 15m candle actually closes below `zone_lo`) sounded right but on this sample the
+  zone almost always went genuinely invalid within the same/next 15m candle as the tick
+  SL touch anyway — waiting just let losses run to the harder ₹2000/lot cap without
+  rescuing any trades. Left in as an opt-in toggle for further tuning, not live.
+- Real SENSEX week backtest (07-27..07-31, pre-optimization mechanic): n=14, win% 21.4,
+  PF 0.42, net -₹7,231 — confirmed the live pain point empirically; also surfaced a
+  same-strike-re-entered-3x-in-1-minute churn pattern on 07-30 not yet investigated.
+
+**Verification scripts** (all `scripts/d1trap_*`, real premium, no synthetic data):
+`d1trap_strike_ladder_fetch.py`/`_backtest.py` (Stage 1), `d1trap_zone_definition_sweep.py`
+(Stage 2), `d1trap_round500_test.py`, `d1trap_verify_live_defaults.py` (confirms the wired
+live `bb._detect_bear_zones` reproduces the sweep scripts' numbers exactly),
+`d1trap_structure_sl_test.py`, `d1trap_sensex_week_fetch.py`/`_backtest.py`.
+
+---
+
 ### FVG — Fair Value Gap (`strategies/fvg/`)
 
 Smart Money Concepts option **buyer** strategy. Detection runs on the underlying

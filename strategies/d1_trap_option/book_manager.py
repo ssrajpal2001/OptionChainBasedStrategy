@@ -65,13 +65,19 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 product = d.get("product_type") or (
                     "NRML" if strategy_name == "d1_trap_fno" else "MIS"
                 )
+                from strategies.d1_trap_option.bear_only_book import (
+                    _ITM_OFFSET_DEFAULT_BY_UNDERLYING, _HTF_MINUTES_DEFAULT_BY_UNDERLYING,
+                )
                 cfg = {
                     "lots": lots,
                     "strategy_name": strategy_name,
                     "htf_tf": params["htf"],
                     "mtf_tf": params["mtf"],
                     "itm_offset": int(params.get("itm", 1)),
-                    "itm_offset_pts": int(params.get("itm_offset_pts", 200)),
+                    "itm_offset_pts": int(params.get(
+                        "itm_offset_pts", _ITM_OFFSET_DEFAULT_BY_UNDERLYING.get(underlying, 200))),
+                    "htf_minutes": int(params.get(
+                        "htf_minutes", _HTF_MINUTES_DEFAULT_BY_UNDERLYING.get(underlying, 60))),
                     "product_type": product,
                 }
 
@@ -195,6 +201,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 lot_multiplier=cfg.get("lots", 1),
                 feeder_token=feeder_token,
                 itm_offset_pts=int(cfg.get("itm_offset_pts", 200)),
+                htf_minutes=int(cfg["htf_minutes"]) if cfg.get("htf_minutes") else None,
                 product_type=cfg.get("product_type", "MIS"),
             )
 
