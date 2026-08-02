@@ -456,6 +456,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._series: Dict[str, _OptionSeries] = {}   # "CE" | "PE" -> _OptionSeries
         self._last_spot_open: Optional[float] = None
         self._latest_chain_snapshot: Optional[ChainSnapshot] = None
+        self._selection_reason: Optional[str] = None
         # 2026-08-01: list of open legs, not a single position -- the flip
         # concept's T1 (fast tick-level breach) and T2 (confirmed retracement)
         # tranches are independent legs that can both be open on the SAME side
@@ -557,6 +558,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._pe_strike = None
         self._series = {}
         self._last_spot_open = None
+        self._selection_reason = None
         self._day_done = False
         if not self._positions:
             pass  # nothing open, clean reset
@@ -574,8 +576,21 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 continue
             if not isinstance(ev, IndexTick):
                 continue
-            is_nifty = ev.symbol in ("NSE_INDEX|Nifty 50", "NIFTY", "NSE:NIFTY50-INDEX")
-            if not is_nifty or not ev.ltp:
+            # 2026-08-02 fix: this was hardcoded to NIFTY-only symbol aliases, so a
+            # SENSEX (or any non-NIFTY) deployment's live-tick fallback path could
+            # never fire -- only the REST _startup_open_fetch path worked for it, and
+            # only if the book happened to start after bars already existed for today.
+            # Mirrors D1TrapOptionBook's (book.py) underlying-aware symbol match.
+            is_own_underlying = (
+                ev.symbol == self._underlying
+                or (self._underlying == "NIFTY"
+                    and ev.symbol in ("NSE_INDEX|Nifty 50", "NIFTY", "NSE:NIFTY50-INDEX"))
+                or (self._underlying == "SENSEX"
+                    and ev.symbol in ("BSE_INDEX|SENSEX", "SENSEX"))
+                or (self._underlying == "BANKNIFTY"
+                    and ev.symbol in ("NSE_INDEX|Nifty Bank", "BANKNIFTY"))
+            )
+            if not is_own_underlying or not ev.ltp:
                 continue
             today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
             if self._today != today:
@@ -642,6 +657,18 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 self._underlying, spot_open, atm, ce_strike, pe_strike, strike_source,
             )
             self._ce_strike, self._pe_strike = ce_strike, pe_strike
+            if strike_source == "oi_wall":
+                self._selection_reason = (
+                    f"ATM={atm} (spot_open={spot_open:.0f}) -> OI-wall: "
+                    f"CE={ce_strike} (PE writers' max-OI strike), "
+                    f"PE={pe_strike} (CE writers' max-OI strike)"
+                )
+            else:
+                self._selection_reason = (
+                    f"ATM={atm} (spot_open={spot_open:.0f}) -> fixed-offset: "
+                    f"CE=ATM-{self._itm_offset_pts}, PE=ATM+{self._itm_offset_pts}"
+                    + (" [OI snapshot not ready yet]" if _OI_WALL_STRIKE_SELECTION_ENABLED else "")
+                )
             self._restore_positions()   # a real running trade must survive a restart
 
             today = self._today or datetime.now(IST).date()
@@ -1418,9 +1445,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             strategy="d1_trap_bear_only", underlying=self._underlying,
             ce_strike=self._ce_strike, pe_strike=self._pe_strike,
             spot_open=self._last_spot_open,
-            selection_reason=(f"ATM={round((self._last_spot_open or 0)/_ATM_ROUND_STEP)*_ATM_ROUND_STEP} "
-                               f"(spot_open={self._last_spot_open}) -> CE=ATM-{self._itm_offset_pts}, "
-                               f"PE=ATM+{self._itm_offset_pts}") if self._last_spot_open else None,
+            selection_reason=self._selection_reason,
             position=legs[0] if legs else None,   # backward-compat: first open leg (or None)
             positions=legs,                        # full list -- may hold both T1 and T2
         )
