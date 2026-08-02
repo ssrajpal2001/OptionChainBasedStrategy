@@ -7040,7 +7040,8 @@ function amoTest() {
                         } else if(deployForm.strategy_name==='d1_trap_bear_only'){
                           deployForm.product_type='MIS';
                           deployForm.underlying='NIFTY';
-                          deployForm._itm_offset_pts=200;
+                          deployForm._itm_offset_pts=150;
+                          deployForm._htf_minutes=60;
                           deployForm.squareoff_time='15:15';
                         } else if(deployForm.strategy_name==='fvg'){
                           deployForm.product_type='MIS';
@@ -7051,7 +7052,7 @@ function amoTest() {
                           deployForm.product_type='MIS';
                         }
                         deployForm.strategy_params = deployForm.strategy_name==='d1_trap_bear_only'
-                          ? JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||200})
+                          ? JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||150, htf_minutes:deployForm._htf_minutes||60})
                           : deployForm.strategy_name==='fvg'
                           ? JSON.stringify({htf_tf:deployForm._fvg_htf||10,ltf_tf:deployForm._fvg_ltf||3,direction_mode:deployForm._fvg_direction||'BOTH'})
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
@@ -7078,7 +7079,15 @@ function amoTest() {
                 </select>
               </template>
               <template x-if="deployForm.strategy_name !== 'd1_trap_fno'">
-                <select x-model="deployForm.underlying" class="t-input">
+                <select x-model="deployForm.underlying" class="t-input"
+                        @change="
+                          if(deployForm.strategy_name==='d1_trap_bear_only'){
+                            const _u=(deployForm.underlying||'').toUpperCase();
+                            deployForm._itm_offset_pts = _u==='SENSEX'?300:150;
+                            deployForm._htf_minutes = _u==='SENSEX'?15:60;
+                            deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts,htf_minutes:deployForm._htf_minutes});
+                          }
+                        ">
                   <template x-for="idx in availableInstruments.filter(i => i !== 'FNO_STOCKS')" :key="idx">
                     <option :value="idx" x-text="idx"></option>
                   </template>
@@ -7119,16 +7128,34 @@ function amoTest() {
                 </div>
               </div>
             </template>
-            <!-- ITM offset (points) — shown only for Bear Trap Only -->
+            <!-- ITM offset (points) + zone timeframe — shown only for Bear Trap Only -->
             <template x-if="deployForm.strategy_name==='d1_trap_bear_only'">
-              <div>
-                <label class="sec-label mb-1">ITM OFFSET (POINTS)</label>
-                <input type="number" class="t-input" x-model.number="deployForm._itm_offset_pts"
-                       min="50" step="50" placeholder="200"
-                       @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||200})"/>
-                <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
-                  CE = ATM − offset, PE = ATM + offset. Recomputed daily from NIFTY's open.
-                </p>
+              <div class="col-span-2 grid grid-cols-2 gap-3"
+                   x-init="deployForm._itm_offset_pts=deployForm._itm_offset_pts||((deployForm.underlying||'').toUpperCase()==='SENSEX'?300:150);
+                           deployForm._htf_minutes=deployForm._htf_minutes||((deployForm.underlying||'').toUpperCase()==='SENSEX'?15:60);">
+                <div>
+                  <label class="sec-label mb-1">ITM OFFSET (POINTS)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._itm_offset_pts"
+                         min="50" step="50" placeholder="150"
+                         @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||150, htf_minutes:deployForm._htf_minutes||60})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+                    CE = ATM − offset, PE = ATM + offset. Recomputed daily from spot's open. Auto-filled
+                    150 (NIFTY) / 300 (SENSEX) — 3-ITM, backtested best of the 0-3 ITM range (2026-08-02).
+                  </p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">ZONE TIMEFRAME (HTF, MIN)</label>
+                  <select class="t-input" x-model.number="deployForm._htf_minutes"
+                          @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||150, htf_minutes:deployForm._htf_minutes||60})">
+                    <option value="60">60 min (NIFTY default)</option>
+                    <option value="15">15 min (SENSEX default)</option>
+                    <option value="30">30 min</option>
+                  </select>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+                    NIFTY validated best at 60m; SENSEX at 15m (faster index needs finer structure) —
+                    2026-08-02 backtest.
+                  </p>
+                </div>
               </div>
             </template>
             <!-- HTF / LTF / Direction Mode — shown only for FVG -->
