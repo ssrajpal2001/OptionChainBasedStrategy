@@ -102,21 +102,25 @@ def _format_partner_trace(trace: list) -> str:
 class RollingMixin:
     """Rolling / single-side-roll logic for the sell-straddle book."""
 
-    async def _single_side_roll(self, now: datetime, reason: str) -> None:
+    async def _single_side_roll(self, now: datetime, reason: str) -> bool:
         """Check-first rollover: close the GOOD leg (less loss / more profit) and re-sell a new
         partner for the RUNNING / bleeding leg ONLY if a candidate passes LTP threshold +
-        re-entry rules + ratio. If no candidate passes, the existing trade continues unchanged."""
+        re-entry rules + ratio. If no candidate passes, the existing trade continues unchanged.
+
+        Returns True if the roll actually executed (new leg opened), False otherwise --
+        callers (e.g. the ITM-pair-gate rollover path) use this to decide whether to fall
+        back to a full close."""
         from strategies.sell_straddle.selection import select_partner_for
         pos = self._position
         if not pos or pos.status != "open":
-            return
+            return False
 
         # Throttle: do not re-attempt the same rollover reason more often than
         # _ROLL_RETRY_SECONDS, otherwise every tick would re-run partner search.
         _attempts = getattr(self, "_last_roll_attempt", None) or {}
         _last = _attempts.get(reason)
         if _last and (now - _last).total_seconds() < _ROLL_RETRY_SECONDS:
-            return
+            return False
         _attempts[reason] = now
         self._last_roll_attempt = _attempts
 
@@ -194,7 +198,7 @@ class RollingMixin:
                 "SellStraddle[%s]: ROLLOVER %s — no valid partner; keeping original pair. reason: %s",
                 self._underlying, reason, _why_plain,
             )
-            return
+            return False
 
         new_strike, new_ltp = partner
         if int(new_strike) == orig_strike:
@@ -202,7 +206,7 @@ class RollingMixin:
                 "SellStraddle[%s]: ROLLOVER %s — best partner is the SAME strike %d; "
                 "no new pair, keeping original pair.", self._underlying, reason, orig_strike
             )
-            return
+            return False
 
         # 3. MAX SKEW CHECK (max_entry_ratio).
         #    Because select_partner_for guarantees new_ltp <= keep_ltp,
@@ -216,7 +220,7 @@ class RollingMixin:
                     self._underlying, reason, roll_side, new_strike, new_ltp,
                     keep_side, keep_strike, keep_ltp, _skew, self._max_entry_ratio,
                 )
-                return
+                return False
 
         # 4. CURRENT-TICK SANITY CHECK: the configured re-entry rule may use a higher
         # timeframe (e.g. tf=2), so a partner can pass on the last closed candle while
@@ -234,7 +238,7 @@ class RollingMixin:
                 ">= vwap=%.2f; keeping original pair.",
                 self._underlying, reason, cand_ce, cand_pe, cur_close, cur_vwap,
             )
-            return
+            return False
 
         # 5. Execute the roll: close the good leg FIRST, wait for the close fill,
         #    then open the new partner. This guarantees the buy-to-close is confirmed
@@ -260,7 +264,7 @@ class RollingMixin:
                         self._underlying, close_eid,
                     )
                     self._roll_in_progress = False
-                    return
+                    return False
         finally:
             self._roll_close_waiters.pop(close_eid, None)
 
@@ -288,8 +292,35 @@ class RollingMixin:
                 float(getattr(self._position, "entry_time_value", 0.0) or 0.0),
                 float(getattr(self, "_session_realized_pnl_pts", 0.0) or 0.0),
             )
+
+        # ITM-pair-gate rollovers only: fund a protective stop on the freshly-rolled leg
+        # worth 70% of the ₹ profit just booked by closing the good leg. Scoped strictly
+        # to this reason string -- standard ltp_decay/ratio/vwap_rise/scalable-TSL rolls
+        # never touch _itm_roll_protection.
+        if reason == "itm_pair_gate_profit_rollover":
+            booked_pnl_rs = self._pnl_rs(float(getattr(close_ev, "realized_pnl", 0.0) or 0.0))
+            if booked_pnl_rs > 0:
+                protect_rs = 0.70 * booked_pnl_rs
+                self._itm_roll_protection = {
+                    "protect_rs": protect_rs,
+                    "new_side": roll_side,
+                    "new_strike": int(new_strike),
+                    "orig_strike": orig_strike,
+                    "kept_side": keep_side,
+                    "kept_strike": keep_strike,
+                }
+                self._clog.info(
+                    "SellStraddle[%s]: ITM-ROLL PROTECTION ARMED — %s%d budget=₹%.0f "
+                    "(70%% of ₹%.0f booked on closed %s%d).",
+                    self._underlying, roll_side, int(new_strike), protect_rs,
+                    booked_pnl_rs, roll_side, orig_strike,
+                )
+            else:
+                self._itm_roll_protection = None
+
         self._persist()
         await self._check_itm_pair_gate(now)
+        return True
 
     async def _single_side_roll_to(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Partial roll: close one side and open a pre-selected candidate strike on that side."""
@@ -393,12 +424,13 @@ class RollingMixin:
     async def _check_itm_pair_gate(self, now: datetime) -> None:
         """
         Called after every rollover completes and on every exit-check cycle while armed.
-        If both legs are ITM AND cumulative P&L in INR >= itm_pair_gate_profit_inr → close
-        both legs fully and restart via re-entry.
-        If both legs are ITM AND cumulative P&L < threshold → just hold and keep watching;
-        we no longer attempt single-side rollover escapes because they churn the position
-        and deepen losses when the gate fires below the profit threshold.
-        Does nothing if the toggle is OFF or the pair is not both ITM.
+        Only activates (arms/watches) when both legs are ITM AND the point-distance between
+        the two ITM strikes is > itm_pair_gate_min_strike_gap -- a narrow both-ITM pair is
+        left alone entirely (no arm, no watch, no action).
+        Once armed, when cumulative P&L in INR >= itm_pair_gate_profit_inr, attempt a
+        rollover via _single_side_roll first; only if no valid partner is found does this
+        fall back to closing both legs fully and restarting via re-entry.
+        Does nothing if the toggle is OFF, the pair is not both ITM, or the gap is too small.
         """
         if not getattr(self, "_itm_pair_gate_enabled", False):
             return
@@ -411,34 +443,155 @@ class RollingMixin:
             self._itm_gate_armed = False
             return
 
+        ce_s = int(pos.ce_leg.strike)
+        pe_s = int(pos.pe_leg.strike)
+        min_gap = float(getattr(self, "_itm_pair_gate_min_strike_gap", 100.0))
+        strike_gap = abs(ce_s - pe_s)
+        if strike_gap <= min_gap:
+            self._itm_gate_armed = False
+            return
+
         cumulative_pts = self._cumulative_pnl_pts()
         cumulative_inr = self._pnl_rs(cumulative_pts)
         threshold_inr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
-        ce_s = int(pos.ce_leg.strike)
-        pe_s = int(pos.pe_leg.strike)
 
         if cumulative_inr >= threshold_inr:
-            logger.info(
-                "SellStraddle[%s]: ITM-PAIR GATE — both legs ITM (CE%d/PE%d) spot=%.0f "
-                "cumulative=%.2f pts (₹%.2f) >= threshold ₹%.2f → closing both and restarting.",
-                self._underlying, ce_s, pe_s, self._spot, cumulative_pts, cumulative_inr, threshold_inr,
-            )
             self._itm_gate_armed = False
+            logger.info(
+                "SellStraddle[%s]: ITM-PAIR GATE — both legs ITM & gap=%d>%.0f (CE%d/PE%d) spot=%.0f "
+                "cumulative=%.2f pts (₹%.2f) >= threshold ₹%.2f → attempting rollover.",
+                self._underlying, strike_gap, min_gap, ce_s, pe_s, self._spot,
+                cumulative_pts, cumulative_inr, threshold_inr,
+            )
+            rolled = await self._single_side_roll(now, "itm_pair_gate_profit_rollover")
+            if rolled:
+                return
+            logger.info(
+                "SellStraddle[%s]: ITM-PAIR GATE — no rollover partner found; closing both and restarting.",
+                self._underlying,
+            )
             await self._close_position("itm_pair_gate_profit")
             # No cooldown — restart immediately via re-entry (not beginning).
             self._beginning_failed = True   # force re-entry path on next entry attempt
             return
 
-        # Below threshold: arm the gate and hold.  No rollover escape — we wait for either
-        # the cumulative P&L to cross the profit threshold (full exit above) or the pair
-        # to stop being both ITM.
+        # Below threshold: arm the gate and hold.  We wait for either the cumulative P&L
+        # to cross the profit threshold (rollover attempt above) or the pair to stop being
+        # both ITM / the gap to close back up.
         if not getattr(self, "_itm_gate_armed", False):
             self._itm_gate_armed = True
             logger.info(
-                "SellStraddle[%s]: ITM-PAIR GATE ARMED — both legs ITM (CE%d/PE%d) spot=%.0f "
+                "SellStraddle[%s]: ITM-PAIR GATE ARMED — both legs ITM & gap=%d>%.0f (CE%d/PE%d) spot=%.0f "
                 "cumulative=%.2f pts (₹%.2f) < threshold ₹%.2f. Holding; no rollover until profit threshold is met.",
-                self._underlying, ce_s, pe_s, self._spot, cumulative_pts, cumulative_inr, threshold_inr,
+                self._underlying, strike_gap, min_gap, ce_s, pe_s, self._spot,
+                cumulative_pts, cumulative_inr, threshold_inr,
             )
+
+    async def _check_itm_roll_protection(self, now: datetime) -> None:
+        """Tick-level protective stop for the leg just opened by an ITM-pair-gate rollover
+        (part 2 of the 70% rule). Must run unconditionally every cycle, same cadence as
+        _check_itm_pair_gate -- it cheaply no-ops when _itm_roll_protection is unset.
+
+        Scoped strictly to the itm_pair_gate_profit_rollover path: standard ltp_decay /
+        ratio / vwap_rise / scalable-TSL rolls never set _itm_roll_protection, so this
+        check never fires for them.
+        """
+        prot = getattr(self, "_itm_roll_protection", None)
+        if not prot:
+            return
+        pos = self._position
+        if not pos or pos.status != "open":
+            self._itm_roll_protection = None
+            return
+
+        new_side = prot["new_side"]
+        leg = pos.ce_leg if new_side == "CE" else pos.pe_leg
+        if int(leg.strike) != int(prot["new_strike"]):
+            # Position moved on since the roll (another roll / manual change) —
+            # this protection budget no longer applies to whatever leg is open now.
+            self._itm_roll_protection = None
+            return
+
+        pnl_pts = float(leg.entry_price or 0.0) - float(getattr(leg, "ltp", 0.0) or 0.0)
+        running_loss_rs = -self._pnl_rs(pnl_pts) if pnl_pts < 0 else 0.0
+        protect_rs = float(prot.get("protect_rs", 0.0) or 0.0)
+        if protect_rs <= 0 or running_loss_rs < protect_rs:
+            return
+
+        self._clog.info(
+            "SellStraddle[%s]: ITM-ROLL PROTECTION STOP — %s%d running loss ₹%.0f >= budget ₹%.0f "
+            "(70%% of profit booked on the prior roll) — closing.",
+            self._underlying, new_side, int(leg.strike), running_loss_rs, protect_rs,
+        )
+        self._itm_roll_protection = None
+        stopped_strike = int(leg.strike)
+        kept_side = prot["kept_side"]
+        kept_strike = int(prot["kept_strike"])
+        orig_strike = int(prot["orig_strike"])
+
+        await self._close_leg(new_side, "itm_roll_protection_stop", now)
+        pos = self._position
+        if not pos or pos.status != "open":
+            return
+
+        kept_leg = pos.pe_leg if kept_side == "PE" else pos.ce_leg
+        kept_ltp = float(getattr(kept_leg, "ltp", 0.0) or getattr(kept_leg, "entry_price", 0.0) or 0.0)
+
+        from strategies.sell_straddle.selection import select_partner_for
+        from strategies.core.rule_evaluator import eval_rules as _eval_rules_prot
+
+        ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
+        rules = ss.get("entry_rules_reentry", [])
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
+        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
+        max_itm = int(ss.get("roll_max_itm_steps", 5))
+        variable_strikes = bool(ss.get("variable_strikes", False))
+
+        def _rule_pass(ce_s: int, pe_s: int) -> bool:
+            ind = self._ind_by_tf(ce_s, pe_s, rules)
+            passed, _reason = _eval_rules_prot(rules, ind)
+            return bool(passed)
+
+        # Step 1: does the strike we ORIGINALLY rolled out of still pass re-entry now?
+        orig_v = self._strike_prem.get((orig_strike, new_side))
+        orig_ltp = float(orig_v.get("ltp", 0.0) or 0.0) if orig_v else 0.0
+        ce_s = orig_strike if new_side == "CE" else kept_strike
+        pe_s = kept_strike if new_side == "CE" else orig_strike
+        if orig_ltp > 0 and _rule_pass(ce_s, pe_s):
+            self._clog.info(
+                "SellStraddle[%s]: ITM-ROLL PROTECTION — restoring prior strike %s%d @%.2f (passes re-entry).",
+                self._underlying, new_side, orig_strike, orig_ltp,
+            )
+            await self._open_leg(new_side, orig_strike, orig_ltp, now, "itm_roll_protection_restore")
+            self._persist()
+            return
+
+        # Step 2: broader pool search for the still-running kept leg, excluding ONLY the
+        # strike we just stopped out of (not orig_strike, which was already checked above).
+        pool = {k: v for k, v in self._strike_prem.items()
+                if not (k[0] == stopped_strike and k[1] == new_side)}
+        partner = select_partner_for(
+            pool, roll_side=new_side, kept_strike=kept_strike, kept_ltp=kept_ltp,
+            spot=self._spot, step=step, offset=offset, ltp_target=ltp_target,
+            rule_pass=_rule_pass, max_itm_steps=max_itm, theta_target=self._theta_target,
+            variable_strikes=variable_strikes, ltp_le_kept=False, metric="balanced_ratio",
+        )
+        if partner:
+            pool_strike, pool_ltp = partner
+            self._clog.info(
+                "SellStraddle[%s]: ITM-ROLL PROTECTION — pool search found %s%d @%.2f (excl %d).",
+                self._underlying, new_side, pool_strike, pool_ltp, stopped_strike,
+            )
+            await self._open_leg(new_side, int(pool_strike), float(pool_ltp), now, "itm_roll_protection_pool")
+            self._persist()
+            return
+
+        self._clog.info(
+            "SellStraddle[%s]: ITM-ROLL PROTECTION — no valid strike (old strike or pool); "
+            "closing entire position.", self._underlying,
+        )
+        await self._close_position("itm_roll_protection_exit_all")
 
     def _apply_sl_cooldown(self) -> None:
         """Block re-entry until the next boundary of the max re-entry timeframe.

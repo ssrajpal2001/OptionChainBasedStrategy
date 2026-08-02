@@ -270,6 +270,22 @@ class ExitMixin:
                 return (f"VWAP rise | VWAP {_curr:.2f} rose {_rise:.2f}% from session low {_min:.2f} "
                         f"(threshold {self._vwap_rise_threshold:.2f}%) → {_roll}")
 
+            if reason == "itm_pair_gate_profit_rollover":
+                _cum_inr = self._pnl_rs(self._cumulative_pnl_pts())
+                _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+                return (f"ITM pair gate rollover | both legs ITM, gap>{self._itm_pair_gate_min_strike_gap:.0f}pts, "
+                        f"cumulative {self._ccy_symbol}{_cum_inr:+.0f} ≥ threshold {self._ccy_symbol}{_thr:.0f} "
+                        f"→ rolled {_side}")
+
+            if reason == "itm_roll_protection_stop":
+                return f"ITM-roll protection stop | {_side} leg hit 70%-of-booked-profit loss budget → closed"
+            if reason == "itm_roll_protection_restore":
+                return f"ITM-roll protection | restored prior strike {_side} (passed re-entry)"
+            if reason == "itm_roll_protection_pool":
+                return f"ITM-roll protection | pool-selected new {_side} partner (excl. stopped-out strike)"
+            if reason == "itm_roll_protection_exit_all":
+                return "ITM-roll protection | no valid strike found — closed entire position"
+
             if reason.startswith("partial_roll_"):
                 return f"Partial roll | closed old {_side} leg"
             if reason.startswith("partial_cleanup_"):
@@ -564,6 +580,10 @@ class ExitMixin:
         # toggle is off or the pair isn't both-ITM, so calling it unconditionally is safe.
         await self._check_itm_pair_gate(now)
 
+        # 9. ITM-ROLL PROTECTION (70% rule, scoped to the ITM-pair-gate rollover path only).
+        # Must also run unconditionally -- cheap no-op when _itm_roll_protection is unset.
+        await self._check_itm_roll_protection(now)
+
     # ── Close / leg helpers ───────────────────────────────────────────────────
 
     def discard_position_after_squareoff(self, reason: str) -> None:
@@ -574,6 +594,7 @@ class ExitMixin:
         pos.realized_pnl = pos.unrealized_pnl
         pos.status = "closed"
         self._session_realized_pnl_pts += pos.realized_pnl
+        self._itm_roll_protection = None
         _cid = getattr(self, "_client_id", "") or "-"
         _bid = getattr(self, "_binding_id", "") or "-"
         logger.info(
@@ -589,6 +610,7 @@ class ExitMixin:
             return
         self._close_in_progress = True
         self._roll_in_progress = False
+        self._itm_roll_protection = None
         try:
             from execution_bridge.straddle_bridge import StraddleOrderEvent
             pos = self._position

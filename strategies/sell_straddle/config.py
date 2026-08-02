@@ -75,6 +75,7 @@ class SellStraddleConfig:
 
     itm_pair_gate_enabled: bool
     itm_pair_gate_profit_inr: float
+    itm_pair_gate_min_strike_gap: float
 
     same_day_expiry_enabled: bool
 
@@ -215,6 +216,7 @@ def load_sell_straddle_config(
 
     itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", True))
     itm_pair_gate_profit_inr = float(ss.get("itm_pair_gate_profit_inr", 500.0))
+    itm_pair_gate_min_strike_gap = float(ss.get("itm_pair_gate_min_strike_gap", 100.0))
 
     same_day_expiry_enabled = bool(ss.get("same_day_expiry_enabled", False))
 
@@ -253,6 +255,7 @@ def load_sell_straddle_config(
         exit_rules=exit_rules,
         itm_pair_gate_enabled=itm_pair_gate_enabled,
         itm_pair_gate_profit_inr=itm_pair_gate_profit_inr,
+        itm_pair_gate_min_strike_gap=itm_pair_gate_min_strike_gap,
         same_day_expiry_enabled=same_day_expiry_enabled,
     )
 
@@ -325,6 +328,9 @@ class ConfigMixin:
 
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
         self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr
+        self._itm_pair_gate_min_strike_gap = cfg.itm_pair_gate_min_strike_gap
+        if not hasattr(self, "_itm_roll_protection"):
+            self._itm_roll_protection = None
 
         self._same_day_expiry_enabled = cfg.same_day_expiry_enabled
 
