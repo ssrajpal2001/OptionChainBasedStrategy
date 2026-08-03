@@ -7776,6 +7776,14 @@ function amoTest() {
                                 <span style="color:var(--t-muted)">TSL locked</span>
                                 <span style="color:var(--t-amber)" x-text="(_p.locked_pct||0)+'%'"></span>
                               </div>
+                              <div class="flex justify-between" x-show="!(_p.locked_pct>0) && _p.tsl_trigger_price" style="color:var(--t-dim)">
+                                <span>TSL activates at</span>
+                                <span x-text="'₹'+fmt(_p.tsl_trigger_price)+' (+'+_p.tsl_trigger_pct+'%) → locks '+_p.tsl_base_lock_pct+'%'"></span>
+                              </div>
+                              <div class="flex justify-between" x-show="_p.locked_pct>0 && _p.tsl_step_pct" style="color:var(--t-dim)">
+                                <span>Next step</span>
+                                <span x-text="'every further +'+_p.tsl_step_pct+'% gain → +'+_p.tsl_step_lock_pct+'%'"></span>
+                              </div>
                               <div class="flex justify-between border-t mt-0.5 pt-0.5" style="border-color:var(--t-border)">
                                 <span style="color:var(--t-muted)">P&L (tick)</span>
                                 <span :style="`color:${((_p.ltp-_p.entry)*_p.qty)>=0?'var(--t-green)':'var(--t-red)'};font-weight:600`"

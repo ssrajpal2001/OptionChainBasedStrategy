@@ -1297,6 +1297,12 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     self._persist_positions()   # persist the new locked-in TSL level immediately --
                                                  # a restart before this is saved must never give back
                                                  # profit already locked in by resetting the trail to 0.
+                    logger.info(
+                        "BearTrap[%s]: %s%d [%s] TSL LOCKED %.1f%% -- ltp=%.2f (profit=%.1f%%) "
+                        "entry=%.2f -> stop now %.2f",
+                        self._underlying, side, pos["strike"], pos.get("tranche", "single"),
+                        calc_lock * 100, ltp, profit_pct * 100, entry, entry * (1 + calc_lock),
+                    )
 
             if pos["high_lock_pct"] > 0:
                 # Tier 1: TSL already locked in profit -- tick-level, immediate.
@@ -1432,11 +1438,20 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
 
     def _leg_view(self, pos: dict) -> dict:
         series = self._series.get(pos["side"])
+        entry = pos["entry_price"]
+        # 2026-08-03: expose the TSL trigger/step shape (not just current locked_pct) so the
+        # UI can show WHEN TSL will lock, not just whether it already has -- previously only
+        # visible by reverse-computing from raw pct constants, nowhere in the dashboard.
         return dict(
-            side=pos["side"], strike=pos["strike"], entry=pos["entry_price"], sl=pos["sl"],
+            side=pos["side"], strike=pos["strike"], entry=entry, sl=pos["sl"],
             locked_pct=round(pos["high_lock_pct"] * 100, 1), qty=pos["qty"],
             tranche=pos.get("tranche", "single"),
             ltp=series.last_ltp if series else None,
+            tsl_trigger_pct=round(pos["tsl_base_pct"] * 100, 1),
+            tsl_trigger_price=round(entry * (1 + pos["tsl_base_pct"]), 2),
+            tsl_base_lock_pct=round(pos["tsl_base_lock_pct"] * 100, 1),
+            tsl_step_pct=round(pos["tsl_step_pct"] * 100, 1),
+            tsl_step_lock_pct=round(pos["tsl_step_lock_pct"] * 100, 1),
         )
 
     def status(self) -> dict:
