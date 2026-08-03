@@ -653,8 +653,10 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     logger.info("BearTrap[%s]: no usable OI-wall snapshot yet -- "
                                 "using fixed-offset strikes for today.", self._underlying)
             logger.info(
-                "BearTrap[%s]: spot_open=%.2f ATM=%d -> CE=%d PE=%d (source=%s)",
+                "BearTrap[%s]: spot_open=%.2f ATM=%d -> CE=%d PE=%d (source=%s) "
+                "| effective config: htf=%dm itm_offset=%dpt",
                 self._underlying, spot_open, atm, ce_strike, pe_strike, strike_source,
+                self._htf_minutes, self._itm_offset_pts,
             )
             self._ce_strike, self._pe_strike = ce_strike, pe_strike
             if strike_source == "oi_wall":
