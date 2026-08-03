@@ -188,6 +188,18 @@ class D1TrapOptionBookManager(StrategyBookManager):
 
         strategy_name = cfg.get("strategy_name", "d1_trap_index")
 
+        # 2026-08-03 fix: D1Trap never called enable_chain() for its own underlying --
+        # StrikeRebalancer's ATM+/-chain_depth subscription only activates once SOME
+        # strategy calls this (see StraddleBookManager/V4CascadeBookManager, which both
+        # already do). A Bear Trap Only deployment on an underlying with no OTHER
+        # strategy also running there (e.g. SENSEX with no sell_straddle deployment)
+        # got chain_enabled=False forever -- book spawned, warmup/REST worked fine,
+        # but live OPTION_TICK never flowed for its strikes, so it could never progress
+        # past whatever zone state the historical replay produced. NIFTY only "worked"
+        # here because a sell_straddle NIFTY deployment happened to already enable it.
+        if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
+            self._rebalancer.enable_chain(underlying)
+
         if strategy_name == "d1_trap_bear_only":
             if _D1TrapBearOnlyBook is None:
                 from strategies.d1_trap_option.bear_only_book import D1TrapBearOnlyBook as _cls
