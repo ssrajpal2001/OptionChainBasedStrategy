@@ -7073,6 +7073,7 @@ function amoTest() {
                 -->
                 <option value="d1_trap_bear_only">Bear Trap Only (Option-Native, NIFTY)</option>
                 <option value="fvg">FVG (Fair Value Gap, NIFTY)</option>
+                <option value="fno_positional">FnO Positional (Swing, All FnO Stocks)</option>
               </select>
             </div>
             <div>
@@ -7085,7 +7086,14 @@ function amoTest() {
                   <option value="ALL_FNO">All 30 FnO Stocks</option>
                 </select>
               </template>
-              <template x-if="deployForm.strategy_name !== 'd1_trap_fno'">
+              <!-- FnO Positional: single sentinel underlying, no per-index choice -->
+              <template x-if="deployForm.strategy_name === 'fno_positional'">
+                <select class="t-input" x-model="deployForm.underlying"
+                        x-init="deployForm.underlying='FNO_STOCKS'" disabled>
+                  <option value="FNO_STOCKS">All FnO Stocks (offline watchlist scan)</option>
+                </select>
+              </template>
+              <template x-if="deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'fno_positional'">
                 <select x-model="deployForm.underlying" class="t-input"
                         @change="
                           if(deployForm.strategy_name==='d1_trap_bear_only'){
