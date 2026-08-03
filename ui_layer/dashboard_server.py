@@ -6285,7 +6285,14 @@ pm2 save
                                     ltp = leg.get("ltp")
                                     entry = leg.get("entry")
                                     qty = leg.get("qty") or 0
-                                    if ltp is not None and entry is not None:
+                                    # 2026-08-03 fix: _OptionSeries.last_ltp defaults to 0.0 (not
+                                    # None) until the first real tick lands -- right after a
+                                    # restart with a restored open position, "ltp is not None"
+                                    # passed with ltp=0.0, producing a fake ~100% loss per leg
+                                    # that tripped RiskManager's daily-loss halt on a phantom
+                                    # number within seconds of startup. Require ltp > 0 (a real
+                                    # quote has actually arrived) before counting it.
+                                    if ltp is not None and entry is not None and float(ltp) > 0:
                                         running += (float(ltp) - float(entry)) * float(qty)
                             except Exception:
                                 pass
