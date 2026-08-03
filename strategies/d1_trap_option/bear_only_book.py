@@ -252,6 +252,20 @@ _SPOT_BIAS_LOOKBACK_DAYS = 20   # 2026-08-03: daily spot HTF bias filter (D1 swi
                         # newest daily bar and the same swing/MSS check re-runs on every new
                         # minute, so a strong intraday reversal can flip the active bias
                         # before end of day, not just at the next day's open.
+_MAX_ZONE_REENTRIES_BY_UNDERLYING = {"NIFTY": 2}   # 2026-08-04: after a T1 leg is
+                        # SL-hit, if its zone is STILL structurally valid (never
+                        # closed a 15m candle below zone_lo -- i.e. the trade
+                        # thesis never actually failed, only that one attempt did),
+                        # re-arm the zone for a fresh ref-candle breach instead of
+                        # permanently retiring it. Capped at this many EXTRA T1
+                        # attempts per zone so a choppy day can't churn it forever.
+                        # Backtested per-index (scripts/d1trap_zone_reentry_test.py,
+                        # full month, both indices at their just-adopted TSL/SL
+                        # settings): NIFTY improved (PF 2.34->2.53, net +Rs49,931->
+                        # +Rs62,475) but SENSEX got WORSE (PF 2.84->1.67, net
+                        # +Rs21,886->+Rs9,171) -- genuinely index-specific, not
+                        # copied across. SENSEX deliberately absent from this dict
+                        # (no re-entry) until re-tested with different assumptions.
 _ITM_OFFSET_DEFAULT_BY_UNDERLYING = {"NIFTY": 150, "SENSEX": 300}   # 2026-08-02:
                         # 3-ITM strike depth, backtested via
                         # scripts/d1trap_strike_ladder_backtest.py against a real
@@ -1126,8 +1140,15 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                                 (m5["timestamp"] < zone["ref_close_time"])]
                 collapse = _collapse_subzones(_to_bars(window_5m))
                 if collapse is None:
-                    # no subzone -> no T2 possible, T1 alone stands
-                    zone["done"] = True
+                    # no subzone -> no T2 possible, T1 alone stands. Don't finalize
+                    # the zone yet if it's still eligible for a re-entry attempt
+                    # after a future SL-hit (see _MAX_ZONE_REENTRIES_BY_UNDERLYING
+                    # and the re-arm hook in _square_off_leg) -- only mark done once
+                    # the re-entry budget is exhausted (or the underlying isn't
+                    # opted in, in which case the cap is 0 and this fires as before).
+                    cap = _MAX_ZONE_REENTRIES_BY_UNDERLYING.get(self._underlying, 0)
+                    if zone.get("reentries_used", 0) >= cap:
+                        zone["done"] = True
                     return
                 zone["sub_lo"], zone["sub_hi"] = collapse
                 threshold_pts = _ZONE_SIZE_THRESHOLD_PCT / 100.0 * zone["ref_high"]
@@ -1418,6 +1439,34 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         lock_ts = pos.get("zone_lock_ts")
         return next((z for z in series.zones if z["lock_ts"] == lock_ts), None)
 
+    def _maybe_rearm_zone(self, pos: dict, reason: str) -> None:
+        """2026-08-04, direct user spec: 'if SL gets hit but zone is valid,
+        trade can be initiated again when criteria are fulfilled.' Only
+        applies to a T1 leg's SL-hit (any hard/soft SL reason, never
+        TSL/EOD) whose owning zone is still structurally intact -- re-arms
+        the zone for a fresh ref-candle breach instead of leaving it
+        permanently spent. Per-index opt-in via
+        _MAX_ZONE_REENTRIES_BY_UNDERLYING (NIFTY only -- SENSEX backtested
+        worse, see that constant's comment)."""
+        if pos.get("tranche") != "T1" or not reason.startswith("sl_hit"):
+            return
+        cap = _MAX_ZONE_REENTRIES_BY_UNDERLYING.get(self._underlying, 0)
+        if cap <= 0:
+            return
+        zone = self._zone_for_position(pos)
+        if zone is None or zone.get("invalid") or zone.get("done"):
+            return
+        used = zone.get("reentries_used", 0)
+        if used >= cap:
+            return
+        zone["reentries_used"] = used + 1
+        zone["breach_ts"] = None
+        zone["sub_lo"] = zone["sub_hi"] = zone["arm_level"] = None
+        zone["armed"] = False
+        logger.info("BearTrap[%s]: %s zone [%.2f,%.2f] RE-ARMED after SL-hit (still valid, "
+                    "reentry %d/%d) -- watching for a fresh ref-candle breach",
+                    self._underlying, pos["side"], zone["zone_lo"], zone["zone_hi"], used + 1, cap)
+
     def _check_exit(self, side: str, ltp: float, ts: datetime) -> None:
         """Each leg (single/T1/T2) is checked and exited fully independently --
         no averaging, no combined exit. A leg's own staircase-TSL profile
@@ -1508,6 +1557,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             return   # already closed by a concurrent check (e.g. tsl + eod racing)
         self._positions = [p for p in self._positions if p is not pos]
         self._persist_positions()
+        self._maybe_rearm_zone(pos, reason)
         expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
         ev = D1TrapOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id,
