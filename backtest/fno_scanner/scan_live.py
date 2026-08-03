@@ -156,10 +156,31 @@ class Signal:
     btst_rr:     float      # BTST R:R (current close → T1 / current close → SL)
     suggested_strike: int   # nearest round-step to entry_line
     expiry:      str = ""   # actual contract expiry from registry e.g. "28 AUG 26"
+    upstox_key:  str = ""   # NSE_EQ instrument key for the underlying spot
 
 
 def _nearest_strike(price: float, step: int = 50) -> int:
     return round(price / step) * step
+
+
+def _step_for(price: float) -> int:
+    if price > 5000:
+        return 100
+    elif price > 2000:
+        return 50
+    elif price > 500:
+        return 20
+    return 10
+
+
+def _itm_strike(price: float, direction: str) -> int:
+    """1-strike ITM, matching the D1Trap/FVG convention: CE ITM = strike
+    BELOW spot, PE ITM = strike ABOVE spot -- one step off the ATM strike,
+    not plain ATM (2026-08-03, user-requested parity with the intraday
+    option-buyer strategies)."""
+    step = _step_for(price)
+    atm = _nearest_strike(price, step)
+    return atm - step if direction == "CE" else atm + step
 
 
 EARNINGS_CUMULATIVE_PCT = 8.0  # 5-day cumulative move above this % = likely earnings rally
@@ -261,15 +282,7 @@ def _check_flip(
         btst_risk   = (flip_sl - last_bar.close) if flip_dir == "PE" else (last_bar.close - flip_sl)
         btst_rr     = (btst_reward / btst_risk) if btst_risk > 0 else 0.0
 
-        if flip_entry > 5000:
-            step = 100
-        elif flip_entry > 2000:
-            step = 50
-        elif flip_entry > 500:
-            step = 20
-        else:
-            step = 10
-        strike = _nearest_strike(flip_entry, step)
+        strike = _itm_strike(flip_entry, flip_dir)
 
         sym_expiries = universe.expiries.get(symbol, [])
         exp_date = _next_monthly_expiry(sym_expiries, target_month, target_year)
@@ -283,6 +296,7 @@ def _check_flip(
             zone_age=age_days, lock_date=lock_date_str, rr=rr,
             btst_rr=btst_rr,
             suggested_strike=strike, expiry=expiry_str,
+            upstox_key=universe.stocks.get(symbol, ""),
         )
 
         if best_flip is None or sig.btst_rr > best_flip.btst_rr:
@@ -420,17 +434,8 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
             else:
                 continue
 
-            # Suggested strike: nearest 50-pt round to entry_line
-            # Adjust step by stock price range
-            if entry_line > 5000:
-                step = 100
-            elif entry_line > 2000:
-                step = 50
-            elif entry_line > 500:
-                step = 20
-            else:
-                step = 10
-            strike = _nearest_strike(entry_line, step)
+            # 1-strike ITM (matches D1Trap/FVG convention), not plain ATM.
+            strike = _itm_strike(entry_line, direction)
 
             # Real expiry from instrument master
             sym_expiries = universe.expiries.get(symbol, [])
@@ -449,6 +454,7 @@ def scan(token: str) -> Tuple[List[Signal], _FnoUniverse]:
                 zone_age=age_days, lock_date=lock_date_str, rr=rr,
                 btst_rr=btst_rr,
                 suggested_strike=strike, expiry=expiry_str,
+                upstox_key=key,
             )
 
             # Keep the signal with best R:R per stock
@@ -638,6 +644,38 @@ def save_watchlist(
         json.dump({"generated": datetime.now().strftime("%Y-%m-%d %H:%M"), "stocks": records}, f, indent=2)
 
     return out_path
+
+
+def load_watchlist(path: Optional[str] = None) -> List[Signal]:
+    """Read back a JSON file written by save_watchlist() (an offline/nightly
+    scan) as Signal objects, for a live book to consume without ever
+    scanning the full ~200-stock universe itself. 2026-08-03: replaces
+    fno_positional's previous live 09:00 scan_live.scan() call, which (a)
+    fetched D1 history for the whole FnO universe every trading day and
+    (b) was silently crashing on every call (scan() returns a (signals,
+    universe) tuple, but the caller assigned it straight to `signals` and
+    iterated it as if it were the signal list -- AttributeError on the
+    very first list comprehension, meaning fno_positional had never
+    actually populated a pending signal in production)."""
+    if path is None:
+        path = str(ROOT / "data" / "fno_positional_watchlist.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    out = []
+    for r in data.get("stocks", []):
+        out.append(Signal(
+            symbol=r["symbol"], direction=r["direction"], status=r["status"],
+            entry_line=r["entry_line"], current=r.get("entry_line", 0.0),
+            dist_pct=r.get("dist_pct", 0.0), hard_sl=r["hard_sl"], day_t1=r["day_t1"],
+            zone_age=r.get("zone_age", 0), lock_date=r.get("lock_date", ""),
+            rr=r.get("rr", 0.0), btst_rr=r.get("btst_rr", 0.0),
+            suggested_strike=r["suggested_strike"], expiry=r.get("expiry", ""),
+            upstox_key=r.get("upstox_key", ""),
+        ))
+    return out
 
 
 if __name__ == "__main__":

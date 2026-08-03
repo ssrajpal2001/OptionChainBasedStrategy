@@ -209,6 +209,9 @@ class InstrumentRegistry:
                 self._expiries[underlying] = sorted(expiry_set)
                 self._loaded.add(underlying)
                 logger.info("InstrumentRegistry [%s]: %d contracts via API", underlying, len(keys))
+                # The options API doesn't expose futures — resolve the near-month
+                # futures key separately from the (cached) master JSON.
+                self._resolve_futures_key(underlying, today, diag)
                 return
 
             diag.append("API returned 0 contracts — falling back to master JSON (works 24/7)")
@@ -218,6 +221,87 @@ class InstrumentRegistry:
 
         # ── Fallback: static NSE master JSON (works 24/7, cached per session) ──
         self._load_from_master_json(underlying, today, diag)
+
+    def _resolve_futures_key(self, underlying: str, today: date, diag: List[str]) -> None:
+        """Populate self._futures_upstox[underlying] with the near-month index
+        futures contract, read from the (session-cached) exchange master JSON.
+        Index underlyings only load OPTIONS via the fast options API, which
+        has no futures endpoint — this is a cheap supplementary lookup against
+        the same master JSON _load_from_master_json already knows how to
+        download/cache, without redoing the (already-succeeded) option parse."""
+        if underlying.upper() in _MCX_UNDERLYINGS or underlying in self._futures_upstox:
+            return
+        import gzip, json
+        from urllib.request import urlopen, Request
+
+        _is_bse = underlying in ("SENSEX", "BANKEX")
+        _exch = "BSE" if _is_bse else "NSE"
+        cache_key = f"{_exch}:{today.isoformat()}"
+        raw_instruments = _MASTER_CACHE.get(cache_key)
+        if raw_instruments is None:
+            url = f"https://assets.upstox.com/market-quote/instruments/exchange/{_exch}.json.gz"
+            try:
+                import ssl as _ssl
+                _ctx = _ssl.create_default_context()
+                _ctx.check_hostname = False
+                _ctx.verify_mode = _ssl.CERT_NONE
+                req = Request(url, headers={"Accept-Encoding": "gzip"})
+                with urlopen(req, timeout=60, context=_ctx) as r:
+                    raw = r.read()
+                try:
+                    raw_instruments = json.loads(gzip.decompress(raw))
+                except Exception:
+                    raw_instruments = json.loads(raw)
+                _MASTER_CACHE[cache_key] = raw_instruments
+            except Exception as exc:
+                diag.append(f"futures key lookup: master JSON download failed: {exc}")
+                return
+
+        seg_prefix = "BSE_FO|" if _is_bse else "NSE_FO|"
+        fut_candidates: List[Tuple[date, str]] = []
+        for inst in raw_instruments:
+            ikey, ts, _strike, exp_raw = self._parse_instrument(inst)
+            if not ikey or not ikey.startswith(seg_prefix):
+                continue
+            _uns = ((inst.get("underlying_symbol") or inst.get("name") or "")
+                    if isinstance(inst, dict)
+                    else (getattr(inst, "underlying_symbol", "") or getattr(inst, "name", "")))
+            if _uns:
+                if str(_uns).upper() != underlying.upper():
+                    continue
+            elif not ts.startswith(underlying):
+                continue
+            _itype = (inst.get("instrument_type", "") if isinstance(inst, dict)
+                      else getattr(inst, "instrument_type", ""))
+            if not (str(_itype).upper().startswith("FUT") or ts.upper().endswith("FUT")):
+                continue
+            try:
+                if isinstance(exp_raw, datetime):
+                    expiry_date = exp_raw.date()
+                elif isinstance(exp_raw, date):
+                    expiry_date = exp_raw
+                elif isinstance(exp_raw, (int, float)) or (isinstance(exp_raw, str) and str(exp_raw).strip().isdigit()):
+                    _epoch = int(exp_raw)
+                    if _epoch > 10_000_000_000:
+                        _epoch //= 1000
+                    from config.global_config import IST as _IST
+                    expiry_date = datetime.fromtimestamp(_epoch, _IST).date()
+                else:
+                    expiry_date = date.fromisoformat(str(exp_raw)[:10])
+            except (ValueError, TypeError, OSError, OverflowError):
+                continue
+            if expiry_date < today:
+                continue
+            fut_candidates.append((expiry_date, ikey))
+
+        if fut_candidates:
+            fut_candidates.sort(key=lambda x: x[0])
+            f_exp, f_ikey = fut_candidates[0]
+            self._futures_upstox[underlying] = f_ikey
+            self._futures_expiry[underlying] = f_exp
+            diag.append(f"futures (near-month): upstox={f_ikey} expiry={f_exp}")
+        else:
+            diag.append("futures key lookup: no FUT instrument matched in master JSON")
 
     def _load_mcx(self, underlying: str, today: date, diag: List[str]) -> None:
         """
@@ -374,6 +458,7 @@ class InstrumentRegistry:
 
         keys: Dict[Tuple[str, int, str], str] = {}
         expiry_set: Set[date] = set()
+        fut_candidates: List[Tuple[date, str]] = []   # (expiry, ikey) — near-month futures
 
         # Segment prefix for this underlying (BSE for SENSEX/BANKEX, NSE for rest)
         seg_prefix = "BSE_FO|" if underlying in ("SENSEX", "BANKEX") else "NSE_FO|"
@@ -428,6 +513,14 @@ class InstrumentRegistry:
             if expiry_date < today:
                 continue
 
+            # Index futures: instrument_type FUT(IDX) or trading_symbol ending "FUT",
+            # no strike. Track the near-month contract as the futures ATM/historical source.
+            _itype = (inst.get("instrument_type", "") if isinstance(inst, dict)
+                      else getattr(inst, "instrument_type", ""))
+            if str(_itype).upper().startswith("FUT") or ts.upper().endswith("FUT"):
+                fut_candidates.append((expiry_date, ikey))
+                continue
+
             opt_type = self._detect_opt_type(ts, ikey, inst)
             if not opt_type:
                 continue
@@ -442,6 +535,14 @@ class InstrumentRegistry:
         self._upstox_keys[underlying] = keys
         self._expiries[underlying] = sorted(expiry_set)
         self._loaded.add(underlying)
+
+        if fut_candidates:
+            fut_candidates.sort(key=lambda x: x[0])
+            f_exp, f_ikey = fut_candidates[0]
+            self._futures_upstox[underlying] = f_ikey
+            self._futures_expiry[underlying] = f_exp
+            diag.append(f"futures (near-month): upstox={f_ikey} expiry={f_exp}")
+
         summary = (
             f"Master JSON result: {len(keys)} contracts across expiries: "
             + ", ".join(e.isoformat() for e in sorted(expiry_set)[:6])

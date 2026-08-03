@@ -52,6 +52,13 @@ MARKET_OPEN        = time(9, 15)
 MARKET_CLOSE       = time(15, 30)
 EXPIRY_WEEK_DAYS   = 7   # close position when ≤7 days left on expiry
 GAP_SKIP_PCT       = 2.5 # skip entry if spot gapped >2.5% from entry_line
+# Breakeven trail trigger — fraction of entry->T1 distance spot must cover
+# before SL moves to breakeven. 2026-08-03: backtested 30/40/50/60/70% across
+# all 207 FnO stocks (scripts/d1trap_fno_breakeven_trail_sweep.py) — 30% won
+# on both PF and aggregate return vs the prior 50% (faster capital turnover:
+# freeing a stock's slot sooner lets more signals get taken in the same
+# window, since per-trade edge is roughly flat across all trigger levels).
+TRAIL_TRIGGER_PCT  = 0.3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,12 +335,26 @@ class FnOPositionalBook:
     # ── Scan ─────────────────────────────────────────────────────────────────
 
     async def _run_scan(self) -> None:
-        self._log.info("FnOBook[%s/%s]: running zone scan...", self._client_id, self._binding_id)
+        # 2026-08-03: reads the offline/nightly scan output (data/fno_positional_watchlist.json,
+        # written by `scan_live.py --save --out data/fno_positional_watchlist.json --top-n 30`
+        # run after market close) instead of scanning the full ~200-stock FnO universe live —
+        # a full live scan is impractical during market hours and (see below) was also broken.
+        # Previously this called scan_live.scan() live, which returns (signals, universe) — a
+        # 2-tuple — but the old code assigned that straight to `signals` and iterated it as the
+        # signal list, raising AttributeError on the first list comprehension every single call.
+        # That means the daily scan never actually completed and self._pending was never
+        # populated in production — this book has never entered a trade until this fix.
+        self._log.info("FnOBook[%s/%s]: loading offline watchlist...", self._client_id, self._binding_id)
         try:
-            from backtest.fno_scanner.scan_live import scan as _scan
-            signals = await asyncio.to_thread(_scan, self._token)
+            from backtest.fno_scanner.scan_live import load_watchlist
+            signals = await asyncio.to_thread(load_watchlist)
         except Exception as exc:
-            self._log.error("FnOBook: scan failed: %s", exc)
+            self._log.error("FnOBook: watchlist load failed: %s", exc)
+            return
+        if not signals:
+            self._log.warning("FnOBook[%s/%s]: watchlist empty — run "
+                              "scan_live.py --save --out data/fno_positional_watchlist.json "
+                              "--top-n 30 after market close", self._client_id, self._binding_id)
             return
         triggered   = sorted([s for s in signals if s.status == "TRIGGERED"],
                               key=lambda s: s.rr, reverse=True)
@@ -356,7 +377,7 @@ class FnOPositionalBook:
                 continue
             # Gap filter: if spot has moved >GAP_SKIP_PCT% from entry_line since
             # yesterday's close, the zone is blown — skip this signal entirely.
-            spot_key = self._spot_key(sig.symbol)
+            spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
             if spot_key:
                 spot = await self._fetch_ltp(spot_key)
                 if spot > 0:
@@ -381,8 +402,8 @@ class FnOPositionalBook:
                 break
             if sig.status != "APPROACHING":
                 continue
-            spot = await self._fetch_ltp(sig.spot_instrument_key if hasattr(sig, "spot_instrument_key")
-                                         else self._spot_key(sig.symbol))
+            spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
+            spot = await self._fetch_ltp(spot_key)
             if spot <= 0:
                 continue
             touched = (
@@ -395,11 +416,14 @@ class FnOPositionalBook:
                 free -= 1
 
     async def _open_position(self, sig) -> None:
-        from backtest.fno_scanner.backtest import TOP_30_STOCKS
-
-        spot_key = TOP_30_STOCKS.get(sig.symbol, "")
+        # 2026-08-03: was hardcoded to the old 30-stock TOP_30_STOCKS dict, so
+        # any signal for one of the ~177 other FnO stocks silently failed
+        # entry ("unknown symbol"). The watchlist JSON now carries each
+        # stock's real upstox_key (resolved from the full instrument master
+        # at scan time), so any FnO stock can actually be traded.
+        spot_key = getattr(sig, "upstox_key", "") or ""
         if not spot_key:
-            self._log.warning("FnOBook: unknown symbol %s — skip", sig.symbol)
+            self._log.warning("FnOBook: no upstox_key for %s — skip", sig.symbol)
             return
 
         # Resolve option instrument key and broker symbol
@@ -473,11 +497,11 @@ class FnOPositionalBook:
             if pos.entry_ltp > 0 and opt > 0:
                 pos.pnl = (opt - pos.entry_ltp) * pos.qty
 
-            # Breakeven trail: once spot has moved ≥50% of entry→T1, protect at entry.
+            # Breakeven trail: once spot has moved >= TRAIL_TRIGGER_PCT of entry->T1, protect at entry.
             if spot > 0 and pos.spot_entry > 0 and pos.day_t1 > 0:
                 _range = abs(pos.day_t1 - pos.spot_entry)
                 _progress = abs(spot - pos.spot_entry)
-                if _range > 0 and _progress >= 0.5 * _range:
+                if _range > 0 and _progress >= TRAIL_TRIGGER_PCT * _range:
                     if pos.direction == "CE" and pos.spot_sl < pos.spot_entry:
                         pos.spot_sl = pos.spot_entry
                         self._log.info(
