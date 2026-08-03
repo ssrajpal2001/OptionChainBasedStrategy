@@ -7724,6 +7724,18 @@ function amoTest() {
                       <div class="mb-2" style="color:var(--t-muted)">
                         <span x-text="_tr.selection_reason || 'Waiting for NIFTY open (09:16 IST) to select strikes...'"></span>
                       </div>
+                      <!-- 2026-08-03: spot HTF bias filter -- shows the active D1 swing/MSS
+                           bias (UP/DOWN/no filter) and which timeframe it's read from, so
+                           it's visible WHY a CE or PE signal was skipped as disagreeing. -->
+                      <div class="mb-2 flex items-center gap-1.5">
+                        <span style="color:var(--t-muted)">Spot bias</span>
+                        <span class="px-1.5 rounded" :style="{
+                            'UP':'background:rgba(16,185,129,0.15);color:var(--t-green)',
+                            'DOWN':'background:rgba(239,68,68,0.15);color:var(--t-red)',
+                          }[_tr.spot_bias]||'background:rgba(100,116,139,0.08);color:var(--t-dim)'"
+                          x-text="_tr.spot_bias ? (_tr.spot_bias+' -- '+(_tr.spot_bias==='UP'?'CE only':'PE only')) : 'none (both sides allowed)'"></span>
+                        <span style="color:var(--t-dim)" x-text="'('+(_tr.spot_bias_tf||'D1')+')'"></span>
+                      </div>
                       <div class="grid grid-cols-2 gap-2 mb-2">
                         <template x-for="side in ['ce','pe']" :key="side">
                           <div class="rounded p-2" style="background:rgba(0,0,0,0.15)"

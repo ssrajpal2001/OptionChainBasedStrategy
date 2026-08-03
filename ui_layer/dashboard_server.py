@@ -3254,6 +3254,7 @@ class DashboardServer:
                                     "ce": mz.get("ce"), "pe": mz.get("pe"),
                                     "position": tp,
                                     "positions": st.get("positions", []),
+                                    "spot_bias": st.get("spot_bias"), "spot_bias_tf": st.get("spot_bias_tf"),
                                 }
                             _spot = float(getattr(tb, "_last_spot", 0.0) or 0.0)
                             _htf_mins = getattr(tb, "_htf_mins", 0)
