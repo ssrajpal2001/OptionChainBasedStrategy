@@ -6272,6 +6272,23 @@ pm2 save
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
+                    elif sname == "d1_trap_bear_only" and self._d1_trap_manager is not None:
+                        # 2026-08-03 fix: header P&L was sell_straddle-only -- an open Bear Trap
+                        # leg's live unrealized P&L never counted toward the header/admin total,
+                        # only its booked (closed) P&L via History. qty here is already
+                        # lot_size*lot_multiplier (see D1TrapBearOnlyBook._leg_view), so no
+                        # separate _lot(u) multiply like the sell_straddle branch above.
+                        book = self._d1_trap_manager.find(c.client_id, d.get("binding_id", ""), u)
+                        if book is not None:
+                            try:
+                                for leg in book.status().get("positions") or []:
+                                    ltp = leg.get("ltp")
+                                    entry = leg.get("entry")
+                                    qty = leg.get("qty") or 0
+                                    if ltp is not None and entry is not None:
+                                        running += (float(ltp) - float(entry)) * float(qty)
+                            except Exception:
+                                pass
                 try:
                     c._daily_pnl = round(booked + running, 2)
                 except Exception:
