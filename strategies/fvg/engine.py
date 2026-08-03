@@ -179,6 +179,11 @@ class FVGOrderEvent:
     expiry: Optional[date] = None
     order_type: str = "MARKET"
     product_type: str = "MIS"
+    exit_price: float = 0.0  # 2026-08-03: real fill price for a SELL/exit event -- same
+                              # fix as D1TrapOrderEvent, see that class for rationale.
+    entry_reason: str = ""   # 2026-08-03: same fix as D1TrapOrderEvent -- the original
+                              # entry reason ("fvg_retest"), not the close reason.
+    entry_ts: Optional[datetime] = None  # 2026-08-03: real entry timestamp.
 
 
 class FVGStrategy(AbstractStrategyBook):
@@ -732,7 +737,8 @@ class FVGStrategy(AbstractStrategyBook):
             entry_price=pos["premium_entry"], sl_price=pos["premium_sl"], trigger_ts=datetime.now(IST),
             reason=reason, underlying=self._underlying,
             option_type=pos["option_type"], strike=pos["strike"], expiry=pos["expiry"],
-            product_type=self._product_type,
+            product_type=self._product_type, exit_price=exit_premium,
+            entry_reason="fvg_retest", entry_ts=pos.get("entry_ts"),
         )
         if self._bus is not None:
             await self._bus.publish(Topic.FVG_ORDER_REQUEST, ev)

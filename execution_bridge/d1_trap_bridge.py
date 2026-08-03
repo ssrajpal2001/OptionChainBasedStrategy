@@ -160,17 +160,24 @@ class D1TrapExecutionBridge:
     # ── paper ─────────────────────────────────────────────────────────────────
 
     async def _paper_fill(self, ev) -> None:
+        # 2026-08-03 fix: entry_price on a SELL/exit event is the ORIGINAL entry, not the
+        # fill -- use the event's real exit_price for a SELL, entry_price for a BUY.
+        # (exit_price defaults to 0.0 on older/legacy events that never set it, e.g.
+        # book.py's D1TrapOptionBook -- fall back to entry_price rather than logging 0.)
+        fill_price = ev.entry_price
+        if ev.action == "SELL" and getattr(ev, "exit_price", 0.0) > 0:
+            fill_price = ev.exit_price
         logger.info(
             "[PAPER] D1Trap %s %s %s%d exp=%s qty=%d spot=%.2f | client=%s/%s",
             ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-            ev.quantity, ev.entry_price, ev.client_id, ev.binding_id,
+            ev.quantity, fill_price, ev.client_id, ev.binding_id,
         )
         self._trade_log.log(
             ev.client_id, ev.binding_id,
             f"[PAPER] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
-            f"exp={ev.expiry} qty={ev.quantity} spot={ev.entry_price:.2f} reason={ev.reason}",
+            f"exp={ev.expiry} qty={ev.quantity} spot={fill_price:.2f} reason={ev.reason}",
         )
-        self._record_history(ev, ev.entry_price, paper=True)
+        self._record_history(ev, fill_price, paper=True)
 
     # ── live ──────────────────────────────────────────────────────────────────
 
@@ -247,8 +254,13 @@ class D1TrapExecutionBridge:
             return
         try:
             from data_layer import trade_history as _th
-            pnl = 0.0  # bridge doesn't know entry fill price for options; book logs spot P&L
+            # 2026-08-03 fix: was hardcoded 0.0 -- both book.py and bear_only_book.py are
+            # buyer-only (BUY to open/pay premium, SELL to close/receive premium)
+            # regardless of the LONG/SHORT signal direction, so P&L is always
+            # (exit - entry) * qty for the option premium itself.
+            pnl = round((fill_price - ev.entry_price) * ev.quantity, 2)
             strategy_name = getattr(ev, "strategy", "d1_trap_option") or "d1_trap_option"
+            _entry_ts = getattr(ev, "entry_ts", None)
             _th.record(
                 ev.client_id, strategy_name, ev.underlying,
                 ev.entry_price, fill_price, ev.reason, pnl,
@@ -259,7 +271,14 @@ class D1TrapExecutionBridge:
                     "entry": ev.entry_price,
                     "exit": fill_price,
                     "pnl": pnl,
-                    "entry_reason": ev.reason,
+                    # 2026-08-03 fix: entry_reason used to reuse ev.reason (the CLOSE
+                    # reason, e.g. eod/sl_hit) since that was the only reason string
+                    # available -- now uses the real order_reason the leg was opened
+                    # with (e.g. bear_trap_flip_t1), falling back to ev.reason only if
+                    # an older event never set it.
+                    "entry_reason": getattr(ev, "entry_reason", "") or ev.reason,
+                    "entry_ts": _entry_ts.isoformat() if hasattr(_entry_ts, "isoformat") else _entry_ts,
+                    "exit_ts": ev.trigger_ts.isoformat() if hasattr(ev.trigger_ts, "isoformat") else ev.trigger_ts,
                 }],
             )
         except Exception:

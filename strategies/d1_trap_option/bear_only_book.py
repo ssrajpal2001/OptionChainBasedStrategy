@@ -1233,6 +1233,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             high_lock_pct=0.0, qty=qty, zone_lock_ts=zone_lock_ts, tranche=tranche,
             tsl_base_pct=base_pct, tsl_base_lock_pct=base_lock,
             tsl_step_pct=step_pct, tsl_step_lock_pct=step_lock,
+            order_reason=order_reason,
         )
         self._positions.append(pos)
         self._persist_positions()
@@ -1362,7 +1363,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             quantity=pos["qty"], entry_price=pos["entry_price"], sl_price=pos["sl"],
             tsl_level=pos["sl"], trigger_ts=datetime.now(IST), reason=reason,
             underlying=self._underlying, option_type=pos["side"], strike=pos["strike"],
-            expiry=expiry, product_type=self._product_type,
+            expiry=expiry, product_type=self._product_type, exit_price=exit_price,
+            entry_reason=pos.get("order_reason", "") or "", entry_ts=pos.get("entry_ts"),
         )
         if self._bus is not None:
             await self._bus.publish(Topic.D1_TRAP_ORDER_REQUEST, ev)

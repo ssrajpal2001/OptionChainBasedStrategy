@@ -129,6 +129,20 @@ class D1TrapOrderEvent:
     expiry: Optional[date] = None
     order_type: str = "MARKET"
     product_type: str = "MIS"
+    exit_price: float = 0.0  # 2026-08-03: real fill price for a SELL/exit event --
+                              # entry_price on a SELL event is the ORIGINAL entry (carried
+                              # through for reference/P&L), not the exit fill. Without this,
+                              # the bridge had no way to know the real exit price and
+                              # silently reused entry_price for both, making every recorded
+                              # trade look like a zero-P&L round trip at the entry price.
+    entry_reason: str = ""   # 2026-08-03: the ORIGINAL order_reason this leg was opened
+                              # with (e.g. "bear_trap_flip_t1") -- a SELL event's own
+                              # `reason` field is the CLOSE reason (eod/sl_hit/...); without
+                              # this the History ledger's "open" row showed the close
+                              # reason on the entry leg, since that was the only reason
+                              # string the bridge ever had access to.
+    entry_ts: Optional[datetime] = None  # 2026-08-03: real entry timestamp, so the History
+                              # ledger's open row shows the actual entry time, not blank.
 
 
 # ── book ─────────────────────────────────────────────────────────────────────

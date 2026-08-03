@@ -2687,10 +2687,17 @@ document.addEventListener('alpine:init', () => {
             const _sk = (lg) => (lg.side ? lg.side + ' ' : '') + (lg.strike || '');
             const _isCryptoShort = (lg) => strat === 'v4_cascade'
                 && ['BTC', 'ETH'].includes(String(inst).toUpperCase()) && lg.side === 'PE';
+            // 2026-08-03 fix: d1_trap_bear_only / d1_trap_option / d1_trap_index /
+            // d1_trap_fno / fvg are all buyer-only (BUY to open/pay premium, SELL to
+            // close/receive premium) -- previously fell through to the SellStraddle
+            // default (SELL-to-open), mislabeling every D1Trap/FVG entry backwards.
+            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg'];
             const _openAction = (lg) => strat === 'v4_cascade'
-                ? (_isCryptoShort(lg) ? 'SELL' : 'BUY') : 'SELL';
+                ? (_isCryptoShort(lg) ? 'SELL' : 'BUY')
+                : _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
             const _closeAction = (lg) => strat === 'v4_cascade'
-                ? (_isCryptoShort(lg) ? 'BUY' : 'SELL') : 'BUY';
+                ? (_isCryptoShort(lg) ? 'BUY' : 'SELL')
+                : _buyerOnlyStrats.includes(strat) ? 'SELL' : 'BUY';
             // OPEN rows. `_ts` = raw timestamp used for chronological sort.
             // Skip junk rows whose price is 0/missing — these are rejected-order / dry fills
             // (no real broker price was ever captured) and only clutter the ledger.
