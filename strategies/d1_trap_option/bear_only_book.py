@@ -140,6 +140,19 @@ _ZONE_MAX_REF_GAP_BARS = 2         # 2026-08-01 rewrite: a merge candidate must 
                                    # replaces the old raw-width-discard approach entirely.
 _SL_BUFFER_PTS = 20.0
 _MAX_RISK_RS_PER_LOT = 2000.0
+# 2026-08-04: SENSEX's real trade detail showed the flat Rs2000/lot hard cap was
+# an inconsistent % of capital across trades (premiums ranged ~Rs500-1300, so the
+# SAME Rs2000 cap meant 2% of capital on an expensive premium and 14% on a cheap
+# one). Capping loss as a % of the trade's OWN capital instead backtested clearly
+# better on SENSEX (8% of capital: PF 2.10->2.84, net +Rs14,819->+Rs21,886, worst
+# single-trade loss Rs2000->Rs1,440) -- scripts/d1trap_tsl_finestep_bos_test.py +
+# the pct-cap sweep. NIFTY does NOT get this: every % cap tested underperformed
+# the existing flat Rs2000 cap there (scripts/d1trap_nifty_finestep_pctcap_sweep.py)
+# -- NIFTY's larger lot size (65 vs 20) and cheaper absolute premiums already put
+# Rs2000/lot in a reasonable 6-10% range without distortion, so tightening it
+# further only cut into real trades. Only underlyings present in this dict get the
+# pct-of-capital treatment; anything absent (incl. NIFTY) keeps the flat cap.
+_MAX_RISK_PCT_BY_UNDERLYING = {"SENSEX": 0.08}
 _STRUCTURE_GATED_SL_ENABLED = False  # 2026-08-02: DEFAULT OFF -- backtested via
                                      # scripts/d1trap_structure_sl_test.py against the
                                      # validated 1-month NIFTY dataset and came out WORSE
@@ -189,11 +202,30 @@ _OI_WALL_STRIKE_SELECTION_ENABLED = True   # 2026-08-02: replaces the fixed ATM+
                         # the swap naturally lands ITM -- but never trade OTM blind).
 _TSL_TRANCHE_BASE_PCT = 0.20        # 2026-08-01: per-lot staircase for the flip
 _TSL_TRANCHE_BASE_LOCK_PCT = 0.125  # concept's T1/T2 tranches specifically --
-_TSL_TRANCHE_STEP_PCT = 0.20        # deliberately the OLDER 20%/12.5% shape, NOT
-_TSL_TRANCHE_STEP_LOCK_PCT = 0.125  # the tightened 10%/7% used for regular single-
-                                     # shot entries elsewhere in this book. Each
-                                     # tranche leg is tracked and exited fully
-                                     # independently off its OWN entry price.
+                                     # UNCHANGED base trigger/lock -- only the STEP
+                                     # (what happens after the first 20%/12.5% tier)
+                                     # is now per-index, see below. Each tranche leg
+                                     # is tracked and exited fully independently off
+                                     # its OWN entry price. All 4 live entry sites
+                                     # (regular T1/T2, flip T1/T2) use this tranche
+                                     # path exclusively (use_tranche_tsl=True) -- the
+                                     # older 10%/7% _TSL_BASE_PCT/_TSL_STEP_PCT below
+                                     # is dead code, no live call site reaches it.
+# 2026-08-04: the OLD step (another full 20%/12.5% before the lock moves again --
+# i.e. no ratchet until +40% total profit) was proven too coarse against real
+# trade detail: every SENSEX trade that ran 28-34% sat frozen at the 12.5% lock
+# the whole way back down (scripts/d1trap_tsl_finestep_bos_test.py). Tightening
+# the step to ratchet every +7.5% profit (not +20%) backtested clearly better on
+# SENSEX (PF 1.71->2.10, net +Rs8,328->+Rs14,819, same trade count). NIFTY was
+# swept separately (scripts/d1trap_nifty_finestep_pctcap_sweep.py) and won at a
+# DIFFERENT, tighter step (+5%/+5%: PF 1.93->2.34, net +Rs30,816->+Rs49,931) --
+# 7.5% was worse than 5% on NIFTY, so this is genuinely per-index, not a value
+# copied across. Falls back to the original 20%/12.5% step for any other
+# underlying (unvalidated there).
+_TSL_TRANCHE_STEP_PCT_BY_UNDERLYING = {"NIFTY": 0.05, "SENSEX": 0.075}
+_TSL_TRANCHE_STEP_LOCK_PCT_BY_UNDERLYING = {"NIFTY": 0.05, "SENSEX": 0.075}
+_TSL_TRANCHE_STEP_PCT = 0.20        # fallback for underlyings not in the dict above
+_TSL_TRANCHE_STEP_LOCK_PCT = 0.125
 _HTF_MINUTES_DEFAULT_BY_UNDERLYING = {"NIFTY": 60, "SENSEX": 15}   # 2026-08-02:
                         # index-specific zone timeframe, backtested via
                         # scripts/d1trap_zone_definition_sweep.py against a real
@@ -1331,14 +1363,18 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             return
 
         sl_buffered = sl - _SL_BUFFER_PTS
-        max_risk_pts = _MAX_RISK_RS_PER_LOT / self._lot_size
-        hard_sl = entry_price - max_risk_pts
+        pct_cap = _MAX_RISK_PCT_BY_UNDERLYING.get(self._underlying)
+        if pct_cap is not None:
+            hard_sl = entry_price * (1 - pct_cap)
+        else:
+            hard_sl = entry_price - _MAX_RISK_RS_PER_LOT / self._lot_size
         sl_final = max(sl_buffered, hard_sl)
         qty = self._lot_size * self._lot_multiplier
 
         if use_tranche_tsl:
             base_pct, base_lock = _TSL_TRANCHE_BASE_PCT, _TSL_TRANCHE_BASE_LOCK_PCT
-            step_pct, step_lock = _TSL_TRANCHE_STEP_PCT, _TSL_TRANCHE_STEP_LOCK_PCT
+            step_pct = _TSL_TRANCHE_STEP_PCT_BY_UNDERLYING.get(self._underlying, _TSL_TRANCHE_STEP_PCT)
+            step_lock = _TSL_TRANCHE_STEP_LOCK_PCT_BY_UNDERLYING.get(self._underlying, _TSL_TRANCHE_STEP_LOCK_PCT)
         else:
             base_pct, base_lock = _TSL_BASE_PCT, _TSL_BASE_LOCK_PCT
             step_pct, step_lock = _TSL_STEP_PCT, _TSL_STEP_LOCK_PCT
