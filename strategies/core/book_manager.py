@@ -170,7 +170,15 @@ class StrategyBookManager:
         return getattr(book, "_position", None) is None
 
     def _reconcile(self) -> None:
-        wanted = self._wanted()
+        try:
+            wanted = self._wanted()
+        except Exception as exc:
+            logger.warning(
+                "%s: _wanted() failed (%s) — skipping this reconcile tick, "
+                "existing books left unchanged.",
+                self.__class__.__name__, exc,
+            )
+            return
         if hasattr(self, "_log_reconcile"):
             self._log_reconcile(wanted, self._books)
 

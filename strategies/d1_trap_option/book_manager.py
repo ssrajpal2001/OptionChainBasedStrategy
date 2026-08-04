@@ -47,10 +47,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
         """Return {(cid, bid, underlying): book_config_dict} for all running trap deployments."""
         wanted: Dict[tuple, dict] = {}
         for strategy_name in _STRATEGY_NAMES:
-            try:
-                rows = self._db.get_running_deployments_by_strategy_sync(strategy_name)
-            except Exception:
-                continue
+            rows = self._db.get_running_deployments_by_strategy_sync(strategy_name)
             for d in rows or []:
                 cid = d.get("client_id", "")
                 bid = d.get("binding_id", "")

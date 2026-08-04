@@ -44,10 +44,7 @@ class StraddleBookManager(StrategyBookManager):
         of client count (replaces N+1 per-client loop).
         """
         wanted: Dict[tuple, int] = {}
-        try:
-            rows = self._db.get_running_straddle_deployments_sync()
-        except Exception:
-            return wanted
+        rows = self._db.get_running_straddle_deployments_sync()
         for d in rows:
             cid = d.get("client_id", "")
             bid = d.get("binding_id", "")

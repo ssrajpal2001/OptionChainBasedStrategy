@@ -53,10 +53,7 @@ class FVGBookManager(StrategyBookManager):
 
     def _wanted(self) -> Dict[tuple, dict]:
         wanted: Dict[tuple, dict] = {}
-        try:
-            rows = self._db.get_running_deployments_by_strategy_sync(_STRATEGY_NAME)
-        except Exception:
-            rows = []
+        rows = self._db.get_running_deployments_by_strategy_sync(_STRATEGY_NAME)
         for d in rows or []:
             cid = d.get("client_id", "")
             bid = d.get("binding_id", "")
