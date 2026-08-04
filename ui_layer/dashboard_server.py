@@ -3955,6 +3955,26 @@ class DashboardServer:
                     strategy_params = sp,
                 )
 
+                # 2026-08-04: SellStraddle reads squareoff_time from a SEPARATE
+                # per-client mechanism (profile.strategy_risk_overrides, applied by
+                # _apply_client_overrides in strategies/sell_straddle/config.py), not
+                # from strategy_deployments.squareoff_time -- the deploy form's field
+                # is stored above for record-keeping but was never actually read by
+                # this strategy. Mirror it into the mechanism that IS read, so this one
+                # field in the deploy form genuinely controls it end-to-end, instead of
+                # requiring a second edit in the separate Risk Overrides panel.
+                if body.strategy_name == "sell_straddle" and _srv._registry is not None:
+                    try:
+                        profile = _srv._registry.get(cid)
+                        if profile is not None:
+                            key = f"sell_straddle:{body.underlying.upper()}"
+                            existing = dict(profile.strategy_risk_overrides.get(key, {}))
+                            existing["force_exit"] = sq
+                            profile.strategy_risk_overrides[key] = existing
+                            _srv._registry.save()
+                    except Exception as exc:
+                        logger.warning("Deploy: could not mirror squareoff_time into risk overrides: %s", exc)
+
             # If engine is already active for this broker, hot-apply immediately
                 # If engine is already active for this broker, hot-apply immediately
                 bindings = await asyncio.to_thread(_srv._client_db.get_bindings_safe_sync, cid)

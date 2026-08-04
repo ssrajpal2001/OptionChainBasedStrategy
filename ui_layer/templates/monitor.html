@@ -7245,17 +7245,10 @@ function amoTest() {
                 only if explicitly selected here.
               </p>
             </div>
-            <div x-show="deployForm.strategy_name !== 'fno_positional' && deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'sell_straddle' && !deployForm.carry_forward">
+            <div x-show="deployForm.strategy_name !== 'fno_positional' && deployForm.strategy_name !== 'd1_trap_fno' && !deployForm.carry_forward">
               <label class="sec-label mb-1">SQUARE-OFF TIME</label>
               <input type="text" class="t-input font-mono" x-model="deployForm.squareoff_time"
                      placeholder="15:15"/>
-            </div>
-            <div x-show="deployForm.strategy_name === 'sell_straddle'" class="col-span-2">
-              <p class="text-[10px]" style="color:var(--t-muted)">
-                Sell Straddle's square-off time is set per-client under
-                <strong>Strategy Risk Overrides</strong> (not here) — this deploy form's
-                square-off field is never read by this strategy.
-              </p>
             </div>
             <div>
               <label class="sec-label mb-1">PRODUCT TYPE</label>
