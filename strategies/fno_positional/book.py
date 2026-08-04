@@ -105,25 +105,36 @@ def zerodha_monthly_symbol(symbol: str, strike: int, direction: str, expiry_str:
 
 
 def resolve_option_key(instruments: list, symbol: str, strike: int,
-                       direction: str, expiry_str: str) -> str:
+                       direction: str, expiry_str: str) -> tuple:
     """Find Upstox NSE_FO instrument_key for a given option contract.
 
     First tries an exact match on trading_symbol; falls back to nearest available
     strike for the same symbol/direction/expiry.
+
+    Returns (instrument_key, resolved_strike) -- resolved_strike may differ from
+    the requested `strike` when the fallback snapped to the nearest REAL listed
+    strike (e.g. a coarse-strike-step stock like PAGEIND where a naive 100pt-step
+    guess doesn't correspond to an actual contract). 2026-08-04 fix: previously
+    only the key was returned, so a caller building a SEPARATE broker symbol
+    (zerodha_monthly_symbol) kept using the original, possibly-nonexistent
+    strike even after this function silently snapped to a different real one --
+    the Upstox LTP tracked one strike while the Zerodha order targeted another,
+    and Zerodha correctly rejected it ("instrument... does not exist").
+    ("", 0) if nothing resolves.
     """
     target = f"{symbol.upper()} {int(strike)} {direction.upper()} {expiry_str.upper()}"
     for inst in instruments:
         if inst.get("segment") != "NSE_FO":
             continue
         if inst.get("trading_symbol", "").upper() == target:
-            return inst.get("instrument_key", "")
+            return inst.get("instrument_key", ""), int(strike)
 
     # Nearest-strike fallback
     try:
         parts  = expiry_str.upper().split()
         exp_dt = datetime.strptime(f"{parts[0]} {parts[1]} {parts[2]}", "%d %b %y").date()
     except Exception:
-        return ""
+        return "", 0
 
     candidates = []
     for inst in instruments:
@@ -147,8 +158,8 @@ def resolve_option_key(instruments: list, symbol: str, strike: int,
         candidates.sort()
         logger.info("FnO: nearest strike %d (target=%d) key=%s",
                     candidates[0][1], strike, candidates[0][2])
-        return candidates[0][2]
-    return ""
+        return candidates[0][2], candidates[0][1]
+    return "", 0
 
 
 def resolve_lot_size(instruments: list, option_key: str) -> int:
@@ -494,8 +505,15 @@ class FnOPositionalBook:
             self._log.warning("FnOBook: no upstox_key for %s — skip", sig.symbol)
             return
 
-        # Resolve option instrument key and broker symbol
-        opt_key = await asyncio.to_thread(
+        # Resolve option instrument key and broker symbol -- use the RESOLVED
+        # strike (may differ from sig.suggested_strike on a coarse-strike-step
+        # stock where the fallback snapped to the nearest real listed contract)
+        # for BOTH the Upstox key lookup and the Zerodha symbol, so they always
+        # refer to the same actual contract. Previously the Zerodha symbol kept
+        # using the original guessed strike even when Upstox silently resolved
+        # to a different one -- Zerodha then correctly rejected the mismatched,
+        # nonexistent contract (confirmed live on PAGEIND, 2026-08-04).
+        opt_key, resolved_strike = await asyncio.to_thread(
             resolve_option_key,
             self._instruments, sig.symbol, sig.suggested_strike, sig.direction, sig.expiry,
         )
@@ -503,9 +521,12 @@ class FnOPositionalBook:
             self._log.warning("FnOBook: could not resolve option key for %s %d %s %s",
                               sig.symbol, sig.suggested_strike, sig.direction, sig.expiry)
             return
+        if resolved_strike != sig.suggested_strike:
+            self._log.info("FnOBook: %s strike snapped %d -> %d (nearest real listed contract)",
+                           sig.symbol, sig.suggested_strike, resolved_strike)
 
         lot_size  = await asyncio.to_thread(resolve_lot_size, self._instruments, opt_key)
-        zerodha_s = zerodha_monthly_symbol(sig.symbol, sig.suggested_strike, sig.direction, sig.expiry)
+        zerodha_s = zerodha_monthly_symbol(sig.symbol, resolved_strike, sig.direction, sig.expiry)
         qty       = max(1, 1) * lot_size   # 1 lot
 
         # Fetch current LTPs for fill reference
@@ -519,7 +540,7 @@ class FnOPositionalBook:
             spot_instrument_key=spot_key,
             option_instrument_key=opt_key,
             broker_symbol=zerodha_s,
-            strike=sig.suggested_strike,
+            strike=resolved_strike,
             expiry_str=sig.expiry,
             lot_size=lot_size,
             qty=qty,
