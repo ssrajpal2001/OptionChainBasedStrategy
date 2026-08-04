@@ -140,19 +140,37 @@ class FVGExecutionBridge:
                 )
                 return
 
-        broker = (self._router._brokers or {}).get(ev.client_id, {}).get(ev.binding_id)
         mode = live_binding.get("trading_mode", "paper") or "paper"
 
-        logger.info(
-            "FVGExecutionBridge: %s %s %s%d exp=%s qty=%d → [%s/%s] mode=%s",
-            ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-            ev.quantity, ev.client_id, ev.binding_id, mode,
+        if mode == "paper":
+            logger.info(
+                "FVGExecutionBridge: %s %s %s%d exp=%s qty=%d → [%s/%s] mode=paper",
+                ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
+                ev.quantity, ev.client_id, ev.binding_id,
+            )
+            await self._paper_fill(ev)
+            return
+
+        from execution_bridge.broker_resolve import resolve_broker_or_alert
+        broker = await resolve_broker_or_alert(
+            self._bus, self._router, ev.client_id, ev.binding_id, "FVG",
+            context=f"{ev.action} {ev.underlying} {ev.option_type}{ev.strike}",
         )
 
-        if broker is None or mode == "paper":
-            await self._paper_fill(ev)
-        else:
-            await self._live_fill(ev, broker)
+        logger.info(
+            "FVGExecutionBridge: %s %s %s%d exp=%s qty=%d → [%s/%s] mode=%s broker=%s",
+            ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
+            ev.quantity, ev.client_id, ev.binding_id, mode,
+            "resolved" if broker is not None else "UNAVAILABLE",
+        )
+
+        if broker is None:
+            # Do NOT call _paper_fill here -- that would fabricate a fill the
+            # engine would treat as real. resolve_broker_or_alert already logged
+            # CRITICAL and published SYSTEM_EVENT; the order is simply dropped.
+            return
+
+        await self._live_fill(ev, broker)
 
     # ── paper ─────────────────────────────────────────────────────────────────
 
