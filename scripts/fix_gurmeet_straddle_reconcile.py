@@ -29,6 +29,8 @@ PATH = f"data/positions/{KEY}.json"
 # Original entry, confirmed from the 09:22:05 real [LIVE] fill in gurmeet's trade log.
 ORIGINAL_CE = {"option_type": "CE", "strike": 24650.0, "entry_price": 126.45}
 ORIGINAL_PE_ENTRY_PRICE = 130.55  # unchanged by the failed roll -- for net_credit recompute only
+ORIGINAL_OPEN_TIME = "2026-08-04T09:22:05.219017+05:30"  # true entry, matches pe_leg.open_time
+                                                          # (never touched by the failed roll)
 
 def main():
     try:
@@ -43,14 +45,18 @@ def main():
     print(json.dumps(pos, indent=2))
 
     ce = pos.get("ce_leg", {})
-    old_open_time = ce.get("open_time")  # preserve -- CE24650 was never actually re-opened
 
     ce["strike"] = ORIGINAL_CE["strike"]
     ce["entry_price"] = ORIGINAL_CE["entry_price"]
-    ce["open_time"] = old_open_time
-    ce["close_time"] = None
+    ce["open_time"] = ORIGINAL_OPEN_TIME   # was showing the roll time (11:57:05) -- CE24650
+    ce["close_time"] = None                # was never actually closed/re-opened at the broker
     ce["open_reason"] = "beginning"
     pos["ce_leg"] = ce
+
+    # Position-level open_time/entry_time also got stamped with the roll time by the
+    # (fictional) fill -- revert to the true original entry.
+    pos["open_time"] = ORIGINAL_OPEN_TIME
+    pos["entry_time"] = ORIGINAL_OPEN_TIME
 
     pos["net_credit"] = ORIGINAL_CE["entry_price"] + ORIGINAL_PE_ENTRY_PRICE
 
