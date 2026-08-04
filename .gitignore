@@ -70,3 +70,4 @@ entry_time_fix.patch
 tools/revert_to_nifty.py
 tools/start_crude_test.py
 .agents/skills/fix-btc-sell-straddle-workflow.skill
+.worktrees/
