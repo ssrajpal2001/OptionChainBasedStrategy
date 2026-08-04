@@ -256,7 +256,7 @@ class FVGStrategy(AbstractStrategyBook):
         # already has a usable premium at the moment of entry (ticks flow via
         # the existing StrikeRebalancer ATM+/-N auto-subscribe range, same
         # precondition already documented for bear_only_book.py).
-        self._option_ltp: Dict[Tuple[int, str], float] = {}
+        self._option_ltp: Dict[Tuple[int, str, date], float] = {}
         self._ltf_bars_since_entry = 0
 
         logger.info(
@@ -464,10 +464,19 @@ class FVGStrategy(AbstractStrategyBook):
                     continue
                 if str(ev.underlying).upper() != self._underlying.upper():
                     continue
-                key = (int(ev.strike), ev.option_type)
+                # 2026-08-04 CRITICAL fix: key was (strike, option_type) with NO expiry --
+                # on any day where a current-week (possibly 0DTE, expiring today) contract
+                # and FVG's own next-week contract share the same strike, ticks from BOTH
+                # landed in the same cache slot, and whichever arrived last (usually the
+                # far-more-active 0DTE one) silently won -- including driving the live
+                # SL/TSL check against a completely different contract's price. Confirmed
+                # live: a real NIFTY PE24650 next-week position (~178-182 at the time) was
+                # closed on a phantom "SL hit" at 101.50 -- the CURRENT-WEEK 0DTE PE24650's
+                # price at that exact moment, not the position's own contract at all.
+                key = (int(ev.strike), ev.option_type, ev.expiry)
                 self._option_ltp[key] = float(ev.ltp)
                 pos = self._position
-                if pos is not None and key == (pos["strike"], pos["option_type"]):
+                if pos is not None and key == (pos["strike"], pos["option_type"], pos["expiry"]):
                     ts = getattr(ev, "timestamp", None) or datetime.now(IST)
                     self._check_exit_premium(float(ev.ltp), ts)
             except Exception:
@@ -637,7 +646,9 @@ class FVGStrategy(AbstractStrategyBook):
         # Option-native SL/TP: entry premium must already be tracked (ticks
         # flow via the ATM+/-N auto-subscribe range) -- don't trade blind if
         # it isn't, same "no data -> no trade" philosophy as bear_only_book.py.
-        premium_entry = self._option_ltp.get((strike, opt_type))
+        # Keyed with expiry (see _option_tick_loop fix) -- a same-strike
+        # current-week contract must never be read as this NEXT-WEEK entry.
+        premium_entry = self._option_ltp.get((strike, opt_type, expiry))
         if premium_entry is None or premium_entry <= 0:
             logger.warning("FVGStrategy[%s]: no live premium for %s%d yet -- entry skipped.",
                             self._underlying, opt_type, strike)
@@ -729,7 +740,7 @@ class FVGStrategy(AbstractStrategyBook):
             return
         self._position = None
         spot = self._last_spot or pos["entry"]
-        exit_premium = self._option_ltp.get((pos["strike"], pos["option_type"]), pos["premium_entry"])
+        exit_premium = self._option_ltp.get((pos["strike"], pos["option_type"], pos["expiry"]), pos["premium_entry"])
 
         ev = FVGOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id,
