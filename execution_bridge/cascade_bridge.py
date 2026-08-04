@@ -205,8 +205,13 @@ class V4CascadeExecutionBridge:
         if live_binding is None or not live_binding.get("terminal_connected"):
             logger.warning("V4CascadeExecutionBridge: %s %s — [%s/%s] terminal not connected, no route.",
                            ev.action, ev.underlying, ev.client_id, ev.binding_id)
-            if ev.action == "ENTRY":
-                await self._abort(ev, routing_failed=True)
+            # EXIT must abort too, not just ENTRY — book.py optimistically marks a leg/position
+            # "closed" at decision time and relies on _on_fill(exit_failed=True) to revert that
+            # if the order never reached the broker. Silently returning here (no fill event at
+            # all) means the revert never fires and the book permanently believes a leg closed
+            # that never actually left the exchange. Matches the broker-resolution-failure path
+            # below and SellStraddle's equivalent zero-binding EXIT fallback.
+            await self._abort(ev, routing_failed=True)
             return
 
         # ENTRY is gated on a RUNNING v4_cascade deployment for this exact

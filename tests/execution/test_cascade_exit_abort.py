@@ -126,6 +126,59 @@ def test_live_exit_never_fakes_fill_when_broker_unresolvable():
     asyncio.run(run())
 
 
+class _DBTerminalDown:
+    """terminal_connected=False -- the OTHER silent-EXIT gate (separate from
+    the broker-unresolvable path above): _handle()'s very first live_binding
+    check used to only call _abort() for ev.action == "ENTRY", so an EXIT
+    hitting this branch returned with no fill event published at all."""
+    def get_bindings_safe_sync(self, cid):
+        return [{"binding_id": "B1", "terminal_connected": False, "trading_mode": "live"}]
+
+    def get_deployments_sync(self, cid):
+        return [{"binding_id": "B1", "strategy_name": "v4_cascade",
+                  "underlying": "NIFTY", "is_running": 1}]
+
+
+class _RouterTerminalDown:
+    def __init__(self):
+        self._client_db = _DBTerminalDown()
+        self._brokers = {}
+
+
+def test_exit_publishes_fill_when_terminal_not_connected():
+    """The exact finding fixed here: terminal_connected=False must abort
+    (and publish exit_failed=True) for EXIT too, not just ENTRY -- otherwise
+    book.py's optimistic 'closed' mark is never reverted because no fill
+    event ever arrives."""
+    async def run():
+        bus = EventBus()
+        bridge = V4CascadeExecutionBridge(bus, _RouterTerminalDown())
+
+        fills = []
+        q = bus.subscribe(Topic.ORDER_FILL)
+
+        async def _drain():
+            while True:
+                fills.append(await q.get())
+
+        task = asyncio.create_task(_drain())
+        await bridge._handle(_exit_ev())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert len(fills) == 1, "EXIT must publish a fill event even when terminal_connected is False"
+        assert isinstance(fills[0], CascadeFillEvent)
+        assert fills[0].exit_failed is True
+        assert fills[0].routing_failed is True
+        assert fills[0].entry_aborted is False
+
+    asyncio.run(run())
+
+
 def test_paper_mode_untouched_no_resolver_no_alert():
     """mode == 'paper' must still go straight to _paper_fill without ever
     touching the broker resolver (pure local simulation, no SYSTEM_EVENT)."""
