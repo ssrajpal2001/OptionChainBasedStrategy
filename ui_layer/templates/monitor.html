@@ -6562,7 +6562,8 @@ function amoTest() {
                           x-text="(b.trading_mode||'paper').toUpperCase()"></span>
                     <span class="px-1.5 py-0.5 rounded font-mono"
                           :style="(b.product_type||'MIS')==='NRML' ? 'background:rgba(var(--t-cyan-rgb),0.08);color:var(--t-cyan)' : 'background:rgba(var(--t-amber-rgb),0.08);color:var(--t-amber)'"
-                          x-text="(b.product_type||'MIS')"></span>
+                          title="Account fallback default only -- each deployment below uses its OWN product type, shown on its chip."
+                          x-text="(b.product_type||'MIS')+' (default)'"></span>
                     <span class="px-1.5 py-0.5 rounded font-mono"
                           :style="b.access_token ? 'background:rgba(var(--t-green-rgb),0.08);color:var(--t-green)' : 'background:rgba(var(--t-red-rgb),0.08);color:var(--t-red)'"
                           x-text="b.access_token ? '● Token OK' : '○ No Token'"></span>
@@ -6571,7 +6572,8 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)"></span>
+                            :title="'This deployment places orders as '+(dep.product_type||'MIS')+' — the account badge above is only a fallback default, not per-strategy.'"
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)+' · '+(dep.product_type||'MIS')"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -6772,8 +6774,8 @@ function amoTest() {
                           :style="(b.product_type||'MIS')==='NRML'
                             ? 'background:rgba(var(--t-cyan-rgb),0.08);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.25)'
                             : 'background:rgba(var(--t-amber-rgb),0.08);color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.25)'"
-                          x-text="(b.product_type||'MIS')"
-                          title="MIS = intraday auto-sqoff | NRML = carry forward"></span>
+                          x-text="(b.product_type||'MIS')+' (default)'"
+                          title="Account fallback default only -- each deployment uses its OWN product type (see its chip below). This is NOT the same as Carry Forward."></span>
                     <!-- Token status badge -->
                     <span class="px-1.5 py-0.5 rounded font-mono"
                           :style="b.access_token
@@ -6789,7 +6791,8 @@ function amoTest() {
                     <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)" :key="dep.deploy_id">
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)"></span>
+                            :title="'This deployment places orders as '+(dep.product_type||'MIS')+' — the account badge above is only a fallback default, not per-strategy.'"
+                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)+' · '+(dep.product_type||'MIS')"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
