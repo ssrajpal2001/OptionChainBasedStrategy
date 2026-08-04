@@ -102,7 +102,23 @@ class StrategyBookManager:
 
     async def liquidate_all(self, scope: str = "FIRM_WIDE") -> None:
         """Emergency liquidation of every managed book. Positions are market-closed
-        and books are stopped. Safe to call multiple times."""
+        and books are stopped. Safe to call multiple times.
+
+        Note on the spawn-race this class otherwise guards against via
+        self._stopping: this method does NOT need that tracking. It never pops
+        keys out of self._books (only reconcile()'s stop/respawn loops do that,
+        and _reconcile() is a plain synchronous function that always runs to
+        completion in one go -- it cannot interleave with this coroutine's
+        awaits). So for the whole duration of this liquidation, every key here
+        remains present in self._books, and the reconcile spawn loop only ever
+        considers `set(wanted) - set(self._books)` -- a key that's still in
+        self._books can never be spawned again, liquidating or not. The
+        narrower risk (reconcile's stop loop popping the same key and calling
+        stop_async() a second time on a book we are concurrently liquidating,
+        if that key also drops out of `_wanted()` mid-liquidation) is real but
+        is a redundant-stop-call/idempotency concern, not a duplicate-live-
+        instance one -- out of scope for this fix.
+        """
         if not self._books:
             return
         logger.warning("%s: KILL_SWITCH received (%s) — liquidating %d book(s).",
@@ -170,6 +186,19 @@ class StrategyBookManager:
             if key is not None:
                 self._stopping.pop(key, None)
 
+    async def _run_liquidate_and_stop(self, book: Any, key: Key, reason: str) -> None:
+        """Same tracked-task discipline as _run_stop_async, but for a book that
+        still has an open position and must be liquidated (not just stopped)
+        before it's gone. Registered in self._stopping so the spawn loop
+        defers a replacement for this key until the real broker-flatten +
+        stop_async() has actually finished -- a book carrying a live position
+        is exactly the highest-stakes case for the duplicate-instance race
+        this class exists to prevent."""
+        try:
+            await self._liquidate_book(book, key, reason=reason)
+        finally:
+            self._stopping.pop(key, None)
+
     def _should_respawn(self, book: Any, value: Any) -> bool:
         """Return True when an existing book should be torn down and recreated."""
         return False
@@ -235,7 +264,8 @@ class StrategyBookManager:
                     "%s: removing %s with open position — liquidating before stop.",
                     self.__class__.__name__, key,
                 )
-                asyncio.create_task(self._liquidate_book(book, key, reason="deployment_stop"))
+                task = asyncio.create_task(self._run_liquidate_and_stop(book, key, reason="deployment_stop"))
+                self._stopping[key] = task
             else:
                 self._stop_book(book, key)
             self._log_stopped(key)

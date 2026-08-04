@@ -169,3 +169,89 @@ async def test_config_change_respawn_also_waits_for_old_stop():
     mgr._reconcile()
     assert len(mgr.spawned) == 2
     assert mgr._books[("c1", "b1", "NIFTY")] is mgr.spawned[1]
+
+
+class _ControllableLiquidateBook(_FakeBook):
+    """Like _FakeBook, but starts with an OPEN position and a controllable
+    async liquidate() that blocks until a test-controlled event is set --
+    exercises the not-flat removal branch of _reconcile(), which must
+    liquidate (real broker-flatten) before the book is actually gone. This is
+    the highest-stakes variant of the duplicate-instance race: a live
+    position, not just an idle book."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self._position = {"open": True}  # not flat
+        self.liquidate_release = asyncio.Event()
+        self.liquidate_called = False
+
+    async def liquidate(self, reason):
+        await self.liquidate_release.wait()
+        self.liquidate_called = True
+        self._position = None  # now flat, post-liquidation
+
+    async def stop_async(self):
+        self.stop_async_called = True
+
+
+class _LiquidatableManager(StrategyBookManager):
+    def __init__(self):
+        super().__init__(bus=None, cfg=None, client_db=None, monitored_indices=[])
+        self._wanted_keys = {("c1", "b1", "NIFTY"): 1}
+        self.spawned = []  # every book ever created, in order
+
+    def _wanted(self):
+        return dict(self._wanted_keys)
+
+    def _spawn_book(self, key, value):
+        book = _ControllableLiquidateBook(key)
+        self.spawned.append(book)
+        return book
+
+
+@pytest.mark.asyncio
+async def test_spawn_waits_for_open_position_liquidation_to_finish():
+    """The not-flat removal branch (asyncio.create_task(_liquidate_book))
+    must be tracked in self._stopping exactly like the flat/_stop_book path,
+    so a book carrying an OPEN POSITION can't get a duplicate live instance
+    spawned while the real liquidation (broker-flatten + stop_async) is still
+    in flight."""
+    mgr = _LiquidatableManager()
+
+    # Tick 1: spawn the first instance, holding an open position.
+    mgr._reconcile()
+    assert len(mgr.spawned) == 1
+    old_book = mgr.spawned[0]
+    assert old_book.started is True
+    assert not mgr._is_flat(old_book)
+
+    # Tick 2: key no longer wanted (deployment stopped) while the position is
+    # still open -> not-flat branch schedules liquidation, tracked.
+    mgr._wanted_keys = {}
+    mgr._reconcile()
+    assert ("c1", "b1", "NIFTY") not in mgr._books
+    assert ("c1", "b1", "NIFTY") in mgr._stopping
+    # Liquidation was scheduled but is BLOCKED (release not set yet) -- the
+    # old book's position has not actually been flattened yet.
+    assert old_book.liquidate_called is False
+
+    # Tick 3: key wanted again immediately (deployment restarted) -- must NOT
+    # spawn a second live instance while the old one's open position is still
+    # being liquidated.
+    mgr._wanted_keys = {("c1", "b1", "NIFTY"): 1}
+    mgr._reconcile()
+    assert len(mgr.spawned) == 1, "must not spawn a duplicate while the old instance's open position is still being liquidated"
+    assert ("c1", "b1", "NIFTY") not in mgr._books
+
+    # Now let the liquidation (and the old instance's stop_async) actually finish.
+    old_book.liquidate_release.set()
+    await asyncio.sleep(0)  # let the scheduled task run to completion
+    await asyncio.sleep(0)
+    assert old_book.liquidate_called is True
+    assert ("c1", "b1", "NIFTY") not in mgr._stopping
+
+    # Tick 4: NOW a replacement may be spawned.
+    mgr._reconcile()
+    assert len(mgr.spawned) == 2
+    assert ("c1", "b1", "NIFTY") in mgr._books
+    assert mgr._books[("c1", "b1", "NIFTY")] is mgr.spawned[1]
