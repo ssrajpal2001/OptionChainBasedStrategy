@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS strategy_deployments (
     max_profit_rs      REAL NOT NULL DEFAULT 0.0,
     max_sl_rs          REAL NOT NULL DEFAULT 0.0,
     squareoff_time     TEXT NOT NULL DEFAULT '15:20',
-    product_type       TEXT NOT NULL DEFAULT 'MIS',      -- "MIS" intraday | "NRML" carry-forward
+    product_type       TEXT NOT NULL DEFAULT 'MIS',      -- "MIS" | "NRML" -- broker margin choice ONLY
+    carry_forward      INTEGER NOT NULL DEFAULT 0,       -- 0=same-day close (default) | 1=hold across days (own SL/TSL/target)
     is_active          INTEGER DEFAULT 1,
     is_running         INTEGER DEFAULT 0,   -- per-strategy Start/Stop toggle (0 = deployed but stopped)
     expiry_mode        TEXT NOT NULL DEFAULT 'current',  -- current|next_week|monthly|<date YYYY-MM-DD>
@@ -563,6 +564,7 @@ class ClientDB:
         squareoff_time:  str,
         product_type:    str = "MIS",
         strategy_params: str = "{}",
+        carry_forward:   bool = False,
     ) -> str:
         """Upsert a strategy deployment config. Returns the deploy_id."""
         deploy_id = f"{client_id}_{binding_id}_{strategy_name}_{underlying}"
@@ -572,8 +574,8 @@ class ClientDB:
             """INSERT INTO strategy_deployments
                (deploy_id, client_id, binding_id, strategy_name, underlying,
                 lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type,
-                strategy_params, is_active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)
+                strategy_params, carry_forward, is_active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
                ON CONFLICT(deploy_id) DO UPDATE SET
                  underlying=excluded.underlying,
                  lot_multiplier=excluded.lot_multiplier,
@@ -582,11 +584,12 @@ class ClientDB:
                  squareoff_time=excluded.squareoff_time,
                  product_type=excluded.product_type,
                  strategy_params=excluded.strategy_params,
+                 carry_forward=excluded.carry_forward,
                  is_active=1,
                  updated_at=excluded.updated_at""",
             (deploy_id, client_id, binding_id, strategy_name, underlying,
              lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type,
-             strategy_params, now, now),
+             strategy_params, int(bool(carry_forward)), now, now),
         )
         logger.info(
             "ClientDB: deployment saved — %s [%s/%s %s %s lots=%.1f]",
@@ -1239,6 +1242,14 @@ class ClientDB:
             "ALTER TABLE strategy_deployments ADD COLUMN expiry_mode TEXT DEFAULT 'current'",
             "ALTER TABLE strategy_deployments ADD COLUMN product_type TEXT DEFAULT 'MIS'",
             "ALTER TABLE strategy_deployments ADD COLUMN strategy_params TEXT DEFAULT '{}'",
+            # 2026-08-04: carry_forward is INDEPENDENT of product_type (MIS/NRML is a
+            # broker margin choice; carry_forward is "does the strategy itself force-
+            # close today or let the position ride to its own SL/TSL/target across
+            # days"). Previously conflated -- BearTrap treated product_type as if
+            # choosing NRML also meant carry-forward, but its EOD force-close fires
+            # unconditionally regardless, so NRML never actually did anything.
+            # Defaults to 0 (same-day close) for every strategy.
+            "ALTER TABLE strategy_deployments ADD COLUMN carry_forward INTEGER DEFAULT 0",
         ):
             try:
                 con.execute(migration)

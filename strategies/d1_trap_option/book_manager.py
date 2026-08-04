@@ -79,6 +79,10 @@ class D1TrapOptionBookManager(StrategyBookManager):
                     "htf_minutes": int(params.get(
                         "htf_minutes", _HTF_MINUTES_DEFAULT_BY_UNDERLYING.get(underlying, 60))),
                     "product_type": product,
+                    # 2026-08-04: carry_forward is independent of product_type -- see
+                    # client_db.py's DDL comment. Defaults to same-day close (0).
+                    "carry_forward": bool(int(d.get("carry_forward", 0) or 0)),
+                    "squareoff_time": d.get("squareoff_time") or "15:15",
                 }
 
                 # ALL_FNO sentinel: one deployment record → all stocks in FNO_STOCK_CONFIG.
@@ -215,6 +219,8 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 itm_offset_pts=int(cfg.get("itm_offset_pts", 200)),
                 htf_minutes=int(cfg["htf_minutes"]) if cfg.get("htf_minutes") else None,
                 product_type=cfg.get("product_type", "MIS"),
+                carry_forward=cfg.get("carry_forward", False),
+                squareoff_time=cfg.get("squareoff_time", "15:15"),
             )
 
         if _D1TrapOptionBook is None:

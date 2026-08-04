@@ -494,6 +494,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         itm_offset_pts: Optional[int] = None,
         htf_minutes: Optional[int] = None,
         product_type: str = "MIS",
+        carry_forward: bool = False,
+        squareoff_time: str = "15:15",
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._strategy_name = "d1_trap_bear_only"
@@ -508,6 +510,21 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             else _HTF_MINUTES_DEFAULT_BY_UNDERLYING.get(underlying.upper(), 60)
         )
         self._product_type = product_type
+        # 2026-08-04, direct user spec: carry_forward is INDEPENDENT of product_type --
+        # product_type (MIS/NRML) is purely a broker margin choice; carry_forward is
+        # "does this book force-close today (default, ALL strategies same-day unless
+        # explicitly told otherwise) or let a position ride across days on its own
+        # SL/TSL/target." Previously this book force-closed at a hardcoded 15:15
+        # unconditionally, ignoring product_type entirely -- so NRML never actually
+        # meant anything here. Now: same-day close fires at the client's own deploy-
+        # section squareoff_time (not a hardcoded constant) unless carry_forward=True,
+        # in which case EOD force-close is skipped altogether.
+        self._carry_forward = bool(carry_forward)
+        try:
+            _h, _m = str(squareoff_time or "15:15").split(":")
+            self._squareoff_time = time(int(_h), int(_m))
+        except Exception:
+            self._squareoff_time = _EOD_TIME
         self._lot_size = (cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
         self._strike_step = int(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_d1_trap_bear_only"
@@ -1535,7 +1552,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     # at the level, not confirmed broken. Let it breathe; the hard
                     # risk cap above remains the worst-case floor.
 
-            if now_t >= _EOD_TIME:
+            if not self._carry_forward and now_t >= self._squareoff_time:
                 asyncio.create_task(self._square_off_leg(pos, "eod", ltp))
 
     async def _eod_loop(self) -> None:
@@ -1544,8 +1561,10 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 break
+            if self._carry_forward:
+                continue
             now = datetime.now(IST)
-            if now.time() >= _EOD_TIME and not self._day_done:
+            if now.time() >= self._squareoff_time and not self._day_done:
                 for pos in list(self._positions):
                     series = self._series.get(pos["side"])
                     ltp = series.last_ltp if series else pos["entry_price"]

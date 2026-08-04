@@ -384,8 +384,9 @@ try:
         max_profit_rs:    float = 0.0
         max_sl_rs:        float = 0.0
         squareoff_time:   str   = "15:20"
-        product_type:     str   = "MIS"   # "MIS" intraday | "NRML" carry-forward
+        product_type:     str   = "MIS"   # "MIS" | "NRML" — broker margin choice ONLY
         strategy_params:  str   = "{}"    # JSON — htf/mtf/ltf/itm for Trap Scanner
+        carry_forward:    bool  = False   # independent of product_type — same-day close (default) vs hold across days
 
 
     class _TrapHistoricalReplaySchema(_PydanticBase):
@@ -3938,6 +3939,7 @@ class DashboardServer:
                     squareoff_time  = sq,
                     product_type    = pt,
                     strategy_params = sp,
+                    carry_forward   = body.carry_forward,
                 )
                 save_deployment_json(
                     deploy_id       = deploy_id,
