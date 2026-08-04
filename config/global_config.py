@@ -225,7 +225,6 @@ class SysEvent:
     DAILY_RESET     = "DAILY_RESET"
     GAP_OPEN        = "GAP_OPEN"        # >1% drift detected at market open
     POSITION_CLOSED = "POSITION_CLOSED" # Explicit close notification from position manager
-    BROKER_UNAVAILABLE = "BROKER_UNAVAILABLE"  # live/paper order could not resolve a broker instance
 
 
 # ─────────────────────────────────────────────────────────────────────────────
