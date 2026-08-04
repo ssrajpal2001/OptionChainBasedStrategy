@@ -21,7 +21,7 @@ excerpt) before sign-off.
 **D1Trap BearOnly, FVG, FnO Positional: Bridge-level fix only — no fabricated fill on broker resolution failure.**
 - [ ] Force `ExecutionRouter._brokers[client][binding]` to `None`/missing while an ENTRY is pending for each strategy.
       Confirm: no `[PAPER]` fill is logged, a `BROKER_UNAVAILABLE` SYSTEM_EVENT fires. Note: D1Trap and FVG strategy engines 
-      do NOT yet have a fill-confirmation feedback loop (a known gap; see "Follow-up Work" section), so the strategy's 
+      do NOT yet have a fill-confirmation feedback loop (a known gap), so the strategy's 
       internal state may advance without confirmation — this is flagged as a follow-up, not silently "fixed" by omission.
 - [ ] Same, but for an EXIT with an already-open position. Confirm no fabricated fill is logged and a `BROKER_UNAVAILABLE` 
       event fires. Acknowledge that D1Trap/FVG/FnO do not yet have exit-state reversion (another follow-up item) — confirm 
