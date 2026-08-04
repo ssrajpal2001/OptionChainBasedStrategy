@@ -43,6 +43,7 @@ class StrategyBookManager:
         self._indices = {str(i).upper() for i in (monitored_indices or [])}
         self._reconcile_sec = reconcile_sec
         self._books: Dict[Key, Any] = {}
+        self._stopping: Dict[Key, asyncio.Task] = {}
         self._rebalancer = None
         self._running = False
         # Lazy subscribe so unit tests that pass bus=None don't crash.
@@ -142,12 +143,32 @@ class StrategyBookManager:
         """Create a new book for ``key`` with configuration ``value``."""
         raise NotImplementedError
 
-    def _stop_book(self, book: Any) -> None:
-        """Stop a book being removed."""
+    def _stop_book(self, book: Any, key: Optional[Key] = None) -> None:
+        """Stop a book being removed. Prefers the book's async stop_async()
+        (proper task-completion wait + EventBus unsubscribe) over the
+        incomplete sync stop(), scheduling it as a tracked background task so
+        a respawn of the same key can wait for it to actually finish instead
+        of running a second live instance alongside a not-yet-dead one."""
+        stop_async = getattr(book, "stop_async", None)
+        if callable(stop_async):
+            task = asyncio.create_task(self._run_stop_async(book, key))
+            if key is not None:
+                self._stopping[key] = task
+        else:
+            try:
+                book.stop()
+            except Exception:
+                pass
+
+    async def _run_stop_async(self, book: Any, key: Optional[Key]) -> None:
         try:
-            book.stop()
-        except Exception:
-            pass
+            await book.stop_async()
+        except Exception as exc:
+            logger.warning("%s: stop_async failed for %s: %s",
+                            self.__class__.__name__, key, exc)
+        finally:
+            if key is not None:
+                self._stopping.pop(key, None)
 
     def _should_respawn(self, book: Any, value: Any) -> bool:
         """Return True when an existing book should be torn down and recreated."""
@@ -182,8 +203,20 @@ class StrategyBookManager:
         if hasattr(self, "_log_reconcile"):
             self._log_reconcile(wanted, self._books)
 
-        # Spawn books for newly-wanted keys.
+        # Snapshot which keys already had a live book BEFORE this tick's spawn
+        # loop runs. The config-change respawn loop below must only consider
+        # these -- never a book the spawn loop just created in this same
+        # tick -- otherwise an always-true _should_respawn() (or one that
+        # happens to re-trigger on the freshly spawned book's initial state)
+        # would immediately tear down the replacement we just spawned,
+        # defeating the whole stop-then-later-spawn discipline.
+        pre_existing_keys = set(self._books)
+
+        # Spawn books for newly-wanted keys -- but not if the previous
+        # instance for this key is still finishing its async stop.
         for key in set(wanted) - set(self._books):
+            if key in self._stopping:
+                continue
             try:
                 book = self._spawn_book(key, wanted[key])
                 book.start()
@@ -204,11 +237,22 @@ class StrategyBookManager:
                 )
                 asyncio.create_task(self._liquidate_book(book, key, reason="deployment_stop"))
             else:
-                self._stop_book(book)
+                self._stop_book(book, key)
             self._log_stopped(key)
 
-        # Re-spawn on configuration change only when flat.
-        for key, value in wanted.items():
+        # Re-spawn on configuration change only when flat. The replacement is
+        # NOT spawned in this same tick -- removing it from self._books here
+        # makes it fall into the spawn loop above on a LATER reconcile tick,
+        # once self._stopping no longer holds this key (i.e. the old
+        # instance's stop_async() has actually finished). This costs one
+        # extra reconcile_sec (~5s) of latency on a lot_multiplier-style
+        # config change, in exchange for guaranteeing the old and new
+        # instances are never both alive at once.
+        for key, value in list(wanted.items()):
+            if key not in pre_existing_keys:
+                continue
+            if key in self._stopping:
+                continue
             book = self._books.get(key)
             if book is None:
                 continue
@@ -216,15 +260,9 @@ class StrategyBookManager:
                 continue
             if not self._should_respawn(book, value):
                 continue
-            try:
-                self._stop_book(book)
-                nb = self._spawn_book(key, value)
-                nb.start()
-                self._books[key] = nb
-                self._log_respawned(key, value)
-            except Exception as exc:
-                logger.warning("%s: re-spawn %s failed: %s",
-                               self.__class__.__name__, key, exc)
+            self._books.pop(key, None)
+            self._stop_book(book, key)
+            self._log_stopped(key)
 
     def stop(self) -> None:
         self._running = False

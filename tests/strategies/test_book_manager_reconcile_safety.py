@@ -77,3 +77,95 @@ def test_wanted_exception_does_not_prevent_recovery_next_tick():
     mgr.should_raise = False
     mgr._reconcile()
     assert ("c1", "b1", "NIFTY") in mgr._books
+
+
+class _ControllableStopBook(_FakeBook):
+    """Like _FakeBook, but stop_async() blocks until a test-controlled event is set,
+    so the test can observe the window where the old instance isn't dead yet."""
+
+    def __init__(self, key):
+        super().__init__(key)
+        self.stop_release = asyncio.Event()
+
+    async def stop_async(self):
+        await self.stop_release.wait()
+        self.stop_async_called = True
+
+
+class _RespawnableManager(StrategyBookManager):
+    def __init__(self):
+        super().__init__(bus=None, cfg=None, client_db=None, monitored_indices=[])
+        self._wanted_keys = {("c1", "b1", "NIFTY"): 1}
+        self.spawned = []  # every book ever created, in order
+
+    def _wanted(self):
+        return dict(self._wanted_keys)
+
+    def _spawn_book(self, key, value):
+        book = _ControllableStopBook(key)
+        self.spawned.append(book)
+        return book
+
+
+@pytest.mark.asyncio
+async def test_respawn_waits_for_old_instance_stop_async_to_finish():
+    mgr = _RespawnableManager()
+
+    # Tick 1: spawn the first instance.
+    mgr._reconcile()
+    assert len(mgr.spawned) == 1
+    old_book = mgr.spawned[0]
+    assert old_book.started is True
+
+    # Simulate the key disappearing (deployment stopped) then immediately
+    # reappearing (deployment restarted) -- exactly the flap this fix guards
+    # against. Tick 2: key no longer wanted -> old_book gets stopped.
+    mgr._wanted_keys = {}
+    mgr._reconcile()
+    assert ("c1", "b1", "NIFTY") not in mgr._books
+    # stop_async was scheduled but is BLOCKED (stop_release not set yet) --
+    # the old book is not actually dead yet.
+    assert old_book.stop_async_called is False
+
+    # Tick 3: key wanted again, but old instance's cleanup hasn't finished.
+    # Must NOT spawn a second live instance yet.
+    mgr._wanted_keys = {("c1", "b1", "NIFTY"): 1}
+    mgr._reconcile()
+    assert len(mgr.spawned) == 1, "must not create a second instance while the first is still stopping"
+    assert ("c1", "b1", "NIFTY") not in mgr._books
+
+    # Now let the old instance's stop_async() actually complete.
+    old_book.stop_release.set()
+    await asyncio.sleep(0)  # let the scheduled stop_async task run to completion
+    await asyncio.sleep(0)
+
+    # Tick 4: NOW a replacement may be spawned.
+    mgr._reconcile()
+    assert len(mgr.spawned) == 2
+    assert ("c1", "b1", "NIFTY") in mgr._books
+    assert mgr._books[("c1", "b1", "NIFTY")] is mgr.spawned[1]
+
+
+@pytest.mark.asyncio
+async def test_config_change_respawn_also_waits_for_old_stop():
+    """The lot_multiplier-changed respawn path must go through the same
+    stop-then-later-spawn discipline as a plain removal+re-add."""
+    mgr = _RespawnableManager()
+    mgr._reconcile()
+    old_book = mgr.spawned[0]
+
+    # Force a respawn via _should_respawn.
+    mgr._should_respawn = lambda book, value: True
+    mgr._reconcile()
+
+    # Old instance removed from _books, stop_async scheduled but blocked.
+    assert ("c1", "b1", "NIFTY") not in mgr._books
+    assert len(mgr.spawned) == 1, "must not spawn the replacement in the same tick as the stop"
+
+    old_book.stop_release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    mgr._reconcile()
+    assert len(mgr.spawned) == 2
+    assert mgr._books[("c1", "b1", "NIFTY")] is mgr.spawned[1]
