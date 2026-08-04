@@ -5,7 +5,6 @@ Rollover logic shared by ratio exit, LTP decay, VWAP rise, and scalable TSL.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -243,30 +242,21 @@ class RollingMixin:
         # 5. Execute the roll: close the good leg FIRST, wait for the close fill,
         #    then open the new partner. This guarantees the buy-to-close is confirmed
         #    before the sell-to-open, avoiding a transient double-short / margin spike.
+        # _close_leg itself now waits for the bridge's confirmation (or exit_aborted /
+        # timeout) before returning -- see strategies/sell_straddle/exits.py.
         self._clog.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (good leg vs running %s%d @%.2f) [%s]",
                     self._underlying, roll_side, roll_side, new_strike, new_ltp,
                     keep_side, keep_strike, keep_ltp, reason)
         self._roll_in_progress = True
         close_ev = await self._close_leg(roll_side, reason, now)
-        close_eid = getattr(close_ev, "event_id", "") or ""
-        waiter: asyncio.Event | None = None
-        if close_eid:
-            waiter = asyncio.Event()
-            self._roll_close_waiters[close_eid] = waiter
-        try:
-            if waiter is not None:
-                try:
-                    await asyncio.wait_for(waiter.wait(), timeout=10.0)
-                except asyncio.TimeoutError:
-                    self._clog.warning(
-                        "SellStraddle[%s]: roll close fill not confirmed within 10s (close_eid=%s) — "
-                        "aborting the open side to avoid a naked/duplicate position.",
-                        self._underlying, close_eid,
-                    )
-                    self._roll_in_progress = False
-                    return False
-        finally:
-            self._roll_close_waiters.pop(close_eid, None)
+        if getattr(close_ev, "close_aborted", False):
+            self._clog.warning(
+                "SellStraddle[%s]: roll close leg not confirmed — aborting the open side to "
+                "avoid a naked/duplicate position. Original pair kept.",
+                self._underlying,
+            )
+            self._roll_in_progress = False
+            return False
 
         await self._open_leg(roll_side, int(new_strike), float(new_ltp), now, f"single_side_roll_{reason}")
         if self._position:
@@ -325,7 +315,13 @@ class RollingMixin:
     async def _single_side_roll_to(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Partial roll: close one side and open a pre-selected candidate strike on that side."""
         other = "PE" if side == "CE" else "CE"
-        await self._close_leg(side, f"partial_roll_{reason}", now)
+        close_ev = await self._close_leg(side, f"partial_roll_{reason}", now)
+        if getattr(close_ev, "close_aborted", False):
+            self._clog.warning(
+                "SellStraddle[%s]: partial roll %s close not confirmed — leaving position "
+                "as-is (no open side, no cleanup).", self._underlying, side,
+            )
+            return
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         theta_target = getattr(self, "_theta_target", 0.0)
         _tv_ok = True
@@ -350,7 +346,14 @@ class RollingMixin:
             return
         logger.warning("SellStraddle[%s]: partial roll %s invalid candidate — closing %s (0-or-2).",
                        self._underlying, side, other)
-        await self._close_leg(other, f"partial_cleanup_{reason}", now)
+        cleanup_ev = await self._close_leg(other, f"partial_cleanup_{reason}", now)
+        if getattr(cleanup_ev, "close_aborted", False):
+            self._clog.critical(
+                "SellStraddle[%s]: partial-roll cleanup close of %s not confirmed — position "
+                "left as-is (one leg already closed, one leg unconfirmed). RECONCILE MANUALLY.",
+                self._underlying, other,
+            )
+            return
         self._position = None
         self._persist()
 
@@ -529,7 +532,15 @@ class RollingMixin:
         kept_strike = int(prot["kept_strike"])
         orig_strike = int(prot["orig_strike"])
 
-        await self._close_leg(new_side, "itm_roll_protection_stop", now)
+        close_ev = await self._close_leg(new_side, "itm_roll_protection_stop", now)
+        if getattr(close_ev, "close_aborted", False):
+            self._clog.warning(
+                "SellStraddle[%s]: ITM-roll protection stop close of %s not confirmed — "
+                "leaving position as-is; protection budget stays armed for next tick.",
+                self._underlying, new_side,
+            )
+            self._itm_roll_protection = prot
+            return
         pos = self._position
         if not pos or pos.status != "open":
             return

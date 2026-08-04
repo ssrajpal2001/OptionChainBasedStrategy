@@ -86,6 +86,11 @@ class StraddleOrderEvent:
     # legacy per-index engine → bridge keeps the old behaviour (route to all eligible brokers).
     client_id:      str  = ""
     binding_id:     str  = ""
+    # Set by the STRATEGY (never by the bridge) after the fact, on the order_ev it already
+    # returned to a caller — True when this EXIT's fill was never confirmed (bridge couldn't
+    # route it, or the wait timed out). Callers (e.g. single-side roll code in rolling.py) must
+    # check this before treating the leg as actually closed / proceeding to open a new partner.
+    close_aborted:  bool = False
 
 
 @dataclass
@@ -113,6 +118,12 @@ class StraddleFillEvent:
     # True when the bridge could not route the order to any eligible broker (terminal off / no running
     # deployment). The strategy must treat this like an aborted entry and clear its pending flag.
     routing_failed: bool = False
+    # True when a LIVE EXIT could not be routed to a broker (resolve_broker_or_alert exhausted its
+    # retries) or timed out unconfirmed. The strategy must NOT treat this as a real close -- the
+    # position stays open, in memory and on disk, so a later tick can retry the exit. Never fake a
+    # close on this path (2026-08-04 incident: bridge told the strategy an EXIT succeeded when the
+    # order never reached the broker).
+    exit_aborted: bool = False
 
 
 # ── Iron Condor order events ──────────────────────────────────────────────────
@@ -373,6 +384,7 @@ class StraddleExecutionBridge:
         _target = (ev.client_id, ev.binding_id) if (ev.client_id and ev.binding_id) else None
 
         routed = 0
+        _abort_published = False  # a per-binding broker-unavailable abort was already published
         for client in clients:
             if _target and client.client_id != _target[0]:
                 continue
@@ -432,22 +444,63 @@ class StraddleExecutionBridge:
                     elif not live_b.get("engine_active"):
                         continue
 
-                broker = (self._router._brokers or {}).get(client.client_id, {}).get(binding_id)
                 mode = live_b.get("trading_mode", "paper") or "paper"
 
+                if mode == "paper":
+                    # PAPER = PURE LOCAL SIMULATION — never send a real order, never touch the
+                    # broker resolver. Use this when you want to backtest / replay without any
+                    # broker interaction.
+                    logger.info(
+                        "StraddleExecutionBridge: routing %s %s → [%s/%s] mode=paper",
+                        ev.action, ev.underlying, client.client_id, binding_id,
+                    )
+                    await self._paper_fill(ev, client.client_id, binding_id, None)
+                    routed += 1
+                    continue
+
+                # mode in {"paper_route", <live>}: needs a REAL broker instance. Never fall back
+                # to _paper_fill on a missing broker here — that fabricates a fill the strategy
+                # would treat as a real exchange confirmation (the 2026-08-04 incident). Retry
+                # then alert loudly instead.
+                from execution_bridge.broker_resolve import resolve_broker_or_alert
+                broker = await resolve_broker_or_alert(
+                    self._bus, self._router, client.client_id, binding_id, "SellStraddle",
+                    context=f"{ev.action} {ev.underlying}",
+                )
+
                 logger.info(
-                    "StraddleExecutionBridge: routing %s %s → [%s/%s] mode=%s",
+                    "StraddleExecutionBridge: routing %s %s → [%s/%s] mode=%s broker=%s",
                     ev.action, ev.underlying, client.client_id, binding_id, mode,
+                    "resolved" if broker is not None else "UNAVAILABLE",
                 )
 
                 if broker is None:
-                    # No broker instance available — pure local simulation so the strategy can
-                    # still run its books without crashing the bridge.
-                    await self._paper_fill(ev, client.client_id, binding_id, broker)
-                elif mode == "paper":
-                    # PAPER = PURE LOCAL SIMULATION — never send a real order. Use this when you
-                    # want to backtest / replay without any broker interaction.
-                    await self._paper_fill(ev, client.client_id, binding_id, broker)
+                    # resolve_broker_or_alert already logged CRITICAL + published SYSTEM_EVENT.
+                    # Do NOT increment `routed` -- this attempt did not actually route anywhere,
+                    # and letting it count would mask the "no engine-active brokers found"
+                    # warning below when every binding in this pass was really an abort.
+                    await self._bus.publish(
+                        Topic.ORDER_FILL,
+                        StraddleFillEvent(
+                            action=ev.action,
+                            underlying=ev.underlying,
+                            atm=ev.atm,
+                            ce_strike=ev.ce_strike,
+                            pe_strike=ev.pe_strike,
+                            ce_fill=0.0,
+                            pe_fill=0.0,
+                            client_id=client.client_id,
+                            binding_id=binding_id,
+                            event_id=ev.event_id,
+                            paper_mode=False,
+                            legs=ev.legs,
+                            entry_aborted=(ev.action == "ENTRY"),
+                            exit_aborted=(ev.action == "EXIT"),
+                            routing_failed=True,
+                        ),
+                    )
+                    _abort_published = True
+                    continue
                 elif mode == "paper_route":
                     # PAPER_ROUTE = send the real order to the broker for connectivity verification,
                     # but book a LOCAL simulated fill at strategy LTP. Intended for no-fund accounts
@@ -465,7 +518,10 @@ class StraddleExecutionBridge:
                 "Ensure Terminal is ON and Engine is ON for at least one broker.",
                 ev.action, ev.underlying,
             )
-            if ev.action == "ENTRY":
+            # If a per-binding broker-unavailable abort was already published inside the loop
+            # above, don't publish a second (generic) abort fill for the same event_id — the
+            # strategy's waiter only needs one signal.
+            if not _abort_published and ev.action == "ENTRY":
                 # Publish an aborted fill so the strategy clears its optimistic position and
                 # pending flag instead of blocking future entries forever.
                 await self._bus.publish(
@@ -482,6 +538,29 @@ class StraddleExecutionBridge:
                         binding_id=ev.binding_id or "",
                         event_id=ev.event_id,
                         entry_aborted=True,
+                        routing_failed=True,
+                    ),
+                )
+            elif not _abort_published and ev.action == "EXIT":
+                # Same idea for EXIT: no eligible binding was found to route the close to (e.g.
+                # terminal not connected). Publish an aborted EXIT fill immediately instead of
+                # making the strategy's waiter sit out the full confirmation timeout — the
+                # strategy must NOT treat this as a real close (position stays open, retries later).
+                await self._bus.publish(
+                    Topic.ORDER_FILL,
+                    StraddleFillEvent(
+                        action="EXIT",
+                        underlying=ev.underlying,
+                        atm=ev.atm,
+                        ce_strike=ev.ce_strike,
+                        pe_strike=ev.pe_strike,
+                        ce_fill=0.0,
+                        pe_fill=0.0,
+                        client_id=ev.client_id or "",
+                        binding_id=ev.binding_id or "",
+                        event_id=ev.event_id,
+                        legs=ev.legs,
+                        exit_aborted=True,
                         routing_failed=True,
                     ),
                 )

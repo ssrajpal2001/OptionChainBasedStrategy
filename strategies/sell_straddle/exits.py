@@ -5,6 +5,7 @@ Implements the exact exit priority order and log format strings used by the engi
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -605,6 +606,11 @@ class ExitMixin:
         self._position = None
         self._persist()
 
+    # Max time to wait for the bridge to confirm (or abort) a full-position EXIT before giving
+    # up and leaving the position open for a later retry. Mirrors the 10s single-side-roll close
+    # timeout in rolling.py, with extra headroom for the exit executor's own market fallback.
+    _CLOSE_CONFIRM_TIMEOUT_SEC = 15.0
+
     async def _close_position(self, reason: str) -> None:
         if not self._position or getattr(self, "_close_in_progress", False):
             return
@@ -614,31 +620,31 @@ class ExitMixin:
         try:
             from execution_bridge.straddle_bridge import StraddleOrderEvent
             pos = self._position
-            # Take the position out of the book immediately so concurrent exit checks
-            # cannot emit duplicate EXIT orders while this one is in flight.
-            self._position = None
-            pos.realized_pnl = pos.unrealized_pnl
-            pos.close_reason = reason
-            pos.close_time = datetime.now(IST)
-            pos.ce_leg.close_time = pos.close_time
-            pos.pe_leg.close_time = pos.close_time
-            pos.status = "closed"
-            self._unpin_position_legs(pos)
-            _close_remark = self._close_remark(pos, reason, pos.close_time)
+            # Do NOT null self._position, mark it closed, or persist/cooldown/audit yet -- the
+            # exit order has not been confirmed by the broker. Compute what finalization will
+            # need, dispatch the order, then WAIT for _on_fill to confirm a real fill (or an
+            # exit_aborted signal from the bridge) before touching any of that. This mirrors the
+            # _roll_close_waiters pattern _single_side_roll already uses for single-leg closes.
+            # (2026-08-04 incident: the old code finalized -- nulled self._position, persisted,
+            # applied cooldown -- BEFORE the order was even dispatched, so a broker outage during
+            # a live EXIT silently discarded a still-open real position.)
+            realized_pnl = pos.unrealized_pnl
+            close_time = datetime.now(IST)
+            _close_remark = self._close_remark(pos, reason, close_time)
 
             _cid = getattr(self, "_client_id", "") or "-"
             _bid = getattr(self, "_binding_id", "") or "-"
             logger.info(
-                "SellStraddle[%s|%s|%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) "
-                "CE %.2f→%.2f PE %.2f→%.2f",
+                "SellStraddle[%s|%s|%s]: CLOSING — reason=%s pnl=%s%.4f (%.2f pts) "
+                "CE %.2f→%.2f PE %.2f→%.2f (awaiting broker confirmation)",
                 self._underlying, _cid, _bid, reason,
-                self._ccy_symbol, self._pnl_rs(pos.realized_pnl), pos.realized_pnl,
+                self._ccy_symbol, self._pnl_rs(realized_pnl), realized_pnl,
                 pos.ce_leg.entry_price, pos.ce_leg.ltp,
                 pos.pe_leg.entry_price, pos.pe_leg.ltp,
             )
             self._clog.info(
-                "CLOSED — reason=%s pnl=%.2fpts CE %.2f→%.2f PE %.2f→%.2f",
-                reason, pos.realized_pnl,
+                "CLOSING — reason=%s pnl=%.2fpts CE %.2f→%.2f PE %.2f→%.2f (awaiting confirmation)",
+                reason, realized_pnl,
                 pos.ce_leg.entry_price, pos.ce_leg.ltp,
                 pos.pe_leg.entry_price, pos.pe_leg.ltp,
             )
@@ -657,7 +663,7 @@ class ExitMixin:
                 spot=self._spot,
                 close_reason=reason,
                 close_remark=_close_remark,
-                realized_pnl=pos.realized_pnl,
+                realized_pnl=realized_pnl,
                 ce_entry=pos.ce_leg.entry_price,
                 pe_entry=pos.pe_leg.entry_price,
                 event_id=f"{self._underlying}_EXIT_{self._event_counter}",
@@ -670,9 +676,63 @@ class ExitMixin:
                     "PE": pos.pe_leg.open_reason,
                 },
                 expiry=pos.expiry_date,
-                close_time=pos.close_time,
+                close_time=close_time,
             )
-            await self._emit_order(order_ev)
+
+            eid = order_ev.event_id
+            waiter = asyncio.Event()
+            self._roll_close_waiters[eid] = waiter
+            try:
+                await self._emit_order(order_ev)
+                try:
+                    await asyncio.wait_for(waiter.wait(), timeout=self._CLOSE_CONFIRM_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    logger.critical(
+                        "SellStraddle[%s|%s|%s]: EXIT fill NOT CONFIRMED within %.0fs "
+                        "(event_id=%s reason=%s) — leaving position OPEN; will retry on a "
+                        "later tick. NOT booking P&L, NOT applying cooldown.",
+                        self._underlying, _cid, _bid, self._CLOSE_CONFIRM_TIMEOUT_SEC, eid, reason,
+                    )
+                    self._clog.critical(
+                        "EXIT fill NOT CONFIRMED within %.0fs (event_id=%s reason=%s) — "
+                        "position stays OPEN.", self._CLOSE_CONFIRM_TIMEOUT_SEC, eid, reason,
+                    )
+                    return
+            finally:
+                self._roll_close_waiters.pop(eid, None)
+
+            fill = self._roll_close_results.pop(eid, None)
+            if fill is not None and getattr(fill, "exit_aborted", False):
+                logger.critical(
+                    "SellStraddle[%s|%s|%s]: EXIT ABORTED by bridge (broker unavailable, "
+                    "event_id=%s reason=%s) — leaving position OPEN; will retry on a later "
+                    "tick. NOT booking P&L, NOT applying cooldown.",
+                    self._underlying, _cid, _bid, eid, reason,
+                )
+                self._clog.critical(
+                    "EXIT ABORTED by bridge (event_id=%s reason=%s) — position stays OPEN.",
+                    eid, reason,
+                )
+                return
+
+            # ── Confirmed by the broker (or a paper/paper_route sim fill) — finalize ──────
+            self._position = None
+            pos.realized_pnl = realized_pnl
+            pos.close_reason = reason
+            pos.close_time = close_time
+            pos.ce_leg.close_time = close_time
+            pos.pe_leg.close_time = close_time
+            pos.status = "closed"
+            self._unpin_position_legs(pos)
+
+            logger.info(
+                "SellStraddle[%s|%s|%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) confirmed "
+                "(event_id=%s).",
+                self._underlying, _cid, _bid, reason,
+                self._ccy_symbol, self._pnl_rs(pos.realized_pnl), pos.realized_pnl, eid,
+            )
+            self._clog.info("CLOSED — reason=%s pnl=%.2fpts confirmed (event_id=%s).",
+                             reason, pos.realized_pnl, eid)
 
             self._session_realized_pnl_pts += pos.realized_pnl
             logger.info(
@@ -706,10 +766,13 @@ class ExitMixin:
             self._close_in_progress = False
 
     async def _close_leg(self, side: str, reason: str, now: datetime) -> StraddleOrderEvent:
-        """Close ONE leg (publish EXIT legs=[side]); book that leg's P&L into the session total.
+        """Close ONE leg (publish EXIT legs=[side]) and WAIT for the bridge to confirm the fill
+        before booking that leg's P&L into the session total.
 
-        Returns the emitted order event so callers (e.g. single-side rolls) can wait for the
-        corresponding fill before sending the next order.
+        Returns the emitted order event; callers MUST check `order_ev.close_aborted` before
+        proceeding to open a new partner or otherwise treating the leg as actually closed --
+        on a broker-unavailable / unconfirmed close, the leg is left exactly as it was (still
+        open, no P&L booked) and `close_aborted=True` is set on the return value.
         """
         from execution_bridge.straddle_bridge import StraddleOrderEvent
         pos = self._position
@@ -718,7 +781,7 @@ class ExitMixin:
             return StraddleOrderEvent(
                 action="EXIT", underlying=self._underlying, atm=0.0,
                 ce_strike=0.0, pe_strike=0.0, ce_ltp=0.0, pe_ltp=0.0,
-                event_id="", legs=[side],
+                event_id="", legs=[side], close_aborted=True,
             )
         leg = pos.ce_leg if side == "CE" else pos.pe_leg
         if leg.entry_price and leg.entry_price > 0:
@@ -728,7 +791,6 @@ class ExitMixin:
             logger.error("SellStraddle[%s]: %s%d entry_price=%.2f invalid at close — booking pnl=0 "
                          "(NOT a real loss; entry was lost). reason=%s",
                          self._underlying, side, int(leg.strike), float(leg.entry_price or 0.0), reason)
-        leg.close_time = now
         _close_remark = self._close_remark(pos, reason, now, side=side)
         self._event_counter += 1
         order_ev = StraddleOrderEvent(
@@ -744,13 +806,43 @@ class ExitMixin:
             leg_open_reasons={side: leg.open_reason},
             expiry=pos.expiry_date,
         )
-        await self._emit_order(order_ev)
-        self._session_realized_pnl_pts += leg_pnl
+
         _cid = getattr(self, "_client_id", "") or "-"
         _bid = getattr(self, "_binding_id", "") or "-"
-        logger.info("SellStraddle[%s|%s|%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
+        eid = order_ev.event_id
+        waiter = asyncio.Event()
+        self._roll_close_waiters[eid] = waiter
+        try:
+            await self._emit_order(order_ev)
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.critical(
+                    "SellStraddle[%s|%s|%s]: LEG CLOSE %s NOT CONFIRMED within 10s (event_id=%s "
+                    "reason=%s) — leg left OPEN, no P&L booked; caller must abort the roll.",
+                    self._underlying, _cid, _bid, side, eid, reason,
+                )
+                order_ev.close_aborted = True
+                return order_ev
+        finally:
+            self._roll_close_waiters.pop(eid, None)
+
+        fill = self._roll_close_results.pop(eid, None)
+        if fill is not None and getattr(fill, "exit_aborted", False):
+            logger.critical(
+                "SellStraddle[%s|%s|%s]: LEG CLOSE %s ABORTED by bridge (broker unavailable, "
+                "event_id=%s reason=%s) — leg left OPEN, no P&L booked; caller must abort the roll.",
+                self._underlying, _cid, _bid, side, eid, reason,
+            )
+            order_ev.close_aborted = True
+            return order_ev
+
+        # ── Confirmed — finalize this leg's close ─────────────────────────────
+        leg.close_time = now
+        self._session_realized_pnl_pts += leg_pnl
+        logger.info("SellStraddle[%s|%s|%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s] confirmed",
                     self._underlying, _cid, _bid, side, leg.strike, leg_pnl, reason)
-        self._clog.info("CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s]",
+        self._clog.info("CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s] confirmed",
                         side, leg.strike, leg_pnl, reason)
         return order_ev
 

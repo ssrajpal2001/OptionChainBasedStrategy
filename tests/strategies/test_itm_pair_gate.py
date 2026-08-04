@@ -16,11 +16,26 @@ from unittest.mock import AsyncMock
 
 from data_layer.base_feeder import EventBus
 from config.global_config import IST, GlobalConfig
+from execution_bridge.straddle_bridge import StraddleFillEvent
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 
 
 def _gated_strategy(bus):
     s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+
+    # _close_position now WAITS for the bridge to confirm the EXIT fill before finalizing
+    # (2026-08-04 fail-loud fix). Simulate an always-available broker: immediately hand back a
+    # confirmed fill through the real _on_fill path whenever an order is emitted.
+    async def _auto_confirm_emit(ev):
+        if ev.action == "EXIT":
+            s._on_fill(StraddleFillEvent(
+                action="EXIT", underlying=ev.underlying, atm=ev.atm,
+                ce_strike=ev.ce_strike, pe_strike=ev.pe_strike,
+                ce_fill=ev.ce_ltp, pe_fill=ev.pe_ltp,
+                client_id="C", binding_id="B", event_id=ev.event_id, legs=ev.legs,
+            ))
+    s._emit_order = _auto_confirm_emit
+
     s._lot_size = 75
     s._lot_multiplier = 1
     s._spot = 24000.0

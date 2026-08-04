@@ -93,6 +93,10 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._primed: bool = False
         self._order_pending: bool = False
         self._roll_close_waiters: Dict[str, asyncio.Event] = {}
+        # event_id -> the StraddleFillEvent that woke the matching waiter above (both leg-closes
+        # and full-position closes). Consumed by _close_leg / _close_position to see whether the
+        # wake-up was a REAL confirmed exit or an exit_aborted (broker unavailable) fill.
+        self._roll_close_results: Dict[str, object] = {}
         self._roll_in_progress: bool = False
         self._last_roll_attempt: Dict[str, datetime] = {}
         self._last_exit_rules_bucket: str = ""
@@ -807,20 +811,37 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             elif fill.action == "EXIT":
                 _exit_legs = getattr(fill, "legs", ["CE", "PE"])
                 _legtag = "+".join(sorted(_exit_legs)) if set(_exit_legs) != {"CE", "PE"} else "CE+PE"
-                logger.info(
-                    "SellStraddle[%s|%s|%s]: EXIT confirmed — legs=%s CE=%.2f PE=%.2f",
-                    self._underlying, fill.client_id, fill.binding_id,
-                    _legtag, fill.ce_fill, fill.pe_fill,
-                )
-                self._clog.info(
-                    "EXIT confirmed — legs=%s CE=%.2f PE=%.2f",
-                    _legtag, fill.ce_fill, fill.pe_fill,
-                )
+                _eid = getattr(fill, "event_id", "")
+                if getattr(fill, "exit_aborted", False):
+                    # Broker unavailable / order never confirmed. Do NOT finalize anything here --
+                    # _close_position / _close_leg (the waiter below wakes them) are responsible
+                    # for leaving the position exactly as it was and retrying later. Never treat
+                    # this as a real close (2026-08-04 incident: bridge faked a successful EXIT).
+                    logger.error(
+                        "SellStraddle[%s|%s|%s]: EXIT ABORTED (broker unavailable) — legs=%s "
+                        "event_id=%s. Position stays OPEN; will be retried.",
+                        self._underlying, fill.client_id, fill.binding_id, _legtag, _eid,
+                    )
+                    self._clog.error("EXIT ABORTED (broker unavailable) — legs=%s event_id=%s",
+                                      _legtag, _eid)
+                else:
+                    logger.info(
+                        "SellStraddle[%s|%s|%s]: EXIT confirmed — legs=%s CE=%.2f PE=%.2f",
+                        self._underlying, fill.client_id, fill.binding_id,
+                        _legtag, fill.ce_fill, fill.pe_fill,
+                    )
+                    self._clog.info(
+                        "EXIT confirmed — legs=%s CE=%.2f PE=%.2f",
+                        _legtag, fill.ce_fill, fill.pe_fill,
+                    )
                 self._order_pending = False
-                # Wake any single-side roll that is waiting for its close fill.
-                # Use .get() (not .pop()) so a fill that arrives before the waiter is
-                # registered still leaves the event set when the roll routine checks it.
-                waiter = self._roll_close_waiters.get(getattr(fill, "event_id", ""))
+                # Record the fill so the waiting _close_position/_close_leg can tell a real
+                # confirmed exit apart from an exit_aborted one, then wake it. Use .get() (not
+                # .pop()) on the waiter so a fill that arrives before the waiter is registered
+                # still leaves the event set when the closing routine checks it.
+                if _eid:
+                    self._roll_close_results[_eid] = fill
+                waiter = self._roll_close_waiters.get(_eid)
                 if waiter is not None:
                     try:
                         waiter.set()

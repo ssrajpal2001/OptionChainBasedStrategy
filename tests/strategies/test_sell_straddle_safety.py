@@ -44,11 +44,26 @@ def _open_position(
 
 
 def _patch_emit(ss: SellStraddleStrategy):
-    """Replace _emit_order with a recorder that captures EXIT/ENTRY events."""
+    """Replace _emit_order with a recorder that captures EXIT/ENTRY events AND immediately
+    confirms EXIT orders by feeding a real fill back through _on_fill -- simulating an
+    always-available broker. _close_position/_close_leg now block on the bridge's confirmation
+    (see 2026-08-04 fail-loud fix), so tests that expect a close to actually finalize need this;
+    tests that want to exercise the broker-unavailable / timeout paths patch _emit_order
+    themselves instead (see test_close_position_leaves_position_open_* below).
+    """
     emitted: list = []
 
     async def _fake_emit(ev):
         emitted.append(ev)
+        if ev.action == "EXIT":
+            fill = StraddleFillEvent(
+                action="EXIT", underlying=ev.underlying, atm=ev.atm,
+                ce_strike=ev.ce_strike, pe_strike=ev.pe_strike,
+                ce_fill=ev.ce_ltp, pe_fill=ev.pe_ltp,
+                client_id="C", binding_id="B", event_id=ev.event_id,
+                legs=ev.legs,
+            )
+            ss._on_fill(fill)
 
     ss._emit_order = _fake_emit
     return emitted
@@ -110,6 +125,82 @@ def test_close_position_does_not_apply_cooldown_on_kill_switch():
     asyncio.run(ss._close_position("kill_switch"))
 
     assert ss._sl_cooldown_until is None
+
+
+# ── Fail-loud EXIT: broker unavailable must NOT fake a close (2026-08-04 incident) ──────────
+
+
+def test_close_position_leaves_position_open_when_bridge_reports_exit_aborted():
+    """Real sequence: _close_position dispatches the EXIT via _emit_order (capturing the real
+    ORDER_REQUEST event_id), then a synthetic exit_aborted StraddleFillEvent (what the bridge
+    publishes when resolve_broker_or_alert can't find a broker) is fed back through the real
+    _on_fill using that same event_id. The position must come out exactly as it went in --
+    same object, same strikes, same entry prices, still 'open' -- so a later tick can retry."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    pos = _open_position(ss)
+    emitted: list = []
+
+    async def _fake_emit(ev):
+        emitted.append(ev)
+        # Simulate the bridge: broker never resolved -> exit_aborted fill, no real fill prices.
+        fill = StraddleFillEvent(
+            action="EXIT", underlying=ev.underlying, atm=ev.atm,
+            ce_strike=ev.ce_strike, pe_strike=ev.pe_strike,
+            ce_fill=0.0, pe_fill=0.0,
+            client_id="C", binding_id="B", event_id=ev.event_id,
+            legs=ev.legs, exit_aborted=True, routing_failed=True,
+        )
+        ss._on_fill(fill)
+
+    ss._emit_order = _fake_emit
+
+    asyncio.run(ss._close_position("day_loss_sl"))
+
+    assert ss._position is pos
+    assert ss._position.status == "open"
+    assert ss._position.ce_leg.strike == 24500.0
+    assert ss._position.ce_leg.entry_price == 120.0
+    assert ss._position.pe_leg.entry_price == 110.0
+    assert len(emitted) == 1
+    assert emitted[0].action == "EXIT"
+    # No P&L booked, no cooldown applied -- nothing about this was a real close.
+    assert ss._session_realized_pnl_pts == 0.0
+    assert ss._sl_cooldown_until is None
+    assert ss._close_in_progress is False  # free to retry on the next tick
+
+
+def test_close_position_leaves_position_open_on_confirmation_timeout(monkeypatch):
+    """If the fill event is simply lost (no exit_aborted, no real fill -- just silence), the
+    wait must time out and leave the position open rather than hang or assume success."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    pos = _open_position(ss)
+    monkeypatch.setattr(type(ss), "_CLOSE_CONFIRM_TIMEOUT_SEC", 0.05)
+
+    async def _fake_emit(ev):
+        pass  # never deliver a fill
+
+    ss._emit_order = _fake_emit
+
+    asyncio.run(ss._close_position("day_loss_sl"))
+
+    assert ss._position is pos
+    assert ss._position.status == "open"
+    assert ss._session_realized_pnl_pts == 0.0
+    assert ss._sl_cooldown_until is None
+
+
+def test_close_position_confirmed_exit_still_finalizes():
+    """Sanity check on the happy path through the new confirm-then-finalize sequence: a REAL
+    confirmed EXIT fill (not aborted) must still close the position, book P&L, and persist."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    _open_position(ss)
+    emitted = _patch_emit(ss)  # auto-confirms EXIT fills
+
+    asyncio.run(ss._close_position("day_loss_sl"))
+
+    assert ss._position is None
+    assert len(emitted) == 1
+    assert emitted[0].action == "EXIT"
 
 
 # ── Routing failure cleanup ────────────────────────────────────────────────
