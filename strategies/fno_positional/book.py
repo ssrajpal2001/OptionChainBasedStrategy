@@ -219,6 +219,13 @@ class FnOPositionalBook:
         self._running    = False
         self._task: Optional[asyncio.Task] = None
         self._instruments: list            = []    # cached NSE master
+        # 2026-08-04: live spot ticks via Fyers (subscribe_fno_equity/EQUITY_TICK)
+        # instead of REST-polling every watchlist stock every 30s -- see
+        # _subscribe_watchlist_spot / _equity_tick_loop. Falls back to REST
+        # (_fetch_ltp) for any symbol not yet warm in this cache (e.g. right
+        # after a fresh subscribe, before the first tick arrives).
+        self._equity_ltp: Dict[str, float] = {}
+        self._equity_tick_task: Optional[asyncio.Task] = None
 
         date_str = datetime.now(IST).strftime("%Y%m%d")
         self._log = make_strategy_logger(
@@ -235,6 +242,8 @@ class FnOPositionalBook:
         # inside _main_loop before the first scan so start() stays synchronous (the
         # base class _reconcile() calls book.start() without await).
         self._task = asyncio.create_task(self._startup_and_loop(), name=f"fno_{self._client_id}_{self._binding_id}")
+        self._equity_tick_task = asyncio.create_task(
+            self._equity_tick_loop(), name=f"fno_{self._client_id}_{self._binding_id}_ticks")
         self._log.info("FnOBook[%s/%s]: started (mode=%s, max_slots=%d)",
                        self._client_id, self._binding_id, self._mode, self._max_slots)
 
@@ -253,6 +262,12 @@ class FnOPositionalBook:
             self._task.cancel()
             try:
                 await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._equity_tick_task and not self._equity_tick_task.done():
+            self._equity_tick_task.cancel()
+            try:
+                await self._equity_tick_task
             except asyncio.CancelledError:
                 pass
 
@@ -332,6 +347,58 @@ class FnOPositionalBook:
 
             await asyncio.sleep(POLL_INTERVAL)
 
+    # ── Live spot ticks (2026-08-04) ────────────────────────────────────────
+    # Only today's watchlist (~30 stocks, not the full ~200-stock universe) is
+    # subscribed for live ticks -- small enough to mirror on BOTH Upstox
+    # (register_extra_spot_keys) and Fyers (subscribe_fno_equity), same
+    # active-passive redundancy as everything else in this system (if one
+    # provider drops, the other already has the same data flowing). Falls
+    # back to the old REST _fetch_ltp for any symbol not yet warm in the
+    # cache (e.g. immediately after subscribing, before the first tick).
+
+    def _subscribe_watchlist_spot(self, signals) -> None:
+        feeder = getattr(self._bus, "_global_feeder", None)
+        if feeder is None:
+            self._log.warning("FnOBook: no _global_feeder on bus — spot ticks will stay REST-polled")
+            return
+        upstox_map = {}
+        fyers_n = 0
+        for sig in signals:
+            symbol = sig.symbol
+            upstox_key = getattr(sig, "upstox_key", "") or ""
+            if upstox_key:
+                upstox_map[upstox_key] = symbol
+            try:
+                feeder.subscribe_fno_equity(f"NSE:{symbol}-EQ", symbol)
+                fyers_n += 1
+            except Exception as exc:
+                self._log.debug("FnOBook: subscribe_fno_equity(%s) failed: %s", symbol, exc)
+        if upstox_map and hasattr(feeder, "register_extra_spot_keys"):
+            feeder.register_extra_spot_keys(upstox_map)
+        self._log.info("FnOBook[%s/%s]: subscribed %d watchlist stocks for live spot "
+                       "(upstox=%d, fyers=%d)", self._client_id, self._binding_id,
+                       len(signals), len(upstox_map), fyers_n)
+
+    async def _equity_tick_loop(self) -> None:
+        q = self._bus.subscribe(Topic.INDEX_TICK)
+        while self._running:
+            try:
+                tick = await q.get()
+            except asyncio.CancelledError:
+                break
+            ltp = getattr(tick, "ltp", 0.0)
+            symbol = getattr(tick, "symbol", "")
+            if symbol and ltp:
+                self._equity_ltp[symbol] = float(ltp)
+
+    async def _spot_ltp(self, symbol: str, instrument_key: str) -> float:
+        """Live tick cache first, REST fallback (covers pre-first-tick / a
+        symbol somehow missing from the watchlist subscribe)."""
+        cached = self._equity_ltp.get(symbol, 0.0)
+        if cached > 0:
+            return cached
+        return await self._fetch_ltp(instrument_key)
+
     # ── Scan ─────────────────────────────────────────────────────────────────
 
     async def _run_scan(self) -> None:
@@ -356,6 +423,7 @@ class FnOPositionalBook:
                               "scan_live.py --save --out data/fno_positional_watchlist.json "
                               "--top-n 30 after market close", self._client_id, self._binding_id)
             return
+        self._subscribe_watchlist_spot(signals)
         triggered   = sorted([s for s in signals if s.status == "TRIGGERED"],
                               key=lambda s: s.rr, reverse=True)
         approaching = sorted([s for s in signals if s.status == "APPROACHING"],
@@ -379,7 +447,7 @@ class FnOPositionalBook:
             # yesterday's close, the zone is blown — skip this signal entirely.
             spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
             if spot_key:
-                spot = await self._fetch_ltp(spot_key)
+                spot = await self._spot_ltp(sig.symbol, spot_key)
                 if spot > 0:
                     gap_pct = abs(spot - sig.entry_line) / sig.entry_line * 100
                     if gap_pct > GAP_SKIP_PCT:
@@ -403,7 +471,7 @@ class FnOPositionalBook:
             if sig.status != "APPROACHING":
                 continue
             spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
-            spot = await self._fetch_ltp(spot_key)
+            spot = await self._spot_ltp(sig.symbol, spot_key)
             if spot <= 0:
                 continue
             touched = (

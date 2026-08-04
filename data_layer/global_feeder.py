@@ -725,6 +725,16 @@ class UpstoxFeeder(BaseFeeder):
 # FyersFeeder — stub for Fyers API v3 WebSocket feed
 # ─────────────────────────────────────────────────────────────────────────────
 
+# 2026-08-04: briefly split (Upstox=index/options exclusively, Fyers=FnO
+# equity exclusively) then REVERTED same-session -- the FnO watchlist is
+# only ~30 stocks (the nightly scan's own top-N, not the full ~200-stock
+# universe), small enough that mirroring it to BOTH providers alongside
+# indices/options costs little and keeps the existing active-passive
+# failover intact for everything, not just indices. Kept as a toggle
+# (rather than deleting the split code) in case a future universe size
+# makes the exclusive split worth revisiting.
+_FYERS_CARRIES_INDEX_OPTIONS = True
+
 _FYERS_INDEX_SYMBOLS: Dict[str, str] = {
     "NIFTY":      "NSE:NIFTY50-INDEX",
     "BANKNIFTY":  "NSE:NIFTYBANK-INDEX",
@@ -901,6 +911,8 @@ class FyersFeeder(BaseFeeder):
         commodities (CRUDEOIL) the ATM source is the near-month FUTURES symbol
         from the registry (e.g. MCX:CRUDEOIL26JUNFUT), not a spot index.
         """
+        if not _FYERS_CARRIES_INDEX_OPTIONS:
+            return []
         from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
         indices = (
             self._cfg.monitored_indices
@@ -1541,13 +1553,22 @@ class GlobalFeeder:
             if hasattr(self._feeder, "register_extra_spot_keys"):
                 self._feeder.register_extra_spot_keys(self._extra_spot_keys)
 
+    def _index_option_feeders(self):
+        """Feeders that should carry index/option token subscriptions. When
+        _FYERS_CARRIES_INDEX_OPTIONS is False (2026-08-04 provider split),
+        Fyers is excluded -- it's dedicated to FnO equity spot only."""
+        feeders = list(self._dual_feeder._feeders.values()) if self._dual_feeder is not None else []
+        if not _FYERS_CARRIES_INDEX_OPTIONS:
+            feeders = [f for f in feeders if getattr(f, "_provider_name", "") != "fyers"]
+        return feeders
+
     async def subscribe_tokens(self, tokens: list) -> None:
-        """Proxy to active feeder — DualFeeder takes priority over initial feeder."""
+        """Proxy to active feeder(s) — DualFeeder takes priority over initial feeder."""
         for t in tokens:
             if t not in self._cached_tokens:
                 self._cached_tokens.append(t)
         if self._dual_feeder is not None:
-            for feeder in self._dual_feeder._feeders.values():
+            for feeder in self._index_option_feeders():
                 await feeder.subscribe_tokens(tokens)
         elif self._feeder is not None:
             await self._feeder.subscribe_tokens(tokens)
@@ -1558,7 +1579,7 @@ class GlobalFeeder:
             if t not in self._cached_tokens:
                 self._cached_tokens.append(t)
         if self._dual_feeder is not None:
-            for feeder in self._dual_feeder._feeders.values():
+            for feeder in self._index_option_feeders():
                 if hasattr(feeder, "resubscribe_tokens"):
                     await feeder.resubscribe_tokens(tokens)
                 else:
@@ -1570,12 +1591,12 @@ class GlobalFeeder:
                 await self._feeder.subscribe_tokens(tokens)
 
     async def unsubscribe_tokens(self, tokens: list) -> None:
-        """Proxy to active feeder — DualFeeder takes priority over initial feeder."""
+        """Proxy to active feeder(s) — DualFeeder takes priority over initial feeder."""
         for t in tokens:
             if t in self._cached_tokens:
                 self._cached_tokens.remove(t)
         if self._dual_feeder is not None:
-            for feeder in self._dual_feeder._feeders.values():
+            for feeder in self._index_option_feeders():
                 await feeder.unsubscribe_tokens(tokens)
         elif self._feeder is not None:
             await self._feeder.unsubscribe_tokens(tokens)
