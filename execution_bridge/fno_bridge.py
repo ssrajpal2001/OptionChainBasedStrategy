@@ -121,10 +121,12 @@ class FnOExecutionBridge:
         self._running = False
 
     async def _handle(self, ev: FnOOrderEvent) -> None:
-        broker = (self._router._brokers.get(ev.client_id, {}) or {}).get(ev.binding_id)
+        from execution_bridge.broker_resolve import resolve_broker_or_alert
+        broker = await resolve_broker_or_alert(
+            self._bus, self._router, ev.client_id, ev.binding_id, "FnOPositional",
+            context=f"{ev.action} {ev.symbol}",
+        )
         if not broker:
-            logger.error("FnOBridge: no broker for %s/%s — cannot route order",
-                         ev.client_id, ev.binding_id)
             await self._bus.publish(Topic.FNO_ORDER_FILL, FnOFillEvent(
                 event_id=ev.event_id, action=ev.action, symbol=ev.symbol,
                 fill_price=0.0, qty=ev.qty,
