@@ -232,22 +232,48 @@ class V4CascadeExecutionBridge:
                 await self._abort(ev, routing_failed=True)
                 return
 
-        broker = (self._router._brokers or {}).get(ev.client_id, {}).get(ev.binding_id)
         mode = live_binding.get("trading_mode", "paper") or "paper"
 
-        logger.info("V4CascadeExecutionBridge: routing %s %s %s tranche=%s → [%s/%s] mode=%s",
-                    ev.action, ev.underlying, ev.side, ev.tranche, ev.client_id, ev.binding_id, mode)
-
-        if broker is None or mode == "paper":
+        if mode == "paper":
+            # PAPER = PURE LOCAL SIMULATION — never send a real order, never touch the
+            # broker resolver.
+            logger.info("V4CascadeExecutionBridge: routing %s %s %s tranche=%s → [%s/%s] mode=paper",
+                        ev.action, ev.underlying, ev.side, ev.tranche, ev.client_id, ev.binding_id)
             await self._paper_fill(ev)
-        else:
-            await self._live_fill(ev, broker)
+            return
+
+        # mode is live (or any non-"paper" value): needs a REAL broker instance. Never fall
+        # back to _paper_fill on a missing broker here — that fabricates a fill the book
+        # would treat as a real exchange confirmation. Retry then alert loudly instead.
+        from execution_bridge.broker_resolve import resolve_broker_or_alert
+        broker = await resolve_broker_or_alert(
+            self._bus, self._router, ev.client_id, ev.binding_id, "V4Cascade",
+            context=f"{ev.action} {ev.underlying} {ev.side} tranche={ev.tranche}",
+        )
+
+        logger.info("V4CascadeExecutionBridge: routing %s %s %s tranche=%s → [%s/%s] mode=%s broker=%s",
+                    ev.action, ev.underlying, ev.side, ev.tranche, ev.client_id, ev.binding_id, mode,
+                    "resolved" if broker is not None else "UNAVAILABLE")
+
+        if broker is None:
+            # resolve_broker_or_alert already logged CRITICAL + published SYSTEM_EVENT. Do NOT
+            # call _paper_fill here — that would fabricate a fill the book would treat as a real
+            # exchange confirmation (the same class of bug fixed for SellStraddle/D1Trap/FVG).
+            await self._abort(ev, routing_failed=True)
+            return
+
+        await self._live_fill(ev, broker)
 
     async def _abort(self, ev: CascadeOrderEvent, routing_failed: bool = False) -> None:
         await self._bus.publish(Topic.ORDER_FILL, CascadeFillEvent(
             action=ev.action, underlying=ev.underlying, side=ev.side, tranche=ev.tranche,
             fill_price=0.0, qty=ev.qty, client_id=ev.client_id, binding_id=ev.binding_id,
-            event_id=ev.event_id, entry_aborted=(ev.action == "ENTRY"), routing_failed=routing_failed,
+            event_id=ev.event_id, entry_aborted=(ev.action == "ENTRY"),
+            # EXIT never gets a fabricated fill either — book.py's _on_fill already reverts a
+            # leg/position marked "closed" optimistically (at decision time, before this order
+            # round-trip) back to "open" on exit_failed=True, same as a zero-fill live rejection.
+            exit_failed=(ev.action == "EXIT"),
+            routing_failed=routing_failed,
         ))
 
     async def _paper_fill(self, ev: CascadeOrderEvent) -> None:
