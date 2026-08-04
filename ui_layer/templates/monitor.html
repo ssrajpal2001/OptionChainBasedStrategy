@@ -7055,6 +7055,10 @@ function amoTest() {
                           deployForm.underlying='NIFTY';
                           deployForm._fvg_htf=10; deployForm._fvg_ltf=3; deployForm._fvg_direction='BOTH';
                           deployForm.squareoff_time='15:15';
+                        } else if(deployForm.strategy_name==='fno_positional'){
+                          deployForm.product_type='NRML';
+                          deployForm.underlying='FNO_STOCKS';
+                          deployForm.squareoff_time='';
                         } else {
                           deployForm.product_type='MIS';
                         }
