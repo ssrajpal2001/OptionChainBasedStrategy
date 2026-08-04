@@ -171,6 +171,93 @@ async def test_config_change_respawn_also_waits_for_old_stop():
     assert mgr._books[("c1", "b1", "NIFTY")] is mgr.spawned[1]
 
 
+class _PlainAsyncStopBook:
+    """Shaped like strategies/fno_positional/book.py's FnOPositionalBook: a
+    plain class (no AbstractStrategyBook base), no `stop_async` attribute at
+    all, and its only cleanup method is `async def stop(self)`. Proves the
+    generic _resolve_async_stop() detection in book_manager.py covers books
+    that don't follow the stop_async naming convention -- this is exactly
+    the shape that flapped 7+ times in the real incident this branch fixes."""
+
+    def __init__(self, key):
+        self.key = key
+        self.started = False
+        self.stop_called = False
+        self.stop_release = asyncio.Event()
+
+    def start(self):
+        self.started = True
+
+    async def stop(self):
+        await self.stop_release.wait()
+        self.stop_called = True
+
+
+class _PlainAsyncStopManager(StrategyBookManager):
+    def __init__(self):
+        super().__init__(bus=None, cfg=None, client_db=None, monitored_indices=[])
+        self._wanted_keys = {("c1", "b1", "NIFTY"): 1}
+        self.spawned = []
+
+    def _wanted(self):
+        return dict(self._wanted_keys)
+
+    def _spawn_book(self, key, value):
+        book = _PlainAsyncStopBook(key)
+        self.spawned.append(book)
+        return book
+
+
+@pytest.mark.asyncio
+async def test_respawn_waits_for_plain_async_stop_to_finish():
+    """Generic-fallback variant of test_respawn_waits_for_old_instance_stop_async_to_finish:
+    the book has no stop_async() at all, only an `async def stop()` -- the
+    manager must still detect it as a coroutine function, schedule it as a
+    tracked background task, and defer a replacement spawn until it actually
+    completes. Before the fix, _stop_book's `getattr(book, "stop_async",
+    None)` check found nothing and fell through to a bare synchronous
+    `book.stop()` call, which for an async def just creates an un-awaited
+    coroutine that never runs -- the key is never added to self._stopping,
+    and a duplicate live instance could be spawned immediately."""
+    mgr = _PlainAsyncStopManager()
+
+    # Tick 1: spawn the first instance.
+    mgr._reconcile()
+    assert len(mgr.spawned) == 1
+    old_book = mgr.spawned[0]
+    assert old_book.started is True
+
+    # Tick 2: key no longer wanted -> old_book's async stop() is scheduled.
+    mgr._wanted_keys = {}
+    mgr._reconcile()
+    assert ("c1", "b1", "NIFTY") not in mgr._books
+    # It must actually have been tracked as in-flight -- proof the coroutine
+    # was scheduled as a task, not silently dropped.
+    assert ("c1", "b1", "NIFTY") in mgr._stopping
+    # Blocked -- not actually dead yet.
+    assert old_book.stop_called is False
+
+    # Tick 3: key wanted again immediately -- must NOT spawn a second live
+    # instance while the old one's stop() coroutine is still in flight.
+    mgr._wanted_keys = {("c1", "b1", "NIFTY"): 1}
+    mgr._reconcile()
+    assert len(mgr.spawned) == 1, "must not create a second instance while the first is still stopping"
+    assert ("c1", "b1", "NIFTY") not in mgr._books
+
+    # Let the old instance's stop() actually complete.
+    old_book.stop_release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert old_book.stop_called is True
+    assert ("c1", "b1", "NIFTY") not in mgr._stopping
+
+    # Tick 4: NOW a replacement may be spawned.
+    mgr._reconcile()
+    assert len(mgr.spawned) == 2
+    assert ("c1", "b1", "NIFTY") in mgr._books
+    assert mgr._books[("c1", "b1", "NIFTY")] is mgr.spawned[1]
+
+
 class _ControllableLiquidateBook(_FakeBook):
     """Like _FakeBook, but starts with an OPEN position and a controllable
     async liquidate() that blocks until a test-controlled event is set --

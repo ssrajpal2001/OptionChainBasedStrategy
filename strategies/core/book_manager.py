@@ -8,6 +8,7 @@ lot multiplier changes while flat.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -144,8 +145,9 @@ class StrategyBookManager:
             except Exception as exc:
                 logger.warning("%s: book.liquidate(%s) failed: %s", self.__class__.__name__, key, exc)
         try:
-            if hasattr(book, "stop_async"):
-                await book.stop_async()
+            coro_fn = self._resolve_async_stop(book)
+            if coro_fn is not None:
+                await coro_fn()
             elif hasattr(book, "stop"):
                 book.stop()
         except Exception as exc:
@@ -159,15 +161,40 @@ class StrategyBookManager:
         """Create a new book for ``key`` with configuration ``value``."""
         raise NotImplementedError
 
-    def _stop_book(self, book: Any, key: Optional[Key] = None) -> None:
-        """Stop a book being removed. Prefers the book's async stop_async()
-        (proper task-completion wait + EventBus unsubscribe) over the
-        incomplete sync stop(), scheduling it as a tracked background task so
-        a respawn of the same key can wait for it to actually finish instead
-        of running a second live instance alongside a not-yet-dead one."""
+    def _resolve_async_stop(self, book: Any) -> Optional[Callable[[], Any]]:
+        """Return a zero-arg callable that, when called, returns the awaitable
+        that fully stops ``book`` (proper task-completion wait + EventBus
+        unsubscribe) -- or None if the book only exposes a synchronous stop().
+
+        Prefers ``stop_async()`` (the AbstractStrategyBook convention used by
+        SellStraddle/D1Trap/FVG/V4Cascade) but ALSO detects any other
+        coroutine-function named ``stop()`` -- not every book class extends
+        AbstractStrategyBook or follows its naming convention (e.g.
+        strategies/fno_positional/book.py's FnOPositionalBook is a plain
+        class with `async def stop(self)`, no `stop_async` at all). Without
+        this fallback, such a book's cleanup coroutine would be called
+        synchronously (`book.stop()`), producing an un-awaited coroutine
+        object that never actually runs -- its cancel/await logic silently
+        never executes, and the key is never tracked in self._stopping, so
+        the spawn-race guard this whole class exists for would not apply to
+        it at all."""
         stop_async = getattr(book, "stop_async", None)
         if callable(stop_async):
-            task = asyncio.create_task(self._run_stop_async(book, key))
+            return stop_async
+        stop_fn = getattr(book, "stop", None)
+        if inspect.iscoroutinefunction(stop_fn):
+            return stop_fn
+        return None
+
+    def _stop_book(self, book: Any, key: Optional[Key] = None) -> None:
+        """Stop a book being removed. Prefers the book's async stop method
+        (see _resolve_async_stop) over an incomplete sync stop(), scheduling
+        it as a tracked background task so a respawn of the same key can wait
+        for it to actually finish instead of running a second live instance
+        alongside a not-yet-dead one."""
+        coro_fn = self._resolve_async_stop(book)
+        if coro_fn is not None:
+            task = asyncio.create_task(self._run_stop_async(coro_fn, key))
             if key is not None:
                 self._stopping[key] = task
         else:
@@ -176,11 +203,11 @@ class StrategyBookManager:
             except Exception:
                 pass
 
-    async def _run_stop_async(self, book: Any, key: Optional[Key]) -> None:
+    async def _run_stop_async(self, coro_fn: Callable[[], Any], key: Optional[Key]) -> None:
         try:
-            await book.stop_async()
+            await coro_fn()
         except Exception as exc:
-            logger.warning("%s: stop_async failed for %s: %s",
+            logger.warning("%s: async stop failed for %s: %s",
                             self.__class__.__name__, key, exc)
         finally:
             if key is not None:
