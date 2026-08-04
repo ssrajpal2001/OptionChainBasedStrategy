@@ -80,8 +80,7 @@ class StraddleBookManager(StrategyBookManager):
             book.set_rebalancer(self._rebalancer)
         if self._delta_chain is not None and hasattr(book, "set_delta_chain_manager"):
             book.set_delta_chain_manager(self._delta_chain)
-        if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
-            self._rebalancer.enable_chain(und)
+        self._enable_chain(und)
         return book
 
     def _should_respawn(self, book, lots):

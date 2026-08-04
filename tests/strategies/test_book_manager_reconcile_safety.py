@@ -342,3 +342,25 @@ async def test_spawn_waits_for_open_position_liquidation_to_finish():
     assert len(mgr.spawned) == 2
     assert ("c1", "b1", "NIFTY") in mgr._books
     assert mgr._books[("c1", "b1", "NIFTY")] is mgr.spawned[1]
+
+
+def test_enable_chain_helper_calls_rebalancer_when_present():
+    from strategies.core.book_manager import StrategyBookManager
+
+    class _FakeRebalancer:
+        def __init__(self):
+            self.enabled = []
+        def enable_chain(self, underlying):
+            self.enabled.append(underlying)
+
+    mgr = StrategyBookManager(bus=None, cfg=None, client_db=None, monitored_indices=[])
+    mgr._rebalancer = _FakeRebalancer()
+    mgr._enable_chain("NIFTY")
+    assert mgr._rebalancer.enabled == ["NIFTY"]
+
+
+def test_enable_chain_helper_noop_when_no_rebalancer():
+    from strategies.core.book_manager import StrategyBookManager
+    mgr = StrategyBookManager(bus=None, cfg=None, client_db=None, monitored_indices=[])
+    mgr._rebalancer = None
+    mgr._enable_chain("NIFTY")  # must not raise

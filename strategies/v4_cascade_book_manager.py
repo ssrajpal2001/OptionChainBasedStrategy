@@ -154,8 +154,7 @@ class V4CascadeBookManager(StrategyBookManager):
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
             book.set_rebalancer(self._rebalancer)
-        if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
-            self._rebalancer.enable_chain(und)
+        self._enable_chain(und)
         return book
 
     def _should_respawn(self, book, lots):

@@ -198,8 +198,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
         # but live OPTION_TICK never flowed for its strikes, so it could never progress
         # past whatever zone state the historical replay produced. NIFTY only "worked"
         # here because a sell_straddle NIFTY deployment happened to already enable it.
-        if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
-            self._rebalancer.enable_chain(underlying)
+        self._enable_chain(underlying)
 
         if strategy_name == "d1_trap_bear_only":
             if _D1TrapBearOnlyBook is None:
