@@ -868,7 +868,15 @@ class StraddleExecutionBridge:
             _full = [ot for ot in fills if filled_qty_by_leg.get(ot, 0) >= qty]
             _partial = [ot for ot in fills if 0 < filled_qty_by_leg.get(ot, 0) < qty]
             _any_filled = [ot for ot in fills if filled_qty_by_leg.get(ot, 0) > 0]
-            if _any_filled and len(_full) < len(_legs):
+            # 2026-08-05: was `if _any_filled and len(_full) < len(_legs)` -- only guarded
+            # ASYMMETRIC fills (one leg succeeded, one failed). A SYMMETRIC total failure
+            # (confirmed live: Fyers rejecting BOTH legs identically with "Algo orders are
+            # not allowed from this app") fell through this guard entirely (_any_filled was
+            # empty) and was reported to the strategy as a normal successful entry at the
+            # fallback LTP price -- a fully fabricated position, no real order ever reached
+            # the broker. Now triggers whenever not ALL legs achieved a full fill, regardless
+            # of whether some, none, or all legs filled.
+            if len(_full) < len(_legs):
                 logger.error("[LIVE] %s ENTRY ASYMMETRIC — filled %s; FLATTENING + ABORTING (no naked leg). client=%s",
                              ev.underlying, filled_qty_by_leg, client_id)
                 self._trade_log.log_event(client_id, binding_id,
@@ -908,6 +916,37 @@ class StraddleExecutionBridge:
                     ce_strike=ev.ce_strike, pe_strike=ev.pe_strike, ce_fill=0.0, pe_fill=0.0,
                     client_id=client_id, binding_id=binding_id, event_id=ev.event_id,
                     paper_mode=paper, legs=ev.legs, entry_aborted=True)
+                await self._bus.publish(Topic.ORDER_FILL, abort_ev)
+                return
+
+        # ── EXIT INCOMPLETE-FILL GUARD (live) ────────────────────────────────────────
+        # 2026-08-05: mirrors the ENTRY guard above -- a live EXIT whose leg(s) got
+        # rejected/failed at the broker (confirmed live: Fyers "Algo orders are not
+        # allowed") used to fall straight through to the normal fill_ev construction
+        # below, which reports the fallback LTP price as if the close genuinely
+        # happened. exit_aborted already exists on StraddleFillEvent specifically for
+        # "never fake a close" (2026-08-04), but was only ever set for the
+        # couldn't-route-to-any-broker case, not for a broker that WAS reached but
+        # REJECTED the order. The strategy's own confirm-then-finalize wait
+        # (_close_position/_close_leg) already correctly leaves the position open and
+        # retries on close_aborted/exit_aborted -- this guard is what actually tells it
+        # to do so instead of believing a fabricated close.
+        if ev.action == "EXIT" and not paper:
+            _full_exit = [ot for ot in fills if filled_qty_by_leg.get(ot, 0) >= qty]
+            if len(_full_exit) < len(_legs):
+                logger.error(
+                    "[LIVE] %s EXIT INCOMPLETE — filled %s of legs %s; NOT reporting a fake "
+                    "close. Position stays open in the strategy's state, will retry. client=%s",
+                    ev.underlying, filled_qty_by_leg, [ot for ot, _ in _legs], client_id,
+                )
+                self._trade_log.log_event(client_id, binding_id,
+                    f"EXIT ABORT {ev.underlying} incomplete fill {filled_qty_by_leg} — "
+                    f"position stays open, will retry")
+                abort_ev = StraddleFillEvent(
+                    action="EXIT", underlying=ev.underlying, atm=ev.atm,
+                    ce_strike=ev.ce_strike, pe_strike=ev.pe_strike, ce_fill=0.0, pe_fill=0.0,
+                    client_id=client_id, binding_id=binding_id, event_id=ev.event_id,
+                    paper_mode=paper, legs=ev.legs, exit_aborted=True)
                 await self._bus.publish(Topic.ORDER_FILL, abort_ev)
                 return
 
