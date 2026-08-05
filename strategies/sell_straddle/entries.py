@@ -49,6 +49,13 @@ class EntryMixin:
         """True once market_open + wait_minutes has passed."""
         if self._primed:
             return True
+        if self._market_open_dt is None:
+            # _market_open_dt is set by the first 1m CANDLE_CLOSE handled in
+            # _on_candle(). On a fresh restart, the tick loop (which calls this via
+            # _maybe_try_entry) can run before that first candle closes -- not
+            # primed yet is the correct answer, not a crash (2026-08-05: this used
+            # to raise TypeError: None + timedelta on every such restart).
+            return False
         wait_min = self._priming_wait_minutes(rules)
         if wait_min == 0:
             self._primed = True
