@@ -412,29 +412,37 @@ class ExitMixin:
         # restored/entry price for ~60s before a real tick corrected it. The eventual
         # ITM-pair-gate close that day used numbers that turned out correct once the
         # real tick landed, but that was luck, not a guarantee -- a threshold could just
-        # as easily have been crossed USING the stale price. Ceiling raised to match
-        # this codebase's existing ATP-staleness convention (vwap_rise's
-        # pair_atp_fresh/vwap_stale_sec, default 90s) instead of an arbitrary 20s, and a
-        # fallback release now logs CRITICAL (not silent info) so a still-stale leg at
-        # release time is loud, not hidden.
+        # as easily have been crossed USING the stale price.
+        # Fixed: ceiling raised to 5 minutes (user-specified — long enough that a genuine
+        # feed problem, not just slow warm-up, is the real explanation by then) AND the
+        # old "arm exits anyway using stale data" fallback is gone entirely — if a fresh
+        # tick for both legs still hasn't arrived after 5 minutes, that's treated as the
+        # feed being stuck, not just slow, so the position is closed instead of being
+        # traded blind on a frozen/unknown leg price.
         if self._post_restore_warmup:
             _both_fresh = self._ce_ltp_fresh and self._pe_ltp_fresh
             _elapsed = _t.monotonic() - self._post_restore_at
-            if _both_fresh or _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC:
+            if _both_fresh:
                 self._post_restore_warmup = False
-                if _both_fresh:
-                    logger.info("SellStraddle[%s]: post-restore warm-up complete — exits armed "
-                                "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
-                                self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
-                else:
-                    logger.critical(
-                        "SellStraddle[%s]: post-restore warm-up TIMED OUT after %.0fs with "
-                        "CE_fresh=%s PE_fresh=%s — arming exits anyway using a possibly-STALE "
-                        "leg price (CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts). A stale leg price can "
-                        "drive an incorrect exit decision until its first real tick arrives.",
-                        self._underlying, _elapsed, self._ce_ltp_fresh, self._pe_ltp_fresh,
-                        pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl,
-                    )
+                logger.info("SellStraddle[%s]: post-restore warm-up complete — exits armed "
+                            "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
+                            self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
+            elif _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC:
+                self._post_restore_warmup = False
+                logger.critical(
+                    "SellStraddle[%s]: post-restore warm-up TIMED OUT after %.0fs with "
+                    "CE_fresh=%s PE_fresh=%s — no fresh tick for %s%s within %.0fs of "
+                    "restart, treating this as a stuck data feed. Closing the restored "
+                    "position rather than trading on an unknown/frozen leg price "
+                    "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
+                    self._underlying, _elapsed, self._ce_ltp_fresh, self._pe_ltp_fresh,
+                    "CE" if not self._ce_ltp_fresh else "",
+                    "+PE" if not self._pe_ltp_fresh else "",
+                    self._POST_RESTORE_WARMUP_MAX_SEC,
+                    pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl,
+                )
+                await self._close_position("post_restore_data_stale")
+                return
             else:
                 return
 
@@ -634,12 +642,14 @@ class ExitMixin:
     # timeout in rolling.py, with extra headroom for the exit executor's own market fallback.
     _CLOSE_CONFIRM_TIMEOUT_SEC = 15.0
 
-    # Max time to hold ALL exit checks after a restart-restore before arming them anyway
-    # even if one leg still hasn't received a live tick (see POST-RESTORE WARM-UP GUARD
-    # above). 2026-08-05: a real restart took CE 82s to get its first tick -- the prior
-    # 20s ceiling let exits run on a stale leg price for ~60s of that. Matches this
-    # codebase's existing ATP-staleness convention (vwap_rise's default vwap_stale_sec).
-    _POST_RESTORE_WARMUP_MAX_SEC = 90.0
+    # Max time to hold ALL exit checks after a restart-restore before treating a still-
+    # not-fresh leg as a stuck data feed rather than just slow warm-up (see POST-RESTORE
+    # WARM-UP GUARD above). 2026-08-05: a real restart took CE 82s to get its first tick
+    # -- the original 20s ceiling let exits run on a stale leg price for ~60s of that.
+    # User-specified: 5 minutes -- long enough that a genuine feed problem, not just
+    # slow warm-up, is the real explanation; past this the position is CLOSED rather
+    # than armed for trading on an unknown/frozen leg price.
+    _POST_RESTORE_WARMUP_MAX_SEC = 300.0
 
     async def _close_position(self, reason: str) -> None:
         if not self._position or getattr(self, "_close_in_progress", False):

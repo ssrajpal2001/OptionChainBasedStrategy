@@ -2,15 +2,15 @@
 Regression test for the 2026-08-05 live incident: after a mid-day restart,
 SellStraddleStrategy holds ALL exit checks until both legs get a fresh live
 tick (self._ce_ltp_fresh/_pe_ltp_fresh), or a fallback timeout releases the
-hold anyway. The old fallback was a flat 20s -- in a real restart, CE took
-82s to get its first tick, so exits (including the ITM pair gate) ran for
-~60s using CE's stale, frozen restored/entry price before a real tick
-corrected it.
+hold. The original fallback was a flat 20s -- in a real restart, CE took 82s
+to get its first tick, so exits (including the ITM pair gate) ran for ~60s
+using CE's stale, frozen restored/entry price before a real tick corrected
+it.
 
-Fixed: ceiling raised to 90s (matching this codebase's existing
-vwap_stale_sec convention) and the fallback-release path now logs CRITICAL
-instead of the same silent INFO used for a genuine both-fresh release, so a
-still-stale leg at release time is loud, not hidden.
+Fixed (final, user-specified): ceiling raised to 5 minutes (300s), and past
+that ceiling a still-not-fresh leg is no longer armed for trading on a
+possibly-stale price at all -- it's treated as a stuck data feed and the
+position is CLOSED instead.
 """
 import asyncio
 import time as _time
@@ -53,6 +53,7 @@ def test_exits_held_when_not_fresh_and_under_ceiling():
     asyncio.run(s._check_exits())
     assert s._post_restore_warmup is True
     s._check_itm_pair_gate.assert_not_awaited()
+    assert s._position is not None and s._position.status == "open"
 
 
 def test_exits_armed_immediately_when_both_fresh():
@@ -60,23 +61,48 @@ def test_exits_armed_immediately_when_both_fresh():
     asyncio.run(s._check_exits())
     assert s._post_restore_warmup is False
     s._check_itm_pair_gate.assert_awaited()
+    assert s._position is not None and s._position.status == "open"
 
 
 def test_old_20s_ceiling_no_longer_releases_a_still_stale_leg():
     """The exact 2026-08-05 shape: CE still not fresh at 20s (would have
-    fired under the old ceiling) -- must now stay held."""
+    fired under the original 20s ceiling) -- must now stay held, well under
+    the new 5-minute ceiling."""
     s = _restored_strategy(EventBus(), elapsed_sec=25.0, ce_fresh=False, pe_fresh=True)
     asyncio.run(s._check_exits())
     assert s._post_restore_warmup is True
     s._check_itm_pair_gate.assert_not_awaited()
+    assert s._position is not None and s._position.status == "open"
 
 
-def test_fallback_ceiling_releases_and_logs_critical_when_still_stale(caplog):
-    import logging
+def test_90s_no_longer_closes_or_arms_either_still_under_5min_ceiling():
+    """90s (the previous ceiling) must no longer trigger anything -- neither
+    the old "arm with stale data" behavior nor the new "close" behavior --
+    since the ceiling is now 300s."""
     s = _restored_strategy(EventBus(), elapsed_sec=95.0, ce_fresh=False, pe_fresh=True)
+    asyncio.run(s._check_exits())
+    assert s._post_restore_warmup is True
+    s._check_itm_pair_gate.assert_not_awaited()
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_5min_ceiling_closes_position_instead_of_arming_stale_data(caplog):
+    import logging
+    s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True)
+    close_calls = []
+
+    async def _fake_close_position(reason):
+        close_calls.append(reason)
+        s._position.status = "closed"
+    s._close_position = _fake_close_position
+
     with caplog.at_level(logging.CRITICAL, logger="strategies.sell_straddle.exits"):
         asyncio.run(s._check_exits())
+
     assert s._post_restore_warmup is False
-    s._check_itm_pair_gate.assert_awaited()
+    assert close_calls == ["post_restore_data_stale"]
+    # Must NOT proceed to arm/evaluate further exit checks on stale data --
+    # the position is being closed, not traded.
+    s._check_itm_pair_gate.assert_not_awaited()
     assert any("TIMED OUT" in r.message for r in caplog.records)
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)

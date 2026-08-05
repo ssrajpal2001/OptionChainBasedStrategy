@@ -2811,6 +2811,7 @@ document.addEventListener('alpine:init', () => {
       if (s === 'itm_roll_protection_restore') return 'ITM-roll protection (restored prior strike)';
       if (s === 'itm_roll_protection_pool') return 'ITM-roll protection (new partner selected)';
       if (s === 'itm_roll_protection_exit_all') return 'ITM-roll protection (no pair → closed all)';
+      if (s === 'post_restore_data_stale') return 'Closed — data feed stuck after restart (5min)';
       if (s === 'kill_switch') return 'Kill switch';
       if (s === 'deployment_stop') return 'Deployment stop';
       if (s === 'system_shutdown') return 'System shutdown';
