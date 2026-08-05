@@ -212,9 +212,16 @@ def _setup_default_client(registry, capital: float) -> None:
 
 def _setup_live_clients(registry) -> None:
     registry.load_non_sensitive()
-    if registry.count() == 0:
-        # JSON file empty — load from DB instead
-        _load_registry_from_db(registry)
+    # broker_bindings are never written to config/client_profiles.json (credentials
+    # must live only in data/clients.db, never in a config file) — DB is the ONLY
+    # source for them. Always refresh from DB, even when load_non_sensitive() already
+    # populated profiles from the JSON snapshot (e.g. written by a dashboard call to
+    # registry.save()), otherwise a client that already exists in that snapshot
+    # silently keeps zero broker bindings forever — this previously caused a full
+    # broker outage across ALL clients/strategies after the first restart following
+    # any registry.save() call, since the old `if registry.count() == 0` guard
+    # skipped DB loading entirely once the JSON file had any rows.
+    _load_registry_from_db(registry)
     if registry.count() == 0:
         logging.getLogger(__name__).warning(
             "No client profiles found. Add profiles to config/client_profiles.json "
@@ -292,8 +299,21 @@ def _load_registry_from_db(registry) -> None:
                     totp_secret=_bdec(b, "totp_secret_enc"),
                     source_ip=_bget(b, "source_ip", "") or "",
                 ))
-            registry.register(profile)
-            log.info("Loaded client from DB: %s (approved=%s)", cid, profile.is_admin_approved)
+            existing = registry.get(cid)
+            if existing is not None:
+                # Already present (e.g. from config/client_profiles.json, which never
+                # carries broker_bindings — credentials must live only in the DB).
+                # DB is authoritative for bindings/approval/bot-active/index; keep
+                # JSON-only fields (strategy_risk_overrides, notes, etc.) as-is.
+                existing.broker_bindings = profile.broker_bindings
+                existing.is_admin_approved = profile.is_admin_approved
+                existing.is_client_bot_active = profile.is_client_bot_active
+                existing.target_index = profile.target_index
+                log.info("Refreshed broker bindings from DB for existing client: %s (%d bindings)",
+                         cid, len(profile.broker_bindings))
+            else:
+                registry.register(profile)
+                log.info("Loaded client from DB: %s (approved=%s)", cid, profile.is_admin_approved)
         con.close()
     except Exception as exc:
         logging.getLogger(__name__).error("_load_registry_from_db failed: %s", exc)
