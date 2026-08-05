@@ -12,12 +12,22 @@ real order. Live mode — MARKET order via broker.place_order() +
 get_order_status(); position booked from the real fill price.
 
 Product: MIS (intraday — all positions are squared off by EOD in engine.py).
-"""
+
+2026-08-05: confirm-then-finalize fill-confirmation feedback loop, mirroring
+execution_bridge/d1_trap_bridge.py's D1TrapFillEvent/_abort() exactly (same
+proven pattern, same problem: strategies/fvg/engine.py's _open_position/
+_square_off now dispatch an order and WAIT for this bridge's FVGOrderFillEvent
+to confirm a real fill -- or an entry_aborted/exit_failed abort -- before
+mutating/persisting self._position. Previously this bridge never published to
+Topic.FVG_ORDER_FILL at all, and a broker-unreachable EXIT silently looked
+like a successful close while the leg was still open at the broker (same root
+class of bug already fixed for SellStraddle/V4Cascade/D1Trap-BearOnly)."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict
 
@@ -26,6 +36,37 @@ from data_layer.base_feeder import EventBus
 from execution_bridge.straddle_bridge import _resolve_option_symbol
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FVGOrderFillEvent:
+    """Published by FVGExecutionBridge to Topic.FVG_ORDER_FILL after every
+    order attempt (paper and live, success and failure). Field shape mirrors
+    D1TrapFillEvent (execution_bridge/d1_trap_bridge.py) exactly -- same
+    proven confirm-then-finalize contract, separate class per this
+    codebase's per-strategy-event convention (CascadeFillEvent/
+    StraddleFillEvent/D1TrapFillEvent are likewise separate classes despite
+    near-identical shape)."""
+    action:      str    # "BUY" | "SELL"
+    underlying:  str
+    option_type: str    # "CE" | "PE"
+    strike:      int
+    fill_price:  float
+    qty:         int
+    client_id:   str
+    binding_id:  str
+    event_id:    str
+    paper_mode:  bool = True
+    symbol:      str = ""
+    timestamp:   datetime = field(default_factory=lambda: datetime.now(IST))
+    # True when a LIVE BUY failed to route (no route/no broker) -- the engine
+    # must discard its optimistic position rather than manage a phantom one.
+    entry_aborted:  bool = False
+    routing_failed: bool = False
+    # True when a LIVE SELL (exit) could not be routed -- the engine must
+    # leave the position exactly as it was (still open, still persisted)
+    # rather than believe an unrouted close actually happened.
+    exit_failed: bool = False
 
 
 class _FVGTradeLogger:
@@ -118,6 +159,12 @@ class FVGExecutionBridge:
                 "FVGExecutionBridge: %s %s — [%s/%s] terminal not connected, no route.",
                 ev.action, ev.underlying, ev.client_id, ev.binding_id,
             )
+            # SELL (EXIT) must abort too, not just silently drop -- engine.py's
+            # _open_position/_square_off optimistically dispatch and AWAIT a
+            # FVGOrderFillEvent before mutating/persisting self._position; a
+            # silent return here (no fill event at all) leaves that wait
+            # hanging until its own timeout instead of failing loud immediately.
+            await self._abort(ev, routing_failed=True)
             return
 
         # EXIT must always route — gate only ENTRY on the shared can_trade() gate
@@ -130,6 +177,7 @@ class FVGExecutionBridge:
                     "FVGExecutionBridge: BUY %s — [%s/%s] can_trade() gate closed.",
                     ev.underlying, ev.client_id, ev.binding_id,
                 )
+                await self._abort(ev, routing_failed=True)
                 return
 
         mode = live_binding.get("trading_mode", "paper") or "paper"
@@ -159,10 +207,33 @@ class FVGExecutionBridge:
         if broker is None:
             # Do NOT call _paper_fill here -- that would fabricate a fill the
             # engine would treat as real. resolve_broker_or_alert already logged
-            # CRITICAL and published SYSTEM_EVENT; the order is simply dropped.
+            # CRITICAL and published SYSTEM_EVENT; abort loudly instead of just
+            # dropping the order (the engine is waiting/relying on this to
+            # revert or not-finalize).
+            await self._abort(ev, routing_failed=True)
             return
 
         await self._live_fill(ev, broker)
+
+    async def _abort(self, ev, routing_failed: bool = False) -> None:
+        """Convert a routing failure into a fill-shaped event instead of silence.
+        Mirrors execution_bridge/cascade_bridge.py's _abort() / d1_trap_bridge.py's
+        _abort() exactly, adapted to FVGOrderEvent's field names."""
+        await self._bus.publish(Topic.FVG_ORDER_FILL, FVGOrderFillEvent(
+            action=ev.action, underlying=ev.underlying,
+            option_type=getattr(ev, "option_type", "") or "",
+            strike=int(getattr(ev, "strike", 0) or 0),
+            fill_price=0.0, qty=int(getattr(ev, "quantity", 0) or 0),
+            client_id=ev.client_id, binding_id=ev.binding_id,
+            event_id=getattr(ev, "event_id", "") or "",
+            entry_aborted=(ev.action == "BUY"),
+            # SELL never gets a fabricated fill either -- engine.py's _on_fill
+            # leaves the position awaiting confirmation exactly as it was
+            # (still open, still persisted) on exit_failed=True, same as
+            # D1Trap-BearOnly's exit_failed and SellStraddle's exit_aborted.
+            exit_failed=(ev.action == "SELL"),
+            routing_failed=routing_failed,
+        ))
 
     # ── paper ─────────────────────────────────────────────────────────────────
 
@@ -183,6 +254,12 @@ class FVGExecutionBridge:
             f"exp={ev.expiry} qty={ev.quantity} spot={fill_price:.2f} reason={ev.reason}",
         )
         self._record_history(ev, fill_price, paper=True)
+        await self._bus.publish(Topic.FVG_ORDER_FILL, FVGOrderFillEvent(
+            action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
+            strike=int(ev.strike or 0), fill_price=fill_price, qty=int(ev.quantity or 0),
+            client_id=ev.client_id, binding_id=ev.binding_id,
+            event_id=getattr(ev, "event_id", "") or "", paper_mode=True,
+        ))
 
     # ── live ──────────────────────────────────────────────────────────────────
 
@@ -218,22 +295,21 @@ class FVGExecutionBridge:
             order_id = await broker.place_order(req)
             fill = await broker.get_order_status(str(order_id))
             avg = float(getattr(fill, "avg_price", 0.0) or 0.0)
-            if avg <= 0:
-                avg = ev.entry_price
-            logger.info(
-                "[LIVE] FVG %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
-                ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-                ev.quantity, avg, order_id, ev.client_id, ev.binding_id,
-            )
-            self._trade_log.log(
-                ev.client_id, ev.binding_id,
-                f"[LIVE] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
-                f"exp={ev.expiry} qty={ev.quantity} @ {avg:.2f} symbol={symbol} "
-                f"order_id={order_id} reason={ev.reason}",
-            )
+            if avg > 0:
+                logger.info(
+                    "[LIVE] FVG %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
+                    ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
+                    ev.quantity, avg, order_id, ev.client_id, ev.binding_id,
+                )
+                self._trade_log.log(
+                    ev.client_id, ev.binding_id,
+                    f"[LIVE] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
+                    f"exp={ev.expiry} qty={ev.quantity} @ {avg:.2f} symbol={symbol} "
+                    f"order_id={order_id} reason={ev.reason}",
+                )
         except Exception as exc:
             logger.error(
-                "[LIVE] FVG %s %s %s%d order FAILED: %s — falling back to spot price.",
+                "[LIVE] FVG %s %s %s%d order FAILED: %s.",
                 ev.action, ev.underlying, ev.option_type, ev.strike, exc,
             )
             self._trade_log.log(
@@ -241,9 +317,34 @@ class FVGExecutionBridge:
                 f"LIVE {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
                 f"FAILED: {exc}",
             )
-            avg = ev.entry_price
+            avg = 0.0
+
+        # No confirmed fill price -- the order did not actually execute (rejected,
+        # zero-fill, or the broker call raised an exception). Previously this fell
+        # back to ev.entry_price and reported success regardless -- a rejected/
+        # failed EXIT would silently look like a real close (2026-08-05 fix, the
+        # same class of bug already fixed for SellStraddle/V4Cascade/D1Trap-
+        # BearOnly: fabricating a fill the engine would treat as a real exchange
+        # confirmation). Abort instead of faking it; engine.py's _square_off/
+        # _open_position leave the position exactly as it was awaiting
+        # confirmation.
+        if avg <= 0:
+            logger.error(
+                "[LIVE] FVG %s %s %s%d — NO confirmed fill, %s NOT reported as a "
+                "fill (no phantom position/close). client=%s/%s",
+                ev.action, ev.underlying, ev.option_type, ev.strike,
+                "entry" if ev.action == "BUY" else "exit", ev.client_id, ev.binding_id,
+            )
+            await self._abort(ev, routing_failed=False)
+            return
 
         self._record_history(ev, avg, paper=False)
+        await self._bus.publish(Topic.FVG_ORDER_FILL, FVGOrderFillEvent(
+            action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
+            strike=int(ev.strike or 0), fill_price=avg, qty=int(ev.quantity or 0),
+            client_id=ev.client_id, binding_id=ev.binding_id,
+            event_id=getattr(ev, "event_id", "") or "", paper_mode=False, symbol=symbol,
+        ))
 
     def _resolve_symbol(self, ev, broker) -> str:
         if not ev.expiry or not ev.strike or not ev.option_type:
