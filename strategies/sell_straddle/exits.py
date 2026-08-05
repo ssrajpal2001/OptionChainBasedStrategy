@@ -406,12 +406,35 @@ class ExitMixin:
             return
 
         # POST-RESTORE WARM-UP GUARD
+        # 2026-08-05 incident: the old 20s fallback fired while CE's leg still hadn't
+        # received a single live tick since restart (took 82s in the observed case) --
+        # every exit check (Day%/ITMgate/etc.) then ran against CE's stale, frozen
+        # restored/entry price for ~60s before a real tick corrected it. The eventual
+        # ITM-pair-gate close that day used numbers that turned out correct once the
+        # real tick landed, but that was luck, not a guarantee -- a threshold could just
+        # as easily have been crossed USING the stale price. Ceiling raised to match
+        # this codebase's existing ATP-staleness convention (vwap_rise's
+        # pair_atp_fresh/vwap_stale_sec, default 90s) instead of an arbitrary 20s, and a
+        # fallback release now logs CRITICAL (not silent info) so a still-stale leg at
+        # release time is loud, not hidden.
         if self._post_restore_warmup:
-            if (self._ce_ltp_fresh and self._pe_ltp_fresh) or (_t.monotonic() - self._post_restore_at > 20.0):
+            _both_fresh = self._ce_ltp_fresh and self._pe_ltp_fresh
+            _elapsed = _t.monotonic() - self._post_restore_at
+            if _both_fresh or _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC:
                 self._post_restore_warmup = False
-                logger.info("SellStraddle[%s]: post-restore warm-up complete — exits armed "
-                            "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
-                            self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
+                if _both_fresh:
+                    logger.info("SellStraddle[%s]: post-restore warm-up complete — exits armed "
+                                "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
+                                self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
+                else:
+                    logger.critical(
+                        "SellStraddle[%s]: post-restore warm-up TIMED OUT after %.0fs with "
+                        "CE_fresh=%s PE_fresh=%s — arming exits anyway using a possibly-STALE "
+                        "leg price (CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts). A stale leg price can "
+                        "drive an incorrect exit decision until its first real tick arrives.",
+                        self._underlying, _elapsed, self._ce_ltp_fresh, self._pe_ltp_fresh,
+                        pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl,
+                    )
             else:
                 return
 
@@ -595,7 +618,7 @@ class ExitMixin:
         pos.realized_pnl = pos.unrealized_pnl
         pos.status = "closed"
         self._session_realized_pnl_pts += pos.realized_pnl
-        self._itm_roll_protection = None
+        self._itm_roll_protection = {}
         _cid = getattr(self, "_client_id", "") or "-"
         _bid = getattr(self, "_binding_id", "") or "-"
         logger.info(
@@ -611,12 +634,19 @@ class ExitMixin:
     # timeout in rolling.py, with extra headroom for the exit executor's own market fallback.
     _CLOSE_CONFIRM_TIMEOUT_SEC = 15.0
 
+    # Max time to hold ALL exit checks after a restart-restore before arming them anyway
+    # even if one leg still hasn't received a live tick (see POST-RESTORE WARM-UP GUARD
+    # above). 2026-08-05: a real restart took CE 82s to get its first tick -- the prior
+    # 20s ceiling let exits run on a stale leg price for ~60s of that. Matches this
+    # codebase's existing ATP-staleness convention (vwap_rise's default vwap_stale_sec).
+    _POST_RESTORE_WARMUP_MAX_SEC = 90.0
+
     async def _close_position(self, reason: str) -> None:
         if not self._position or getattr(self, "_close_in_progress", False):
             return
         self._close_in_progress = True
         self._roll_in_progress = False
-        self._itm_roll_protection = None
+        self._itm_roll_protection = {}
         try:
             from execution_bridge.straddle_bridge import StraddleOrderEvent
             pos = self._position

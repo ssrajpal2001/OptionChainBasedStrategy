@@ -287,11 +287,16 @@ class RollingMixin:
         # worth 70% of the ₹ profit just booked by closing the good leg. Scoped strictly
         # to this reason string -- standard ltp_decay/ratio/vwap_rise/scalable-TSL rolls
         # never touch _itm_roll_protection.
+        # Keyed by side (roll_side) -- arming/clearing this side's budget must never
+        # touch the other side's still-active budget (e.g. CE rolls again while PE's
+        # protection from an earlier rollover is still armed and running).
         if reason == "itm_pair_gate_profit_rollover":
+            if not isinstance(getattr(self, "_itm_roll_protection", None), dict):
+                self._itm_roll_protection = {}
             booked_pnl_rs = self._pnl_rs(float(getattr(close_ev, "realized_pnl", 0.0) or 0.0))
             if booked_pnl_rs > 0:
                 protect_rs = 0.70 * booked_pnl_rs
-                self._itm_roll_protection = {
+                self._itm_roll_protection[roll_side] = {
                     "protect_rs": protect_rs,
                     "new_side": roll_side,
                     "new_strike": int(new_strike),
@@ -301,12 +306,12 @@ class RollingMixin:
                 }
                 self._clog.info(
                     "SellStraddle[%s]: ITM-ROLL PROTECTION ARMED — %s%d budget=₹%.0f "
-                    "(70%% of ₹%.0f booked on closed %s%d).",
+                    "(70%% of ₹%.0f booked on closed %s%d). Other side's budget (if any) unaffected.",
                     self._underlying, roll_side, int(new_strike), protect_rs,
                     booked_pnl_rs, roll_side, orig_strike,
                 )
             else:
-                self._itm_roll_protection = None
+                self._itm_roll_protection.pop(roll_side, None)
 
         self._persist()
         await self._check_itm_pair_gate(now)
@@ -491,28 +496,43 @@ class RollingMixin:
             )
 
     async def _check_itm_roll_protection(self, now: datetime) -> None:
-        """Tick-level protective stop for the leg just opened by an ITM-pair-gate rollover
-        (part 2 of the 70% rule). Must run unconditionally every cycle, same cadence as
-        _check_itm_pair_gate -- it cheaply no-ops when _itm_roll_protection is unset.
+        """Tick-level protective stop for the leg(s) just opened by an ITM-pair-gate
+        rollover (part 2 of the 70% rule). Must run unconditionally every cycle, same
+        cadence as _check_itm_pair_gate -- it cheaply no-ops when _itm_roll_protection
+        is empty.
 
         Scoped strictly to the itm_pair_gate_profit_rollover path: standard ltp_decay /
         ratio / vwap_rise / scalable-TSL rolls never set _itm_roll_protection, so this
         check never fires for them.
+
+        Tracked independently per side (CE/PE) -- roll_side is decided dynamically each
+        time a rollover fires (whichever leg currently has the better P&L), so CE and PE
+        can each roll via this gate at different times while the OTHER side's budget is
+        still armed and running. Checking/clearing one side's entry must never touch the
+        other side's.
         """
-        prot = getattr(self, "_itm_roll_protection", None)
-        if not prot:
+        prot_map = getattr(self, "_itm_roll_protection", None)
+        if not isinstance(prot_map, dict):
+            self._itm_roll_protection = {}
             return
+        if not prot_map:
+            return
+        for side in ("CE", "PE"):
+            prot = prot_map.get(side)
+            if prot:
+                await self._check_itm_roll_protection_side(side, prot, now)
+
+    async def _check_itm_roll_protection_side(self, new_side: str, prot: dict, now: datetime) -> None:
         pos = self._position
         if not pos or pos.status != "open":
-            self._itm_roll_protection = None
+            self._itm_roll_protection.pop(new_side, None)
             return
 
-        new_side = prot["new_side"]
         leg = pos.ce_leg if new_side == "CE" else pos.pe_leg
         if int(leg.strike) != int(prot["new_strike"]):
             # Position moved on since the roll (another roll / manual change) —
             # this protection budget no longer applies to whatever leg is open now.
-            self._itm_roll_protection = None
+            self._itm_roll_protection.pop(new_side, None)
             return
 
         pnl_pts = float(leg.entry_price or 0.0) - float(getattr(leg, "ltp", 0.0) or 0.0)
@@ -526,7 +546,7 @@ class RollingMixin:
             "(70%% of profit booked on the prior roll) — closing.",
             self._underlying, new_side, int(leg.strike), running_loss_rs, protect_rs,
         )
-        self._itm_roll_protection = None
+        self._itm_roll_protection.pop(new_side, None)
         stopped_strike = int(leg.strike)
         kept_side = prot["kept_side"]
         kept_strike = int(prot["kept_strike"])
@@ -539,7 +559,7 @@ class RollingMixin:
                 "leaving position as-is; protection budget stays armed for next tick.",
                 self._underlying, new_side,
             )
-            self._itm_roll_protection = prot
+            self._itm_roll_protection[new_side] = prot
             return
         pos = self._position
         if not pos or pos.status != "open":

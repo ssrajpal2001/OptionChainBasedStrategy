@@ -329,8 +329,11 @@ class ConfigMixin:
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
         self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr
         self._itm_pair_gate_min_strike_gap = cfg.itm_pair_gate_min_strike_gap
-        if not hasattr(self, "_itm_roll_protection"):
-            self._itm_roll_protection = None
+        if not hasattr(self, "_itm_roll_protection") or not isinstance(self._itm_roll_protection, dict):
+            # Keyed by side ("CE"/"PE") -- each side's 70%-of-booked-profit budget is
+            # tracked independently. A rollover on one side must never wipe out a
+            # still-active budget already armed on the other side.
+            self._itm_roll_protection = {}
 
         self._same_day_expiry_enabled = cfg.same_day_expiry_enabled
 
