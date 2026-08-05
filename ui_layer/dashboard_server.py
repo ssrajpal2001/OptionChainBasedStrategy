@@ -1035,8 +1035,7 @@ class DashboardServer:
             raise HTTPException(status_code=400, detail="role must be 'admin' or 'client'.")
 
         @app.post("/api/admin/change-password", tags=["Admin"])
-        async def admin_change_password(request: Request, body: _ChangeAdminPasswordSchema):
-            _require_admin(request)
+        async def admin_change_password(body: _ChangeAdminPasswordSchema, _: dict = Depends(_require_admin)):
             current = body.current_password
             new_pwd = body.new_password
             if not current or not new_pwd:
@@ -1064,8 +1063,7 @@ class DashboardServer:
             return {"ok": True}
 
         @app.post("/api/admin/client/{client_id}/reset-token", tags=["Admin"])
-        async def generate_client_reset_token(client_id: str, request: Request):
-            _require_admin(request)
+        async def generate_client_reset_token(client_id: str, _: dict = Depends(_require_admin)):
             if not _srv._client_db:
                 raise HTTPException(status_code=503, detail="DB not available.")
             token = await _srv._client_db.create_reset_token("client", client_id)
