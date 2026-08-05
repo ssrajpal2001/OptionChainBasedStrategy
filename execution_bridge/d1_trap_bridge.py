@@ -31,6 +31,44 @@ from execution_bridge.straddle_bridge import _resolve_option_symbol
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class D1TrapFillEvent:
+    """Published by D1TrapExecutionBridge to Topic.D1_TRAP_ORDER_FILL after every
+    order attempt (paper and live, success and failure). Field shape mirrors
+    CascadeFillEvent (execution_bridge/cascade_bridge.py) exactly -- same proven
+    confirm-then-finalize contract, separate class per this codebase's
+    per-strategy-event convention.
+
+    2026-08-05: previously this bridge never published to D1_TRAP_ORDER_FILL at
+    all -- bear_only_book.py's _enter_leg/_square_off_leg mutated (and persisted)
+    self._positions before the order was even dispatched, so nothing ever told
+    the book whether a BUY/SELL actually reached the broker. A broker-unreachable
+    EXIT silently looked like a successful close while the leg was still open at
+    the broker."""
+    action:      str    # "BUY" | "SELL"
+    underlying:  str
+    option_type: str    # "CE" | "PE"
+    strike:      int
+    fill_price:  float
+    qty:         int
+    client_id:   str
+    binding_id:  str
+    event_id:    str
+    paper_mode:  bool = True
+    symbol:      str = ""
+    timestamp:   datetime = field(default_factory=lambda: datetime.now(IST))
+    # True when a LIVE BUY failed to route (no route/no broker) -- the book must
+    # discard its optimistic leg rather than manage a phantom position.
+    entry_aborted:  bool = False
+    routing_failed: bool = False
+    # True when a LIVE SELL (exit) could not be routed -- the book must leave the
+    # leg exactly as it was (still open, still persisted) rather than believe an
+    # unrouted close actually happened. This is the field cascade_bridge.py's
+    # _abort()/exit_failed and sell_straddle's exit_aborted solve the exact same
+    # problem for.
+    exit_failed: bool = False
+
+
 class _D1TrapTradeLogger:
     def __init__(self, log_dir: str = "logs/trades") -> None:
         os.makedirs(log_dir, exist_ok=True)
@@ -120,6 +158,14 @@ class D1TrapExecutionBridge:
                 "D1TrapExecutionBridge: %s %s — [%s/%s] terminal not connected, no route.",
                 ev.action, ev.underlying, ev.client_id, ev.binding_id,
             )
+            # SELL (EXIT) must abort too, not just silently drop -- bear_only_book.py
+            # optimistically appends a leg / awaits a fill for a leg it already
+            # decided to close, and relies on a D1_TRAP_ORDER_FILL abort to revert/
+            # not-finalize that if the order never reached the broker. Silently
+            # returning here (no fill event at all) means the book hangs waiting
+            # for a confirmation that will never come (BUY) or -- pre-confirm-then-
+            # finalize -- believed a leg closed that never left the exchange (SELL).
+            await self._abort(ev, routing_failed=True)
             return
 
         # EXIT must always route — gate only ENTRY on the shared can_trade() gate
@@ -136,6 +182,7 @@ class D1TrapExecutionBridge:
                     "D1TrapExecutionBridge: BUY %s — [%s/%s] can_trade() gate closed "
                     "(strategy=%s).", ev.underlying, ev.client_id, ev.binding_id, ev.strategy,
                 )
+                await self._abort(ev, routing_failed=True)
                 return
 
         mode = live_binding.get("trading_mode", "paper") or "paper"
@@ -165,10 +212,32 @@ class D1TrapExecutionBridge:
         if broker is None:
             # Do NOT call _paper_fill here -- that would fabricate a fill the book
             # would treat as real. resolve_broker_or_alert already logged CRITICAL
-            # and published SYSTEM_EVENT; the order is simply dropped.
+            # and published SYSTEM_EVENT; abort loudly instead of just dropping the
+            # order (the book is waiting/relying on this to revert or not-finalize).
+            await self._abort(ev, routing_failed=True)
             return
 
         await self._live_fill(ev, broker)
+
+    async def _abort(self, ev, routing_failed: bool = False) -> None:
+        """Convert a routing failure into a fill-shaped event instead of silence.
+        Mirrors execution_bridge/cascade_bridge.py's _abort() exactly, adapted to
+        D1TrapOrderEvent's field names."""
+        await self._bus.publish(Topic.D1_TRAP_ORDER_FILL, D1TrapFillEvent(
+            action=ev.action, underlying=ev.underlying,
+            option_type=getattr(ev, "option_type", "") or "",
+            strike=int(getattr(ev, "strike", 0) or 0),
+            fill_price=0.0, qty=int(getattr(ev, "quantity", 0) or 0),
+            client_id=ev.client_id, binding_id=ev.binding_id,
+            event_id=getattr(ev, "event_id", "") or "",
+            entry_aborted=(ev.action == "BUY"),
+            # SELL never gets a fabricated fill either -- bear_only_book.py's
+            # _on_fill leaves a leg awaiting confirmation exactly as it was (still
+            # open, still persisted) on exit_failed=True, same as SellStraddle's
+            # exit_aborted and V4Cascade's exit_failed.
+            exit_failed=(ev.action == "SELL"),
+            routing_failed=routing_failed,
+        ))
 
     # ── paper ─────────────────────────────────────────────────────────────────
 
@@ -191,6 +260,12 @@ class D1TrapExecutionBridge:
             f"exp={ev.expiry} qty={ev.quantity} spot={fill_price:.2f} reason={ev.reason}",
         )
         self._record_history(ev, fill_price, paper=True)
+        await self._bus.publish(Topic.D1_TRAP_ORDER_FILL, D1TrapFillEvent(
+            action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
+            strike=int(ev.strike or 0), fill_price=fill_price, qty=int(ev.quantity or 0),
+            client_id=ev.client_id, binding_id=ev.binding_id,
+            event_id=getattr(ev, "event_id", "") or "", paper_mode=True,
+        ))
 
     # ── live ──────────────────────────────────────────────────────────────────
 
@@ -226,22 +301,21 @@ class D1TrapExecutionBridge:
             order_id = await broker.place_order(req)
             fill = await broker.get_order_status(str(order_id))
             avg = float(getattr(fill, "avg_price", 0.0) or 0.0)
-            if avg <= 0:
-                avg = ev.entry_price
-            logger.info(
-                "[LIVE] D1Trap %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
-                ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-                ev.quantity, avg, order_id, ev.client_id, ev.binding_id,
-            )
-            self._trade_log.log(
-                ev.client_id, ev.binding_id,
-                f"[LIVE] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
-                f"exp={ev.expiry} qty={ev.quantity} @ {avg:.2f} symbol={symbol} "
-                f"order_id={order_id} reason={ev.reason}",
-            )
+            if avg > 0:
+                logger.info(
+                    "[LIVE] D1Trap %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
+                    ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
+                    ev.quantity, avg, order_id, ev.client_id, ev.binding_id,
+                )
+                self._trade_log.log(
+                    ev.client_id, ev.binding_id,
+                    f"[LIVE] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
+                    f"exp={ev.expiry} qty={ev.quantity} @ {avg:.2f} symbol={symbol} "
+                    f"order_id={order_id} reason={ev.reason}",
+                )
         except Exception as exc:
             logger.error(
-                "[LIVE] D1Trap %s %s %s%d order FAILED: %s — falling back to spot price.",
+                "[LIVE] D1Trap %s %s %s%d order FAILED: %s.",
                 ev.action, ev.underlying, ev.option_type, ev.strike, exc,
             )
             self._trade_log.log(
@@ -249,9 +323,33 @@ class D1TrapExecutionBridge:
                 f"LIVE {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
                 f"FAILED: {exc}",
             )
-            avg = ev.entry_price
+            avg = 0.0
+
+        # No confirmed fill price -- the order did not actually execute (rejected,
+        # zero-fill, or the broker call raised an exception). Previously this fell
+        # back to ev.entry_price and reported success regardless -- a rejected/
+        # failed EXIT would silently look like a real close (2026-08-05 fix, the
+        # exact class of bug already fixed for SellStraddle/V4Cascade: fabricating
+        # a fill the book would treat as a real exchange confirmation). Abort
+        # instead of faking it; bear_only_book.py's _on_fill leaves the leg
+        # exactly as it was awaiting confirmation.
+        if avg <= 0:
+            logger.error(
+                "[LIVE] D1Trap %s %s %s%d — NO confirmed fill, %s NOT reported as a "
+                "fill (no phantom position/close). client=%s/%s",
+                ev.action, ev.underlying, ev.option_type, ev.strike,
+                "entry" if ev.action == "BUY" else "exit", ev.client_id, ev.binding_id,
+            )
+            await self._abort(ev, routing_failed=False)
+            return
 
         self._record_history(ev, avg, paper=False)
+        await self._bus.publish(Topic.D1_TRAP_ORDER_FILL, D1TrapFillEvent(
+            action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
+            strike=int(ev.strike or 0), fill_price=avg, qty=int(ev.quantity or 0),
+            client_id=ev.client_id, binding_id=ev.binding_id,
+            event_id=getattr(ev, "event_id", "") or "", paper_mode=False, symbol=symbol,
+        ))
 
     def _resolve_symbol(self, ev, broker) -> str:
         if not ev.expiry or not ev.strike or not ev.option_type:

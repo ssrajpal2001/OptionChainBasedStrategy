@@ -558,6 +558,17 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._rest_open_attempted = False   # 2026-07-31 fix: REST-open must always get
                                              # first attempt before the live-tick fallback
                                              # is allowed to fire -- see _startup_open_fetch.
+        # 2026-08-05: confirm-then-finalize fill-confirmation feedback loop (mirrors
+        # SellStraddle's _roll_close_waiters/_roll_close_results, exits.py/engine.py).
+        # _square_off_leg dispatches an EXIT and WAITS for the bridge's
+        # D1TrapFillEvent to confirm it before removing the leg from self._positions
+        # / persisting the close -- a broker-unreachable EXIT must leave the leg
+        # open, not silently believed closed. _enter_leg still mutates optimistically
+        # (same as SellStraddle's ENTRY) but registers its event_id on the leg so an
+        # entry_aborted fill can revert (discard) it reactively.
+        self._event_counter = 0
+        self._fill_waiters: Dict[str, asyncio.Event] = {}
+        self._fill_results: Dict[str, object] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -566,6 +577,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._subscribe(Topic.INDEX_TICK)
         self._subscribe(Topic.OPTION_TICK)
         self._subscribe(Topic.MATRIX_SNAPSHOT)
+        self._subscribe(Topic.D1_TRAP_ORDER_FILL)
         self._tasks.append(asyncio.create_task(
             self._index_tick_loop(), name=f"beartrap_idx_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
@@ -576,6 +588,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             self._eod_loop(), name=f"beartrap_eod_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
             self._startup_open_fetch(), name=f"beartrap_openfetch_{self._underlying}"))
+        self._tasks.append(asyncio.create_task(
+            self._fill_loop(), name=f"beartrap_fill_{self._underlying}"))
 
     async def _matrix_snapshot_loop(self) -> None:
         """Track the latest OI ChainSnapshot for this underlying -- MATRIX_SNAPSHOT is
@@ -591,6 +605,64 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             if not isinstance(ev, ChainSnapshot) or ev.underlying != self._underlying:
                 continue
             self._latest_chain_snapshot = ev
+
+    async def _fill_loop(self) -> None:
+        """Consume Topic.D1_TRAP_ORDER_FILL (D1TrapExecutionBridge's confirm/abort
+        events) -- the other half of the confirm-then-finalize round trip started
+        by _enter_leg/_square_off_leg. Mirrors SellStraddle's engine.py _fill_loop
+        shape."""
+        from execution_bridge.d1_trap_bridge import D1TrapFillEvent
+        q = self._loop_queues.get(Topic.D1_TRAP_ORDER_FILL)
+        if q is None:
+            return
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            if not isinstance(ev, D1TrapFillEvent):
+                continue
+            if (ev.client_id != self._client_id or ev.binding_id != self._binding_id
+                    or ev.underlying != self._underlying):
+                continue
+            try:
+                self._on_fill(ev)
+            except Exception:
+                logger.exception("BearTrap[%s]: _on_fill error (recovered, fill loop alive).",
+                                  self._underlying)
+
+    def _on_fill(self, fill) -> None:
+        """BUY: reactively revert the optimistic leg _enter_leg already appended (and
+        persisted) if the bridge reports entry_aborted -- same shape as SellStraddle's
+        _on_fill ENTRY-abort branch. SELL: record the fill result and wake whichever
+        _square_off_leg call is awaiting this event_id -- confirm-then-finalize does
+        the actual finalizing there, not here (mirrors SellStraddle's EXIT branch)."""
+        eid = getattr(fill, "event_id", "")
+        if fill.action == "BUY":
+            if getattr(fill, "entry_aborted", False):
+                before = len(self._positions)
+                self._positions = [p for p in self._positions if p.get("_event_id") != eid]
+                if len(self._positions) != before:
+                    self._persist_positions()
+                    logger.critical(
+                        "BearTrap[%s]: ENTRY ABORTED (broker unavailable/routing failed, "
+                        "event_id=%s) -- discarding optimistic leg; book has no phantom "
+                        "position for it.", self._underlying, eid,
+                    )
+            # Confirmed ENTRY needs no further action here -- the leg already carries
+            # its entry_price from the local computation made at decision time.
+            return
+        if fill.action == "SELL":
+            if eid:
+                self._fill_results[eid] = fill
+            waiter = self._fill_waiters.get(eid)
+            if waiter is not None:
+                try:
+                    waiter.set()
+                except RuntimeError:
+                    pass
 
     async def _startup_open_fetch(self) -> None:
         """Get TODAY's real 09:15 open via REST the moment the book starts, regardless
@@ -1425,11 +1497,24 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             tsl_step_pct=step_pct, tsl_step_lock_pct=step_lock,
             order_reason=order_reason,
         )
+        # 2026-08-05: this still mutates (appends) + persists BEFORE the order is
+        # dispatched/confirmed -- same optimistic shape SellStraddle's ENTRY uses,
+        # NOT the blocking confirm-then-finalize shape EXIT uses below in
+        # _square_off_leg. That's intentional here too: entries fire from sync tick-
+        # processing call sites that can't await a broker round trip mid-bar-scan
+        # without a much larger refactor. Instead, the leg is tagged with this
+        # event_id so a later entry_aborted fill (bridge couldn't route the BUY) can
+        # reactively discard it in _on_fill -- exactly mirroring SellStraddle's
+        # engine.py _on_fill ENTRY-abort branch (self._position = None on abort).
+        self._event_counter += 1
+        eid = f"{self._underlying}_{side}{pos['strike']}_ENTRY_{self._event_counter}"
+        pos["_event_id"] = eid
         self._positions.append(pos)
         self._persist_positions()
-        logger.info("BearTrap[%s]: ENTER BUY %s %d [%s] entry=%.2f sl=%.2f (risk=Rs%.0f/lot) reason=%s",
+        logger.info("BearTrap[%s]: ENTER BUY %s %d [%s] entry=%.2f sl=%.2f (risk=Rs%.0f/lot) reason=%s "
+                    "(awaiting broker confirmation, event_id=%s)",
                     self._underlying, side, pos["strike"], tranche, entry_price, sl_final,
-                    (entry_price - sl_final) * self._lot_size, order_reason)
+                    (entry_price - sl_final) * self._lot_size, order_reason, eid)
 
         expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
         ev = D1TrapOrderEvent(
@@ -1439,7 +1524,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             trigger_ts=datetime.now(IST), reason=order_reason,
             underlying=self._underlying, option_type=side,
             strike=pos["strike"], expiry=expiry,
-            product_type=self._product_type,
+            product_type=self._product_type, event_id=eid,
         )
         if self._bus is not None:
             asyncio.create_task(self._bus.publish(Topic.D1_TRAP_ORDER_REQUEST, ev))
@@ -1507,6 +1592,11 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         for pos in list(self._positions):
             if pos["side"] != side:
                 continue
+            if pos.get("_closing"):
+                # A confirm-then-finalize EXIT round trip for this leg is already in
+                # flight (it stays in self._positions, unconfirmed, until the bridge
+                # replies) -- don't dispatch a second EXIT for the same leg.
+                continue
             entry = pos["entry_price"]
             profit_pct = (ltp - entry) / entry
 
@@ -1566,32 +1656,95 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             now = datetime.now(IST)
             if now.time() >= self._squareoff_time and not self._day_done:
                 for pos in list(self._positions):
+                    if pos.get("_closing"):
+                        continue
                     series = self._series.get(pos["side"])
                     ltp = series.last_ltp if series else pos["entry_price"]
                     await self._square_off_leg(pos, "eod", ltp)
                 self._day_done = True
 
+    # Max time to wait for the bridge to confirm (or abort) an EXIT before giving up
+    # and leaving the leg open for a later retry. Mirrors SellStraddle's
+    # _CLOSE_CONFIRM_TIMEOUT_SEC (exits.py) / V4Cascade's equivalent close timeout.
+    _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
+
     async def _square_off_leg(self, pos: dict, reason: str, exit_price: float) -> None:
+        """Confirm-then-finalize EXIT: dispatch the order, WAIT for the bridge's
+        D1TrapFillEvent to confirm a real fill (or an exit_failed abort) before
+        removing the leg from self._positions / persisting the close. Mirrors
+        strategies/sell_straddle/exits.py's _close_position/_close_leg exactly.
+
+        2026-08-05 fix: the old code removed the leg from self._positions and
+        persisted that removal BEFORE the order was even dispatched -- a broker
+        outage during a live EXIT silently discarded a still-open real position
+        (same root class of bug as the 2026-08-04 SellStraddle incident this
+        mirrors the fix for)."""
         if not any(p is pos for p in self._positions):
             return   # already closed by a concurrent check (e.g. tsl + eod racing)
-        self._positions = [p for p in self._positions if p is not pos]
-        self._persist_positions()
-        self._maybe_rearm_zone(pos, reason)
-        expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
-        ev = D1TrapOrderEvent(
-            client_id=self._client_id, binding_id=self._binding_id,
-            strategy="d1_trap_bear_only", direction="LONG", action="SELL",
-            quantity=pos["qty"], entry_price=pos["entry_price"], sl_price=pos["sl"],
-            tsl_level=pos["sl"], trigger_ts=datetime.now(IST), reason=reason,
-            underlying=self._underlying, option_type=pos["side"], strike=pos["strike"],
-            expiry=expiry, product_type=self._product_type, exit_price=exit_price,
-            entry_reason=pos.get("order_reason", "") or "", entry_ts=pos.get("entry_ts"),
-        )
-        if self._bus is not None:
-            await self._bus.publish(Topic.D1_TRAP_ORDER_REQUEST, ev)
-        logger.info("BearTrap[%s]: SELL %s %d [%s] reason=%s exit=%.2f",
+        if pos.get("_closing"):
+            return   # a confirm-then-finalize round trip for this leg is already in flight
+        pos["_closing"] = True
+        try:
+            self._event_counter += 1
+            eid = f"{self._underlying}_{pos['side']}{pos['strike']}_EXIT_{self._event_counter}"
+            expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
+            ev = D1TrapOrderEvent(
+                client_id=self._client_id, binding_id=self._binding_id,
+                strategy="d1_trap_bear_only", direction="LONG", action="SELL",
+                quantity=pos["qty"], entry_price=pos["entry_price"], sl_price=pos["sl"],
+                tsl_level=pos["sl"], trigger_ts=datetime.now(IST), reason=reason,
+                underlying=self._underlying, option_type=pos["side"], strike=pos["strike"],
+                expiry=expiry, product_type=self._product_type, exit_price=exit_price,
+                entry_reason=pos.get("order_reason", "") or "", entry_ts=pos.get("entry_ts"),
+                event_id=eid,
+            )
+            logger.info("BearTrap[%s]: SELL %s %d [%s] reason=%s exit=%.2f "
+                        "(awaiting broker confirmation, event_id=%s)",
+                        self._underlying, pos["side"], pos["strike"], pos.get("tranche", "single"),
+                        reason, exit_price, eid)
+
+            waiter = asyncio.Event()
+            self._fill_waiters[eid] = waiter
+            try:
+                if self._bus is not None:
+                    await self._bus.publish(Topic.D1_TRAP_ORDER_REQUEST, ev)
+                try:
+                    await asyncio.wait_for(waiter.wait(), timeout=self._EXIT_CONFIRM_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    logger.critical(
+                        "BearTrap[%s]: EXIT %s%d [%s] fill NOT CONFIRMED within %.0fs "
+                        "(event_id=%s reason=%s) -- leg stays OPEN; will retry on a "
+                        "later tick/EOD pass. NOT removing from positions, NOT "
+                        "persisting close.",
+                        self._underlying, pos["side"], pos["strike"], pos.get("tranche", "single"),
+                        self._EXIT_CONFIRM_TIMEOUT_SEC, eid, reason,
+                    )
+                    return
+            finally:
+                self._fill_waiters.pop(eid, None)
+
+            fill = self._fill_results.pop(eid, None)
+            if fill is not None and getattr(fill, "exit_failed", False):
+                logger.critical(
+                    "BearTrap[%s]: EXIT %s%d [%s] ABORTED by bridge (broker "
+                    "unavailable, event_id=%s reason=%s) -- leg stays OPEN; will "
+                    "retry on a later tick/EOD pass. NOT removing from positions, "
+                    "NOT persisting close.",
                     self._underlying, pos["side"], pos["strike"], pos.get("tranche", "single"),
-                    reason, exit_price)
+                    eid, reason,
+                )
+                return
+
+            # ── Confirmed by the broker (or a paper sim fill) -- finalize ──────
+            self._positions = [p for p in self._positions if p is not pos]
+            self._persist_positions()
+            self._maybe_rearm_zone(pos, reason)
+            logger.info("BearTrap[%s]: SELL %s %d [%s] reason=%s exit=%.2f CONFIRMED "
+                        "(event_id=%s)",
+                        self._underlying, pos["side"], pos["strike"], pos.get("tranche", "single"),
+                        reason, exit_price, eid)
+        finally:
+            pos["_closing"] = False
 
     async def liquidate(self, reason: str = "kill_switch") -> None:
         for pos in list(self._positions):
@@ -1613,7 +1766,12 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         if self._positions:
             legs = []
             for pos in self._positions:
-                d = dict(pos)
+                # Drop transient in-memory-only bookkeeping (leading "_") -- e.g.
+                # "_event_id"/"_closing" from the confirm-then-finalize fill loop --
+                # so the on-disk format stays exactly what it was before that was
+                # added; these keys mean nothing across a restart (a fresh instance
+                # never has an in-flight waiter for an old event_id anyway).
+                d = {k: v for k, v in pos.items() if not k.startswith("_")}
                 d["entry_ts"] = pos["entry_ts"].isoformat() if pos.get("entry_ts") else None
                 d["zone_lock_ts"] = pos["zone_lock_ts"].isoformat() if pos.get("zone_lock_ts") else None
                 legs.append(d)

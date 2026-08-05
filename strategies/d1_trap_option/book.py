@@ -143,6 +143,10 @@ class D1TrapOrderEvent:
                               # string the bridge ever had access to.
     entry_ts: Optional[datetime] = None  # 2026-08-03: real entry timestamp, so the History
                               # ledger's open row shows the actual entry time, not blank.
+    event_id: str = ""       # 2026-08-05: correlates this request with the D1TrapFillEvent
+                              # the bridge publishes back on Topic.D1_TRAP_ORDER_FILL, so the
+                              # book can match a confirm/abort to the exact leg that dispatched
+                              # it (confirm-then-finalize, mirrors StraddleOrderEvent.event_id).
 
 
 # ── book ─────────────────────────────────────────────────────────────────────
