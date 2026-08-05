@@ -219,21 +219,11 @@ class V4CascadeExecutionBridge:
         # ALWAYS be allowed to route — a square-off/stop sets is_running=0
         # the instant after the EXIT publishes; gating the close would strand
         # the open leg on the exchange.
-        if ev.action == "ENTRY" and db is not None and hasattr(db, "get_deployments_sync"):
-            try:
-                deployments = db.get_deployments_sync(ev.client_id)
-            except Exception:
-                deployments = []
-            matching = [
-                d for d in deployments
-                if d.get("binding_id") == ev.binding_id
-                and d.get("strategy_name") == "v4_cascade"
-                and str(d.get("underlying", "")).upper() == ev.underlying.upper()
-                and int(d.get("is_running", 0) or 0) == 1
-            ]
-            if not matching:
-                logger.warning("V4CascadeExecutionBridge: %s %s — [%s/%s] no running v4_cascade "
-                               "deployment, no route.", ev.action, ev.underlying, ev.client_id, ev.binding_id)
+        if ev.action == "ENTRY" and db is not None:
+            from strategies.core.gate import can_trade
+            if not can_trade(ev.client_id, ev.binding_id, db, "v4_cascade", ev.underlying):
+                logger.warning("V4CascadeExecutionBridge: %s %s — [%s/%s] can_trade() gate closed, "
+                               "no route.", ev.action, ev.underlying, ev.client_id, ev.binding_id)
                 await self._abort(ev, routing_failed=True)
                 return
 

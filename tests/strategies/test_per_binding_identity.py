@@ -31,6 +31,7 @@ class _DB:
     def get_bindings_safe_sync(self, cid):
         return [{"binding_id": ("Z1" if cid == "C1" else "Z9"),
                  "terminal_connected": True,
+                 "engine_active": True,
                  "is_trade_enabled": True}]
     def get_deployments_sync(self, cid):
         return [{"strategy_name": "sell_straddle", "underlying": "NIFTY",

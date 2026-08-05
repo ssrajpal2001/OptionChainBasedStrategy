@@ -120,22 +120,14 @@ class FVGExecutionBridge:
             )
             return
 
-        # EXIT must always route — gate only ENTRY on is_running
-        if ev.action == "BUY" and db is not None and hasattr(db, "get_deployments_sync"):
-            try:
-                deployments = db.get_deployments_sync(ev.client_id)
-            except Exception:
-                deployments = []
-            matching = [
-                d for d in deployments
-                if d.get("binding_id") == ev.binding_id
-                and d.get("strategy_name") == "fvg"
-                and str(d.get("underlying", "")).upper() == ev.underlying.upper()
-                and int(d.get("is_running", 0) or 0) == 1
-            ]
-            if not matching:
+        # EXIT must always route — gate only ENTRY on the shared can_trade() gate
+        # (terminal_connected AND engine_active AND is_trade_enabled AND a running
+        # fvg deployment for this underlying on this binding).
+        if ev.action == "BUY" and db is not None:
+            from strategies.core.gate import can_trade
+            if not can_trade(ev.client_id, ev.binding_id, db, "fvg", ev.underlying):
                 logger.warning(
-                    "FVGExecutionBridge: BUY %s — [%s/%s] no running fvg deployment.",
+                    "FVGExecutionBridge: BUY %s — [%s/%s] can_trade() gate closed.",
                     ev.underlying, ev.client_id, ev.binding_id,
                 )
                 return

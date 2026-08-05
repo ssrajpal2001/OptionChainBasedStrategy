@@ -31,6 +31,8 @@ async def test_no_paper_fallback_when_broker_missing_in_live_mode(monkeypatch):
                 "binding_id": "zerodha",
                 "trading_mode": "live",
                 "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": True,
             }]
 
         def get_deployments_sync(self, client_id):
@@ -58,6 +60,7 @@ async def test_no_paper_fallback_when_broker_missing_in_live_mode(monkeypatch):
         action = "BUY"
         client_id = "gurmeet"
         binding_id = "zerodha"
+        strategy = "d1_trap_index"
         underlying = "NIFTY"
         option_type = "PE"
         strike = 24600
@@ -97,6 +100,8 @@ async def test_paper_mode_still_local_sim_untouched(monkeypatch):
                 "binding_id": "zerodha",
                 "trading_mode": "paper",
                 "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": True,
             }]
 
         def get_deployments_sync(self, client_id):
@@ -124,6 +129,7 @@ async def test_paper_mode_still_local_sim_untouched(monkeypatch):
         action = "BUY"
         client_id = "gurmeet"
         binding_id = "zerodha"
+        strategy = "d1_trap_index"
         underlying = "NIFTY"
         option_type = "PE"
         strike = 24600

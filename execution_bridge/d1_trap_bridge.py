@@ -122,24 +122,19 @@ class D1TrapExecutionBridge:
             )
             return
 
-        # EXIT must always route — gate only ENTRY on is_running
-        if ev.action == "BUY" and db is not None and hasattr(db, "get_deployments_sync"):
-            try:
-                deployments = db.get_deployments_sync(ev.client_id)
-            except Exception:
-                deployments = []
-            _trap_names = {"d1_trap_option", "d1_trap_index", "d1_trap_fno"}
-            matching = [
-                d for d in deployments
-                if d.get("binding_id") == ev.binding_id
-                and d.get("strategy_name") in _trap_names
-                and str(d.get("underlying", "")).upper() == ev.underlying.upper()
-                and int(d.get("is_running", 0) or 0) == 1
-            ]
-            if not matching:
+        # EXIT must always route — gate only ENTRY on the shared can_trade() gate
+        # (terminal_connected AND engine_active AND is_trade_enabled AND a running
+        # deployment of THIS exact strategy for THIS underlying on THIS binding).
+        # Uses ev.strategy (the strategy that actually placed the order — e.g.
+        # "d1_trap_bear_only" for the live-traded engine) rather than a hardcoded
+        # name allowlist, which previously omitted "d1_trap_bear_only" entirely and
+        # would have silently blocked every live BUY for that strategy.
+        if ev.action == "BUY" and db is not None:
+            from strategies.core.gate import can_trade
+            if not can_trade(ev.client_id, ev.binding_id, db, ev.strategy, ev.underlying):
                 logger.warning(
-                    "D1TrapExecutionBridge: BUY %s — [%s/%s] no running trap deployment.",
-                    ev.underlying, ev.client_id, ev.binding_id,
+                    "D1TrapExecutionBridge: BUY %s — [%s/%s] can_trade() gate closed "
+                    "(strategy=%s).", ev.underlying, ev.client_id, ev.binding_id, ev.strategy,
                 )
                 return
 
