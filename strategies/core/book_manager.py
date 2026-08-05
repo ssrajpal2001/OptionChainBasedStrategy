@@ -246,6 +246,14 @@ class StrategyBookManager:
         """True when the book has no open position. Override if the book uses a different field."""
         return getattr(book, "_position", None) is None
 
+    def _enable_chain(self, underlying: str) -> None:
+        """Ensure the option chain is subscribed for ``underlying`` before a
+        book starts trading it. Shared by every manager's _spawn_book -- was
+        previously copy-pasted per-manager (2026-08-03 fix, applied 3
+        separate times as new strategies hit the same missing-chain bug)."""
+        if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
+            self._rebalancer.enable_chain(underlying)
+
     def _reconcile(self) -> None:
         try:
             wanted = self._wanted()

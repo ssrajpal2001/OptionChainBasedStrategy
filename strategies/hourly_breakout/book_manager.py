@@ -22,10 +22,7 @@ class HourlyBreakoutBookManager(StrategyBookManager):
 
     def _wanted(self) -> Dict[tuple, int]:
         wanted: Dict[tuple, int] = {}
-        try:
-            rows = self._db.get_running_deployments_by_strategy_sync(_STRATEGY_NAME)
-        except Exception:
-            return wanted
+        rows = self._db.get_running_deployments_by_strategy_sync(_STRATEGY_NAME)
         for d in rows or []:
             cid = d.get("client_id", "")
             bid = d.get("binding_id", "")

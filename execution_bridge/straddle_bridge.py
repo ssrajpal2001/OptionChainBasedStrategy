@@ -30,6 +30,7 @@ from data_layer.base_feeder import EventBus
 from data_layer.instrument_registry import REGISTRY as _REG
 from data_layer.runtime_config import RuntimeConfig as _RC
 from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
+from strategies.core.gate import can_trade
 
 logger = logging.getLogger(__name__)
 
@@ -420,15 +421,19 @@ class StraddleExecutionBridge:
                     continue
 
                 # Gate: this binding must have a RUNNING sell_straddle deployment on THIS
-                # underlying. The per-strategy Run toggle (is_running) is the authority now —
-                # not the binding-level engine_active (legacy events without tags still honour
-                # engine_active for back-compat).
-                _matching = [
-                    d for d in deployments
-                    if d.get("binding_id") == binding_id
-                    and d.get("strategy_name") == "sell_straddle"
-                    and str(d.get("underlying", "")).upper() == ev.underlying.upper()
-                ]
+                # underlying, AND terminal_connected/is_trade_enabled — the shared
+                # can_trade() gate (strategies/core/gate.py). Replaces the old inline
+                # predicate, which diverged between the _target (per-binding) path
+                # (checked is_running but not is_trade_enabled) and the legacy broadcast
+                # path (checked engine_active but not is_running). NOTE: `engine_active`
+                # is deliberately NOT part of can_trade() — no currently-reachable UI
+                # control sets it True (the per-broker Trade toggle that used to drive it
+                # was removed 2026-06-11 in favor of per-strategy Run toggles; see
+                # gate.py's _evaluate() docstring), so it's effectively always 0 in
+                # production and would silently block every ENTRY if required here.
+                # can_trade() now requires terminal_connected + is_trade_enabled +
+                # a running deployment on both paths.
+                #
                 # An EXIT (buy-to-close) must ALWAYS be allowed to route — a square-off / kill /
                 # stop sets is_running=False the instant after the EXIT is published, so gating the
                 # close on is_running would strand the open legs on the exchange (the exact bug:
@@ -436,12 +441,13 @@ class StraddleExecutionBridge:
                 # deployment. The EXIT still needs terminal_connected (checked above) to place.
                 _is_exit = (ev.action == "EXIT")
                 if not _is_exit:
-                    if not _matching:
+                    # Preserve pre-existing fail-closed behavior when no ClientDB is wired
+                    # (can_trade() itself fails OPEN with client_db=None — correct for unit
+                    # tests/headless callers, but here `db` missing means we could not read
+                    # deployments at all, so the old code always blocked ENTRY in that case).
+                    if db is None:
                         continue
-                    if _target:
-                        if not any(int(d.get("is_running", 0) or 0) == 1 for d in _matching):
-                            continue
-                    elif not live_b.get("engine_active"):
+                    if not can_trade(client.client_id, binding_id, db, "sell_straddle", ev.underlying):
                         continue
 
                 mode = live_b.get("trading_mode", "paper") or "paper"

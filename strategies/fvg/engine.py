@@ -58,6 +58,7 @@ from config.global_config import IST, Topic
 from data_layer.base_feeder import CandleEvent, IndexTick, OptionTick
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
+from strategies.core.position import PositionStoreMixin
 from strategies.d1_trap_option.book import (
     _Bar,
     _build_bar,
@@ -184,9 +185,15 @@ class FVGOrderEvent:
     entry_reason: str = ""   # 2026-08-03: same fix as D1TrapOrderEvent -- the original
                               # entry reason ("fvg_retest"), not the close reason.
     entry_ts: Optional[datetime] = None  # 2026-08-03: real entry timestamp.
+    event_id: str = ""       # 2026-08-05: correlates this request with the
+                              # FVGOrderFillEvent execution_bridge/fvg_bridge.py
+                              # publishes back on Topic.FVG_ORDER_FILL, so the
+                              # engine can match a confirm/abort to the exact
+                              # BUY/SELL that dispatched it (confirm-then-finalize,
+                              # mirrors D1TrapOrderEvent.event_id).
 
 
-class FVGStrategy(AbstractStrategyBook):
+class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
     """One independent FVG trading book per (client, binding, underlying)."""
 
     def __init__(
@@ -259,6 +266,28 @@ class FVGStrategy(AbstractStrategyBook):
         self._option_ltp: Dict[Tuple[int, str, date], float] = {}
         self._ltf_bars_since_entry = 0
 
+        # 2026-08-05: confirm-then-finalize fill-confirmation feedback loop (mirrors
+        # SellStraddle's _roll_close_waiters/_roll_close_results and D1Trap-BearOnly's
+        # _fill_waiters/_fill_results). Both _open_position and _square_off dispatch
+        # an order and WAIT for execution_bridge/fvg_bridge.py's FVGOrderFillEvent to
+        # confirm it before mutating/persisting self._position -- a broker-unreachable
+        # BUY or SELL must leave the book exactly as it was (no phantom entry, no
+        # falsely-believed close), not finalize optimistically. Unlike D1Trap-
+        # BearOnly's _enter_leg (called synchronously from sync tick-processing, so it
+        # can't block on a broker round trip), FVG's _open_position/_square_off are
+        # already only ever invoked via asyncio.create_task(...) -- so BOTH open and
+        # close can fully await confirmation before touching self._position at all,
+        # per the plan's Task 7 spec (persist()/clear() move to the confirmed-finalize
+        # point, not optimistic-decision time).
+        self._event_counter = 0
+        self._fill_waiters: Dict[str, asyncio.Event] = {}
+        self._fill_results: Dict[str, object] = {}
+        self._entry_in_flight = False   # guards against a second _open_position task
+                                         # firing while one is still awaiting confirmation
+                                         # (self._position stays None throughout the wait).
+
+        self._restore_position()
+
         logger.info(
             "FVGStrategy[%s/%s/%s]: htf=%dm ltf=%dm itm_offset=%d direction_mode=%s lot=%d step=%d "
             "| TSL: initial_sl=%.1f%% trigger=%.1f%% first_lock=%.1f%% step=%.1f%% step_lock=%.1f%%",
@@ -270,11 +299,58 @@ class FVGStrategy(AbstractStrategyBook):
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
+    @property
+    def _persist_key(self) -> str:
+        if self._client_id and self._binding_id:
+            return f"{self._client_id}_{self._binding_id}_{self._underlying}_fvg"
+        return f"{self._underlying}_fvg"
+
+    @staticmethod
+    def _position_to_store_dict(pos: dict) -> dict:
+        """JSON-serialisable snapshot of self._position for PositionStore."""
+        d = dict(pos)
+        expiry = d.get("expiry")
+        d["expiry"] = expiry.isoformat() if expiry else None
+        entry_ts = d.get("entry_ts")
+        d["entry_ts"] = entry_ts.isoformat() if entry_ts else None
+        return d
+
+    @staticmethod
+    def _position_from_store_dict(d: dict) -> dict:
+        """Inverse of _position_to_store_dict -- restores date/datetime types."""
+        pos = dict(d)
+        if pos.get("expiry"):
+            pos["expiry"] = date.fromisoformat(pos["expiry"])
+        if pos.get("entry_ts"):
+            pos["entry_ts"] = datetime.fromisoformat(pos["entry_ts"])
+        zone = pos.get("fvg_zone")
+        if zone is not None:
+            pos["fvg_zone"] = tuple(zone)
+        return pos
+
+    def _restore_position(self) -> None:
+        """Restore an open position persisted before a restart, so a mid-day
+        crash/redeploy doesn't silently lose track of a still-open broker
+        leg. Mirrors SellStraddleStrategy.start()'s restore-on-start shape
+        (strategies/sell_straddle/engine.py)."""
+        try:
+            saved = self.load(self._persist_key)
+            if saved:
+                self._position = self._position_from_store_dict(saved)
+                logger.info(
+                    "FVGStrategy[%s]: restored open position from store (%s strike=%s qty=%s).",
+                    self._underlying, self._position.get("option_type"),
+                    self._position.get("strike"), self._position.get("qty"),
+                )
+        except Exception:
+            logger.exception("FVGStrategy[%s]: position restore failed.", self._underlying)
+
     def start(self) -> None:
         super().start()
         self._subscribe(Topic.CANDLE_CLOSE)
         self._subscribe(Topic.INDEX_TICK)
         self._subscribe(Topic.OPTION_TICK)
+        self._subscribe(Topic.FVG_ORDER_FILL)
         self._tasks.append(asyncio.create_task(
             self._candle_loop(), name=f"fvg_candle_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
@@ -285,6 +361,52 @@ class FVGStrategy(AbstractStrategyBook):
             self._eod_loop(), name=f"fvg_eod_{self._underlying}"))
         self._tasks.append(asyncio.create_task(
             self._startup_load(), name=f"fvg_startup_{self._underlying}"))
+        self._tasks.append(asyncio.create_task(
+            self._fill_loop(), name=f"fvg_fill_{self._underlying}"))
+
+    async def _fill_loop(self) -> None:
+        """Consume Topic.FVG_ORDER_FILL (FVGExecutionBridge's confirm/abort events)
+        -- the other half of the confirm-then-finalize round trip started by
+        _open_position/_square_off. Mirrors D1TrapBearOnlyBook._fill_loop shape."""
+        from execution_bridge.fvg_bridge import FVGOrderFillEvent
+        q = self._loop_queues.get(Topic.FVG_ORDER_FILL)
+        if q is None:
+            return
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            if not isinstance(ev, FVGOrderFillEvent):
+                continue
+            if (ev.client_id != self._client_id or ev.binding_id != self._binding_id
+                    or ev.underlying != self._underlying):
+                continue
+            try:
+                self._on_fill(ev)
+            except Exception:
+                logger.exception("FVGStrategy[%s]: _on_fill error (recovered, fill loop alive).",
+                                  self._underlying)
+
+    def _on_fill(self, fill) -> None:
+        """Both BUY (_open_position) and SELL (_square_off) fully await
+        confirmation here -- unlike D1Trap-BearOnly's ENTRY (which mutates
+        optimistically and only reactively reverts on abort), FVG's caller is
+        already inside an asyncio.create_task(...), so there is nothing
+        optimistic to revert: just record the fill result and wake whichever
+        call is awaiting this event_id. Finalizing (setting/clearing
+        self._position, persist()/clear()) happens there, not here."""
+        eid = getattr(fill, "event_id", "")
+        if eid:
+            self._fill_results[eid] = fill
+        waiter = self._fill_waiters.get(eid)
+        if waiter is not None:
+            try:
+                waiter.set()
+            except RuntimeError:
+                pass
 
     def reset_session(self) -> None:
         """New trading day: roll PDH/PDL from yesterday's HTF bars, clear
@@ -587,7 +709,7 @@ class FVGStrategy(AbstractStrategyBook):
     # ── entry / exit ─────────────────────────────────────────────────────────
 
     def _check_retest_entry(self, bar: _Bar) -> None:
-        if self._warming_up or self._position is not None:
+        if self._warming_up or self._position is not None or self._entry_in_flight:
             return
         if bar.timestamp.time() >= _ENTRY_CUTOFF:
             return
@@ -626,67 +748,120 @@ class FVGStrategy(AbstractStrategyBook):
         est_risk_rs = est_premium_distance * self._lot_size
         return est_risk_rs <= _MAX_RISK_RS_PER_LOT
 
+    # Max time to wait for the bridge to confirm (or abort) a BUY/SELL before
+    # giving up. Mirrors D1TrapBearOnlyBook._EXIT_CONFIRM_TIMEOUT_SEC /
+    # SellStraddle's _CLOSE_CONFIRM_TIMEOUT_SEC (exits.py).
+    _ENTRY_CONFIRM_TIMEOUT_SEC = 15.0
+    _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
+
     async def _open_position(self, fvg: dict, direction: str, entry_price: float,
                               sl_price: float, ts: datetime) -> None:
-        if self._position is not None:
+        """Confirm-then-finalize ENTRY: dispatch the BUY, WAIT for the bridge's
+        FVGOrderFillEvent to confirm a real fill (or an entry_aborted abort)
+        before setting self._position / persisting it. Unlike D1Trap-BearOnly's
+        _enter_leg (sync call site, must mutate optimistically), this method is
+        only ever launched via asyncio.create_task(...), so it can safely await
+        the full round trip -- self._position is never set to a phantom/
+        optimistic value at all; a routing failure or timeout simply leaves the
+        book flat, per the plan's Task 7 spec."""
+        if self._position is not None or self._entry_in_flight:
             return
-        atm = round(entry_price / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
-        if direction == "LONG":
-            strike = int(atm - self._itm_offset_pts)
-            opt_type = "CE"
-        else:
-            strike = int(atm + self._itm_offset_pts)
-            opt_type = "PE"
+        self._entry_in_flight = True
+        try:
+            atm = round(entry_price / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
+            if direction == "LONG":
+                strike = int(atm - self._itm_offset_pts)
+                opt_type = "CE"
+            else:
+                strike = int(atm + self._itm_offset_pts)
+                opt_type = "PE"
 
-        expiry = _next_week_expiry(self._underlying, ts.date())
-        if not expiry:
-            logger.warning("FVGStrategy[%s]: no active next-week expiry -- cannot enter.", self._underlying)
-            return
+            expiry = _next_week_expiry(self._underlying, ts.date())
+            if not expiry:
+                logger.warning("FVGStrategy[%s]: no active next-week expiry -- cannot enter.",
+                                self._underlying)
+                return
 
-        # Option-native SL/TP: entry premium must already be tracked (ticks
-        # flow via the ATM+/-N auto-subscribe range) -- don't trade blind if
-        # it isn't, same "no data -> no trade" philosophy as bear_only_book.py.
-        # Keyed with expiry (see _option_tick_loop fix) -- a same-strike
-        # current-week contract must never be read as this NEXT-WEEK entry.
-        premium_entry = self._option_ltp.get((strike, opt_type, expiry))
-        if premium_entry is None or premium_entry <= 0:
-            logger.warning("FVGStrategy[%s]: no live premium for %s%d yet -- entry skipped.",
-                            self._underlying, opt_type, strike)
-            return
+            # Option-native SL/TP: entry premium must already be tracked (ticks
+            # flow via the ATM+/-N auto-subscribe range) -- don't trade blind if
+            # it isn't, same "no data -> no trade" philosophy as bear_only_book.py.
+            # Keyed with expiry (see _option_tick_loop fix) -- a same-strike
+            # current-week contract must never be read as this NEXT-WEEK entry.
+            premium_entry = self._option_ltp.get((strike, opt_type, expiry))
+            if premium_entry is None or premium_entry <= 0:
+                logger.warning("FVGStrategy[%s]: no live premium for %s%d yet -- entry skipped.",
+                                self._underlying, opt_type, strike)
+                return
 
-        # SL = whichever is TIGHTER (higher price / smaller loss) of the
-        # configurable initial_sl_pct stop and the hard Rs/lot risk cap --
-        # mirrors bear_only_book.py's max(structural_sl, entry - MAX_RISK/lot_size).
-        pct_sl = premium_entry * (1 - self._initial_sl_pct)
-        cap_sl = premium_entry - (_MAX_RISK_RS_PER_LOT / self._lot_size)
-        premium_sl = max(pct_sl, cap_sl)
-        qty = self._lot_size * self._lot_multiplier
+            # SL = whichever is TIGHTER (higher price / smaller loss) of the
+            # configurable initial_sl_pct stop and the hard Rs/lot risk cap --
+            # mirrors bear_only_book.py's max(structural_sl, entry - MAX_RISK/lot_size).
+            pct_sl = premium_entry * (1 - self._initial_sl_pct)
+            cap_sl = premium_entry - (_MAX_RISK_RS_PER_LOT / self._lot_size)
+            premium_sl = max(pct_sl, cap_sl)
+            qty = self._lot_size * self._lot_multiplier
 
-        self._position = {
-            "direction": direction, "entry": entry_price, "sl": sl_price,
-            "premium_entry": premium_entry, "premium_sl": premium_sl,
-            "high_lock_pct": 0.0,   # staircase TSL ratchet, see _check_exit_premium
-            "option_type": opt_type, "strike": strike, "expiry": expiry, "qty": qty,
-            "entry_ts": ts, "fvg_zone": (fvg["zone_lo"], fvg["zone_hi"]),
-        }
-        self._ltf_bars_since_entry = 0
+            self._event_counter += 1
+            eid = f"{self._underlying}_{opt_type}{strike}_ENTRY_{self._event_counter}"
+            ev = FVGOrderEvent(
+                client_id=self._client_id, binding_id=self._binding_id,
+                direction=direction, action="BUY", quantity=qty,
+                entry_price=premium_entry, sl_price=premium_sl, trigger_ts=ts,
+                reason="fvg_retest", underlying=self._underlying,
+                option_type=opt_type, strike=strike, expiry=expiry,
+                product_type=self._product_type, event_id=eid,
+            )
+            logger.info(
+                "FVGStrategy[%s]: BUY %s strike=%d exp=%s qty=%d spot=%.2f premium=%.2f "
+                "SL=%.2f(prem) zone=[%.2f,%.2f] (awaiting broker confirmation, event_id=%s)",
+                self._underlying, opt_type, strike, expiry, qty, entry_price, premium_entry,
+                premium_sl, fvg["zone_lo"], fvg["zone_hi"], eid,
+            )
 
-        ev = FVGOrderEvent(
-            client_id=self._client_id, binding_id=self._binding_id,
-            direction=direction, action="BUY", quantity=qty,
-            entry_price=premium_entry, sl_price=premium_sl, trigger_ts=ts,
-            reason="fvg_retest", underlying=self._underlying,
-            option_type=opt_type, strike=strike, expiry=expiry,
-            product_type=self._product_type,
-        )
-        if self._bus is not None:
-            await self._bus.publish(Topic.FVG_ORDER_REQUEST, ev)
-        logger.info(
-            "FVGStrategy[%s]: BUY %s strike=%d exp=%s qty=%d spot=%.2f premium=%.2f "
-            "SL=%.2f(prem) zone=[%.2f,%.2f]",
-            self._underlying, opt_type, strike, expiry, qty, entry_price, premium_entry,
-            premium_sl, fvg["zone_lo"], fvg["zone_hi"],
-        )
+            waiter = asyncio.Event()
+            self._fill_waiters[eid] = waiter
+            try:
+                if self._bus is not None:
+                    await self._bus.publish(Topic.FVG_ORDER_REQUEST, ev)
+                try:
+                    await asyncio.wait_for(waiter.wait(), timeout=self._ENTRY_CONFIRM_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    logger.critical(
+                        "FVGStrategy[%s]: ENTRY %s%d fill NOT CONFIRMED within %.0fs "
+                        "(event_id=%s) -- NOT entering; no phantom position.",
+                        self._underlying, opt_type, strike, self._ENTRY_CONFIRM_TIMEOUT_SEC, eid,
+                    )
+                    return
+            finally:
+                self._fill_waiters.pop(eid, None)
+
+            fill = self._fill_results.pop(eid, None)
+            if fill is not None and getattr(fill, "entry_aborted", False):
+                logger.critical(
+                    "FVGStrategy[%s]: ENTRY %s%d ABORTED by bridge (broker unavailable/routing "
+                    "failed, event_id=%s) -- NOT entering; no phantom position.",
+                    self._underlying, opt_type, strike, eid,
+                )
+                return
+
+            # ── Confirmed by the broker (or a paper sim fill) -- finalize ──────
+            self._position = {
+                "direction": direction, "entry": entry_price, "sl": sl_price,
+                "premium_entry": premium_entry, "premium_sl": premium_sl,
+                "high_lock_pct": 0.0,   # staircase TSL ratchet, see _check_exit_premium
+                "option_type": opt_type, "strike": strike, "expiry": expiry, "qty": qty,
+                "entry_ts": ts, "fvg_zone": (fvg["zone_lo"], fvg["zone_hi"]),
+            }
+            self._ltf_bars_since_entry = 0
+            self.persist(self._persist_key, self._position_to_store_dict(self._position),
+                         product_type=self._product_type)
+            logger.info(
+                "FVGStrategy[%s]: BUY %s strike=%d exp=%s qty=%d premium=%.2f CONFIRMED "
+                "(event_id=%s)",
+                self._underlying, opt_type, strike, expiry, qty, premium_entry, eid,
+            )
+        finally:
+            self._entry_in_flight = False
 
     def _check_exit_premium(self, premium: float, ts: datetime) -> None:
         """Option-native SL/step-locked-TSL -- triggered off the position's
@@ -710,6 +885,10 @@ class FVGStrategy(AbstractStrategyBook):
             steps = int((profit_pct - self._trail_trigger_pct) // self._step_pct)
             calc_lock = self._first_lock_pct + steps * self._step_lock_pct
             pos["high_lock_pct"] = max(pos["high_lock_pct"], calc_lock)
+        if pos.get("_closing"):
+            # A confirm-then-finalize EXIT round trip is already in flight for this
+            # position -- don't dispatch a second SELL for it.
+            return
         stop_price = entry * (1 + pos["high_lock_pct"]) if pos["high_lock_pct"] > 0 else pos["premium_sl"]
         if premium <= stop_price:
             reason = "tsl_hit" if pos["high_lock_pct"] > 0 else "sl_hit"
@@ -731,32 +910,92 @@ class FVGStrategy(AbstractStrategyBook):
         self._ltf_bars_since_entry += 1
         if pos["high_lock_pct"] > 0:
             return
+        if pos.get("_closing"):
+            return
         if self._ltf_bars_since_entry >= self._stagnation_bars:
             asyncio.create_task(self._square_off("stagnation_exit"))
 
     async def _square_off(self, reason: str) -> None:
+        """Confirm-then-finalize EXIT: dispatch the SELL, WAIT for the bridge's
+        FVGOrderFillEvent to confirm a real fill (or an exit_failed abort) before
+        clearing self._position / the persisted store. Mirrors
+        strategies/sell_straddle/exits.py's _close_position and
+        D1TrapBearOnlyBook._square_off_leg exactly.
+
+        2026-08-05 fix: the old code nulled self._position and cleared the
+        persisted store BEFORE the order was even dispatched -- a broker outage
+        during a live EXIT silently discarded a still-open real position (same
+        root class of bug already fixed for SellStraddle/V4Cascade/
+        D1Trap-BearOnly)."""
         pos = self._position
         if pos is None:
             return
-        self._position = None
-        spot = self._last_spot or pos["entry"]
-        exit_premium = self._option_ltp.get((pos["strike"], pos["option_type"], pos["expiry"]), pos["premium_entry"])
+        if pos.get("_closing"):
+            return   # a confirm-then-finalize round trip for this position is already in flight
+        pos["_closing"] = True
+        try:
+            spot = self._last_spot or pos["entry"]
+            exit_premium = self._option_ltp.get(
+                (pos["strike"], pos["option_type"], pos["expiry"]), pos["premium_entry"])
 
-        ev = FVGOrderEvent(
-            client_id=self._client_id, binding_id=self._binding_id,
-            direction=pos["direction"], action="SELL", quantity=pos["qty"],
-            entry_price=pos["premium_entry"], sl_price=pos["premium_sl"], trigger_ts=datetime.now(IST),
-            reason=reason, underlying=self._underlying,
-            option_type=pos["option_type"], strike=pos["strike"], expiry=pos["expiry"],
-            product_type=self._product_type, exit_price=exit_premium,
-            entry_reason="fvg_retest", entry_ts=pos.get("entry_ts"),
-        )
-        if self._bus is not None:
-            await self._bus.publish(Topic.FVG_ORDER_REQUEST, ev)
-        logger.info("FVGStrategy[%s]: SELL %s strike=%d reason=%s spot=%.2f exit_premium=%.2f "
-                    "entry_premium=%.2f",
-                    self._underlying, pos["option_type"], pos["strike"], reason, spot,
-                    exit_premium, pos["premium_entry"])
+            self._event_counter += 1
+            eid = f"{self._underlying}_{pos['option_type']}{pos['strike']}_EXIT_{self._event_counter}"
+            ev = FVGOrderEvent(
+                client_id=self._client_id, binding_id=self._binding_id,
+                direction=pos["direction"], action="SELL", quantity=pos["qty"],
+                entry_price=pos["premium_entry"], sl_price=pos["premium_sl"],
+                trigger_ts=datetime.now(IST),
+                reason=reason, underlying=self._underlying,
+                option_type=pos["option_type"], strike=pos["strike"], expiry=pos["expiry"],
+                product_type=self._product_type, exit_price=exit_premium,
+                entry_reason="fvg_retest", entry_ts=pos.get("entry_ts"), event_id=eid,
+            )
+            logger.info(
+                "FVGStrategy[%s]: SELL %s strike=%d reason=%s spot=%.2f exit_premium=%.2f "
+                "entry_premium=%.2f (awaiting broker confirmation, event_id=%s)",
+                self._underlying, pos["option_type"], pos["strike"], reason, spot,
+                exit_premium, pos["premium_entry"], eid,
+            )
+
+            waiter = asyncio.Event()
+            self._fill_waiters[eid] = waiter
+            try:
+                if self._bus is not None:
+                    await self._bus.publish(Topic.FVG_ORDER_REQUEST, ev)
+                try:
+                    await asyncio.wait_for(waiter.wait(), timeout=self._EXIT_CONFIRM_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    logger.critical(
+                        "FVGStrategy[%s]: EXIT %s%d fill NOT CONFIRMED within %.0fs "
+                        "(event_id=%s reason=%s) -- position stays OPEN; will retry on a "
+                        "later tick/EOD pass. NOT clearing persisted store.",
+                        self._underlying, pos["option_type"], pos["strike"],
+                        self._EXIT_CONFIRM_TIMEOUT_SEC, eid, reason,
+                    )
+                    return
+            finally:
+                self._fill_waiters.pop(eid, None)
+
+            fill = self._fill_results.pop(eid, None)
+            if fill is not None and getattr(fill, "exit_failed", False):
+                logger.critical(
+                    "FVGStrategy[%s]: EXIT %s%d ABORTED by bridge (broker unavailable, "
+                    "event_id=%s reason=%s) -- position stays OPEN; will retry on a later "
+                    "tick/EOD pass. NOT clearing persisted store.",
+                    self._underlying, pos["option_type"], pos["strike"], eid, reason,
+                )
+                return
+
+            # ── Confirmed by the broker (or a paper sim fill) -- finalize ──────
+            self._position = None
+            self.clear(self._persist_key)
+            logger.info(
+                "FVGStrategy[%s]: SELL %s strike=%d reason=%s exit_premium=%.2f CONFIRMED "
+                "(event_id=%s)",
+                self._underlying, pos["option_type"], pos["strike"], reason, exit_premium, eid,
+            )
+        finally:
+            pos["_closing"] = False
 
     async def liquidate(self, reason: str = "kill_switch") -> None:
         await self._square_off(reason)

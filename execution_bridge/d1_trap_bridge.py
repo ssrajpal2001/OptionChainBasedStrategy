@@ -14,51 +14,43 @@ Live mode   — MARKET order via broker.place_order() + get_order_status();
 
 Product: MIS (intraday — all positions are squared off by EOD in book.py).
 Exchange: NFO (NIFTY), BFO (SENSEX), etc. resolved via order_exchange().
+
+2026-08-05 (Task 8): the routing/paper/live/abort/history mechanics (which
+were byte-for-byte identical to execution_bridge/fvg_bridge.py after Tasks
+6-7 mirrored this file exactly) now live in
+execution_bridge/option_buyer_bridge_base.py::OptionBuyerExecutionBridge.
+This file is a thin subclass supplying only what's genuinely D1Trap-specific:
+the Topics, the fill-event class, the request-event class, and the trade-log/
+label strings.
 """
 from __future__ import annotations
 
-import asyncio
-import logging
-import os
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, Optional
+from dataclasses import dataclass
 
-from config.global_config import IST, Topic, order_exchange
-from data_layer.base_feeder import EventBus
-from execution_bridge.straddle_bridge import _resolve_option_symbol
-
-logger = logging.getLogger(__name__)
+from config.global_config import Topic
+from execution_bridge.option_buyer_bridge_base import (
+    OptionBuyerExecutionBridge,
+    OptionBuyerFillEvent,
+)
 
 
-class _D1TrapTradeLogger:
-    def __init__(self, log_dir: str = "logs/trades") -> None:
-        os.makedirs(log_dir, exist_ok=True)
-        self._log_dir = log_dir
-        self._handles: Dict[str, object] = {}
+@dataclass
+class D1TrapFillEvent(OptionBuyerFillEvent):
+    """Published by D1TrapExecutionBridge to Topic.D1_TRAP_ORDER_FILL after every
+    order attempt (paper and live, success and failure). Field shape mirrors
+    CascadeFillEvent (execution_bridge/cascade_bridge.py) exactly -- same proven
+    confirm-then-finalize contract, separate class per this codebase's
+    per-strategy-event convention.
 
-    def _handle(self, client_id: str, binding_id: str):
-        today = datetime.now(IST).strftime("%Y%m%d")
-        key = f"{client_id}-{binding_id}-d1_trap-{today}"
-        if key not in self._handles:
-            path = os.path.join(self._log_dir, f"{key}.log")
-            self._handles[key] = open(path, "a", encoding="utf-8", buffering=1)
-        return self._handles[key]
-
-    def log(self, client_id: str, binding_id: str, message: str) -> None:
-        ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-        self._handle(client_id, binding_id).write(f"{ts}  D1TRAP  {message}\n")
-
-    def close_all(self) -> None:
-        for h in self._handles.values():
-            try:
-                h.close()
-            except Exception:
-                pass
-        self._handles.clear()
+    2026-08-05: previously this bridge never published to D1_TRAP_ORDER_FILL at
+    all -- bear_only_book.py's _enter_leg/_square_off_leg mutated (and persisted)
+    self._positions before the order was even dispatched, so nothing ever told
+    the book whether a BUY/SELL actually reached the broker. A broker-unreachable
+    EXIT silently looked like a successful close while the leg was still open at
+    the broker."""
 
 
-class D1TrapExecutionBridge:
+class D1TrapExecutionBridge(OptionBuyerExecutionBridge):
     """
     Listens for D1TrapOrderEvent on Topic.D1_TRAP_ORDER_REQUEST.
 
@@ -67,240 +59,19 @@ class D1TrapExecutionBridge:
     Upstox numeric key, etc.) at order time using the broker's provider field.
     """
 
-    def __init__(self, bus: EventBus, router, log_dir: str = "logs/trades") -> None:
-        self._bus = bus
-        self._router = router
-        self._trade_log = _D1TrapTradeLogger(log_dir)
-        self._running = False
-        self._q = bus.subscribe(Topic.D1_TRAP_ORDER_REQUEST)
+    REQUEST_TOPIC = Topic.D1_TRAP_ORDER_REQUEST
+    FILL_TOPIC = Topic.D1_TRAP_ORDER_FILL
+    FILL_EVENT_CLS = D1TrapFillEvent
+    KEY_TAG = "d1_trap"
+    LOG_TAG = "D1TRAP"
+    BROKER_RESOLVE_LABEL = "D1Trap"
+    ORDER_TAG_PREFIX = "D1T_"
+    # ev.strategy is a required (non-default) field on D1TrapOrderEvent, so this
+    # fallback is never actually hit in practice -- kept for parity with
+    # _record_history's original `getattr(ev, "strategy", "d1_trap_option")`.
+    DEFAULT_GATE_STRATEGY = "d1_trap_option"
+    DEFAULT_HISTORY_STRATEGY = "d1_trap_option"
 
-    async def run(self) -> None:
-        self._running = True
-        logger.info("D1TrapExecutionBridge: started.")
-        while self._running:
-            try:
-                ev = await asyncio.wait_for(self._q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
-            except asyncio.CancelledError:
-                break
-            try:
-                from strategies.d1_trap_option.book import D1TrapOrderEvent
-                if not isinstance(ev, D1TrapOrderEvent):
-                    continue
-                await self._handle(ev)
-            except Exception:
-                logger.exception("D1TrapExecutionBridge: _handle error.")
-
-    def stop(self) -> None:
-        self._running = False
-        self._trade_log.close_all()
-        logger.info("D1TrapExecutionBridge: stopped.")
-
-    # ── routing ───────────────────────────────────────────────────────────────
-
-    async def _handle(self, ev) -> None:
-        if not ev.client_id or not ev.binding_id:
-            logger.error("D1TrapExecutionBridge: event missing client_id/binding_id — dropped.")
-            return
-
-        db = getattr(self._router, "_client_db", None) or getattr(self._router, "_db", None)
-        live_binding = None
-        if db is not None and hasattr(db, "get_bindings_safe_sync"):
-            try:
-                for b in db.get_bindings_safe_sync(ev.client_id):
-                    if b.get("binding_id") == ev.binding_id:
-                        live_binding = b
-                        break
-            except Exception:
-                live_binding = None
-
-        if live_binding is None or not live_binding.get("terminal_connected"):
-            logger.warning(
-                "D1TrapExecutionBridge: %s %s — [%s/%s] terminal not connected, no route.",
-                ev.action, ev.underlying, ev.client_id, ev.binding_id,
-            )
-            return
-
-        # EXIT must always route — gate only ENTRY on is_running
-        if ev.action == "BUY" and db is not None and hasattr(db, "get_deployments_sync"):
-            try:
-                deployments = db.get_deployments_sync(ev.client_id)
-            except Exception:
-                deployments = []
-            _trap_names = {"d1_trap_option", "d1_trap_index", "d1_trap_fno"}
-            matching = [
-                d for d in deployments
-                if d.get("binding_id") == ev.binding_id
-                and d.get("strategy_name") in _trap_names
-                and str(d.get("underlying", "")).upper() == ev.underlying.upper()
-                and int(d.get("is_running", 0) or 0) == 1
-            ]
-            if not matching:
-                logger.warning(
-                    "D1TrapExecutionBridge: BUY %s — [%s/%s] no running trap deployment.",
-                    ev.underlying, ev.client_id, ev.binding_id,
-                )
-                return
-
-        mode = live_binding.get("trading_mode", "paper") or "paper"
-
-        if mode == "paper":
-            logger.info(
-                "D1TrapExecutionBridge: %s %s %s%d exp=%s qty=%d → [%s/%s] mode=paper",
-                ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-                ev.quantity, ev.client_id, ev.binding_id,
-            )
-            await self._paper_fill(ev)
-            return
-
-        from execution_bridge.broker_resolve import resolve_broker_or_alert
-        broker = await resolve_broker_or_alert(
-            self._bus, self._router, ev.client_id, ev.binding_id, "D1Trap",
-            context=f"{ev.action} {ev.underlying} {ev.option_type}{ev.strike}",
-        )
-
-        logger.info(
-            "D1TrapExecutionBridge: %s %s %s%d exp=%s qty=%d → [%s/%s] mode=%s broker=%s",
-            ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-            ev.quantity, ev.client_id, ev.binding_id, mode,
-            "resolved" if broker is not None else "UNAVAILABLE",
-        )
-
-        if broker is None:
-            # Do NOT call _paper_fill here -- that would fabricate a fill the book
-            # would treat as real. resolve_broker_or_alert already logged CRITICAL
-            # and published SYSTEM_EVENT; the order is simply dropped.
-            return
-
-        await self._live_fill(ev, broker)
-
-    # ── paper ─────────────────────────────────────────────────────────────────
-
-    async def _paper_fill(self, ev) -> None:
-        # 2026-08-03 fix: entry_price on a SELL/exit event is the ORIGINAL entry, not the
-        # fill -- use the event's real exit_price for a SELL, entry_price for a BUY.
-        # (exit_price defaults to 0.0 on older/legacy events that never set it, e.g.
-        # book.py's D1TrapOptionBook -- fall back to entry_price rather than logging 0.)
-        fill_price = ev.entry_price
-        if ev.action == "SELL" and getattr(ev, "exit_price", 0.0) > 0:
-            fill_price = ev.exit_price
-        logger.info(
-            "[PAPER] D1Trap %s %s %s%d exp=%s qty=%d spot=%.2f | client=%s/%s",
-            ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-            ev.quantity, fill_price, ev.client_id, ev.binding_id,
-        )
-        self._trade_log.log(
-            ev.client_id, ev.binding_id,
-            f"[PAPER] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
-            f"exp={ev.expiry} qty={ev.quantity} spot={fill_price:.2f} reason={ev.reason}",
-        )
-        self._record_history(ev, fill_price, paper=True)
-
-    # ── live ──────────────────────────────────────────────────────────────────
-
-    async def _live_fill(self, ev, broker) -> None:
-        symbol = self._resolve_symbol(ev, broker)
-        if not symbol:
-            logger.error(
-                "D1TrapExecutionBridge: no tradable symbol for %s %s%d — paper fallback.",
-                ev.underlying, ev.option_type, ev.strike,
-            )
-            await self._paper_fill(ev)
-            return
-
-        from execution_bridge.base_broker import OrderRequest, OrderSide, OrderType
-        side = OrderSide.BUY if ev.action == "BUY" else OrderSide.SELL
-        exchange = order_exchange(ev.underlying)
-
-        product = getattr(ev, "product_type", None) or "MIS"
-        req = OrderRequest(
-            symbol=symbol,
-            exchange=exchange,
-            side=side,
-            qty=ev.quantity,
-            order_type=OrderType.MARKET,
-            product=product,
-            price=ev.entry_price,  # ignored for MARKET; MockBroker uses as fill
-            tag=f"D1T_{ev.underlying}_{ev.action}"[:20],
-        )
-
-        avg = 0.0
-        order_id = ""
-        try:
-            order_id = await broker.place_order(req)
-            fill = await broker.get_order_status(str(order_id))
-            avg = float(getattr(fill, "avg_price", 0.0) or 0.0)
-            if avg <= 0:
-                avg = ev.entry_price
-            logger.info(
-                "[LIVE] D1Trap %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
-                ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-                ev.quantity, avg, order_id, ev.client_id, ev.binding_id,
-            )
-            self._trade_log.log(
-                ev.client_id, ev.binding_id,
-                f"[LIVE] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
-                f"exp={ev.expiry} qty={ev.quantity} @ {avg:.2f} symbol={symbol} "
-                f"order_id={order_id} reason={ev.reason}",
-            )
-        except Exception as exc:
-            logger.error(
-                "[LIVE] D1Trap %s %s %s%d order FAILED: %s — falling back to spot price.",
-                ev.action, ev.underlying, ev.option_type, ev.strike, exc,
-            )
-            self._trade_log.log(
-                ev.client_id, ev.binding_id,
-                f"LIVE {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
-                f"FAILED: {exc}",
-            )
-            avg = ev.entry_price
-
-        self._record_history(ev, avg, paper=False)
-
-    def _resolve_symbol(self, ev, broker) -> str:
-        if not ev.expiry or not ev.strike or not ev.option_type:
-            return ""
-        _b = getattr(broker, "_binding", None)
-        provider = _b.provider if _b else getattr(broker, "provider", "mock")
-        return _resolve_option_symbol(
-            ev.underlying, ev.expiry, int(ev.strike), ev.option_type, provider
-        )
-
-    def _record_history(self, ev, fill_price: float, paper: bool) -> None:
-        if ev.action != "SELL":
-            return
-        try:
-            from data_layer import trade_history as _th
-            # 2026-08-03 fix: was hardcoded 0.0 -- both book.py and bear_only_book.py are
-            # buyer-only (BUY to open/pay premium, SELL to close/receive premium)
-            # regardless of the LONG/SHORT signal direction, so P&L is always
-            # (exit - entry) * qty for the option premium itself.
-            pnl = round((fill_price - ev.entry_price) * ev.quantity, 2)
-            strategy_name = getattr(ev, "strategy", "d1_trap_option") or "d1_trap_option"
-            _entry_ts = getattr(ev, "entry_ts", None)
-            _th.record(
-                ev.client_id, strategy_name, ev.underlying,
-                ev.entry_price, fill_price, ev.reason, pnl,
-                binding_id=ev.binding_id,
-                legs=[{
-                    "side": ev.option_type,
-                    "strike": ev.strike,
-                    "entry": ev.entry_price,
-                    "exit": fill_price,
-                    "pnl": pnl,
-                    # 2026-08-03 fix: entry_reason used to reuse ev.reason (the CLOSE
-                    # reason, e.g. eod/sl_hit) since that was the only reason string
-                    # available -- now uses the real order_reason the leg was opened
-                    # with (e.g. bear_trap_flip_t1), falling back to ev.reason only if
-                    # an older event never set it.
-                    "entry_reason": getattr(ev, "entry_reason", "") or ev.reason,
-                    "entry_ts": _entry_ts.isoformat() if hasattr(_entry_ts, "isoformat") else _entry_ts,
-                    "exit_ts": ev.trigger_ts.isoformat() if hasattr(ev.trigger_ts, "isoformat") else ev.trigger_ts,
-                }],
-            )
-        except Exception:
-            logger.exception(
-                "D1TrapExecutionBridge: trade_history record failed for %s/%s",
-                ev.client_id, ev.binding_id,
-            )
+    def _order_event_cls(self):
+        from strategies.d1_trap_option.book import D1TrapOrderEvent
+        return D1TrapOrderEvent

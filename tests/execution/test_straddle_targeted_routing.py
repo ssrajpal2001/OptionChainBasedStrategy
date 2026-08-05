@@ -20,7 +20,8 @@ class _DB:
     # Two clients A and B, each one binding, both engine_active+terminal+deployed on NIFTY.
     def get_bindings_safe_sync(self, cid):
         return [{"binding_id": f"{cid}_b1", "engine_active": True,
-                 "terminal_connected": True, "trading_mode": "paper"}]
+                 "terminal_connected": True, "is_trade_enabled": True,
+                 "trading_mode": "paper"}]
     def get_deployments_sync(self, cid):
         return [{"binding_id": f"{cid}_b1", "strategy_name": "sell_straddle",
                  "underlying": "NIFTY", "is_running": 1}]

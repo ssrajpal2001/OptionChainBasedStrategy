@@ -92,8 +92,7 @@ class FVGBookManager(StrategyBookManager):
         # subscription only activates once SOME strategy calls enable_chain(); without
         # this, an FVG deployment on an underlying with no sell_straddle/v4_cascade
         # also running there would spawn fine but never receive live option ticks.
-        if self._rebalancer is not None and hasattr(self._rebalancer, "enable_chain"):
-            self._rebalancer.enable_chain(underlying)
+        self._enable_chain(underlying)
         book = FVGStrategy(
             self._bus, self._cfg, underlying, client_id, binding_id,
             lot_multiplier=value["lots"], feeder_token=feeder_token,
