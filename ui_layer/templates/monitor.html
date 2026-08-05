@@ -2807,6 +2807,10 @@ document.addEventListener('alpine:init', () => {
       if (s === 'day_profit_target') return 'Day profit target';
       if (s === 'itm_pair_gate_profit') return 'ITM pair gate (full exit)';
       if (s === 'itm_pair_gate') return 'ITM pair gate (rollover escape)';
+      if (s === 'itm_roll_protection_stop') return 'ITM-roll protection SL (70% of booked profit)';
+      if (s === 'itm_roll_protection_restore') return 'ITM-roll protection (restored prior strike)';
+      if (s === 'itm_roll_protection_pool') return 'ITM-roll protection (new partner selected)';
+      if (s === 'itm_roll_protection_exit_all') return 'ITM-roll protection (no pair → closed all)';
       if (s === 'kill_switch') return 'Kill switch';
       if (s === 'deployment_stop') return 'Deployment stop';
       if (s === 'system_shutdown') return 'System shutdown';
