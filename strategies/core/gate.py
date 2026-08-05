@@ -37,35 +37,41 @@ def _evaluate(client_id: str, binding_id: str, client_db: Any, strategy_name: st
 
     Generalized (2026-07-19) — no more per-strategy-name hardcoding. EVERY
     strategy (sell_straddle, v4_cascade, and any future one) is gated the
-    same way: terminal_connected AND engine_active AND is_trade_enabled AND
-    a running deployment of THIS strategy_name for THIS underlying on THIS
-    binding. Previously only sell_straddle got the full check and every
-    other strategy silently fell through to a terminal-only check — the
-    exact class of routing bug documented in project memory (the BTC
-    --mode paper routing bug), now closed for good by removing the special
-    case.
+    same way: terminal_connected AND is_trade_enabled AND a running
+    deployment of THIS strategy_name for THIS underlying on THIS binding.
+    Previously only sell_straddle got the full check and every other
+    strategy silently fell through to a terminal-only check — the exact
+    class of routing bug documented in project memory (the BTC --mode paper
+    routing bug), now closed for good by removing the special case.
 
-    2026-08-05: added the `engine_active` check alongside `is_trade_enabled`.
-    These are two INDEPENDENTLY-toggled DB columns, not the same concept
-    under two names (`client_db.py::set_engine_active`'s own docstring says
-    "Does NOT touch is_trade_enabled"). The dashboard's "Trade" toggle
-    (`/api/client/set_trade/{binding_id}`) sets BOTH in lockstep — but a
-    separate "Trading Engine" toggle (`/api/client/broker/{id}/engine-start`
-    `/engine-stop`) can flip `engine_active` on its own, without touching
-    `is_trade_enabled`. The live bridges (straddle_bridge.py,
-    d1_trap_bridge.py, fvg_bridge.py, cascade_bridge.py) have always gated
-    on `engine_active`; this gate previously checked only
-    `is_trade_enabled`, silently diverging from them whenever a deployment
-    was engine-started without the Trade toggle (or vice versa). Both are
-    now required, matching CLAUDE.md's "Gated on Terminal ON + Trade ON."""
+    2026-08-05: briefly added an `engine_active` check alongside
+    `is_trade_enabled`, then REVERTED it the same day after code review
+    found it was a critical regression. `engine_active` is set to True in
+    exactly two dashboard endpoints (`/api/client/set_trade/{id}` and
+    `/api/client/broker/{id}/engine-start`), but NEITHER is wired to a
+    reachable UI control any more — `git show da5161c` (2026-06-11) removed
+    the per-broker Trade toggle that used to drive it and replaced the live
+    control surface with per-STRATEGY Run toggles
+    (`POST /api/client/deployment/{id}/run`, which only ever touches
+    `strategy_deployments.is_running`). Confirmed against a real production
+    DB snapshot (`data/clients.db.bak_20260701_085629`): `engine_active=0`
+    on every binding, including ones actively trading with
+    `is_trade_enabled=1`. Requiring `engine_active` here would have
+    silently blocked every ENTRY for every strategy the moment this
+    shipped. CLAUDE.md's "Gated on Terminal ON + Trade ON" describes the
+    pre-da5161c UI and is stale on this point. The live bridges
+    (straddle_bridge.py etc.) do reference `engine_active` in one legacy/
+    effectively-dead broadcast code path, not in the per-binding path every
+    real book actually uses — so "the live bridges have always gated on
+    engine_active" is NOT a safe generalization; do not re-add this check
+    without first confirming a currently-reachable write path sets
+    `engine_active=True` for real trading bindings."""
     try:
         bindings = {b.get("binding_id"): b for b in client_db.get_bindings_safe_sync(client_id)}
         binding = bindings.get(binding_id)
         if not binding:
             return False
         if not binding.get("terminal_connected"):
-            return False
-        if not binding.get("engine_active"):
             return False
         if not binding.get("is_trade_enabled"):
             return False
@@ -98,9 +104,8 @@ def can_trade(
     """
     Return True if the binding may trade for the given strategy.
 
-    Requires terminal_connected AND engine_active AND is_trade_enabled AND
-    a running deployment of that strategy for this underlying on this
-    binding.
+    Requires terminal_connected AND is_trade_enabled AND a running
+    deployment of that strategy for this underlying on this binding.
 
     Fail-open when ``client_db`` is None. Result is cached for 5 seconds.
     """

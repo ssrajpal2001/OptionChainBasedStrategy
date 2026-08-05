@@ -5,13 +5,19 @@ can_trade() is the ONE shared entry gate every strategy bridge/manager is meant
 to call before routing an ENTRY order. It must require ALL of:
   - a matching binding exists
   - binding.terminal_connected
-  - binding.engine_active   (the "Trading Engine" toggle the live bridges gate on)
-  - binding.is_trade_enabled (the "Trade" toggle; kept in lockstep with
-    engine_active by the dashboard's set_trade endpoint, but independently
-    settable via the separate engine-start/engine-stop endpoints -- so both
-    must be checked, neither implies the other)
+  - binding.is_trade_enabled
   - a deployment for this exact (binding_id, strategy_name, underlying) with
     is_running == 1
+
+`binding.engine_active` is deliberately NOT part of this contract (see
+strategies/core/gate.py::_evaluate() docstring, 2026-08-05 entry): no
+currently-reachable dashboard control sets it True for a real trading
+binding — the per-broker "Trade" toggle that used to drive it was removed
+2026-06-11 in favor of per-strategy Run toggles, and a real production DB
+snapshot confirms `engine_active=0` on every binding, including actively
+trading ones. The default fixture below mirrors that real-world state
+(`engine_active: False`) precisely so a regression that re-adds an
+engine_active requirement gets caught here.
 """
 from strategies.core.gate import can_trade, _cache
 
@@ -21,7 +27,9 @@ class _DB:
         self._binding = {
             "binding_id": "B1",
             "terminal_connected": True,
-            "engine_active": True,
+            # Matches real production state (data/clients.db.bak_20260701_085629):
+            # engine_active is 0 on every binding, including live-trading ones.
+            "engine_active": False,
             "is_trade_enabled": True,
         }
         self._binding.update(binding_overrides)
@@ -55,10 +63,17 @@ def test_terminal_disconnected_false():
     assert can_trade("C1", "B1", db, "sell_straddle", "NIFTY") is False
 
 
-def test_engine_inactive_false():
+def test_engine_inactive_but_everything_else_fine_still_true():
+    """Regression guard (2026-08-05 fix round 1): engine_active=0 is the REAL
+    production state for every binding today (no reachable UI control ever
+    sets it True). can_trade() must NOT require it — requiring it would
+    silently block every live ENTRY for every strategy the moment this
+    shipped. This is the exact scenario code review found in a real DB
+    backup: terminal_connected=1, is_trade_enabled=1, engine_active=0, and
+    the deployment running — must pass."""
     _clear_cache()
     db = _DB(engine_active=False)
-    assert can_trade("C1", "B1", db, "sell_straddle", "NIFTY") is False
+    assert can_trade("C1", "B1", db, "sell_straddle", "NIFTY") is True
 
 
 def test_trade_disabled_false():

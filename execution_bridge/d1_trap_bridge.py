@@ -123,8 +123,8 @@ class D1TrapExecutionBridge:
             return
 
         # EXIT must always route — gate only ENTRY on the shared can_trade() gate
-        # (terminal_connected AND engine_active AND is_trade_enabled AND a running
-        # deployment of THIS exact strategy for THIS underlying on THIS binding).
+        # (terminal_connected AND is_trade_enabled AND a running deployment of
+        # THIS exact strategy for THIS underlying on THIS binding).
         # Uses ev.strategy (the strategy that actually placed the order — e.g.
         # "d1_trap_bear_only" for the live-traded engine) rather than a hardcoded
         # name allowlist, which previously omitted "d1_trap_bear_only" entirely and

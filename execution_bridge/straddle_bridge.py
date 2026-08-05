@@ -421,12 +421,18 @@ class StraddleExecutionBridge:
                     continue
 
                 # Gate: this binding must have a RUNNING sell_straddle deployment on THIS
-                # underlying, AND terminal_connected/engine_active/is_trade_enabled — the
-                # shared can_trade() gate (strategies/core/gate.py). Replaces the old
-                # inline predicate, which diverged between the _target (per-binding)
-                # path (checked is_running but not engine_active/is_trade_enabled) and
-                # the legacy broadcast path (checked engine_active but not is_running) —
-                # can_trade() now requires ALL of these on both paths.
+                # underlying, AND terminal_connected/is_trade_enabled — the shared
+                # can_trade() gate (strategies/core/gate.py). Replaces the old inline
+                # predicate, which diverged between the _target (per-binding) path
+                # (checked is_running but not is_trade_enabled) and the legacy broadcast
+                # path (checked engine_active but not is_running). NOTE: `engine_active`
+                # is deliberately NOT part of can_trade() — no currently-reachable UI
+                # control sets it True (the per-broker Trade toggle that used to drive it
+                # was removed 2026-06-11 in favor of per-strategy Run toggles; see
+                # gate.py's _evaluate() docstring), so it's effectively always 0 in
+                # production and would silently block every ENTRY if required here.
+                # can_trade() now requires terminal_connected + is_trade_enabled +
+                # a running deployment on both paths.
                 #
                 # An EXIT (buy-to-close) must ALWAYS be allowed to route — a square-off / kill /
                 # stop sets is_running=False the instant after the EXIT is published, so gating the

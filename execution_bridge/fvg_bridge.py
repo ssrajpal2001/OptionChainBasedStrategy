@@ -121,8 +121,8 @@ class FVGExecutionBridge:
             return
 
         # EXIT must always route — gate only ENTRY on the shared can_trade() gate
-        # (terminal_connected AND engine_active AND is_trade_enabled AND a running
-        # fvg deployment for this underlying on this binding).
+        # (terminal_connected AND is_trade_enabled AND a running fvg deployment
+        # for this underlying on this binding).
         if ev.action == "BUY" and db is not None:
             from strategies.core.gate import can_trade
             if not can_trade(ev.client_id, ev.binding_id, db, "fvg", ev.underlying):
