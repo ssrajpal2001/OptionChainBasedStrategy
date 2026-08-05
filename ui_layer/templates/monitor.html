@@ -5767,12 +5767,55 @@ function amoTest() {
         </div>
 
         <!-- T1 alert banner -->
-        <template x-if="book.positions && book.positions.some(p => p.close_reason === 't1_hit' && p.status === 'OPEN')">
+        <template x-if="book.positions && book.positions.some(p => p.t1_alerted && p.status === 'OPEN')">
           <div class="font-mono text-xs px-3 py-2 rounded font-bold"
                style="background:rgba(var(--t-green-rgb),0.08);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)">
-            &#x1F4A1; T1 HIT on one or more positions — consider adding hedge option (PE/CE of same strike)
+            &#x1F4A1; T1 HIT — awaiting action — on:
+            <span x-text="(book.positions||[]).filter(p => p.t1_alerted && p.status==='OPEN').map(p => p.symbol).join(', ')"></span>
+            (consider adding hedge option, or manually close — T1 does not auto-close)
           </div>
         </template>
+
+        <!-- Pending watchlist (today's scanned candidates not yet entered) -->
+        <div x-show="book.pending && book.pending.length > 0" class="overflow-x-auto mt-1">
+          <div class="font-mono text-xs mb-1" style="color:var(--t-muted)">
+            WATCHLIST — <span x-text="book.pending.length"></span> pending
+          </div>
+          <table class="font-mono text-xs w-full" style="border-collapse:collapse">
+            <thead>
+              <tr style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
+                <th class="text-left py-1 pr-3">Stock</th>
+                <th class="text-left py-1 pr-3">Dir</th>
+                <th class="text-left py-1 pr-3">Status</th>
+                <th class="text-right py-1 pr-3">Entry</th>
+                <th class="text-right py-1 pr-3">SL</th>
+                <th class="text-right py-1 pr-3">T1</th>
+                <th class="text-right py-1 pr-3">Dist%</th>
+                <th class="text-right py-1 pr-3">B-R:R</th>
+                <th class="text-left py-1 pr-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="sig in book.pending" :key="sig.symbol + sig.direction">
+                <tr :style="sig.blocked ? 'opacity:0.5' : ''"
+                    style="border-bottom:1px solid rgba(var(--t-border-rgb),0.4)">
+                  <td class="py-1 pr-3 font-bold" x-text="sig.symbol"></td>
+                  <td class="py-1 pr-3"
+                      :style="sig.direction==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'"
+                      x-text="sig.direction"></td>
+                  <td class="py-1 pr-3" style="color:var(--t-muted)" x-text="sig.status"></td>
+                  <td class="py-1 pr-3 text-right" x-text="sig.entry_line.toFixed(2)"></td>
+                  <td class="py-1 pr-3 text-right" style="color:var(--t-red)" x-text="sig.hard_sl.toFixed(2)"></td>
+                  <td class="py-1 pr-3 text-right" style="color:var(--t-green)" x-text="sig.day_t1.toFixed(2)"></td>
+                  <td class="py-1 pr-3 text-right" x-text="sig.dist_pct.toFixed(2) + '%'"></td>
+                  <td class="py-1 pr-3 text-right" x-text="sig.btst_rr.toFixed(2)"></td>
+                  <td class="py-1 pr-3 text-xs" style="color:var(--t-amber)"
+                      x-text="sig.blocked ? 'BLOCKED (stale/stopped)' : ''"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
       </div>
     </template>
 

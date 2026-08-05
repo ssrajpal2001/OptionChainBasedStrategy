@@ -197,6 +197,11 @@ class FnOPosition:
     open_time:            str    = ""
     close_time:           str    = ""
     close_reason:         str    = ""
+    t1_alerted:           bool   = False  # Day T1 alert already fired -- position stays
+                                           # OPEN either way (T1 is alert-only, no auto-close);
+                                           # this is a dedup flag, NOT a close record. Was
+                                           # previously (mis)stored in close_reason, which made
+                                           # an open position with pnl<0 look like a booked loss.
     pnl:                  float  = 0.0
     client_id:            str    = ""
     binding_id:           str    = ""
@@ -658,10 +663,10 @@ class FnOPositionalBook:
                 await self._close_position(pos, "sl_hit")
                 await self._rescan_and_refill()
 
-            elif t1_hit and pos.close_reason != "t1_hit":
+            elif t1_hit and not pos.t1_alerted:
                 self._log.info("FnOBook[%s/%s]: T1 HIT %s  spot=%.1f >= t1=%.1f",
                                self._client_id, self._binding_id, pos.symbol, spot, pos.day_t1)
-                pos.close_reason = "t1_hit"
+                pos.t1_alerted = True
                 await self._bus.publish(Topic.SYSTEM_EVENT, {
                     "type":      "fno_t1_alert",
                     "client_id": self._client_id,
@@ -828,5 +833,21 @@ class FnOPositionalBook:
             "max_slots":    self._max_slots,
             "open_count":   len(self._open_positions),
             "pending_count":len(self._pending),
+            "pending":      [
+                {
+                    "symbol":     sig.symbol,
+                    "direction":  sig.direction,
+                    "status":     sig.status,
+                    "entry_line": round(sig.entry_line, 2),
+                    "hard_sl":    round(sig.hard_sl, 2),
+                    "day_t1":     round(sig.day_t1, 2),
+                    "dist_pct":   round(sig.dist_pct, 2),
+                    "btst_rr":    round(sig.btst_rr, 2),
+                    "strike":     sig.suggested_strike,
+                    "expiry":     sig.expiry,
+                    "blocked":    (sig.symbol, sig.direction) in self._blocked_today,
+                }
+                for sig in self._pending
+            ],
             "positions":    [asdict(p) for p in self._positions],
         }
