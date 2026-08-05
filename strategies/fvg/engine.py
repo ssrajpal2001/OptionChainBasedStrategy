@@ -58,6 +58,7 @@ from config.global_config import IST, Topic
 from data_layer.base_feeder import CandleEvent, IndexTick, OptionTick
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
+from strategies.core.position import PositionStoreMixin
 from strategies.d1_trap_option.book import (
     _Bar,
     _build_bar,
@@ -186,7 +187,7 @@ class FVGOrderEvent:
     entry_ts: Optional[datetime] = None  # 2026-08-03: real entry timestamp.
 
 
-class FVGStrategy(AbstractStrategyBook):
+class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
     """One independent FVG trading book per (client, binding, underlying)."""
 
     def __init__(
@@ -259,6 +260,8 @@ class FVGStrategy(AbstractStrategyBook):
         self._option_ltp: Dict[Tuple[int, str, date], float] = {}
         self._ltf_bars_since_entry = 0
 
+        self._restore_position()
+
         logger.info(
             "FVGStrategy[%s/%s/%s]: htf=%dm ltf=%dm itm_offset=%d direction_mode=%s lot=%d step=%d "
             "| TSL: initial_sl=%.1f%% trigger=%.1f%% first_lock=%.1f%% step=%.1f%% step_lock=%.1f%%",
@@ -269,6 +272,52 @@ class FVGStrategy(AbstractStrategyBook):
         )
 
     # ── lifecycle ────────────────────────────────────────────────────────────
+
+    @property
+    def _persist_key(self) -> str:
+        if self._client_id and self._binding_id:
+            return f"{self._client_id}_{self._binding_id}_{self._underlying}_fvg"
+        return f"{self._underlying}_fvg"
+
+    @staticmethod
+    def _position_to_store_dict(pos: dict) -> dict:
+        """JSON-serialisable snapshot of self._position for PositionStore."""
+        d = dict(pos)
+        expiry = d.get("expiry")
+        d["expiry"] = expiry.isoformat() if expiry else None
+        entry_ts = d.get("entry_ts")
+        d["entry_ts"] = entry_ts.isoformat() if entry_ts else None
+        return d
+
+    @staticmethod
+    def _position_from_store_dict(d: dict) -> dict:
+        """Inverse of _position_to_store_dict -- restores date/datetime types."""
+        pos = dict(d)
+        if pos.get("expiry"):
+            pos["expiry"] = date.fromisoformat(pos["expiry"])
+        if pos.get("entry_ts"):
+            pos["entry_ts"] = datetime.fromisoformat(pos["entry_ts"])
+        zone = pos.get("fvg_zone")
+        if zone is not None:
+            pos["fvg_zone"] = tuple(zone)
+        return pos
+
+    def _restore_position(self) -> None:
+        """Restore an open position persisted before a restart, so a mid-day
+        crash/redeploy doesn't silently lose track of a still-open broker
+        leg. Mirrors SellStraddleStrategy.start()'s restore-on-start shape
+        (strategies/sell_straddle/engine.py)."""
+        try:
+            saved = self.load(self._persist_key)
+            if saved:
+                self._position = self._position_from_store_dict(saved)
+                logger.info(
+                    "FVGStrategy[%s]: restored open position from store (%s strike=%s qty=%s).",
+                    self._underlying, self._position.get("option_type"),
+                    self._position.get("strike"), self._position.get("qty"),
+                )
+        except Exception:
+            logger.exception("FVGStrategy[%s]: position restore failed.", self._underlying)
 
     def start(self) -> None:
         super().start()
@@ -670,6 +719,8 @@ class FVGStrategy(AbstractStrategyBook):
             "entry_ts": ts, "fvg_zone": (fvg["zone_lo"], fvg["zone_hi"]),
         }
         self._ltf_bars_since_entry = 0
+        self.persist(self._persist_key, self._position_to_store_dict(self._position),
+                     product_type=self._product_type)
 
         ev = FVGOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id,
@@ -739,6 +790,7 @@ class FVGStrategy(AbstractStrategyBook):
         if pos is None:
             return
         self._position = None
+        self.clear(self._persist_key)
         spot = self._last_spot or pos["entry"]
         exit_premium = self._option_ltp.get((pos["strike"], pos["option_type"], pos["expiry"]), pos["premium_entry"])
 
