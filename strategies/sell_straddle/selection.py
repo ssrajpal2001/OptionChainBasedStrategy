@@ -331,14 +331,9 @@ def select_balanced_pair(
     balance_ratio: float = 1.0,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
-    Balanced-pair selection for beginning AND re-entry:
-      1. ATM both sides; require both LTP > 0.
-      2. Anchor = side with LOWER TIME VALUE at ATM.
-      3. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target).
-      4. Partner = scan the other side over ATM +/- offset for a strike whose raw LTP is
-         <= anchor_time_value * balance_ratio and passes the dual floor.  If rule_pass is supplied, the
-         combined (ce_strike, pe_strike) pair must also pass it.  Pick the HIGHEST such LTP
-         (closest to anchor time value from below).  The partner may be ITM or OTM.
+    Balanced-pair selection for RE-ENTRY (and any other single-ATM caller):
+      ATM = spot rounded to the nearest strike (or the closest doubly-quoted strike
+      for variable-strike chains), then select_balanced_pair_at() at that one strike.
 
     `variable_strikes=True`: discover ATM and candidate strikes from the actual quoted
     chain instead of assuming a fixed strike step. Used for Delta BTC/ETH daily options.
@@ -348,6 +343,46 @@ def select_balanced_pair(
         atm = _common_atm(strike_prem, spot)
     else:
         atm = int(round(spot / step) * step)
+    return select_balanced_pair_at(
+        strike_prem, atm, spot, step, offset, ltp_target, trace=trace,
+        entry_basis=entry_basis, theta_target=theta_target, rule_pass=rule_pass,
+        variable_strikes=variable_strikes, balance_ratio=balance_ratio,
+    )
+
+
+def select_balanced_pair_at(
+    strike_prem: Dict[Key, dict],
+    atm: int,
+    spot: float,
+    step: float,
+    offset: int,
+    ltp_target: float,
+    trace: Optional[list] = None,
+    entry_basis: str = "ltp",
+    theta_target: float = 0.0,
+    rule_pass=None,  # optional callable(ce_strike, pe_strike) -> bool
+    variable_strikes: bool = False,
+    balance_ratio: float = 1.0,
+) -> Optional[Tuple[int, int, float, float]]:
+    """
+    Same anchor+partner balanced-pair search as select_balanced_pair(), but takes the
+    anchor strike explicitly instead of computing it by rounding spot to one nearest
+    strike. Lets a caller anchor the search at any strike -- e.g. BEGINNING entry's
+    near/far dual-anchor selection (2026-08-05), which evaluates the two strikes
+    actually bracketing spot (floor(spot/step)*step and that +step) as two independent
+    candidates instead of only ever considering the single nearest-rounded strike.
+
+      1. Both sides quoted at `atm`; require both LTP > 0.
+      2. Anchor = side with LOWER TIME VALUE at `atm`.
+      3. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target).
+      4. Partner = scan the other side over atm +/- offset for a strike whose raw LTP is
+         <= anchor_time_value * balance_ratio and passes the dual floor. If rule_pass is
+         supplied, the combined (ce_strike, pe_strike) pair must also pass it. Pick the
+         HIGHEST such LTP (closest to anchor time value from below). The partner may be
+         ITM or OTM.
+
+    Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
+    """
     ce_atm = strike_prem.get((atm, "CE"))
     pe_atm = strike_prem.get((atm, "PE"))
     if not ce_atm or not pe_atm:

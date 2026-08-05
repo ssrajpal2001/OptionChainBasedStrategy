@@ -292,6 +292,17 @@ class EntryMixin:
                 except Exception:
                     pass
 
+        # BEGINNING entry (2026-08-05): near/far dual-anchor selection, not single-ATM.
+        # Instead of rounding spot to one nearest strike, evaluate the two strikes that
+        # actually bracket spot as two independent candidates -- see
+        # _eval_beginning_near_far for the full mechanic. RE-ENTRY is unchanged below.
+        if use_beginning_sel:
+            await self._eval_beginning_near_far(
+                now, rule_key, rules, step, offset, ltp_target, theta_target,
+                variable_strikes, balance_ratio,
+            )
+            return
+
         from strategies.sell_straddle.selection import select_balanced_pair, reentry_block_reason
 
         _trace: list = []
@@ -340,6 +351,102 @@ class EntryMixin:
         ce_strike, pe_strike, ce_ltp, pe_ltp = sel
         ind_by_tf = self._ind_by_tf(ce_strike, pe_strike, rules)
         passed, reason = _eval_rules(rules, ind_by_tf)
+        await self._finalize_entry_decision(
+            now, rule_key, concept, ce_strike, pe_strike, ce_ltp, pe_ltp,
+            ind_by_tf, passed, reason, ltp_target, theta_target, offset,
+        )
+
+    async def _eval_beginning_near_far(
+        self, now: datetime, rule_key: str, rules: list, step: float, offset: int,
+        ltp_target: float, theta_target: float, variable_strikes: bool, balance_ratio: float,
+    ) -> None:
+        """BEGINNING entry (2026-08-05, user-specified): instead of rounding spot to one
+        nearest strike, evaluate the two strikes that actually bracket spot --
+        near = floor(spot/step)*step, far = near+step -- as two independent anchor
+        candidates, each via the same anchor+partner balanced-pair search RE-ENTRY
+        uses (select_balanced_pair_at). Entry criteria (SLOPE etc.) is checked on
+        BOTH resulting pairs. If both pass, the max/min-premium ratio (the same
+        ratio concept used as the _max_entry_ratio safety gate right before entry)
+        decides between them -- lower ratio (more balanced) wins. If only one
+        passes, take it directly. If neither passes, no trade this cycle -- exactly
+        like today, BEGINNING keeps retrying every eligible cycle regardless."""
+        from strategies.sell_straddle.selection import select_balanced_pair_at
+
+        near = int(self._spot // step) * int(step) if self._spot > 0 and step > 0 else 0
+        far = near + int(step)
+
+        candidates: list = []
+        for label, atm in (("near", near), ("far", far)):
+            _trace: list = []
+            sel = select_balanced_pair_at(
+                self._strike_prem, atm, self._spot, step, offset, ltp_target, trace=_trace,
+                entry_basis=self._entry_basis, theta_target=theta_target,
+                variable_strikes=variable_strikes, balance_ratio=balance_ratio,
+            )
+            for _ln in _trace:
+                self._clog.info("SELECT %s | [%s@%d] %s", self._underlying, label, atm, _ln)
+            if not sel:
+                self._clog.info(
+                    "EVAL %s [%s] NO-PAIR @ %s(%d) — spot=%.2f (ltp≥%.0f theta≥%.0f offset=%d)",
+                    self._underlying, rule_key, label, atm, self._spot, ltp_target, theta_target, offset,
+                )
+                continue
+            ce_strike, pe_strike, ce_ltp, pe_ltp = sel
+            ind_by_tf = self._ind_by_tf(ce_strike, pe_strike, rules)
+            passed, reason = _eval_rules(rules, ind_by_tf)
+            self._clog.info(
+                "EVAL %s [%s/beginning] %s(%d) sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s",
+                self._underlying, rule_key, label, atm, ce_strike, ce_ltp, pe_strike, pe_ltp,
+                ce_ltp + pe_ltp, reason, "PASS" if passed else "BLOCK",
+            )
+            candidates.append({
+                "label": label, "ce_strike": ce_strike, "pe_strike": pe_strike,
+                "ce_ltp": ce_ltp, "pe_ltp": pe_ltp, "ind_by_tf": ind_by_tf,
+                "passed": passed, "reason": reason,
+            })
+
+        if not candidates:
+            return  # both NO-PAIR, already logged above
+
+        passing = [c for c in candidates if c["passed"]]
+        if not passing:
+            return  # both evaluated, neither passed entry criteria -- already logged above
+
+        def _ratio(c: dict) -> float:
+            hi, lo = max(c["ce_ltp"], c["pe_ltp"]), min(c["ce_ltp"], c["pe_ltp"])
+            return (hi / lo) if lo > 0 else float("inf")
+
+        if len(passing) == 1:
+            chosen = passing[0]
+        else:
+            chosen = min(passing, key=_ratio)
+            self._clog.info(
+                "EVAL %s [%s] BOTH near/far pairs passed entry criteria — "
+                "%s=CE%d/PE%d(ratio=%.3fx) vs %s=CE%d/PE%d(ratio=%.3fx) -> choosing %s (lower ratio)",
+                self._underlying, rule_key,
+                passing[0]["label"], passing[0]["ce_strike"], passing[0]["pe_strike"], _ratio(passing[0]),
+                passing[1]["label"], passing[1]["ce_strike"], passing[1]["pe_strike"], _ratio(passing[1]),
+                chosen["label"],
+            )
+
+        await self._finalize_entry_decision(
+            now, rule_key, "beginning", chosen["ce_strike"], chosen["pe_strike"],
+            chosen["ce_ltp"], chosen["pe_ltp"], chosen["ind_by_tf"], chosen["passed"], chosen["reason"],
+            ltp_target, theta_target, offset,
+        )
+
+    async def _finalize_entry_decision(
+        self, now: datetime, rule_key: str, concept: str,
+        ce_strike: int, pe_strike: int, ce_ltp: float, pe_ltp: float,
+        ind_by_tf: dict, passed: bool, reason: str,
+        ltp_target: float, theta_target: float, offset: int,
+    ) -> None:
+        """Shared tail for both entry paths once a single candidate pair has been
+        selected and rule-evaluated: log, audit, the _max_entry_ratio safety gate,
+        and (if everything passes) dispatch _open_position. Extracted 2026-08-05 so
+        BEGINNING's near/far dual-anchor path and RE-ENTRY's single-ATM path share
+        the exact same finalize logic rather than risking behavior drift between
+        two copies."""
         _dump = {tf: {k: round(v, 2) for k, v in (d or {}).items()} for tf, d in ind_by_tf.items()}
         self._clog.info(
             "EVAL %s [%s/%s] sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s | ind_by_tf=%s",
@@ -357,7 +464,7 @@ class EntryMixin:
             ltp_target=ltp_target,
             theta_target=theta_target,
             offset=offset,
-            selected_pair=(int(ce_strike), int(pe_strike), float(ce_ltp), float(pe_ltp)) if sel else None,
+            selected_pair=(int(ce_strike), int(pe_strike), float(ce_ltp), float(pe_ltp)),
             ind_by_tf=_dump,
             passed=passed,
             reason=reason,
