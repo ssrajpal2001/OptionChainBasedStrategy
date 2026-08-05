@@ -2684,6 +2684,7 @@ document.addEventListener('alpine:init', () => {
                             exit: tr.exit_price, pnl: tr.pnl, entry_ts: null,
                             exit_ts: (tr.date || tr.ts || null) }];
             const strat = tr.strategy || '—', inst = tr.instrument || '—';
+            const bindId = tr.binding_id || '';
             const _sk = (lg) => (lg.side ? lg.side + ' ' : '') + (lg.strike || '');
             const _isCryptoShort = (lg) => strat === 'v4_cascade'
                 && ['BTC', 'ETH'].includes(String(inst).toUpperCase()) && lg.side === 'PE';
@@ -2707,7 +2708,7 @@ document.addEventListener('alpine:init', () => {
                 _ts: lg.entry_ts || '',
                 time: this.fmtHMS(lg.entry_ts),
                 action: _openAction(lg), side: lg.side || '',
-                strategy: strat, instrument: inst, strike: _sk(lg),
+                strategy: strat, instrument: inst, strike: _sk(lg), binding_id: bindId,
                 price: lg.entry,
                 pnl: null,
                 reason: isOpen ? 'OPEN' : (lg.entry_reason || 'entry'),
@@ -2722,7 +2723,7 @@ document.addEventListener('alpine:init', () => {
                 _ts: _x,
                 time: this.fmtHMS(_x),
                 action: _closeAction(lg), side: lg.side || '',
-                strategy: strat, instrument: inst, strike: _sk(lg),
+                strategy: strat, instrument: inst, strike: _sk(lg), binding_id: bindId,
                 price: lg.exit,
                 // If the leg's entry was lost (<=0) the recorded P&L is a phantom (e.g. -32360) —
                 // show '—' instead of a garbage number.
@@ -2765,9 +2766,14 @@ document.addEventListener('alpine:init', () => {
       const groups = {};
       for (const r of this.csHistoryFlat) {
         const day = (r._ts && String(r._ts).slice(0, 10)) || 'undated';
-        const key = day + '|' + (r.strategy || '—') + '|' + (r.instrument || '—');
+        // binding_id included -- two separate broker bindings running the identical
+        // strategy/instrument/day (e.g. the same client trading both Zerodha and Fyers)
+        // must NOT be merged into one group; that made two genuinely separate real
+        // trades look like one trade's data duplicated (and its P&L doubled).
+        const key = day + '|' + (r.strategy || '—') + '|' + (r.instrument || '—') + '|' + (r.binding_id || '—');
         if (!groups[key]) groups[key] = {
           key, day, strategy: r.strategy || '—', instrument: r.instrument || '—',
+          binding_id: r.binding_id || '—',
           rows: [], buys: 0, sells: 0, pnl: 0, _sort: r._ts || '',
         };
         const g = groups[key];
@@ -8505,7 +8511,8 @@ function amoTest() {
                     <div class="font-ui font-bold text-sm truncate" style="color:var(--t-bright)" x-text="g.instrument"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)">
                       <span x-text="histDayLabel(g.day)"></span> ·
-                      <span style="color:var(--t-dim)" x-text="g.strategy"></span>
+                      <span style="color:var(--t-dim)" x-text="g.strategy"></span> ·
+                      <span style="color:var(--t-cyan)" x-text="g.binding_id"></span>
                     </div>
                   </div>
                 </div>
@@ -8567,6 +8574,7 @@ function amoTest() {
                 <th class="px-4 py-2 text-left sec-label">TIME</th>
                 <th class="px-4 py-2 text-left sec-label">ACTION</th>
                 <th class="px-4 py-2 text-left sec-label">STRATEGY</th>
+                <th class="px-4 py-2 text-left sec-label">BROKER</th>
                 <th class="px-4 py-2 text-left sec-label">INSTRUMENT</th>
                 <th class="px-4 py-2 text-left sec-label">STRIKE</th>
                 <th class="px-4 py-2 text-right sec-label">PRICE</th>
@@ -8583,6 +8591,7 @@ function amoTest() {
                       :style="`color:${rw.action==='SELL'?'var(--t-green)':'var(--t-red)'}`"
                       x-text="rw.action"></td>
                   <td data-label="Strategy" class="px-4 py-2 font-ui font-semibold" style="color:var(--t-text)" x-text="rw.strategy"></td>
+                  <td data-label="Broker" class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="rw.binding_id || '—'"></td>
                   <td data-label="Instrument" class="px-4 py-2 font-mono" style="color:var(--t-cyan)" x-text="rw.instrument"></td>
                   <td data-label="Strike" class="px-4 py-2 font-mono font-semibold"
                       :style="`color:${rw.side==='CE'?'var(--t-green)':rw.side==='PE'?'var(--t-amber)':'var(--t-text)'}`"
