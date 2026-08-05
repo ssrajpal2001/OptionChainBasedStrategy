@@ -85,7 +85,6 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._prev_vwap_atp: Optional[float] = None
         self._strike_prem: Dict[Tuple[int, str], dict] = {}
         self._prev_atp_closed: Dict[Tuple[int, str], float] = {}
-        self._beginning_failed: bool = False
         self._itm_gate_armed: bool = False
         self._ltp_target: float = 0.0
 
@@ -617,7 +616,6 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._last_entry_bucket_r = ""
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
-        self._beginning_failed = False
         # Recompute effective entry expiry for the new session/day.
         self._entry_expiry_date = self._effective_entry_expiry()
         try:

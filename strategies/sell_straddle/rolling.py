@@ -479,8 +479,11 @@ class RollingMixin:
                 self._underlying,
             )
             await self._close_position("itm_pair_gate_profit")
-            # No cooldown — restart immediately via re-entry (not beginning).
-            self._beginning_failed = True   # force re-entry path on next entry attempt
+            # No cooldown — restart immediately. Already goes via re-entry (not
+            # beginning) since trades_today >= 1 at this point (a trade already
+            # happened earlier today to reach this position) -- is_beginning is
+            # trades_today==0, already False here regardless of _beginning_failed
+            # (removed 2026-08-05: was a redundant belt-and-suspenders write).
             return
 
         # Below threshold: arm the gate and hold.  We wait for either the cumulative P&L

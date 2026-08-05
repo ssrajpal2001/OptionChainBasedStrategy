@@ -165,9 +165,18 @@ class EntryMixin:
         workflow = ss.get("entry_workflow_mode", "hybrid")
         is_beginning = (self._trades_today == 0)
 
-        want_beg = (workflow == "beginning_only") or (
-            workflow == "hybrid" and is_beginning and not self._beginning_failed)
-        want_re = (workflow == "reentry_only") or (workflow == "hybrid")
+        # User-specified hybrid contract (2026-08-05): BEGINNING is retried on every
+        # eligible cycle for as long as trades_today == 0 -- a single blocked check
+        # must NOT permanently lock it out for the rest of the day (the old
+        # _beginning_failed flip did exactly that after just one failure). RE-ENTRY
+        # must never be evaluated at all until the first trade has actually happened
+        # (trades_today > 0) -- previously want_re was unconditionally True in hybrid
+        # mode, so re-entry ran in parallel with beginning from tick one, even before
+        # any trade existed. A mid-day restart with trades_today==0 still correctly
+        # goes through is_beginning (state-based, not time-of-day-based) -- no change
+        # needed there.
+        want_beg = (workflow == "beginning_only") or (workflow == "hybrid" and is_beginning)
+        want_re = (workflow == "reentry_only") or (workflow == "hybrid" and not is_beginning)
 
         due_beg = False
         if want_beg:
@@ -354,8 +363,6 @@ class EntryMixin:
             reason=reason,
         )
         if not passed:
-            if use_beginning_sel and "N/A" not in reason:
-                self._beginning_failed = True
             return
 
         if self._max_entry_ratio > 0 and ce_ltp > 0 and pe_ltp > 0:
@@ -417,7 +424,6 @@ class EntryMixin:
         self._persist()
         asyncio.create_task(self._seed_exec_legs(int(ce_strike), int(pe_strike)))
         self._trades_today += 1
-        self._beginning_failed = False
         self._order_pending = True
         # Accumulate total premium/credit deployed today so day-level % guardrails
         # use the correct denominator across multiple trades/re-entries.
