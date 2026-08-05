@@ -237,6 +237,12 @@ class FnOPositionalBook:
         # after a fresh subscribe, before the first tick arrives).
         self._equity_ltp: Dict[str, float] = {}
         self._equity_tick_task: Optional[asyncio.Task] = None
+        # (symbol, direction) pairs stopped out today — excluded from re-entry so a
+        # rescan can't immediately re-fire the same already-invalidated signal.
+        # See 2026-08-05 incident: a stale (2-day-old) APPROACHING signal whose spot
+        # had already moved past hard_sl before entry caused an infinite
+        # enter→instant-SL→rescan→re-enter loop, 6 real orders/min on one stock.
+        self._blocked_today: set = set()
 
         date_str = datetime.now(IST).strftime("%Y%m%d")
         self._log = make_strategy_logger(
@@ -445,6 +451,17 @@ class FnOPositionalBook:
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
+    def _already_sl_side(self, sig, spot: float) -> bool:
+        """True if entering right now would open a position already past its own
+        hard_sl — i.e. the zone is stale/blown and the SL would fire on the very
+        next poll. Applies regardless of which path (TRIGGERED/APPROACHING) found
+        the signal; a scan-file zone can go stale (nightly scan not re-run,
+        overnight gap, etc.) between when it was written and when it's acted on."""
+        return (
+            (sig.direction == "CE" and spot <= sig.hard_sl) or
+            (sig.direction == "PE" and spot >= sig.hard_sl)
+        )
+
     async def _try_enter_triggered(self) -> None:
         free = self._max_slots - len(self._open_positions)
         if free <= 0:
@@ -454,6 +471,10 @@ class FnOPositionalBook:
                 break
             if sig.status != "TRIGGERED":
                 continue
+            key = (sig.symbol, sig.direction)
+            if key in self._blocked_today:
+                self._pending.remove(sig)
+                continue
             # Gap filter: if spot has moved >GAP_SKIP_PCT% from entry_line since
             # yesterday's close, the zone is blown — skip this signal entirely.
             spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
@@ -461,12 +482,14 @@ class FnOPositionalBook:
                 spot = await self._spot_ltp(sig.symbol, spot_key)
                 if spot > 0:
                     gap_pct = abs(spot - sig.entry_line) / sig.entry_line * 100
-                    if gap_pct > GAP_SKIP_PCT:
+                    if gap_pct > GAP_SKIP_PCT or self._already_sl_side(sig, spot):
                         self._log.warning(
-                            "FnOBook: SKIP %s %s — gap %.1f%% from zone %.1f (spot=%.1f) > %.1f%% threshold",
-                            sig.symbol, sig.direction, gap_pct, sig.entry_line, spot, GAP_SKIP_PCT,
+                            "FnOBook: SKIP %s %s — gap %.1f%% from zone %.1f (spot=%.1f, "
+                            "hard_sl=%.1f) — stale/blown zone, would enter already past SL",
+                            sig.symbol, sig.direction, gap_pct, sig.entry_line, spot, sig.hard_sl,
                         )
                         self._pending.remove(sig)
+                        self._blocked_today.add(key)
                         continue
             self._pending.remove(sig)
             await self._open_position(sig)
@@ -481,6 +504,10 @@ class FnOPositionalBook:
                 break
             if sig.status != "APPROACHING":
                 continue
+            key = (sig.symbol, sig.direction)
+            if key in self._blocked_today:
+                self._pending.remove(sig)
+                continue
             spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
             spot = await self._spot_ltp(sig.symbol, spot_key)
             if spot <= 0:
@@ -489,6 +516,15 @@ class FnOPositionalBook:
                 (sig.direction == "CE" and spot <= sig.entry_line * 1.002) or
                 (sig.direction == "PE" and spot >= sig.entry_line * 0.998)
             )
+            if touched and self._already_sl_side(sig, spot):
+                self._log.warning(
+                    "FnOBook: SKIP %s %s — spot=%.1f already past hard_sl=%.1f "
+                    "(stale zone: entry_line=%.1f) — refusing to enter pre-stopped",
+                    sig.symbol, sig.direction, spot, sig.hard_sl, sig.entry_line,
+                )
+                self._pending.remove(sig)
+                self._blocked_today.add(key)
+                continue
             if touched:
                 self._pending.remove(sig)
                 await self._open_position(sig)
@@ -618,6 +654,7 @@ class FnOPositionalBook:
             if sl_hit:
                 self._log.warning("FnOBook[%s/%s]: SL HIT %s  spot=%.1f <= sl=%.1f",
                                   self._client_id, self._binding_id, pos.symbol, spot, pos.spot_sl)
+                self._blocked_today.add((pos.symbol, pos.direction))
                 await self._close_position(pos, "sl_hit")
                 await self._rescan_and_refill()
 
