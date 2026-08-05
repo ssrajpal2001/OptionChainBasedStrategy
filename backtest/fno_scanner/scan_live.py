@@ -710,8 +710,24 @@ if __name__ == "__main__":
     print_report(signals)
 
     if args.save:
-        path = save_watchlist(signals, universe=universe, top_n=args.top_n, out_path=args.out)
+        # Two independent live consumers read this scan's output under two different
+        # default filenames: D1TrapOptionBookManager's WATCHLIST sentinel reads
+        # data/fno_watchlist.json (save_watchlist()'s own default), while
+        # FnOPositionalBook's load_watchlist() reads data/fno_positional_watchlist.json.
+        # The documented nightly command (`--save --top-n N`, no --out) used to only
+        # ever write the first of those -- FnOPositionalBook silently kept trading a
+        # stale file until someone happened to pass --out explicitly. 2026-08-05
+        # incident: that staleness (scan hadn't refreshed fno_positional_watchlist.json
+        # since 08-03) let an already-invalidated zone fire live. If the caller didn't
+        # override --out, write both so one command actually refreshes both consumers.
+        out_paths = [args.out] if args.out else [
+            str(ROOT / "data" / "fno_watchlist.json"),
+            str(ROOT / "data" / "fno_positional_watchlist.json"),
+        ]
+        written = [save_watchlist(signals, universe=universe, top_n=args.top_n, out_path=p)
+                   for p in out_paths]
         triggered_n   = sum(1 for s in signals if s.status == "TRIGGERED")
         approaching_n = sum(1 for s in signals if s.status == "APPROACHING")
-        print(f"\n  Watchlist saved → {path}")
+        for path in written:
+            print(f"\n  Watchlist saved → {path}")
         print(f"  {triggered_n} TRIGGERED  +  {approaching_n} APPROACHING  →  {min(len(signals), args.top_n)} stocks written")
