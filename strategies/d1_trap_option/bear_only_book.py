@@ -934,6 +934,15 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     # missing it (would-have-entered logging only during warmup).
                     self._check_fast_flip_tranche1(side, h, ts)
                     replayed_counts[side] += 1
+                    # 2026-08-05: this loop can run hundreds of iterations late in the
+                    # day (replaying every 1m bar since market open on a restart), and
+                    # _process_new_bar's pandas resample/sort_index is genuinely
+                    # CPU-bound with zero await points -- confirmed live via py-spy
+                    # that this froze the ENTIRE process (GIL-bound single event loop
+                    # thread), including the dashboard's HTTP server, for the whole
+                    # replay duration. Yield every iteration so other coroutines
+                    # (HTTP requests, other strategies' ticks) can interleave.
+                    await asyncio.sleep(0)
                 for side, n in replayed_counts.items():
                     if n:
                         logger.info("BearTrap[%s]: %s replayed %d intraday bars (market already open, "
