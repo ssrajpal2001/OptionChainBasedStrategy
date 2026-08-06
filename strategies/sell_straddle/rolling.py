@@ -175,7 +175,15 @@ class RollingMixin:
             theta_target=self._theta_target,
             variable_strikes=variable_strikes,
             trace=_partner_trace,
-            ltp_le_kept=False,
+            # 2026-08-06 CRITICAL FIX: was False, contradicting this codebase's own
+            # documented rule ("the new partner must be ... STRICTLY <= the kept
+            # leg's LTP -- never roll into a richer leg"). With False, the "MAX SKEW
+            # CHECK" a few lines below this call is silently toothless -- its own
+            # comment claims "select_partner_for guarantees new_ltp <= keep_ltp" but
+            # that guarantee only holds when this flag is True. A roll meant to
+            # de-risk a decayed leg could select a MORE expensive/exposed leg than
+            # the one being kept, the opposite of the intended behavior.
+            ltp_le_kept=True,
             metric="balanced_ratio",
         )
 
@@ -464,6 +472,20 @@ class RollingMixin:
         threshold_inr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
 
         if cumulative_inr >= threshold_inr:
+            # 2026-08-06 CRITICAL FIX: _single_side_roll's own tail unconditionally
+            # re-calls _check_itm_pair_gate after every successful roll. When the
+            # reason IS itm_pair_gate_profit_rollover, that reentrant call can see
+            # the SAME still-both-ITM, still-over-threshold pair and attempt to
+            # roll AGAIN with the identical reason -- but _last_roll_attempt's 60s
+            # throttle (just set by the roll still unwinding) blocks it, and
+            # _single_side_roll's "no partner found" return is indistinguishable
+            # from that throttle block. Net effect: close 1 leg -> open 1 leg ->
+            # (misread as "no partner") -> close both -> reopen fresh -- 4 real
+            # orders instead of 2, immediately after the roll that just succeeded.
+            # Guarded so the reentrant call this exact path triggers is a clean
+            # no-op instead of a second attempt.
+            if getattr(self, "_itm_gate_rolling", False):
+                return
             self._itm_gate_armed = False
             logger.info(
                 "SellStraddle[%s]: ITM-PAIR GATE — both legs ITM & gap=%d>%.0f (CE%d/PE%d) spot=%.0f "
@@ -471,7 +493,11 @@ class RollingMixin:
                 self._underlying, strike_gap, min_gap, ce_s, pe_s, self._spot,
                 cumulative_pts, cumulative_inr, threshold_inr,
             )
-            rolled = await self._single_side_roll(now, "itm_pair_gate_profit_rollover")
+            self._itm_gate_rolling = True
+            try:
+                rolled = await self._single_side_roll(now, "itm_pair_gate_profit_rollover")
+            finally:
+                self._itm_gate_rolling = False
             if rolled:
                 return
             logger.info(
@@ -609,7 +635,7 @@ class RollingMixin:
             pool, roll_side=new_side, kept_strike=kept_strike, kept_ltp=kept_ltp,
             spot=self._spot, step=step, offset=offset, ltp_target=ltp_target,
             rule_pass=_rule_pass, max_itm_steps=max_itm, theta_target=self._theta_target,
-            variable_strikes=variable_strikes, ltp_le_kept=False, metric="balanced_ratio",
+            variable_strikes=variable_strikes, ltp_le_kept=True, metric="balanced_ratio",
         )
         if partner:
             pool_strike, pool_ltp = partner

@@ -88,3 +88,46 @@ def test_itm_pair_gate_arms_then_holds_below_threshold():
         assert s._itm_gate_armed is True
         assert s._position is not None and s._position.status == "open"
     asyncio.run(run())
+
+
+def test_itm_pair_gate_reentrant_call_from_roll_tail_is_a_noop():
+    """2026-08-06 CRITICAL FIX regression test. _single_side_roll's own tail
+    unconditionally re-calls _check_itm_pair_gate after every successful
+    roll. When the roll reason is itm_pair_gate_profit_rollover, that
+    reentrant call used to see the same still-both-ITM, still-over-threshold
+    pair and try to roll AGAIN with the identical reason -- but the 60s
+    per-reason throttle (just set by the roll still unwinding) blocked it,
+    and the resulting False was misread as "no partner found", triggering an
+    immediate close-both-and-restart right after the roll that just
+    succeeded: 4 real orders instead of 2.
+
+    Simulate this exactly: mock _single_side_roll to behave like the real
+    one's tail -- call self._check_itm_pair_gate(now) again BEFORE
+    returning. With the fix, that reentrant call must be a clean no-op:
+    _single_side_roll must be invoked exactly once, and _close_position
+    must never fire."""
+    async def run():
+        bus = EventBus()
+        s = _gated_strategy(bus)
+        s._close_position = AsyncMock(wraps=s._close_position)
+
+        call_count = {"n": 0}
+        real_check = s._check_itm_pair_gate
+
+        async def _fake_single_side_roll(now, reason):
+            call_count["n"] += 1
+            # Simulate _single_side_roll's real tail: re-call the gate check
+            # BEFORE returning, from within the same still-over-threshold state.
+            await real_check(now)
+            return True  # simulate a successful roll
+
+        s._single_side_roll = _fake_single_side_roll
+
+        await s._check_itm_pair_gate(datetime.datetime.now(IST))
+
+        assert call_count["n"] == 1, (
+            f"_single_side_roll was invoked {call_count['n']} times -- the reentrant "
+            "call from the simulated roll tail was NOT treated as a no-op."
+        )
+        s._close_position.assert_not_awaited()
+    asyncio.run(run())

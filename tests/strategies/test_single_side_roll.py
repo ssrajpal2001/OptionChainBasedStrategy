@@ -1,6 +1,6 @@
 import asyncio
 import datetime
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from data_layer.base_feeder import EventBus
 from config.global_config import IST, GlobalConfig
@@ -186,5 +186,75 @@ def test_single_side_roll_reopen_rejected_closes_kept_leg_for_real():
         assert s._position is None
         assert s._roll_in_progress is False
         assert s._order_pending is False
+
+    asyncio.run(run())
+
+
+def test_single_side_roll_enforces_ltp_le_kept_on_the_real_selection_call():
+    """2026-08-06 CRITICAL FIX regression test. select_partner_for's ltp_le_kept
+    parameter defaults to False (documented as intentional for OTHER callers,
+    e.g. re-entry pair selection) -- but this codebase's OWN documented
+    rollover rule is "the new partner must be ... STRICTLY <= the kept leg's
+    LTP (never roll into a richer leg)". The two live rolling.py call sites
+    were passing ltp_le_kept=False, silently disabling that rule for every
+    real roll. This directly asserts the actual keyword argument
+    _single_side_roll passes at its real call site -- not a re-derivation of
+    select_partner_for's own already-tested behavior."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._itm_pair_gate_enabled = False
+        s._spot = 24400.0
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,
+            ce_leg=StraddleLeg("CE", 24450, 152.75, 107.0,
+                               open_time=datetime.datetime.now(IST)),
+            pe_leg=StraddleLeg("PE", 24450, 132.05, 162.95,
+                               open_time=datetime.datetime.now(IST)),
+            net_credit=284.8, status="open",
+        )
+
+        mock_select = MagicMock(return_value=None)  # None -> "no partner", roll no-ops cleanly
+        with patch("strategies.sell_straddle.selection.select_partner_for", mock_select):
+            await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
+
+        assert mock_select.called
+        _, kwargs = mock_select.call_args
+        assert kwargs.get("ltp_le_kept") is True, (
+            f"_single_side_roll called select_partner_for with ltp_le_kept="
+            f"{kwargs.get('ltp_le_kept')!r} -- the 'never roll into a richer leg' "
+            f"rule is not being enforced."
+        )
+
+    asyncio.run(run())
+
+
+def test_itm_roll_protection_pool_search_enforces_ltp_le_kept():
+    """Same fix, second call site: _check_itm_roll_protection_side's broader
+    pool search must also enforce ltp_le_kept=True."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._spot = 24400.0
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,
+            ce_leg=StraddleLeg("CE", 24450, 152.75, 107.0,
+                               open_time=datetime.datetime.now(IST)),
+            pe_leg=StraddleLeg("PE", 24450, 132.05, 162.95,
+                               open_time=datetime.datetime.now(IST)),
+            net_credit=284.8, status="open",
+        )
+        prot = {
+            "protect_rs": 1000.0, "new_side": "CE", "new_strike": 24450,
+            "orig_strike": 24400, "kept_side": "PE", "kept_strike": 24450,
+        }
+
+        mock_select = MagicMock(return_value=None)
+        with patch("strategies.sell_straddle.selection.select_partner_for", mock_select):
+            await s._check_itm_roll_protection_side("CE", prot, datetime.datetime.now(IST))
+
+        if mock_select.called:  # only the broader pool-search branch calls it
+            _, kwargs = mock_select.call_args
+            assert kwargs.get("ltp_le_kept") is True
 
     asyncio.run(run())
