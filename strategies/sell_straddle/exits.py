@@ -693,9 +693,23 @@ class ExitMixin:
         self._persist()
 
     # Max time to wait for the bridge to confirm (or abort) a full-position EXIT before giving
-    # up and leaving the position open for a later retry. Mirrors the 10s single-side-roll close
-    # timeout in rolling.py, with extra headroom for the exit executor's own market fallback.
-    _CLOSE_CONFIRM_TIMEOUT_SEC = 15.0
+    # up and leaving the position open for a later retry.
+    # 2026-08-06 CRITICAL FIX: must exceed the bridge's OWN worst-case time to determine a
+    # fill, or this timer always loses the race. Confirmed live incident: straddle_bridge.py's
+    # exit executor waits up to market_fill_timeout_sec=8.0s (smart_executor.py), and if still
+    # under-filled, the bridge's own under-fill retry loop then polls get_order_status for up to
+    # 15 MORE seconds (range(15) x 1s, straddle_bridge.py::_do_leg -- extended from 5s->15s
+    # earlier the same day to give Zerodha time to settle a genuinely-filling order). That's a
+    # ~23s worst case for the bridge to publish ANY fill (real or paper_route's simulated one) --
+    # but this constant was still 15s, so _close_position gave up ~8s before the bridge could
+    # ever answer. The position was left "open" every single time a close didn't fill instantly
+    # (always true for paper_route's expected broker-rejection path, and for any live exit that
+    # takes more than an instant to confirm). The very next tick then saw the position still
+    # open, past force-exit, and fired a BRAND NEW real EOD close order -- repeating every
+    # ~15-16s indefinitely, each cycle placing a genuinely new order on the real broker (2026-08-06
+    # ssrajpal2001 paper_route: 20+ real BUY orders in 5 minutes at EOD squareoff). Set with real
+    # margin over the ~23s bridge worst case, not just barely above it.
+    _CLOSE_CONFIRM_TIMEOUT_SEC = 35.0
 
     # Max time to hold ALL exit checks after a restart-restore before treating a still-
     # not-fresh leg as a stuck data feed rather than just slow warm-up (see POST-RESTORE

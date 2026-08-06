@@ -203,6 +203,70 @@ def test_close_position_confirmed_exit_still_finalizes():
     assert emitted[0].action == "EXIT"
 
 
+# ── 2026-08-06 CRITICAL FIX: close-confirm timeout vs bridge worst-case latency ─────────────
+#
+# Real incident: straddle_bridge.py's EXIT path can legitimately take up to ~23s to publish a
+# fill -- SmartOrderExecutor's exit market_fill_timeout_sec=8.0s, then (if still under-filled)
+# the bridge's OWN under-fill retry loop polls get_order_status for up to 15 more seconds
+# (range(15) x 1s sleep, straddle_bridge.py::_do_leg). _CLOSE_CONFIRM_TIMEOUT_SEC was 15.0s --
+# shorter than the bridge's own worst case -- so _close_position gave up before the bridge could
+# ever answer. This is exactly what paper_route's expected broker-rejection path hits on every
+# single exit (confirmed live 2026-08-06: 20+ real duplicate BUY orders on ssrajpal2001 inside
+# 5 minutes at EOD squareoff, one new real order roughly every 15-16s).
+
+
+def test_close_confirm_timeout_has_margin_over_bridge_worst_case():
+    """Documents and locks the invariant that caused the incident: the strategy's wait for a
+    close confirmation must exceed the bridge's own worst-case time to determine one (8s
+    executor timeout + 15s under-fill retry = 23s), with real margin -- not just barely above
+    it. If either side's timing constant changes in the future, this test must be revisited
+    together with the other, not independently."""
+    _bridge_worst_case_sec = 8.0 + 15.0  # SmartOrderExecutor exit market_fill_timeout_sec + straddle_bridge.py's under-fill retry loop
+    assert SellStraddleStrategy._CLOSE_CONFIRM_TIMEOUT_SEC >= _bridge_worst_case_sec + 10.0, (
+        "close-confirm timeout no longer has safe margin over the bridge's worst-case fill "
+        "latency -- a slow (but real) exit confirmation would be dropped, leaving the position "
+        "marked open and causing EOD to redispatch a brand new real close order every cycle."
+    )
+
+
+def test_close_position_finalizes_when_bridge_confirmation_is_delayed_past_old_timeout(monkeypatch):
+    """Reproduces the real incident at test scale: a delayed bridge confirmation that would have
+    been dropped by the OLD 15s timeout (proportionally, arrives after the 'old' cutoff but
+    before the 'new' one) must still let _close_position finalize -- proving the fixed timeout
+    actually catches a same-cycle late confirmation instead of leaving the position open for
+    EOD to redispatch a duplicate real order on the next tick."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    pos = _open_position(ss)
+    # Scale the real 15s(old)/35s(new)/~23s(bridge) numbers down by 100x for a fast test.
+    old_timeout, new_timeout, bridge_delay = 0.15, 0.35, 0.23
+    monkeypatch.setattr(type(ss), "_CLOSE_CONFIRM_TIMEOUT_SEC", new_timeout)
+
+    async def _delayed_emit(ev):
+        async def _deliver():
+            await asyncio.sleep(bridge_delay)  # simulates the bridge's real ~23s worst case
+            fill = StraddleFillEvent(
+                action="EXIT", underlying=ev.underlying, atm=ev.atm,
+                ce_strike=ev.ce_strike, pe_strike=ev.pe_strike,
+                ce_fill=ev.ce_ltp, pe_fill=ev.pe_ltp,
+                client_id="C", binding_id="B", event_id=ev.event_id,
+                legs=ev.legs,
+            )
+            ss._on_fill(fill)
+        asyncio.create_task(_deliver())
+
+    ss._emit_order = _delayed_emit
+
+    asyncio.run(ss._close_position("eod_squareoff"))
+
+    # The bridge_delay (0.23) is well past what the OLD timeout (0.15) would have tolerated --
+    # confirming this scenario really does reproduce the incident's dropped-confirmation shape --
+    # but is comfortably under the NEW timeout (0.35), so the position must be fully closed.
+    assert bridge_delay > old_timeout
+    assert bridge_delay < new_timeout
+    assert ss._position is None
+    assert pos.status == "closed"
+
+
 # ── Routing failure cleanup ────────────────────────────────────────────────
 
 
