@@ -106,8 +106,18 @@ class ExitMixin:
         return False
 
     def _build_exit_criteria(self, pos, pnl: float, credit: float):
-        """Build the live exit-criteria list (and per-tf indicator dump)."""
+        """Build the live exit-criteria list (and per-tf indicator dump).
+
+        2026-08-06 CRITICAL FIX: this used to be one giant try/except around
+        every criterion -- an exception in an EARLIER section (e.g. Day%)
+        silently discarded every criterion after it, including the Dynamic
+        (exit_rules) stop-loss, with zero log trace. Indistinguishable from
+        "rules genuinely didn't pass" -- the single most dangerous failure
+        mode for a stop-loss: it silently stops firing. Each criterion is now
+        independently guarded so one failure can't suppress the others, and
+        every failure is logged instead of swallowed."""
         _crit = []
+        _exit_dump = None
         try:
             _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
             _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
@@ -118,23 +128,43 @@ class ExitMixin:
                               (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
             elif not credit:
                 _crit.append(("Day%", "SKIPPED (initial_credit=0!)", False))
-            _ce_ltp = float(getattr(getattr(pos, "ce_leg", None), "ltp", 0) or 0)
-            _pe_ltp = float(getattr(getattr(pos, "pe_leg", None), "ltp", 0) or 0)
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria Day%% failed: %s", self._underlying, exc)
+
+        _ce_ltp = float(getattr(getattr(pos, "ce_leg", None), "ltp", 0) or 0)
+        _pe_ltp = float(getattr(getattr(pos, "pe_leg", None), "ltp", 0) or 0)
+
+        try:
             if self._ltp_decay_enabled:
                 _lo = min(_ce_ltp, _pe_ltp) if (_ce_ltp > 0 and _pe_ltp > 0) else 0.0
                 _crit.append(("LTPdecay", f"min({_lo:.1f}) < {self._ltp_exit_min:.0f}",
                               _lo > 0 and _lo < self._ltp_exit_min))
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria LTPdecay failed: %s", self._underlying, exc)
+
+        try:
             if _ce_ltp > 0 and _pe_ltp > 0 and getattr(self, "_ratio_threshold", 0.0):
                 _r = max(_ce_ltp, _pe_ltp) / min(_ce_ltp, _pe_ltp)
                 _crit.append(("Ratio", f"{_r:.2f} vs {self._ratio_threshold:.1f}x", _r >= self._ratio_threshold))
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria Ratio failed: %s", self._underlying, exc)
+
+        try:
             if self._tsl_enabled:
                 _crit.append(("TSL", "ON (scalable)", False))
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria TSL failed: %s", self._underlying, exc)
+
+        try:
             if self._vwap_rise_enabled:
                 _stale = not self._pool_engine.pair_atp_fresh(
                     pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec)
                 _crit.append(("VWAPrise",
                               f"ON {self._vwap_rise_threshold:.1f}%{' STALE-skip' if _stale else ''}", False))
-            _exit_dump = None
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria VWAPrise failed: %s", self._underlying, exc)
+
+        try:
             if self._exit_rules:
                 _exit_ind_by_tf = self._ind_by_tf(pos.ce_leg.strike, pos.pe_leg.strike, self._exit_rules)
                 _passed, _reason = _eval_rules(self._exit_rules, _exit_ind_by_tf)
@@ -144,15 +174,21 @@ class ExitMixin:
                 if 1 in _exit_dump:
                     _exit_dump[1]["stale"] = (0.0 if self._pool_engine.pair_atp_fresh(
                         pos.ce_leg.strike, pos.pe_leg.strike, self._vwap_stale_sec) else 1.0)
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria Dynamic(exit_rules) failed "
+                         "-- this SL is NOT being evaluated this cycle: %s", self._underlying, exc)
+
+        try:
             if getattr(self, "_itm_pair_gate_enabled", False):
                 _both = self._both_itm()
                 _cum_inr = self._pnl_rs(self._cumulative_pnl_pts()) if _both else 0.0
                 _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
                 _crit.append(("ITMgate", f"bothITM={_both} cum₹{_cum_inr:.0f} vs threshold₹{_thr:.0f}",
                               _both and _cum_inr >= _thr))
-            return _crit, _exit_dump
-        except Exception:
-            return _crit, None
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria ITMgate failed: %s", self._underlying, exc)
+
+        return _crit, _exit_dump
 
     def _day_pct(self, pos) -> float:
         """Session day-% using the same basis as the guardrail trigger in _check_exits."""
