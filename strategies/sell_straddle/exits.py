@@ -886,6 +886,54 @@ class ExitMixin:
                         side, leg.strike, leg_pnl, reason)
         return order_ev
 
+    async def _abort_roll_reopen(self, fill) -> None:
+        """A single-leg roll-reopen (_open_leg, called mid-roll after the old leg's
+        close already confirmed) was rejected by the broker. The OTHER leg (the one
+        being kept) is still genuinely open — close it for real too, matching this
+        codebase's "0 or 2" rollover doctrine, rather than leaving it orphaned or
+        (the 2026-08-06 bug this replaces) nulling self._position outright while a
+        real leg is still live at the broker."""
+        _legs = list(getattr(fill, "legs", []) or [])
+        if not _legs:
+            return
+        roll_side = _legs[0]
+        keep_side = "PE" if roll_side == "CE" else "CE"
+        _cid = getattr(self, "_client_id", "") or "-"
+        _bid = getattr(self, "_binding_id", "") or "-"
+        now = datetime.now(IST)
+        logger.error(
+            "SellStraddle[%s|%s|%s]: ROLL-REOPEN ABORTED on %s leg — the %s leg is still "
+            "genuinely open at the broker (the roll's close of the old %s leg already "
+            "confirmed). Closing %s for real to return to a clean flat state.",
+            self._underlying, _cid, _bid, roll_side, keep_side, roll_side, keep_side,
+        )
+        close_ev = await self._close_leg(keep_side, "roll_reopen_aborted", now)
+        if getattr(close_ev, "close_aborted", False):
+            self._clog.critical(
+                "ROLL-REOPEN ABORT CLEANUP: closing kept leg %s ALSO not confirmed -- "
+                "position state is AMBIGUOUS (rolled leg rejected, kept leg's close "
+                "unconfirmed). NOT clearing tracking blindly. RECONCILE MANUALLY against "
+                "the real broker positions before trusting this book's state.",
+                keep_side,
+            )
+            logger.critical(
+                "SellStraddle[%s|%s|%s]: ROLL-REOPEN ABORT CLEANUP FAILED — kept leg %s "
+                "close also unconfirmed. RECONCILE MANUALLY.",
+                self._underlying, _cid, _bid, keep_side,
+            )
+            self._roll_in_progress = False
+            self._order_pending = False
+            return
+        if self._position:
+            self._position.status = "closed"
+            self._position.close_reason = "roll_reopen_aborted"
+            self._position.close_time = now
+        self._position = None
+        self._roll_in_progress = False
+        self._order_pending = False
+        self._persist()
+        self._apply_sl_cooldown()
+
     async def _open_leg(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Open ONE leg at a new strike (publish ENTRY legs=[side]); update the leg."""
         from execution_bridge.straddle_bridge import StraddleOrderEvent

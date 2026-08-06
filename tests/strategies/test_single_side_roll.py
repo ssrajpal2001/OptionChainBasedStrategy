@@ -99,3 +99,92 @@ def test_single_side_roll_waits_for_close_fill_before_open():
         assert s._roll_in_progress is False
 
     asyncio.run(run())
+
+
+def test_single_side_roll_reopen_rejected_closes_kept_leg_for_real():
+    """2026-08-06 CRITICAL FIX regression test. Sequence: old CE leg closes for
+    real (confirmed), then the broker REJECTS the new CE leg's reopen order
+    (entry_aborted, legs=["CE"] -- the roll-reopen signature). The kept PE leg
+    is still genuinely open at the broker. The old (pre-fix) behavior nulled
+    self._position outright, discarding tracking of that real, untouched PE
+    leg -- an orphaned real position the engine would then believe is flat.
+    The fix must instead send a REAL close order for the kept PE leg and only
+    then finalize the position as closed -- never a blind null, never a
+    close order for the CE leg that was never actually opened."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._itm_pair_gate_enabled = False
+        s._spot = 24400.0
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,
+            ce_leg=StraddleLeg("CE", 24450, 152.75, 107.0,
+                               open_time=datetime.datetime.now(IST)),
+            pe_leg=StraddleLeg("PE", 24450, 132.05, 162.95,
+                               open_time=datetime.datetime.now(IST)),
+            net_credit=284.8, status="open",
+        )
+
+        emitted = []
+        orig_emit = s._emit_order
+
+        async def capture_emit(ev):
+            emitted.append(ev)
+            await orig_emit(ev)
+
+        s._emit_order = capture_emit
+
+        with patch("strategies.sell_straddle.selection.select_partner_for",
+                   return_value=(24350, 156.90)):
+            async def deliver_fills():
+                await asyncio.sleep(0.02)
+                close_ev = [o for o in emitted if o.action == "EXIT"][0]
+                # Old CE leg closes for real.
+                s._on_fill(StraddleFillEvent(
+                    action="EXIT", underlying="NIFTY", atm=24500.0,
+                    ce_strike=24450.0, pe_strike=24450.0,
+                    ce_fill=107.0, pe_fill=0.0,
+                    client_id="C", binding_id="B",
+                    event_id=close_ev.event_id, legs=["CE"],
+                ))
+                await asyncio.sleep(0.02)
+                open_ev = [o for o in emitted if o.action == "ENTRY"][0]
+                # New CE leg's reopen is REJECTED by the broker.
+                s._on_fill(StraddleFillEvent(
+                    action="ENTRY", underlying="NIFTY", atm=24500.0,
+                    ce_strike=24350.0, pe_strike=24450.0,
+                    ce_fill=0.0, pe_fill=0.0,
+                    client_id="C", binding_id="B",
+                    event_id=open_ev.event_id, legs=["CE"],
+                    entry_aborted=True,
+                ))
+                # Give the scheduled _abort_roll_reopen task a moment to run,
+                # then confirm the real PE close it sends.
+                await asyncio.sleep(0.02)
+                pe_close_ev = [o for o in emitted if o.action == "EXIT" and o.legs == ["PE"]][0]
+                s._on_fill(StraddleFillEvent(
+                    action="EXIT", underlying="NIFTY", atm=24500.0,
+                    ce_strike=24450.0, pe_strike=24450.0,
+                    ce_fill=0.0, pe_fill=162.95,
+                    client_id="C", binding_id="B",
+                    event_id=pe_close_ev.event_id, legs=["PE"],
+                ))
+
+            task = asyncio.create_task(deliver_fills())
+            await s._single_side_roll(datetime.datetime.now(IST), "scalable_tsl")
+            await task
+            await asyncio.sleep(0.05)  # let the asyncio.create_task cleanup finish
+
+        # A real close order was sent for the KEPT leg (PE) -- never a blind null.
+        pe_closes = [o for o in emitted if o.action == "EXIT" and o.legs == ["PE"]]
+        assert len(pe_closes) == 1, emitted
+        # No close/open order was ever sent for CE a second time (it was never
+        # really open -- must not send a phantom close for it).
+        ce_orders = [o for o in emitted if "CE" in o.legs]
+        assert len(ce_orders) == 2  # the original close + the rejected reopen attempt only
+        # Position correctly ends up fully flat, not silently orphaned.
+        assert s._position is None
+        assert s._roll_in_progress is False
+        assert s._order_pending is False
+
+    asyncio.run(run())

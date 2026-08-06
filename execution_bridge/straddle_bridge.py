@@ -553,6 +553,7 @@ class StraddleExecutionBridge:
                         client_id=ev.client_id or "",
                         binding_id=ev.binding_id or "",
                         event_id=ev.event_id,
+                        legs=ev.legs,
                         entry_aborted=True,
                         routing_failed=True,
                     ),

@@ -792,6 +792,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _routing_failed = getattr(fill, "routing_failed", False)
                 if getattr(fill, "entry_aborted", False) or _routing_failed:
                     _reason = "routing failed" if _routing_failed else "asymmetric fill"
+                    # 2026-08-06 CRITICAL FIX: this branch was written for a full 2-leg
+                    # ENTRY (BEGINNING/RE-ENTRY) and reused verbatim for a single-leg
+                    # roll-reopen (_open_leg, called mid-roll after the old leg already
+                    # closed for real). Unconditionally nulling self._position here for
+                    # a single-leg abort would discard tracking of the OTHER leg, which
+                    # is still genuinely open at the broker -- an orphaned real position
+                    # the engine then believes is flat and could double up on. A fill
+                    # carries legs=[side] (length 1) ONLY from _open_leg's roll-reopen
+                    # call; every full-entry fill carries the 2-element default.
+                    _legs = list(getattr(fill, "legs", ["CE", "PE"]) or [])
+                    if len(_legs) == 1 and self._position is not None and self._position.status == "open":
+                        asyncio.create_task(self._abort_roll_reopen(fill))
+                        return
                     logger.error(
                         "SellStraddle[%s]: ENTRY ABORTED (%s) — discarding optimistic position. [%s/%s]",
                         self._underlying, _reason, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
