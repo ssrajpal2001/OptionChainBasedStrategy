@@ -717,6 +717,13 @@ document.addEventListener('alpine:init', () => {
     csHistoryLoading: false,
     histView: 'grouped',     // 'grouped' (by script+day) | 'ledger' (flat order-book)
     histGroupOpen: {},       // {groupKey: bool} — expanded state per day/script group
+    // 2026-08-06: strategy/broker filters for the History tab — useful once a client runs
+    // several brokers × strategies at once (e.g. 4-5 broker bindings under one client, all
+    // on sell_straddle) and the flat ledger otherwise mixes everything together. 'all' = no
+    // filter. The underlying data already carried strategy/binding_id per row; this was a
+    // presentation gap only, no backend change needed.
+    histFilterStrategy: 'all',
+    histFilterBinding: 'all',
     csKillBroker: {},        // {binding_id: {armed:false, countdown:5, timer:null}}
     csPosBrokerLoading: false,
 
@@ -2759,12 +2766,29 @@ document.addEventListener('alpine:init', () => {
       return pnl;
     },
 
+    // Distinct strategy/binding_id values seen in the loaded history — populates the
+    // filter dropdowns. 'all' is prepended by the template, not here.
+    histStrategyOptions() {
+      return [...new Set(this.csHistoryFlat.map(r => r.strategy || '—'))].sort();
+    },
+    histBindingOptions() {
+      return [...new Set(this.csHistoryFlat.map(r => r.binding_id || '—'))].sort();
+    },
+    // Rows after applying the strategy/broker filters — every other history method
+    // (grouped view, ledger pagination) reads from this, never csHistoryFlat directly.
+    histFilteredRows() {
+      return this.csHistoryFlat.filter(r =>
+        (this.histFilterStrategy === 'all' || (r.strategy || '—') === this.histFilterStrategy) &&
+        (this.histFilterBinding === 'all' || (r.binding_id || '—') === this.histFilterBinding)
+      );
+    },
+
     // ── History GROUPED by script (instrument) + day ──
     // Each group = one trading day for one instrument; header shows the transaction
     // counts (buys/sells) and the group's total P&L. Newest day first.
     histGroups() {
       const groups = {};
-      for (const r of this.csHistoryFlat) {
+      for (const r of this.histFilteredRows()) {
         const day = (r._ts && String(r._ts).slice(0, 10)) || 'undated';
         // binding_id included -- two separate broker bindings running the identical
         // strategy/instrument/day (e.g. the same client trading both Zerodha and Fyers)
@@ -2791,10 +2815,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     // ── History pagination (10 rows/page) — used by the flat ledger fallback ──
-    histTotalPages() { return Math.max(1, Math.ceil(this.csHistoryFlat.length / this.csHistPerPage)); },
+    histTotalPages() { return Math.max(1, Math.ceil(this.histFilteredRows().length / this.csHistPerPage)); },
     histPageRows() {
       const start = (this.csHistPage - 1) * this.csHistPerPage;
-      return this.csHistoryFlat.slice(start, start + this.csHistPerPage);
+      return this.histFilteredRows().slice(start, start + this.csHistPerPage);
     },
     histPrev() { if (this.csHistPage > 1) this.csHistPage--; },
     histNext() { if (this.csHistPage < this.histTotalPages()) this.csHistPage++; },
@@ -8486,6 +8510,22 @@ function amoTest() {
               <button class="px-3 py-1 text-xs font-mono border-l" style="border-color:var(--t-border)" @click="histView='ledger'"
                       :style="histView==='ledger' ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan)' : 'color:var(--t-muted)'">Ledger</button>
             </div>
+            <!-- Strategy / broker filters -- most useful once several bindings x strategies
+                 are running at once and the ledger would otherwise mix everything together. -->
+            <select class="text-xs font-mono rounded border px-2 py-1" style="border-color:var(--t-border);background:var(--t-bg);color:var(--t-fg)"
+                    x-model="histFilterStrategy" @change="csHistPage=1">
+              <option value="all">All strategies</option>
+              <template x-for="s in histStrategyOptions()" :key="s">
+                <option :value="s" x-text="s"></option>
+              </template>
+            </select>
+            <select class="text-xs font-mono rounded border px-2 py-1" style="border-color:var(--t-border);background:var(--t-bg);color:var(--t-fg)"
+                    x-model="histFilterBinding" @change="csHistPage=1">
+              <option value="all">All brokers</option>
+              <template x-for="b in histBindingOptions()" :key="b">
+                <option :value="b" x-text="b"></option>
+              </template>
+            </select>
             <button class="btn-action" style="width:auto;padding:5px 14px" @click="loadClientHistory()" :disabled="csHistoryLoading">
               <span x-show="!csHistoryLoading">↻ Refresh</span><span x-show="csHistoryLoading">Loading…</span>
             </button>
@@ -8495,9 +8535,13 @@ function amoTest() {
         <div x-show="csHistoryFlat.length === 0 && !csHistoryLoading" class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
           No trade history yet.
         </div>
+        <div x-show="csHistoryFlat.length > 0 && histFilteredRows().length === 0 && !csHistoryLoading"
+             class="px-5 py-8 text-center text-sm" style="color:var(--t-muted)">
+          No trades match this strategy/broker filter.
+        </div>
 
         <!-- ═══ GROUPED VIEW — by script (instrument) + day ═══ -->
-        <div x-show="csHistoryFlat.length > 0 && histView==='grouped'" class="p-3 space-y-3">
+        <div x-show="histFilteredRows().length > 0 && histView==='grouped'" class="p-3 space-y-3">
           <template x-for="g in histGroups()" :key="g.key">
             <div class="rounded border" style="border-color:var(--t-border)">
               <!-- Group header: day · instrument · txn counts · total P&L (click to expand) -->
@@ -8567,7 +8611,7 @@ function amoTest() {
         </div>
 
         <!-- ═══ LEDGER VIEW — flat order-book (paginated) ═══ -->
-        <div x-show="csHistoryFlat.length > 0 && histView==='ledger'" class="overflow-x-auto">
+        <div x-show="histFilteredRows().length > 0 && histView==='ledger'" class="overflow-x-auto">
           <table class="t-table w-full text-xs">
             <thead>
               <tr class="border-b" style="border-color:var(--t-border);background:var(--t-surface)">
@@ -8610,7 +8654,7 @@ function amoTest() {
           <!-- Pagination: 10 rows per page -->
           <div class="flex items-center justify-between px-4 py-2 border-t" style="border-color:var(--t-border)">
             <span class="font-mono text-xs" style="color:var(--t-muted)"
-                  x-text="'Page '+csHistPage+' of '+histTotalPages()+'  ('+csHistoryFlat.length+' rows)'"></span>
+                  x-text="'Page '+csHistPage+' of '+histTotalPages()+'  ('+histFilteredRows().length+' rows)'"></span>
             <div class="flex items-center gap-2">
               <button class="btn-action" style="width:auto;padding:4px 12px"
                       @click="histPrev()" :disabled="csHistPage<=1"

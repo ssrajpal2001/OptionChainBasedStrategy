@@ -159,7 +159,11 @@ class EntryMixin:
     # ── Entry dispatch ────────────────────────────────────────────────────────
 
     async def _maybe_try_entry(self, now: datetime) -> None:
-        if self._position and self._position.status == "open":
+        # Defense-in-depth: engine.py's tick-loop dispatch already routes any existing
+        # self._position (open OR closing) to _check_exits, never here -- but guard
+        # defensively against ANY non-empty position, not just "open", so a future/other
+        # call site can never dispatch a fresh entry while a close is still in flight.
+        if self._position and self._position.status != "closed":
             return
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         workflow = ss.get("entry_workflow_mode", "hybrid")

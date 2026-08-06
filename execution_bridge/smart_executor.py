@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Awaitable, Callable, Optional, Tuple, Union
 
 from execution_bridge.base_broker import OrderRequest, OrderSide, OrderStatus, OrderType
 
@@ -34,6 +34,13 @@ class LegFill:
     avg_price: float
     order_ids: list           # every broker order_id used for this leg (limit + chases + market)
     completed: bool           # True if the full qty filled
+
+
+class OrderPlacementFailed(Exception):
+    """Raised when place_order() failed after all retry attempts -- the order never reached
+    the broker at all (distinct from a broker-side REJECTED, which means it DID reach the
+    broker and was refused). Callers use this to distinguish 'never sent' from 'sent and
+    refused' -- they need very different handling (retry placement vs. accept the rejection)."""
 
 
 def _round_tick(price: float, tick: float) -> float:
@@ -60,6 +67,28 @@ class SmartOrderExecutor:
         # Defaults to fill_timeout_sec for any other/older caller.
         self._market_timeout = (market_fill_timeout_sec if market_fill_timeout_sec is not None
                                  else fill_timeout_sec)
+
+    # 2026-08-06 CONFIRM-MODEL REDESIGN: "did the order reach the broker" (placement) must be a
+    # fast, boundedly-retried question, separate from "did it fill" (which can genuinely take a
+    # while and must never be capped by a timeout that causes a duplicate dispatch). place_order()
+    # itself was never retried before -- a single transient failure (network blip, broker API
+    # hiccup) fell straight through to the LTP fallback with zero real order sent, indistinguishable
+    # from a deliberate rejection. Real brokers punch an accepted order in milliseconds; 3 quick
+    # retries covers a genuine transient failure without ever waiting around for a fill.
+    async def _place_with_retries(self, broker, req: OrderRequest, attempts: int = 3,
+                                   backoff_sec: float = 0.5) -> str:
+        last_exc: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                oid = await broker.place_order(req)
+                if oid:
+                    return str(oid)
+                last_exc = RuntimeError("place_order returned no order_id")
+            except Exception as exc:
+                last_exc = exc
+            if attempt < attempts - 1:
+                await asyncio.sleep(backoff_sec)
+        raise OrderPlacementFailed(f"order placement failed after {attempts} attempts: {last_exc}")
 
     async def _await_fill(self, broker, order_id: str, timeout: Optional[float] = None) -> Tuple[int, float, str]:
         """Poll until filled / timeout. Returns (filled_qty, avg_price, state)."""
@@ -113,17 +142,38 @@ class SmartOrderExecutor:
 
     async def execute_leg(self, broker, *, broker_symbol: str, exchange: str, side: OrderSide,
                           qty: int, product: str, tag: str, client_id: str,
-                          use_limit: bool, tick: float = 0.0) -> LegFill:
+                          use_limit: bool, tick: float = 0.0,
+                          on_placed: Optional[Callable[[str], Union[None, Awaitable[None]]]] = None,
+                          ) -> LegFill:
+        """`on_placed(order_id)`, if given, fires ONCE -- the instant this leg's FIRST order_id is
+        obtained from the broker (placement retried up to 3x internally first) -- so a caller can
+        confirm "the order reached the broker" fast, without waiting for this whole call (which
+        still runs to completion and returns the real fill, exactly as before). Never fires twice
+        even if a chase/mop-up places additional orders for the same leg."""
         order_ids: list = []
         filled_qty = 0
         notional = 0.0   # Σ(price × qty) for VWAP of the real fills
+        _placed_notified = False
+
+        async def _notify_placed(oid: str) -> None:
+            nonlocal _placed_notified
+            if _placed_notified or on_placed is None:
+                return
+            _placed_notified = True
+            try:
+                result = on_placed(oid)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.exception("SmartExec[%s]: on_placed callback failed", broker_symbol)
 
         async def _market(remaining: int) -> None:
             nonlocal filled_qty, notional
             req = OrderRequest(broker_symbol=broker_symbol, exchange=exchange, side=side, qty=remaining,
                                order_type=OrderType.MARKET, product=product, tag=tag, client_id=client_id)
-            oid = await broker.place_order(req)
-            order_ids.append(str(oid))
+            oid = await self._place_with_retries(broker, req)
+            order_ids.append(oid)
+            await _notify_placed(oid)
             q, avg, _ = await self._await_fill(broker, oid, timeout=self._market_timeout)
             if q <= 0 or avg <= 0:                       # market should fill; last-resort status fetch
                 f = await broker.get_order_status(oid)
@@ -167,8 +217,9 @@ class SmartOrderExecutor:
             req = OrderRequest(broker_symbol=broker_symbol, exchange=exchange, side=side, qty=remaining,
                                order_type=OrderType.LIMIT, price=price, product=product,
                                tag=tag, client_id=client_id, time_in_force="ioc")
-            oid = await broker.place_order(req)
-            order_ids.append(str(oid))
+            oid = await self._place_with_retries(broker, req)
+            order_ids.append(oid)
+            await _notify_placed(oid)
             q, avg, _st = await self._await_fill(broker, oid)
             # IOC is terminal immediately — take the broker's AUTHORITATIVE final fill (handles a
             # partial fill where the await loop saw it mid-flight). Book once; never double-count.

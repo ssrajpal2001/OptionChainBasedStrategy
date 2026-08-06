@@ -125,6 +125,19 @@ class StraddleFillEvent:
     # close on this path (2026-08-04 incident: bridge told the strategy an EXIT succeeded when the
     # order never reached the broker).
     exit_aborted: bool = False
+    # 2026-08-06 CONFIRM-MODEL REDESIGN: split "reached the broker" from "filled". `accepted=True`
+    # fires the INSTANT an order_id exists (placement retried up to 3x internally) -- fast, no
+    # price yet, ce_fill/pe_fill are 0.0 on this event. The strategy uses this ONLY to know a close/
+    # entry is genuinely in flight (stop worrying about duplicate dispatch); it must keep waiting
+    # (no timeout) for the LATER, real fill event to actually finalize P&L/position state.
+    accepted: bool = False
+    # True when placement itself failed after 3 retries (order_id never obtained -- broker
+    # unreachable / persistent API error). Distinct from exit_aborted/routing_failed (which mean
+    # "we didn't even try" or "gave up waiting for confirmation") -- this means "we tried to place
+    # the order and the broker never accepted it". ENTRY: strategy stops for the day. EXIT: the
+    # position stays exactly as it was (open, not "closing") so the very next tick retries -- an
+    # open real position must never stop being retried for close.
+    placement_failed: bool = False
 
 
 # ── Iron Condor order events ──────────────────────────────────────────────────
@@ -838,7 +851,33 @@ class StraddleExecutionBridge:
         # An EXIT must get flat promptly → faster mid-then-market executor; ENTRY tries the mid harder.
         _ex = self._exit_executor if ev.action == "EXIT" else self._executor
 
+        # 2026-08-06 CONFIRM-MODEL REDESIGN: publish a fast "accepted" signal the instant EVERY
+        # expected leg has a real order_id at the broker -- BEFORE waiting for any fill. This is
+        # what lets the strategy stop blocking on a slow/uncertain confirm wait; it only needs to
+        # know the order genuinely reached the broker, not that it filled yet.
+        _expected_legs = len(ev.legs)
+        _placed_count = 0
+        _accepted_published = False
+        _placement_failed = False
+
+        async def _mark_placed(opt_type: str, oid: str) -> None:
+            nonlocal _placed_count, _accepted_published
+            _placed_count += 1
+            if _placed_count >= _expected_legs and not _accepted_published:
+                _accepted_published = True
+                await self._bus.publish(
+                    Topic.ORDER_FILL,
+                    StraddleFillEvent(
+                        action=ev.action, underlying=ev.underlying, atm=ev.atm,
+                        ce_strike=ev.ce_strike, pe_strike=ev.pe_strike,
+                        ce_fill=0.0, pe_fill=0.0,
+                        client_id=client_id, binding_id=binding_id,
+                        event_id=ev.event_id, paper_mode=paper, legs=ev.legs, accepted=True,
+                    ),
+                )
+
         async def _do_leg(opt_type, strike):
+            from execution_bridge.smart_executor import OrderPlacementFailed
             symbol = _resolve_option_symbol(ev.underlying, expiry, int(strike), opt_type, provider)
             _fallback_ltp = ev.ce_ltp if opt_type == "CE" else ev.pe_ltp
             if not symbol:
@@ -848,6 +887,7 @@ class StraddleExecutionBridge:
             try:
                 legfill = await _ex.execute_leg(
                     broker, broker_symbol=symbol, exchange=order_exchange(ev.underlying),
+                    on_placed=lambda oid, _ot=opt_type: _mark_placed(_ot, oid),
                     side=side, qty=qty, product=_ss_product,
                     tag=f"SS_{ev.underlying}_{ev.action}", client_id=client_id,
                     use_limit=_use_limit, tick=0.0,
@@ -983,6 +1023,16 @@ class StraddleExecutionBridge:
                     except Exception:
                         pass
                 return opt_type, _px, _fq, symbol
+            except OrderPlacementFailed as exc:
+                # The order never reached the broker at all -- distinct from a REJECTED/
+                # under-filled order (which DID reach the broker). Never fake acceptance here.
+                nonlocal _placement_failed
+                _placement_failed = True
+                logger.error("[LIVE] %s %s %s PLACEMENT FAILED (order never reached broker): %s",
+                             ev.action, ev.underlying, opt_type, exc)
+                self._trade_log.log_event(client_id, binding_id,
+                    f"LIVE {ev.action} {ev.underlying} {opt_type}{int(strike)} PLACEMENT FAILED: {exc}")
+                return opt_type, _fallback_ltp, 0, symbol
             except Exception as exc:
                 logger.error("[LIVE] %s %s %s order FAILED: %s — falling back to LTP",
                              ev.action, ev.underlying, opt_type, exc)
@@ -992,6 +1042,45 @@ class StraddleExecutionBridge:
 
         _legs = [(ot, st) for ot, st in (("CE", ev.ce_strike), ("PE", ev.pe_strike)) if ot in ev.legs]
         _results = await asyncio.gather(*[_do_leg(ot, st) for ot, st in _legs])
+
+        if _placement_failed:
+            # At least one leg's order never reached the broker. ENTRY: tell the strategy to
+            # stop-for-day (nothing was risked, no naked leg -- whatever DID place, if anything,
+            # still needs the existing atomicity-guard flatten below, so fall through for ENTRY
+            # rather than return early). EXIT: the position must stay exactly "open" (never
+            # "closing") so the very next tick retries -- an open real position must never stop
+            # being retried for close, per explicit requirement.
+            logger.critical(
+                "[LIVE] %s %s — PLACEMENT FAILED for at least one leg after 3 retries each. "
+                "%s", ev.action, ev.underlying,
+                "Stopping entries for today." if ev.action == "ENTRY"
+                else "Position stays OPEN; will retry next tick.",
+            )
+            self._trade_log.log_event(client_id, binding_id,
+                f"{ev.action} {ev.underlying} PLACEMENT FAILED for at least one leg after retries")
+            if ev.action == "EXIT":
+                abort_ev = StraddleFillEvent(
+                    action="EXIT", underlying=ev.underlying, atm=ev.atm,
+                    ce_strike=ev.ce_strike, pe_strike=ev.pe_strike, ce_fill=0.0, pe_fill=0.0,
+                    client_id=client_id, binding_id=binding_id, event_id=ev.event_id,
+                    paper_mode=paper, legs=ev.legs, placement_failed=True)
+                await self._bus.publish(Topic.ORDER_FILL, abort_ev)
+                return
+            elif paper:
+                # ENTRY + paper mode: the live-only atomicity guard below never runs for
+                # paper, so handle the abort here directly rather than falling through to a
+                # fabricated successful fill_ev at the bottom of this function.
+                abort_ev = StraddleFillEvent(
+                    action="ENTRY", underlying=ev.underlying, atm=ev.atm,
+                    ce_strike=ev.ce_strike, pe_strike=ev.pe_strike, ce_fill=0.0, pe_fill=0.0,
+                    client_id=client_id, binding_id=binding_id, event_id=ev.event_id,
+                    paper_mode=paper, legs=ev.legs, entry_aborted=True, placement_failed=True)
+                await self._bus.publish(Topic.ORDER_FILL, abort_ev)
+                return
+            # ENTRY + live: fall through to the atomicity guard below, which will see
+            # filled_qty_by_leg short of `qty` for the failed leg(s) and flatten+abort with
+            # placement_failed=_placement_failed threaded onto its own abort_ev.
+
         fills = {ot: px for ot, px, _fq, _sym in _results}
         filled_qty_by_leg = {ot: _fq for ot, _px, _fq, _sym in _results}
         symbol_by_leg = {ot: _sym for ot, _px, _fq, _sym in _results}
@@ -1050,7 +1139,11 @@ class StraddleExecutionBridge:
                     action="ENTRY", underlying=ev.underlying, atm=ev.atm,
                     ce_strike=ev.ce_strike, pe_strike=ev.pe_strike, ce_fill=0.0, pe_fill=0.0,
                     client_id=client_id, binding_id=binding_id, event_id=ev.event_id,
-                    paper_mode=paper, legs=ev.legs, entry_aborted=True)
+                    paper_mode=paper, legs=ev.legs, entry_aborted=True,
+                    # Only true when a leg's order never reached the broker at all (placement
+                    # exhausted its 3 retries) -- distinguishes "stop entries for today" from a
+                    # recoverable asymmetric-fill abort, which should NOT stop future entries.
+                    placement_failed=_placement_failed)
                 await self._bus.publish(Topic.ORDER_FILL, abort_ev)
                 return
 

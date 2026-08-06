@@ -166,7 +166,6 @@ def test_close_position_leaves_position_open_when_bridge_reports_exit_aborted():
     # No P&L booked, no cooldown applied -- nothing about this was a real close.
     assert ss._session_realized_pnl_pts == 0.0
     assert ss._sl_cooldown_until is None
-    assert ss._close_in_progress is False  # free to retry on the next tick
 
 
 def test_close_position_leaves_position_open_on_confirmation_timeout(monkeypatch):

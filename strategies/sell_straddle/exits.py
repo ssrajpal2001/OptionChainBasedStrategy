@@ -360,6 +360,13 @@ class ExitMixin:
         pos = self._position
         if not pos:
             return
+        if pos.status != "open":
+            # "closing" -- a close is already dispatched and genuinely in flight (real
+            # order_id at the broker, per the 2026-08-06 confirm-model redesign). This is
+            # the single source of truth that stops a duplicate close from ever being
+            # dispatched; no other exit check may run until it resolves back to "open"
+            # (retry) or "closed" (done).
+            return
         now = datetime.now(IST)
         pnl = pos.unrealized_pnl
 
@@ -721,9 +728,15 @@ class ExitMixin:
     _POST_RESTORE_WARMUP_MAX_SEC = 300.0
 
     async def _close_position(self, reason: str) -> None:
-        if not self._position or getattr(self, "_close_in_progress", False):
+        # 2026-08-06 CONFIRM-MODEL REDESIGN: pos.status is now the reentrancy guard, not the
+        # ephemeral _close_in_progress flag. Set to "closing" SYNCHRONOUSLY here, before the
+        # first await -- this is what stops a duplicate close from ever being dispatched,
+        # regardless of how long the real fill takes to confirm (the confirm wait below no
+        # longer has to be short to prevent duplicates; it only decides how long we wait
+        # before giving up and reverting to "open" for a retry).
+        if not self._position or self._position.status != "open":
             return
-        self._close_in_progress = True
+        self._position.status = "closing"
         self._roll_in_progress = False
         self._itm_roll_protection = {}
         try:
@@ -798,30 +811,34 @@ class ExitMixin:
                 except asyncio.TimeoutError:
                     logger.critical(
                         "SellStraddle[%s|%s|%s]: EXIT fill NOT CONFIRMED within %.0fs "
-                        "(event_id=%s reason=%s) — leaving position OPEN; will retry on a "
+                        "(event_id=%s reason=%s) — reverting to OPEN; will retry on a "
                         "later tick. NOT booking P&L, NOT applying cooldown.",
                         self._underlying, _cid, _bid, self._CLOSE_CONFIRM_TIMEOUT_SEC, eid, reason,
                     )
                     self._clog.critical(
                         "EXIT fill NOT CONFIRMED within %.0fs (event_id=%s reason=%s) — "
-                        "position stays OPEN.", self._CLOSE_CONFIRM_TIMEOUT_SEC, eid, reason,
+                        "reverting to OPEN.", self._CLOSE_CONFIRM_TIMEOUT_SEC, eid, reason,
                     )
+                    pos.status = "open"
                     return
             finally:
                 self._roll_close_waiters.pop(eid, None)
 
             fill = self._roll_close_results.pop(eid, None)
-            if fill is not None and getattr(fill, "exit_aborted", False):
+            if fill is not None and (getattr(fill, "exit_aborted", False)
+                                      or getattr(fill, "placement_failed", False)):
+                _why = "placement failed" if getattr(fill, "placement_failed", False) else "broker unavailable"
                 logger.critical(
-                    "SellStraddle[%s|%s|%s]: EXIT ABORTED by bridge (broker unavailable, "
-                    "event_id=%s reason=%s) — leaving position OPEN; will retry on a later "
+                    "SellStraddle[%s|%s|%s]: EXIT ABORTED by bridge (%s, "
+                    "event_id=%s reason=%s) — reverting to OPEN; will retry on a later "
                     "tick. NOT booking P&L, NOT applying cooldown.",
-                    self._underlying, _cid, _bid, eid, reason,
+                    self._underlying, _cid, _bid, _why, eid, reason,
                 )
                 self._clog.critical(
-                    "EXIT ABORTED by bridge (event_id=%s reason=%s) — position stays OPEN.",
-                    eid, reason,
+                    "EXIT ABORTED by bridge (%s, event_id=%s reason=%s) — reverting to OPEN.",
+                    _why, eid, reason,
                 )
+                pos.status = "open"
                 return
 
             # ── Confirmed by the broker (or a paper/paper_route sim fill) — finalize ──────
@@ -872,7 +889,18 @@ class ExitMixin:
                 pe_exit=float(pos.pe_leg.ltp or 0.0),
             )
         finally:
-            self._close_in_progress = False
+            # Safety net for a truly unexpected exception escaping the try block above (a bug
+            # in _persist()/_close_remark()/etc, not a normal abort path -- those already reset
+            # status to "open" explicitly before returning). Without this, such an exception
+            # would leave pos.status stuck at "closing" forever, permanently blocking every
+            # future exit check for this position -- worse than the bug it would be escaping.
+            if self._position is pos and pos.status == "closing":
+                logger.critical(
+                    "SellStraddle[%s]: _close_position exited unexpectedly while still "
+                    "'closing' (reason=%s) — reverting to OPEN so exit checks can resume.",
+                    self._underlying, reason,
+                )
+                pos.status = "open"
 
     async def _close_leg(self, side: str, reason: str, now: datetime) -> StraddleOrderEvent:
         """Close ONE leg (publish EXIT legs=[side]) and WAIT for the bridge to confirm the fill

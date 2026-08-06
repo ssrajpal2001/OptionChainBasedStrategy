@@ -785,6 +785,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                             self._entry_expiry_date = _new_exp
                     if self._position and self._position.status == "open":
                         _state = "position OPEN — exit-checking"
+                    elif self._position and self._position.status == "closing":
+                        _state = "position CLOSING — order in flight, awaiting broker confirmation"
                     elif self._sl_cooldown_until and datetime.now(IST) < self._sl_cooldown_until:
                         _left = int((self._sl_cooldown_until - datetime.now(IST)).total_seconds())
                         _strikes = len(getattr(self._pool_engine, "_closes", {}) or {})
@@ -802,11 +804,18 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                                     _idx_count, self._spot, _state)
                     _idx_count = 0
                     # Republish position state every heartbeat so late-connecting browsers
-                    # see the open position without waiting for the next entry/exit event.
-                    if self._position and self._position.status == "open":
+                    # see the open/closing position without waiting for the next entry/exit event.
+                    if self._position and self._position.status in ("open", "closing"):
                         self.notify_position_update(self._position.to_dict(), force=True)
                 try:
-                    if self._position and self._position.status == "open":
+                    if self._position:
+                        # Route to _check_exits whenever a position object exists at all --
+                        # including status=="closing" (a close is genuinely in flight; see
+                        # 2026-08-06 confirm-model redesign). _check_exits itself is a no-op
+                        # while "closing". The entry path must NEVER run here: _maybe_try_entry's
+                        # own guard only checks == "open", so a "closing" position would
+                        # otherwise fall through this dispatch into evaluating a fresh entry
+                        # while the old position hasn't finished closing yet.
                         await self._check_exits()
                     else:
                         await self._maybe_try_entry(datetime.now(IST))
@@ -882,6 +891,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     if len(_legs) == 1 and self._position is not None and self._position.status == "open":
                         asyncio.create_task(self._abort_roll_reopen(fill))
                         return
+                    _placement_failed = getattr(fill, "placement_failed", False)
+                    if _placement_failed:
+                        _reason = "placement failed after 3 retries"
                     logger.error(
                         "SellStraddle[%s]: ENTRY ABORTED (%s) — discarding optimistic position. [%s/%s]",
                         self._underlying, _reason, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
@@ -894,6 +906,18 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     # Routing failures carry no broker risk; cooldown only for real asymmetric fills.
                     if not _routing_failed:
                         self._apply_sl_cooldown()
+                    if _placement_failed:
+                        # 2026-08-06 CONFIRM-MODEL REDESIGN: the order never even reached the
+                        # broker after 3 retries -- something is genuinely wrong (connectivity,
+                        # broker outage). Stop opening NEW positions for the rest of the day.
+                        # This must NEVER apply to exits -- an open real position is always
+                        # retried, never abandoned; see _close_position/_close_leg.
+                        self._stop_for_day = True
+                        logger.critical(
+                            "SellStraddle[%s|%s|%s]: STOPPING ENTRIES FOR TODAY — order "
+                            "placement failed after 3 retries (broker unreachable?).",
+                            self._underlying, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
+                        )
                     return
                 if self._position and self._position.status == "open":
                     _legs = getattr(fill, "legs", ["CE", "PE"])
@@ -931,18 +955,34 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _exit_legs = getattr(fill, "legs", ["CE", "PE"])
                 _legtag = "+".join(sorted(_exit_legs)) if set(_exit_legs) != {"CE", "PE"} else "CE+PE"
                 _eid = getattr(fill, "event_id", "")
-                if getattr(fill, "exit_aborted", False):
-                    # Broker unavailable / order never confirmed. Do NOT finalize anything here --
-                    # _close_position / _close_leg (the waiter below wakes them) are responsible
-                    # for leaving the position exactly as it was and retrying later. Never treat
-                    # this as a real close (2026-08-04 incident: bridge faked a successful EXIT).
-                    logger.error(
-                        "SellStraddle[%s|%s|%s]: EXIT ABORTED (broker unavailable) — legs=%s "
-                        "event_id=%s. Position stays OPEN; will be retried.",
+                if getattr(fill, "accepted", False):
+                    # 2026-08-06 CONFIRM-MODEL REDESIGN: the order reached the broker (a real
+                    # order_id exists) -- no price yet, not a fill. _close_position/_close_leg
+                    # already set pos.status="closing" synchronously the instant they started
+                    # (that's what actually stops a duplicate dispatch), so this signal's only
+                    # job is fast UI feedback -- do NOT touch waiters/results, that's reserved
+                    # for the real terminal outcome (fill or abort) below.
+                    logger.info(
+                        "SellStraddle[%s|%s|%s]: EXIT accepted (order in flight) — legs=%s event_id=%s",
                         self._underlying, fill.client_id, fill.binding_id, _legtag, _eid,
                     )
-                    self._clog.error("EXIT ABORTED (broker unavailable) — legs=%s event_id=%s",
-                                      _legtag, _eid)
+                    self._clog.info("EXIT accepted (order in flight) — legs=%s event_id=%s", _legtag, _eid)
+                    if self._position is not None:
+                        self.notify_position_update(self._position.to_dict(), force=True)
+                    return
+                if getattr(fill, "exit_aborted", False) or getattr(fill, "placement_failed", False):
+                    # Broker unavailable / order never confirmed / never reached the broker at
+                    # all. Do NOT finalize anything here -- _close_position / _close_leg (the
+                    # waiter below wakes them) are responsible for reverting to "open" and
+                    # retrying later. Never treat this as a real close (2026-08-04 incident:
+                    # bridge faked a successful EXIT).
+                    _why = "placement failed" if getattr(fill, "placement_failed", False) else "broker unavailable"
+                    logger.error(
+                        "SellStraddle[%s|%s|%s]: EXIT ABORTED (%s) — legs=%s "
+                        "event_id=%s. Position will revert to OPEN; will be retried.",
+                        self._underlying, fill.client_id, fill.binding_id, _why, _legtag, _eid,
+                    )
+                    self._clog.error("EXIT ABORTED (%s) — legs=%s event_id=%s", _why, _legtag, _eid)
                 else:
                     logger.info(
                         "SellStraddle[%s|%s|%s]: EXIT confirmed — legs=%s CE=%.2f PE=%.2f",
