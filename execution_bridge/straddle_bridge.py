@@ -837,6 +837,19 @@ class StraddleExecutionBridge:
                 # cancelled as it is being processed") that Zerodha needed longer than 5s to settle
                 # a real, genuinely-filling MARKET order; giving up early made the atomicity guard
                 # abort fills that would have confirmed moments later.
+                #
+                # 2026-08-06 SPEED FIX: this loop used to blindly run all 15 attempts (15s)
+                # regardless of the broker's actual reported status -- including for an order
+                # that was REJECTED on the very first poll (e.g. paper_route's expected
+                # no-funds rejection, or any real margin/contract rejection), which can never
+                # later show a fill. SmartOrderExecutor._await_fill already short-circuits on
+                # REJECTED/CANCELLED (smart_executor.py); this loop is the SEPARATE retry pass
+                # straddle_bridge.py runs on top of that, and it was blind to the same signal --
+                # so a known-dead order still cost a further ~15s here on every single close/entry
+                # for a no-funds R&D client, compounding across every roll in a session. Only a
+                # genuinely still-PENDING/OPEN order should keep polling; a terminal
+                # REJECTED/CANCELLED status ends the wait immediately.
+                from execution_bridge.base_broker import OrderStatus as _OrderStatus
                 if _fq < qty and _oids and hasattr(broker, "get_order_status"):
                     try:
                         _f = None
@@ -853,6 +866,13 @@ class StraddleExecutionBridge:
                                 _fq = _real_qty if _real_qty > 0 else qty
                                 logger.info("[LIVE] %s %s %s — broker fill confirmed after %ds: qty=%d avg=%.4f",
                                             ev.action, ev.underlying, opt_type, _attempt+1, _fq, _px)
+                                break
+                            if getattr(_f, "status", None) in (_OrderStatus.REJECTED, _OrderStatus.CANCELLED):
+                                logger.info(
+                                    "[LIVE] %s %s %s — broker reports terminal %s after %ds, "
+                                    "stopping poll early (was going to wait up to 15s).",
+                                    ev.action, ev.underlying, opt_type, _f.status, _attempt + 1,
+                                )
                                 break
                         if _f is not None and _px == _fallback_ltp:
                             # 2026-08-06: the order-status endpoint (e.g. Kite order_history)
