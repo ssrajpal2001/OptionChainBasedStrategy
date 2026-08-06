@@ -173,6 +173,22 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                              product_type=getattr(self, "_product_type", "MIS"))
                 self.notify_position_update(self._position.to_dict(), force=True)
             else:
+                # 2026-08-06 DIAGNOSTIC (temporary): a real, freshly-filled position has
+                # been observed going missing (self._position -> None/closed) within
+                # seconds-to-minutes of entry, on multiple independent client books,
+                # with no single _persist() caller consistently reproducing it despite
+                # extensive log-based investigation. Log the full call stack every time
+                # this branch clears the store so the NEXT occurrence identifies the
+                # exact caller directly instead of another round of guessing. Remove
+                # once root-caused.
+                import traceback
+                logger.warning(
+                    "SellStraddle[%s|%s|%s]: _persist() CLEARING position store "
+                    "(self._position=%r) -- call stack:\n%s",
+                    self._underlying, getattr(self, "_client_id", "") or "-",
+                    getattr(self, "_binding_id", "") or "-", self._position,
+                    "".join(traceback.format_stack(limit=10)),
+                )
                 self.clear(self._persist_key)
                 self.notify_position_update(None, force=True)
         except Exception as exc:
