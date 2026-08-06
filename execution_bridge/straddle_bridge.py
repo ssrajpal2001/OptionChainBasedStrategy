@@ -907,9 +907,19 @@ class StraddleExecutionBridge:
                                     )
                             if not _confirmed_via_position:
                                 _raw = getattr(_f, "raw", {}) or {}
-                                _reason = (f"state={_raw.get('state')} unfilled={_raw.get('unfilled_size')} "
-                                           f"avg={getattr(_f,'avg_price',0)} "
-                                           f"cancel_reason={_raw.get('cancellation_reason') or _raw.get('meta_data')}")
+                                # 2026-08-06: the old `state=%r` read a field that does not exist in
+                                # Kite's response at all (Zerodha calls it `status`) -- this log has
+                                # NEVER actually shown the real order status or rejection reason in
+                                # months of use. Fixed to read the real parsed OrderFill.status plus
+                                # Kite's actual raw fields (status/status_message/pending_quantity),
+                                # so a genuine REJECTED-with-reason is finally distinguishable from a
+                                # real pending/still-processing order.
+                                _reason = (f"parsed_status={getattr(_f,'status',None)} "
+                                           f"raw_status={_raw.get('status')} "
+                                           f"status_message={_raw.get('status_message')} "
+                                           f"pending_qty={_raw.get('pending_quantity')} "
+                                           f"filled_qty={_raw.get('filled_quantity')} "
+                                           f"avg={getattr(_f,'avg_price',0)}")
                                 logger.warning("[LIVE] %s %s %s UNDER-FILL %d/%d — exchange: %s",
                                                ev.action, ev.underlying, opt_type, _fq, qty, _reason)
                                 self._trade_log.log_event(client_id, binding_id,
