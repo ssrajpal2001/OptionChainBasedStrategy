@@ -10,6 +10,7 @@ genuinely still-PENDING/OPEN order (the real scenario that justified extending
 this loop to 15s in the first place)."""
 import asyncio
 
+from config.global_config import Topic
 from data_layer.base_feeder import EventBus
 from execution_bridge.straddle_bridge import StraddleExecutionBridge, StraddleOrderEvent
 from execution_bridge.smart_executor import LegFill
@@ -103,6 +104,47 @@ def test_rejected_order_stops_polling_immediately(monkeypatch):
             f"isn't working."
         )
         assert len(sleep_calls) == 2
+
+    asyncio.run(run())
+
+
+def test_rejected_order_stops_polling_immediately_on_a_real_live_entry(monkeypatch):
+    """Same fast-path, but for action='ENTRY' with paper=False (real live money) --
+    _do_leg is one shared closure used for both ENTRY and EXIT and both paper_route
+    and live mode, so this proves the fix isn't accidentally scoped to EXIT/paper
+    only. A real live ENTRY that gets rejected on both legs must recognize that
+    fast and abort cleanly, not sit through 15s per leg first."""
+    async def run():
+        import execution_bridge.straddle_bridge as sb
+        bus = EventBus()
+        broker = _RejectingBroker()
+        br = StraddleExecutionBridge(bus, registry=None, router=None)
+        monkeypatch.setattr(sb, "_resolve_option_symbol", lambda *a, **k: f"SYM-{a[3]}")
+        monkeypatch.setattr(sb, "order_exchange", lambda *_a, **_k: "NFO")
+
+        sleep_calls: list = []
+        monkeypatch.setattr(sb.asyncio, "sleep", _fast_sleep_factory(sleep_calls))
+
+        br._executor.execute_leg = _underfilled_exec_leg
+        br._exit_executor.execute_leg = _underfilled_exec_leg
+
+        fills = bus.subscribe(Topic.ORDER_FILL)
+        ev = StraddleOrderEvent(action="ENTRY", underlying="NIFTY", atm=24650,
+                                ce_strike=24700, pe_strike=24600, ce_ltp=90.0, pe_ltp=70.0,
+                                lot_size=65, lot_multiplier=1, client_id="cli", binding_id="B1")
+        await br._live_fill(ev, "cli", "B1", broker, paper=False)
+
+        assert list(broker.status_calls.values()) == [1, 1], (
+            f"real live ENTRY still burned extra polls on a known-dead rejection: "
+            f"{broker.status_calls}"
+        )
+        seen = []
+        while not fills.empty():
+            seen.append(fills.get_nowait())
+        assert any(getattr(f, "entry_aborted", False) for f in seen), (
+            "a fully-rejected live ENTRY must publish entry_aborted so the strategy "
+            "discards its optimistic position instead of hanging."
+        )
 
     asyncio.run(run())
 
