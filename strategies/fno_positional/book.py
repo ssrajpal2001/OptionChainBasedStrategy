@@ -467,6 +467,26 @@ class FnOPositionalBook:
             (sig.direction == "PE" and spot >= sig.hard_sl)
         )
 
+    def _log_entry_decision(self, sig, spot: float, concept: str) -> None:
+        """Full WHY narrative for a real entry decision -- zone boundaries, when it
+        was locked, when/why it triggered now, and the R:R that justified taking it.
+        Logged once, right before the order is dispatched, so a trade can be
+        explained from the log alone without cross-referencing the scan output."""
+        _zone = (f"[{sig.zone_lo:.2f}, {sig.zone_hi:.2f}]" if sig.zone_lo > 0 and sig.zone_hi > 0
+                 else "(zone bounds unavailable -- pre-2026-08-06 watchlist file)")
+        if concept == "TRIGGERED":
+            _why = "zone was already retested as of yesterday's close (BTST setup)"
+        else:
+            _why = (f"spot just touched entry_line (spot={spot:.2f} vs entry_line={sig.entry_line:.2f}, "
+                     f"{sig.dist_pct:.2f}% away)")
+        self._log.info(
+            "FnOBook[%s/%s]: ENTRY DECISION %s %s [%s] — %s | zone %s locked %s (age=%dd) | "
+            "entry_line=%.2f hard_sl=%.2f day_t1=%.2f | zone R:R=%.2f BTST R:R=%.2f | %s",
+            self._client_id, self._binding_id, sig.symbol, sig.direction, concept, _why,
+            _zone, sig.lock_date, sig.zone_age, sig.entry_line, sig.hard_sl, sig.day_t1,
+            sig.rr, sig.btst_rr, f"expiry={sig.expiry}" if sig.expiry else "",
+        )
+
     async def _try_enter_triggered(self) -> None:
         free = self._max_slots - len(self._open_positions)
         if free <= 0:
@@ -497,6 +517,7 @@ class FnOPositionalBook:
                         self._blocked_today.add(key)
                         continue
             self._pending.remove(sig)
+            self._log_entry_decision(sig, spot if spot_key else 0.0, "TRIGGERED")
             await self._open_position(sig)
             free -= 1
 
@@ -532,6 +553,7 @@ class FnOPositionalBook:
                 continue
             if touched:
                 self._pending.remove(sig)
+                self._log_entry_decision(sig, spot, "APPROACHING")
                 await self._open_position(sig)
                 free -= 1
 

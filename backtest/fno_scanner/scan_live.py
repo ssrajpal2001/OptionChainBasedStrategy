@@ -157,6 +157,8 @@ class Signal:
     suggested_strike: int   # nearest round-step to entry_line
     expiry:      str = ""   # actual contract expiry from registry e.g. "28 AUG 26"
     upstox_key:  str = ""   # NSE_EQ instrument key for the underlying spot
+    zone_lo:     float = 0.0   # zone boundary (0.0 if not populated -- see load_watchlist)
+    zone_hi:     float = 0.0   # zone boundary
 
 
 def _nearest_strike(price: float, step: int = 50) -> int:
@@ -674,6 +676,7 @@ def load_watchlist(path: Optional[str] = None) -> List[Signal]:
             rr=r.get("rr", 0.0), btst_rr=r.get("btst_rr", 0.0),
             suggested_strike=r["suggested_strike"], expiry=r.get("expiry", ""),
             upstox_key=r.get("upstox_key", ""),
+            zone_lo=r.get("zone_lo", 0.0), zone_hi=r.get("zone_hi", 0.0),
         ))
     return out
 
