@@ -35,6 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_layer.client_db import ClientDB  # noqa: E402
 from data_layer.historical_candles import fetch_upstox_intraday_1m, fetch_upstox_daily  # noqa: E402
+from data_layer.instrument_registry import REGISTRY  # noqa: E402
+from data_layer.oi_buildup import classify_oi_buildup, oi_agreement  # noqa: E402
 
 WATCHLIST_PATH = Path(__file__).resolve().parents[1] / "data" / "fno_positional_watchlist.json"
 GAP_SKIP_PCT = 2.5  # mirrors strategies/fno_positional/book.py
@@ -49,6 +51,27 @@ def _touched(direction: str, spot: float, entry_line: float) -> bool:
         (direction == "CE" and spot <= entry_line * 1.002) or
         (direction == "PE" and spot >= entry_line * 0.998)
     )
+
+
+async def _oi_note(symbol: str, direction: str, token: str) -> str:
+    """Mirrors FnOPositionalBook._check_oi_buildup exactly -- real futures OI
+    day-over-day buildup classification vs the trade's direction. Diagnostic
+    only in the live book (never gates entry); reported here purely as
+    additional context on today's real signals."""
+    try:
+        await asyncio.to_thread(REGISTRY.load_futures_only_sync, symbol)
+        fut_key = REGISTRY.get_futures_upstox(symbol)
+        if not fut_key:
+            return "OI: unavailable (no futures key resolved)"
+        candles = await fetch_upstox_daily(fut_key, token, lookback_days=5)
+        if len(candles) < 2:
+            return "OI: unavailable (insufficient daily candles)"
+        prev, curr = candles[-2], candles[-1]
+        buildup = classify_oi_buildup(prev["close"], curr["close"], prev["oi"], curr["oi"])
+        agreement = oi_agreement(direction, buildup)
+        return f"OI: {buildup} ({agreement} {direction} thesis)"
+    except Exception as exc:
+        return f"OI: unavailable ({exc})"
 
 
 def _hit_t1_or_sl(direction: str, spot: float, day_t1: float, hard_sl: float) -> str:
@@ -91,6 +114,9 @@ async def check_one(stock: dict, token: str) -> None:
         print(f"  Real trailing daily closes (last {len(closes)}): {closes}")
     else:
         print("  Real trailing daily closes: unavailable (fetch failed/empty)")
+
+    oi_note = await _oi_note(symbol, direction, token)
+    print(f"  {oi_note}")
 
     intraday = await fetch_upstox_intraday_1m(upstox_key, token)
     if not intraday:
