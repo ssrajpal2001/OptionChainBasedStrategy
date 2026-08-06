@@ -106,3 +106,33 @@ def test_5min_ceiling_closes_position_instead_of_arming_stale_data(caplog):
     s._check_itm_pair_gate.assert_not_awaited()
     assert any("TIMED OUT" in r.message for r in caplog.records)
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+def test_5min_ceiling_keeps_guard_armed_when_close_is_not_confirmed(caplog):
+    """2026-08-06 CRITICAL FIX regression test. If the safety close itself
+    fails to confirm (broker unavailable/timeout -- plausible under the same
+    conditions causing a stuck feed), the OLD code cleared
+    _post_restore_warmup BEFORE attempting the close, so the very next tick
+    would fall straight through to normal exit checks on the still-stale
+    leg price -- exactly what this guard exists to prevent. The guard must
+    now stay ARMED so the safety close is retried next cycle instead."""
+    import logging
+    s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True)
+
+    async def _fake_close_position_that_fails(reason):
+        # Simulates _close_position's own fail-safe behavior: broker
+        # unavailable / confirmation timeout -> position left exactly as it
+        # was, still open, nothing finalized.
+        pass
+    s._close_position = _fake_close_position_that_fails
+
+    with caplog.at_level(logging.CRITICAL, logger="strategies.sell_straddle.exits"):
+        asyncio.run(s._check_exits())
+
+    assert s._post_restore_warmup is True, (
+        "guard was disarmed even though the safety close was never confirmed -- "
+        "the next tick would trade blind on the still-stale leg price."
+    )
+    assert s._position is not None and s._position.status == "open"
+    s._check_itm_pair_gate.assert_not_awaited()
+    assert any("NOT confirmed" in r.message for r in caplog.records)

@@ -464,7 +464,17 @@ class ExitMixin:
                             "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
                             self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
             elif _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC:
-                self._post_restore_warmup = False
+                # 2026-08-06 fix: do NOT clear _post_restore_warmup until the safety
+                # close actually confirms. The old order (clear the flag, then
+                # attempt the close) meant that if _close_position itself timed out
+                # or got exit_aborted (broker unavailable -- plausible under the
+                # same conditions causing a stuck feed), the position stayed open
+                # but the guard was already disarmed -- the very next tick would
+                # fall straight through to normal Day%/ITMgate/etc. checks using
+                # the still-stale/frozen leg price, exactly what this guard exists
+                # to prevent. Now the flag only clears on a CONFIRMED close, so a
+                # failed attempt correctly retries the safety close next cycle
+                # instead of silently trading blind.
                 logger.critical(
                     "SellStraddle[%s]: post-restore warm-up TIMED OUT after %.0fs with "
                     "CE_fresh=%s PE_fresh=%s — no fresh tick for %s%s within %.0fs of "
@@ -478,6 +488,15 @@ class ExitMixin:
                     pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl,
                 )
                 await self._close_position("post_restore_data_stale")
+                if not (self._position and self._position.status == "open"):
+                    self._post_restore_warmup = False
+                else:
+                    logger.critical(
+                        "SellStraddle[%s]: post-restore safety close NOT confirmed -- "
+                        "guard stays ARMED, will retry closing next cycle rather than "
+                        "falling through to normal exit checks on stale data.",
+                        self._underlying,
+                    )
                 return
             else:
                 return
