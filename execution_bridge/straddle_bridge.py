@@ -23,7 +23,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config.global_config import IST, Topic, order_exchange
 from data_layer.base_feeder import EventBus
@@ -352,6 +352,21 @@ class StraddleExecutionBridge:
         # here (EXIT was deliberately left out of that fix, see straddle_bridge.py under-fill path).
         self._exit_executor = SmartOrderExecutor(fill_timeout_sec=2.0, chase_attempts=1,
                                                   market_fill_timeout_sec=8.0)
+        # 2026-08-06 CRITICAL FIX: per-(client,binding) task chain. run() used to `await
+        # self._handle(ev)` directly in its single consumer loop -- meaning EVERY client's
+        # orders funneled through one queue processed strictly one-at-a-time, globally. Real
+        # incident: gurmeet and ssrajpal2001 both hit their 15:20 EOD force-exit in the same
+        # tick (order-request timestamps 13ms apart); gurmeet's order sat queued behind
+        # ssrajpal2001's slower one and didn't even reach the broker until ~16s later --
+        # blowing past gurmeet's own strategy-side confirm wait even though the individual
+        # order, once actually picked up, placed and filled in under a second. With N clients
+        # this compounds directly (client #50 could wait for 49 others' orders to clear first).
+        # Fix: different (client,binding) keys now run FULLY CONCURRENTLY (one asyncio task
+        # each) so one client can never block another's order from even starting. A single
+        # client's OWN events still process strictly in the order they were queued (each new
+        # task for a key awaits the prior task for that SAME key first) -- entries/rolls/exits
+        # for one client's one binding are never reordered or raced against each other.
+        self._key_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -367,15 +382,35 @@ class StraddleExecutionBridge:
                 break
             if not isinstance(ev, StraddleOrderEvent):
                 continue
+            key = (ev.client_id or "", ev.binding_id or "")
+            prev_task = self._key_tasks.get(key)
+            task = asyncio.create_task(self._handle_chained(ev, prev_task, key))
+            self._key_tasks[key] = task
+
+    async def _handle_chained(self, ev: StraddleOrderEvent, prev_task: Optional[asyncio.Task],
+                               key: Tuple[str, str]) -> None:
+        """Run `_handle(ev)` after any prior in-flight order for this SAME (client,binding)
+        has finished (preserves per-client ordering), while different keys' tasks run
+        concurrently with no wait on each other at all."""
+        if prev_task is not None and not prev_task.done():
             try:
-                await self._handle(ev)
-            except Exception as exc:
-                # One bad order must NOT kill the bridge (which would silently stop ALL
-                # future routing). Log and keep serving.
-                logger.exception(
-                    "StraddleExecutionBridge: _handle error for %s %s: %s",
-                    ev.action, ev.underlying, exc,
-                )
+                await prev_task
+            except Exception:
+                pass  # the prior order's own failure was already logged where it happened
+        try:
+            await self._handle(ev)
+        except Exception as exc:
+            # One bad order must NOT kill the bridge (which would silently stop ALL
+            # future routing). Log and keep serving.
+            logger.exception(
+                "StraddleExecutionBridge: _handle error for %s %s: %s",
+                ev.action, ev.underlying, exc,
+            )
+        finally:
+            # Only clear the slot if we're still the latest task registered for this key
+            # (avoid a late-finishing older task wiping a newer one's entry).
+            if self._key_tasks.get(key) is asyncio.current_task():
+                self._key_tasks.pop(key, None)
 
     def stop(self) -> None:
         self._running = False
