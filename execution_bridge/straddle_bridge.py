@@ -829,7 +829,10 @@ class StraddleExecutionBridge:
                             await asyncio.sleep(1)
                             _f = await broker.get_order_status(str(_oids[-1]))
                             _real_avg = float(getattr(_f, "avg_price", 0.0) or 0.0)
-                            _real_qty = int(getattr(_f, "filled_qty", 0) or 0)
+                            # OrderFill's field is `qty`, not `filled_qty` -- the old
+                            # getattr(_f, "filled_qty", 0) always silently returned the
+                            # 0 default regardless of the real value.
+                            _real_qty = int(getattr(_f, "qty", 0) or 0)
                             if _real_avg > 0:
                                 _px = _real_avg
                                 _fq = _real_qty if _real_qty > 0 else qty
@@ -837,14 +840,53 @@ class StraddleExecutionBridge:
                                             ev.action, ev.underlying, opt_type, _attempt+1, _fq, _px)
                                 break
                         if _f is not None and _px == _fallback_ltp:
-                            _raw = getattr(_f, "raw", {}) or {}
-                            _reason = (f"state={_raw.get('state')} unfilled={_raw.get('unfilled_size')} "
-                                       f"avg={getattr(_f,'avg_price',0)} "
-                                       f"cancel_reason={_raw.get('cancellation_reason') or _raw.get('meta_data')}")
-                            logger.warning("[LIVE] %s %s %s UNDER-FILL %d/%d — exchange: %s",
-                                           ev.action, ev.underlying, opt_type, _fq, qty, _reason)
-                            self._trade_log.log_event(client_id, binding_id,
-                                f"{ev.action} {ev.underlying} {opt_type}{int(strike)} UNDER-FILL {_fq}/{qty} — exchange: {_reason}")
+                            # 2026-08-06: the order-status endpoint (e.g. Kite order_history)
+                            # has been observed returning an empty/inconclusive response for
+                            # orders that DID fill at the exchange -- twice today a real,
+                            # confirmed-in-broker fill was discarded as "unfilled" this way,
+                            # leaving a genuinely open position untracked. Before giving up,
+                            # cross-check the broker's ACTUAL positions -- ground truth for
+                            # what's really held, independent of whether the status endpoint
+                            # kept up. ENTRY only (the observed failure mode); EXIT keeps the
+                            # existing conservative behavior since "did the qty reduce" is a
+                            # harder match to make safely without the pre-exit baseline.
+                            # NSE/MCX only -- Delta (crypto) has its own dedicated, battle-tested
+                            # late-residual-fill reconcile further down this handler (2026-06-13
+                            # cancel-race fix); this earlier check must not preempt it.
+                            _confirmed_via_position = False
+                            if ev.action == "ENTRY" and not _use_limit and hasattr(broker, "get_positions"):
+                                try:
+                                    for _pos in await broker.get_positions():
+                                        if (_pos.symbol == symbol and _pos.avg_price > 0
+                                                and abs(_pos.qty) >= qty):
+                                            _px = _pos.avg_price
+                                            _fq = qty
+                                            _confirmed_via_position = True
+                                            logger.info(
+                                                "[LIVE] %s %s %s — order-status inconclusive but "
+                                                "broker POSITION confirms fill: qty=%d avg=%.4f "
+                                                "(status endpoint was stale/empty, not the broker)",
+                                                ev.action, ev.underlying, opt_type, _fq, _px,
+                                            )
+                                            self._trade_log.log_event(client_id, binding_id,
+                                                f"{ev.action} {ev.underlying} {opt_type}{int(strike)} "
+                                                f"CONFIRMED via broker position (order-status was "
+                                                f"inconclusive) {_fq}@{_px:.4f}")
+                                            break
+                                except Exception as exc:
+                                    logger.warning(
+                                        "[LIVE] %s %s %s position cross-check failed: %s",
+                                        ev.action, ev.underlying, opt_type, exc,
+                                    )
+                            if not _confirmed_via_position:
+                                _raw = getattr(_f, "raw", {}) or {}
+                                _reason = (f"state={_raw.get('state')} unfilled={_raw.get('unfilled_size')} "
+                                           f"avg={getattr(_f,'avg_price',0)} "
+                                           f"cancel_reason={_raw.get('cancellation_reason') or _raw.get('meta_data')}")
+                                logger.warning("[LIVE] %s %s %s UNDER-FILL %d/%d — exchange: %s",
+                                               ev.action, ev.underlying, opt_type, _fq, qty, _reason)
+                                self._trade_log.log_event(client_id, binding_id,
+                                    f"{ev.action} {ev.underlying} {opt_type}{int(strike)} UNDER-FILL {_fq}/{qty} — exchange: {_reason}")
                     except Exception:
                         pass
                 return opt_type, _px, _fq, symbol

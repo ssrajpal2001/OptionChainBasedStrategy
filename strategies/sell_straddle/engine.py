@@ -756,6 +756,21 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     continue
                 if ev.underlying != self._underlying:
                     continue
+                # 2026-08-06 CRITICAL FIX: Topic.ORDER_FILL is broadcast to every
+                # subscriber -- EventBus.publish() has no per-book routing. When two
+                # different (client, binding) books trade the SAME underlying
+                # concurrently (confirmed real today: ssrajpal2001/SA5770 and
+                # gurmeet/zerodha both running sell_straddle on NIFTY), a fill event
+                # for ONE book's order was being delivered to and processed by BOTH
+                # books' _on_fill, because only `underlying` was ever checked. The
+                # entry_aborted branch unconditionally nulls self._position with no
+                # further guard -- one client's broker timeout/asymmetric-fill abort
+                # was silently wiping a completely unrelated client's real, already-
+                # confirmed position. Root cause of the "confirmed real position
+                # vanishes within seconds, no matching log for THIS book" incidents
+                # investigated throughout 2026-08-06.
+                if ev.client_id != self._client_id or ev.binding_id != self._binding_id:
+                    continue
                 try:
                     self._on_fill(ev)
                 except Exception as _exc:
