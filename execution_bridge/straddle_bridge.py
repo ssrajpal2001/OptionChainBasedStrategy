@@ -856,7 +856,8 @@ class StraddleExecutionBridge:
                             _confirmed_via_position = False
                             if ev.action == "ENTRY" and not _use_limit and hasattr(broker, "get_positions"):
                                 try:
-                                    for _pos in await broker.get_positions():
+                                    _all_pos = await broker.get_positions()
+                                    for _pos in _all_pos:
                                         if (_pos.symbol == symbol and _pos.avg_price > 0
                                                 and abs(_pos.qty) >= qty):
                                             _px = _pos.avg_price
@@ -873,6 +874,18 @@ class StraddleExecutionBridge:
                                                 f"CONFIRMED via broker position (order-status was "
                                                 f"inconclusive) {_fq}@{_px:.4f}")
                                             break
+                                    else:
+                                        # No match -- log what we searched for vs what the broker
+                                        # actually returned, so a symbol-format mismatch is visible
+                                        # immediately instead of looking identical to "genuinely
+                                        # no position" (the previous silent gap).
+                                        logger.warning(
+                                            "[LIVE] %s %s %s position cross-check: NO MATCH for "
+                                            "symbol=%r qty>=%d among %d broker position(s): %s",
+                                            ev.action, ev.underlying, opt_type, symbol, qty,
+                                            len(_all_pos),
+                                            [(p.symbol, p.qty, p.avg_price) for p in _all_pos],
+                                        )
                                 except Exception as exc:
                                     logger.warning(
                                         "[LIVE] %s %s %s position cross-check failed: %s",
