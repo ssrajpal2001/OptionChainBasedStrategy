@@ -31,8 +31,17 @@ def _path(key: str) -> str:
     return os.path.join(_DIR, f"{key}.json")
 
 
-def save(key: str, position: dict, product_type: str = "MIS") -> None:
-    """Persist an open position. `position` must be JSON-serialisable."""
+def save(key: str, position: dict, product_type: str = "MIS") -> bool:
+    """Persist an open position. `position` must be JSON-serialisable.
+
+    2026-08-06: now returns True/False instead of always None. Previously a
+    write failure was only a WARNING log the caller had no way to detect --
+    _persist()'s own try/except was structurally incapable of ever noticing
+    a failed write to retry it, since the failure was already swallowed one
+    layer down here. A single transient I/O failure (disk full, permission,
+    AV lock) could silently desync the on-disk file from the true in-memory
+    state until the next state-transition event, or forever if the process
+    crashed/restarted in between."""
     try:
         os.makedirs(_DIR, exist_ok=True)
         payload = {
@@ -44,8 +53,10 @@ def save(key: str, position: dict, product_type: str = "MIS") -> None:
         with open(tmp, "w") as f:
             json.dump(payload, f, indent=2, default=str)
         os.replace(tmp, _path(key))   # atomic
+        return True
     except Exception as exc:
         logger.warning("PositionStore.save[%s] failed: %s", key, exc)
+        return False
 
 
 def load(key: str) -> Optional[dict]:
@@ -79,13 +90,19 @@ def load(key: str) -> Optional[dict]:
     return payload.get("position")
 
 
-def clear(key: str) -> None:
-    """Remove a stored position (call on exit/close)."""
+def clear(key: str) -> bool:
+    """Remove a stored position (call on exit/close). Returns True on success
+    or if there was nothing to remove; False if removal was attempted and
+    failed (2026-08-06, same rationale as save()'s return value: a failed
+    clear() left a stale "still open" file on disk that a later restart would
+    wrongly resurrect as a real position the broker no longer holds)."""
     try:
         if os.path.exists(_path(key)):
             os.remove(_path(key))
+        return True
     except Exception as exc:
         logger.warning("PositionStore.clear[%s] failed: %s", key, exc)
+        return False
 
 
 def list_keys() -> list:

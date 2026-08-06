@@ -166,11 +166,50 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         """Stamp this book's identity on every order so the bridge routes to ONLY this binding."""
         await self._order_emitter.emit(Topic.ORDER_REQUEST, ev)
 
+    def _current_product_type(self) -> str:
+        """The REAL configured product type for this underlying's sell_straddle
+        deployment (MIS/NRML) -- same source straddle_bridge.py reads when it
+        actually places the order. 2026-08-06 CRITICAL FIX: self._product_type
+        was never set anywhere on this class, so _persist() always silently
+        tagged every stored position "MIS" regardless of real config. Any
+        NRML (carry-forward) deployment would have a legitimately-still-open
+        overnight position wrongly discarded on the next restart as
+        "yesterday's already-squared-off intraday position" (position_store.py's
+        MIS new-day-discard rule)."""
+        try:
+            _pt = str(RuntimeConfig.index_section(self._underlying, "sell_straddle")
+                      .get("product_type", "MIS")).upper()
+        except Exception:
+            _pt = "MIS"
+        return _pt if _pt in ("MIS", "NRML") else "MIS"
+
     def _persist(self) -> None:
         try:
             if self._position and self._position.status == "open":
-                self.persist(self._persist_key, self._position.to_dict(),
-                             product_type=getattr(self, "_product_type", "MIS"))
+                # 2026-08-06 CRITICAL FIX: save()/clear() now report success/failure
+                # instead of always silently swallowing an I/O error two layers
+                # down (position_store.py). One retry, then a LOUD, impossible-to-
+                # miss alert on repeated failure -- previously a single transient
+                # disk/permission hiccup could desync the on-disk file from the
+                # real in-memory position with zero signal anywhere, until the
+                # next state-transition event or forever if the process crashed
+                # in between.
+                _ok = self.persist(self._persist_key, self._position.to_dict(),
+                                   product_type=self._current_product_type())
+                if not _ok:
+                    _ok = self.persist(self._persist_key, self._position.to_dict(),
+                                       product_type=self._current_product_type())
+                if not _ok:
+                    _cid = getattr(self, "_client_id", "") or "-"
+                    _bid = getattr(self, "_binding_id", "") or "-"
+                    logger.critical(
+                        "SellStraddle[%s|%s|%s]: POSITION PERSIST FAILED TWICE -- "
+                        "on-disk state may be STALE/DESYNCED from the real in-memory "
+                        "position. A restart before the next successful persist would "
+                        "orphan this real broker position. Check disk space/permissions "
+                        "on the positions data directory NOW.",
+                        self._underlying, _cid, _bid,
+                    )
                 self.notify_position_update(self._position.to_dict(), force=True)
             else:
                 # 2026-08-06 DIAGNOSTIC (temporary): a real, freshly-filled position has
@@ -189,7 +228,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     getattr(self, "_binding_id", "") or "-", self._position,
                     "".join(traceback.format_stack(limit=10)),
                 )
-                self.clear(self._persist_key)
+                _ok = self.clear(self._persist_key)
+                if not _ok:
+                    _ok = self.clear(self._persist_key)
+                if not _ok:
+                    logger.critical(
+                        "SellStraddle[%s|%s|%s]: POSITION CLEAR FAILED TWICE -- a stale "
+                        "'still open' file may be left on disk. A restart before the "
+                        "next successful clear could RESURRECT an already-closed "
+                        "position the broker no longer holds. Check disk space/"
+                        "permissions on the positions data directory NOW.",
+                        self._underlying, getattr(self, "_client_id", "") or "-",
+                        getattr(self, "_binding_id", "") or "-",
+                    )
                 self.notify_position_update(None, force=True)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: persist failed: %s", self._underlying, exc)
