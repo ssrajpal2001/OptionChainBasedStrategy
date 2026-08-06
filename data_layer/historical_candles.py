@@ -30,10 +30,12 @@ _WARM_CACHE_TTL_SECONDS = 300.0
 
 
 def _parse_candles(r: dict) -> List[dict]:
-    """Upstox candle response (newest-first) -> oldest-first list of candle dicts."""
+    """Upstox candle response (newest-first) -> oldest-first list of candle dicts.
+    'oi' is Upstox's optional 7th column (open interest) -- 0 for instruments/
+    intervals that don't carry it (e.g. equity spot, 1-minute)."""
     rows = (r.get("data", {}) or {}).get("candles", []) or []
     return [{"ts": c[0], "open": c[1], "high": c[2], "low": c[3], "close": c[4],
-             "volume": c[5]} for c in reversed(rows)]
+             "volume": c[5], "oi": (c[6] if len(c) > 6 else 0)} for c in reversed(rows)]
 
 
 def _fyers_ts_to_iso(ts: int) -> str:
@@ -106,6 +108,24 @@ async def fetch_upstox_range_1m(
     rows = await asyncio.to_thread(_get_all)
     rows.sort(key=lambda r: r["ts"])
     return rows
+
+
+async def fetch_upstox_daily(instrument_key: str, access_token: str, lookback_days: int = 5) -> List[dict]:
+    """Daily candles (oldest-first) for instrument_key over the trailing
+    lookback_days calendar days, via the 'day' interval endpoint. Each candle
+    includes 'oi' (open interest) -- populated by Upstox for F&O instruments
+    (e.g. a stock's near-month futures key), 0 for spot/equity keys. Used for
+    day-over-day OI-buildup classification, not candle price analysis. []
+    on error/empty."""
+    def _get():
+        from urllib.parse import quote as _q
+        end = date.today() - timedelta(days=1)
+        start = end - timedelta(days=lookback_days)
+        url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/day/"
+               f"{end.isoformat()}/{start.isoformat()}")
+        return _parse_candles(_http_get_json(url, access_token))
+
+    return await asyncio.to_thread(_get)
 
 
 async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> List[dict]:

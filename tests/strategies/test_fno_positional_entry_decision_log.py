@@ -11,7 +11,16 @@ data was unavailable to the live book even if it wanted to log it.
 2. _log_entry_decision() produces a log line with the zone bounds, lock date,
    age, entry_line/hard_sl/day_t1, R:R figures, and a WHY clause distinguishing
    TRIGGERED (already retested) from APPROACHING (just touched entry_line).
+
+Also covers the 2026-08-06 OI-buildup confirmation note (_check_oi_buildup):
+a best-effort, NEVER-blocking futures-OI classification appended to the same
+entry-decision log line. Buildup can lag a zone touch by hours/days, so this
+is diagnostic-only -- it must never raise or delay/skip an entry, only degrade
+to an "unavailable" note on any failure (see data_layer/oi_buildup.py for the
+pure classification logic, tested separately in tests/data_layer/).
 """
+import asyncio
+
 from backtest.fno_scanner.scan_live import Signal, save_watchlist, load_watchlist
 from strategies.fno_positional.book import FnOPositionalBook
 
@@ -93,3 +102,63 @@ def test_log_entry_decision_handles_missing_zone_bounds_gracefully():
     book._log_entry_decision(sig, spot=1497.0, concept="APPROACHING")
     msg = book._log.messages[-1]
     assert "unavailable" in msg
+
+
+def test_log_entry_decision_includes_oi_note_when_passed():
+    book = _book()
+    sig = _signal(status="APPROACHING")
+    book._log_entry_decision(sig, spot=1497.0, concept="APPROACHING",
+                              oi_note="OI: LONG_BUILDUP (CONFIRMS CE thesis)")
+    msg = book._log.messages[-1]
+    assert "OI: LONG_BUILDUP (CONFIRMS CE thesis)" in msg
+
+
+def test_check_oi_buildup_never_raises_when_no_futures_key_resolved(monkeypatch):
+    """No futures key resolvable (e.g. symbol not found in the master JSON) must
+    degrade to a plain 'unavailable' note -- never raise, never block entry."""
+    import strategies.fno_positional.book as book_mod
+
+    monkeypatch.setattr(book_mod.REGISTRY, "load_futures_only_sync", lambda *a, **k: None)
+    monkeypatch.setattr(book_mod.REGISTRY, "get_futures_upstox", lambda *a, **k: "")
+
+    book = _book()
+    sig = _signal()
+    note = asyncio.run(book._check_oi_buildup(sig))
+    assert "unavailable" in note
+
+
+def test_check_oi_buildup_never_raises_on_fetch_exception(monkeypatch):
+    """Any unexpected failure in the futures-key resolve or Upstox fetch (network
+    error, bad token, etc) must degrade to an 'unavailable' note, never raise --
+    this check must never be able to block or delay a real entry."""
+    import strategies.fno_positional.book as book_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("network blew up")
+
+    monkeypatch.setattr(book_mod.REGISTRY, "load_futures_only_sync", _boom)
+
+    book = _book()
+    sig = _signal()
+    note = asyncio.run(book._check_oi_buildup(sig))
+    assert "unavailable" in note
+
+
+def test_check_oi_buildup_classifies_and_reports_agreement(monkeypatch):
+    import strategies.fno_positional.book as book_mod
+
+    monkeypatch.setattr(book_mod.REGISTRY, "load_futures_only_sync", lambda *a, **k: None)
+    monkeypatch.setattr(book_mod.REGISTRY, "get_futures_upstox", lambda *a, **k: "NSE_FO|999")
+
+    async def _fake_daily(*a, **k):
+        return [
+            {"ts": "d1", "open": 0, "high": 0, "low": 0, "close": 100.0, "volume": 0, "oi": 1000},
+            {"ts": "d2", "open": 0, "high": 0, "low": 0, "close": 105.0, "volume": 0, "oi": 1200},
+        ]
+    monkeypatch.setattr(book_mod, "fetch_upstox_daily", _fake_daily)
+
+    book = _book()
+    sig = _signal(direction="CE")
+    note = asyncio.run(book._check_oi_buildup(sig))
+    assert "LONG_BUILDUP" in note
+    assert "CONFIRMS CE thesis" in note

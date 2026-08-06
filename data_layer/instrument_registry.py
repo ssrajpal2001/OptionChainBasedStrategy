@@ -410,6 +410,20 @@ class InstrumentRegistry:
     def get_futures_upstox(self, underlying: str) -> str:
         return self._futures_upstox.get(underlying.upper(), "")
 
+    def load_futures_only_sync(self, underlying: str, today: date = None) -> None:
+        """Resolve just the near-month futures instrument_key for an arbitrary
+        NSE F&O underlying via the master JSON. load_sync's options-API path
+        only works for underlyings in _UPSTOX_UNDERLYING_KEY (indices/MCX) and
+        returns early for anything else -- this bypasses that restriction for
+        callers that only need the futures key (e.g. OI-buildup checks on
+        individual F&O stocks), not the full option-contract map. Cheap to call
+        repeatedly: _load_from_master_json's download is cached per (exchange,
+        day) in _MASTER_CACHE."""
+        underlying = underlying.upper()
+        if underlying in self._futures_upstox:
+            return
+        self._load_from_master_json(underlying, today or date.today())
+
     def get_diagnostics(self, underlying: str) -> List[str]:
         """Return the diagnostic log from the last load_sync call for this underlying."""
         return list(self._diag.get(underlying, ["No load attempted yet."]))

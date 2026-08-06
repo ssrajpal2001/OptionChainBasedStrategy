@@ -38,6 +38,9 @@ from typing import Any, Dict, List, Optional
 
 from config.global_config import IST, Topic
 from utils.logging_utils import make_strategy_logger
+from data_layer.instrument_registry import REGISTRY
+from data_layer.historical_candles import fetch_upstox_daily
+from data_layer.oi_buildup import classify_oi_buildup, oi_agreement
 
 logger = logging.getLogger(__name__)
 
@@ -467,11 +470,13 @@ class FnOPositionalBook:
             (sig.direction == "PE" and spot >= sig.hard_sl)
         )
 
-    def _log_entry_decision(self, sig, spot: float, concept: str) -> None:
+    def _log_entry_decision(self, sig, spot: float, concept: str, oi_note: str = "") -> None:
         """Full WHY narrative for a real entry decision -- zone boundaries, when it
         was locked, when/why it triggered now, and the R:R that justified taking it.
         Logged once, right before the order is dispatched, so a trade can be
-        explained from the log alone without cross-referencing the scan output."""
+        explained from the log alone without cross-referencing the scan output.
+        oi_note (see _check_oi_buildup) is purely informational -- it never
+        affects whether this entry happens, only what gets logged about it."""
         _zone = (f"[{sig.zone_lo:.2f}, {sig.zone_hi:.2f}]" if sig.zone_lo > 0 and sig.zone_hi > 0
                  else "(zone bounds unavailable -- pre-2026-08-06 watchlist file)")
         if concept == "TRIGGERED":
@@ -481,11 +486,36 @@ class FnOPositionalBook:
                      f"{sig.dist_pct:.2f}% away)")
         self._log.info(
             "FnOBook[%s/%s]: ENTRY DECISION %s %s [%s] — %s | zone %s locked %s (age=%dd) | "
-            "entry_line=%.2f hard_sl=%.2f day_t1=%.2f | zone R:R=%.2f BTST R:R=%.2f | %s",
+            "entry_line=%.2f hard_sl=%.2f day_t1=%.2f | zone R:R=%.2f BTST R:R=%.2f | %s | %s",
             self._client_id, self._binding_id, sig.symbol, sig.direction, concept, _why,
             _zone, sig.lock_date, sig.zone_age, sig.entry_line, sig.hard_sl, sig.day_t1,
-            sig.rr, sig.btst_rr, f"expiry={sig.expiry}" if sig.expiry else "",
+            sig.rr, sig.btst_rr, f"expiry={sig.expiry}" if sig.expiry else "", oi_note,
         )
+
+    async def _check_oi_buildup(self, sig) -> str:
+        """Best-effort futures OI-buildup confirmation note -- diagnostic only,
+        NEVER blocks or delays entry. Classifies the underlying's near-month
+        futures OI (day-over-day) into LONG_BUILDUP/SHORT_BUILDUP/SHORT_COVERING/
+        LONG_UNWINDING and checks whether it agrees with the trade's direction
+        (CE=bullish, PE=bearish). Buildup can lag a zone touch by hours or days,
+        so this is only ever a log note, never a gate -- see CLAUDE.md/session
+        note on why OI is confirmation-only here, not a filter.
+        Any failure (no futures key resolvable, Upstox call fails, <2 daily
+        candles) degrades to a plain 'unavailable' note rather than raising."""
+        try:
+            await asyncio.to_thread(REGISTRY.load_futures_only_sync, sig.symbol)
+            fut_key = REGISTRY.get_futures_upstox(sig.symbol)
+            if not fut_key:
+                return "OI: unavailable (no futures key resolved)"
+            candles = await fetch_upstox_daily(fut_key, self._token, lookback_days=5)
+            if len(candles) < 2:
+                return "OI: unavailable (insufficient daily candles)"
+            prev, curr = candles[-2], candles[-1]
+            buildup = classify_oi_buildup(prev["close"], curr["close"], prev["oi"], curr["oi"])
+            agreement = oi_agreement(sig.direction, buildup)
+            return f"OI: {buildup} ({agreement} {sig.direction} thesis)"
+        except Exception as exc:
+            return f"OI: unavailable ({exc})"
 
     async def _try_enter_triggered(self) -> None:
         free = self._max_slots - len(self._open_positions)
@@ -517,7 +547,8 @@ class FnOPositionalBook:
                         self._blocked_today.add(key)
                         continue
             self._pending.remove(sig)
-            self._log_entry_decision(sig, spot if spot_key else 0.0, "TRIGGERED")
+            oi_note = await self._check_oi_buildup(sig)
+            self._log_entry_decision(sig, spot if spot_key else 0.0, "TRIGGERED", oi_note)
             await self._open_position(sig)
             free -= 1
 
@@ -553,7 +584,8 @@ class FnOPositionalBook:
                 continue
             if touched:
                 self._pending.remove(sig)
-                self._log_entry_decision(sig, spot, "APPROACHING")
+                oi_note = await self._check_oi_buildup(sig)
+                self._log_entry_decision(sig, spot, "APPROACHING", oi_note)
                 await self._open_position(sig)
                 free -= 1
 
