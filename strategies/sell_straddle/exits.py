@@ -891,12 +891,20 @@ class ExitMixin:
         try:
             await self._emit_order(order_ev)
             try:
-                await asyncio.wait_for(waiter.wait(), timeout=10.0)
+                # 2026-08-06: was hardcoded 10.0, shorter than the bridge's own
+                # documented worst-case confirmation latency (confirmed live: Kite
+                # needed longer than 5s to settle a genuinely-filling order, which is
+                # why the bridge's own retry loop was extended to 15s on top of the
+                # executor's own wait). A too-short local wait here risks the SAME
+                # leg being closed twice -- once by a late-arriving real fill, once
+                # by a second close order sent after this wait gave up too early.
+                # Aligned to the same constant _close_position already uses.
+                await asyncio.wait_for(waiter.wait(), timeout=self._CLOSE_CONFIRM_TIMEOUT_SEC)
             except asyncio.TimeoutError:
                 logger.critical(
-                    "SellStraddle[%s|%s|%s]: LEG CLOSE %s NOT CONFIRMED within 10s (event_id=%s "
+                    "SellStraddle[%s|%s|%s]: LEG CLOSE %s NOT CONFIRMED within %.0fs (event_id=%s "
                     "reason=%s) — leg left OPEN, no P&L booked; caller must abort the roll.",
-                    self._underlying, _cid, _bid, side, eid, reason,
+                    self._underlying, _cid, _bid, side, self._CLOSE_CONFIRM_TIMEOUT_SEC, eid, reason,
                 )
                 order_ev.close_aborted = True
                 return order_ev
