@@ -78,6 +78,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._trades_today: int = 0
 
         self._spot: float = 0.0
+        self._spot_reject_streak: int = 0  # consecutive suspect-jump ticks ignored
         self._ce_ltp: float = 0.0
         self._pe_ltp: float = 0.0
         self._ce_atp: float = 0.0
@@ -735,7 +736,32 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     break
                 if tick.symbol != self._underlying:
                     continue
-                self._spot = tick.ltp
+                # 2026-08-06 HIGH-priority fix: Day%/theta and the ITM-pair-gate's
+                # both-ITM check all trust self._spot with zero validation -- a
+                # single garbage/glitched index tick (decimal misprint, wrong
+                # instrument leaking in) could misclassify both legs as ITM or
+                # distort the theta split enough to fire a real close/roll off
+                # one bad tick, before the next real tick corrects it. Reject a
+                # single-tick jump > 20% vs the last accepted spot (genuine NSE/
+                # crypto index moves essentially never do this in one tick) --
+                # but with a safety valve: after 5 consecutive rejections, accept
+                # anyway rather than risk getting permanently stuck on a stale
+                # value if the market genuinely gapped that far.
+                _new_spot = float(tick.ltp or 0.0)
+                if _new_spot > 0:
+                    if (self._spot > 0 and self._spot_reject_streak < 5
+                            and abs(_new_spot - self._spot) / self._spot > 0.20):
+                        self._spot_reject_streak += 1
+                        logger.warning(
+                            "SellStraddle[%s]: SUSPECT index tick spot=%.2f vs last=%.2f "
+                            "(%.1f%% jump) -- ignoring for this tick (streak=%d/5).",
+                            self._underlying, _new_spot, self._spot,
+                            abs(_new_spot - self._spot) / self._spot * 100,
+                            self._spot_reject_streak,
+                        )
+                    else:
+                        self._spot_reject_streak = 0
+                        self._spot = _new_spot
                 _idx_count += 1
                 try:
                     self._append_chart_point(datetime.now(IST))
