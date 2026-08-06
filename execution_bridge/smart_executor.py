@@ -44,15 +44,26 @@ def _round_tick(price: float, tick: float) -> float:
 
 class SmartOrderExecutor:
     def __init__(self, fill_timeout_sec: float = 4.0, chase_attempts: int = 2,
-                 poll_interval: float = 0.5, settle_timeout_sec: float = 6.0) -> None:
+                 poll_interval: float = 0.5, settle_timeout_sec: float = 6.0,
+                 market_fill_timeout_sec: Optional[float] = None) -> None:
         self._timeout = fill_timeout_sec
         self._chases = chase_attempts
         self._poll = poll_interval
         self._settle = settle_timeout_sec   # max wait for a cancelled order to reach a TERMINAL state
+        # 2026-08-06: plain MARKET orders (NSE/MCX, use_limit=False) have been observed taking
+        # well over fill_timeout_sec to settle on the broker side under real conditions -- Zerodha
+        # confirmed via a failed cancel_order ("Order cannot be cancelled as it is being
+        # processed") that an order our own poll had already given up on was still genuinely
+        # in flight, not dead. Giving up early made the atomicity guard abort a real fill.
+        # Kept SEPARATE from fill_timeout_sec (the Delta LIMIT-chase per-attempt budget) so
+        # fixing NSE's patience doesn't slow down Delta's already-tuned chase cadence.
+        # Defaults to fill_timeout_sec for any other/older caller.
+        self._market_timeout = (market_fill_timeout_sec if market_fill_timeout_sec is not None
+                                 else fill_timeout_sec)
 
-    async def _await_fill(self, broker, order_id: str) -> Tuple[int, float, str]:
+    async def _await_fill(self, broker, order_id: str, timeout: Optional[float] = None) -> Tuple[int, float, str]:
         """Poll until filled / timeout. Returns (filled_qty, avg_price, state)."""
-        deadline = asyncio.get_event_loop().time() + self._timeout
+        deadline = asyncio.get_event_loop().time() + (timeout if timeout is not None else self._timeout)
         last = (0, 0.0, "unknown")
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -113,7 +124,7 @@ class SmartOrderExecutor:
                                order_type=OrderType.MARKET, product=product, tag=tag, client_id=client_id)
             oid = await broker.place_order(req)
             order_ids.append(str(oid))
-            q, avg, _ = await self._await_fill(broker, oid)
+            q, avg, _ = await self._await_fill(broker, oid, timeout=self._market_timeout)
             if q <= 0 or avg <= 0:                       # market should fill; last-resort status fetch
                 f = await broker.get_order_status(oid)
                 q = int(getattr(f, "qty", 0) or 0); avg = float(getattr(f, "avg_price", 0.0) or 0.0)

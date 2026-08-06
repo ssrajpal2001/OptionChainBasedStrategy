@@ -337,11 +337,21 @@ class StraddleExecutionBridge:
         # Slippage-aware executor: crypto LIMIT-at-mid (chase→market); books from the REAL fill.
         from execution_bridge.smart_executor import SmartOrderExecutor
         # ENTRY: no rush — try the mid harder (2 chases × 4s) to save the spread.
-        self._executor = SmartOrderExecutor(fill_timeout_sec=4.0, chase_attempts=2)
+        # market_fill_timeout_sec=15.0 (2026-08-06): plain NSE MARKET orders confirmed via a
+        # failed cancel_order ("Order cannot be cancelled as it is being processed") taking
+        # longer than the old 4s to settle on Zerodha's side under real conditions -- the
+        # atomicity guard was aborting real fills that simply hadn't been confirmed yet. Kept
+        # separate from fill_timeout_sec so Delta's LIMIT-chase cadence is untouched.
+        self._executor = SmartOrderExecutor(fill_timeout_sec=4.0, chase_attempts=2,
+                                             market_fill_timeout_sec=15.0)
         # EXIT/square-off: get flat PROMPTLY — try the mid ONCE (2s) then market the remainder, so a
         # kill/EOD/manual square-off doesn't dawdle ~12s on a wide Delta book. Still anti-slippage
-        # (one mid attempt) but guarantees a fast flat via the market fallback.
-        self._exit_executor = SmartOrderExecutor(fill_timeout_sec=2.0, chase_attempts=1)
+        # (one mid attempt) but guarantees a fast flat via the market fallback. Market-side timeout
+        # also extended (same root cause as ENTRY) but stays shorter than ENTRY's -- an EXIT
+        # genuinely needs to get flat fast, and the position-cross-check safety net doesn't apply
+        # here (EXIT was deliberately left out of that fix, see straddle_bridge.py under-fill path).
+        self._exit_executor = SmartOrderExecutor(fill_timeout_sec=2.0, chase_attempts=1,
+                                                  market_fill_timeout_sec=8.0)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -821,11 +831,15 @@ class StraddleExecutionBridge:
                 # Under-fill with NO exception (order was accepted but didn't fully fill) — pull the
                 # EXCHANGE's final order state so the reason is exchange-sourced, not inferred
                 # (distinguishes 'rested unfilled / cancelled' from a margin/contract rejection).
-                # If filled_qty=0, poll order status (up to 5s) until broker confirms real fill
+                # If filled_qty=0, poll order status until broker confirms real fill. 2026-08-06:
+                # extended 5s->15s -- confirmed via a failed cancel_order ("Order cannot be
+                # cancelled as it is being processed") that Zerodha needed longer than 5s to settle
+                # a real, genuinely-filling MARKET order; giving up early made the atomicity guard
+                # abort fills that would have confirmed moments later.
                 if _fq < qty and _oids and hasattr(broker, "get_order_status"):
                     try:
                         _f = None
-                        for _attempt in range(5):
+                        for _attempt in range(15):
                             await asyncio.sleep(1)
                             _f = await broker.get_order_status(str(_oids[-1]))
                             _real_avg = float(getattr(_f, "avg_price", 0.0) or 0.0)
