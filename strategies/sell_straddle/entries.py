@@ -204,6 +204,21 @@ class EntryMixin:
                          due_reentry: bool = True) -> None:
         if self._stop_for_day:
             return
+        # 2026-08-06 HIGH-priority fix: _try_entry (driven by INDEX_TICK, its own
+        # async loop) and reset_session() (driven by CANDLE_CLOSE, a SEPARATE
+        # async loop) are unsynchronized. Index ticks can start flowing and this
+        # function can run before the first candle of a new day has closed and
+        # triggered reset_session() -- in that window, self._primed/_trades_today/
+        # _entry_expiry_date/_strike_prem are all still YESTERDAY's values. For
+        # NIFTY that mainly risks the wrong entry-rule-set being used for the
+        # day's real first trade (is_beginning miscomputed); for any deployment
+        # using a 1-minute rule the window is a solid ~55s, not a rare fluke.
+        # Defer entirely until reset_session() has actually run for today's
+        # session -- correctness over a few seconds of extra latency at the
+        # literal start of the trading day.
+        if (self._market_open_dt is not None
+                and self._session_day(self._market_open_dt) != self._session_day(now)):
+            return
         if not self._any_active_terminal():
             import time as _t
             if _t.monotonic() - getattr(self, "_no_term_log", 0.0) > 60.0:
