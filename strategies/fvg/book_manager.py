@@ -30,11 +30,17 @@ _DIRECTION_MODES = ("BOTH", "CE_ONLY", "PE_ONLY")
 # after removing stale multi-day-FVG trades). All overridable per deployment
 # via strategy_params.
 _DEFAULT_PARAMS = {
-    "itm_offset_pts": 50, "min_rr": 2.0, "htf_tf": 10, "ltf_tf": 3, "direction_mode": "BOTH",
+    "min_rr": 2.0, "htf_tf": 10, "ltf_tf": 3, "direction_mode": "BOTH",
     "initial_sl_pct": 0.20, "trail_trigger_pct": 0.15, "first_lock_pct": 0.08,
     "step_pct": 0.10, "step_lock_pct": 0.05,
 }
 _TSL_KEYS = ("initial_sl_pct", "trail_trigger_pct", "first_lock_pct", "step_pct", "step_lock_pct")
+# itm_offset_pts deliberately has NO force-filled default here (2026-08-06 fix) --
+# when a deployment doesn't explicitly configure it, FVGStrategy itself derives
+# "1-strike ITM" from the underlying's own strike_step (50 for NIFTY, 100 for
+# SENSEX/BANKNIFTY). Force-filling 50 here for every underlying is exactly the bug
+# that silently computed a never-listed SENSEX strike (78750, not a multiple of
+# 100) -- confirmed live via scripts/fvg_today_check.py.
 
 
 def _parse_params(raw: str) -> dict:
@@ -65,9 +71,12 @@ class FVGBookManager(StrategyBookManager):
             except Exception:
                 lots = 1
             params = _parse_params(d.get("strategy_params", "{}"))
+            raw_itm = params.get("itm_offset_pts")
             cfg = {
                 "lots": lots,
-                "itm_offset_pts": int(params.get("itm_offset_pts", 50)),
+                # None -> FVGStrategy derives "1-strike ITM" from the underlying's
+                # own strike_step (see book_manager.py module comment above).
+                "itm_offset_pts": int(raw_itm) if raw_itm is not None else None,
                 "min_rr": float(params.get("min_rr", 2.0)),
                 "htf_tf": int(params.get("htf_tf", 10)),
                 "ltf_tf": int(params.get("ltf_tf", 3)),
@@ -106,7 +115,7 @@ class FVGBookManager(StrategyBookManager):
         )
         logger.info("FVGBookManager: spawned %s/%s/%s (lots=%d itm=%d htf=%dm ltf=%dm mode=%s "
                     "| TSL trigger=%.1f%% lock=%.1f%% step=%.1f%%/%.1f%%).",
-                    client_id, binding_id, underlying, value["lots"], value["itm_offset_pts"],
+                    client_id, binding_id, underlying, value["lots"], book._itm_offset_pts,
                     value["htf_tf"], value["ltf_tf"], value["direction_mode"],
                     value["trail_trigger_pct"] * 100, value["first_lock_pct"] * 100,
                     value["step_pct"] * 100, value["step_lock_pct"] * 100)

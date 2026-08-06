@@ -205,7 +205,7 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
         binding_id: str,
         lot_multiplier: int = 1,
         feeder_token: str = "",
-        itm_offset_pts: int = _DEFAULT_ITM_OFFSET_PTS,
+        itm_offset_pts: Optional[int] = None,
         min_rr: float = 2.0,   # vestigial -- see self._min_rr comment below
         product_type: str = "MIS",
         htf_mins: int = _DEFAULT_HTF_MINS,
@@ -220,7 +220,18 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._lot_multiplier = max(1, lot_multiplier)
         self._feeder_token = feeder_token
-        self._itm_offset_pts = itm_offset_pts
+        self._strike_step = int(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
+        # 2026-08-06 fix: _DEFAULT_ITM_OFFSET_PTS=50 is NIFTY's own strike_step (its
+        # strikes are on a 50pt grid, so atm-50/atm+50 lands on a real listed strike).
+        # SENSEX/BANKNIFTY are on a 100pt grid -- the old flat-50 default silently
+        # computed a strike that was never listed at all (confirmed live via
+        # scripts/fvg_today_check.py: a real SENSEX FVG entry today computed 78750CE,
+        # which has no Upstox instrument key -- only multiples of 100 exist). When the
+        # deployment doesn't explicitly configure itm_offset_pts (None), "1-strike ITM"
+        # now means one real strike on THIS underlying's own grid, not a hardcoded 50.
+        # An explicit override (a user deliberately setting strategy_params.
+        # itm_offset_pts) is still respected exactly as configured.
+        self._itm_offset_pts = int(itm_offset_pts) if itm_offset_pts is not None else self._strike_step
         self._min_rr = min_rr   # kept for API/strategy_params compatibility; no longer
                                  # drives the exit (fixed R:R target replaced by the
                                  # step-locked TSL below -- see _check_exit_premium)
@@ -234,7 +245,6 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
         self._first_lock_pct = float(first_lock_pct)
         self._step_pct = float(step_pct)
         self._step_lock_pct = float(step_lock_pct)
-        self._strike_step = int(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
         self._lot_size = int(cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
         self._spot_symbol = f"NSE_INDEX|{underlying}"
 
@@ -291,7 +301,7 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
         logger.info(
             "FVGStrategy[%s/%s/%s]: htf=%dm ltf=%dm itm_offset=%d direction_mode=%s lot=%d step=%d "
             "| TSL: initial_sl=%.1f%% trigger=%.1f%% first_lock=%.1f%% step=%.1f%% step_lock=%.1f%%",
-            client_id, binding_id, underlying, self._htf_mins, self._ltf_mins, itm_offset_pts,
+            client_id, binding_id, underlying, self._htf_mins, self._ltf_mins, self._itm_offset_pts,
             self._direction_mode, self._lot_size, self._strike_step,
             self._initial_sl_pct * 100, self._trail_trigger_pct * 100, self._first_lock_pct * 100,
             self._step_pct * 100, self._step_lock_pct * 100,

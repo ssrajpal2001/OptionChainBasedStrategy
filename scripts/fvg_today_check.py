@@ -151,12 +151,17 @@ def _replay_option_pnl(entry: dict, premium_candles: list, lot_size: int) -> dic
 
 
 async def check_one(underlying: str, token: str, cfg: GlobalConfig) -> None:
-    print(f"\n{'='*70}\n{underlying}  (HTF={_DEFAULT_HTF_MINS}m LTF={_DEFAULT_LTF_MINS}m "
-          f"itm_offset={_DEFAULT_ITM_OFFSET_PTS}pts direction_mode=BOTH -- validated defaults)")
-
     key = _upstox_key_for(underlying)
     lot_size = int(cfg.exchange.lot_sizes.get(underlying, 75))
+    # 2026-08-06 fix: matches strategies/fvg/engine.py's own default resolution --
+    # "1-strike ITM" means one real strike on THIS underlying's own grid (e.g. 100pts
+    # for SENSEX/BANKNIFTY), not a hardcoded 50pts (NIFTY's grid) applied everywhere.
+    # A flat 50pt offset previously computed an off-grid, never-listed SENSEX strike.
+    itm_offset_pts = int(cfg.exchange.strike_steps.get(underlying, _DEFAULT_ITM_OFFSET_PTS))
     today = datetime.now(IST).date()
+
+    print(f"\n{'='*70}\n{underlying}  (HTF={_DEFAULT_HTF_MINS}m LTF={_DEFAULT_LTF_MINS}m "
+          f"itm_offset={itm_offset_pts}pts direction_mode=BOTH -- validated defaults)")
 
     # Multi-day baseline (excludes today) -- same role as _startup_load's
     # historical fetch: HTF structure/swings + PDH/PDL, computed BEFORE
@@ -262,9 +267,9 @@ async def check_one(underlying: str, token: str, cfg: GlobalConfig) -> None:
                     continue
                 atm = round(entry_price / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
                 if direction == "LONG":
-                    strike, opt_type = int(atm - _DEFAULT_ITM_OFFSET_PTS), "CE"
+                    strike, opt_type = int(atm - itm_offset_pts), "CE"
                 else:
-                    strike, opt_type = int(atm + _DEFAULT_ITM_OFFSET_PTS), "PE"
+                    strike, opt_type = int(atm + itm_offset_pts), "PE"
                 entry = dict(ts=bar.timestamp, direction=direction, opt_type=opt_type,
                              strike=strike, spot=entry_price, sl_spot=sl_price,
                              zone=(fvg["zone_lo"], fvg["zone_hi"]))
