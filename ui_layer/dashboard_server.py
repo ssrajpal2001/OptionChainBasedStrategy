@@ -6078,23 +6078,34 @@ pm2 save
         return self._sell_straddles_static
 
     def _find_ss_book(self, client_id: str, binding_id: str, underlying: str):
-        """Locate the per-binding book for this deployment; fall back to per-underlying match."""
+        """Locate the per-binding book for this deployment; fall back to per-underlying match.
+
+        2026-08-06: temporarily logged at WARNING (not DEBUG) on every miss/fallback
+        path -- prior investigation (2026-07-03) into "UI shows no position despite a
+        real filled trade" got stuck because this was DEBUG-level and never actually
+        appeared in production logs. Revert to DEBUG once the current recurrence is
+        root-caused."""
         if self._straddle_manager is not None:
             b = self._straddle_manager.find(client_id, binding_id, underlying)
             if b is not None:
                 return b
-            logger.debug("_find_ss_book miss: cid=%s bid=%s und=%s books=%s",
+            logger.warning("_find_ss_book MISS: cid=%s bid=%s und=%s books=%s",
                         client_id, binding_id, underlying,
                         list(self._straddle_manager._books.keys()))
         else:
-            logger.debug("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
+            logger.warning("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
         u = str(underlying).upper()
         for s in self._sell_straddles:
             if getattr(s, "_underlying", None) == u and (
                 not getattr(s, "_client_id", "") or
                 (s._client_id == client_id and s._binding_id == binding_id)
             ):
+                logger.warning("_find_ss_book: fallback scan matched cid=%s bid=%s und=%s "
+                               "(manager.find missed but per-underlying scan recovered it)",
+                               client_id, binding_id, underlying)
                 return s
+        logger.warning("_find_ss_book: TOTAL MISS cid=%s bid=%s und=%s -- no book found via "
+                       "manager or fallback scan, UI will show no position", client_id, binding_id, underlying)
         return None
 
     @property
