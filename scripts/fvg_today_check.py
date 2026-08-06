@@ -21,15 +21,21 @@ detection logic:
     replay uses the SAME validated-baseline defaults as the live book,
     not independently guessed numbers.
 
-Scope: this checks the SPOT-SIDE entry trigger only (does a high-liquidity
+Scope: this checks the SPOT-SIDE entry trigger (does a high-liquidity
 MITIGATED FVG retest actually fire within the entry window, same gating the
-live engine applies). It does NOT replay post-entry option-premium P&L --
-the live engine's SL/TSL trigger off the position's own real option premium
-(Topic.OPTION_TICK), which requires per-strike historical option candle data
-this script does not fetch. It also does NOT verify a live premium tick
-existed for the computed strike at the trigger instant (a real, separate
-gate in _open_position) -- flagged explicitly in the output as a known
-scope limit, not silently assumed away.
+live engine applies), AND, if an entry fires, fetches the REAL option
+premium history for that exact strike/expiry (Upstox intraday 1-min candles)
+and replays the live engine's own option-native SL/step-locked-TSL/
+stagnation/EOD exit logic (_check_exit_premium/_check_stagnation_exit in
+strategies/fvg/engine.py) against those real closes to report an actual
+profit/loss. This is a 1-MINUTE CANDLE-CLOSE approximation of the live
+engine's per-TICK evaluation -- a real intra-minute wick through the SL/TSL
+level between candle closes would not be caught here, so a reported "still
+running"/near-miss result is a slight optimistic bias vs what tick-level
+execution would show. It also does NOT verify a live premium tick existed
+for the computed strike at the exact trigger instant (a real, separate gate
+in _open_position) -- flagged explicitly in the output as a known scope
+limit, not silently assumed away.
 
 Run on the box with a real Upstox access_token (data/clients.db) -- e.g. EC2:
     python3 scripts/fvg_today_check.py
@@ -45,6 +51,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.global_config import GlobalConfig, IST  # noqa: E402
 from data_layer.client_db import ClientDB  # noqa: E402
+from data_layer.historical_candles import fetch_upstox_intraday_1m  # noqa: E402
 from data_layer.instrument_registry import REGISTRY  # noqa: E402
 from strategies.d1_trap_option.book import (  # noqa: E402
     _build_bar,
@@ -62,14 +69,21 @@ from strategies.fvg.detector import (  # noqa: E402
 )
 from strategies.fvg.engine import (  # noqa: E402
     _ATM_ROUND_STEP,
+    _DEFAULT_FIRST_LOCK_PCT,
     _DEFAULT_HTF_MINS,
+    _DEFAULT_INITIAL_SL_PCT,
     _DEFAULT_ITM_OFFSET_PTS,
     _DEFAULT_LTF_MINS,
+    _DEFAULT_STEP_LOCK_PCT,
+    _DEFAULT_STEP_PCT,
+    _DEFAULT_TRAIL_TRIGGER_PCT,
     _ENTRY_CUTOFF,
+    _EOD_TIME,
     _HIST_WARMUP_DAYS,
     _MAX_RISK_RS_PER_LOT,
     _OPTION_DELTA_APPROX,
     _SESSION_OPEN,
+    _STAGNATION_MINUTES,
     _next_week_expiry,
 )
 
@@ -80,6 +94,60 @@ def _risk_within_cap(spot_sl_distance: float, lot_size: int) -> bool:
     est_premium_distance = spot_sl_distance * _OPTION_DELTA_APPROX
     est_risk_rs = est_premium_distance * lot_size
     return est_risk_rs <= _MAX_RISK_RS_PER_LOT
+
+
+def _replay_option_pnl(entry: dict, premium_candles: list, lot_size: int) -> dict:
+    """Mirrors FVGStrategy._check_exit_premium / _check_stagnation_exit / EOD
+    square-off EXACTLY (same formulas, same defaults), replayed against real
+    1-min option candle closes instead of live ticks. Returns a result dict
+    or {'error': ...} if there's no usable premium data."""
+    decision_ts = entry["ts"] + timedelta(minutes=_DEFAULT_LTF_MINS)
+    candles = [c for c in premium_candles if datetime.fromisoformat(c["ts"]) >= decision_ts]
+    if not candles:
+        return {"error": "no real premium data at/after the entry moment"}
+
+    entry_premium = float(candles[0]["close"])
+    entry_actual_ts = candles[0]["ts"]
+    if entry_premium <= 0:
+        return {"error": f"entry-moment premium is {entry_premium} (bad/zero data)"}
+
+    pct_sl = entry_premium * (1 - _DEFAULT_INITIAL_SL_PCT)
+    cap_sl = entry_premium - (_MAX_RISK_RS_PER_LOT / lot_size)
+    premium_sl = max(pct_sl, cap_sl)
+    high_lock_pct = 0.0
+
+    exit_reason, exit_price, exit_ts = None, None, None
+    for c in candles[1:]:
+        ts = datetime.fromisoformat(c["ts"])
+        premium = float(c["close"])
+        if ts.time() >= _EOD_TIME:
+            exit_reason, exit_price, exit_ts = "eod", premium, c["ts"]
+            break
+        profit_pct = (premium - entry_premium) / entry_premium
+        if profit_pct >= _DEFAULT_TRAIL_TRIGGER_PCT:
+            steps = int((profit_pct - _DEFAULT_TRAIL_TRIGGER_PCT) // _DEFAULT_STEP_PCT)
+            calc_lock = _DEFAULT_FIRST_LOCK_PCT + steps * _DEFAULT_STEP_LOCK_PCT
+            high_lock_pct = max(high_lock_pct, calc_lock)
+        stop_price = entry_premium * (1 + high_lock_pct) if high_lock_pct > 0 else premium_sl
+        if premium <= stop_price:
+            exit_reason = "tsl_hit" if high_lock_pct > 0 else "sl_hit"
+            exit_price, exit_ts = premium, c["ts"]
+            break
+        if high_lock_pct == 0 and (ts - decision_ts) >= timedelta(minutes=_STAGNATION_MINUTES):
+            exit_reason, exit_price, exit_ts = "stagnation_exit", premium, c["ts"]
+            break
+
+    if exit_reason is None:
+        exit_reason = "still running (real data ends before an exit trigger)"
+        exit_price, exit_ts = float(candles[-1]["close"]), candles[-1]["ts"]
+
+    pnl_per_lot = (exit_price - entry_premium) * lot_size
+    return {
+        "entry_premium": entry_premium, "entry_actual_ts": entry_actual_ts,
+        "exit_reason": exit_reason, "exit_price": exit_price, "exit_ts": exit_ts,
+        "high_lock_pct": high_lock_pct, "pnl_per_lot": pnl_per_lot,
+        "pnl_pct": (exit_price - entry_premium) / entry_premium * 100,
+    }
 
 
 async def check_one(underlying: str, token: str, cfg: GlobalConfig) -> None:
@@ -222,11 +290,37 @@ async def check_one(underlying: str, token: str, cfg: GlobalConfig) -> None:
           f"at {entry['ts']} spot={entry['spot']:.2f}")
     print(f"    Strike={entry['strike']} expiry={expiry or 'UNRESOLVED'} "
           f"spot_sl={entry['sl_spot']:.2f} fvg_zone={entry['zone']}")
-    print("    CAVEAT: spot-side trigger only. Live entry also requires a real "
-          "option-premium tick for this exact strike/expiry to exist at the "
-          "trigger instant (_open_position's 'no live premium -> skip' gate) -- "
-          "not verified here. Post-entry option-premium SL/TSL P&L is not "
-          "replayed by this script.")
+    print("    NOTE: live entry also requires a real option-premium tick for this "
+          "exact strike/expiry to exist at the trigger instant "
+          "(_open_position's 'no live premium -> skip' gate) -- not verified here.")
+
+    if not expiry:
+        print("    P&L: SKIPPED -- could not resolve expiry, cannot fetch real premium.")
+        return
+    opt_key = REGISTRY.get_upstox_key(underlying, expiry, entry["strike"], entry["opt_type"])
+    if not opt_key:
+        print(f"    P&L: SKIPPED -- no Upstox instrument key resolved for "
+              f"{underlying} {entry['strike']}{entry['opt_type']} exp={expiry}.")
+        return
+    premium_candles = await fetch_upstox_intraday_1m(opt_key, token)
+    if not premium_candles:
+        print("    P&L: SKIPPED -- no real premium candles returned for this strike today.")
+        return
+
+    result = _replay_option_pnl(entry, premium_candles, lot_size)
+    if "error" in result:
+        print(f"    P&L: SKIPPED -- {result['error']}.")
+        return
+    sign = "+" if result["pnl_per_lot"] >= 0 else ""
+    print(f"    REAL PREMIUM REPLAY: entry_premium={result['entry_premium']:.2f} "
+          f"(at {result['entry_actual_ts']}) -> exit={result['exit_reason']} "
+          f"@ {result['exit_price']:.2f} (at {result['exit_ts']})")
+    print(f"    P&L per lot (qty={lot_size}): {sign}Rs{result['pnl_per_lot']:.2f} "
+          f"({sign}{result['pnl_pct']:.1f}%)"
+          + (f", TSL locked at {result['high_lock_pct']*100:.1f}%" if result["high_lock_pct"] > 0 else ""))
+    print("    (1-min candle-close approximation of tick-level exit evaluation -- "
+          "a real intra-minute wick through SL/TSL between candle closes wouldn't "
+          "be caught here, so this is a slight optimistic bias.)")
 
 
 async def main() -> int:
