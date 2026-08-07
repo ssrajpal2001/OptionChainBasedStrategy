@@ -173,6 +173,15 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                 if bucket_bars:
                     tf_bar = dict(timestamp=entry["bucket_open"], high=max(b.high for b in bucket_bars),
                                   low=min(b.low for b in bucket_bars), close=bucket_bars[-1].close, duration=1)
+                    # 2026-08-07, per user: confirming the breakout PATTERN genuinely needs a
+                    # closed candle (can't know "higher high AND higher low" held until the
+                    # candle finishes) -- but the FILL must not wait for the candle to close.
+                    # Capture the resistance level being tested (the prior closed candle's own
+                    # high) BEFORE this candle is processed, so once a breakout confirms we can
+                    # walk back through the real 1-min bars inside this bucket and punch the
+                    # trade at the exact bar/price where R1 was actually crossed -- not the
+                    # bucket's close, which can be materially different on a 3m/5m bucket.
+                    prior_r1_high = (calc.states.get("OPT", {}).get("last_candle", {}) or {}).get("high")
                     phase_before = calc.get_calculated_sr_state("OPT")["current_phase"]
                     calc.process_straddle_candle("OPT", tf_bar, silent=True)
                     st = calc.get_calculated_sr_state("OPT")
@@ -197,9 +206,13 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                             voided.append({"zone_lo": zone["zone_lo"], "zone_hi": zone["zone_hi"],
                                            "lock_ts": zone["lock_ts"], "voided_at": tf_bar["timestamp"],
                                            "s1_low": s1_low})
-                        elif phase_before == "INITIAL_TREND_ESTABLISHMENT" and phase_after == "R1_TRACKING":
-                            entry_premium = float(tf_bar["close"])
-                            position = {"zone_ts": zone["lock_ts"], "entry_ts": tf_bar["timestamp"],
+                        elif (phase_before == "INITIAL_TREND_ESTABLISHMENT" and phase_after == "R1_TRACKING"
+                                and prior_r1_high is not None):
+                            breach_bar = next((b for b in bucket_bars if b.high >= prior_r1_high), bucket_bars[0])
+                            entry_premium = float(prior_r1_high)   # fill AT the breached level, per user
+                            entry["trace"][-1]["breach_ts"] = breach_bar.timestamp
+                            entry["trace"][-1]["breach_price"] = entry_premium
+                            position = {"zone_ts": zone["lock_ts"], "entry_ts": breach_bar.timestamp,
                                         "entry_premium": entry_premium}
                 entry["bucket_open"] = b_open
                 entry["bucket"] = []
@@ -270,10 +283,14 @@ async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> No
             print(f"    S&R TF={tf}m: ENTRY @ {result['entry_ts']} premium={result['entry_premium']:.2f} -> "
                   f"exit={result['exit_reason']} @ {result['exit_price']:.2f} ({result['exit_ts']}) "
                   f"P&L/lot={sign}Rs{result['pnl']:.2f}{void_note}")
-            print(f"      {'Time':<22}{'High':>9}{'Low':>9}{'Close':>9}{'Phase':>26}{'S1(SL)':>9}{'R1':>9}")
+            print(f"      {'Bucket':<22}{'High':>9}{'Low':>9}{'Close':>9}{'Phase':>26}{'S1(SL)':>9}{'R1':>9}")
             for t in result["trace"]:
-                marker = " <-- ENTRY" if t["ts"] == result["entry_ts"] else (
-                    " <-- EXIT" if t["ts"] == result["exit_ts"] else "")
+                marker = ""
+                if "breach_ts" in t:
+                    marker = f" <-- BREAKOUT CONFIRMED (real fill @ {t['breach_price']:.2f} " \
+                             f"on the {t['breach_ts']} 1m bar, not this bucket's close)"
+                elif t["ts"] == result["exit_ts"]:
+                    marker = " <-- EXIT"
                 print(f"      {str(t['ts']):<22}{t['high']:>9.2f}{t['low']:>9.2f}{t['close']:>9.2f}"
                       f"{t['phase_before']+'->'+t['phase_after']:>26}{t['s1_low']:>9.2f}{t['r1_high']:>9.2f}{marker}")
 
