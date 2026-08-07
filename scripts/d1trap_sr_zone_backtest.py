@@ -78,9 +78,17 @@ _MAX_RISK_RS_PER_LOT = 2000.0   # sanity backstop even while SL trails S&R struc
 
 
 def _candles_to_bars(candles: list) -> List[_Bar]:
+    """Matches strategies/d1_trap_option/book.py's own _fetch_bars parsing
+    exactly (.astimezone(IST)) -- without it, these "today" bars end up with
+    a different tz representation than the historical bars from
+    _fetch_1m_bars, and pandas silently falls back to object dtype when the
+    two are combined into one DataFrame column, breaking the .dt accessor
+    _resample() depends on (confirmed live: AttributeError "Can only use
+    .dt accessor with datetimelike values")."""
     out = []
     for c in candles:
         ts = datetime.fromisoformat(c["ts"]) if isinstance(c["ts"], str) else c["ts"]
+        ts = ts.astimezone(IST)
         out.append(_Bar(timestamp=ts, open=float(c["open"]), high=float(c["high"]),
                          low=float(c["low"]), close=float(c["close"])))
     return out
