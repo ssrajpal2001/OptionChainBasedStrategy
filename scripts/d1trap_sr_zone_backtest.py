@@ -145,10 +145,17 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
         for zone in zones:
             if zone["lock_ts"] > bar.timestamp:
                 continue
-            touched = bar.low <= zone["zone_hi"]
-            if not touched:
-                continue
-            if zone["lock_ts"] not in touched_zone_ts:
+            # 2026-08-07 fix: "touched" is a ONE-TIME trigger to START watching a zone, not a
+            # per-bar gate. It was being re-checked on every single bar, so once a real
+            # breakout carried price outside the original touch threshold (which naturally
+            # happens as the move develops), those later bars were silently dropped from the
+            # bucket instead of still being fed to the tracker -- the bucket containing the
+            # actual entry could then never close at all, since nothing ever triggered its
+            # boundary-crossing detection. Once watching starts, every bar keeps flowing in.
+            already_watching = zone["lock_ts"] in touched_zone_ts
+            if not already_watching:
+                if bar.low > zone["zone_hi"]:
+                    continue
                 touched_zone_ts.add(zone["lock_ts"])
                 active_sr[zone["lock_ts"]] = {"calc": SupportResistanceCalculator(),
                                                "bucket": [], "bucket_open": None, "trace": [], "void": False}
@@ -173,16 +180,26 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                 if bucket_bars:
                     tf_bar = dict(timestamp=entry["bucket_open"], high=max(b.high for b in bucket_bars),
                                   low=min(b.low for b in bucket_bars), close=bucket_bars[-1].close, duration=1)
-                    # 2026-08-07, per user: confirming the breakout PATTERN genuinely needs a
-                    # closed candle (can't know "higher high AND higher low" held until the
-                    # candle finishes) -- but the FILL must not wait for the candle to close.
-                    # Capture the resistance level being tested (the prior closed candle's own
-                    # high) BEFORE this candle is processed, so once a breakout confirms we can
-                    # walk back through the real 1-min bars inside this bucket and punch the
-                    # trade at the exact bar/price where R1 was actually crossed -- not the
-                    # bucket's close, which can be materially different on a 3m/5m bucket.
-                    prior_r1_high = (calc.states.get("OPT", {}).get("last_candle", {}) or {}).get("high")
-                    phase_before = calc.get_calculated_sr_state("OPT")["current_phase"]
+                    # 2026-08-07, per user (corrected): the trade does NOT fire on the very
+                    # first breakout (that only establishes S1 -- R1 is still just tracking,
+                    # unestablished). The real trigger is later: breakout -> pullback confirms
+                    # R1 established (-> S2_TRACKING) -> a bounce that does NOT yet re-break R1
+                    # promotes S2 to S1 and starts tracking a fresh peak as R2 (-> R2_TRACKING)
+                    # -> ONLY WHEN THAT R2 BREACHES THE ALREADY-ESTABLISHED R1 does the trade
+                    # fire. Both R1 and S1 are genuinely established by that point. Confirmed
+                    # against the user's own real data: the 1m NIFTY trace reached
+                    # S2_TRACKING->R2_TRACKING at 09:26 but fell back to S2_TRACKING at 09:27
+                    # without ever breaching R1 -- correctly NOT an entry under this rule.
+                    #
+                    # The level being breached at THIS trigger is the tracker's own live
+                    # R1['high'] (set via the earlier S2->S1 promotion), NOT the raw previous
+                    # candle's high -- those are different values by this stage. Captured
+                    # before processing so the real fill can be found on the actual 1-min bar
+                    # that crossed it (same "punch at the real breach, not bucket close"
+                    # principle as before).
+                    st_before = calc.get_calculated_sr_state("OPT")
+                    phase_before = st_before["current_phase"]
+                    live_r1_high = (st_before.get("sr_levels", {}).get("R1") or {}).get("high")
                     calc.process_straddle_candle("OPT", tf_bar, silent=True)
                     st = calc.get_calculated_sr_state("OPT")
                     phase_after = st["current_phase"]
@@ -206,10 +223,9 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                             voided.append({"zone_lo": zone["zone_lo"], "zone_hi": zone["zone_hi"],
                                            "lock_ts": zone["lock_ts"], "voided_at": tf_bar["timestamp"],
                                            "s1_low": s1_low})
-                        elif (phase_before == "INITIAL_TREND_ESTABLISHMENT" and phase_after == "R1_TRACKING"
-                                and prior_r1_high is not None):
-                            breach_bar = next((b for b in bucket_bars if b.high >= prior_r1_high), bucket_bars[0])
-                            entry_premium = float(prior_r1_high)   # fill AT the breached level, per user
+                        elif phase_before == "R2_TRACKING" and phase_after == "R1_TRACKING":
+                            breach_bar = next((b for b in bucket_bars if b.high >= live_r1_high), bucket_bars[0])
+                            entry_premium = float(live_r1_high)   # fill AT the breached level, per user
                             entry["trace"][-1]["breach_ts"] = breach_bar.timestamp
                             entry["trace"][-1]["breach_price"] = entry_premium
                             position = {"zone_ts": zone["lock_ts"], "entry_ts": breach_bar.timestamp,
@@ -217,6 +233,19 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                 entry["bucket_open"] = b_open
                 entry["bucket"] = []
             entry["bucket"].append(bar)
+
+    # 2026-08-07 fix: a position opened near the end of the available bars (no
+    # later bar ever hit EOD_TIME or the trailing SL) was falling through to
+    # "no_entry": True below, silently discarding a real fired entry -- found
+    # while verifying the touch-gating fix against a constructed scenario
+    # whose bars ran out shortly after the R2-breaches-R1 entry candle.
+    if position is not None:
+        last_bar = today_1m[-1]
+        pnl = (last_bar.close - position["entry_premium"]) * lot_size
+        return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
+                "exit_reason": "still running (no exit before available data ended)",
+                "exit_price": last_bar.close, "exit_ts": last_bar.timestamp, "pnl": pnl,
+                "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
 
     return {"no_entry": True, "voided": voided}
 
