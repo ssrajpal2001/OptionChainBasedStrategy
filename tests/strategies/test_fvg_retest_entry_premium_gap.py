@@ -51,6 +51,14 @@ class _RecordingBus:
         self.published.append((topic, event))
 
 
+def _fixed_intraday_ts() -> datetime:
+    """A fixed mid-morning timestamp, safely inside the entry window
+    (< _ENTRY_CUTOFF = 14:30) -- using datetime.now(IST) here made this test
+    wall-clock dependent and it started failing for real whenever the test
+    happened to run after 14:30 IST (confirmed: this session, run at 14:44)."""
+    return datetime.now(IST).replace(hour=10, minute=15, second=0, microsecond=0)
+
+
 def _make_bearish_fvg(zone_lo=24550.0, zone_hi=24560.0) -> dict:
     """A high-liquidity MITIGATED bearish (PE) FVG, matching detect_fvg's
     real dict shape closely enough for _check_retest_entry's own field reads."""
@@ -83,7 +91,7 @@ async def test_retest_entry_does_not_consume_fvg_when_no_live_premium_yet(
     strat._fvgs = [fvg]
     strat._last_spot = 24540.0  # below the zone -- realistic for a bearish setup
 
-    bar = _make_bar(datetime.now(IST), 24540.0)
+    bar = _make_bar(_fixed_intraday_ts(), 24540.0)
     strat._check_retest_entry(bar)
     await asyncio.sleep(0)
 
@@ -112,7 +120,7 @@ async def test_retest_entry_consumes_fvg_once_premium_becomes_available(
     # PE strike = ATM(round 100) + itm_offset(50). spot=24540 -> atm=24500 -> PE24550.
     strat._option_ltp[(24550, "PE", expiry)] = 150.0
 
-    bar = _make_bar(datetime.now(IST), 24540.0)
+    bar = _make_bar(_fixed_intraday_ts(), 24540.0)
     strat._check_retest_entry(bar)
     await asyncio.sleep(0)
 
@@ -138,7 +146,7 @@ async def test_retest_entry_retried_next_bar_after_premium_arrives(tmp_path, mon
     strat._fvgs = [fvg]
     strat._last_spot = 24540.0
 
-    ts1 = datetime.now(IST)
+    ts1 = _fixed_intraday_ts()
     strat._check_retest_entry(_make_bar(ts1, 24540.0))
     await asyncio.sleep(0)
     assert fvg["state"] == "MITIGATED"

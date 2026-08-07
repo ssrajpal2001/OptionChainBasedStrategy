@@ -580,6 +580,19 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         # abandoned.
         self._stop_for_day = False
         self._consecutive_entry_rejections = 0
+        # 2026-08-07 fix: confirmed live (NIFTY, 10:48:00) -- two zone objects in
+        # series.zones (distinct per the 60m zone-detection dedup key, ref_ts) can
+        # independently reach Stage 2 and both get assigned the SAME 15m ref candle
+        # via _find_latest_closed_ref_bar (it just returns "whatever the latest
+        # closed 15m candle is," with no link back to which 60m zone is asking).
+        # Both then breach on the identical real tick and each independently fire
+        # a real T1 entry -- confirmed via two back-to-back identical "ref-candle
+        # breach @ <same candle>" log lines, both real orders, both later stopped
+        # out (2x the intended loss on one signal). This tracks which (side,
+        # ref_open) combinations have already fired an entry THIS SESSION, as a
+        # structural guard against acting on the same real reference candle twice,
+        # independent of how many zone objects end up tracking it.
+        self._fired_ref_breach_refs: set = set()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -746,6 +759,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._spot_bias_last_check_minute = None
         self._stop_for_day = False
         self._consecutive_entry_rejections = 0
+        self._fired_ref_breach_refs = set()
         if not self._positions:
             pass  # nothing open, clean reset
 
@@ -1227,6 +1241,27 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     zone["breach_ts"] = last_ts
                     logger.info("BearTrap[%s]: %s ref-candle breach @ %s (high=%.2f)",
                                 self._underlying, side, last_ts, zone["ref_high"])
+                    # 2026-08-07 fix: a DIFFERENT zone object (distinct per the 60m
+                    # zone-detection dedup key) can independently reach this same
+                    # Stage 2/3 point and get assigned the SAME 15m ref candle
+                    # (_find_latest_closed_ref_bar has no notion of "which zone is
+                    # asking" -- it just returns whatever the latest closed 15m
+                    # candle is). Confirmed live: two zones both breached on the
+                    # identical ref candle within the same tick, firing two real
+                    # entries for one signal. This is the structural guard --
+                    # refuse to act on the same (side, ref candle) twice this
+                    # session, independent of how many zone objects track it.
+                    ref_key = (side, zone["ref_open"])
+                    if ref_key in self._fired_ref_breach_refs:
+                        logger.warning(
+                            "BearTrap[%s]: %s ref-candle breach @ %s already fired an entry "
+                            "this session (a different zone object tracking the same real "
+                            "reference candle) -- refusing to double-enter.",
+                            self._underlying, side, zone["ref_open"],
+                        )
+                        active_zone_locks.add(zone["lock_ts"])
+                        continue
+                    self._fired_ref_breach_refs.add(ref_key)
                     # T1 (fast tranche, 2026-08-01): fire immediately on breach --
                     # no waiting for a 5m subzone. If one later forms and price
                     # retraces into it, T2 adds a second lot below. If not, T1
