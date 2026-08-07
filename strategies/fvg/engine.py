@@ -743,9 +743,57 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
                             "(sl_distance=%.2f).", self._underlying, sl_distance)
                 fvg["state"] = "INVALIDATED"   # consumed either way -- don't re-check every bar
                 continue
-            asyncio.create_task(self._open_position(fvg, direction, entry_price, sl_price, bar.timestamp))
+            # 2026-08-07 fix: this used to mark the FVG INVALIDATED unconditionally
+            # right here, before knowing whether _open_position would actually
+            # succeed. Confirmed live (NIFTY PE24550, 2026-08-07 12:25): a real
+            # high-liquidity MITIGATED retest fired, but no live premium tick had
+            # arrived yet for that exact strike -- _open_position bailed out with
+            # "no live premium -- entry skipped", and the FVG was still gone
+            # forever, a real opportunity silently wasted over a transient data
+            # gap, not a genuine market invalidation. Now the sync pre-check runs
+            # FIRST; the FVG is only consumed once we know the entry can actually
+            # be attempted. If data isn't ready, it stays MITIGATED and is
+            # retried on the next LTF bar close.
+            resolved = self._resolve_strike_and_premium(direction, entry_price, bar.timestamp)
+            if resolved is None:
+                logger.info(
+                    "FVGStrategy[%s]: retest entry for %s zone [%.2f,%.2f] not ready yet "
+                    "(no active expiry or no live premium tick) -- will retry next bar.",
+                    self._underlying, direction, fvg["zone_lo"], fvg["zone_hi"],
+                )
+                continue
+            strike, opt_type, expiry, premium_entry = resolved
+            asyncio.create_task(self._open_position(
+                fvg, direction, entry_price, sl_price, bar.timestamp,
+                strike=strike, opt_type=opt_type, expiry=expiry, premium_entry=premium_entry,
+            ))
             fvg["state"] = "INVALIDATED"  # consumed -- entered, stop offering it again
             return
+
+    def _resolve_strike_and_premium(self, direction: str, entry_price: float, ts: datetime):
+        """Sync pre-check: is there enough live data to actually attempt this
+        entry right now (an active next-week expiry AND a real live premium
+        tick for the exact strike/expiry)? Returns (strike, opt_type, expiry,
+        premium_entry) if so, else None. See _check_retest_entry for why this
+        must run BEFORE a high-liquidity MITIGATED FVG gets consumed."""
+        atm = round(entry_price / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
+        if direction == "LONG":
+            strike, opt_type = int(atm - self._itm_offset_pts), "CE"
+        else:
+            strike, opt_type = int(atm + self._itm_offset_pts), "PE"
+
+        expiry = _next_week_expiry(self._underlying, ts.date())
+        if not expiry:
+            return None
+
+        # Keyed with expiry (see _option_tick_loop's 2026-08-04 fix) -- a
+        # same-strike current-week contract must never be read as this
+        # NEXT-WEEK entry's premium.
+        premium_entry = self._option_ltp.get((strike, opt_type, expiry))
+        if premium_entry is None or premium_entry <= 0:
+            return None
+
+        return strike, opt_type, expiry, premium_entry
 
     def _risk_within_cap(self, spot_sl_distance: float) -> bool:
         """Pre-trade filter: approximate the option-premium risk from the
@@ -765,7 +813,10 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
     _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 
     async def _open_position(self, fvg: dict, direction: str, entry_price: float,
-                              sl_price: float, ts: datetime) -> None:
+                              sl_price: float, ts: datetime,
+                              strike: Optional[int] = None, opt_type: Optional[str] = None,
+                              expiry: Optional[date] = None,
+                              premium_entry: Optional[float] = None) -> None:
         """Confirm-then-finalize ENTRY: dispatch the BUY, WAIT for the bridge's
         FVGOrderFillEvent to confirm a real fill (or an entry_aborted abort)
         before setting self._position / persisting it. Unlike D1Trap-BearOnly's
@@ -773,35 +824,26 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
         only ever launched via asyncio.create_task(...), so it can safely await
         the full round trip -- self._position is never set to a phantom/
         optimistic value at all; a routing failure or timeout simply leaves the
-        book flat, per the plan's Task 7 spec."""
+        book flat, per the plan's Task 7 spec.
+
+        strike/opt_type/expiry/premium_entry: normally pre-resolved by
+        _check_retest_entry's sync _resolve_strike_and_premium() call BEFORE it
+        decides to consume the FVG (2026-08-07 fix -- see that method). If any
+        are omitted (e.g. a direct call site, or tests), resolved internally
+        here exactly as before."""
         if self._position is not None or self._entry_in_flight:
             return
         self._entry_in_flight = True
         try:
-            atm = round(entry_price / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
-            if direction == "LONG":
-                strike = int(atm - self._itm_offset_pts)
-                opt_type = "CE"
-            else:
-                strike = int(atm + self._itm_offset_pts)
-                opt_type = "PE"
-
-            expiry = _next_week_expiry(self._underlying, ts.date())
-            if not expiry:
-                logger.warning("FVGStrategy[%s]: no active next-week expiry -- cannot enter.",
-                                self._underlying)
-                return
-
-            # Option-native SL/TP: entry premium must already be tracked (ticks
-            # flow via the ATM+/-N auto-subscribe range) -- don't trade blind if
-            # it isn't, same "no data -> no trade" philosophy as bear_only_book.py.
-            # Keyed with expiry (see _option_tick_loop fix) -- a same-strike
-            # current-week contract must never be read as this NEXT-WEEK entry.
-            premium_entry = self._option_ltp.get((strike, opt_type, expiry))
-            if premium_entry is None or premium_entry <= 0:
-                logger.warning("FVGStrategy[%s]: no live premium for %s%d yet -- entry skipped.",
-                                self._underlying, opt_type, strike)
-                return
+            if strike is None or opt_type is None or expiry is None or premium_entry is None:
+                resolved = self._resolve_strike_and_premium(direction, entry_price, ts)
+                if resolved is None:
+                    logger.warning(
+                        "FVGStrategy[%s]: no active next-week expiry or no live premium -- "
+                        "entry skipped.", self._underlying,
+                    )
+                    return
+                strike, opt_type, expiry, premium_entry = resolved
 
             # SL = whichever is TIGHTER (higher price / smaller loss) of the
             # configurable initial_sl_pct stop and the hard Rs/lot risk cap --
