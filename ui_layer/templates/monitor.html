@@ -8514,6 +8514,46 @@ function amoTest() {
                 <span class="font-mono text-xs" style="color:var(--t-muted)"
                       x-text="book.open_count + ' open / ' + book.max_slots + ' slots'"></span>
               </div>
+
+              <!-- Watchlist stocks being tracked (not yet entered) -- 2026-08-07: the backend
+                   already returns this via get_state()'s "pending" field, the UI just never
+                   rendered it, so a healthy book watching several real stocks looked
+                   identical to an idle one with nothing tracked at all. -->
+              <div x-show="book.pending && book.pending.length > 0" class="mb-2 overflow-x-auto">
+                <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-cyan)"
+                     x-text="'WATCHING ('+book.pending.length+')'"></div>
+                <table class="font-mono text-xs w-full" style="border-collapse:collapse">
+                  <thead>
+                    <tr class="text-right" style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
+                      <th class="text-left py-1 pr-3 font-normal">Stock</th>
+                      <th class="text-left py-1 pr-3 font-normal">Dir</th>
+                      <th class="text-left py-1 pr-3 font-normal">Status</th>
+                      <th class="py-1 pr-3 font-normal">Entry Line</th>
+                      <th class="py-1 pr-3 font-normal">Dist%</th>
+                      <th class="py-1 pr-3 font-normal">Hard SL</th>
+                      <th class="py-1 font-normal">T1</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="sig in book.pending" :key="sig.symbol+'_'+sig.direction">
+                      <tr :style="sig.blocked ? 'opacity:0.5' : ''" style="border-bottom:1px solid rgba(var(--t-border-rgb),0.3)">
+                        <td class="py-1 pr-3 font-bold" style="color:var(--t-bright)" x-text="sig.symbol"></td>
+                        <td class="py-1 pr-3" :style="sig.direction==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="sig.direction"></td>
+                        <td class="py-1 pr-3" :style="sig.status==='TRIGGERED'?'color:var(--t-amber);font-weight:600':'color:var(--t-muted)'"
+                            x-text="sig.status + (sig.blocked ? ' · blocked' : '')"></td>
+                        <td class="py-1 pr-3 text-right" x-text="sig.entry_line"></td>
+                        <td class="py-1 pr-3 text-right" :style="Math.abs(sig.dist_pct)<2?'color:var(--t-amber)':'color:var(--t-muted)'"
+                            x-text="(sig.dist_pct>0?'+':'')+sig.dist_pct+'%'"></td>
+                        <td class="py-1 pr-3 text-right" style="color:var(--t-red)" x-text="sig.hard_sl"></td>
+                        <td class="py-1 text-right" style="color:var(--t-green)" x-text="sig.day_t1"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div x-show="!book.pending || book.pending.length === 0"
+                   class="font-mono text-xs py-1" style="color:var(--t-dim)">No stocks currently being watched.</div>
+
               <!-- No positions -->
               <div x-show="!book.positions || book.positions.length === 0"
                    class="font-mono text-xs py-2" style="color:var(--t-muted)">No positions yet.</div>
