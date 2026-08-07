@@ -105,9 +105,17 @@ def _bars_to_df(bars: List[_Bar]):
 def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int) -> Optional[dict]:
     """One S&R-timeframe variant: 1-min touch detection, TF-min S&R tracking
     from the touch forward, entry on first confirmed breakout, SL trails S1.
-    Returns the trade result dict, or None if nothing fired."""
+    Returns the trade result dict (including a full per-candle "trace" of
+    the winning zone's S&R state, for inspection), or None if nothing fired.
+
+    2026-08-07 fix: the position's OWN zone must keep being fed candles
+    after entry so S1 genuinely trails -- the original version gated ALL
+    zones (including the position's own) behind "one position at a time",
+    silently freezing the SL at whatever S1 was at the entry instant
+    instead of letting it ratchet the way "SL as new support" was meant to
+    work."""
     touched_zone_ts: set = set()
-    active_sr: dict = {}   # zone lock_ts -> {"calc": SupportResistanceCalculator, "bucket": [...], "bucket_open": ts}
+    active_sr: dict = {}   # zone lock_ts -> {"calc", "bucket", "bucket_open", "trace"}
     position: Optional[dict] = None
 
     for bar in today_1m:
@@ -119,13 +127,14 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
             if bar.timestamp.time() >= _EOD_TIME:
                 pnl = (bar.close - position["entry_premium"]) * lot_size
                 return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
-                        "exit_reason": "eod", "exit_price": bar.close, "exit_ts": bar.timestamp, "pnl": pnl}
+                        "exit_reason": "eod", "exit_price": bar.close, "exit_ts": bar.timestamp, "pnl": pnl,
+                        "trace": active_sr[position["zone_ts"]]["trace"]}
             sl = active_sr[position["zone_ts"]]["calc"].get_calculated_sr_state("OPT")["sr_levels"]["S1"]["low"]
             if bar.close <= sl:
                 pnl = (bar.close - position["entry_premium"]) * lot_size
                 return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
                         "exit_reason": f"sl_trail@{sl:.2f}", "exit_price": bar.close, "exit_ts": bar.timestamp,
-                        "pnl": pnl}
+                        "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"]}
 
         for zone in zones:
             if zone["lock_ts"] > bar.timestamp:
@@ -136,9 +145,13 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
             if zone["lock_ts"] not in touched_zone_ts:
                 touched_zone_ts.add(zone["lock_ts"])
                 active_sr[zone["lock_ts"]] = {"calc": SupportResistanceCalculator(),
-                                               "bucket": [], "bucket_open": None}
-            if position is not None:
-                continue   # one position at a time -- still update touch bookkeeping above
+                                               "bucket": [], "bucket_open": None, "trace": []}
+
+            is_position_zone = position is not None and zone["lock_ts"] == position["zone_ts"]
+            if position is not None and not is_position_zone:
+                continue   # a different zone -- frozen while a position is open elsewhere;
+                           # the position's OWN zone (is_position_zone=True) still falls through
+                           # below so its S&R tracker keeps updating and the SL keeps trailing.
 
             entry = active_sr[zone["lock_ts"]]
             calc = entry["calc"]
@@ -153,8 +166,14 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                                   low=min(b.low for b in bucket_bars), close=bucket_bars[-1].close, duration=1)
                     phase_before = calc.get_calculated_sr_state("OPT")["current_phase"]
                     calc.process_straddle_candle("OPT", tf_bar, silent=True)
-                    phase_after = calc.get_calculated_sr_state("OPT")["current_phase"]
-                    if phase_before == "INITIAL_TREND_ESTABLISHMENT" and phase_after == "R1_TRACKING":
+                    st = calc.get_calculated_sr_state("OPT")
+                    phase_after = st["current_phase"]
+                    entry["trace"].append({
+                        "ts": tf_bar["timestamp"], "high": tf_bar["high"], "low": tf_bar["low"],
+                        "close": tf_bar["close"], "phase_before": phase_before, "phase_after": phase_after,
+                        "s1_low": st["sr_levels"]["S1"]["low"], "r1_high": st["sr_levels"]["R1"]["high"],
+                    })
+                    if position is None and phase_before == "INITIAL_TREND_ESTABLISHMENT" and phase_after == "R1_TRACKING":
                         entry_premium = float(tf_bar["close"])
                         position = {"zone_ts": zone["lock_ts"], "entry_ts": tf_bar["timestamp"],
                                     "entry_premium": entry_premium}
@@ -225,6 +244,12 @@ async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> No
             print(f"    S&R TF={tf}m: ENTRY @ {result['entry_ts']} premium={result['entry_premium']:.2f} -> "
                   f"exit={result['exit_reason']} @ {result['exit_price']:.2f} ({result['exit_ts']}) "
                   f"P&L/lot={sign}Rs{result['pnl']:.2f}")
+            print(f"      {'Time':<22}{'High':>9}{'Low':>9}{'Close':>9}{'Phase':>26}{'S1(SL)':>9}{'R1':>9}")
+            for t in result["trace"]:
+                marker = " <-- ENTRY" if t["ts"] == result["entry_ts"] else (
+                    " <-- EXIT" if t["ts"] == result["exit_ts"] else "")
+                print(f"      {str(t['ts']):<22}{t['high']:>9.2f}{t['low']:>9.2f}{t['close']:>9.2f}"
+                      f"{t['phase_before']+'->'+t['phase_after']:>26}{t['s1_low']:>9.2f}{t['r1_high']:>9.2f}{marker}")
 
 
 async def main() -> int:
