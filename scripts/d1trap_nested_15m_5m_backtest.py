@@ -112,8 +112,20 @@ def _detect_zones(bars_15m: List[_Bar], direction: str) -> List[dict]:
             ref_ts=ref.timestamp, ref_idx=ref_i, ref_high=ref.high, ref_low=ref.low,
             direction=direction,
         ))
-    return _collapse_nearby_zones(out, threshold_pts=_ZONE_MERGE_THRESHOLD_PTS,
-                                   max_ref_gap=_ZONE_MAX_REF_GAP_BARS)
+
+    collapsed = _collapse_nearby_zones(out, threshold_pts=_ZONE_MERGE_THRESHOLD_PTS,
+                                        max_ref_gap=_ZONE_MAX_REF_GAP_BARS)
+    # _collapse_nearby_zones (reused from bear_only_book.py) builds a fresh dict
+    # per merged zone containing only the fields IT knows about -- ref_high/
+    # ref_low/direction (added above) get silently dropped on any merge. It does
+    # preserve ref_idx though, which still indexes into this same bars_15m list,
+    # so re-derive the dropped fields from there rather than losing them.
+    for z in collapsed:
+        ref_bar = bars_15m[z["ref_idx"]]
+        z["ref_high"] = ref_bar.high
+        z["ref_low"] = ref_bar.low
+        z["direction"] = direction
+    return collapsed
 
 
 def _find_subtrap(bars_5m: List[_Bar], direction: str) -> Optional[dict]:
