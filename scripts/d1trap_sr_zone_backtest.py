@@ -40,15 +40,24 @@ T1/T2 are not run at all in this script (per user: "temp drop t1/t2") --
 this is testing the S&R replacement in isolation, not stacked with the
 existing tranches.
 
+2026-08-07: added a persistent daily comparison log
+(data/d1trap_sr_exit_variant_log.jsonl) so the TF x exit_mode comparison
+accumulates a real track record across multiple days instead of being
+re-read by hand from console output each run -- same pattern as
+scripts/fno_positional_today_check.py's OI-vs-outcome log. Deduped per
+(date, underlying, side, tf_minutes, exit_mode), safe to re-run same-day.
+
 Run on the box with a real Upstox access_token (data/clients.db):
     python3 scripts/d1trap_sr_zone_backtest.py
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -74,7 +83,70 @@ _ENTRY_CUTOFF = time(14, 30)
 _EOD_TIME = time(15, 15)
 _ATM_ROUND_STEP = 100
 _SR_TF_SWEEP = (1, 3, 5)
-_MAX_RISK_RS_PER_LOT = 2000.0   # sanity backstop even while SL trails S&R structure
+_MAX_RISK_RS_PER_LOT = 2000.0   # hard backstop -- enforced in _run_sr_variant, see _sl_for_mode
+_LOG_PATH = Path(__file__).resolve().parents[1] / "data" / "d1trap_sr_exit_variant_log.jsonl"
+
+
+def _append_variant_log(records: List[dict]) -> None:
+    """Append/update today's (underlying, side, tf_minutes, exit_mode) rows in the running
+    exit-variant track record. Dedupes by (date, underlying, side, tf_minutes, exit_mode) so
+    re-running the script the same day updates rows in place instead of piling up
+    duplicates -- same pattern as fno_positional_today_check.py's signal log."""
+    if not records:
+        return
+    existing = []
+    if _LOG_PATH.exists():
+        for line in _LOG_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            existing.append(row)
+    new_keys = {(r["date"], r["underlying"], r["side"], r["tf_minutes"], r["exit_mode"]) for r in records}
+    kept = [r for r in existing if (r.get("date"), r.get("underlying"), r.get("side"),
+                                     r.get("tf_minutes"), r.get("exit_mode")) not in new_keys]
+    kept.extend(records)
+    _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _LOG_PATH.write_text("\n".join(json.dumps(r) for r in kept) + "\n", encoding="utf-8")
+
+
+def _print_variant_track_record() -> None:
+    if not _LOG_PATH.exists():
+        return
+    rows = []
+    for line in _LOG_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    dated = [r for r in rows if r.get("pnl") is not None]
+    if not dated:
+        return
+    days = sorted(set(r["date"] for r in rows))
+    print(f"\n{'='*70}\nRUNNING EXIT-VARIANT TRACK RECORD  ({len(days)} day(s) logged: "
+          f"{', '.join(days)})")
+    print(f"  {'TF':<5}{'Mode':<16}{'Trades':>8}{'Win%':>7}{'Net P&L':>14}{'Profit Factor':>16}")
+    combos = sorted({(r["tf_minutes"], r["exit_mode"]) for r in dated})
+    for tf, mode in combos:
+        bucket = [r for r in dated if r["tf_minutes"] == tf and r["exit_mode"] == mode]
+        n = len(bucket)
+        wins = [r["pnl"] for r in bucket if r["pnl"] > 0]
+        losses = [r["pnl"] for r in bucket if r["pnl"] <= 0]
+        win_pct = (len(wins) / n * 100) if n else 0.0
+        net = sum(r["pnl"] for r in bucket)
+        gross_loss = abs(sum(losses))
+        pf = (sum(wins) / gross_loss) if gross_loss > 0 else float("inf") if wins else 0.0
+        pf_str = "inf" if pf == float("inf") else f"{pf:.2f}"
+        sign = "+" if net >= 0 else ""
+        print(f"  {tf}m{'':<3}{mode:<16}{n:>8}{win_pct:>6.1f}%{sign}Rs{net:>10.2f}{pf_str:>16}")
+    print("  (Still early -- read this as a running signal, not a verdict, until it covers "
+          "at least 1-2 real weeks.)")
 
 
 def _candles_to_bars(candles: list) -> List[_Bar]:
@@ -113,11 +185,16 @@ _EXIT_MODES = ("raw", "bucket_close", "buffered", "profit_trigger")
 
 
 def _sl_for_mode(exit_mode: str, position: dict, live_s1: float) -> float:
+    """The mode's own structural SL -- NOT risk-capped here. The hard Rs/lot risk cap is
+    enforced separately, once per 1-min bar, regardless of exit_mode's own check cadence (see
+    the "universal hard risk cap" block in _run_sr_variant) -- a real broker-side stop fires
+    on the actual tick, it doesn't wait for a TF bucket to close, so bucket_close mode must
+    not be allowed to defer the cap the way it defers its own structural SL."""
     if exit_mode == "buffered":
         return live_s1 * (1 - _SL_BUFFER_PCT)
     if exit_mode == "profit_trigger":
         return live_s1 if position.get("triggered") else position["initial_sl"]
-    return live_s1   # "raw" and "bucket_close" (bucket_close's own check lives elsewhere)
+    return live_s1   # "raw" and "bucket_close" (bucket_close's own structural check lives elsewhere)
 
 
 def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int,
@@ -163,6 +240,19 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                 return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
                         "exit_reason": "eod", "exit_price": bar.close, "exit_ts": bar.timestamp, "pnl": pnl,
                         "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
+            # 2026-08-07: universal hard risk cap, checked on EVERY 1-min bar regardless of
+            # exit_mode -- a real broker-side stop fires on the actual tick, it can't be
+            # deferred to a TF bucket closing. Found necessary after a real bucket_close@5m
+            # run lost Rs4,002/lot on one trade; _MAX_RISK_RS_PER_LOT had been defined in this
+            # script since its first version but never actually referenced anywhere -- dead
+            # code despite the docstring calling it a "sanity backstop".
+            cap_floor = position["entry_premium"] - (_MAX_RISK_RS_PER_LOT / lot_size)
+            if bar.close <= cap_floor:
+                pnl = (bar.close - position["entry_premium"]) * lot_size
+                return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
+                        "exit_reason": f"risk_cap@{cap_floor:.2f}", "exit_price": bar.close, "exit_ts": bar.timestamp,
+                        "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
+
             if exit_mode == "profit_trigger" and not position["triggered"]:
                 if bar.close >= position["entry_premium"] * (1 + _PROFIT_TRIGGER_PCT):
                     position["triggered"] = True
@@ -267,7 +357,9 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                     elif is_position_zone and exit_mode == "bucket_close":
                         # only evaluate the SL on the position's own TF-bucket close, not every
                         # intervening 1-min bar -- filters noise the S&R tracker itself wouldn't
-                        # act on (it only updates state on bucket boundaries too).
+                        # act on (it only updates state on bucket boundaries too). The hard
+                        # Rs/lot risk cap is NOT deferred to bucket close -- see the universal
+                        # per-bar cap check at the top of the outer loop.
                         if tf_bar["close"] <= s1_low:
                             pnl = (tf_bar["close"] - position["entry_premium"]) * lot_size
                             return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
@@ -374,7 +466,15 @@ async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> No
 
         print(f"\n    {'--- EXIT-VARIANT COMPARISON (same entries, different SL rule) ---':<80}")
         print(f"    {'TF':<5}{'Mode':<16}{'Entry':>10}{'Exit':>10}{'Exit reason':<28}{'Hold':>8}{'P&L/lot':>12}")
+        log_records = []
+        side = f"{direction}{strike}"
         for tf, mode, result in summary_rows:
+            log_records.append({
+                "date": today.isoformat(), "underlying": underlying, "side": side,
+                "tf_minutes": tf, "exit_mode": mode,
+                "pnl": result.get("pnl"), "entry_ts": str(result.get("entry_ts", "")),
+                "exit_reason": result.get("exit_reason"), "no_entry": bool(result.get("no_entry")),
+            })
             if result.get("no_entry"):
                 print(f"    {tf}m{'':<3}{mode:<16}{'NO ENTRY':>10}")
                 continue
@@ -382,6 +482,7 @@ async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> No
             sign = "+" if result["pnl"] >= 0 else ""
             print(f"    {tf}m{'':<3}{mode:<16}{result['entry_premium']:>10.2f}{result['exit_price']:>10.2f}"
                   f"{result['exit_reason']:<28}{hold_min:>6}m{sign}Rs{result['pnl']:>9.2f}")
+        _append_variant_log(log_records)
 
 
 async def main() -> int:
@@ -399,6 +500,7 @@ async def main() -> int:
 
     for underlying in ("NIFTY", "SENSEX"):
         await check_underlying(underlying, token, cfg)
+    _print_variant_track_record()
     return 0
 
 
