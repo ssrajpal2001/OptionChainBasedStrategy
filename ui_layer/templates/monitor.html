@@ -7834,6 +7834,81 @@ function amoTest() {
                     </div>
                   </template>
 
+                  <!-- FVG live zone panel (2026-08-07: FVGStrategy.monitoring_fvgs() existed
+                       but had no UI surface at all -- silence in the terminal read as "not
+                       working" even when the book was healthy and tracking real FVGs. Own
+                       fetch/interval, same pattern as the WATCHLIST TRACKER above, since FVG
+                       is one book per (client,binding,underlying), not a multi-stock list. -->
+                  <template x-if="dep.strategy_name==='fvg'">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{
+                           _bk: null,
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/fvg/status', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) {
+                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id && bk.underlying===dep.underlying) || null;
+                               }
+                             } catch(e) {}
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 15000)">
+                      <template x-if="!_bk">
+                        <div class="text-center" style="color:var(--t-dim)">Loading FVG state…</div>
+                      </template>
+                      <template x-if="_bk">
+                        <div>
+                          <div class="flex items-center justify-between mb-2">
+                            <span style="color:var(--t-muted)">SPOT <span style="color:var(--t-text);font-weight:600" x-text="fmt(_bk.spot||0)"></span></span>
+                            <span style="color:var(--t-muted)">
+                              <span style="color:var(--t-cyan)" x-text="(_bk.zones||[]).length"></span> active ·
+                              <span style="color:var(--t-amber)" x-text="(_bk.zones||[]).filter(z=>z.high_liquidity).length"></span> high-liquidity
+                            </span>
+                          </div>
+
+                          <!-- Open position -->
+                          <template x-if="_bk.position">
+                            <div class="mb-1.5 pb-1.5" style="border-bottom:1px solid var(--t-border)"
+                                 x-data="{ get _p(){ return _bk.position; } }">
+                              <div class="flex items-center gap-2 mb-1" style="color:var(--t-green);font-weight:600">
+                                ● TRADE ACTIVE
+                                <span x-text="_p.option_type+' '+_p.strike+' exp '+_p.expiry"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Premium entry / SL</span>
+                                <span x-text="fmt(_p.premium_entry)+' / '+fmt(_p.premium_sl)"></span>
+                              </div>
+                              <div class="flex justify-between" x-show="_p.tsl_locked_pct>0">
+                                <span style="color:var(--t-muted)">TSL locked</span>
+                                <span style="color:var(--t-amber)" x-text="(_p.tsl_locked_pct*100).toFixed(1)+'%'"></span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Active zones -->
+                          <template x-if="!_bk.position && (_bk.zones||[]).length===0">
+                            <div class="text-center py-1" style="color:var(--t-dim)">No active FVGs — scanning</div>
+                          </template>
+                          <template x-for="(z,i) in (_bk.zones||[]).slice(0,3)" :key="i">
+                            <div class="flex items-center justify-between mb-1" :style="i<Math.min((_bk.zones||[]).length,3)-1?'border-bottom:1px solid var(--t-border);padding-bottom:2px':''">
+                              <span class="px-1.5 py-0.5 rounded font-bold"
+                                    :style="z.direction==='BULLISH'?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
+                                    x-text="(z.direction==='BULLISH'?'▲ CE':'▼ PE')+(z.high_liquidity?' ★':'')"></span>
+                              <span style="color:var(--t-muted)" x-text="z.state"></span>
+                              <span style="color:var(--t-text)" x-text="fmt(z.zone_lo)+'–'+fmt(z.zone_hi)"></span>
+                              <span :style="z.dist_pct!==null && Math.abs(z.dist_pct)<2?'color:var(--t-amber)':'color:var(--t-dim)'"
+                                    x-text="z.dist_pct!==null ? (z.dist_pct>0?'+':'')+z.dist_pct.toFixed(1)+'%' : '—'"></span>
+                            </div>
+                          </template>
+                          <div x-show="(_bk.zones||[]).length>3" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
+                               x-text="'+ '+((_bk.zones||[]).length-3)+' more zone(s) scanning'"></div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
                   <!-- Trap tracking (day-locked strikes). 2026-07-21: shown ALWAYS when
                        present, not just while no position is open -- the engine keeps
                        scanning BOTH sides continuously even while one side holds a trade

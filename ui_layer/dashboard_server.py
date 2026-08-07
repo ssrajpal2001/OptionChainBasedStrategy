@@ -657,6 +657,7 @@ class DashboardServer:
         fno_positional_manager=None, # FnOPositionalBookManager — stock positional option books
         hourly_breakout_manager=None, # HourlyBreakoutBookManager — 1H trap + 5M retest books
         d1_trap_manager=None,  # D1TrapOptionBookManager — trap scanner (index + FnO)
+        fvg_manager=None,  # FVGBookManager — Fair Value Gap SMC books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -672,6 +673,7 @@ class DashboardServer:
         self._fno_positional_manager = fno_positional_manager
         self._hourly_breakout_manager = hourly_breakout_manager
         self._d1_trap_manager = d1_trap_manager
+        self._fvg_manager = fvg_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -5937,6 +5939,7 @@ pm2 save
                 return {"ok": False, "error": str(exc)}
 
         self._register_d1trap_routes(app)
+        self._register_fvg_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6156,6 +6159,34 @@ pm2 save
             # Sort: books with MONITORING zones or pending first, then by symbol
             result.sort(key=lambda r: (
                 0 if (r.get("pending") or any(z["state"] == "MONITORING" for z in r.get("zones", []))) else 1,
+                r.get("underlying", "")
+            ))
+            return {"ok": True, "books": result}
+
+    # ── FVG monitoring endpoint ──────────────────────────────────────────────
+
+    def _register_fvg_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/fvg/status")
+        async def fvg_status():
+            """Return live monitoring state for all active FVG books -- same shape/
+            intent as /api/d1trap/zones above (FVGStrategy had no dashboard surface
+            at all before this; monitoring_fvgs() already existed, just unused)."""
+            if _srv._fvg_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._fvg_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_fvgs"):
+                    continue
+                try:
+                    result.append(b.monitoring_fvgs())
+                except Exception:
+                    pass
+            # Books with an open position or an active high-liquidity FVG first.
+            result.sort(key=lambda r: (
+                0 if (r.get("position") or any(z.get("high_liquidity") for z in r.get("zones", []))) else 1,
                 r.get("underlying", "")
             ))
             return {"ok": True, "books": result}
