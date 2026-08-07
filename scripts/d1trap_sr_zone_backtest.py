@@ -102,11 +102,14 @@ def _bars_to_df(bars: List[_Bar]):
     ])
 
 
-def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int) -> Optional[dict]:
+def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int) -> dict:
     """One S&R-timeframe variant: 1-min touch detection, TF-min S&R tracking
     from the touch forward, entry on first confirmed breakout, SL trails S1.
-    Returns the trade result dict (including a full per-candle "trace" of
-    the winning zone's S&R state, for inspection), or None if nothing fired.
+    Always returns a dict with a "voided" list (zones where the tracker's S1
+    fell below the zone's own low before ever entering -- market moved below
+    the zone, thesis dead, per user spec). If an entry fired, the dict also
+    has entry/exit/pnl/"trace" (full per-candle S&R state for that zone);
+    otherwise it's {"no_entry": True, "voided": [...]}.
 
     2026-08-07 fix: the position's OWN zone must keep being fed candles
     after entry so S1 genuinely trails -- the original version gated ALL
@@ -115,8 +118,11 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
     instead of letting it ratchet the way "SL as new support" was meant to
     work."""
     touched_zone_ts: set = set()
-    active_sr: dict = {}   # zone lock_ts -> {"calc", "bucket", "bucket_open", "trace"}
+    active_sr: dict = {}   # zone lock_ts -> {"calc", "bucket", "bucket_open", "trace", "void"}
     position: Optional[dict] = None
+    voided: List[dict] = []   # [{"zone_lo","zone_hi","lock_ts","voided_at","s1_low"}] -- populated
+                               # regardless of whether an entry ever fires, so the caller can show
+                               # the void mechanic actually working even on a NO ENTRY run.
 
     for bar in today_1m:
         if bar.timestamp.time() >= _ENTRY_CUTOFF and position is None:
@@ -128,13 +134,13 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                 pnl = (bar.close - position["entry_premium"]) * lot_size
                 return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
                         "exit_reason": "eod", "exit_price": bar.close, "exit_ts": bar.timestamp, "pnl": pnl,
-                        "trace": active_sr[position["zone_ts"]]["trace"]}
+                        "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
             sl = active_sr[position["zone_ts"]]["calc"].get_calculated_sr_state("OPT")["sr_levels"]["S1"]["low"]
             if bar.close <= sl:
                 pnl = (bar.close - position["entry_premium"]) * lot_size
                 return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
                         "exit_reason": f"sl_trail@{sl:.2f}", "exit_price": bar.close, "exit_ts": bar.timestamp,
-                        "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"]}
+                        "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
 
         for zone in zones:
             if zone["lock_ts"] > bar.timestamp:
@@ -145,7 +151,11 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
             if zone["lock_ts"] not in touched_zone_ts:
                 touched_zone_ts.add(zone["lock_ts"])
                 active_sr[zone["lock_ts"]] = {"calc": SupportResistanceCalculator(),
-                                               "bucket": [], "bucket_open": None, "trace": []}
+                                               "bucket": [], "bucket_open": None, "trace": [], "void": False}
+
+            entry = active_sr[zone["lock_ts"]]
+            if entry["void"]:
+                continue   # market already moved below the zone before entry -- dead for the day
 
             is_position_zone = position is not None and zone["lock_ts"] == position["zone_ts"]
             if position is not None and not is_position_zone:
@@ -153,7 +163,6 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                            # the position's OWN zone (is_position_zone=True) still falls through
                            # below so its S&R tracker keeps updating and the SL keeps trailing.
 
-            entry = active_sr[zone["lock_ts"]]
             calc = entry["calc"]
             b_open = bar.timestamp.replace(
                 minute=(bar.timestamp.minute // tf_minutes) * tf_minutes, second=0, microsecond=0)
@@ -168,20 +177,35 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                     calc.process_straddle_candle("OPT", tf_bar, silent=True)
                     st = calc.get_calculated_sr_state("OPT")
                     phase_after = st["current_phase"]
+                    s1_low = st["sr_levels"]["S1"]["low"]
                     entry["trace"].append({
                         "ts": tf_bar["timestamp"], "high": tf_bar["high"], "low": tf_bar["low"],
                         "close": tf_bar["close"], "phase_before": phase_before, "phase_after": phase_after,
-                        "s1_low": st["sr_levels"]["S1"]["low"], "r1_high": st["sr_levels"]["R1"]["high"],
+                        "s1_low": s1_low, "r1_high": st["sr_levels"]["R1"]["high"],
                     })
-                    if position is None and phase_before == "INITIAL_TREND_ESTABLISHMENT" and phase_after == "R1_TRACKING":
-                        entry_premium = float(tf_bar["close"])
-                        position = {"zone_ts": zone["lock_ts"], "entry_ts": tf_bar["timestamp"],
-                                    "entry_premium": entry_premium}
+                    if position is None:
+                        # 2026-08-07, per user: while a zone is still being watched (no entry
+                        # yet), if the S&R tracker establishes an S1 BELOW the zone's own low,
+                        # the market has genuinely moved below the zone -- the reclaim thesis is
+                        # dead, void it so it can never fire an entry later in the day. Mirrors
+                        # BearTrap's own existing _prevalidate_zones invalidation, expressed in
+                        # terms of the S&R tracker's own tracked swing low instead of a raw
+                        # candle close.
+                        if s1_low < zone["zone_lo"]:
+                            entry["void"] = True
+                            entry["trace"][-1]["voided"] = True
+                            voided.append({"zone_lo": zone["zone_lo"], "zone_hi": zone["zone_hi"],
+                                           "lock_ts": zone["lock_ts"], "voided_at": tf_bar["timestamp"],
+                                           "s1_low": s1_low})
+                        elif phase_before == "INITIAL_TREND_ESTABLISHMENT" and phase_after == "R1_TRACKING":
+                            entry_premium = float(tf_bar["close"])
+                            position = {"zone_ts": zone["lock_ts"], "entry_ts": tf_bar["timestamp"],
+                                        "entry_premium": entry_premium}
                 entry["bucket_open"] = b_open
                 entry["bucket"] = []
             entry["bucket"].append(bar)
 
-    return None
+    return {"no_entry": True, "voided": voided}
 
 
 async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> None:
@@ -237,13 +261,15 @@ async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> No
 
         for tf in _SR_TF_SWEEP:
             result = _run_sr_variant(zones, today_1m, tf, lot_size)
-            if result is None:
-                print(f"    S&R TF={tf}m: NO ENTRY today")
+            void_note = f" ({len(result['voided'])} zone(s) voided -- moved below before entry)" \
+                if result["voided"] else ""
+            if result.get("no_entry"):
+                print(f"    S&R TF={tf}m: NO ENTRY today{void_note}")
                 continue
             sign = "+" if result["pnl"] >= 0 else ""
             print(f"    S&R TF={tf}m: ENTRY @ {result['entry_ts']} premium={result['entry_premium']:.2f} -> "
                   f"exit={result['exit_reason']} @ {result['exit_price']:.2f} ({result['exit_ts']}) "
-                  f"P&L/lot={sign}Rs{result['pnl']:.2f}")
+                  f"P&L/lot={sign}Rs{result['pnl']:.2f}{void_note}")
             print(f"      {'Time':<22}{'High':>9}{'Low':>9}{'Close':>9}{'Phase':>26}{'S1(SL)':>9}{'R1':>9}")
             for t in result["trace"]:
                 marker = " <-- ENTRY" if t["ts"] == result["entry_ts"] else (
