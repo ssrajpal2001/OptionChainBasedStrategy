@@ -102,7 +102,26 @@ def _bars_to_df(bars: List[_Bar]):
     ])
 
 
-def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int) -> dict:
+_SL_BUFFER_PCT = 0.02          # exit_mode="buffered": pad the SL 2% below live S1 so a shallow
+                                # poke doesn't stop the trade out -- untuned first-pass value.
+_PROFIT_TRIGGER_PCT = 0.05     # exit_mode="profit_trigger": SL stays frozen at the entry-time S1
+                                # until premium has moved 5% in favor; only then does it start
+                                # trailing the live S1. Mirrors BearTrap's staircase TSL / FVG's
+                                # step-locked TSL discipline -- don't tighten the stop until the
+                                # trade has proven itself. Untuned first-pass value.
+_EXIT_MODES = ("raw", "bucket_close", "buffered", "profit_trigger")
+
+
+def _sl_for_mode(exit_mode: str, position: dict, live_s1: float) -> float:
+    if exit_mode == "buffered":
+        return live_s1 * (1 - _SL_BUFFER_PCT)
+    if exit_mode == "profit_trigger":
+        return live_s1 if position.get("triggered") else position["initial_sl"]
+    return live_s1   # "raw" and "bucket_close" (bucket_close's own check lives elsewhere)
+
+
+def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int,
+                     exit_mode: str = "raw") -> dict:
     """One S&R-timeframe variant: 1-min touch detection, TF-min S&R tracking
     from the touch forward, entry on first confirmed breakout, SL trails S1.
     Always returns a dict with a "voided" list (zones where the tracker's S1
@@ -116,7 +135,16 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
     zones (including the position's own) behind "one position at a time",
     silently freezing the SL at whatever S1 was at the entry instant
     instead of letting it ratchet the way "SL as new support" was meant to
-    work."""
+    work.
+
+    2026-08-07: added exit_mode variants after observing today's real trades
+    close for very small profit/loss -- entries land right where the
+    tracker just promoted a nearby swing as S1, so the raw stop sits very
+    close to entry and a single 1-min noise dip is enough to cut the trade.
+    "raw" is the original/validated behavior (default, unchanged). The
+    other three ("bucket_close", "buffered", "profit_trigger") are cheap
+    variants of the SAME entry logic, compared side by side in
+    check_underlying() -- see _sl_for_mode()/_EXIT_MODES above."""
     touched_zone_ts: set = set()
     active_sr: dict = {}   # zone lock_ts -> {"calc", "bucket", "bucket_open", "trace", "void"}
     position: Optional[dict] = None
@@ -135,12 +163,17 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                 return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
                         "exit_reason": "eod", "exit_price": bar.close, "exit_ts": bar.timestamp, "pnl": pnl,
                         "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
-            sl = active_sr[position["zone_ts"]]["calc"].get_calculated_sr_state("OPT")["sr_levels"]["S1"]["low"]
-            if bar.close <= sl:
-                pnl = (bar.close - position["entry_premium"]) * lot_size
-                return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
-                        "exit_reason": f"sl_trail@{sl:.2f}", "exit_price": bar.close, "exit_ts": bar.timestamp,
-                        "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
+            if exit_mode == "profit_trigger" and not position["triggered"]:
+                if bar.close >= position["entry_premium"] * (1 + _PROFIT_TRIGGER_PCT):
+                    position["triggered"] = True
+            if exit_mode != "bucket_close":   # bucket_close's own check lives in the zone loop below
+                live_s1 = active_sr[position["zone_ts"]]["calc"].get_calculated_sr_state("OPT")["sr_levels"]["S1"]["low"]
+                sl = _sl_for_mode(exit_mode, position, live_s1)
+                if bar.close <= sl:
+                    pnl = (bar.close - position["entry_premium"]) * lot_size
+                    return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
+                            "exit_reason": f"sl_{exit_mode}@{sl:.2f}", "exit_price": bar.close, "exit_ts": bar.timestamp,
+                            "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
 
         for zone in zones:
             if zone["lock_ts"] > bar.timestamp:
@@ -229,7 +262,18 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
                             entry["trace"][-1]["breach_ts"] = breach_bar.timestamp
                             entry["trace"][-1]["breach_price"] = entry_premium
                             position = {"zone_ts": zone["lock_ts"], "entry_ts": breach_bar.timestamp,
-                                        "entry_premium": entry_premium}
+                                        "entry_premium": entry_premium, "initial_sl": s1_low,
+                                        "triggered": False}
+                    elif is_position_zone and exit_mode == "bucket_close":
+                        # only evaluate the SL on the position's own TF-bucket close, not every
+                        # intervening 1-min bar -- filters noise the S&R tracker itself wouldn't
+                        # act on (it only updates state on bucket boundaries too).
+                        if tf_bar["close"] <= s1_low:
+                            pnl = (tf_bar["close"] - position["entry_premium"]) * lot_size
+                            return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
+                                    "exit_reason": f"sl_bucket_close@{s1_low:.2f}", "exit_price": tf_bar["close"],
+                                    "exit_ts": tf_bar["timestamp"], "pnl": pnl, "trace": entry["trace"],
+                                    "voided": voided}
                 entry["bucket_open"] = b_open
                 entry["bucket"] = []
             entry["bucket"].append(bar)
@@ -301,27 +345,43 @@ async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> No
         print(f"\n  {direction}{strike}: {len(hist_1m)} historical + {len(today_1m)} today 1m bars -> "
               f"{len(zones)} HTF({htf_minutes}m) zones")
 
+        summary_rows = []   # (tf, exit_mode, result) -- for the comparison table below
         for tf in _SR_TF_SWEEP:
-            result = _run_sr_variant(zones, today_1m, tf, lot_size)
-            void_note = f" ({len(result['voided'])} zone(s) voided -- moved below before entry)" \
-                if result["voided"] else ""
+            for mode in _EXIT_MODES:
+                result = _run_sr_variant(zones, today_1m, tf, lot_size, exit_mode=mode)
+                summary_rows.append((tf, mode, result))
+                if mode != "raw":
+                    continue   # only the validated baseline gets the full per-candle trace below
+                void_note = f" ({len(result['voided'])} zone(s) voided -- moved below before entry)" \
+                    if result["voided"] else ""
+                if result.get("no_entry"):
+                    print(f"    S&R TF={tf}m [raw]: NO ENTRY today{void_note}")
+                    continue
+                sign = "+" if result["pnl"] >= 0 else ""
+                print(f"    S&R TF={tf}m [raw]: ENTRY @ {result['entry_ts']} premium={result['entry_premium']:.2f} -> "
+                      f"exit={result['exit_reason']} @ {result['exit_price']:.2f} ({result['exit_ts']}) "
+                      f"P&L/lot={sign}Rs{result['pnl']:.2f}{void_note}")
+                print(f"      {'Bucket':<22}{'High':>9}{'Low':>9}{'Close':>9}{'Phase':>26}{'S1(SL)':>9}{'R1':>9}")
+                for t in result["trace"]:
+                    marker = ""
+                    if "breach_ts" in t:
+                        marker = f" <-- BREAKOUT CONFIRMED (real fill @ {t['breach_price']:.2f} " \
+                                 f"on the {t['breach_ts']} 1m bar, not this bucket's close)"
+                    elif t["ts"] == result["exit_ts"]:
+                        marker = " <-- EXIT"
+                    print(f"      {str(t['ts']):<22}{t['high']:>9.2f}{t['low']:>9.2f}{t['close']:>9.2f}"
+                          f"{t['phase_before']+'->'+t['phase_after']:>26}{t['s1_low']:>9.2f}{t['r1_high']:>9.2f}{marker}")
+
+        print(f"\n    {'--- EXIT-VARIANT COMPARISON (same entries, different SL rule) ---':<80}")
+        print(f"    {'TF':<5}{'Mode':<16}{'Entry':>10}{'Exit':>10}{'Exit reason':<28}{'Hold':>8}{'P&L/lot':>12}")
+        for tf, mode, result in summary_rows:
             if result.get("no_entry"):
-                print(f"    S&R TF={tf}m: NO ENTRY today{void_note}")
+                print(f"    {tf}m{'':<3}{mode:<16}{'NO ENTRY':>10}")
                 continue
+            hold_min = int((result["exit_ts"] - result["entry_ts"]).total_seconds() // 60)
             sign = "+" if result["pnl"] >= 0 else ""
-            print(f"    S&R TF={tf}m: ENTRY @ {result['entry_ts']} premium={result['entry_premium']:.2f} -> "
-                  f"exit={result['exit_reason']} @ {result['exit_price']:.2f} ({result['exit_ts']}) "
-                  f"P&L/lot={sign}Rs{result['pnl']:.2f}{void_note}")
-            print(f"      {'Bucket':<22}{'High':>9}{'Low':>9}{'Close':>9}{'Phase':>26}{'S1(SL)':>9}{'R1':>9}")
-            for t in result["trace"]:
-                marker = ""
-                if "breach_ts" in t:
-                    marker = f" <-- BREAKOUT CONFIRMED (real fill @ {t['breach_price']:.2f} " \
-                             f"on the {t['breach_ts']} 1m bar, not this bucket's close)"
-                elif t["ts"] == result["exit_ts"]:
-                    marker = " <-- EXIT"
-                print(f"      {str(t['ts']):<22}{t['high']:>9.2f}{t['low']:>9.2f}{t['close']:>9.2f}"
-                      f"{t['phase_before']+'->'+t['phase_after']:>26}{t['s1_low']:>9.2f}{t['r1_high']:>9.2f}{marker}")
+            print(f"    {tf}m{'':<3}{mode:<16}{result['entry_premium']:>10.2f}{result['exit_price']:>10.2f}"
+                  f"{result['exit_reason']:<28}{hold_min:>6}m{sign}Rs{result['pnl']:>9.2f}")
 
 
 async def main() -> int:
