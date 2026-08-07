@@ -569,6 +569,17 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._event_counter = 0
         self._fill_waiters: Dict[str, asyncio.Event] = {}
         self._fill_results: Dict[str, object] = {}
+        # 2026-08-07: mirrors SellStraddle's engine.py _on_fill stop-for-day fix.
+        # _on_fill's entry_aborted branch already correctly discards a rejected
+        # optimistic leg (no phantom position), but had no memory of repeated
+        # failures -- a broker rejecting every order all day (e.g. insufficient
+        # funds) let every subsequent zone/tranche trigger dispatch a fresh real
+        # order forever. 3 consecutive entry rejections stop new entries for the
+        # day; a confirmed entry resets the streak. Never applies to EXIT -- an
+        # already-open real leg is always retried via _square_off_leg, never
+        # abandoned.
+        self._stop_for_day = False
+        self._consecutive_entry_rejections = 0
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -651,8 +662,18 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                         "event_id=%s) -- discarding optimistic leg; book has no phantom "
                         "position for it.", self._underlying, eid,
                     )
-            # Confirmed ENTRY needs no further action here -- the leg already carries
-            # its entry_price from the local computation made at decision time.
+                self._consecutive_entry_rejections += 1
+                if self._consecutive_entry_rejections >= 3:
+                    self._stop_for_day = True
+                    logger.critical(
+                        "BearTrap[%s]: STOPPING ENTRIES FOR TODAY -- %d consecutive entry "
+                        "rejections (broker unreachable/rejecting orders?).",
+                        self._underlying, self._consecutive_entry_rejections,
+                    )
+                return
+            # Confirmed ENTRY needs no further action on the leg itself -- it already
+            # carries its entry_price from the local computation made at decision time.
+            self._consecutive_entry_rejections = 0
             return
         if fill.action == "SELL":
             if eid:
@@ -723,6 +744,8 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         self._spot_bias = None
         self._today_spot_o = self._today_spot_h = self._today_spot_l = self._today_spot_c = None
         self._spot_bias_last_check_minute = None
+        self._stop_for_day = False
+        self._consecutive_entry_rejections = 0
         if not self._positions:
             pass  # nothing open, clean reset
 
@@ -1455,6 +1478,13 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         """tranche: 'single' (regular raw_breakout/swing_breach, one-shot, never
         coexists with anything else) | 'T1' (flip fast/unconfirmed) | 'T2' (flip
         confirmed retracement, may stack on top of an open T1 on the same side)."""
+        if self._stop_for_day:
+            logger.warning(
+                "BearTrap[%s]: skip %s [%s] entry @ %.2f -- stopped for the day "
+                "(%d consecutive entry rejections).",
+                self._underlying, side, tranche, entry_price, self._consecutive_entry_rejections,
+            )
+            return
         if not self._bias_allows(side):
             # 2026-08-03 spot HTF bias filter -- single choke point for all four
             # entry call sites (regular T1 breach, regular T2 swing-breach, flip T1
