@@ -108,6 +108,15 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._initial_net_credit: float = 0.0
         self._initial_entry_time_value: float = 0.0
         self._stop_for_day: bool = False
+        # 2026-08-07: a live entry that reached the broker and was rejected/aborted
+        # (insufficient funds, asymmetric fill, etc — entry_aborted, NOT
+        # placement_failed which already stops-for-day on its own first
+        # occurrence) used to just cooldown-and-retry forever, hammering the
+        # broker with the same doomed order all session. Now stops entries for
+        # the day after 3 CONSECUTIVE such rejections (resets to 0 on any real
+        # confirmed entry) — same "3 tries then stop" principle already applied
+        # to placement failures. See _on_fill's entry_aborted branch.
+        self._consecutive_entry_rejections: int = 0
 
         self._post_restore_warmup: bool = False
         self._post_restore_at: float = 0.0
@@ -672,6 +681,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._initial_net_credit = 0.0
         self._initial_entry_time_value = 0.0
         self._stop_for_day = False
+        self._consecutive_entry_rejections = 0
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()
@@ -903,6 +913,12 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     self._order_pending = False
                     self._roll_in_progress = False
                     self._persist()
+                    # (_persist() above already pushes notify_position_update(None, force=True)
+                    # via its own "clearing position store" branch -- confirmed by reading it,
+                    # not assumed; a UI-push gap was the first hypothesis for the 2026-08-07
+                    # ssrajpal2001 incident and disproven by a regression test that passed on
+                    # pre-fix code. Real cause of the "again and again" symptom was the
+                    # unconditional cooldown+retry below, fixed by the rejection counter.)
                     # Routing failures carry no broker risk; cooldown only for real asymmetric fills.
                     if not _routing_failed:
                         self._apply_sl_cooldown()
@@ -918,8 +934,33 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                             "placement failed after 3 retries (broker unreachable?).",
                             self._underlying, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
                         )
+                    elif not _routing_failed:
+                        # 2026-08-07 fix: the order DID reach the broker and was rejected/
+                        # aborted (e.g. insufficient funds, asymmetric fill) -- not a transport
+                        # failure, so this alone isn't grounds to stop immediately (a single
+                        # rejection could be transient). But left unchecked this cooldown-and-
+                        # retry loops forever on a durable rejection reason (no funds doesn't
+                        # fix itself) -- real incident 2026-08-07: repeated live orders sent to
+                        # Zerodha and rejected every cycle, cooldown re-arming each time. Same
+                        # "3 tries then stop" principle as placement_failed above, just scoped
+                        # to broker-side rejections instead of transport failures. Resets to 0
+                        # on any real confirmed entry (see the ENTRY-confirmed branch below).
+                        self._consecutive_entry_rejections += 1
+                        if self._consecutive_entry_rejections >= 3:
+                            self._stop_for_day = True
+                            logger.critical(
+                                "SellStraddle[%s|%s|%s]: STOPPING ENTRIES FOR TODAY — %d "
+                                "consecutive live entry rejections by the broker (insufficient "
+                                "funds or a persistent reject reason?).",
+                                self._underlying, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
+                                self._consecutive_entry_rejections,
+                            )
                     return
                 if self._position and self._position.status == "open":
+                    # A real confirmed entry (full 2-leg or a roll-reopen single leg) proves
+                    # the broker connection works right now -- clear the rejection streak so
+                    # a later, unrelated rejection doesn't inherit count from an old one.
+                    self._consecutive_entry_rejections = 0
                     _legs = getattr(fill, "legs", ["CE", "PE"])
                     if "CE" in _legs and fill.ce_fill and fill.ce_fill > 0:
                         self._position.ce_leg.ltp = fill.ce_fill

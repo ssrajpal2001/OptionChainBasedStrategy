@@ -201,3 +201,97 @@ def test_entry_asymmetric_abort_does_not_set_stop_for_day():
     ss._on_fill(fill)
 
     assert ss._stop_for_day is False
+
+
+def test_entry_aborted_pushes_cleared_position_to_ui():
+    """2026-08-07 (ssrajpal2001 incident investigation): a UI-push gap was the first
+    hypothesis for why the dashboard stayed on a stale position after a rejected live
+    entry. Disproven -- this test PASSES even on the pre-fix engine.py, because
+    _persist() already pushes notify_position_update(None, force=True) via its own
+    'clearing position store' branch whenever self._position is cleared. Kept as a
+    regression lock on that existing (correct) behavior, not as evidence of a fix --
+    the real cause of the incident was the unconditional cooldown+retry loop, covered
+    by the tests below."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    _open_position(ss)
+    pushed: list = []
+    ss.notify_position_update = lambda data, **kw: pushed.append((data, kw.get("force")))
+
+    fill = StraddleFillEvent(
+        action="ENTRY", underlying="NIFTY", atm=24500.0, ce_strike=24500.0, pe_strike=24500.0,
+        ce_fill=0.0, pe_fill=0.0, client_id="C", binding_id="B",
+        event_id="ev_reject", entry_aborted=True,
+    )
+    ss._on_fill(fill)
+
+    assert ss._position is None
+    assert pushed == [(None, True)]
+
+
+def test_three_consecutive_entry_rejections_stops_entries_for_day():
+    """2026-08-07 real incident: a live entry rejected by the broker (insufficient funds,
+    not a placement_failed -- the order DID reach the broker) used to cooldown-and-retry
+    forever, hammering the broker with the same doomed order all session. Must stop entries
+    for the day after 3 CONSECUTIVE such rejections -- same '3 tries then stop' principle
+    already applied to placement_failed, just for broker-side rejections instead of
+    transport failures. The first two rejections must NOT stop for the day (could be
+    transient) -- only the third."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+
+    def _reject(n):
+        ss._order_pending = True
+        ss._trades_today = 1
+        fill = StraddleFillEvent(
+            action="ENTRY", underlying="NIFTY", atm=24500.0, ce_strike=24500.0, pe_strike=24500.0,
+            ce_fill=0.0, pe_fill=0.0, client_id="", binding_id="",
+            event_id=f"ev_reject_{n}", entry_aborted=True,
+        )
+        ss._on_fill(fill)
+
+    _reject(1)
+    assert ss._stop_for_day is False
+    assert ss._consecutive_entry_rejections == 1
+    _reject(2)
+    assert ss._stop_for_day is False
+    assert ss._consecutive_entry_rejections == 2
+    _reject(3)
+    assert ss._stop_for_day is True
+    assert ss._consecutive_entry_rejections == 3
+
+
+def test_confirmed_entry_resets_consecutive_rejection_counter():
+    """A real confirmed entry proves the broker connection works right now -- it must reset
+    the rejection streak so 2 old rejections don't combine with 1 new one to falsely stop
+    entries for the day."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+
+    for n in (1, 2):
+        ss._order_pending = True
+        ss._trades_today = 1
+        fill = StraddleFillEvent(
+            action="ENTRY", underlying="NIFTY", atm=24500.0, ce_strike=24500.0, pe_strike=24500.0,
+            ce_fill=0.0, pe_fill=0.0, client_id="", binding_id="",
+            event_id=f"ev_reject_{n}", entry_aborted=True,
+        )
+        ss._on_fill(fill)
+    assert ss._consecutive_entry_rejections == 2
+
+    _open_position(ss)
+    confirmed_fill = StraddleFillEvent(
+        action="ENTRY", underlying="NIFTY", atm=24500.0, ce_strike=24500.0, pe_strike=24500.0,
+        ce_fill=120.0, pe_fill=110.0, client_id="C", binding_id="B", event_id="ev_confirmed",
+    )
+    ss._on_fill(confirmed_fill)
+    assert ss._consecutive_entry_rejections == 0
+
+    ss._order_pending = True
+    ss._trades_today = 1
+    ss._position = None
+    third_fill = StraddleFillEvent(
+        action="ENTRY", underlying="NIFTY", atm=24500.0, ce_strike=24500.0, pe_strike=24500.0,
+        ce_fill=0.0, pe_fill=0.0, client_id="", binding_id="",
+        event_id="ev_reject_3", entry_aborted=True,
+    )
+    ss._on_fill(third_fill)
+    assert ss._stop_for_day is False
+    assert ss._consecutive_entry_rejections == 1
