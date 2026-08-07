@@ -233,16 +233,16 @@ async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> No
     atm = round(entry["spot"] / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
     strike = int(atm - itm_offset) if direction == "CE" else int(atm + itm_offset)
     opt_type = direction
+    try:
+        await asyncio.to_thread(REGISTRY.load_sync, underlying, token)
+    except Exception:
+        pass
     expiry = REGISTRY.get_active_expiry(underlying, today)
     print(f"    Strike={strike}{opt_type} expiry={expiry} spot_sl={entry['sl_spot']:.2f}")
 
     if not expiry:
         print("    P&L: SKIPPED -- no active expiry resolved.")
         return
-    try:
-        await asyncio.to_thread(REGISTRY.load_sync, underlying, token)
-    except Exception:
-        pass
     opt_key = REGISTRY.get_upstox_key(underlying, expiry, strike, opt_type)
     if not opt_key:
         print(f"    P&L: SKIPPED -- no Upstox instrument key for {underlying} {strike}{opt_type}.")
