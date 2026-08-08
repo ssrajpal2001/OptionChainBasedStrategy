@@ -138,6 +138,20 @@ class SideState:
         self.flip_candidates: List[dict] = []
         self.position: Optional[dict] = None
         self.trades: List[dict] = []
+        # 2026-08-08 fix, mirroring bear_only_book.py's own 2026-08-07 live fix
+        # (commit eb23992, "CRITICAL: fix BearTrap double-firing a real entry on
+        # the same reference candle"): a DIFFERENT zone dict object (distinct per
+        # the 60m zone-detection dedup key, e.g. one from warmup_zones and another
+        # discovered later via refresh_intraday_zones) can independently reach its
+        # own ref-candle assignment and get handed the SAME real 15m ref candle
+        # (_find_latest_closed_ref_bar has no notion of "which zone is asking").
+        # Confirmed in this script's own first real BANKNIFTY run: the SAME entry
+        # price fired 2-7 times in a row, each closing (sl_hit) within 1-2 minutes
+        # before the next near-duplicate zone re-fired -- ~Rs59,700 of pure
+        # duplicate-churn loss embedded in a Rs43,286 net "loss" that first run
+        # reported. Reset fresh every day (new SideState per day, same as live's
+        # reset_session()).
+        self.fired_ref_opens: set = set()
 
 
 def warmup_zones(state: SideState, as_of_day: date, data: dict) -> None:
@@ -259,10 +273,13 @@ def process_zones_tick(state: SideState, last_ts, last_low, last_high, data: dic
             window_5m = m5[(m5["timestamp"] >= zone["ref_open"]) & (m5["timestamp"] < zone["ref_close_time"])]
             collapse = bb._collapse_subzones(bb._to_bars(window_5m))
             if collapse is None:
-                if state.position is None:
+                # 2026-08-08 fix: refuse a second real entry off the same reference
+                # candle, even from a different zone object -- see SideState.fired_ref_opens.
+                if state.position is None and zone["ref_open"] not in state.fired_ref_opens:
                     audit = dict()
                     open_position(state, zone["ref_high"], zone["ref_low"], last_ts,
                                    origin="raw_breakout", audit=audit)
+                    state.fired_ref_opens.add(zone["ref_open"])
                 zone["done"] = True
                 return
             zone["sub_lo"], zone["sub_hi"] = collapse
@@ -275,8 +292,9 @@ def process_zones_tick(state: SideState, last_ts, last_low, last_high, data: dic
                 zone["armed"] = True
             continue
         if last_high >= zone["sub_hi"]:
-            if state.position is None:
+            if state.position is None and zone["ref_open"] not in state.fired_ref_opens:
                 open_position(state, zone["sub_hi"], zone["ref_low"], last_ts, origin="swing_breach", audit=dict())
+                state.fired_ref_opens.add(zone["ref_open"])
             zone["done"] = True
             return
 
