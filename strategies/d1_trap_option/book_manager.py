@@ -18,10 +18,13 @@ from strategies.core import StrategyBookManager
 
 logger = logging.getLogger(__name__)
 
-_STRATEGY_NAMES = {"d1_trap_index", "d1_trap_fno", "d1_trap_option", "d1_trap_bear_only"}
+_STRATEGY_NAMES = {"d1_trap_index", "d1_trap_fno", "d1_trap_option", "d1_trap_bear_only", "d1_trap_sr",
+                    "d1_trap_fno_sr"}
 
 _D1TrapOptionBook = None  # lazy-imported
 _D1TrapBearOnlyBook = None  # lazy-imported
+_D1TrapSRBook = None  # lazy-imported
+_D1TrapFnOSRBook = None  # lazy-imported
 
 
 def _parse_params(raw: str, strategy_name: str) -> dict:
@@ -33,6 +36,19 @@ def _parse_params(raw: str, strategy_name: str) -> dict:
 
     if strategy_name == "d1_trap_fno":
         defaults = {"htf": "D1", "mtf": "75min", "ltf": "5min", "itm": 1, "top_n": 5}
+    elif strategy_name == "d1_trap_sr":
+        # 2026-08-08: S&R ping-pong mechanic (strategies/d1_trap_option/sr_book.py),
+        # validated for BANKNIFTY (see CLAUDE.md's D1 Trap BearTrap section). "htf"/
+        # "itm" here reuse d1_trap_bear_only's own key names/values so a deployment
+        # row can carry both without ambiguity; sr_tf/exit_mode are S&R-specific.
+        defaults = {"sr_tf": 3, "exit_mode": "raw"}
+    elif strategy_name == "d1_trap_fno_sr":
+        # 2026-08-09: positional S&R ping-pong for FnO stocks
+        # (strategies/d1_trap_option/fno_sr_book.py) -- daily bars only (validated
+        # best swing tf via scripts/fno_positional_sr_backtest.py), 1-ITM option
+        # selection, day-low/day-high TSL. "itm" here means ITM STEPS (matches
+        # d1_trap_fno's own convention), not points.
+        defaults = {"itm": 1, "hard_risk_pct": 0.10}
     else:
         defaults = {"htf": "75min", "mtf": "15min", "ltf": "5min", "itm": 1}
 
@@ -60,7 +76,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                     lots = 1
                 params = _parse_params(d.get("strategy_params", "{}"), strategy_name)
                 product = d.get("product_type") or (
-                    "NRML" if strategy_name == "d1_trap_fno" else "MIS"
+                    "NRML" if strategy_name in ("d1_trap_fno", "d1_trap_fno_sr") else "MIS"
                 )
                 from strategies.d1_trap_option.bear_only_book import (
                     _ITM_OFFSET_DEFAULT_BY_UNDERLYING, _HTF_MINUTES_DEFAULT_BY_UNDERLYING,
@@ -68,13 +84,16 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 cfg = {
                     "lots": lots,
                     "strategy_name": strategy_name,
-                    "htf_tf": params["htf"],
-                    "mtf_tf": params["mtf"],
+                    "htf_tf": params.get("htf", "75min"),
+                    "mtf_tf": params.get("mtf", "15min"),
                     "itm_offset": int(params.get("itm", 1)),
                     "itm_offset_pts": int(params.get(
                         "itm_offset_pts", _ITM_OFFSET_DEFAULT_BY_UNDERLYING.get(underlying, 200))),
                     "htf_minutes": int(params.get(
                         "htf_minutes", _HTF_MINUTES_DEFAULT_BY_UNDERLYING.get(underlying, 60))),
+                    "sr_tf_minutes": int(params.get("sr_tf", 3)),
+                    "exit_mode": params.get("exit_mode", "raw"),
+                    "hard_risk_pct": float(params.get("hard_risk_pct", 0.10)),
                     "product_type": product,
                     # 2026-08-04: carry_forward is independent of product_type -- see
                     # client_db.py's DDL comment. Defaults to same-day close (0).
@@ -95,7 +114,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 # WATCHLIST sentinel: reads data/fno_watchlist.json (written by nightly scan).
                 # top_n stocks (default 5, override via strategy_params {"top_n": N}) are
                 # subscribed — only APPROACHING status entries, sorted by btst_rr descending.
-                if underlying == "WATCHLIST" and strategy_name == "d1_trap_fno":
+                if underlying == "WATCHLIST" and strategy_name in ("d1_trap_fno", "d1_trap_fno_sr"):
                     try:
                         import json as _json
                         from pathlib import Path as _Path
@@ -148,15 +167,16 @@ class D1TrapOptionBookManager(StrategyBookManager):
         self._retry_fno_equity_registration()
 
     def _retry_fno_equity_registration(self) -> None:
-        """After each reconcile, ensure all live d1_trap_fno books have their equity
-        symbol subscribed on the GlobalFeeder. Safe to call repeatedly — idempotent."""
+        """After each reconcile, ensure all live d1_trap_fno / d1_trap_fno_sr books
+        have their equity symbol subscribed on the GlobalFeeder. Safe to call
+        repeatedly — idempotent."""
         gf = getattr(self._bus, "_global_feeder", None)
         if gf is None:
             return
         if not hasattr(gf, "register_extra_spot_keys"):
             return
         for key, book in list(self._books.items()):
-            if getattr(book, "_strategy_name", "") != "d1_trap_fno":
+            if getattr(book, "_strategy_name", "") not in ("d1_trap_fno", "d1_trap_fno_sr"):
                 continue
             upstox_key = getattr(book, "_upstox_key_override", "")
             underlying  = book._underlying
@@ -176,7 +196,7 @@ class D1TrapOptionBookManager(StrategyBookManager):
                     logger.debug("TrapBookManager: equity feed retry failed for %s: %s", underlying, exc)
 
     def _spawn_book(self, key, cfg):
-        global _D1TrapOptionBook, _D1TrapBearOnlyBook
+        global _D1TrapOptionBook, _D1TrapBearOnlyBook, _D1TrapSRBook, _D1TrapFnOSRBook
 
         cid, bid, underlying = key
 
@@ -217,6 +237,46 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 product_type=cfg.get("product_type", "MIS"),
                 carry_forward=cfg.get("carry_forward", False),
                 squareoff_time=cfg.get("squareoff_time", "15:15"),
+            )
+
+        if strategy_name == "d1_trap_sr":
+            if _D1TrapSRBook is None:
+                from strategies.d1_trap_option.sr_book import D1TrapSRBook as _cls
+                _D1TrapSRBook = _cls
+            return _D1TrapSRBook(
+                bus=self._bus,
+                cfg=self._cfg,
+                underlying=underlying,
+                client_id=cid,
+                binding_id=bid,
+                lot_multiplier=cfg.get("lots", 1),
+                feeder_token=feeder_token,
+                itm_offset_pts=int(cfg.get("itm_offset_pts", 200)),
+                htf_minutes=int(cfg["htf_minutes"]) if cfg.get("htf_minutes") else None,
+                sr_tf_minutes=int(cfg.get("sr_tf_minutes", 3)),
+                exit_mode=cfg.get("exit_mode", "raw"),
+                product_type=cfg.get("product_type", "MIS"),
+                carry_forward=cfg.get("carry_forward", False),
+                squareoff_time=cfg.get("squareoff_time", "15:15"),
+            )
+
+        if strategy_name == "d1_trap_fno_sr":
+            if _D1TrapFnOSRBook is None:
+                from strategies.d1_trap_option.fno_sr_book import D1TrapFnOSRBook as _cls
+                _D1TrapFnOSRBook = _cls
+            return _D1TrapFnOSRBook(
+                bus=self._bus,
+                cfg=self._cfg,
+                underlying=underlying,
+                client_id=cid,
+                binding_id=bid,
+                lot_multiplier=cfg.get("lots", 1),
+                feeder_token=feeder_token,
+                itm_offset=int(cfg.get("itm_offset", 1)),
+                hard_risk_pct=float(cfg.get("hard_risk_pct", 0.10)),
+                upstox_key=cfg.get("upstox_key", ""),
+                lot_override=cfg.get("lot_override", 0),
+                step_override=cfg.get("step_override", 0),
             )
 
         if _D1TrapOptionBook is None:

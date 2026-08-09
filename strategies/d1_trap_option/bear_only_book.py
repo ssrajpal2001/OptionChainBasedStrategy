@@ -226,7 +226,7 @@ _TSL_TRANCHE_STEP_PCT_BY_UNDERLYING = {"NIFTY": 0.05, "SENSEX": 0.075}
 _TSL_TRANCHE_STEP_LOCK_PCT_BY_UNDERLYING = {"NIFTY": 0.05, "SENSEX": 0.075}
 _TSL_TRANCHE_STEP_PCT = 0.20        # fallback for underlyings not in the dict above
 _TSL_TRANCHE_STEP_LOCK_PCT = 0.125
-_HTF_MINUTES_DEFAULT_BY_UNDERLYING = {"NIFTY": 60, "SENSEX": 15}   # 2026-08-02:
+_HTF_MINUTES_DEFAULT_BY_UNDERLYING = {"NIFTY": 60, "SENSEX": 15, "BANKNIFTY": 15}   # 2026-08-02:
                         # index-specific zone timeframe, backtested via
                         # scripts/d1trap_zone_definition_sweep.py against a real
                         # month of premium (both under the new ref.close boundary
@@ -237,6 +237,10 @@ _HTF_MINUTES_DEFAULT_BY_UNDERLYING = {"NIFTY": 60, "SENSEX": 15}   # 2026-08-02:
                         # structure the 60m frame just misses. Falls back to 60m
                         # for any other underlying. Overridable per-deployment via
                         # the constructor's htf_minutes param / strategy_params.
+                        # BANKNIFTY: 2026-08-08, scripts/d1trap_banknifty_sweep.py
+                        # full-month sweep -- 15m clearly best (PF 1.638) vs 60m
+                        # (PF 1.542) and 30m (PF 1.296), same directional pattern
+                        # as SENSEX (faster-moving index needs the finer HTF).
 _SPOT_BIAS_LOOKBACK_DAYS = 20   # 2026-08-03: daily spot HTF bias filter (D1 swing/MSS via
                         # strategies.fvg.detector, reused as-is -- same functions already
                         # unit-tested for FVG). Backtested against real spot history: on the
@@ -266,7 +270,7 @@ _MAX_ZONE_REENTRIES_BY_UNDERLYING = {"NIFTY": 2}   # 2026-08-04: after a T1 leg 
                         # +Rs21,886->+Rs9,171) -- genuinely index-specific, not
                         # copied across. SENSEX deliberately absent from this dict
                         # (no re-entry) until re-tested with different assumptions.
-_ITM_OFFSET_DEFAULT_BY_UNDERLYING = {"NIFTY": 150, "SENSEX": 300}   # 2026-08-02:
+_ITM_OFFSET_DEFAULT_BY_UNDERLYING = {"NIFTY": 150, "SENSEX": 300, "BANKNIFTY": 300}   # 2026-08-02:
                         # 3-ITM strike depth, backtested via
                         # scripts/d1trap_strike_ladder_backtest.py against a real
                         # month of 0/1/2/3-ITM premium on both indices -- 3-ITM was
@@ -275,6 +279,10 @@ _ITM_OFFSET_DEFAULT_BY_UNDERLYING = {"NIFTY": 150, "SENSEX": 300}   # 2026-08-02
                         # real dead zone on both indices). NOT tested beyond 3-ITM
                         # (the old 200/500pt defaults are ~4/5-ITM) -- flagged as a
                         # follow-up, not assumed superseded.
+                        # BANKNIFTY: 2026-08-08 sweep confirmed 300pt (3-ITM on its
+                        # 100pt grid) was ALREADY the right extrapolated default --
+                        # PF 1.638 vs 0-ITM 0.670, 1-ITM 1.037, 2-ITM 0.633 (2-ITM a
+                        # dead zone here too, same pattern as NIFTY/SENSEX).
 
 
 @dataclass(frozen=True)
@@ -954,7 +962,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
             self._restore_positions()   # a real running trade must survive a restart
 
             today = self._today or datetime.now(IST).date()
-            expiry = REGISTRY.get_active_expiry(self._underlying, today)
+            expiry = REGISTRY.get_active_expiry_strict(self._underlying, today)
             if expiry is None or not self._feeder_token:
                 logger.warning("BearTrap[%s]: no expiry/token — cannot warm history.", self._underlying)
                 self._series["CE"] = _OptionSeries(strike=ce_strike, side="CE")
@@ -1590,7 +1598,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                     self._underlying, side, pos["strike"], tranche, entry_price, sl_final,
                     (entry_price - sl_final) * self._lot_size, order_reason, eid)
 
-        expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
+        expiry = REGISTRY.get_active_expiry_strict(self._underlying, self._today or datetime.now(IST).date())
         ev = D1TrapOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id,
             strategy="d1_trap_bear_only", direction="LONG", action="BUY",
@@ -1761,7 +1769,7 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
         try:
             self._event_counter += 1
             eid = f"{self._underlying}_{pos['side']}{pos['strike']}_EXIT_{self._event_counter}"
-            expiry = REGISTRY.get_active_expiry(self._underlying, self._today or datetime.now(IST).date())
+            expiry = REGISTRY.get_active_expiry_strict(self._underlying, self._today or datetime.now(IST).date())
             ev = D1TrapOrderEvent(
                 client_id=self._client_id, binding_id=self._binding_id,
                 strategy="d1_trap_bear_only", direction="LONG", action="SELL",

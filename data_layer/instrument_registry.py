@@ -119,16 +119,30 @@ class InstrumentRegistry:
             self._load_from_master_json(underlying, today, diag)
             return
 
+        underlying_key = _UPSTOX_UNDERLYING_KEY.get(underlying)
+        if not underlying_key:
+            # 2026-08-09 fix: individual FnO stocks (RELIANCE, HDFCBANK, ...) were
+            # never in _UPSTOX_UNDERLYING_KEY (that dict only has indices/MCX), so
+            # this used to just log an error and return -- self._expiries[underlying]
+            # was NEVER populated for any FnO stock, meaning get_active_expiry()
+            # always returned None and _get_expiry() (strategies/d1_trap_option/
+            # book.py, used by BOTH d1_trap_fno and the new d1_trap_fno_sr) could
+            # never resolve an expiry -- every entry attempt silently failed with
+            # "no active expiry -- cannot enter", for the WATCHLIST mechanism too,
+            # not just new code. _load_from_master_json already works correctly for
+            # arbitrary NSE F&O underlyings (confirmed: RELIANCE resolves real
+            # 2026-08-25/09-29/10-27 monthly expiries) -- it just was never called
+            # here. Route non-index underlyings through it instead of erroring out.
+            diag.append(f"'{underlying}' not in _UPSTOX_UNDERLYING_KEY (index/MCX only) "
+                        f"-- falling back to master JSON for FnO stock expiry/contract data")
+            self._load_from_master_json(underlying, today, diag)
+            return
+
         try:
             import upstox_client
         except ImportError:
             diag.append("ERROR: upstox_client not installed — pip install upstox-python-sdk")
             logger.warning(diag[-1])
-            return
-
-        underlying_key = _UPSTOX_UNDERLYING_KEY.get(underlying)
-        if not underlying_key:
-            diag.append(f"ERROR: no Upstox underlying key mapping for '{underlying}'")
             return
 
         diag.append(f"underlying_key = {underlying_key}")
@@ -630,6 +644,32 @@ class InstrumentRegistry:
             if exp >= from_date:
                 return exp
         return None
+
+    def get_active_expiry_strict(
+        self, underlying: str, from_date: date, max_days_out: int = 35,
+    ) -> Optional[date]:
+        """Like get_active_expiry, but returns None instead of silently substituting
+        a far-month contract when the TRUE front-month contract for a historical
+        from_date has already expired and been delisted from the currently-loaded
+        master (get_active_expiry has no record of it, so it returns the next
+        one it still has -- which can be a whole cycle away).
+
+        2026-08-09: this exact bug silently fed pre-rollover BANKNIFTY backtest
+        dates (in a window that crossed the July->August monthly expiry) real
+        historical prices for the AUGUST contract instead of the JULY one that
+        was actually front-month on those dates -- valid-looking data, wrong
+        contract. Monthly cycles run ~28-31 days apart, so a resolved expiry
+        more than max_days_out days past from_date is a strong signal the real
+        contract for that date is gone, not that this IS the real contract.
+        Any backtest walking multiple historical days for a monthly-expiry
+        underlying should use this, not get_active_expiry, and skip the day
+        entirely on None rather than falling back to the loose version."""
+        exp = self.get_active_expiry(underlying, from_date)
+        if exp is None:
+            return None
+        if (exp - from_date).days > max_days_out:
+            return None
+        return exp
 
     def all_expiries(self, underlying: str) -> List[date]:
         """Return all loaded active expiry dates for an underlying."""

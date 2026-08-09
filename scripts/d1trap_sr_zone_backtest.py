@@ -74,16 +74,13 @@ from strategies.d1_trap_option.bear_only_book import (  # noqa: E402
     _to_bars,
 )
 from strategies.d1_trap_option.book import _fetch_1m_bars, _upstox_key_for  # noqa: E402
-from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator  # noqa: E402
+from strategies.d1_trap_option.support_resistance import SRPingPongTracker, _EXIT_MODES  # noqa: E402
 from scripts.d1trap_nested_15m_5m_backtest import _detect_zones  # noqa: E402
 
 _HIST_WARMUP_DAYS = 14
 _SESSION_OPEN = time(9, 15)
-_ENTRY_CUTOFF = time(14, 30)
-_EOD_TIME = time(15, 15)
 _ATM_ROUND_STEP = 100
 _SR_TF_SWEEP = (1, 3, 5)
-_MAX_RISK_RS_PER_LOT = 2000.0   # hard backstop -- enforced in _run_sr_variant, see _sl_for_mode
 _LOG_PATH = Path(__file__).resolve().parents[1] / "data" / "d1trap_sr_exit_variant_log.jsonl"
 
 
@@ -174,216 +171,53 @@ def _bars_to_df(bars: List[_Bar]):
     ])
 
 
-_SL_BUFFER_PCT = 0.02          # exit_mode="buffered": pad the SL 2% below live S1 so a shallow
-                                # poke doesn't stop the trade out -- untuned first-pass value.
-_PROFIT_TRIGGER_PCT = 0.05     # exit_mode="profit_trigger": SL stays frozen at the entry-time S1
-                                # until premium has moved 5% in favor; only then does it start
-                                # trailing the live S1. Mirrors BearTrap's staircase TSL / FVG's
-                                # step-locked TSL discipline -- don't tighten the stop until the
-                                # trade has proven itself. Untuned first-pass value.
-_EXIT_MODES = ("raw", "bucket_close", "buffered", "profit_trigger")
-
-
-def _sl_for_mode(exit_mode: str, position: dict, live_s1: float) -> float:
-    """The mode's own structural SL -- NOT risk-capped here. The hard Rs/lot risk cap is
-    enforced separately, once per 1-min bar, regardless of exit_mode's own check cadence (see
-    the "universal hard risk cap" block in _run_sr_variant) -- a real broker-side stop fires
-    on the actual tick, it doesn't wait for a TF bucket to close, so bucket_close mode must
-    not be allowed to defer the cap the way it defers its own structural SL."""
-    if exit_mode == "buffered":
-        return live_s1 * (1 - _SL_BUFFER_PCT)
-    if exit_mode == "profit_trigger":
-        return live_s1 if position.get("triggered") else position["initial_sl"]
-    return live_s1   # "raw" and "bucket_close" (bucket_close's own structural check lives elsewhere)
-
-
 def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int,
-                     exit_mode: str = "raw") -> dict:
-    """One S&R-timeframe variant: 1-min touch detection, TF-min S&R tracking
-    from the touch forward, entry on first confirmed breakout, SL trails S1.
-    Always returns a dict with a "voided" list (zones where the tracker's S1
-    fell below the zone's own low before ever entering -- market moved below
-    the zone, thesis dead, per user spec). If an entry fired, the dict also
-    has entry/exit/pnl/"trace" (full per-candle S&R state for that zone);
-    otherwise it's {"no_entry": True, "voided": [...]}.
+                     exit_mode: str = "raw", sl_buffer_pct: float = None, gate_mode: str = "touch") -> dict:
+    """One S&R-timeframe variant for one (side, day) -- thin wrapper driving the shared
+    strategies.d1_trap_option.support_resistance.SRPingPongTracker bar-by-bar, so this
+    backtest and the live D1TrapSRBook (strategies/d1_trap_option/sr_book.py) can never
+    silently diverge (2026-08-08 refactor -- see SRPingPongTracker's docstring for the
+    full mechanic writeup, previously inlined here).
 
-    2026-08-07 fix: the position's OWN zone must keep being fed candles
-    after entry so S1 genuinely trails -- the original version gated ALL
-    zones (including the position's own) behind "one position at a time",
-    silently freezing the SL at whatever S1 was at the entry instant
-    instead of letting it ratchet the way "SL as new support" was meant to
-    work.
+    sl_buffer_pct only affects exit_mode="buffered" (None = SRPingPongTracker's own
+    default, currently 2%) -- added 2026-08-08 to sweep wider give-back buffers.
 
-    2026-08-07: added exit_mode variants after observing today's real trades
-    close for very small profit/loss -- entries land right where the
-    tracker just promoted a nearby swing as S1, so the raw stop sits very
-    close to entry and a single 1-min noise dip is enough to cut the trade.
-    "raw" is the original/validated behavior (default, unchanged). The
-    other three ("bucket_close", "buffered", "profit_trigger") are cheap
-    variants of the SAME entry logic, compared side by side in
-    check_underlying() -- see _sl_for_mode()/_EXIT_MODES above."""
-    touched_zone_ts: set = set()
-    active_sr: dict = {}   # zone lock_ts -> {"calc", "bucket", "bucket_open", "trace", "void"}
-    position: Optional[dict] = None
-    voided: List[dict] = []   # [{"zone_lo","zone_hi","lock_ts","voided_at","s1_low"}] -- populated
-                               # regardless of whether an entry ever fires, so the caller can show
-                               # the void mechanic actually working even on a NO ENTRY run.
+    gate_mode="touch" (default, validated BANKNIFTY config) starts S&R the instant
+    price touches the zone; gate_mode="breach" (2026-08-09) waits for the zone's own
+    MTF ref-candle breach_ts first -- requires `zones` to come from the real
+    D1TrapBearOnlyBook state machine (book._series[side].zones), not a bare
+    zone_lo/zone_hi/lock_ts dict, since only that populates breach_ts.
 
+    Returns {"no_entry": True, "voided": [...]} if nothing fired, otherwise
+    entry/exit/pnl/"voided" (the "trace" field this used to carry was internal
+    per-bucket debug state, dropped when the loop moved into the tracker -- use
+    the tracker directly if per-candle trace output is needed again)."""
+    kwargs = {} if sl_buffer_pct is None else {"sl_buffer_pct": sl_buffer_pct}
+    tracker = SRPingPongTracker(zones, tf_minutes, lot_size, exit_mode=exit_mode, gate_mode=gate_mode, **kwargs)
     for bar in today_1m:
-        if bar.timestamp.time() >= _ENTRY_CUTOFF and position is None:
+        ev = tracker.on_bar(bar)
+        if ev and ev["type"] == "exit":
+            trace = tracker.active_sr.get(ev["zone_ts"], {}).get("trace", [])
+            return {"entry_ts": ev["entry_ts"], "entry_premium": ev["entry_premium"],
+                     "exit_reason": ev["reason"], "exit_price": ev["exit_price"],
+                     "exit_ts": ev["exit_ts"], "pnl": ev["pnl"], "trace": trace, "voided": tracker.voided}
+        if tracker.day_done and tracker.position is None:
             break
 
-        # EOD exit for an open position
-        if position is not None:
-            if bar.timestamp.time() >= _EOD_TIME:
-                pnl = (bar.close - position["entry_premium"]) * lot_size
-                return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
-                        "exit_reason": "eod", "exit_price": bar.close, "exit_ts": bar.timestamp, "pnl": pnl,
-                        "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
-            # 2026-08-07: universal hard risk cap, checked on EVERY 1-min bar regardless of
-            # exit_mode -- a real broker-side stop fires on the actual tick, it can't be
-            # deferred to a TF bucket closing. Found necessary after a real bucket_close@5m
-            # run lost Rs4,002/lot on one trade; _MAX_RISK_RS_PER_LOT had been defined in this
-            # script since its first version but never actually referenced anywhere -- dead
-            # code despite the docstring calling it a "sanity backstop".
-            cap_floor = position["entry_premium"] - (_MAX_RISK_RS_PER_LOT / lot_size)
-            if bar.close <= cap_floor:
-                pnl = (bar.close - position["entry_premium"]) * lot_size
-                return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
-                        "exit_reason": f"risk_cap@{cap_floor:.2f}", "exit_price": bar.close, "exit_ts": bar.timestamp,
-                        "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
-
-            if exit_mode == "profit_trigger" and not position["triggered"]:
-                if bar.close >= position["entry_premium"] * (1 + _PROFIT_TRIGGER_PCT):
-                    position["triggered"] = True
-            if exit_mode != "bucket_close":   # bucket_close's own check lives in the zone loop below
-                live_s1 = active_sr[position["zone_ts"]]["calc"].get_calculated_sr_state("OPT")["sr_levels"]["S1"]["low"]
-                sl = _sl_for_mode(exit_mode, position, live_s1)
-                if bar.close <= sl:
-                    pnl = (bar.close - position["entry_premium"]) * lot_size
-                    return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
-                            "exit_reason": f"sl_{exit_mode}@{sl:.2f}", "exit_price": bar.close, "exit_ts": bar.timestamp,
-                            "pnl": pnl, "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
-
-        for zone in zones:
-            if zone["lock_ts"] > bar.timestamp:
-                continue
-            # 2026-08-07 fix: "touched" is a ONE-TIME trigger to START watching a zone, not a
-            # per-bar gate. It was being re-checked on every single bar, so once a real
-            # breakout carried price outside the original touch threshold (which naturally
-            # happens as the move develops), those later bars were silently dropped from the
-            # bucket instead of still being fed to the tracker -- the bucket containing the
-            # actual entry could then never close at all, since nothing ever triggered its
-            # boundary-crossing detection. Once watching starts, every bar keeps flowing in.
-            already_watching = zone["lock_ts"] in touched_zone_ts
-            if not already_watching:
-                if bar.low > zone["zone_hi"]:
-                    continue
-                touched_zone_ts.add(zone["lock_ts"])
-                active_sr[zone["lock_ts"]] = {"calc": SupportResistanceCalculator(),
-                                               "bucket": [], "bucket_open": None, "trace": [], "void": False}
-
-            entry = active_sr[zone["lock_ts"]]
-            if entry["void"]:
-                continue   # market already moved below the zone before entry -- dead for the day
-
-            is_position_zone = position is not None and zone["lock_ts"] == position["zone_ts"]
-            if position is not None and not is_position_zone:
-                continue   # a different zone -- frozen while a position is open elsewhere;
-                           # the position's OWN zone (is_position_zone=True) still falls through
-                           # below so its S&R tracker keeps updating and the SL keeps trailing.
-
-            calc = entry["calc"]
-            b_open = bar.timestamp.replace(
-                minute=(bar.timestamp.minute // tf_minutes) * tf_minutes, second=0, microsecond=0)
-            if entry["bucket_open"] is None:
-                entry["bucket_open"] = b_open
-            elif b_open != entry["bucket_open"]:
-                bucket_bars = entry["bucket"]
-                if bucket_bars:
-                    tf_bar = dict(timestamp=entry["bucket_open"], high=max(b.high for b in bucket_bars),
-                                  low=min(b.low for b in bucket_bars), close=bucket_bars[-1].close, duration=1)
-                    # 2026-08-07, per user (corrected): the trade does NOT fire on the very
-                    # first breakout (that only establishes S1 -- R1 is still just tracking,
-                    # unestablished). The real trigger is later: breakout -> pullback confirms
-                    # R1 established (-> S2_TRACKING) -> a bounce that does NOT yet re-break R1
-                    # promotes S2 to S1 and starts tracking a fresh peak as R2 (-> R2_TRACKING)
-                    # -> ONLY WHEN THAT R2 BREACHES THE ALREADY-ESTABLISHED R1 does the trade
-                    # fire. Both R1 and S1 are genuinely established by that point. Confirmed
-                    # against the user's own real data: the 1m NIFTY trace reached
-                    # S2_TRACKING->R2_TRACKING at 09:26 but fell back to S2_TRACKING at 09:27
-                    # without ever breaching R1 -- correctly NOT an entry under this rule.
-                    #
-                    # The level being breached at THIS trigger is the tracker's own live
-                    # R1['high'] (set via the earlier S2->S1 promotion), NOT the raw previous
-                    # candle's high -- those are different values by this stage. Captured
-                    # before processing so the real fill can be found on the actual 1-min bar
-                    # that crossed it (same "punch at the real breach, not bucket close"
-                    # principle as before).
-                    st_before = calc.get_calculated_sr_state("OPT")
-                    phase_before = st_before["current_phase"]
-                    live_r1_high = (st_before.get("sr_levels", {}).get("R1") or {}).get("high")
-                    calc.process_straddle_candle("OPT", tf_bar, silent=True)
-                    st = calc.get_calculated_sr_state("OPT")
-                    phase_after = st["current_phase"]
-                    s1_low = st["sr_levels"]["S1"]["low"]
-                    entry["trace"].append({
-                        "ts": tf_bar["timestamp"], "high": tf_bar["high"], "low": tf_bar["low"],
-                        "close": tf_bar["close"], "phase_before": phase_before, "phase_after": phase_after,
-                        "s1_low": s1_low, "r1_high": st["sr_levels"]["R1"]["high"],
-                    })
-                    if position is None:
-                        # 2026-08-07, per user: while a zone is still being watched (no entry
-                        # yet), if the S&R tracker establishes an S1 BELOW the zone's own low,
-                        # the market has genuinely moved below the zone -- the reclaim thesis is
-                        # dead, void it so it can never fire an entry later in the day. Mirrors
-                        # BearTrap's own existing _prevalidate_zones invalidation, expressed in
-                        # terms of the S&R tracker's own tracked swing low instead of a raw
-                        # candle close.
-                        if s1_low < zone["zone_lo"]:
-                            entry["void"] = True
-                            entry["trace"][-1]["voided"] = True
-                            voided.append({"zone_lo": zone["zone_lo"], "zone_hi": zone["zone_hi"],
-                                           "lock_ts": zone["lock_ts"], "voided_at": tf_bar["timestamp"],
-                                           "s1_low": s1_low})
-                        elif phase_before == "R2_TRACKING" and phase_after == "R1_TRACKING":
-                            breach_bar = next((b for b in bucket_bars if b.high >= live_r1_high), bucket_bars[0])
-                            entry_premium = float(live_r1_high)   # fill AT the breached level, per user
-                            entry["trace"][-1]["breach_ts"] = breach_bar.timestamp
-                            entry["trace"][-1]["breach_price"] = entry_premium
-                            position = {"zone_ts": zone["lock_ts"], "entry_ts": breach_bar.timestamp,
-                                        "entry_premium": entry_premium, "initial_sl": s1_low,
-                                        "triggered": False}
-                    elif is_position_zone and exit_mode == "bucket_close":
-                        # only evaluate the SL on the position's own TF-bucket close, not every
-                        # intervening 1-min bar -- filters noise the S&R tracker itself wouldn't
-                        # act on (it only updates state on bucket boundaries too). The hard
-                        # Rs/lot risk cap is NOT deferred to bucket close -- see the universal
-                        # per-bar cap check at the top of the outer loop.
-                        if tf_bar["close"] <= s1_low:
-                            pnl = (tf_bar["close"] - position["entry_premium"]) * lot_size
-                            return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
-                                    "exit_reason": f"sl_bucket_close@{s1_low:.2f}", "exit_price": tf_bar["close"],
-                                    "exit_ts": tf_bar["timestamp"], "pnl": pnl, "trace": entry["trace"],
-                                    "voided": voided}
-                entry["bucket_open"] = b_open
-                entry["bucket"] = []
-            entry["bucket"].append(bar)
-
-    # 2026-08-07 fix: a position opened near the end of the available bars (no
-    # later bar ever hit EOD_TIME or the trailing SL) was falling through to
-    # "no_entry": True below, silently discarding a real fired entry -- found
-    # while verifying the touch-gating fix against a constructed scenario
-    # whose bars ran out shortly after the R2-breaches-R1 entry candle.
-    if position is not None:
+    # A position opened near the end of the available bars (no later bar ever hit
+    # EOD_TIME or the trailing SL) -- close it at the last available price rather than
+    # silently discarding a real fired entry (matches the pre-refactor behavior).
+    if tracker.position is not None:
         last_bar = today_1m[-1]
-        pnl = (last_bar.close - position["entry_premium"]) * lot_size
-        return {"entry_ts": position["entry_ts"], "entry_premium": position["entry_premium"],
+        pos = tracker.position
+        pnl = (last_bar.close - pos["entry_premium"]) * lot_size
+        trace = tracker.active_sr.get(pos["zone_ts"], {}).get("trace", [])
+        return {"entry_ts": pos["entry_ts"], "entry_premium": pos["entry_premium"],
                 "exit_reason": "still running (no exit before available data ended)",
                 "exit_price": last_bar.close, "exit_ts": last_bar.timestamp, "pnl": pnl,
-                "trace": active_sr[position["zone_ts"]]["trace"], "voided": voided}
+                "trace": trace, "voided": tracker.voided}
 
-    return {"no_entry": True, "voided": voided}
+    return {"no_entry": True, "voided": tracker.voided}
 
 
 async def check_underlying(underlying: str, token: str, cfg: GlobalConfig) -> None:

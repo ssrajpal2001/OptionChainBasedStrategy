@@ -1095,7 +1095,7 @@ def _get_expiry(underlying: str, today: date, positional: bool) -> Optional[date
     - Index (intraday): current weekly/nearest expiry from registry.
     - FnO stock (positional): current monthly; if <= 5 calendar days to expiry → next month.
     """
-    expiry = REGISTRY.get_active_expiry(underlying, today)
+    expiry = REGISTRY.get_active_expiry_strict(underlying, today)
     if expiry is None:
         return None
     if positional:
@@ -1103,7 +1103,7 @@ def _get_expiry(underlying: str, today: date, positional: bool) -> Optional[date
         if (expiry - today).days <= 5:
             # Try to get next month's expiry
             next_try = expiry + timedelta(days=10)
-            next_exp = REGISTRY.get_active_expiry(underlying, next_try)
+            next_exp = REGISTRY.get_active_expiry_strict(underlying, next_try)
             if next_exp and next_exp > expiry:
                 expiry = next_exp
     return expiry
