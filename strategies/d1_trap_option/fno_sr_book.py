@@ -456,3 +456,38 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
             strategy="d1_trap_fno_sr", underlying=self._underlying, last_spot=self._last_spot,
             position=self._position, zones_long=len(self._zones_long), zones_short=len(self._zones_short),
         )
+
+    def monitoring_zones(self) -> dict:
+        """Same shape as D1TrapOptionBook.monitoring_zones() (book.py) so the
+        existing WATCHLIST TRACKER UI (/api/d1trap/zones) can render this book
+        too -- 2026-08-11 fix: that endpoint skips any book without this exact
+        method (hasattr check), so this class was silently invisible to that
+        panel despite running and building zones correctly."""
+        spot = self._last_spot
+        touched = (self._tracker.touched_long | self._tracker.touched_short) if self._tracker else set()
+        zones = []
+        for z in self._zones_long + self._zones_short:
+            dist = None
+            if spot:
+                mid = (z["zone_lo"] + z["zone_hi"]) / 2
+                dist = round((spot - mid) / mid * 100, 2) if mid else None
+            zones.append({
+                "direction": z["side"],
+                "zone_lo": round(z["zone_lo"], 2),
+                "zone_hi": round(z["zone_hi"], 2),
+                "state": "MONITORING" if z["lock_ts"] in touched else "WAITING",
+                "dist_pct": dist,
+                "ref_ts": z["lock_ts"].strftime("%Y-%m-%d") if z.get("lock_ts") else None,
+            })
+        zones.sort(key=lambda zz: (0 if zz["state"] == "MONITORING" else 1,
+                                    abs(zz["dist_pct"]) if zz["dist_pct"] is not None else 999))
+        return {
+            "underlying": self._underlying,
+            "client_id": self._client_id,
+            "binding_id": self._binding_id,
+            "spot": round(spot, 2) if spot else None,
+            "zones": zones[:10],
+            "total_zones": len(self._zones_long) + len(self._zones_short),
+            "pending": None,
+            "position": bool(self._position),
+        }
