@@ -24,21 +24,29 @@ the moment the trade is placed — never a naked, unlimited-risk position.
    possible loss on the trade. This is what turns a naked short straddle
    into a proper Iron Condor: four legs, defined risk, known worst case.
 3. **Wait for the right entry price.** This is a VWAP-to-VWAP comparison,
-   not a tick-to-VWAP comparison:
-   - Combine all four legs' prices into one net structure value (premium
-     collected from the two sold legs, minus premium paid for the two
-     bought hedges), then calculate the VWAP (volume-weighted average
-     price) of that combined value across the **previous trading day**.
-     This gives one **fixed reference number** — calculated once, from
-     yesterday, and it does not move during today's session.
-   - Do the same VWAP calculation for **today**, live — the combined
-     four-leg value's own running VWAP, continuously updating as today's
-     session progresses (building up from this morning's open through
-     right now).
-   - The strategy enters the moment **today's running VWAP rises to meet
-     or exceed yesterday's fixed VWAP** (today's average value ≥
-     yesterday's average value). All four legs go in together, at the
-     same time, once that condition is true.
+   not a tick-to-VWAP comparison — and the four legs are **added together,
+   never netted/subtracted**, at this step (2026-08-10 correction: no
+   "sell minus hedge" here):
+   - Calculate the VWAP (volume-weighted average price) of **each of the
+     four legs individually**, across the **previous trading day** —
+     four separate VWAP numbers (sell CE, sell PE, hedge CE, hedge PE).
+     **Add all four together** into one combined figure. This gives one
+     **fixed reference number** — calculated once, from yesterday, and it
+     does not move during today's session.
+   - Do the same for **today**, live: each of the four legs' own running
+     VWAP, continuously updating as today's session progresses, added
+     together into today's combined figure (also continuously updating).
+   - The strategy enters the moment **today's combined running VWAP rises
+     to meet or exceed yesterday's combined fixed VWAP**. All four legs go
+     in together, at the same time, once that condition is true.
+
+   *(This combined-VWAP figure is used only to time the entry — it is a
+   simple sum of all four legs' average prices, not the strategy's actual
+   cost or credit. The real economics — what was actually collected vs.
+   paid — come from the real entry fills, and are what the target/stop-loss
+   in step 4 track. Flagging this distinction explicitly since it's easy to
+   conflate the two "combined" numbers — worth confirming this split is
+   correct.)*
 4. **Manage the trade with a fixed target and stop-loss.** Once in the
    trade, there is no rolling and no adjustment. The position is held until
    either:
@@ -57,21 +65,26 @@ the moment the trade is placed — never a naked, unlimited-risk position.
 | Minimum LTP for hedge (CE/PE) | ₹20 | Yes, per deployment |
 | Profit target (points, net 4-leg) | — | Yes, per deployment |
 | Stop-loss (points, net 4-leg) | — | Yes, per deployment |
-| Entry trigger reference | Previous day's VWAP of the 4-leg combo | Fixed methodology, recalculated daily |
+| Entry trigger reference | Previous day's VWAP, all 4 legs summed (not netted) | Fixed methodology, recalculated daily |
 
 ### A worked example (illustrative numbers)
 
 - NIFTY option chain scan finds: Sell 24,500 CE @ ₹55, Sell 24,300 PE @ ₹52
-  → combined sell credit ₹107.
-- Hedge scan finds: Buy 24,700 CE @ ₹22, Buy 24,100 PE @ ₹19 → combined
-  hedge cost ₹41.
-- Net credit if entered = ₹107 − ₹41 = **₹66** (this moment's live value).
-- Yesterday, this same four-leg combination's full-day VWAP worked out to
-  a fixed **₹64**.
-- Today, the strategy tracks this same combination's own running VWAP live,
-  starting from market open. Say by mid-morning today's running VWAP has
-  built up to ₹64.50 — that's ≥ yesterday's ₹64, so the entry condition is
-  met and all four legs go in together.
+  (both above the ₹50 sell threshold). Hedge scan finds: Buy 24,700 CE @
+  ₹22, Buy 24,100 PE @ ₹19 (both above the ₹20 hedge threshold).
+- **Entry timing (combined-VWAP, summed, not netted)**: yesterday, each
+  leg's own full-day VWAP was — sell CE ₹54, sell PE ₹50, hedge CE ₹21,
+  hedge PE ₹18. Added together: **₹143** — this is yesterday's fixed
+  reference number.
+  Today, the strategy tracks each leg's own running VWAP live from market
+  open. Say by mid-morning today's four running VWAPs add up to ₹144.20 —
+  that's ≥ yesterday's ₹143, so the entry condition is met and all four
+  legs go in together, at whatever their live prices are at that instant.
+- **Actual position economics (net, from the real fills)**: suppose the
+  four legs actually fill at ₹55 / ₹52 / ₹22 / ₹19 — sell credit ₹107,
+  hedge cost ₹41, net credit received = **₹66**. This is the number the
+  target and stop-loss track from here, not the ₹143/₹144 combined-VWAP
+  figure used only to time the entry.
 - From there: if the net position gains, say, 25 points (net value moves
   to ₹39, since this is a net credit position — profit as the structure
   cheapens), the target closes it. If it loses 15 points instead (net value
@@ -112,19 +125,27 @@ the moment the trade is placed — never a naked, unlimited-risk position.
   implementation, see Open Question below): today's strikes are selected
   first (via the LTP-threshold scan, using live/current prices), and then
   *those specific four contracts'* own historical intraday data from the
-  previous trading day is fetched and combined (net of the two sold minus
-  the two bought legs, bar by bar) to compute one combined VWAP for
-  yesterday. This mirrors how "previous day's high/low" is normally used
-  as a reference — the contract's own prior session, not a separately
-  re-run selection process for "yesterday."
-- **A live, continuously-updating VWAP for today's same four-leg net
-  combination** (2026-08-10 correction — the entry condition compares
-  today's running VWAP to yesterday's fixed VWAP, not a live tick/LTP to
-  yesterday's VWAP). This is a genuinely new piece of tracking, not a
-  reuse of Sell Straddle's existing per-strike VWAP (`PoolIndicatorEngine`
-  tracks VWAP per individual strike, not a combined net-of-four-legs
-  structure value) — the closest existing pattern to build from, but the
-  combination logic itself is new.
+  previous trading day is fetched, each leg's own VWAP is calculated
+  separately, and the four VWAPs are **added together** (2026-08-10
+  correction: summed, never netted/subtracted — sell-leg and hedge-leg
+  VWAPs are both added the same way) to produce one combined reference
+  number for yesterday. This mirrors how "previous day's high/low" is
+  normally used as a reference — the contract's own prior session, not a
+  separately re-run selection process for "yesterday."
+- **A live, continuously-updating VWAP for today's same four legs**,
+  calculated the identical way — each leg's own running VWAP, summed
+  together into one running combined figure, compared against yesterday's
+  fixed combined figure to trigger entry. This is a genuinely new piece of
+  tracking, not a reuse of Sell Straddle's existing per-strike VWAP
+  (`PoolIndicatorEngine` tracks VWAP per individual strike already, which
+  is the closest existing pattern to build the per-leg piece from — but
+  the four-way sum-and-compare logic on top of it is new).
+- **Separately**, the actual net credit/debit from the real entry fills
+  (sell proceeds minus hedge cost) is what the points-based target/stop-
+  loss track in step 4 — a different, simpler "combined" number than the
+  summed-VWAP entry-timing figure above. Worth double-checking with the
+  user that this split (summed VWAPs to time entry, netted fills to track
+  P&L) is the intended design, not just an engineering assumption.
 - The 4-leg atomic entry/exit sequencing and the points-based net-position
   SL/target tracking — no existing strategy in this codebase manages a
   4-leg structure as a single unit; Sell Straddle manages 2 legs
