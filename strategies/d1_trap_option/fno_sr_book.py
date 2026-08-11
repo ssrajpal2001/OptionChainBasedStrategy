@@ -116,7 +116,7 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
         self._known_bull: set = set()
         self._tracker: Optional[PositionalSRTracker] = None
         self._last_spot: Optional[float] = None
-        self._d1_fetched_today = False
+        self._d1_refreshed_for_date: Optional[date] = None
         self._loaded = False
 
         self._position: Optional[dict] = None
@@ -267,7 +267,21 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
     async def _d1_refresh_loop(self) -> None:
         """Once per day after D1 close, fetch today's real daily bar and feed it
         through zone discovery + PositionalSRTracker.on_bar -- mirrors book.py's
-        own _d1_daily_refresh_loop cadence exactly (~15:30 IST)."""
+        own _d1_daily_refresh_loop cadence exactly (~15:30 IST).
+
+        2026-08-11 bug fix: this used to gate on
+        `self._daily_bars[-1].timestamp.date() == today` ("already fetched
+        today, skip"). But _startup_load()'s own fetch also ends at
+        `today` -- if Upstox's daily-candle endpoint hands back an
+        in-progress/current-day entry when queried mid-session (any
+        startup/restart before 15:30, which is every restart in practice),
+        that guard was ALREADY satisfied the instant the process started,
+        permanently blocking the real post-close refresh for that entire
+        day. Confirmed live: 3 restarts across 2 trading days, zero "D1
+        close bar" log lines ever -- the actual entry-evaluation code
+        never ran, not "no signal fired." Fixed to track completion of
+        THIS loop's own refresh explicitly (_d1_refreshed_for_date), never
+        inferred from what date happens to be in the loaded bar data."""
         while self._running:
             try:
                 await asyncio.sleep(60)
@@ -279,8 +293,8 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
             if now.time() < _D1_CLOSE:
                 continue
             today = now.date()
-            if self._daily_bars and self._daily_bars[-1].timestamp.date() == today:
-                continue   # already fetched today
+            if self._d1_refreshed_for_date == today:
+                continue   # this loop already completed today's refresh
             if not self._feeder_token:
                 continue
             try:
@@ -289,11 +303,15 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
                 if not bars or bars[-1].timestamp.date() != today:
                     continue
                 new_bar = bars[-1]
-                self._daily_bars.append(new_bar)
+                if not self._daily_bars or self._daily_bars[-1].timestamp.date() != today:
+                    self._daily_bars.append(new_bar)
+                else:
+                    self._daily_bars[-1] = new_bar   # replace startup's stale/partial same-day bar
                 self._discover_new_zones(today)
                 ev = self._tracker.on_bar(new_bar)
                 if ev is not None:
                     await self._handle_tracker_event(ev, new_bar)
+                self._d1_refreshed_for_date = today
                 logger.info("D1TrapFnOSR[%s]: D1 close bar %.2f/%.2f/%.2f/%.2f -> zones(L=%d/S=%d)",
                             self._underlying, new_bar.open, new_bar.high, new_bar.low, new_bar.close,
                             len(self._zones_long), len(self._zones_short))
