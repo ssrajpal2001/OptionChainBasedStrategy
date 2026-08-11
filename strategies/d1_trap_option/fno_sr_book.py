@@ -117,6 +117,15 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
         self._tracker: Optional[PositionalSRTracker] = None
         self._last_spot: Optional[float] = None
         self._d1_refreshed_for_date: Optional[date] = None
+        # Display-only live touch tracking (2026-08-11) -- separate from
+        # PositionalSRTracker's own touched_long/touched_short, which only
+        # update once daily inside on_bar() (correctly, since the validated
+        # S&R entry mechanic is daily-bar-driven). The WAITING->MONITORING
+        # state shown in monitoring_zones() shouldn't have to wait for
+        # end-of-day just to reflect that live price has already entered a
+        # zone -- this set updates on every tick, purely for that display,
+        # and never feeds into the tracker's own entry-evaluation logic.
+        self._live_touched: set = set()
         self._loaded = False
 
         self._position: Optional[dict] = None
@@ -210,6 +219,7 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
                                                  hard_risk_pct=self._hard_risk_pct)
             if self._daily_bars:
                 self._last_spot = self._daily_bars[-1].close
+                self._update_live_touch(self._last_spot)
             logger.info("D1TrapFnOSR[%s]: %d D1 bars -> zones(L=%d/S=%d)", self._underlying,
                         len(self._daily_bars), len(self._zones_long), len(self._zones_short))
             self._loaded = True
@@ -263,6 +273,19 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
                 continue
             if getattr(ev, "symbol", None) == self._underlying and getattr(ev, "ltp", None):
                 self._last_spot = ev.ltp
+                self._update_live_touch(ev.ltp)
+
+    def _update_live_touch(self, spot: float) -> None:
+        """Display-only: mark a zone as touched the instant live price enters
+        it, independent of the tracker's own once-daily touch check. Never
+        creates/advances an S&R calculator and never gates entry -- purely
+        flips WAITING->MONITORING in monitoring_zones()."""
+        for z in self._zones_long:
+            if z["lock_ts"] not in self._live_touched and spot <= z["zone_hi"]:
+                self._live_touched.add(z["lock_ts"])
+        for z in self._zones_short:
+            if z["lock_ts"] not in self._live_touched and spot >= z["zone_lo"]:
+                self._live_touched.add(z["lock_ts"])
 
     async def _d1_refresh_loop(self) -> None:
         """Once per day after D1 close, fetch today's real daily bar and feed it
@@ -308,6 +331,8 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
                 else:
                     self._daily_bars[-1] = new_bar   # replace startup's stale/partial same-day bar
                 self._discover_new_zones(today)
+                if self._last_spot is not None:
+                    self._update_live_touch(self._last_spot)   # catch newly-discovered zones already in-range
                 ev = self._tracker.on_bar(new_bar)
                 if ev is not None:
                     await self._handle_tracker_event(ev, new_bar)
@@ -464,7 +489,8 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
         method (hasattr check), so this class was silently invisible to that
         panel despite running and building zones correctly."""
         spot = self._last_spot
-        touched = (self._tracker.touched_long | self._tracker.touched_short) if self._tracker else set()
+        touched = self._live_touched | ((self._tracker.touched_long | self._tracker.touched_short)
+                                         if self._tracker else set())
         zones = []
         for z in self._zones_long + self._zones_short:
             dist = None
