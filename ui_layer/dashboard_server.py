@@ -3535,8 +3535,8 @@ class DashboardServer:
             binding_id: str, body: _BrokerModeSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            if body.mode not in ("paper", "live"):
-                raise HTTPException(400, "mode must be 'paper' or 'live'.")
+            if body.mode not in ("paper", "paper_route", "live"):
+                raise HTTPException(400, "mode must be 'paper', 'paper_route', or 'live'.")
             await _srv._client_db.set_trading_mode(cid, binding_id, body.mode)
             # Hot-swap the LIVE broker's in-memory mode so the change takes effect WITHOUT a
             # terminal restart (order routing reads DB trading_mode per-order, but keep the broker
@@ -3544,7 +3544,7 @@ class DashboardServer:
             try:
                 broker = ((getattr(_srv._router, "_brokers", None) or {}).get(cid, {}) or {}).get(binding_id)
                 if broker is not None:
-                    broker._trading_mode_raw = "live" if body.mode == "live" else "paper"
+                    broker._trading_mode_raw = body.mode
                     _bind = getattr(broker, "_binding", None) or getattr(broker, "_b", None)
                     if _bind is not None:
                         try:

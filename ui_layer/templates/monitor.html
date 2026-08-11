@@ -6380,12 +6380,20 @@ function amoTest() {
                       :style="portalBroker.trading_mode==='paper'
                         ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.35)'
                         : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
-                      @click="portalBroker.trading_mode='paper'">Paper</button>
+                      @click="portalBroker.trading_mode='paper'"
+                      title="Pure local simulation — never sends a real order to the broker.">Paper</button>
+              <button class="flex-1 text-xs font-mono rounded border transition-all"
+                      :style="portalBroker.trading_mode==='paper_route'
+                        ? 'background:rgba(var(--t-amber-rgb),0.1);color:var(--t-amber);border-color:rgba(var(--t-amber-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.trading_mode='paper_route'"
+                      title="Sends the REAL order to the broker (for connectivity/no-funds testing), then books a local simulated fill regardless of the broker's response — shows as running even if the broker rejects it.">Paper-Route</button>
               <button class="flex-1 text-xs font-mono rounded border transition-all"
                       :style="portalBroker.trading_mode==='live'
                         ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.35)'
                         : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
-                      @click="portalBroker.trading_mode='live'">Live</button>
+                      @click="portalBroker.trading_mode='live'"
+                      title="Real order, real fill required — a genuine rejection correctly aborts and will not show as running.">Live</button>
             </div>
           </div>
           <div>
@@ -6636,7 +6644,9 @@ function amoTest() {
                   <div class="text-xs mt-0.5 flex flex-wrap items-center gap-1.5" style="color:var(--t-muted)">
                     <span x-text="(b.provider||'').toUpperCase()"></span>
                     <span class="px-1.5 py-0.5 rounded font-mono font-bold"
-                          :style="(b.trading_mode||'paper')==='live' ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green)' : 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan)'"
+                          :style="(b.trading_mode||'paper')==='live' ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green)'
+                            : (b.trading_mode||'paper')==='paper_route' ? 'background:rgba(var(--t-amber-rgb),0.12);color:var(--t-amber)'
+                            : 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan)'"
                           x-text="(b.trading_mode||'paper').toUpperCase()"></span>
                     <span class="px-1.5 py-0.5 rounded font-mono"
                           :style="(b.product_type||'MIS')==='NRML' ? 'background:rgba(var(--t-cyan-rgb),0.08);color:var(--t-cyan)' : 'background:rgba(var(--t-amber-rgb),0.08);color:var(--t-amber)'"
@@ -6845,6 +6855,8 @@ function amoTest() {
                     <span class="px-1.5 py-0.5 rounded font-mono font-bold"
                           :style="(b.trading_mode||'paper')==='live'
                             ? 'background:rgba(var(--t-green-rgb),0.12);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)'
+                            : (b.trading_mode||'paper')==='paper_route'
+                            ? 'background:rgba(var(--t-amber-rgb),0.12);color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.3)'
                             : 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.25)'"
                           x-text="(b.trading_mode||'paper').toUpperCase()"></span>
                     <!-- Product type badge -->
@@ -6907,12 +6919,21 @@ function amoTest() {
                           :style="(b.trading_mode||'paper')==='paper'
                             ? 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan);font-weight:600'
                             : 'background:transparent;color:var(--t-muted);opacity:0.7'"
+                          title="Pure local simulation — never sends a real order to the broker."
                           @click="setBrokerMode(b.binding_id,'paper')">Paper</button>
+                  <button class="px-3 py-1.5 transition-all"
+                          :disabled="b.engine_active || (csBrokerOp[b.binding_id]||{}).loading"
+                          :style="(b.trading_mode||'paper')==='paper_route'
+                            ? 'background:rgba(var(--t-amber-rgb),0.15);color:var(--t-amber);font-weight:600'
+                            : 'background:transparent;color:var(--t-muted);opacity:0.7'"
+                          title="Sends the REAL order to the broker (connectivity/no-funds testing), books a local simulated fill regardless of the broker's response — shows as running even if the broker rejects it."
+                          @click="setBrokerMode(b.binding_id,'paper_route')">Paper-Route</button>
                   <button class="px-3 py-1.5 transition-all"
                           :disabled="b.engine_active || (csBrokerOp[b.binding_id]||{}).loading"
                           :style="(b.trading_mode||'paper')==='live'
                             ? 'background:rgba(var(--t-green-rgb),0.15);color:var(--t-green);font-weight:600'
                             : 'background:transparent;color:var(--t-muted);opacity:0.7'"
+                          title="Real order, real fill required — a genuine rejection correctly aborts and will not show as running."
                           @click="setBrokerMode(b.binding_id,'live')">Live</button>
                 </div>
 
@@ -7422,12 +7443,20 @@ function amoTest() {
                       :style="portalBroker.trading_mode==='paper'
                         ? 'background:rgba(var(--t-cyan-rgb),0.1);color:var(--t-cyan);border-color:rgba(var(--t-cyan-rgb),0.35)'
                         : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
-                      @click="portalBroker.trading_mode='paper'">Paper</button>
+                      @click="portalBroker.trading_mode='paper'"
+                      title="Pure local simulation — never sends a real order to the broker.">Paper</button>
+              <button class="flex-1 py-1.5 text-xs font-mono rounded border transition-all"
+                      :style="portalBroker.trading_mode==='paper_route'
+                        ? 'background:rgba(var(--t-amber-rgb),0.1);color:var(--t-amber);border-color:rgba(var(--t-amber-rgb),0.35)'
+                        : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
+                      @click="portalBroker.trading_mode='paper_route'"
+                      title="Sends the REAL order to the broker (for connectivity/no-funds testing), then books a local simulated fill regardless of the broker's response — shows as running even if the broker rejects it.">Paper-Route</button>
               <button class="flex-1 py-1.5 text-xs font-mono rounded border transition-all"
                       :style="portalBroker.trading_mode==='live'
                         ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.35)'
                         : 'background:transparent;color:var(--t-muted);border-color:var(--t-border)'"
-                      @click="portalBroker.trading_mode='live'">Live</button>
+                      @click="portalBroker.trading_mode='live'"
+                      title="Real order, real fill required — a genuine rejection correctly aborts and will not show as running.">Live</button>
             </div>
           </div>
           <div>
