@@ -41,7 +41,11 @@ def _parse_params(raw: str, strategy_name: str) -> dict:
         # validated for BANKNIFTY (see CLAUDE.md's D1 Trap BearTrap section). "htf"/
         # "itm" here reuse d1_trap_bear_only's own key names/values so a deployment
         # row can carry both without ambiguity; sr_tf/exit_mode are S&R-specific.
-        defaults = {"sr_tf": 3, "exit_mode": "raw"}
+        # 2026-08-12: strike_mode/execute_strike_mode -- opt-in fixed-period strike
+        # (prev month/week high-low anchor) + daily-1-ITM real execution, both
+        # default OFF (byte-identical to prior behavior unless explicitly set).
+        defaults = {"sr_tf": 3, "exit_mode": "raw", "strike_mode": "daily_atm",
+                    "execute_strike_mode": "same"}
     elif strategy_name == "d1_trap_fno_sr":
         # 2026-08-09: positional S&R ping-pong for FnO stocks
         # (strategies/d1_trap_option/fno_sr_book.py) -- daily bars only (validated
@@ -93,6 +97,8 @@ class D1TrapOptionBookManager(StrategyBookManager):
                         "htf_minutes", _HTF_MINUTES_DEFAULT_BY_UNDERLYING.get(underlying, 60))),
                     "sr_tf_minutes": int(params.get("sr_tf", 3)),
                     "exit_mode": params.get("exit_mode", "raw"),
+                    "strike_mode": params.get("strike_mode", "daily_atm"),
+                    "execute_strike_mode": params.get("execute_strike_mode", "same"),
                     "hard_risk_pct": float(params.get("hard_risk_pct", 0.10)),
                     "product_type": product,
                     # 2026-08-04: carry_forward is independent of product_type -- see
@@ -258,6 +264,8 @@ class D1TrapOptionBookManager(StrategyBookManager):
                 product_type=cfg.get("product_type", "MIS"),
                 carry_forward=cfg.get("carry_forward", False),
                 squareoff_time=cfg.get("squareoff_time", "15:15"),
+                strike_mode=cfg.get("strike_mode", "daily_atm"),
+                execute_strike_mode=cfg.get("execute_strike_mode", "same"),
             )
 
         if strategy_name == "d1_trap_fno_sr":

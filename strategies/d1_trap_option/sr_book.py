@@ -97,6 +97,23 @@ _SR_EXIT_MODE_DEFAULT = "raw"
 _EOD_TIME = time(15, 15)
 _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 
+# 2026-08-12, direct user request/validated backtest (scripts/d1trap_fixed_
+# monthly_strike_sweep.py, scripts/d1trap_fixed_weekly_strike_sweep.py,
+# scripts/d1trap_scan_vs_execute_strike_sweep.py): instead of recomputing
+# CE/PE off TODAY's own ATM every day, anchor to the PREVIOUS period's real
+# spot high/low and hold that SAME strike pair for the whole current period
+# -- consistently beat daily-ATM at deeper ITM depth across all three
+# underlyings tested (BANKNIFTY @300, NIFTY @300, SENSEX @600 all showed
+# real, repeated PF/win% gains; the exact PF numbers on the thin n=9-14
+# samples should NOT be taken at face value, but the DIRECTION repeated
+# three independent times). BANKNIFTY/FINNIFTY are monthly expiry so
+# "period" = calendar month; NIFTY/SENSEX are weekly, so "period" = ISO
+# week (Mon-Sun, a simplification -- not exactly aligned to the real
+# NSE/BSE weekly expiry cycle, noted since it could matter later).
+_MONTHLY_EXPIRY_UNDERLYINGS = {"BANKNIFTY", "FINNIFTY"}
+_STRIKE_MODE_DEFAULT = "daily_atm"          # "daily_atm" | "fixed_period"
+_EXECUTE_STRIKE_MODE_DEFAULT = "same"       # "same" | "daily_itm1"
+
 
 class D1TrapSRBook(AbstractStrategyBook):
     """Per-(client, binding) live book. S&R ping-pong entry/exit driven off
@@ -120,6 +137,8 @@ class D1TrapSRBook(AbstractStrategyBook):
         product_type: str = "MIS",
         carry_forward: bool = False,
         squareoff_time: str = "15:15",
+        strike_mode: str = _STRIKE_MODE_DEFAULT,
+        execute_strike_mode: str = _EXECUTE_STRIKE_MODE_DEFAULT,
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._strategy_name = "d1_trap_sr"
@@ -135,6 +154,10 @@ class D1TrapSRBook(AbstractStrategyBook):
         )
         self._sr_tf_minutes = int(sr_tf_minutes)
         self._exit_mode = exit_mode
+        self._strike_mode = strike_mode if strike_mode in ("daily_atm", "fixed_period") else "daily_atm"
+        self._execute_strike_mode = (
+            execute_strike_mode if execute_strike_mode in ("same", "daily_itm1") else "same"
+        )
         self._product_type = product_type
         self._carry_forward = bool(carry_forward)
         try:
@@ -154,6 +177,18 @@ class D1TrapSRBook(AbstractStrategyBook):
         self._last_spot_open: Optional[float] = None
         self._last_spot: Optional[float] = None   # live-updating, for monitoring_zones() display only
         self._selection_reason: Optional[str] = None
+        # strike_mode="fixed_period": cache survives reset_session() (NOT cleared
+        # daily) since the whole point is the strike stays fixed across many days
+        # within one period -- keyed by _period_key() so a new period recomputes.
+        self._period_strike_cache: Dict[tuple, tuple] = {}
+        # execute_strike_mode="daily_itm1": the SCAN strike (self._ce_strike/
+        # _pe_strike) only ever drives zone detection + entry/exit TIMING; these
+        # are the strike REAL orders actually get placed on, recomputed fresh
+        # every day off that day's own ATM +/- 1 real strike step, independent
+        # of whatever strike_mode picked for scanning.
+        self._exec_ce_strike: Optional[int] = None
+        self._exec_pe_strike: Optional[int] = None
+        self._execute_ltp: Dict[str, float] = {}   # "CE"/"PE" -> latest live LTP on the execute strike
         # At most ONE leg per side, but keep a list for shape-parity with
         # BearOnly's status()/persistence -- SRPingPongTracker itself already
         # enforces the one-position-at-a-time invariant per side per day.
@@ -290,6 +325,12 @@ class D1TrapSRBook(AbstractStrategyBook):
         self._day_done = False
         self._stop_for_day = False
         self._consecutive_entry_rejections = 0
+        # NOTE: self._period_strike_cache is deliberately NOT cleared here --
+        # strike_mode="fixed_period"'s whole point is holding the same strike
+        # across many days within one period; only a new period_key recomputes.
+        self._exec_ce_strike = None
+        self._exec_pe_strike = None
+        self._execute_ltp = {}
 
     # ── daily strike selection ──────────────────────────────────────────────
 
@@ -331,21 +372,107 @@ class D1TrapSRBook(AbstractStrategyBook):
         atm = round(spot_open / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
         return int(atm - self._itm_offset_pts), int(atm + self._itm_offset_pts)
 
+    def _period_key(self, d: date) -> tuple:
+        if self._underlying.upper() in _MONTHLY_EXPIRY_UNDERLYINGS:
+            return (d.year, d.month)
+        y, w, _ = d.isocalendar()
+        return (y, w)
+
+    async def _prev_period_hilo(self, today: date) -> tuple[Optional[float], Optional[float]]:
+        """Real spot high/low over the PREVIOUS period (calendar month for
+        monthly-expiry underlyings, ISO week for weekly-expiry ones)."""
+        if self._underlying.upper() in _MONTHLY_EXPIRY_UNDERLYINGS:
+            first_of_this_month = today.replace(day=1)
+            prev_end = first_of_this_month - timedelta(days=1)
+            prev_start = prev_end.replace(day=1)
+        else:
+            this_monday = today - timedelta(days=today.weekday())
+            prev_start = this_monday - timedelta(days=7)
+            prev_end = this_monday - timedelta(days=1)
+        if not self._feeder_token:
+            return None, None
+        spot_key = _upstox_key_for(self._underlying)
+        rows = await fetch_upstox_range_1m(spot_key, self._feeder_token, prev_start, prev_end)
+        if not rows:
+            return None, None
+        return min(r["low"] for r in rows), max(r["high"] for r in rows)
+
+    async def _fixed_period_strikes(self, spot_open: float) -> tuple[int, int]:
+        """strike_mode="fixed_period": anchor CE/PE to the PREVIOUS period's
+        real spot low/high and cache per period_key so the SAME strikes hold
+        across every day within the current period (not recomputed daily).
+        Falls back to daily-ATM if prev-period data can't be resolved (no
+        token, holiday-only range, etc.) rather than leaving strikes unset."""
+        today = self._today or datetime.now(IST).date()
+        period_key = self._period_key(today)
+        cached = self._period_strike_cache.get(period_key)
+        if cached is not None:
+            return cached
+        prev_lo, prev_hi = await self._prev_period_hilo(today)
+        if prev_lo is None or prev_hi is None:
+            logger.warning(
+                "D1TrapSR[%s]: strike_mode=fixed_period but could not resolve prev-period "
+                "high/low -- falling back to daily ATM for %s.", self._underlying, period_key,
+            )
+            return self._fixed_offset_strikes(spot_open)
+        ce = int(round(prev_lo / _ATM_ROUND_STEP) * _ATM_ROUND_STEP - self._itm_offset_pts)
+        pe = int(round(prev_hi / _ATM_ROUND_STEP) * _ATM_ROUND_STEP + self._itm_offset_pts)
+        self._period_strike_cache[period_key] = (ce, pe)
+        logger.info(
+            "D1TrapSR[%s]: fixed_period strikes for %s -- prev period low=%.2f high=%.2f -> CE=%d PE=%d",
+            self._underlying, period_key, prev_lo, prev_hi, ce, pe,
+        )
+        return ce, pe
+
+    async def _setup_execute_strikes(self, spot_open: float) -> None:
+        """execute_strike_mode="daily_itm1": REAL orders are placed on this
+        strike (today's own ATM +/- 1 real strike step), independent of the
+        SCAN strike driving zone detection/timing. Subscribes the feeder to
+        both legs so _option_tick_loop can track their live LTP -- paper mode
+        trusts whatever entry_price/exit_price the book passes in (it does
+        NOT look up real market data itself), so without this, a paper fill
+        would silently book the SCAN strike's price against the EXECUTE
+        strike's instrument -- a real mismatch, not just a display issue."""
+        atm = round(spot_open / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
+        self._exec_ce_strike = int(atm - self._strike_step)
+        self._exec_pe_strike = int(atm + self._strike_step)
+        self._execute_ltp = {}
+        today = self._today or datetime.now(IST).date()
+        expiry = REGISTRY.get_active_expiry_strict(self._underlying, today)
+        logger.info("D1TrapSR[%s]: execute strikes (daily 1-ITM, step=%d) CE=%d PE=%d",
+                    self._underlying, self._strike_step, self._exec_ce_strike, self._exec_pe_strike)
+        if expiry is None:
+            return
+        gf = getattr(self._bus, "_global_feeder", None)
+        for side, strike in (("CE", self._exec_ce_strike), ("PE", self._exec_pe_strike)):
+            key = REGISTRY.get_upstox_key(self._underlying, expiry, strike, side)
+            if key and gf is not None and hasattr(gf, "subscribe_tokens"):
+                asyncio.create_task(gf.subscribe_tokens([key]))
+
     async def _select_strikes_for_today(self, spot_open: float) -> None:
         try:
-            ce_strike, pe_strike = self._fixed_offset_strikes(spot_open)
+            if self._strike_mode == "fixed_period":
+                ce_strike, pe_strike = await self._fixed_period_strikes(spot_open)
+            else:
+                ce_strike, pe_strike = self._fixed_offset_strikes(spot_open)
             atm = round(spot_open / _ATM_ROUND_STEP) * _ATM_ROUND_STEP
             logger.info(
                 "D1TrapSR[%s]: spot_open=%.2f ATM=%d -> CE=%d PE=%d | "
-                "effective config: htf=%dm itm_offset=%dpt sr_tf=%dm exit_mode=%s",
+                "effective config: htf=%dm itm_offset=%dpt sr_tf=%dm exit_mode=%s strike_mode=%s "
+                "execute_strike_mode=%s",
                 self._underlying, spot_open, atm, ce_strike, pe_strike,
                 self._htf_minutes, self._itm_offset_pts, self._sr_tf_minutes, self._exit_mode,
+                self._strike_mode, self._execute_strike_mode,
             )
             self._ce_strike, self._pe_strike = ce_strike, pe_strike
             self._selection_reason = (
                 f"ATM={atm} (spot_open={spot_open:.0f}) -> fixed-offset: "
                 f"CE=ATM-{self._itm_offset_pts}, PE=ATM+{self._itm_offset_pts}"
+                if self._strike_mode == "daily_atm" else
+                f"fixed_period ({self._period_key(self._today or datetime.now(IST).date())}): CE={ce_strike} PE={pe_strike}"
             )
+            if self._execute_strike_mode == "daily_itm1":
+                await self._setup_execute_strikes(spot_open)
             self._restore_positions()
 
             today = self._today or datetime.now(IST).date()
@@ -403,6 +530,13 @@ class D1TrapSRBook(AbstractStrategyBook):
                 continue
             if not isinstance(ev, OptionTick) or not ev.ltp:
                 continue
+            if self._execute_strike_mode == "daily_itm1":
+                ev_strike = int(getattr(ev, "strike", 0) or 0)
+                ev_side = str(getattr(ev, "option_type", "")).upper()
+                if self._exec_ce_strike and ev_strike == self._exec_ce_strike and ev_side == "CE":
+                    self._execute_ltp["CE"] = ev.ltp
+                elif self._exec_pe_strike and ev_strike == self._exec_pe_strike and ev_side == "PE":
+                    self._execute_ltp["PE"] = ev.ltp
             side = self._match_side(ev)
             if side is None:
                 continue
@@ -470,9 +604,22 @@ class D1TrapSRBook(AbstractStrategyBook):
                             self._underlying, side, ev["entry_premium"])
             return
         qty = self._lot_size * self._lot_multiplier
+        scan_strike = self._ce_strike if side == "CE" else self._pe_strike
+        strike, entry_price = scan_strike, ev["entry_premium"]
+        if self._execute_strike_mode == "daily_itm1":
+            exec_strike = self._exec_ce_strike if side == "CE" else self._exec_pe_strike
+            real_ltp = self._execute_ltp.get(side)
+            if exec_strike is None or real_ltp is None:
+                logger.warning(
+                    "D1TrapSR[%s]: %s entry signal fired on scan strike %d but execute strike/live "
+                    "LTP not ready (exec_strike=%s ltp=%s) -- skipping this entry rather than trading "
+                    "a stale/wrong price.", self._underlying, side, scan_strike, exec_strike, real_ltp,
+                )
+                return
+            strike, entry_price = exec_strike, real_ltp
         pos = dict(
-            side=side, strike=self._ce_strike if side == "CE" else self._pe_strike,
-            entry_price=ev["entry_premium"], initial_sl=ev["initial_sl"], entry_ts=ev["entry_ts"],
+            side=side, strike=strike, scan_strike=scan_strike,
+            entry_price=entry_price, initial_sl=ev["initial_sl"], entry_ts=ev["entry_ts"],
             qty=qty, order_reason="sr_ping_pong_entry",
         )
         self._event_counter += 1
@@ -500,7 +647,22 @@ class D1TrapSRBook(AbstractStrategyBook):
         pos = next((p for p in self._positions if p["side"] == side and not p.get("_closing")), None)
         if pos is None:
             return
-        await self._square_off_leg(pos, ev["reason"], ev["exit_price"])
+        exit_price = ev["exit_price"]
+        if self._execute_strike_mode == "daily_itm1":
+            real_ltp = self._execute_ltp.get(side)
+            if real_ltp is not None:
+                exit_price = real_ltp
+            else:
+                # Exits must always proceed (an open real position needs closing)
+                # -- fall back to the scan-strike exit price rather than leaving
+                # the leg open, but log loudly since this means the booked P&L
+                # won't reflect the actually-executed strike's real price.
+                logger.warning(
+                    "D1TrapSR[%s]: %s exit signal fired but execute strike live LTP unavailable -- "
+                    "using scan-strike exit price %.2f as fallback so the real leg still closes.",
+                    self._underlying, side, exit_price,
+                )
+        await self._square_off_leg(pos, ev["reason"], exit_price)
 
     async def _square_off_leg(self, pos: dict, reason: str, exit_price: float) -> None:
         """Confirm-then-finalize EXIT -- mirrors bear_only_book.py's
@@ -605,7 +767,13 @@ class D1TrapSRBook(AbstractStrategyBook):
         restored = []
         for d in (data.get("legs") or []):
             side = d.get("side")
-            expected_strike = self._ce_strike if side == "CE" else self._pe_strike
+            # A stored leg's strike is whatever REAL orders trade on -- the
+            # execute strike when execute_strike_mode="daily_itm1" is active
+            # (recomputed same-day so this matches), else the scan strike.
+            if self._execute_strike_mode == "daily_itm1":
+                expected_strike = self._exec_ce_strike if side == "CE" else self._exec_pe_strike
+            else:
+                expected_strike = self._ce_strike if side == "CE" else self._pe_strike
             if d.get("strike") != expected_strike:
                 logger.warning("D1TrapSR[%s]: discarding stored %s leg -- strike %s doesn't match "
                                 "today's selected %s.", self._underlying, side, d.get("strike"), expected_strike)
