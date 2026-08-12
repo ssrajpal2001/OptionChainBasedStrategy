@@ -172,7 +172,8 @@ def _bars_to_df(bars: List[_Bar]):
 
 
 def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lot_size: int,
-                     exit_mode: str = "raw", sl_buffer_pct: float = None, gate_mode: str = "touch") -> dict:
+                     exit_mode: str = "raw", sl_buffer_pct: float = None, gate_mode: str = "touch",
+                     min_breach_buffer_pct: float = 0.0, min_r2_bucket_count: int = 0) -> dict:
     """One S&R-timeframe variant for one (side, day) -- thin wrapper driving the shared
     strategies.d1_trap_option.support_resistance.SRPingPongTracker bar-by-bar, so this
     backtest and the live D1TrapSRBook (strategies/d1_trap_option/sr_book.py) can never
@@ -193,7 +194,9 @@ def _run_sr_variant(zones: List[dict], today_1m: List[_Bar], tf_minutes: int, lo
     per-bucket debug state, dropped when the loop moved into the tracker -- use
     the tracker directly if per-candle trace output is needed again)."""
     kwargs = {} if sl_buffer_pct is None else {"sl_buffer_pct": sl_buffer_pct}
-    tracker = SRPingPongTracker(zones, tf_minutes, lot_size, exit_mode=exit_mode, gate_mode=gate_mode, **kwargs)
+    tracker = SRPingPongTracker(zones, tf_minutes, lot_size, exit_mode=exit_mode, gate_mode=gate_mode,
+                                 min_breach_buffer_pct=min_breach_buffer_pct,
+                                 min_r2_bucket_count=min_r2_bucket_count, **kwargs)
     for bar in today_1m:
         ev = tracker.on_bar(bar)
         if ev and ev["type"] == "exit":

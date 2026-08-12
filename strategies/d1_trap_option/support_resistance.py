@@ -408,12 +408,29 @@ class SRPingPongTracker:
     "entry_premium", "zone_ts"})."""
 
     def __init__(self, zones: List[dict], tf_minutes: int, lot_size: int, exit_mode: str = "raw",
-                 sl_buffer_pct: float = _SL_BUFFER_PCT, gate_mode: str = "touch"):
+                 sl_buffer_pct: float = _SL_BUFFER_PCT, gate_mode: str = "touch",
+                 min_breach_buffer_pct: float = 0.0, min_r2_bucket_count: int = 0):
         self.zones = zones
         self.tf_minutes = tf_minutes
         self.lot_size = lot_size
         self.exit_mode = exit_mode
         self.sl_buffer_pct = sl_buffer_pct   # only read by exit_mode="buffered"
+        # 2026-08-12, high-win-rate/PF-weighted optimization pass (direct user request:
+        # "85-95% accuracy, fine with fewer trades"). Both default to 0 (byte-identical
+        # to the validated live behavior) -- opt-in selectivity filters ONLY, never
+        # touching the underlying S&R state machine itself (that stays the proven ground
+        # truth). A rejected breach does NOT void the zone or roll back calc's internal
+        # phase -- it just skips firing an order for that specific transition; the zone
+        # keeps being watched for a later, stronger setup (or gets voided normally if S1
+        # undercuts zone_lo).
+        #   min_breach_buffer_pct: require the R1-breaching bar's high to clear the live
+        #     R1 level by this fraction (not a bare tick-over) -- filters marginal breaks.
+        #   min_r2_bucket_count: require the R2 leg to have persisted for at least this
+        #     many TF-buckets before its breakout counts as a valid entry -- filters
+        #     one-bar-wonder "confirmations" that are really still noise.
+        self.min_breach_buffer_pct = min_breach_buffer_pct
+        self.min_r2_bucket_count = min_r2_bucket_count
+        self._r2_bucket_counts: dict = {}   # zone lock_ts -> consecutive buckets seen in R2_TRACKING
         # 2026-08-09, direct user question ("wait for MTF/LTF trap or immediately
         # start S&R?"): gate_mode controls WHEN a zone starts being fed into its own
         # SupportResistanceCalculator.
@@ -518,6 +535,18 @@ class SRPingPongTracker:
                         "close": tf_bar["close"], "phase_before": phase_before, "phase_after": phase_after,
                         "s1_low": s1_low, "r1_high": st["sr_levels"]["R1"]["high"],
                     })
+                    # min_r2_bucket_count bookkeeping -- count consecutive TF-buckets this
+                    # zone has spent in R2_TRACKING (reset whenever it leaves that phase).
+                    # Snapshot the count BEFORE updating it: the very bucket whose high
+                    # breaches R1 is itself the one that flips phase_after away from
+                    # R2_TRACKING, so updating first would reset the count to 0 right
+                    # before the gate below ever gets to check it.
+                    r2_bucket_count_before = self._r2_bucket_counts.get(zone["lock_ts"], 0)
+                    if phase_after == "R2_TRACKING":
+                        self._r2_bucket_counts[zone["lock_ts"]] = r2_bucket_count_before + 1
+                    elif phase_after != "S2_TRACKING":
+                        self._r2_bucket_counts[zone["lock_ts"]] = 0
+
                     if self.position is None:
                         if s1_low < zone["zone_lo"]:
                             entry["void"] = True
@@ -526,16 +555,21 @@ class SRPingPongTracker:
                                                  "lock_ts": zone["lock_ts"], "voided_at": tf_bar["timestamp"],
                                                  "s1_low": s1_low})
                         elif phase_before == "R2_TRACKING" and phase_after == "R1_TRACKING":
-                            breach_bar = next((b for b in bucket_bars if b.high >= live_r1_high), bucket_bars[0])
-                            entry_premium = float(live_r1_high)
-                            entry["trace"][-1]["breach_ts"] = breach_bar.timestamp
-                            entry["trace"][-1]["breach_price"] = entry_premium
-                            self.position = {"zone_ts": zone["lock_ts"], "entry_ts": breach_bar.timestamp,
-                                              "entry_premium": entry_premium, "initial_sl": s1_low,
-                                              "triggered": False}
-                            pending_entry_event = dict(type="entry", entry_ts=breach_bar.timestamp,
-                                                        entry_premium=entry_premium, zone_ts=zone["lock_ts"],
-                                                        initial_sl=s1_low)
+                            breach_ok = tf_bar["high"] >= live_r1_high * (1 + self.min_breach_buffer_pct)
+                            r2_bars_ok = r2_bucket_count_before >= self.min_r2_bucket_count
+                            if breach_ok and r2_bars_ok:
+                                breach_bar = next((b for b in bucket_bars if b.high >= live_r1_high), bucket_bars[0])
+                                entry_premium = float(live_r1_high)
+                                entry["trace"][-1]["breach_ts"] = breach_bar.timestamp
+                                entry["trace"][-1]["breach_price"] = entry_premium
+                                self.position = {"zone_ts": zone["lock_ts"], "entry_ts": breach_bar.timestamp,
+                                                  "entry_premium": entry_premium, "initial_sl": s1_low,
+                                                  "triggered": False}
+                                pending_entry_event = dict(type="entry", entry_ts=breach_bar.timestamp,
+                                                            entry_premium=entry_premium, zone_ts=zone["lock_ts"],
+                                                            initial_sl=s1_low)
+                            else:
+                                entry["trace"][-1]["breach_rejected"] = True
                     elif is_position_zone and self.exit_mode == "bucket_close":
                         if tf_bar["close"] <= s1_low:
                             return self._exit(f"sl_bucket_close@{s1_low:.2f}", tf_bar["close"], tf_bar["timestamp"])
