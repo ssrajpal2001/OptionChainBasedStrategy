@@ -13,6 +13,7 @@ its own client/binding so the bridge routes only to that broker.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Dict
 
@@ -38,12 +39,12 @@ class StraddleBookManager(StrategyBookManager):
             if hasattr(book, "set_delta_chain_manager"):
                 book.set_delta_chain_manager(delta_chain)
 
-    def _wanted(self) -> Dict[tuple, int]:
-        """Map of (client,binding,underlying) → lot_multiplier for every sell_straddle
-        deployment that is RUNNING (is_running=1). Single JOIN query — O(1) regardless
-        of client count (replaces N+1 per-client loop).
+    def _wanted(self) -> Dict[tuple, dict]:
+        """Map of (client,binding,underlying) → {"lots", "shadow_on_reject"} for every
+        sell_straddle deployment that is RUNNING (is_running=1). Single JOIN query —
+        O(1) regardless of client count (replaces N+1 per-client loop).
         """
-        wanted: Dict[tuple, int] = {}
+        wanted: Dict[tuple, dict] = {}
         rows = self._db.get_running_straddle_deployments_sync()
         for d in rows:
             cid = d.get("client_id", "")
@@ -61,10 +62,20 @@ class StraddleBookManager(StrategyBookManager):
                 lots = max(1, int(round(float(d.get("lot_multiplier", 1) or 1))))
             except Exception:
                 lots = 1
-            wanted[(cid, bid, und)] = lots
+            # 2026-08-12, direct request, opt-in per deployment: when set, a broker
+            # rejection falls back to a local paper-style fill instead of aborting
+            # the position — see SellStraddleStrategy.__init__'s shadow_on_reject
+            # docstring and OrderPlacementFailed handling in straddle_bridge.py.
+            shadow = False
+            try:
+                params = json.loads(d.get("strategy_params") or "{}")
+                shadow = bool(params.get("shadow_on_reject", False))
+            except Exception:
+                pass
+            wanted[(cid, bid, und)] = {"lots": lots, "shadow_on_reject": shadow}
         return wanted
 
-    def _spawn_book(self, key, lots):
+    def _spawn_book(self, key, value):
         # Avoid circular import with strategies.sell_straddle.__init__.py at module
         # load time.  Tests can monkeypatch SellStraddleStrategy directly.
         cls = SellStraddleStrategy
@@ -73,7 +84,8 @@ class StraddleBookManager(StrategyBookManager):
         cid, bid, und = key
         book = cls(
             self._bus, self._cfg, underlying=und,
-            lot_multiplier=lots, client_id=cid, binding_id=bid,
+            lot_multiplier=value["lots"], client_id=cid, binding_id=bid,
+            shadow_on_reject=value.get("shadow_on_reject", False),
         )
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
@@ -83,17 +95,20 @@ class StraddleBookManager(StrategyBookManager):
         self._enable_chain(und)
         return book
 
-    def _should_respawn(self, book, lots):
-        return getattr(book, "_lot_multiplier", 1) != lots
+    def _should_respawn(self, book, value):
+        return (getattr(book, "_lot_multiplier", 1) != value["lots"]
+                or getattr(book, "_shadow_on_reject", False) != value.get("shadow_on_reject", False))
 
-    def _log_spawned(self, key, lots):
-        logger.info("StraddleBookManager: spawned book %s/%s/%s (lots=%d)", *key, lots)
+    def _log_spawned(self, key, value):
+        logger.info("StraddleBookManager: spawned book %s/%s/%s (lots=%d shadow_on_reject=%s)",
+                     *key, value["lots"], value.get("shadow_on_reject", False))
 
     def _log_stopped(self, key):
         logger.info("StraddleBookManager: stopped book %s/%s/%s", *key)
 
-    def _log_respawned(self, key, lots):
-        logger.info("StraddleBookManager: re-spawned %s/%s/%s lots→%d", *key, lots)
+    def _log_respawned(self, key, value):
+        logger.info("StraddleBookManager: re-spawned %s/%s/%s lots→%d shadow_on_reject=%s",
+                     *key, value["lots"], value.get("shadow_on_reject", False))
 
     def _log_reconcile(self, wanted, current):
         # Log the reconcile snapshot at INFO only when the wanted set changes so

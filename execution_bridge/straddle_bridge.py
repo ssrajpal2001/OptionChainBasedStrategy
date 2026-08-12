@@ -19,6 +19,7 @@ Log files:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -572,8 +573,25 @@ class StraddleExecutionBridge:
                     # consistent with the simulation.
                     await self._live_fill(ev, client.client_id, binding_id, broker, paper=True)
                 else:
+                    # 2026-08-12: opt-in per deployment (strategy_params {"shadow_on_reject": true})
+                    # -- looked up from the SAME `deployments` list already fetched above, no extra
+                    # DB query. Only ever affects the OrderPlacementFailed fallback inside
+                    # _live_fill (see its docstring) -- a genuinely-successful live order is
+                    # completely unaffected by this flag.
+                    _shadow = False
+                    for _d in deployments:
+                        if (str(_d.get("binding_id", "")) == binding_id
+                                and str(_d.get("strategy_name", "")).lower() == "sell_straddle"
+                                and str(_d.get("underlying", "") or _d.get("assigned_instrument", "")).upper()
+                                    == ev.underlying.upper()):
+                            try:
+                                _shadow = bool(json.loads(_d.get("strategy_params") or "{}").get("shadow_on_reject", False))
+                            except Exception:
+                                _shadow = False
+                            break
                     # LIVE: real broker order + real fill, order_id tracked for close-via-order-id.
-                    await self._live_fill(ev, client.client_id, binding_id, broker, paper=False)
+                    await self._live_fill(ev, client.client_id, binding_id, broker, paper=False,
+                                           shadow_on_reject=_shadow)
                 routed += 1
 
         if routed == 0:
@@ -808,6 +826,7 @@ class StraddleExecutionBridge:
         binding_id: str,
         broker,
         paper:      bool = False,
+        shadow_on_reject: bool = False,
     ) -> None:
         """Place actual SELL/BUY orders via broker API.
 
@@ -1073,7 +1092,22 @@ class StraddleExecutionBridge:
             )
             self._trade_log.log_event(client_id, binding_id,
                 f"{ev.action} {ev.underlying} PLACEMENT FAILED for at least one leg after retries")
-            if ev.action == "EXIT":
+            if ev.action == "EXIT" and shadow_on_reject and not any(_fq > 0 for _ot, _px, _fq, _sym in _results):
+                # Mirror of the ENTRY shadow branch below -- a shadow position (entered via
+                # _paper_fill after a rejection) still routes through this SAME live path on
+                # exit, since the binding's own trading_mode is genuinely "live" and has no
+                # memory of any individual position's paper_mode. Without this, a shadow
+                # position could never close -- it would sit "open" forever, retrying an exit
+                # against a broker that will never accept it. Same all-or-nothing safety
+                # check as ENTRY: only when no leg got any real fill.
+                logger.warning(
+                    "[LIVE] %s EXIT — shadow_on_reject fallback: broker rejected, no real fill "
+                    "on either leg, closing the SIMULATED position at strategy LTP. client=%s",
+                    ev.underlying, client_id,
+                )
+                await self._paper_fill(ev, client_id, binding_id, broker)
+                return
+            elif ev.action == "EXIT":
                 abort_ev = StraddleFillEvent(
                     action="EXIT", underlying=ev.underlying, atm=ev.atm,
                     ce_strike=ev.ce_strike, pe_strike=ev.pe_strike, ce_fill=0.0, pe_fill=0.0,
@@ -1091,6 +1125,25 @@ class StraddleExecutionBridge:
                     client_id=client_id, binding_id=binding_id, event_id=ev.event_id,
                     paper_mode=paper, legs=ev.legs, entry_aborted=True, placement_failed=True)
                 await self._bus.publish(Topic.ORDER_FILL, abort_ev)
+                return
+            elif shadow_on_reject and not any(_fq > 0 for _ot, _px, _fq, _sym in _results):
+                # 2026-08-12, direct request, opt-in per deployment: order never reached the
+                # broker AND -- critically -- NO leg got any real fill at all (a clean, total
+                # failure, e.g. today's real SENSEX BFO-segment restriction, which blocks the
+                # whole exchange segment so both legs fail identically). Fall back to the SAME
+                # _paper_fill() a genuinely paper-mode deployment already uses -- not a
+                # hand-rolled event -- so the position runs full real exit logic (SL/TSL/Day%/
+                # etc.) against a fill that never touched the broker, tagged paper_mode=True,
+                # never confusable with a real fill. If ANY leg DID get a real fill
+                # (asymmetric), this branch is skipped entirely and control falls through to
+                # the existing atomicity guard below, which flattens the real leg(s) and
+                # aborts -- never silently paired with a fake one.
+                logger.warning(
+                    "[LIVE] %s ENTRY — shadow_on_reject fallback: broker rejected, no real fill "
+                    "on either leg, booking a SIMULATED position at strategy LTP. client=%s",
+                    ev.underlying, client_id,
+                )
+                await self._paper_fill(ev, client_id, binding_id, broker)
                 return
             # ENTRY + live: fall through to the atomicity guard below, which will see
             # filled_qty_by_leg short of `qty` for the failed leg(s) and flatten+abort with

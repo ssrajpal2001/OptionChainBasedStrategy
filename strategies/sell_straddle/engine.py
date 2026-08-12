@@ -65,6 +65,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         lot_multiplier: int = 1,
         client_id: str = "",
         binding_id: str = "",
+        shadow_on_reject: bool = False,
     ) -> None:
         if cfg is None:
             from config.global_config import GlobalConfig
@@ -73,6 +74,18 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         PositionUpdateMixin.__init__(self, bus, client_id, binding_id, "sell_straddle", underlying)
         self._lot_multiplier = lot_multiplier
         self._client_db = None
+        # 2026-08-12, direct request, opt-in per deployment (strategy_params
+        # {"shadow_on_reject": true}): when the broker rejects an order this
+        # strategy would otherwise abort the position entirely (see
+        # OrderPlacementFailed handling in straddle_bridge.py). With this flag
+        # set, the bridge instead falls back to a local paper-style fill --
+        # SAME code path a genuinely paper-mode deployment already uses, just
+        # triggered by a rejection instead of the binding's own trading_mode --
+        # so the position runs full real exit logic (SL/TSL/Day%/etc.)
+        # against a fill that never actually reached the broker. Never
+        # confused with a real position: paper_mode=True on every fill this
+        # produces, same flag the UI already uses to badge paper trades.
+        self._shadow_on_reject = shadow_on_reject
 
         self._position: Optional[StraddlePosition] = None
         self._trades_today: int = 0
