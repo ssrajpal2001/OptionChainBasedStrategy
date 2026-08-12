@@ -688,6 +688,7 @@ class D1TrapSRBook(AbstractStrategyBook):
                     "direction": "LONG" if side == "CE" else "SHORT",
                     "option_side": side,
                     "strike": series.strike,
+                    "ltp": round(side_ltp, 2) if side_ltp else None,
                     "zone_lo": round(z["zone_lo"], 2),
                     "zone_hi": round(z["zone_hi"], 2),
                     "state": "MONITORING" if z["lock_ts"] in touched_lock_ts else "WAITING",
