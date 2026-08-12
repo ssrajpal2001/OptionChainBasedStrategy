@@ -660,6 +660,7 @@ class D1TrapSRBook(AbstractStrategyBook):
         not here, by design (see this file's own module docstring)."""
         spot = self._last_spot
         zones = []
+        by_side: Dict[str, list] = {"CE": [], "PE": []}
         for side in ("CE", "PE"):
             series = self._series.get(side)
             tracker = self._sr_trackers.get(side)
@@ -678,7 +679,7 @@ class D1TrapSRBook(AbstractStrategyBook):
                 if side_ltp:
                     mid = (z["zone_lo"] + z["zone_hi"]) / 2
                     dist = round((side_ltp - mid) / mid * 100, 2) if mid else None
-                zones.append({
+                zd = {
                     # "direction" kept as LONG/SHORT to match the WATCHLIST TRACKER UI's
                     # existing vocabulary (built for fno_sr_book.py's spot-bias zones) --
                     # CE zone -> LONG-biased trade, PE zone -> SHORT-biased trade, same
@@ -694,15 +695,33 @@ class D1TrapSRBook(AbstractStrategyBook):
                     "state": "MONITORING" if z["lock_ts"] in touched_lock_ts else "WAITING",
                     "dist_pct": dist,
                     "ref_ts": z["lock_ts"].strftime("%Y-%m-%d %H:%M") if z.get("lock_ts") else None,
-                })
-        zones.sort(key=lambda zz: (0 if zz["state"] == "MONITORING" else 1,
-                                    abs(zz["dist_pct"]) if zz["dist_pct"] is not None else 999))
+                }
+                zones.append(zd)
+                by_side[side].append(zd)
+
+        def _rank(zz: dict) -> tuple:
+            return (0 if zz["state"] == "MONITORING" else 1,
+                    abs(zz["dist_pct"]) if zz["dist_pct"] is not None else 999)
+
+        zones.sort(key=_rank)
+        for side in by_side:
+            by_side[side].sort(key=_rank)
+
+        # 2026-08-12, direct request: a mixed top-10 across both sides can crowd one side
+        # out entirely (e.g. 10 CE zones outranking every PE zone) -- ce_zone/pe_zone
+        # guarantee the UI can always show each side's own best zone side by side, not
+        # just whichever side happened to win the combined ranking. `zones` (mixed,
+        # capped 10) kept unchanged for anything else already reading it.
         return {
             "underlying": self._underlying,
             "client_id": self._client_id,
             "binding_id": self._binding_id,
             "spot": round(spot, 2) if spot else None,
             "zones": zones[:10],
+            "ce_zone": by_side["CE"][0] if by_side["CE"] else None,
+            "pe_zone": by_side["PE"][0] if by_side["PE"] else None,
+            "ce_zone_count": len(by_side["CE"]),
+            "pe_zone_count": len(by_side["PE"]),
             "total_zones": sum(len(s.zones) for s in self._series.values()),
             "pending": None,
             "position": bool(self._positions),

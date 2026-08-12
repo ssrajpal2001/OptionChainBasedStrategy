@@ -7811,13 +7811,58 @@ function amoTest() {
                         <span class="font-mono text-xs font-bold" style="color:var(--t-cyan)"
                               x-text="dep.strategy_name==='d1_trap_sr' ? 'ZONE TRACKER' : 'WATCHLIST TRACKER'"></span>
                         <span class="ml-2 font-mono text-xs" style="color:var(--t-muted)"
-                              x-text="dep.strategy_name==='d1_trap_sr' ? ((_mbooks[0]&&_mbooks[0].zones||[]).length+' zones') : _mbooks.length+' stocks'"></span>
+                              x-text="dep.strategy_name==='d1_trap_sr' ? ((_mbooks[0]&&_mbooks[0].ce_zone_count||0)+' CE / '+(_mbooks[0]&&_mbooks[0].pe_zone_count||0)+' PE zones') : _mbooks.length+' stocks'"></span>
                         <button @click="_load()" class="ml-auto font-mono text-xs px-2" style="color:var(--t-muted)">⟳</button>
                       </div>
                       <div x-show="_mbooks.length===0" class="px-3 py-2 font-mono text-xs" style="color:var(--t-muted)">
                         Loading…
                       </div>
-                      <table x-show="_mbooks.length>0" class="w-full font-mono text-xs border-collapse">
+
+                      <!-- d1_trap_sr: CE and PE side by side -- a single mixed top-zone list
+                           can crowd one side out entirely if the other side's zones all rank
+                           higher, so this reads ce_zone/pe_zone directly (each side's own
+                           best zone, always present independently of the other side). -->
+                      <template x-if="dep.strategy_name==='d1_trap_sr' && _mbooks.length>0">
+                        <div class="grid grid-cols-2 gap-2 p-2"
+                             x-data="{ get _bk(){ return _mbooks[0]||{}; } }">
+                          <template x-for="side in ['ce_zone','pe_zone']" :key="side">
+                            <div class="rounded p-2" style="background:rgba(0,0,0,0.15)"
+                                 x-data="{ get _z(){ return _bk[side]||null; } }">
+                              <div class="flex items-center justify-between mb-1">
+                                <span class="font-mono text-xs font-bold"
+                                      :style="side==='ce_zone'?'color:var(--t-green)':'color:var(--t-red)'"
+                                      x-text="(side==='ce_zone'?'CE ':'PE ')+(_z&&_z.strike?_z.strike:(side==='ce_zone'?(_bk.ce_zone_count===0?'no zones':''):(_bk.pe_zone_count===0?'no zones':'')))"></span>
+                                <span class="px-1 rounded text-xs font-bold"
+                                      :style="{
+                                        'MONITORING': 'background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)',
+                                        'WAITING':    'background:rgba(100,116,139,0.1);color:var(--t-muted)',
+                                      }[_z&&_z.state]||'color:var(--t-dim)'"
+                                      x-text="_z ? _z.state : '—'"></span>
+                              </div>
+                              <div class="flex justify-between font-mono text-xs mb-0.5">
+                                <span style="color:var(--t-muted)">LTP</span>
+                                <span style="color:var(--t-cyan)" x-text="_z&&_z.ltp!=null ? _z.ltp.toFixed(2) : '—'"></span>
+                              </div>
+                              <div class="flex justify-between font-mono text-xs mb-0.5">
+                                <span style="color:var(--t-muted)">Zone</span>
+                                <span style="color:var(--t-text)"
+                                      x-text="_z ? _z.zone_lo.toLocaleString('en-IN')+' – '+_z.zone_hi.toLocaleString('en-IN') : '—'"></span>
+                              </div>
+                              <div class="flex justify-between font-mono text-xs mb-0.5">
+                                <span style="color:var(--t-muted)">Dist%</span>
+                                <span :style="_z&&_z.dist_pct!==null ? (Math.abs(_z.dist_pct)<2?'color:var(--t-amber)':'color:var(--t-muted)') : 'color:var(--t-dim)'"
+                                      x-text="_z&&_z.dist_pct!==null ? (_z.dist_pct>0?'+':'')+_z.dist_pct.toFixed(1)+'%' : '—'"></span>
+                              </div>
+                              <div class="flex justify-between font-mono text-xs">
+                                <span style="color:var(--t-muted)">Zone Date</span>
+                                <span style="color:var(--t-muted)" x-text="_z&&_z.ref_ts ? _z.ref_ts.slice(0,10) : '—'"></span>
+                              </div>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+
+                      <table x-show="dep.strategy_name!=='d1_trap_sr' && _mbooks.length>0" class="w-full font-mono text-xs border-collapse">
                         <thead>
                           <tr style="background:var(--t-surface);color:var(--t-muted)">
                             <th class="text-left px-2 py-1">Symbol</th>
