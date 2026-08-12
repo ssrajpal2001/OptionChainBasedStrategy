@@ -321,3 +321,97 @@ async def test_exit_publishes_exit_failed_fill_when_broker_unresolved_live(monke
     assert topic == Topic.D1_TRAP_ORDER_FILL
     assert fill.exit_failed is True
     assert fill.event_id == ev.event_id
+
+
+# ── 2026-08-12: real live-fill success path, previously never covered ────────
+# Every test above only exercises abort/reject/no-route paths, which all
+# short-circuit before OrderRequest is ever constructed. That gap let a real
+# bug ship for 7 days (commit 85f9ddb, 2026-08-05) undetected by a fully
+# green suite: OrderRequest(symbol=...) -- the dataclass field is actually
+# broker_symbol, so EVERY live order crashed with TypeError before
+# broker.place_order() was ever called (confirmed live in production on
+# BANKNIFTY D1TrapSR 2026-08-12 -- entry + both exit attempts all raised
+# this). This test drives _handle() all the way through a live mode="live"
+# ENTRY with a broker that actually resolves and fills, so the bug is back
+# in scope and would fail loudly if it regressed.
+
+
+@pytest.mark.asyncio
+async def test_live_fill_success_reaches_broker_and_publishes_real_fill(monkeypatch):
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge, D1TrapFillEvent
+    from execution_bridge.base_broker import OrderRequest
+
+    class _FakeDB:
+        def get_bindings_safe_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "trading_mode": "live",
+                "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": True,
+            }]
+
+        def get_deployments_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "strategy_name": "d1_trap_bear_only",
+                "underlying": "NIFTY",
+                "is_running": 1,
+            }]
+
+    class _FakeRouter:
+        _brokers = {}
+        _client_db = _FakeDB()
+
+    captured = {}
+
+    class _FakeFill:
+        avg_price = 91.5
+
+    class _FakeBroker:
+        provider = "zerodha"
+
+        async def place_order(self, req):
+            assert isinstance(req, OrderRequest)
+            captured["req"] = req
+            return "ORDER123"
+
+        async def get_order_status(self, order_id):
+            assert order_id == "ORDER123"
+            return _FakeFill()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return _FakeBroker()
+    monkeypatch.setattr(
+        "execution_bridge.broker_resolve.resolve_broker_or_alert", _fake_resolve,
+    )
+
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+
+    bus = _CapturingBus()
+    bridge = D1TrapExecutionBridge.__new__(D1TrapExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter()
+    bridge._trade_log = _FakeTradeLog()
+    bridge._resolve_symbol = lambda ev, broker: "NIFTY24AUG24600PE"
+
+    class _BuyEv(_Ev):
+        action = "BUY"
+        event_id = "NIFTY_PE24600_ENTRY_1"
+
+    ev = _BuyEv()
+    await bridge._handle(ev)  # must not raise -- bug #1 raised TypeError here
+
+    # Regression guard: OrderRequest was actually constructed and reached
+    # broker.place_order() with the field the dataclass really has.
+    assert captured["req"].broker_symbol == "NIFTY24AUG24600PE"
+
+    assert len(bus.published) == 1
+    topic, fill = bus.published[0]
+    assert topic == Topic.D1_TRAP_ORDER_FILL
+    assert isinstance(fill, D1TrapFillEvent)
+    assert fill.paper_mode is False
+    assert fill.fill_price == 91.5
+    assert fill.symbol == "NIFTY24AUG24600PE"
