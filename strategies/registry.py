@@ -14,6 +14,7 @@ from strategies.fno_positional import FnOPositionalBookManager
 from strategies.hourly_breakout import HourlyBreakoutBookManager
 from strategies.d1_trap_option import D1TrapOptionBookManager
 from strategies.fvg import FVGBookManager
+from strategies.oi_flow import OIFlowBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -44,6 +45,13 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "fvg": {
         "manager_class": FVGBookManager,
+        "per_binding": True,
+    },
+    # 2026-08-12: fully standalone -- shares no runtime infra (Topics,
+    # events, bridge, book manager) with any other strategy above. See
+    # strategies/oi_flow/__init__.py.
+    "oi_flow": {
+        "manager_class": OIFlowBookManager,
         "per_binding": True,
     },
 }

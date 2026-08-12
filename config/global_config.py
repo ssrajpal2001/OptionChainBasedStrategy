@@ -209,6 +209,10 @@ class Topic:
     EQUITY_TICK           = "equity_tick"            # FnO stock equity spot ticks (Fyers feed)
     FVG_ORDER_REQUEST     = "fvg_order_request"      # Fair Value Gap strategy orders (fvg_bridge.py)
     FVG_ORDER_FILL        = "fvg_order_fill"         # Fair Value Gap fill confirmations
+    OI_FLOW_ORDER_REQUEST = "oi_flow_order_request"  # OI-Flow Pre-Breakout strategy orders (oi_flow_bridge.py)
+    OI_FLOW_ORDER_FILL    = "oi_flow_order_fill"     # OI-Flow Pre-Breakout fill confirmations -- fully
+                                                      # standalone strategy, own Topics by design (shares
+                                                      # no runtime infra with D1Trap/FVG/SellStraddle)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

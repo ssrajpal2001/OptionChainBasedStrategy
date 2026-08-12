@@ -2,13 +2,14 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-08-03):** This project is **ONLY** working on three strategies:
+> **CURRENT FOCUS (2026-08-12):** This project is **ONLY** working on four strategies:
 > 1. **SellStraddle** — theta-decay option seller (mature, live in production)
 > 2. **D1 Trap FnO/Index** — zone-based option buyer (active development)
 > 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, entering paper trading; see "FVG Strategy" section below)
+> 4. **OI-Flow Pre-Breakout** — OI-divergence option buyer (new 2026-08-12, built as a **fully standalone 4th strategy pipeline** — own package, own Topics, own execution bridge, own book manager; shares zero runtime infrastructure with strategies 1-3. Not yet deployed even in paper mode — see "OI-Flow Pre-Breakout Strategy" section below.)
 >
 > Do NOT suggest, implement, or discuss any other strategies. All new work belongs to
-> one of these three. When starting a new session, read the D1 Trap and FVG sections below first.
+> one of these four. When starting a new session, read the D1 Trap, FVG, and OI-Flow sections below first.
 
 ---
 
@@ -492,6 +493,96 @@ TSL tiers, stagnation window, entry filters, expiry selection) before paper
 deployment. Dashboard deploy form (`monitor.html`) exposes HTF/LTF/direction_mode;
 TSL/expiry params are code-defaulted (override via raw `strategy_params` JSON if
 needed). Ready for paper trading — see "Launch Commands" at the top of this file.
+
+---
+
+### OI-Flow Pre-Breakout Strategy (`strategies/oi_flow/`)
+
+Smart-money-flow option **buyer** strategy for BANKNIFTY. Built 2026-08-12 from a
+direct user request to integrate Open Interest (OI) analysis with the price-action
+skill the user already trades with (option premium chart, not spot). Core insight
+from the design discussion: raw/absolute OI is a **lagging** indicator — by the time
+total OI confirms a breakout, the move already happened. The edge is in OI
+**divergence and rate-of-change** while price is still consolidating at a wall,
+catching writers unwinding *before* the breakout candle closes.
+
+**Fully standalone by explicit user direction** — own package (`strategies/oi_flow/`),
+own order/fill events (`events.py`), own execution bridge
+(`execution_bridge/oi_flow_bridge.py`), own book manager (`book_manager.py`), own
+`Topic.OI_FLOW_ORDER_REQUEST`/`OI_FLOW_ORDER_FILL`. Shares **zero runtime
+infrastructure** with SellStraddle/D1Trap/FVG — no shared Topic, no shared event
+class, no shared bridge instance, no shared book manager. Even the swing-point/
+market-structure-shift detector (`detector.py`) is a fresh, independent
+implementation, not imported from `strategies/fvg/detector.py`'s equivalent, despite
+the conceptual overlap — a deliberate exception to this codebase's normal reuse
+discipline, made so this strategy stays fully removable/auditable in isolation with
+zero blast radius onto anything else.
+
+What genuinely IS reused (platform/base infrastructure every strategy in this
+codebase already sits on, not another strategy's own logic): `strategies.core.
+base_book.AbstractStrategyBook`, `strategies.core.book_manager.StrategyBookManager`,
+`execution_bridge.base_broker.{OrderRequest,OrderSide,OrderType}`,
+`execution_bridge.broker_resolve.resolve_broker_or_alert`,
+`strategies.core.gate.can_trade`, `data_layer.instrument_registry.REGISTRY`,
+`data_layer.position_store`, `matrix_engine.option_matrix` (`ChainSnapshot`/
+`Topic.MATRIX_SNAPSHOT` — read-only, the platform's own shared OI/PCR aggregation).
+
+**⚠️ Cannot be backtested against history.** Confirmed by direct inspection:
+`data_layer/historical_candles.py`'s intraday endpoints (`fetch_upstox_1m`,
+`fetch_upstox_intraday_1m`, `fetch_upstox_range_1m`) hardcode OI to 0 — Upstox's
+historical-candle API simply has no intraday OI field. (The unrelated day-level
+`fetch_upstox_daily` endpoint does have an OI column, but daily granularity is
+useless for a 3-5 minute divergence signal.) Every other strategy in this codebase
+was validated against real historical data before going live; this one structurally
+cannot be. It is correct-by-construction (unit-tested logic on hand-built synthetic
+sequences) and validated **forward**, in paper mode, via the structured telemetry
+described below — matching the same honesty pattern already established for
+`D1TrapBearOnlyBook`'s `_oi_wall_strikes` feature (also live/paper-only, same root
+cause).
+
+**Mechanic:**
+1. `strategies/oi_flow/tracker.py` (`OIFlowTracker`) — the missing piece: a rolling,
+   wall-clock-anchored per-(strike, side) OI time series, computed from absolute `oi`
+   levels (`oi_roc()`), **never** from a broker-supplied delta field — confirmed
+   Upstox's live WebSocket feed hardcodes `change_oi=0` (`data_layer/global_feeder.py`;
+   only Fyers populates a genuine per-tick delta). Returns `None` (never 0) during
+   warm-up so a data gap can never silently read as "confirmed flat."
+2. `strategies/oi_flow/detector.py` — two separate gates:
+   - `detect_pre_breakout_signal()` (**spot** chart + OI wall): is spot still within
+     `proximity_pct` of the OI wall (`ChainSnapshot.max_call_oi_strike`/
+     `max_put_oi_strike`), with no confirmed market-structure break yet
+     (`has_recent_structure_break` — absence of a break is exactly "still
+     consolidating"), while the opposing side's OI is flattening/dropping
+     (`max_opposing_roc_pct`) and the supporting side is building
+     (`min_supporting_roc_pct`), gated by a PCR band (`min_pcr_bias`/`max_pcr_bias`,
+     off `ChainSnapshot.pcr_smooth()` — real rolling history, zero new infra needed).
+   - `confirm_option_price_action()` (**option premium** chart — the actual tradeable
+     instrument): premium holding above its own rolling VWAP with no active
+     rejection wick; the stop-loss is the option chart's **own** recent confirmed
+     swing low (`swing_pivot=2` default — needs 5+ bars to confirm anything, by
+     design), never a spot-derived offset.
+   Both gates must pass before `strategies/oi_flow/engine.py`'s `OIFlowStrategy`
+   emits an entry — spot-only firing without the option-side confirmation was
+   explicitly rejected during design.
+3. Entry: BUY at the option's current live LTP (from the book's own option-tick
+   loop). Exit: SL hit (checked every option tick against the position's own
+   strike), the universal hard ₹2000/lot risk-cap backstop, or EOD squareoff.
+4. `strategies/oi_flow/telemetry.py` — since there's no backtest, **every** signal
+   evaluation (fired or not, and exactly why not) gets logged to
+   `logs/oi_flow/{underlying}_{date}.jsonl`. This is the substitute for a backtest
+   report: it lets a rejection be reviewed after the fact just as easily as a real
+   trade ("was the spot gate right to reject this, in hindsight?").
+
+**Status (2026-08-12):** Phases 1-5 built and unit-tested (tracker, detector, bridge,
+engine/book manager, telemetry) — **not yet deployed, not even in paper mode.**
+Registered in `strategies/registry.py` as `"oi_flow"`; deploy via a direct
+`strategy_deployments` DB row (`strategy_name="oi_flow"`, `underlying="BANKNIFTY"`,
+`product_type="MIS"`), same pre-UI-form pattern every other strategy in this
+codebase used before its own dashboard deploy form existed — no UI form built yet.
+**Before any live-capital conversation**, an explicit graduation criterion needs
+agreement: target ~20-30 real signal evaluations with a reviewable win/loss split in
+paper mode first — there is no backtest number to compare against, so this must be
+agreed up front, not decided after the fact once real numbers start coming in.
 
 ---
 

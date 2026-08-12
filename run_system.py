@@ -478,6 +478,14 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    # 2026-08-12: fully standalone bridge -- own Topics (OI_FLOW_ORDER_REQUEST/
+    # FILL), shares no runtime state with the D1Trap/FVG bridges above despite
+    # the identical construction pattern.
+    from execution_bridge.oi_flow_bridge import OIFlowExecutionBridge
+    oi_flow_bridge = OIFlowExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -651,6 +659,7 @@ async def _run_live(
         asyncio.create_task(fno_bridge.run(),           name="fno_bridge"),
         asyncio.create_task(d1_trap_bridge.run(),       name="d1_trap_bridge"),
         asyncio.create_task(fvg_bridge.run(),           name="fvg_bridge"),
+        asyncio.create_task(oi_flow_bridge.run(),       name="oi_flow_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -689,6 +698,7 @@ async def _run_live(
     fno_bridge.stop()
     d1_trap_bridge.stop()
     fvg_bridge.stop()
+    oi_flow_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task
