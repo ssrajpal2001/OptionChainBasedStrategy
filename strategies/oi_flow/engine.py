@@ -266,6 +266,8 @@ class OIFlowStrategy(AbstractStrategyBook):
         row.option_sl_level = confirmation.sl_level
         row.option_gate_ok = confirmation.ok
         row.option_gate_reason = confirmation.reason
+        row.volume_spike = confirmation.volume_spike
+        row.volume_ratio = confirmation.volume_ratio
         if option_bars:
             row.option_premium = option_bars[-1].close
         if not confirmation.ok:
@@ -313,7 +315,7 @@ class OIFlowStrategy(AbstractStrategyBook):
                 wall = snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike
                 if wall and float(ev.strike) == float(wall):
                     self._live_option_ltp[side] = ev.ltp
-                    closed = self._option_acc[side].on_tick(ev.timestamp, ev.ltp)
+                    closed = self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
 
             if self._position is not None and self._position["side"] == side \
                     and float(ev.strike) == float(self._position["strike"]):

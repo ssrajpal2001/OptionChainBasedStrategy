@@ -573,8 +573,29 @@ cause).
    report: it lets a rejection be reviewed after the fact just as easily as a real
    trade ("was the spot gate right to reject this, in hindsight?").
 
-**Status (2026-08-12):** Phases 1-5 built and unit-tested (tracker, detector, bridge,
-engine/book manager, telemetry) — **not yet deployed, not even in paper mode.**
+**Volume/absorption confirmation (2026-08-13, soft/logged only, not a hard gate):**
+`Bar` now carries `volume` (a per-bar delta) and `BarAccumulator.on_tick()` accepts an
+optional cumulative-volume arg — Upstox (`vtt`)/Fyers (`vol_traded_today`) both report
+real, live CUMULATIVE SESSION volume on every option tick (unlike OI's `change_oi=0`
+gotcha), so a bar's own volume is the delta between its first and last tick's cumulative
+reading, same shape `OIFlowTracker` already handles for OI. `detect_volume_spike()`
+(`detector.py`) flags when the option's own latest 1-min bar volume is ≥1.5× its
+trailing 20-bar average — the "high volume + OI dropping while price consolidates =
+writers being absorbed, not defending" read. Wired into `confirm_option_price_action()`
+as two additive `OptionConfirmation` fields (`volume_spike`, `volume_ratio`), populated
+on **every** return path including blocked ones, but **never gates `ok`** — deliberately
+kept soft/telemetry-only (mirrors how PCR was already treated) rather than stacking a
+4th untested hard AND-gate on top of the existing spot+option gates before a single
+forward day has run. Promote to a real gate only once `logs/oi_flow/*.jsonl` shows it
+earns its keep. The SL-anchoring and partial-profit-booking refinements from the same
+discussion (anchor SL to the absorption candle's own low; lock partial profit once the
+breakout candle closes) were deliberately deferred — they change money-tracking/exit
+mechanics, higher regression risk, better done after a few days of the simpler
+version's telemetry exist to review, not blind on day one.
+
+**Status (2026-08-13):** Phases 1-5 built and unit-tested (tracker, detector, bridge,
+engine/book manager, telemetry) plus the volume/absorption addition above — **not yet
+deployed, not even in paper mode.**
 Registered in `strategies/registry.py` as `"oi_flow"`; deploy via a direct
 `strategy_deployments` DB row (`strategy_name="oi_flow"`, `underlying="BANKNIFTY"`,
 `product_type="MIS"`), same pre-UI-form pattern every other strategy in this

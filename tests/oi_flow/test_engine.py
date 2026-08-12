@@ -10,11 +10,12 @@ data to replay).
 """
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from config.global_config import IST, Topic
+from data_layer.base_feeder import OptionTick
 import strategies.oi_flow.engine as engine_module
 from strategies.oi_flow.detector import Bar, BarAccumulator
 from strategies.oi_flow.engine import OIFlowStrategy
@@ -239,6 +240,48 @@ async def test_enter_publishes_order_event_via_bus():
     assert order.option_type == "CE"
     assert order.strike == 57700
     assert order.entry_price == 526.0
+
+
+# ── _option_tick_loop ────────────────────────────────────────────────────────
+
+def _real_option_tick(strike, side, ltp, volume, ts, underlying="BANKNIFTY"):
+    """_option_tick_loop() does `isinstance(ev, OptionTick)` -- unlike
+    _FakeTick (duck-typed, used only against OIFlowTracker directly), this
+    loop needs the real, frozen dataclass."""
+    return OptionTick(
+        symbol=f"{underlying}{side}{int(strike)}", underlying=underlying, strike=strike,
+        option_type=side, expiry=date(2026, 8, 27), ltp=ltp, bid=ltp, ask=ltp,
+        oi=0, change_oi=0, volume=volume, iv=0.0, delta=0.0, timestamp=ts,
+    )
+
+
+@pytest.mark.asyncio
+async def test_option_tick_loop_threads_cumulative_volume_into_option_bars():
+    """Regression guard for the ev.volume -> BarAccumulator.on_tick()
+    wiring (2026-08-13): without passing ev.volume through, an option
+    bar's own volume would silently stay 0.0 forever and
+    detect_volume_spike() could never fire for real ticks."""
+    book = _make_book()
+    base = _base()
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0, pcr=1.3)
+    book._rewatch_oi_strikes(book._latest_snap)
+
+    q = asyncio.Queue()
+    book._loop_queues[Topic.OPTION_TICK] = q
+    # First two ticks stay WITHIN the same 1-min bucket (volume accrues on
+    # the second one); the third rolls into a new bucket, closing the first.
+    await q.put(_real_option_tick(57700.0, "CE", 500.0, 10_000, base))
+    await q.put(_real_option_tick(57700.0, "CE", 502.0, 10_600, base + timedelta(seconds=30)))
+    await q.put(_real_option_tick(57700.0, "CE", 501.0, 10_900, base + timedelta(minutes=1)))
+
+    try:
+        await asyncio.wait_for(book._option_tick_loop(), timeout=0.2)
+    except asyncio.TimeoutError:
+        pass   # expected -- the loop only exits on self._running=False, never on its own
+
+    assert len(book._option_acc["CE"].bars) == 1
+    assert book._option_acc["CE"].bars[0].volume == 600   # 10_600 - 10_000
+    assert book._live_option_ltp["CE"] == 501.0
 
 
 # ── _check_exit ──────────────────────────────────────────────────────────────

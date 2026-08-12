@@ -57,6 +57,12 @@ class SignalTelemetryRow:
     option_sl_level: Optional[float] = None
     option_gate_ok: Optional[bool] = None
     option_gate_reason: Optional[str] = None
+    # Absorption/catalyst read (2026-08-13) -- option's own 1-min bar
+    # volume vs. its trailing average. Soft/logged only, never gates an
+    # entry (see detector.py's OptionConfirmation docstring) -- this is
+    # the forward-review evidence that decides whether it should.
+    volume_spike: Optional[bool] = None
+    volume_ratio: Optional[float] = None
 
     # Final outcome.
     entered: bool = False

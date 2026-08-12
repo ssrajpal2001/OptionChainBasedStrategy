@@ -34,45 +34,64 @@ from datetime import datetime
 from typing import List, Optional
 
 _UPPER_WICK_REJECTION_RATIO = 0.55   # upper wick / total range >= this -> rejection candle
+_VOLUME_SPIKE_RATIO_DEFAULT = 1.5    # current bar volume / trailing avg >= this -> absorption spike
 
 
 @dataclass
 class Bar:
     """Self-contained OHLC bar -- deliberately not imported from any other
-    strategy's own bar dataclass, however structurally similar."""
+    strategy's own bar dataclass, however structurally similar. `volume`
+    is this bar's OWN traded volume (a delta), not the broker's cumulative
+    session total -- BarAccumulator does that subtraction; defaults to 0.0
+    so every existing caller/test that builds a Bar without it is
+    unaffected."""
     timestamp: datetime
     open: float
     high: float
     low: float
     close: float
+    volume: float = 0.0
 
 
 class BarAccumulator:
-    """Buckets a live ltp tick stream (spot OR option, caller's choice) into
-    fixed-timeframe bars. Self-contained -- does not reuse any other
-    strategy's own tick-to-bar bucket logic."""
+    """Buckets a live ltp (+ optional cumulative volume) tick stream (spot
+    OR option, caller's choice) into fixed-timeframe bars. Self-contained
+    -- does not reuse any other strategy's own tick-to-bar bucket logic.
+
+    Upstox/Fyers both report `volume` as CUMULATIVE SESSION volume on every
+    tick (`vtt`/`vol_traded_today` -- confirmed real, live data, unlike
+    OI's change_oi=0 gotcha), never a ready per-tick delta -- same shape
+    OIFlowTracker already handles for OI. A bar's own volume is therefore
+    the cumulative reading at its last tick minus the cumulative reading
+    at its first tick."""
 
     def __init__(self, timeframe_min: int = 1) -> None:
         self._tf = timeframe_min
         self.bars: List[Bar] = []
         self._bucket_open_ts: Optional[datetime] = None
         self._bucket: Optional[Bar] = None
+        self._bucket_open_volume: Optional[float] = None
 
-    def on_tick(self, ts: datetime, ltp: float) -> bool:
-        """Returns True iff this tick closed a bar (a new bucket started)."""
+    def on_tick(self, ts: datetime, ltp: float, volume: Optional[float] = None) -> bool:
+        """Returns True iff this tick closed a bar (a new bucket started).
+        `volume`, if given, is the tick's CUMULATIVE session volume."""
         bucket_ts = ts.replace(minute=(ts.minute // self._tf) * self._tf, second=0, microsecond=0)
         if self._bucket_open_ts is None:
             self._bucket_open_ts = bucket_ts
             self._bucket = Bar(timestamp=bucket_ts, open=ltp, high=ltp, low=ltp, close=ltp)
+            self._bucket_open_volume = volume
             return False
         if bucket_ts != self._bucket_open_ts:
             self.bars.append(self._bucket)
             self._bucket_open_ts = bucket_ts
             self._bucket = Bar(timestamp=bucket_ts, open=ltp, high=ltp, low=ltp, close=ltp)
+            self._bucket_open_volume = volume
             return True
         self._bucket.high = max(self._bucket.high, ltp)
         self._bucket.low = min(self._bucket.low, ltp)
         self._bucket.close = ltp
+        if volume is not None and self._bucket_open_volume is not None:
+            self._bucket.volume = max(0.0, volume - self._bucket_open_volume)
         return False
 
     def all_bars(self) -> List[Bar]:
@@ -239,11 +258,55 @@ def detect_pre_breakout_signal(
 # ── 2d. Option-side confirmation gate ────────────────────────────────────────
 
 @dataclass(frozen=True)
+class VolumeSpikeInfo:
+    """Absorption/catalyst read on the option's own 1-min bar volume: is
+    the latest bar's volume elevated vs. its own trailing average? Mirrors
+    the "high volume + OI dropping while price consolidates = writers
+    being absorbed, not defending" read from the user's OI-Volume matrix
+    -- this only computes the volume half; the OI-ROC half is already
+    detect_pre_breakout_signal()'s job."""
+    is_spike: bool
+    current_volume: float
+    avg_volume: float
+    ratio: float
+
+
+def detect_volume_spike(
+    bars: List[Bar], lookback: int = 20, spike_ratio: float = _VOLUME_SPIKE_RATIO_DEFAULT,
+) -> Optional[VolumeSpikeInfo]:
+    """Is the most recent bar's volume >= `spike_ratio`x its own trailing
+    `lookback`-bar average? None (never a false read) when there aren't
+    enough prior bars to form a baseline, or the baseline is zero (no
+    volume data threaded in yet) -- same "insufficient history -> None"
+    contract as OIFlowTracker.oi_roc(), so a cold-start/no-volume-wired
+    caller can never misread "no data" as "confirmed no spike"."""
+    if len(bars) < 2:
+        return None
+    current = bars[-1]
+    window = bars[-(lookback + 1):-1] if lookback else bars[:-1]
+    if not window:
+        return None
+    avg = sum(b.volume for b in window) / len(window)
+    if avg <= 0:
+        return None
+    ratio = current.volume / avg
+    return VolumeSpikeInfo(is_spike=ratio >= spike_ratio, current_volume=current.volume,
+                            avg_volume=avg, ratio=ratio)
+
+
+@dataclass(frozen=True)
 class OptionConfirmation:
     ok: bool
     reason: str
     vwap: Optional[float] = None
     sl_level: Optional[float] = None
+    # Soft/logged only -- NOT part of the ok/reason decision. Volume data
+    # cannot be backtested any better than OI can (no forward evidence
+    # yet), so this is surfaced for telemetry review, not wired as a
+    # fourth hard AND-gate on day one. Promote to a real gate only once
+    # forward telemetry (logs/oi_flow/*.jsonl) shows it earns its keep.
+    volume_spike: Optional[bool] = None
+    volume_ratio: Optional[float] = None
 
 
 def _vwap(bars: List[Bar]) -> Optional[float]:
@@ -267,13 +330,19 @@ def confirm_option_price_action(
     lookback: int = 20,
     swing_pivot: int = 2,
     wick_rejection_ratio: float = _UPPER_WICK_REJECTION_RATIO,
+    volume_spike_ratio: float = _VOLUME_SPIKE_RATIO_DEFAULT,
 ) -> OptionConfirmation:
     """CE: premium must be holding ABOVE its own recent VWAP with no active
     upper-wick rejection on the most recent candle (rejection = seller
     pressure right at the current price, a bad time to buy into strength).
     PE mirrors: below VWAP, no lower-wick rejection. sl_level is the
     option's own most recent confirmed swing low (CE) / swing high (PE) --
-    the stop anchor engine.py must use, never a spot-derived offset."""
+    the stop anchor engine.py must use, never a spot-derived offset.
+
+    Also computes (but never gates on) a volume-spike read via
+    detect_volume_spike() -- populated on every returned path, including
+    the blocked ones, so a rejection is just as reviewable for "was there
+    an absorption spike here anyway?" as a fired confirmation."""
     if side not in ("CE", "PE"):
         raise ValueError(f"side must be CE or PE, got {side!r}")
     if not option_bars_1m:
@@ -284,23 +353,33 @@ def confirm_option_price_action(
     if vwap is None:
         return OptionConfirmation(ok=False, reason="no_vwap")
 
+    vol_info = detect_volume_spike(option_bars_1m, lookback=lookback, spike_ratio=volume_spike_ratio)
+    volume_spike = vol_info.is_spike if vol_info is not None else None
+    volume_ratio = vol_info.ratio if vol_info is not None else None
+
     last = option_bars_1m[-1]
     rng = last.high - last.low
     if side == "CE":
         if last.close < vwap:
-            return OptionConfirmation(ok=False, reason="below_vwap", vwap=vwap)
+            return OptionConfirmation(ok=False, reason="below_vwap", vwap=vwap,
+                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
         upper_wick = last.high - max(last.open, last.close)
         if rng > 0 and (upper_wick / rng) >= wick_rejection_ratio:
-            return OptionConfirmation(ok=False, reason="upper_wick_rejection", vwap=vwap)
+            return OptionConfirmation(ok=False, reason="upper_wick_rejection", vwap=vwap,
+                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
         sl = swing_low(window, pivot=swing_pivot)
     else:
         if last.close > vwap:
-            return OptionConfirmation(ok=False, reason="above_vwap", vwap=vwap)
+            return OptionConfirmation(ok=False, reason="above_vwap", vwap=vwap,
+                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
         lower_wick = min(last.open, last.close) - last.low
         if rng > 0 and (lower_wick / rng) >= wick_rejection_ratio:
-            return OptionConfirmation(ok=False, reason="lower_wick_rejection", vwap=vwap)
+            return OptionConfirmation(ok=False, reason="lower_wick_rejection", vwap=vwap,
+                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
         sl = swing_high(window, pivot=swing_pivot)
 
     if sl is None:
-        return OptionConfirmation(ok=False, reason="no_swing_sl_anchor_yet", vwap=vwap)
-    return OptionConfirmation(ok=True, reason="confirmed", vwap=vwap, sl_level=sl)
+        return OptionConfirmation(ok=False, reason="no_swing_sl_anchor_yet", vwap=vwap,
+                                   volume_spike=volume_spike, volume_ratio=volume_ratio)
+    return OptionConfirmation(ok=True, reason="confirmed", vwap=vwap, sl_level=sl,
+                               volume_spike=volume_spike, volume_ratio=volume_ratio)

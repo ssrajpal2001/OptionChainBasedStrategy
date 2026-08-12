@@ -15,6 +15,7 @@ from config.global_config import IST
 from strategies.oi_flow.detector import (
     Bar, BarAccumulator, SwingPoint, find_swing_points, has_recent_structure_break,
     swing_low, swing_high, detect_pre_breakout_signal, confirm_option_price_action,
+    detect_volume_spike,
 )
 from strategies.oi_flow.tracker import OIFlowTracker
 
@@ -40,6 +41,68 @@ def test_bar_accumulator_buckets_ticks_and_reports_bar_close():
     assert acc.bars[0].open == 100.0
     assert acc.bars[0].high == 102.0
     assert acc.bars[0].close == 102.0   # last tick BEFORE the new bucket started
+
+
+def test_bar_accumulator_tracks_per_bar_volume_from_cumulative_session_volume():
+    """Upstox/Fyers report cumulative SESSION volume on every tick -- a
+    bar's own volume must be the delta between its first and last tick's
+    cumulative reading, not the raw cumulative number itself."""
+    base = _base()
+    acc = BarAccumulator(timeframe_min=1)
+    acc.on_tick(base, 100.0, volume=10_000)
+    acc.on_tick(base + timedelta(seconds=30), 102.0, volume=10_400)
+    closed = acc.on_tick(base + timedelta(minutes=1), 99.0, volume=10_900)   # closes bar 1, opens bar 2
+    assert closed is True
+    assert acc.bars[0].volume == 400   # 10_400 - 10_000 (last tick INSIDE bar 1 vs. its own open)
+    acc.on_tick(base + timedelta(minutes=1, seconds=30), 101.0, volume=11_200)
+    assert acc.all_bars()[-1].volume == 300   # 11_200 - 10_900, bar 2's own delta so far
+
+
+def test_bar_accumulator_volume_stays_zero_when_no_volume_threaded_in():
+    """Spot IndexTick volume is not meaningful for an index -- callers that
+    never pass `volume` (the spot accumulator) must not crash and must
+    just leave every bar's volume at its 0.0 default."""
+    base = _base()
+    acc = BarAccumulator(timeframe_min=1)
+    acc.on_tick(base, 100.0)
+    acc.on_tick(base + timedelta(minutes=1), 99.0)
+    assert acc.bars[0].volume == 0.0
+
+
+# ── detect_volume_spike ───────────────────────────────────────────────────────
+
+def test_detect_volume_spike_none_on_fewer_than_two_bars():
+    base = _base()
+    assert detect_volume_spike([_bar(base, 500, 502, 498, 500)]) is None
+    assert detect_volume_spike([]) is None
+
+
+def test_detect_volume_spike_none_when_no_volume_data_threaded_in():
+    """Bars built without volume (the 0.0 default) must read as 'no data'
+    (None), never as a false 'confirmed no spike' (False)."""
+    base = _base()
+    bars = [Bar(base + timedelta(minutes=i), 500, 502, 498, 500) for i in range(5)]
+    assert detect_volume_spike(bars) is None
+
+
+def test_detect_volume_spike_true_when_current_bar_well_above_trailing_average():
+    base = _base()
+    bars = [Bar(base + timedelta(minutes=i), 500, 502, 498, 500, volume=1000.0) for i in range(20)]
+    bars.append(Bar(base + timedelta(minutes=20), 500, 505, 498, 503, volume=2000.0))   # 2x avg
+    info = detect_volume_spike(bars, lookback=20, spike_ratio=1.5)
+    assert info is not None
+    assert info.is_spike is True
+    assert info.ratio == pytest.approx(2.0)
+    assert info.avg_volume == pytest.approx(1000.0)
+
+
+def test_detect_volume_spike_false_when_current_bar_in_line_with_average():
+    base = _base()
+    bars = [Bar(base + timedelta(minutes=i), 500, 502, 498, 500, volume=1000.0) for i in range(20)]
+    bars.append(Bar(base + timedelta(minutes=20), 500, 502, 498, 500, volume=1050.0))   # ~normal
+    info = detect_volume_spike(bars, lookback=20, spike_ratio=1.5)
+    assert info is not None
+    assert info.is_spike is False
 
 
 # ── find_swing_points / has_recent_structure_break ───────────────────────────
@@ -289,3 +352,34 @@ def test_option_confirmation_sl_level_matches_real_swing_low():
     conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1)
     assert conf.ok is True
     assert conf.sl_level == 502
+
+
+def test_option_confirmation_surfaces_volume_spike_without_blocking_ok():
+    """A confirmed, otherwise-passing entry with an elevated final-bar
+    volume must still pass (volume is a soft/logged dimension, not a
+    fourth hard gate) while surfacing the spike for telemetry review."""
+    base = _base()
+    bars = [
+        Bar(base, 512, 515, 510, 513, volume=1000.0),
+        Bar(base + timedelta(minutes=1), 506, 512, 502, 508, volume=1000.0),   # swing low @ 502
+        Bar(base + timedelta(minutes=2), 514, 520, 511, 518, volume=1000.0),
+        Bar(base + timedelta(minutes=3), 519, 525, 516, 523, volume=2500.0),   # absorption spike
+    ]
+    conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1)
+    assert conf.ok is True
+    assert conf.sl_level == 502
+    assert conf.volume_spike is True
+    assert conf.volume_ratio == pytest.approx(2.5)
+
+
+def test_option_confirmation_volume_fields_populated_even_when_blocked():
+    """A rejection (below_vwap here) must still carry the volume read --
+    was there real absorption happening even on a setup we didn't take?"""
+    base = _base()
+    bars = [Bar(base + timedelta(minutes=i), 500, 505, 495, 500, volume=1000.0) for i in range(5)]
+    bars.append(Bar(base + timedelta(minutes=5), 480, 482, 460, 462, volume=3000.0))
+    conf = confirm_option_price_action(bars, "CE", lookback=6, swing_pivot=1)
+    assert conf.ok is False
+    assert conf.reason == "below_vwap"
+    assert conf.volume_spike is True
+    assert conf.volume_ratio == pytest.approx(3.0)
