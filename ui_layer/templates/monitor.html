@@ -2143,7 +2143,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',fvg:'FVG'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -2699,7 +2699,9 @@ document.addEventListener('alpine:init', () => {
             // d1_trap_fno / fvg are all buyer-only (BUY to open/pay premium, SELL to
             // close/receive premium) -- previously fell through to the SellStraddle
             // default (SELL-to-open), mislabeling every D1Trap/FVG entry backwards.
-            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg'];
+            // d1_trap_sr added 2026-08-12 -- same option-buyer mechanic, only the entry
+            // trigger (S&R ping-pong vs T1/T2) differs from d1_trap_bear_only.
+            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg'];
             const _openAction = (lg) => strat === 'v4_cascade'
                 ? (_isCryptoShort(lg) ? 'SELL' : 'BUY')
                 : _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
@@ -6984,7 +6986,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',fvg:'FVG'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -7106,10 +7108,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',fvg:'FVG'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
+                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',fvg:'FVG'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -7152,6 +7154,13 @@ function amoTest() {
                           deployForm._itm_offset_pts=150;
                           deployForm._htf_minutes=60;
                           deployForm.squareoff_time='15:15';
+                        } else if(deployForm.strategy_name==='d1_trap_sr'){
+                          deployForm.product_type='MIS';
+                          deployForm.underlying='NIFTY';
+                          const _srd={NIFTY:[150,60],SENSEX:[300,15],BANKNIFTY:[300,15]};
+                          [deployForm._itm_offset_pts,deployForm._htf_minutes]=_srd[deployForm.underlying]||[200,60];
+                          deployForm._sr_tf=3; deployForm._exit_mode='raw';
+                          deployForm.squareoff_time='15:15';
                         } else if(deployForm.strategy_name==='fvg'){
                           deployForm.product_type='MIS';
                           deployForm.underlying='NIFTY';
@@ -7166,6 +7175,8 @@ function amoTest() {
                         }
                         deployForm.strategy_params = deployForm.strategy_name==='d1_trap_bear_only'
                           ? JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts||150, htf_minutes:deployForm._htf_minutes||60})
+                          : deployForm.strategy_name==='d1_trap_sr'
+                          ? JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts, htf_minutes:deployForm._htf_minutes, sr_tf:deployForm._sr_tf||3, exit_mode:deployForm._exit_mode||'raw'})
                           : deployForm.strategy_name==='fvg'
                           ? JSON.stringify({htf_tf:deployForm._fvg_htf||10,ltf_tf:deployForm._fvg_ltf||3,direction_mode:deployForm._fvg_direction||'BOTH'})
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
@@ -7177,7 +7188,8 @@ function amoTest() {
                 <option value="d1_trap_index">Trap Scanner - Index (Intraday)</option>
                 <option value="d1_trap_fno">Trap Scanner - FnO (Positional)</option>
                 -->
-                <option value="d1_trap_bear_only">Bear Trap Only (Option-Native, NIFTY)</option>
+                <option value="d1_trap_bear_only">Bear Trap Only (Option-Native, T1/T2)</option>
+                <option value="d1_trap_sr">D1 Trap S&amp;R (Option-Native, S&amp;R Ping-Pong)</option>
                 <option value="fvg">FVG (Fair Value Gap, NIFTY)</option>
                 <option value="fno_positional">FnO Positional (Swing, All FnO Stocks)</option>
               </select>
@@ -7204,9 +7216,14 @@ function amoTest() {
                         @change="
                           if(deployForm.strategy_name==='d1_trap_bear_only'){
                             const _u=(deployForm.underlying||'').toUpperCase();
-                            deployForm._itm_offset_pts = _u==='SENSEX'?300:150;
-                            deployForm._htf_minutes = _u==='SENSEX'?15:60;
+                            const _d={NIFTY:[150,60],SENSEX:[300,15],BANKNIFTY:[300,15]};
+                            [deployForm._itm_offset_pts,deployForm._htf_minutes]=_d[_u]||[150,60];
                             deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts,htf_minutes:deployForm._htf_minutes});
+                          } else if(deployForm.strategy_name==='d1_trap_sr'){
+                            const _u=(deployForm.underlying||'').toUpperCase();
+                            const _d={NIFTY:[150,60],SENSEX:[300,15],BANKNIFTY:[300,15]};
+                            [deployForm._itm_offset_pts,deployForm._htf_minutes]=_d[_u]||[200,60];
+                            deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts,htf_minutes:deployForm._htf_minutes,sr_tf:deployForm._sr_tf||3,exit_mode:deployForm._exit_mode||'raw'});
                           }
                         ">
                   <template x-for="idx in availableInstruments.filter(i => i !== 'FNO_STOCKS')" :key="idx">
@@ -7276,6 +7293,58 @@ function amoTest() {
                     NIFTY validated best at 60m; SENSEX at 15m (faster index needs finer structure) —
                     2026-08-02 backtest.
                   </p>
+                </div>
+              </div>
+            </template>
+            <!-- ITM offset (points) + zone timeframe + S&R timeframe + exit mode — shown only for D1 Trap S&R -->
+            <template x-if="deployForm.strategy_name==='d1_trap_sr'">
+              <div class="col-span-2 grid grid-cols-2 gap-3"
+                   x-init="const _d={NIFTY:[150,60],SENSEX:[300,15],BANKNIFTY:[300,15]}[(deployForm.underlying||'').toUpperCase()]||[200,60];
+                           deployForm._itm_offset_pts=deployForm._itm_offset_pts||_d[0];
+                           deployForm._htf_minutes=deployForm._htf_minutes||_d[1];
+                           deployForm._sr_tf=deployForm._sr_tf||3;
+                           deployForm._exit_mode=deployForm._exit_mode||'raw';">
+                <div>
+                  <label class="sec-label mb-1">ITM OFFSET (POINTS)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._itm_offset_pts"
+                         min="50" step="50" placeholder="150"
+                         @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts,htf_minutes:deployForm._htf_minutes,sr_tf:deployForm._sr_tf||3,exit_mode:deployForm._exit_mode||'raw'})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+                    CE = ATM − offset, PE = ATM + offset. Same per-underlying defaults as Bear Trap Only
+                    (NIFTY 150 / SENSEX 300 / BANKNIFTY 300) — this mechanic reuses the same zone
+                    detection, only the entry trigger differs.
+                  </p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">ZONE TIMEFRAME (HTF, MIN)</label>
+                  <select class="t-input" x-model.number="deployForm._htf_minutes"
+                          @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts,htf_minutes:deployForm._htf_minutes,sr_tf:deployForm._sr_tf||3,exit_mode:deployForm._exit_mode||'raw'})">
+                    <option value="60">60 min (NIFTY default)</option>
+                    <option value="15">15 min (SENSEX/BANKNIFTY default)</option>
+                    <option value="30">30 min</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">S&amp;R TIMEFRAME (MIN)</label>
+                  <select class="t-input" x-model.number="deployForm._sr_tf"
+                          @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts,htf_minutes:deployForm._htf_minutes,sr_tf:deployForm._sr_tf||3,exit_mode:deployForm._exit_mode||'raw'})">
+                    <option value="1">1 min</option>
+                    <option value="3">3 min (validated default, BANKNIFTY)</option>
+                    <option value="5">5 min</option>
+                  </select>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
+                    Timeframe the R2-breaches-R1 support/resistance ping-pong mechanic runs on, once
+                    price touches the HTF zone. Only tf=3 is backtest-validated (BANKNIFTY, PF 3.819) —
+                    NIFTY/SENSEX at this tf are unvalidated, running on the same default by extrapolation.
+                  </p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">EXIT MODE</label>
+                  <select class="t-input" x-model="deployForm._exit_mode"
+                          @change="deployForm.strategy_params=JSON.stringify({itm_offset_pts:deployForm._itm_offset_pts,htf_minutes:deployForm._htf_minutes,sr_tf:deployForm._sr_tf||3,exit_mode:deployForm._exit_mode||'raw'})">
+                    <option value="raw">Raw (trail live S1, validated best)</option>
+                    <option value="hold_eod">Hold to EOD (tested worse — do not use without new data)</option>
+                  </select>
                 </div>
               </div>
             </template>
@@ -7646,7 +7715,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',fvg:'FVG'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',fvg:'FVG'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
