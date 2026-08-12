@@ -2193,14 +2193,24 @@ class DashboardServer:
             logger.info("Dashboard: OI window set to ±%d strikes", int(body.n))
             return {"ok": True, "window": int(max(0, body.n))}
 
+        def _all_fno_positional_books():
+            """Both the legacy fno_positional module AND D1TrapFnOSRBook (d1_trap_fno_sr)
+            expose a get_state() in the same shape (2026-08-12) -- combine both managers'
+            books here so this table isn't blind to whichever one a deployment actually
+            uses. hasattr-gated, same pattern as /api/d1trap/zones's monitoring_zones()
+            check, so any future book type without get_state() is silently skipped rather
+            than erroring the whole endpoint."""
+            books = list(getattr(_srv._fno_positional_manager, "books", None) or [])
+            d1_mgr = getattr(_srv, "_d1_trap_manager", None)
+            if d1_mgr is not None:
+                books += [b for b in (d1_mgr.books or []) if hasattr(b, "get_state")]
+            return books
+
         @app.get("/api/fno/positions", tags=["Admin"])
         async def api_fno_positions(_: dict = Depends(_require_admin)):
             """Return all FnO positional book states (open + closed positions)."""
-            mgr = _srv._fno_positional_manager
-            if mgr is None:
-                return {"ok": True, "books": []}
             books_state = []
-            for book in (mgr.books or []):
+            for book in _all_fno_positional_books():
                 try:
                     books_state.append(book.get_state())
                 except Exception:
@@ -2211,11 +2221,8 @@ class DashboardServer:
         async def api_client_fno_positions(user: dict = Depends(_require_client)):
             """Return FnO positional book states for the requesting client."""
             cid = user.get("client_id", "")
-            mgr = _srv._fno_positional_manager
-            if mgr is None:
-                return {"ok": True, "books": []}
             books_state = []
-            for book in (mgr.books or []):
+            for book in _all_fno_positional_books():
                 try:
                     state = book.get_state()
                     if state.get("client_id") == cid:

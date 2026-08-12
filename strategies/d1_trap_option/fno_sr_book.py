@@ -482,6 +482,62 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
             position=self._position, zones_long=len(self._zones_long), zones_short=len(self._zones_short),
         )
 
+    def get_state(self) -> dict:
+        """Same shape as FnOPositionalBook.get_state() (strategies/fno_positional/book.py)
+        so the existing "FnO Positional Positions" admin/client tables can render this book
+        too -- 2026-08-12 fix, same class of gap as monitoring_zones() above: those tables
+        only ever read the OLD fno_positional module, so this book was invisible there
+        despite running and holding real positions.
+
+        Deliberately does NOT track live option premium (entry_ltp/current_ltp/pnl stay
+        0.0) -- this book only ever subscribes to spot/INDEX_TICK, never OPTION_TICK, by
+        design (SL/TSL are spot-level, not premium-level, matching the D1 zone's own
+        spot-based mechanic). Adding live premium tracking would mean new tick-subscription
+        code in a running live strategy, not just a read-only display method -- out of
+        scope for this fix. current_spot/spot_sl are real and meaningful for this strategy
+        specifically (unlike the legacy module, where they're a secondary field alongside
+        premium P&L)."""
+        pos = self._position
+        positions = []
+        if pos is not None:
+            entry_ts = pos.get("entry_ts")
+            positions.append({
+                "slot_id":       f"{self._underlying}_{entry_ts.isoformat() if entry_ts else 'open'}",
+                "symbol":        self._underlying,
+                "direction":     pos.get("option_type", "?"),
+                "strike":        pos.get("strike"),
+                "expiry_str":    pos["expiry"].isoformat() if pos.get("expiry") else "",
+                "lot_size":      self._lot_size,
+                "qty":           pos.get("qty"),
+                "spot_entry":    pos.get("entry"),
+                "spot_sl":       pos.get("sl"),
+                "day_t1":        0.0,
+                "entry_ltp":     0.0,
+                "current_spot":  self._last_spot,
+                "current_ltp":   0.0,
+                "status":        "CLOSING" if pos.get("_closing") else "OPEN",
+                "open_time":     entry_ts.isoformat() if entry_ts else "",
+                "close_time":    "",
+                "close_reason":  "",
+                "t1_alerted":    False,
+                "pnl":           0.0,
+                "client_id":     self._client_id,
+                "binding_id":    self._binding_id,
+            })
+        return {
+            "client_id":     self._client_id,
+            "binding_id":    self._binding_id,
+            # This book has no reference to its own binding's trading_mode (live/paper is
+            # resolved at the execution-bridge layer, not held here) -- "unknown" rather
+            # than guessing "live", since the UI badge is a live-trading confidence signal.
+            "mode":          "unknown",
+            "max_slots":     1,
+            "open_count":    len(positions),
+            "pending_count": 0,
+            "pending":       [],
+            "positions":     positions,
+        }
+
     def monitoring_zones(self) -> dict:
         """Same shape as D1TrapOptionBook.monitoring_zones() (book.py) so the
         existing WATCHLIST TRACKER UI (/api/d1trap/zones) can render this book
