@@ -152,6 +152,7 @@ class D1TrapSRBook(AbstractStrategyBook):
         self._series: Dict[str, _OptionSeries] = {}
         self._sr_trackers: Dict[str, SRPingPongTracker] = {}   # "CE"/"PE" -> today's tracker
         self._last_spot_open: Optional[float] = None
+        self._last_spot: Optional[float] = None   # live-updating, for monitoring_zones() display only
         self._selection_reason: Optional[str] = None
         # At most ONE leg per side, but keep a list for shape-parity with
         # BearOnly's status()/persistence -- SRPingPongTracker itself already
@@ -314,6 +315,7 @@ class D1TrapSRBook(AbstractStrategyBook):
             )
             if not is_own_underlying or not ev.ltp:
                 continue
+            self._last_spot = ev.ltp
             today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
             if self._today != today:
                 self.reset_session()
@@ -641,3 +643,51 @@ class D1TrapSRBook(AbstractStrategyBook):
             position=legs[0] if legs else None, positions=legs,
             sr_tf_minutes=self._sr_tf_minutes, exit_mode=self._exit_mode,
         )
+
+    def monitoring_zones(self) -> dict:
+        """Same shape as D1TrapOptionBook.monitoring_zones() (book.py) so the existing
+        WATCHLIST TRACKER UI (/api/d1trap/zones) can render this book too -- 2026-08-12
+        fix: this class never had this method at all, so NIFTY/SENSEX/BANKNIFTY d1_trap_sr
+        books were completely invisible in that panel despite running and holding real
+        zones/positions, same class of gap fno_sr_book.py's monitoring_zones() fixed for
+        the FnO WATCHLIST book on 2026-08-11.
+
+        "MONITORING" here means the zone has been touched -- i.e. its lock_ts is a key in
+        that side's SRPingPongTracker.active_sr dict (the tracker only starts a zone's own
+        SupportResistanceCalculator once price has actually touched it, gate_mode="touch").
+        No separate WAITING->MONITORING->invalid state machine exists on this book's own
+        zone dicts the way bear_only_book.py has -- that state lives inside the tracker,
+        not here, by design (see this file's own module docstring)."""
+        spot = self._last_spot
+        zones = []
+        for side in ("CE", "PE"):
+            series = self._series.get(side)
+            tracker = self._sr_trackers.get(side)
+            if series is None:
+                continue
+            touched_lock_ts = set((tracker.active_sr or {}).keys()) if tracker is not None else set()
+            for z in series.zones:
+                dist = None
+                if spot:
+                    mid = (z["zone_lo"] + z["zone_hi"]) / 2
+                    dist = round((spot - mid) / mid * 100, 2) if mid else None
+                zones.append({
+                    "direction": side,
+                    "zone_lo": round(z["zone_lo"], 2),
+                    "zone_hi": round(z["zone_hi"], 2),
+                    "state": "MONITORING" if z["lock_ts"] in touched_lock_ts else "WAITING",
+                    "dist_pct": dist,
+                    "ref_ts": z["lock_ts"].strftime("%Y-%m-%d %H:%M") if z.get("lock_ts") else None,
+                })
+        zones.sort(key=lambda zz: (0 if zz["state"] == "MONITORING" else 1,
+                                    abs(zz["dist_pct"]) if zz["dist_pct"] is not None else 999))
+        return {
+            "underlying": self._underlying,
+            "client_id": self._client_id,
+            "binding_id": self._binding_id,
+            "spot": round(spot, 2) if spot else None,
+            "zones": zones[:10],
+            "total_zones": sum(len(s.zones) for s in self._series.values()),
+            "pending": None,
+            "position": bool(self._positions),
+        }

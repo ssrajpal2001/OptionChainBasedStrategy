@@ -1032,6 +1032,21 @@ class StraddleExecutionBridge:
                              ev.action, ev.underlying, opt_type, exc)
                 self._trade_log.log_event(client_id, binding_id,
                     f"LIVE {ev.action} {ev.underlying} {opt_type}{int(strike)} PLACEMENT FAILED: {exc}")
+                # 2026-08-12 direct request: surface the REAL broker rejection text in the
+                # dashboard, not just server-side logs the client can't see. Published on
+                # Topic.POSITION_UPDATE (not SYSTEM_EVENT) deliberately -- ws_bridge.py's
+                # _sys_loop strips SYSTEM_EVENT payloads down to {code,msg}, dropping
+                # client_id/binding_id; POSITION_UPDATE is forwarded verbatim, so this
+                # dict reaches the browser with its client_id intact for the frontend to
+                # filter on (never shown to a different client's session).
+                if self._bus is not None:
+                    asyncio.create_task(self._bus.publish(Topic.POSITION_UPDATE, {
+                        "type": "strategy_alert", "severity": "critical",
+                        "client_id": client_id, "binding_id": binding_id,
+                        "underlying": ev.underlying,
+                        "msg": f"{ev.underlying} {opt_type}{int(strike)} order REJECTED by broker: {exc}",
+                        "ts": datetime.now(IST).isoformat(),
+                    }))
                 return opt_type, _fallback_ltp, 0, symbol
             except Exception as exc:
                 logger.error("[LIVE] %s %s %s order FAILED: %s — falling back to LTP",

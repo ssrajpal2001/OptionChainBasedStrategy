@@ -551,6 +551,9 @@ document.addEventListener('alpine:init', () => {
     authClientId:   '',
     authClientName: '',
 
+    /* ── Live strategy alerts (broker rejections etc.), 2026-08-12 ────── */
+    strategyAlerts: [],   // [{id, severity, underlying, msg, ts}]
+
     loginTab:    'admin',
     loginUser:   '',
     loginPass:   '',
@@ -1375,7 +1378,21 @@ document.addEventListener('alpine:init', () => {
           this.loadClientPositions();
           this.loadClientFnoPositions();
         }
+      } else if (msg.type === 'strategy_alert') {
+        // Broker rejection / critical strategy alert. Broadcast is global (same
+        // pipe as position_update) but client_id-tagged -- only show if it's
+        // actually about the logged-in client, never another client's session.
+        if (this.screen === 'client' && msg.client_id === this.authClientId) {
+          const id = Date.now() + Math.random();
+          this.strategyAlerts.push({ id, severity: msg.severity || 'critical',
+            underlying: msg.underlying || '', msg: msg.msg || '', ts: msg.ts || '' });
+          if (this.strategyAlerts.length > 5) this.strategyAlerts.shift();
+          setTimeout(() => { this.strategyAlerts = this.strategyAlerts.filter(a => a.id !== id); }, 30000);
+        }
       }
+    },
+    dismissStrategyAlert(id) {
+      this.strategyAlerts = this.strategyAlerts.filter(a => a.id !== id);
     },
 
     _addEvent(evt) {
@@ -6345,6 +6362,22 @@ function amoTest() {
      CLIENT LAYOUT — Phase 7 (3-phase: onboarding / pending / active)
 ════════════════════════════════════════════════════════════════════════════ -->
 <main x-show="screen === 'client'" class="flex-1 p-4 w-full client-main">
+
+  <!-- ══ LIVE STRATEGY ALERTS (broker rejections etc.) — visible on every tab ══ -->
+  <div class="space-y-2 mb-3" x-show="strategyAlerts.length > 0">
+    <template x-for="a in strategyAlerts" :key="a.id">
+      <div class="rounded p-3 flex items-start justify-between gap-3 font-mono text-xs"
+           style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:var(--t-red)">
+        <div class="flex-1">
+          <span class="font-bold" x-text="(a.underlying?a.underlying+' — ':'')+'BROKER ALERT'"></span>
+          <span class="ml-2" style="color:var(--t-muted)" x-text="a.ts"></span>
+          <div class="mt-1" style="color:var(--t-text)" x-text="a.msg"></div>
+        </div>
+        <button class="shrink-0 px-2 py-0.5 rounded" style="border:1px solid rgba(239,68,68,0.4)"
+                @click="dismissStrategyAlert(a.id)">✕</button>
+      </div>
+    </template>
+  </div>
 
   <!-- ══ PHASE: ONBOARDING (no brokers yet) ═══════════════════════════════════ -->
   <div x-show="clientPhase === 'onboarding'" class="slide-in">
