@@ -135,6 +135,17 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
         self._stop_for_day = False
         self._consecutive_entry_rejections = 0
 
+        # Live option premium tracking (2026-08-12, direct request) -- this book
+        # only ever subscribed to spot ticks before; SL/TSL are spot-level by
+        # design, but the FnO Positional Positions panel needs REAL option LTP/
+        # P&L, not the spot-denominated signal levels. _option_key_subscribed
+        # tracks what we've asked the feeder to stream so re-entry doesn't
+        # resubscribe the same key every fill; _live_option_ltp seeds from the
+        # real fill_price at entry (see _on_fill) and updates from live
+        # Topic.OPTION_TICK ticks matching the open position's exact contract.
+        self._live_option_ltp: float = 0.0
+        self._option_key_subscribed: Optional[str] = None
+
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def reset_session(self) -> None:
@@ -148,10 +159,51 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
         super().start()
         self._subscribe(Topic.INDEX_TICK)   # equity spot ticks arrive on this topic too
         self._subscribe(Topic.D1_TRAP_ORDER_FILL)
+        self._subscribe(Topic.OPTION_TICK)
         self._tasks.append(asyncio.create_task(self._startup_load(), name=f"fnosr_startup_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._tick_loop(), name=f"fnosr_tick_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._d1_refresh_loop(), name=f"fnosr_d1refresh_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._fill_loop(), name=f"fnosr_fill_{self._underlying}"))
+        self._tasks.append(asyncio.create_task(self._option_tick_loop(), name=f"fnosr_opttick_{self._underlying}"))
+
+    async def _option_tick_loop(self) -> None:
+        q = self._loop_queues.get(Topic.OPTION_TICK)
+        if q is None:
+            return
+        while self._running:
+            try:
+                tick: OptionTick = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            pos = self._position
+            if pos is None:
+                continue
+            if (tick.underlying == self._underlying and tick.strike == pos.get("strike")
+                    and tick.option_type == pos.get("option_type") and tick.expiry == pos.get("expiry")):
+                self._live_option_ltp = tick.ltp
+
+    def _ensure_option_feed(self) -> None:
+        """Subscribe the feeder to the open position's exact option contract, if not
+        already done for this key. Safe to call repeatedly -- idempotent, no-ops once
+        _option_key_subscribed matches. Metadata decode (underlying/strike/side/expiry
+        for the incoming ticks) needs no separate registration -- GlobalFeeder's
+        _get_option_meta already resolves any key from REGISTRY._upstox_keys directly,
+        which is already loaded for this underlying (used for the REST warmup fetch)."""
+        pos = self._position
+        if pos is None:
+            return
+        key = REGISTRY.get_upstox_key(self._underlying, pos["expiry"], pos["strike"], pos["option_type"])
+        if not key or key == self._option_key_subscribed:
+            return
+        gf = getattr(self._bus, "_global_feeder", None)
+        if gf is None or not hasattr(gf, "subscribe_tokens"):
+            return
+        asyncio.create_task(gf.subscribe_tokens([key]))
+        self._option_key_subscribed = key
+        logger.info("D1TrapFnOSR[%s]: subscribed live option feed for %s %d (%s)",
+                    self._underlying, pos["option_type"], pos["strike"], key)
 
     async def _fill_loop(self) -> None:
         from execution_bridge.d1_trap_bridge import D1TrapFillEvent
@@ -191,6 +243,13 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
                                      self._underlying, self._consecutive_entry_rejections)
                 return
             self._consecutive_entry_rejections = 0
+            if self._position is not None and self._position.get("_event_id") == eid:
+                fill_price = float(getattr(fill, "fill_price", 0.0) or 0.0)
+                self._position["entry_ltp"] = fill_price
+                self._position["paper_mode"] = bool(getattr(fill, "paper_mode", True))
+                self._live_option_ltp = fill_price   # seed until the first live tick arrives
+                self._persist_position()
+                self._ensure_option_feed()
             return
         if fill.action == "SELL":
             if eid:
@@ -434,6 +493,8 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
                 return
 
             self._position = None
+            self._live_option_ltp = 0.0
+            self._option_key_subscribed = None
             self._persist_position()
             logger.info("D1TrapFnOSR[%s]: SELL %s %d reason=%s CONFIRMED (event_id=%s)",
                         self._underlying, pos["option_type"], pos["strike"], reason, eid)
@@ -471,6 +532,8 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
             logger.exception("D1TrapFnOSR[%s]: failed to parse stored position -- discarding.", self._underlying)
             return
         self._position = d
+        self._live_option_ltp = float(d.get("entry_ltp", 0.0) or 0.0)   # seed until a fresh tick arrives
+        self._ensure_option_feed()
         logger.info("D1TrapFnOSR[%s]: RESTORED open position -- %s %d@%.2f", self._underlying,
                     d["option_type"], d["strike"], d["entry"])
 
@@ -489,18 +552,19 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
         only ever read the OLD fno_positional module, so this book was invisible there
         despite running and holding real positions.
 
-        Deliberately does NOT track live option premium (entry_ltp/current_ltp/pnl stay
-        0.0) -- this book only ever subscribes to spot/INDEX_TICK, never OPTION_TICK, by
-        design (SL/TSL are spot-level, not premium-level, matching the D1 zone's own
-        spot-based mechanic). Adding live premium tracking would mean new tick-subscription
-        code in a running live strategy, not just a read-only display method -- out of
-        scope for this fix. current_spot/spot_sl are real and meaningful for this strategy
-        specifically (unlike the legacy module, where they're a secondary field alongside
-        premium P&L)."""
+        entry_ltp/current_ltp/pnl are REAL (2026-08-12): entry_ltp comes from the actual
+        broker fill_price (D1TrapFillEvent), current_ltp from a live Topic.OPTION_TICK feed
+        this book now explicitly subscribes on entry (see _ensure_option_feed). Always a
+        long option (BUY to open, this strategy never shorts), so pnl is a plain
+        (current - entry) * qty, no direction sign needed. current_spot/spot_sl remain the
+        strategy's own real risk levels (spot-based SL/TSL, not premium-based)."""
         pos = self._position
         positions = []
         if pos is not None:
             entry_ts = pos.get("entry_ts")
+            entry_ltp = float(pos.get("entry_ltp", 0.0) or 0.0)
+            current_ltp = float(self._live_option_ltp or entry_ltp)
+            qty = pos.get("qty") or 0
             positions.append({
                 "slot_id":       f"{self._underlying}_{entry_ts.isoformat() if entry_ts else 'open'}",
                 "symbol":        self._underlying,
@@ -508,29 +572,32 @@ class D1TrapFnOSRBook(AbstractStrategyBook):
                 "strike":        pos.get("strike"),
                 "expiry_str":    pos["expiry"].isoformat() if pos.get("expiry") else "",
                 "lot_size":      self._lot_size,
-                "qty":           pos.get("qty"),
+                "qty":           qty,
                 "spot_entry":    pos.get("entry"),
                 "spot_sl":       pos.get("sl"),
                 "day_t1":        0.0,
-                "entry_ltp":     0.0,
+                "entry_ltp":     entry_ltp,
                 "current_spot":  self._last_spot,
-                "current_ltp":   0.0,
+                "current_ltp":   current_ltp,
                 "status":        "CLOSING" if pos.get("_closing") else "OPEN",
                 "open_time":     entry_ts.isoformat() if entry_ts else "",
                 "close_time":    "",
                 "close_reason":  "",
                 "t1_alerted":    False,
-                "pnl":           0.0,
+                "pnl":           round((current_ltp - entry_ltp) * qty, 2) if entry_ltp else 0.0,
                 "client_id":     self._client_id,
                 "binding_id":    self._binding_id,
             })
+        # "unknown" until a fill has actually happened -- paper_mode comes from the real
+        # D1TrapFillEvent, not guessed. Book only ever holds one position, so its paper_mode
+        # is a fair stand-in for the book-level mode badge.
+        mode = "unknown"
+        if pos is not None and "paper_mode" in pos:
+            mode = "paper" if pos["paper_mode"] else "live"
         return {
             "client_id":     self._client_id,
             "binding_id":    self._binding_id,
-            # This book has no reference to its own binding's trading_mode (live/paper is
-            # resolved at the execution-bridge layer, not held here) -- "unknown" rather
-            # than guessing "live", since the UI badge is a live-trading confidence signal.
-            "mode":          "unknown",
+            "mode":          mode,
             "max_slots":     1,
             "open_count":    len(positions),
             "pending_count": 0,
