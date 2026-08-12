@@ -345,7 +345,7 @@ class OptionBuyerExecutionBridge:
 
         product = getattr(ev, "product_type", None) or "MIS"
         req = OrderRequest(
-            symbol=symbol,
+            broker_symbol=symbol,
             exchange=exchange,
             side=side,
             qty=ev.quantity,
@@ -408,7 +408,7 @@ class OptionBuyerExecutionBridge:
             action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
             strike=int(ev.strike or 0), fill_price=avg, qty=int(ev.quantity or 0),
             client_id=ev.client_id, binding_id=ev.binding_id,
-            event_id=getattr(ev, "event_id", "") or "", paper_mode=False, symbol=symbol,
+            event_id=getattr(ev, "event_id", "") or "", paper_mode=False,
         ))
 
     def _resolve_symbol(self, ev, broker) -> str:
