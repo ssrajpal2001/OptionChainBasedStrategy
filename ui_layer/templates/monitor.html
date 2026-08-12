@@ -7853,7 +7853,7 @@ function amoTest() {
                               </td>
                               <td class="px-2"
                                   :style="_z&&_z.direction==='LONG'?'color:var(--t-green)':'color:var(--t-red)'"
-                                  x-text="_z ? (_z.direction==='LONG'?'▲ L':'▼ S') : '—'"></td>
+                                  x-text="_z ? ((_z.direction==='LONG'?'▲ L':'▼ S')+(_z.option_side?' '+_z.option_side+(_z.strike?' '+_z.strike:''):'')) : '—'"></td>
                               <td class="text-right px-2" style="color:var(--t-text)"
                                   x-text="_z ? _z.zone_lo.toLocaleString('en-IN') : '—'"></td>
                               <td class="text-right px-2" style="color:var(--t-text)"

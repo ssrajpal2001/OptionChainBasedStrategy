@@ -666,13 +666,28 @@ class D1TrapSRBook(AbstractStrategyBook):
             if series is None:
                 continue
             touched_lock_ts = set((tracker.active_sr or {}).keys()) if tracker is not None else set()
+            # 2026-08-12 fix: these zones are detected on the OPTION'S OWN premium chart
+            # (bear_only_book.py's design, reused unchanged -- see this file's module
+            # docstring), NOT the index/spot. dist_pct MUST compare against that side's
+            # own live premium (series.last_ltp), never self._last_spot (index points vs
+            # option premium rupees -- comparing them produced nonsense like +7713%,
+            # confirmed against real live BANKNIFTY/NIFTY/SENSEX numbers).
+            side_ltp = series.last_ltp
             for z in series.zones:
                 dist = None
-                if spot:
+                if side_ltp:
                     mid = (z["zone_lo"] + z["zone_hi"]) / 2
-                    dist = round((spot - mid) / mid * 100, 2) if mid else None
+                    dist = round((side_ltp - mid) / mid * 100, 2) if mid else None
                 zones.append({
-                    "direction": side,
+                    # "direction" kept as LONG/SHORT to match the WATCHLIST TRACKER UI's
+                    # existing vocabulary (built for fno_sr_book.py's spot-bias zones) --
+                    # CE zone -> LONG-biased trade, PE zone -> SHORT-biased trade, same
+                    # mapping this mechanic already uses when it actually enters. Strike
+                    # and the literal CE/PE side are carried separately so the UI can show
+                    # exactly which contract each zone belongs to, not just the bias arrow.
+                    "direction": "LONG" if side == "CE" else "SHORT",
+                    "option_side": side,
+                    "strike": series.strike,
                     "zone_lo": round(z["zone_lo"], 2),
                     "zone_hi": round(z["zone_hi"], 2),
                     "state": "MONITORING" if z["lock_ts"] in touched_lock_ts else "WAITING",
