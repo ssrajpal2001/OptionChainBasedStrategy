@@ -599,9 +599,10 @@ class PositionalSRTracker:
         pos = self.position
         sign = 1 if pos["side"] == "LONG" else -1
         pnl_pct = sign * (exit_price - pos["entry_price"]) / pos["entry_price"]
+        mfe_pct = sign * (pos["mfe_price"] - pos["entry_price"]) / pos["entry_price"]
         ev = dict(type="exit", side=pos["side"], reason=reason, exit_price=exit_price, exit_ts=exit_ts,
                    pnl_pct=pnl_pct, entry_ts=pos["entry_ts"], entry_price=pos["entry_price"],
-                   zone_ts=pos["zone_ts"])
+                   zone_ts=pos["zone_ts"], mfe_price=pos["mfe_price"], mfe_pct=mfe_pct)
         self.position = None
         return ev
 
@@ -649,7 +650,8 @@ class PositionalSRTracker:
                                              "lock_ts": zone["lock_ts"], "voided_at": bar.timestamp, "s1_low": s1_low})
                     elif phase_before == "R2_TRACKING" and phase_after == "R1_TRACKING" and live_r1_high:
                         self.position = {"side": "LONG", "zone_ts": zone["lock_ts"], "entry_ts": bar.timestamp,
-                                          "entry_price": float(live_r1_high), "tsl_level": s1_low}
+                                          "entry_price": float(live_r1_high), "tsl_level": s1_low,
+                                          "mfe_price": float(live_r1_high)}
                         pending_entry = dict(type="entry", side="LONG", entry_ts=bar.timestamp,
                                               entry_price=float(live_r1_high), zone_ts=zone["lock_ts"],
                                               initial_sl=s1_low)
@@ -661,7 +663,8 @@ class PositionalSRTracker:
                                              "lock_ts": zone["lock_ts"], "voided_at": bar.timestamp, "r1_high": r1_high})
                     elif phase_before in ("R2_TRACKING", "S2_TRACKING") and phase_after == "S1_TRACKING" and live_s1_low:
                         self.position = {"side": "SHORT", "zone_ts": zone["lock_ts"], "entry_ts": bar.timestamp,
-                                          "entry_price": float(live_s1_low), "tsl_level": r1_high}
+                                          "entry_price": float(live_s1_low), "tsl_level": r1_high,
+                                          "mfe_price": float(live_s1_low)}
                         pending_entry = dict(type="entry", side="SHORT", entry_ts=bar.timestamp,
                                               entry_price=float(live_s1_low), zone_ts=zone["lock_ts"],
                                               initial_sl=r1_high)

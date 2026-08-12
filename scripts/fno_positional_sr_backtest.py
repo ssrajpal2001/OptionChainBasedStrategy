@@ -86,7 +86,8 @@ def _zone_dicts(zones, side: str) -> List[dict]:
 
 
 async def backtest_one(symbol: str, start: date, end: date, token: str,
-                        zone_days: int = 1, entry_days: int = 1) -> dict:
+                        zone_days: int = 1, entry_days: int = 1,
+                        hard_risk_pct: float = _HARD_RISK_PCT) -> dict:
     """zone_days/entry_days DECOUPLED -- 2026-08-09, per direct user request to
     check whether zone detection benefits from a coarser/more-mature timeframe
     even though entry granularity already conclusively favors daily
@@ -112,7 +113,7 @@ async def backtest_one(symbol: str, start: date, end: date, token: str,
     zones_short: List[dict] = []
     known_bear: set = set()
     known_bull: set = set()
-    tracker = PositionalSRTracker(zones_long, zones_short, hard_risk_pct=_HARD_RISK_PCT)
+    tracker = PositionalSRTracker(zones_long, zones_short, hard_risk_pct=hard_risk_pct)
     trades: List[dict] = []
     open_ev = None
     age_cutoff_days = _MAX_ZONE_AGE_DAYS * max(1, zone_days)
@@ -144,19 +145,23 @@ async def backtest_one(symbol: str, start: date, end: date, token: str,
                 side=ev["side"], entry_ts=str(ev["entry_ts"].date()), entry_price=ev["entry_price"],
                 exit_ts=str(ev["exit_ts"].date()), exit_price=ev["exit_price"], reason=ev["reason"],
                 pnl_pct=round(ev["pnl_pct"] * 100, 2), hold_days=hold_days,
+                mfe_pct=round(ev.get("mfe_pct", 0.0) * 100, 2),
             ))
             open_ev = None
 
     if tracker.position is not None:
         last = entry_bars[-1]
-        sign = 1 if tracker.position["side"] == "LONG" else -1
-        pnl_pct = sign * (last.close - tracker.position["entry_price"]) / tracker.position["entry_price"]
+        pos = tracker.position
+        sign = 1 if pos["side"] == "LONG" else -1
+        pnl_pct = sign * (last.close - pos["entry_price"]) / pos["entry_price"]
+        mfe_pct = sign * (pos.get("mfe_price", pos["entry_price"]) - pos["entry_price"]) / pos["entry_price"]
         trades.append(dict(
-            side=tracker.position["side"], entry_ts=str(tracker.position["entry_ts"].date()),
-            entry_price=tracker.position["entry_price"], exit_ts=str(last.timestamp.date()),
+            side=pos["side"], entry_ts=str(pos["entry_ts"].date()),
+            entry_price=pos["entry_price"], exit_ts=str(last.timestamp.date()),
             exit_price=last.close, reason="still_open_at_backtest_end",
             pnl_pct=round(pnl_pct * 100, 2),
-            hold_days=(last.timestamp.date() - tracker.position["entry_ts"].date()).days,
+            hold_days=(last.timestamp.date() - pos["entry_ts"].date()).days,
+            mfe_pct=round(mfe_pct * 100, 2),
         ))
 
     wins = [t["pnl_pct"] for t in trades if t["pnl_pct"] > 0]
