@@ -6159,11 +6159,24 @@ pm2 save
             result = []
             for b in books:
                 if not hasattr(b, "monitoring_zones"):
+                    logger.warning(
+                        "d1trap_zones: book %s (%s) has no monitoring_zones() -- silently "
+                        "invisible to the WATCHLIST TRACKER panel.",
+                        getattr(b, "_underlying", "?"), type(b).__name__,
+                    )
                     continue
                 try:
                     result.append(b.monitoring_zones())
                 except Exception:
-                    pass
+                    # 2026-08-12: this used to swallow silently -- a book whose
+                    # monitoring_zones() raised (e.g. a genuinely-running FnO
+                    # WATCHLIST stock book) would just vanish from the panel with
+                    # zero trace anywhere, indistinguishable from "never spawned."
+                    logger.exception(
+                        "d1trap_zones: monitoring_zones() raised for %s (%s) -- "
+                        "dropped from the WATCHLIST TRACKER panel.",
+                        getattr(b, "_underlying", "?"), type(b).__name__,
+                    )
             # Sort: books with MONITORING zones or pending first, then by symbol
             result.sort(key=lambda r: (
                 0 if (r.get("pending") or any(z["state"] == "MONITORING" for z in r.get("zones", []))) else 1,
