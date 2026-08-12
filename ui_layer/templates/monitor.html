@@ -7773,8 +7773,14 @@ function amoTest() {
                     </div>
                   </div>
 
-                  <!-- WATCHLIST / ALL_FNO: show monitoring table for all tracked stocks -->
-                  <template x-if="dep.underlying==='WATCHLIST'||dep.underlying==='ALL_FNO'">
+                  <!-- WATCHLIST / ALL_FNO: show monitoring table for all tracked stocks.
+                       d1_trap_sr (2026-08-12): same panel, same /api/d1trap/zones fetch --
+                       this book never had a monitoring_zones() before today, so NIFTY/
+                       SENSEX/BANKNIFTY d1_trap_sr deployments had literally no UI panel
+                       at all despite running and holding real zones. Filtered to just
+                       this deployment's own underlying (not every book on the binding)
+                       so a NIFTY card doesn't also show BANKNIFTY/SENSEX/FnO stock rows. -->
+                  <template x-if="dep.underlying==='WATCHLIST'||dep.underlying==='ALL_FNO'||dep.strategy_name==='d1_trap_sr'">
                     <div class="rounded mb-2 overflow-hidden" style="border:1px solid var(--t-border)"
                          x-data="{
                            _mbooks: [],
@@ -7786,7 +7792,9 @@ function amoTest() {
                                const d = await r.json();
                                if (d.ok) {
                                  const all = d.books || [];
-                                 this._mbooks = all.filter(bk => bk.binding_id === b.binding_id);
+                                 const _singleUnderlying = dep.strategy_name==='d1_trap_sr';
+                                 this._mbooks = all.filter(bk => bk.binding_id === b.binding_id &&
+                                   (!_singleUnderlying || bk.underlying === dep.underlying));
                                }
                              } catch(e) {}
                            },
@@ -7800,8 +7808,10 @@ function amoTest() {
                          }"
                          x-init="_load(); setInterval(()=>_load(), 30000); window.addEventListener('spot-tick', e => _onSpotTick(e))">
                       <div class="flex items-center px-3 py-1.5" style="background:var(--t-surface);border-bottom:1px solid var(--t-border)">
-                        <span class="font-mono text-xs font-bold" style="color:var(--t-cyan)">WATCHLIST TRACKER</span>
-                        <span class="ml-2 font-mono text-xs" style="color:var(--t-muted)" x-text="_mbooks.length+' stocks'"></span>
+                        <span class="font-mono text-xs font-bold" style="color:var(--t-cyan)"
+                              x-text="dep.strategy_name==='d1_trap_sr' ? 'ZONE TRACKER' : 'WATCHLIST TRACKER'"></span>
+                        <span class="ml-2 font-mono text-xs" style="color:var(--t-muted)"
+                              x-text="dep.strategy_name==='d1_trap_sr' ? ((_mbooks[0]&&_mbooks[0].zones||[]).length+' zones') : _mbooks.length+' stocks'"></span>
                         <button @click="_load()" class="ml-auto font-mono text-xs px-2" style="color:var(--t-muted)">⟳</button>
                       </div>
                       <div x-show="_mbooks.length===0" class="px-3 py-2 font-mono text-xs" style="color:var(--t-muted)">
