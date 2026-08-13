@@ -593,17 +593,33 @@ breakout candle closes) were deliberately deferred — they change money-trackin
 mechanics, higher regression risk, better done after a few days of the simpler
 version's telemetry exist to review, not blind on day one.
 
-**Status (2026-08-13):** Phases 1-5 built and unit-tested (tracker, detector, bridge,
-engine/book manager, telemetry) plus the volume/absorption addition above — **not yet
-deployed, not even in paper mode.**
-Registered in `strategies/registry.py` as `"oi_flow"`; deploy via a direct
-`strategy_deployments` DB row (`strategy_name="oi_flow"`, `underlying="BANKNIFTY"`,
-`product_type="MIS"`), same pre-UI-form pattern every other strategy in this
-codebase used before its own dashboard deploy form existed — no UI form built yet.
-**Before any live-capital conversation**, an explicit graduation criterion needs
-agreement: target ~20-30 real signal evaluations with a reviewable win/loss split in
-paper mode first — there is no backtest number to compare against, so this must be
-agreed up front, not decided after the fact once real numbers start coming in.
+**Full dashboard UI integration + paper_route (2026-08-13):** `oi_flow` is now a
+selectable option in the deploy form (`monitor.html` ADD STRATEGY dropdown, default
+underlying NIFTY) — no more raw SQL needed to deploy. `OIFlowExecutionBridge` gained
+`paper_route` handling (previously only pure `paper`/full `live` existed): the order
+genuinely reaches the real broker (verifies routing/whitelist from a no-fund account,
+mirrors `StraddleExecutionBridge`'s own `paper_route` contract), and the strategy's
+own fill always finalizes — the broker's real `avg_price` if it happened to confirm
+one, else a local simulated fill at the strategy's own price; a genuinely unresolvable
+broker still aborts loudly. New `OIFlowStrategy.monitoring_state()` + `GET
+/api/oiflow/status` + a live panel on the deployment card (mirrors the FVG/D1Trap zone
+panels) show the OI wall + buildup per strike, the open position with running P&L, and
+an in-memory "recent remarks" trail (last 30 signal evaluations, human-readable) — the
+live-UI counterpart to `telemetry.py`'s JSONL log.
+
+**Status (2026-08-13):** Phases 1-5 + the volume/absorption addition + the paper_route/
+dashboard integration above are all built, unit-tested, and pushed. First real
+deployment (BOTH live and paper_route) is scheduled for the next trading session —
+**NIFTY**, not BANKNIFTY (the strategy is underlying-agnostic by design; the client's
+own choice for the first real run), one binding on `trading_mode=live` (real funds)
+and one on `trading_mode=paper_route` (order verified against the real broker, fill
+simulated) running side-by-side with `sell_straddle`. Deploy via the dashboard form,
+not a raw SQL row.
+**Before any FURTHER live-capital scale-up beyond this first deployment**, an explicit
+graduation criterion needs agreement: target ~20-30 real signal evaluations with a
+reviewable win/loss split first — there is no backtest number to compare against, so
+this must be agreed up front, not decided after the fact once real numbers start
+coming in.
 
 ---
 
