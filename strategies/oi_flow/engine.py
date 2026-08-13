@@ -47,6 +47,21 @@ from strategies.oi_flow.tracker import OIFlowTracker
 
 logger = logging.getLogger(__name__)
 
+
+def _make_strategy_logger(underlying: str, client_id: str = "", binding_id: str = "") -> logging.Logger:
+    """Dedicated, rotating, per-(underlying,client,binding,day) log file --
+    same utils.logging_utils.make_strategy_logger platform utility
+    SellStraddle/V4Cascade already use (strategies/sell_straddle/engine.py's
+    own _make_strategy_logger, logs/clients/ss_{UND}_{client}_{binding}_
+    {date}.log), so OI-Flow gets the same dedicated-log-per-index behavior
+    -- e.g. running OI-Flow on both NIFTY and SENSEX for the same client/
+    binding writes to two separate files, never mixed together."""
+    from utils.logging_utils import make_strategy_logger
+    tag = f"{underlying}" + (f"_{client_id}_{binding_id}" if client_id and binding_id else "")
+    date_str = datetime.now(IST).strftime("%Y%m%d")
+    return make_strategy_logger(f"oiflow_{tag}_{date_str}", propagate=False)
+
+
 _DEFAULT_WINDOW_SEC = 180
 _DEFAULT_MAX_OPPOSING_ROC_PCT = -0.01
 _DEFAULT_MIN_SUPPORTING_ROC_PCT = 0.02
@@ -122,6 +137,12 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._lot_size = (cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
         self._strike_step = float(cfg.exchange.strike_steps.get(underlying, 100) if cfg else 100)
         self._persist_key = f"{client_id}_{binding_id}_{underlying}_oi_flow"
+        # Dedicated per-(underlying,client,binding,day) rotating log file --
+        # same as SellStraddle's own self._clog (strategies/sell_straddle/
+        # engine.py). Never recreated on reset_session(), matching that same
+        # convention (a live process rarely spans an actual midnight
+        # rollover for intraday NSE trading).
+        self._clog = _make_strategy_logger(underlying, client_id, binding_id)
 
         self._today: Optional[date] = None
         self._oi_tracker = OIFlowTracker(max_history_sec=max(window_sec * 2, 600))
@@ -371,7 +392,10 @@ class OIFlowStrategy(AbstractStrategyBook):
                 wall = snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike
                 if wall and float(ev.strike) == float(wall):
                     self._live_option_ltp[side] = ev.ltp
-                    closed = self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
+                    # Return value (bar-closed?) intentionally unused -- SL/
+                    # TSL/exit checks run every tick unconditionally below,
+                    # not gated on a bar boundary.
+                    self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
 
             if self._position is not None and self._position["side"] == side \
                     and float(ev.strike) == float(self._position["strike"]):
@@ -448,6 +472,8 @@ class OIFlowStrategy(AbstractStrategyBook):
             "OIFlow[%s]: ENTER BUY %s %d entry=%.2f sl=%.2f (awaiting broker confirmation, event_id=%s)",
             self._underlying, side, strike, entry_price, self._position["sl_price"], eid,
         )
+        self._clog.info("ENTER BUY %s %d entry=%.2f sl=%.2f event_id=%s",
+                         side, strike, entry_price, self._position["sl_price"], eid)
         expiry = REGISTRY.get_active_expiry_strict(self._underlying, self._today or datetime.now(IST).date())
         order_ev = OIFlowOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id, action="BUY",
@@ -494,6 +520,8 @@ class OIFlowStrategy(AbstractStrategyBook):
                         "-- leg stays OPEN; will retry on a later tick/EOD pass.",
                         self._underlying, pos["side"], pos["strike"], _EXIT_CONFIRM_TIMEOUT_SEC, eid, reason,
                     )
+                    self._clog.info("EXIT %s%d fill NOT CONFIRMED within %.0fs event_id=%s reason=%s -- retrying later",
+                                     pos["side"], pos["strike"], _EXIT_CONFIRM_TIMEOUT_SEC, eid, reason)
                     return
             finally:
                 self._fill_waiters.pop(eid, None)
@@ -505,6 +533,8 @@ class OIFlowStrategy(AbstractStrategyBook):
                     "-- leg stays OPEN; will retry on a later tick/EOD pass.",
                     self._underlying, pos["side"], pos["strike"], eid, reason,
                 )
+                self._clog.info("EXIT %s%d ABORTED by bridge (broker unavailable) event_id=%s reason=%s -- leg stays OPEN",
+                                 pos["side"], pos["strike"], eid, reason)
                 return
 
             if self._position is pos:
@@ -512,6 +542,8 @@ class OIFlowStrategy(AbstractStrategyBook):
             self._persist_position()
             logger.info("OIFlow[%s]: SELL %s %d reason=%s exit=%.2f CONFIRMED (event_id=%s)",
                         self._underlying, pos["side"], pos["strike"], reason, exit_price, eid)
+            self._clog.info("SELL %s %d reason=%s exit=%.2f CONFIRMED event_id=%s",
+                             pos["side"], pos["strike"], reason, exit_price, eid)
         finally:
             pos["_closing"] = False
 
@@ -546,6 +578,8 @@ class OIFlowStrategy(AbstractStrategyBook):
                     "OIFlow[%s]: ENTRY ABORTED (broker unavailable/gate closed, event_id=%s) "
                     "-- discarding optimistic position.", self._underlying, fill.event_id,
                 )
+                self._clog.info("ENTRY ABORTED (broker unavailable/gate closed) event_id=%s -- discarding position",
+                                 fill.event_id)
                 self._position = None
                 self._persist_position()
             return
@@ -583,6 +617,8 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._position = d
         logger.info("OIFlow[%s]: RESTORED open leg from disk on restart -- %s%s@%.2f",
                     self._underlying, d["side"], int(d["strike"]), d["entry_price"])
+        self._clog.info("RESTORED open leg from disk on restart -- %s%s@%.2f",
+                         d["side"], int(d["strike"]), d["entry_price"])
 
     # ── dashboard ────────────────────────────────────────────────────────────
 

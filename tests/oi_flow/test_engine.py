@@ -9,6 +9,7 @@ feed (which doesn't exist for this strategy anyway -- no historical OI
 data to replay).
 """
 import asyncio
+import logging
 from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -109,6 +110,7 @@ def _make_book() -> OIFlowStrategy:
     book._fill_waiters = {}
     book._fill_results = {}
     book._recent_remarks = deque(maxlen=30)
+    book._clog = logging.getLogger("test_oi_flow_clog")   # avoid real log-file I/O in tests
     book._persist_position = lambda: None   # avoid real disk I/O in tests
     return book
 
@@ -152,6 +154,34 @@ def _seed_option_bars_ok(book: OIFlowStrategy, base) -> None:
     book._live_option_ltp["CE"] = 526.0
 
 
+# ── dedicated per-underlying log file (2026-08-13) ───────────────────────────
+
+def test_make_strategy_logger_gives_a_distinct_file_per_underlying(tmp_path, monkeypatch):
+    """Explicit ask: OI-Flow needs its own dedicated log file per underlying,
+    same as SellStraddle's ss_{UND}_{client}_{binding}_{date}.log -- running
+    NIFTY and SENSEX for the same client/binding must never mix into one
+    file. Uses the real utils.logging_utils.make_strategy_logger (the same
+    platform utility SellStraddle/V4Cascade already use) redirected to a
+    temp dir so this doesn't touch real logs/clients/."""
+    import utils.logging_utils as logging_utils_module
+    _real = logging_utils_module.make_strategy_logger
+    monkeypatch.setattr(
+        logging_utils_module, "make_strategy_logger",
+        lambda stem, **kw: _real(stem, log_dir=str(tmp_path), propagate=kw.get("propagate", False)),
+    )
+    from strategies.oi_flow.engine import _make_strategy_logger
+    lg_nifty = _make_strategy_logger("NIFTY", "ssrajpal2001", "SA5770")
+    lg_sensex = _make_strategy_logger("SENSEX", "ssrajpal2001", "SA5770")
+    assert lg_nifty is not lg_sensex
+    assert lg_nifty.name != lg_sensex.name
+    assert "NIFTY" in lg_nifty.name and "SENSEX" not in lg_nifty.name
+    assert "SENSEX" in lg_sensex.name and "NIFTY" not in lg_sensex.name
+    import os
+    files = os.listdir(tmp_path)
+    assert any("NIFTY" in f for f in files)
+    assert any("SENSEX" in f for f in files)
+
+
 # ── _rewatch_oi_strikes ───────────────────────────────────────────────────────
 
 def test_rewatch_oi_strikes_derives_correct_watch_list():
@@ -162,6 +192,51 @@ def test_rewatch_oi_strikes_derives_correct_watch_list():
     assert (57600.0, "PE") in book._watched_strikes    # one step below -- CE's supporting side
     assert (57200.0, "PE") in book._watched_strikes    # put wall itself
     assert (57300.0, "CE") in book._watched_strikes    # one step above -- PE's supporting side
+
+
+# ── _on_spot_bar_close: single-position-at-a-time (CE XOR PE) ────────────────
+
+def test_on_spot_bar_close_never_evaluates_either_side_while_a_position_is_open():
+    """Explicit requirement: only one side's trade may be active at a time --
+    if CE is running, a PE entry must never even be ATTEMPTED (not just
+    blocked after evaluation). _on_spot_bar_close() is the ONLY caller of
+    _try_enter()/_enter() in the whole engine, and its very first check is
+    `self._position is not None` -- this drives that guard directly (not
+    _try_enter() in isolation, which every other test uses) to prove the
+    real-world entry point actually skips evaluation entirely."""
+    book = _make_book()
+    base = _base()
+    # An open CE position already exists...
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0)
+    # ...and PE's own gates would trivially pass if ever evaluated (proves
+    # the guard, not a coincidental PE-side rejection, is what's blocking it).
+    book._spot_acc.bars = _flat_spot_bars(base, price=57190.0)
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0, pcr=0.5)
+    book._rewatch_oi_strikes(book._latest_snap)
+    _try_enter_calls = []
+    book._try_enter = lambda side: _try_enter_calls.append(side)
+
+    book._on_spot_bar_close()
+
+    assert _try_enter_calls == []   # never even attempted, PE or otherwise
+    assert book._position["side"] == "CE"   # the original CE position is untouched
+
+
+def test_on_spot_bar_close_evaluates_when_flat():
+    """Sanity check for the test above: with no open position, evaluation
+    DOES proceed (proves the guard is position-gated, not permanently off)."""
+    book = _make_book()
+    base = _base()
+    book._position = None
+    book._spot_acc.bars = _flat_spot_bars(base, price=57690.0)
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0, pcr=1.3)
+    _try_enter_calls = []
+    book._try_enter = lambda side: _try_enter_calls.append(side)
+
+    book._on_spot_bar_close()
+
+    assert "CE" in _try_enter_calls
 
 
 # ── _try_enter ────────────────────────────────────────────────────────────────

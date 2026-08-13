@@ -160,14 +160,6 @@ def swing_low(bars: List[Bar], pivot: int = 2) -> Optional[float]:
     return max(lows, key=lambda s: s.index).price
 
 
-def swing_high(bars: List[Bar], pivot: int = 2) -> Optional[float]:
-    """Mirror of swing_low() for PE-side stop-loss anchoring."""
-    highs = [s for s in find_swing_points(bars, pivot=pivot) if s.kind == "HIGH"]
-    if not highs:
-        return None
-    return max(highs, key=lambda s: s.index).price
-
-
 # ── 2c. Spot-side pre-breakout signal ────────────────────────────────────────
 
 @dataclass(frozen=True)

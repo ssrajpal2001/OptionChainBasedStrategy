@@ -14,7 +14,7 @@ import pytest
 from config.global_config import IST
 from strategies.oi_flow.detector import (
     Bar, BarAccumulator, SwingPoint, find_swing_points, has_recent_structure_break,
-    swing_low, swing_high, detect_pre_breakout_signal, confirm_option_price_action,
+    swing_low, detect_pre_breakout_signal, confirm_option_price_action,
     detect_volume_spike,
 )
 from strategies.oi_flow.tracker import OIFlowTracker
@@ -159,7 +159,7 @@ def test_has_recent_structure_break_false_when_still_inside_the_range():
     assert has_recent_structure_break(bars, swings, "BULLISH") is False
 
 
-def test_swing_low_and_swing_high_return_the_most_recent_confirmed_value():
+def test_swing_low_returns_the_most_recent_confirmed_value():
     base = _base()
     bars = [
         _bar(base, 12, 15, 10, 13),
@@ -167,7 +167,16 @@ def test_swing_low_and_swing_high_return_the_most_recent_confirmed_value():
         _bar(base + timedelta(minutes=2), 14, 16, 9, 15),
     ]
     assert swing_low(bars, pivot=1) == 4
-    assert swing_high(bars, pivot=1) is None   # no confirmed swing high in this sequence
+
+
+def test_swing_low_none_when_no_confirmed_swing_low_in_sequence():
+    base = _base()
+    bars = [
+        _bar(base, 8, 10, 5, 9),
+        _bar(base + timedelta(minutes=1), 12, 15, 8, 14),   # a swing HIGH, not a low
+        _bar(base + timedelta(minutes=2), 7, 9, 4, 6),
+    ]
+    assert swing_low(bars, pivot=1) is None
 
 
 # ── detect_pre_breakout_signal ───────────────────────────────────────────────
