@@ -372,6 +372,39 @@ def test_option_confirmation_surfaces_volume_spike_without_blocking_ok():
     assert conf.volume_ratio == pytest.approx(2.5)
 
 
+def test_option_confirmation_pe_side_uses_identical_long_premium_logic_as_ce():
+    """2026-08-13 regression guard: a bought PE is still LONG its own
+    premium (profit = premium rising), so confirmation must require
+    close > vwap / no upper-wick rejection / sl = swing LOW for PE too --
+    identical to CE, never a below-vwap / swing-high mirror. Same bar
+    sequence as test_option_confirmation_sl_level_matches_real_swing_low,
+    just evaluated with side='PE' to prove there's no side-dependent branch."""
+    base = _base()
+    bars = [
+        _bar(base, 512, 515, 510, 513),
+        _bar(base + timedelta(minutes=1), 506, 512, 502, 508),   # swing low @ 502
+        _bar(base + timedelta(minutes=2), 514, 520, 511, 518),
+        _bar(base + timedelta(minutes=3), 519, 525, 516, 523),
+    ]
+    conf_ce = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1)
+    conf_pe = confirm_option_price_action(bars, "PE", lookback=4, swing_pivot=1)
+    assert conf_pe.ok is True
+    assert conf_pe.sl_level == 502   # swing LOW, not swing high (the old bug's anchor)
+    assert conf_pe.ok == conf_ce.ok and conf_pe.sl_level == conf_ce.sl_level and conf_pe.vwap == conf_ce.vwap
+
+
+def test_option_confirmation_pe_side_blocked_below_vwap_same_as_ce():
+    """The old (buggy) PE branch REQUIRED close < vwap to pass -- this
+    proves the fixed version blocks PE on a below-vwap close, exactly like
+    CE, not the inverse."""
+    base = _base()
+    bars = [_bar(base + timedelta(minutes=i), 500, 505, 495, 500) for i in range(5)]
+    bars.append(_bar(base + timedelta(minutes=5), 480, 482, 460, 462))   # sharp drop, closes low
+    conf = confirm_option_price_action(bars, "PE", lookback=6, swing_pivot=1)
+    assert conf.ok is False
+    assert conf.reason == "below_vwap"
+
+
 def test_option_confirmation_volume_fields_populated_even_when_blocked():
     """A rejection (below_vwap here) must still carry the volume read --
     was there real absorption happening even on a setup we didn't take?"""

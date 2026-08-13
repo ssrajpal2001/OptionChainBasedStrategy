@@ -301,6 +301,24 @@ def test_check_exit_triggers_on_sl_hit_for_ce():
     assert "sl_option_swing_low" in exited.get("reason", "")
 
 
+def test_check_exit_triggers_on_sl_hit_for_pe_same_direction_as_ce():
+    """2026-08-13 regression guard: a bought PE is long its own premium,
+    same as CE -- SL fires when the PREMIUM FALLS to/through its own
+    swing-low floor, not when it rises. Before the fix, PE's condition was
+    `ltp >= sl_price` (fires on a RISE) -- this proves the fixed version
+    fires on a FALL, identically to CE."""
+    book = _make_book()
+    book._position = dict(side="PE", strike=57200.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(475.0)   # premium fell below the 480 SL floor
+
+    assert exited.get("exit_price") == 475.0
+    assert "sl_option_swing_low" in exited.get("reason", "")
+
+
 def test_check_exit_no_trigger_when_above_sl():
     book = _make_book()
     book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,

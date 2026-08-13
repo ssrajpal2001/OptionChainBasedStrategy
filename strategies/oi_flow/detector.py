@@ -312,10 +312,11 @@ class OptionConfirmation:
 def _vwap(bars: List[Bar]) -> Optional[float]:
     """Simple session-anchored typical-price VWAP over the given bars (this
     strategy's own, not borrowed from any other strategy's indicator
-    engine). Uses (H+L+C)/3 as the proxy typical price since real per-bar
-    traded volume isn't threaded into Bar (ltp-tick-derived OHLC only) --
-    documented limitation, adequate for a "holding above recent value
-    area" check, not a precision volume-weighted calculation."""
+    engine). Uses (H+L+C)/3 as the proxy typical price, unweighted by
+    volume even though Bar.volume exists (2026-08-13) -- true
+    volume-weighting is a further refinement, not done here; this stays
+    an adequate "holding above recent value area" check, not a precision
+    VWAP."""
     if not bars:
         return None
     total = 0.0
@@ -332,12 +333,25 @@ def confirm_option_price_action(
     wick_rejection_ratio: float = _UPPER_WICK_REJECTION_RATIO,
     volume_spike_ratio: float = _VOLUME_SPIKE_RATIO_DEFAULT,
 ) -> OptionConfirmation:
-    """CE: premium must be holding ABOVE its own recent VWAP with no active
-    upper-wick rejection on the most recent candle (rejection = seller
-    pressure right at the current price, a bad time to buy into strength).
-    PE mirrors: below VWAP, no lower-wick rejection. sl_level is the
-    option's own most recent confirmed swing low (CE) / swing high (PE) --
-    the stop anchor engine.py must use, never a spot-derived offset.
+    """Both CE and PE entries BUY the option -- long its own premium either
+    way (profit = premium rising, loss = premium falling), so this check is
+    IDENTICAL for both sides: premium must be holding ABOVE its own recent
+    VWAP with no active upper-wick rejection on the most recent candle
+    (rejection = seller pressure right at the current price, a bad time to
+    buy into strength). sl_level is the option's own most recent confirmed
+    swing LOW (for either side) -- the stop anchor engine.py must use,
+    never a spot-derived offset.
+
+    `side` does NOT flip this logic -- 2026-08-13 fix: an earlier version
+    mirrored CE/PE here the way detect_pre_breakout_signal() correctly
+    mirrors them for the SPOT-side gate (where CE/PE really do point
+    opposite directions), but that mirroring is wrong on the option's OWN
+    premium chart -- a bought PE is still a long position on its own
+    premium, not a short. The old PE branch required premium BELOW its own
+    VWAP (entering into weakness) and anchored SL to a swing HIGH (often
+    not even below the entry price) -- caught because zero tests ever
+    exercised the PE branch before this fix. `side` is kept only for the
+    dataclass/telemetry's own labeling, not the decision.
 
     Also computes (but never gates on) a volume-spike read via
     detect_volume_spike() -- populated on every returned path, including
@@ -359,24 +373,14 @@ def confirm_option_price_action(
 
     last = option_bars_1m[-1]
     rng = last.high - last.low
-    if side == "CE":
-        if last.close < vwap:
-            return OptionConfirmation(ok=False, reason="below_vwap", vwap=vwap,
-                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
-        upper_wick = last.high - max(last.open, last.close)
-        if rng > 0 and (upper_wick / rng) >= wick_rejection_ratio:
-            return OptionConfirmation(ok=False, reason="upper_wick_rejection", vwap=vwap,
-                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
-        sl = swing_low(window, pivot=swing_pivot)
-    else:
-        if last.close > vwap:
-            return OptionConfirmation(ok=False, reason="above_vwap", vwap=vwap,
-                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
-        lower_wick = min(last.open, last.close) - last.low
-        if rng > 0 and (lower_wick / rng) >= wick_rejection_ratio:
-            return OptionConfirmation(ok=False, reason="lower_wick_rejection", vwap=vwap,
-                                       volume_spike=volume_spike, volume_ratio=volume_ratio)
-        sl = swing_high(window, pivot=swing_pivot)
+    if last.close < vwap:
+        return OptionConfirmation(ok=False, reason="below_vwap", vwap=vwap,
+                                   volume_spike=volume_spike, volume_ratio=volume_ratio)
+    upper_wick = last.high - max(last.open, last.close)
+    if rng > 0 and (upper_wick / rng) >= wick_rejection_ratio:
+        return OptionConfirmation(ok=False, reason="upper_wick_rejection", vwap=vwap,
+                                   volume_spike=volume_spike, volume_ratio=volume_ratio)
+    sl = swing_low(window, pivot=swing_pivot)
 
     if sl is None:
         return OptionConfirmation(ok=False, reason="no_swing_sl_anchor_yet", vwap=vwap,

@@ -355,14 +355,18 @@ class OIFlowStrategy(AbstractStrategyBook):
                 self._check_exit(ev.ltp)
 
     def _check_exit(self, ltp: float) -> None:
+        # Both CE and PE positions BUY the option -- long its own premium
+        # either way, so the SL check is identical for both sides: premium
+        # falling to/through its own swing-low floor. 2026-08-13 fix: PE
+        # used to check `ltp >= sl_price` (fires on a RISE), a leftover
+        # from confirm_option_price_action()'s own now-fixed PE mirroring
+        # bug (detector.py) -- was never actually consistent with this
+        # line's own "sl_option_swing_low" label, which already assumed a
+        # falling-through-a-low semantic for both sides.
         pos = self._position
         if pos is None or pos.get("_closing"):
             return
-        side = pos["side"]
-        if side == "CE" and ltp <= pos["sl_price"]:
-            self._exit(reason=f"sl_option_swing_low@{pos['sl_price']:.2f}", exit_price=ltp)
-            return
-        if side == "PE" and ltp >= pos["sl_price"]:
+        if ltp <= pos["sl_price"]:
             self._exit(reason=f"sl_option_swing_low@{pos['sl_price']:.2f}", exit_price=ltp)
             return
         risk_floor = pos["entry_price"] - (self._hard_risk_rs_per_lot / (self._lot_size * self._lot_multiplier))
