@@ -753,6 +753,34 @@ reviewable win/loss split first — there is no backtest number to compare again
 this must be agreed up front, not decided after the fact once real numbers start
 coming in.
 
+**⚠️ CRITICAL PLATFORM BUG found and fixed during first live deployment (2026-08-13):**
+`matrix_engine/option_matrix.py`'s `OptionMatrixEngine.initialize()` had **zero callers
+anywhere in the codebase** — confirmed via a repo-wide grep, only its own definition.
+`OptionMatrix.on_option_tick()`'s very first line is `if self._snap is None: return
+False`, and `self._snap` is ONLY ever set by `initialize()` — so `Topic.MATRIX_SNAPSHOT`
+had **never been published, for any underlying, ever**, regardless of real tick volume.
+Confirmed live: NIFTY was receiving ~1600 real option ticks/min (via SellStraddle's own
+independent consumption of the same `Topic.OPTION_TICK` stream — SellStraddle does not
+use `OptionMatrixEngine` at all, confirmed zero references) while OI-Flow sat on `WAIT`
+for over an hour on its first live day, because it depends entirely on this snapshot.
+No test existed for `option_matrix.py` at all before this — that's how it went
+unnoticed. This is a **platform bug, not an OI-Flow bug** — `D1TrapBearOnlyBook`'s
+`_oi_wall_strikes` feature also reads this same snapshot but was silently protected by
+its own documented fallback ("falls back to the fixed-offset strike if no snapshot has
+published yet"), so it never surfaced as a visible failure there.
+
+**Fix**: `OptionMatrixEngine._consume_index()` now self-initializes a matrix the moment
+it sees the first real `INDEX_TICK` for that underlying (resolving the active expiry via
+the same `REGISTRY.get_active_expiry()` every other live consumer already uses), instead
+of waiting for an external `initialize()` call that was never coming.
+`tests/matrix_engine/test_option_matrix.py` (new — first test coverage this file has
+ever had) covers the exact bug (`on_option_tick` returns `False` before init), the fix
+(lazy self-init on first tick, only once, gracefully no-ops if the registry isn't loaded
+yet or spot≤0), and an end-to-end regression driving both consumer loops together to
+confirm a real `MATRIX_SNAPSHOT` publish. **SellStraddle (including Gurmeet's live
+capital) has zero dependency on this component and was completely unaffected, before or
+after this fix** — confirmed via direct code inspection before touching anything.
+
 ---
 
 ## Key Design Decisions
