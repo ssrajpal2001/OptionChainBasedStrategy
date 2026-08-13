@@ -39,7 +39,7 @@ from data_layer import position_store
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.oi_flow.detector import (
-    BarAccumulator, detect_pre_breakout_signal, confirm_option_price_action,
+    BarAccumulator, detect_pre_breakout_signal, confirm_option_price_action, swing_low,
 )
 from strategies.oi_flow.events import OIFlowOrderEvent, OIFlowFillEvent
 from strategies.oi_flow.telemetry import log_signal_evaluation, new_row
@@ -259,7 +259,17 @@ class OIFlowStrategy(AbstractStrategyBook):
         return symbol in aliases.get(u, ())
 
     def _on_spot_bar_close(self) -> None:
-        if self._day_done or self._position is not None or self._latest_snap is None:
+        if self._day_done or self._position is not None:
+            return
+        spot = self._spot_acc.bars[-1].close if self._spot_acc.bars else None
+        if self._latest_snap is None:
+            # Every 1-min spot bar close until the first chain snapshot
+            # arrives -- without this, the log file looks completely dead
+            # during startup (same complaint SellStraddle's own WAIT line
+            # exists to avoid): confirms the book is alive and ticking,
+            # just still waiting on Topic.MATRIX_SNAPSHOT.
+            self._clog.info("WAIT spot=%s -- waiting for first OI chain snapshot (Topic.MATRIX_SNAPSHOT)...",
+                             f"{spot:.2f}" if spot is not None else "?")
             return
         now_t = self._spot_acc.bars[-1].timestamp.time() if self._spot_acc.bars else datetime.now(IST).time()
         if now_t >= self._squareoff_time:
@@ -279,7 +289,16 @@ class OIFlowStrategy(AbstractStrategyBook):
             # reviewable later as a fired signal, since there's no
             # backtest to compare against.
             log_signal_evaluation(row)
-            self._recent_remarks.appendleft(self._remark_for(row))
+            remark = self._remark_for(row)
+            self._recent_remarks.appendleft(remark)
+            # 2026-08-13: also write every evaluation to the dedicated
+            # per-underlying log file (self._clog), not just the in-memory
+            # dashboard trail -- previously self._clog only got written to
+            # on actual entries/exits, so during a long stretch of "no
+            # signal yet" the file looked dead/silent, unlike SellStraddle's
+            # own _clog which logs a WAIT/evaluation line every cycle even
+            # while idle. This is the fix for that.
+            self._clog.info(remark["text"])
 
     def _remark_for(self, row) -> dict:
         """Turns one telemetry row into a short, human-readable line for the
@@ -387,18 +406,36 @@ class OIFlowStrategy(AbstractStrategyBook):
             self._oi_tracker.on_option_tick(ev)
 
             side = str(ev.option_type).upper()
-            snap = self._latest_snap
-            if snap is not None:
-                wall = snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike
-                if wall and float(ev.strike) == float(wall):
-                    self._live_option_ltp[side] = ev.ltp
-                    # Return value (bar-closed?) intentionally unused -- SL/
-                    # TSL/exit checks run every tick unconditionally below,
-                    # not gated on a bar boundary.
-                    self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
+            has_position = self._position is not None and self._position["side"] == side
+            # 2026-08-13 fix: which strike _option_acc[side]/_live_option_ltp
+            # track must switch the moment a position opens. Before this,
+            # both ALWAYS followed the CURRENT OI wall (snap.max_call_oi_
+            # strike/max_put_oi_strike) -- correct while scanning/flat, but
+            # _rewatch_oi_strikes() re-derives the wall on every new
+            # MATRIX_SNAPSHOT regardless of position state, so a wall that
+            # drifts to a DIFFERENT strike while a position is open would
+            # silently redirect these onto the NEW wall's premium -- a
+            # different instrument's price series entirely -- corrupting
+            # the EOD exit-price fallback, the dashboard's live P&L, and
+            # (2026-08-13) the S1 trailing-stop swing-low calculation,
+            # while the actual held position sits at the OLD strike.
+            # Post-entry: lock onto the position's own strike, immune to
+            # wall drift. Pre-entry/flat: keep following the current wall
+            # (that IS the correct behavior while scanning for an entry).
+            if has_position:
+                target_strike = float(self._position["strike"])
+            else:
+                snap = self._latest_snap
+                wall = (snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike) if snap else None
+                target_strike = float(wall) if wall else None
+            is_target_strike = target_strike is not None and float(ev.strike) == target_strike
+            if is_target_strike:
+                self._live_option_ltp[side] = ev.ltp
+                closed = self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
+                if closed and has_position:
+                    self._maybe_promote_s1(side)
 
-            if self._position is not None and self._position["side"] == side \
-                    and float(ev.strike) == float(self._position["strike"]):
+            if has_position and is_target_strike:
                 self._check_exit(ev.ltp)
 
     def _check_exit(self, ltp: float) -> None:
@@ -431,15 +468,56 @@ class OIFlowStrategy(AbstractStrategyBook):
             pos["high_lock_pct"] = max(pos.get("high_lock_pct", 0.0), calc_lock)
 
         high_lock_pct = pos.get("high_lock_pct", 0.0)
-        stop_price = entry * (1 + high_lock_pct) if high_lock_pct > 0 else pos["sl_price"]
+        pct_floor = entry * (1 + high_lock_pct) if high_lock_pct > 0 else pos["sl_price"]
+        # S1 trailing stop (2026-08-13, user's own framing: "S1 will act as
+        # TSL"): the option's own most recent CONFIRMED swing low since
+        # entry, promoted (ratcheted, never lowered) as new higher lows
+        # print -- see _maybe_promote_s1(). Combined with the percentage
+        # ratchet above via max(): whichever floor is currently TIGHTER
+        # (higher) binds, so S1 can tighten the stop beyond what the flat
+        # percentage alone would give (a real, confirmed price-action
+        # level rather than an arbitrary percentage step), while never
+        # loosening protection the percentage ratchet already earned.
+        s1_floor = pos.get("s1_floor", pos["sl_price"])
+        stop_price = max(pct_floor, s1_floor)
         if ltp <= stop_price:
-            reason = f"tsl_hit@{stop_price:.2f}" if high_lock_pct > 0 else f"sl_option_swing_low@{stop_price:.2f}"
+            # Label only credits S1/TSL when one of them actually PROMOTED
+            # past the original swing-low anchor -- a plain SL hit (neither
+            # ever activated) must still read as "sl_option_swing_low", not
+            # a misleading "s1_hit"/"tsl_hit" implying a promotion that
+            # never happened.
+            if s1_floor > pos["sl_price"] and s1_floor >= pct_floor:
+                reason = f"s1_hit@{stop_price:.2f}"
+            elif high_lock_pct > 0:
+                reason = f"tsl_hit@{stop_price:.2f}"
+            else:
+                reason = f"sl_option_swing_low@{stop_price:.2f}"
             self._exit(reason=reason, exit_price=ltp)
             return
 
         risk_floor = entry - (self._hard_risk_rs_per_lot / (self._lot_size * self._lot_multiplier))
         if ltp <= risk_floor:
             self._exit(reason=f"hard_risk_cap@{risk_floor:.2f}", exit_price=ltp)
+
+    def _maybe_promote_s1(self, side: str) -> None:
+        """S1 trailing stop, per the user's own framing ('S1 will act as
+        TSL'): as the option's own premium chart prints a new CONFIRMED
+        swing low (swing_low(), the SAME function already used for the
+        entry-time SL anchor -- this strategy's own utility, not another
+        strategy's S&R code) ABOVE the current s1_floor, promote the floor
+        to it. Ratchets only, same discipline as the percentage TSL. Called
+        only on an option-bar CLOSE for the position's OWN strike (a
+        confirmed swing point can't change mid-bar), never on the non-
+        position side."""
+        pos = self._position
+        if pos is None or pos["side"] != side:
+            return
+        new_s1 = swing_low(self._option_acc[side].bars, pivot=2)
+        if new_s1 is not None and new_s1 > pos.get("s1_floor", pos["sl_price"]):
+            old = pos.get("s1_floor", pos["sl_price"])
+            pos["s1_floor"] = new_s1
+            logger.info("OIFlow[%s]: S1 promoted %s: %.2f -> %.2f", self._underlying, side, old, new_s1)
+            self._clog.info("S1 promoted %s: %.2f -> %.2f", side, old, new_s1)
 
     async def _eod_loop(self) -> None:
         while self._running:
@@ -461,11 +539,13 @@ class OIFlowStrategy(AbstractStrategyBook):
         qty = self._lot_size * self._lot_multiplier
         self._event_counter += 1
         eid = f"{self._underlying}_{side}{int(strike)}_ENTRY_{self._event_counter}"
+        _initial_sl = sl_price if sl_price is not None else entry_price * 0.8
         self._position = dict(
             side=side, strike=strike, entry_price=entry_price,
-            sl_price=(sl_price if sl_price is not None else entry_price * 0.8),
+            sl_price=_initial_sl,
             entry_ts=datetime.now(IST), qty=qty, _event_id=eid,
             high_lock_pct=0.0,   # step-locked TSL ratchet, see _check_exit
+            s1_floor=_initial_sl,   # S1 trailing stop, see _maybe_promote_s1
         )
         self._persist_position()
         logger.info(
@@ -654,11 +734,16 @@ class OIFlowStrategy(AbstractStrategyBook):
             pos = self._position
             ltp = self._live_option_ltp.get(pos["side"])
             pnl = ((ltp - pos["entry_price"]) * pos["qty"]) if ltp is not None else None
+            high_lock_pct = pos.get("high_lock_pct", 0.0)
+            pct_floor = pos["entry_price"] * (1 + high_lock_pct) if high_lock_pct > 0 else pos["sl_price"]
+            s1_floor = pos.get("s1_floor", pos["sl_price"])
             position = {
                 "side": pos["side"], "strike": pos["strike"], "entry_price": pos["entry_price"],
                 "sl_price": pos["sl_price"], "qty": pos["qty"],
                 "entry_ts": pos["entry_ts"].isoformat() if pos.get("entry_ts") else None,
                 "ltp": ltp, "pnl": pnl,
+                "s1_floor": s1_floor, "tsl_floor": pct_floor,
+                "effective_stop": max(pct_floor, s1_floor),
             }
 
         return {

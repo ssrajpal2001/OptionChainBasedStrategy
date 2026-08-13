@@ -239,6 +239,26 @@ def test_on_spot_bar_close_evaluates_when_flat():
     assert "CE" in _try_enter_calls
 
 
+def test_on_spot_bar_close_logs_wait_when_no_snapshot_yet():
+    """2026-08-13 fix: before this, a book with no MATRIX_SNAPSHOT yet just
+    silently returned every bar close -- the log file looked completely
+    dead during startup. Now it writes a WAIT line every bar close until
+    the first snapshot arrives, same visibility SellStraddle's own _clog
+    already gives."""
+    book = _make_book()
+    base = _base()
+    book._position = None
+    book._latest_snap = None
+    book._spot_acc.bars = _flat_spot_bars(base, price=57690.0)
+    logged = []
+    book._clog = type("FakeLog", (), {"info": staticmethod(lambda *a, **kw: logged.append(a))})()
+
+    book._on_spot_bar_close()
+
+    assert len(logged) == 1
+    assert "WAIT" in logged[0][0]
+
+
 # ── _try_enter ────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -487,6 +507,164 @@ def test_check_exit_tsl_symmetric_for_pe():
     book._check_exit(535.0)
 
     assert "tsl_hit@540.00" in exited.get("reason", "")
+
+
+# ── S1 trailing stop ("S1 will act as TSL") ──────────────────────────────────
+
+def test_maybe_promote_s1_promotes_to_a_new_higher_confirmed_swing_low():
+    book = _make_book()
+    base = _base()
+    book._position = dict(side="CE", strike=57700.0, entry_price=520.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._option_acc["CE"].bars = [
+        Bar(base, 520, 522, 518, 521),
+        Bar(base + timedelta(minutes=1), 519, 521, 515, 518),
+        Bar(base + timedelta(minutes=2), 506, 512, 502, 508),   # confirmed swing low @ 502 (pivot=2)
+        Bar(base + timedelta(minutes=3), 514, 518, 511, 515),
+        Bar(base + timedelta(minutes=4), 519, 524, 516, 522),
+        Bar(base + timedelta(minutes=5), 523, 528, 520, 526),
+    ]
+
+    book._maybe_promote_s1("CE")
+
+    assert book._position["s1_floor"] == 502
+
+
+def test_maybe_promote_s1_never_demotes():
+    book = _make_book()
+    base = _base()
+    book._position = dict(side="CE", strike=57700.0, entry_price=520.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=502.0)
+    # This sequence's OWN confirmed swing low (482) is LOWER than the
+    # already-promoted s1_floor (502) -- must not un-ratchet.
+    book._option_acc["CE"].bars = [
+        Bar(base, 500, 502, 498, 500),
+        Bar(base + timedelta(minutes=1), 499, 501, 495, 497),
+        Bar(base + timedelta(minutes=2), 486, 492, 482, 488),   # confirmed swing low @ 482
+        Bar(base + timedelta(minutes=3), 494, 498, 491, 495),
+        Bar(base + timedelta(minutes=4), 499, 504, 496, 502),
+        Bar(base + timedelta(minutes=5), 503, 508, 500, 506),
+    ]
+
+    book._maybe_promote_s1("CE")
+
+    assert book._position["s1_floor"] == 502.0   # unchanged
+
+
+def test_maybe_promote_s1_noop_when_no_position():
+    book = _make_book()
+    book._position = None
+    book._option_acc["CE"].bars = _flat_spot_bars(_base(), price=500.0)
+    book._maybe_promote_s1("CE")   # must not raise
+    assert book._position is None
+
+
+def test_maybe_promote_s1_noop_for_the_non_position_side():
+    book = _make_book()
+    base = _base()
+    book._position = dict(side="CE", strike=57700.0, entry_price=520.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._option_acc["PE"].bars = [
+        Bar(base, 520, 522, 518, 521),
+        Bar(base + timedelta(minutes=1), 519, 521, 515, 518),
+        Bar(base + timedelta(minutes=2), 506, 512, 502, 508),
+        Bar(base + timedelta(minutes=3), 514, 518, 511, 515),
+        Bar(base + timedelta(minutes=4), 519, 524, 516, 522),
+        Bar(base + timedelta(minutes=5), 523, 528, 520, 526),
+    ]
+
+    book._maybe_promote_s1("PE")   # position is CE -- PE-side bars must never affect it
+
+    assert book._position["s1_floor"] == 480.0
+
+
+def test_check_exit_s1_hit_when_s1_floor_is_the_tighter_constraint():
+    """S1 has promoted well above both the original SL and the (inactive)
+    percentage floor -- it alone should bind, and the exit reason should
+    credit S1, not the plain SL or the percentage TSL."""
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=495.0)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(490.0)   # below S1's 495 floor; pct_floor is still just the original 480 SL
+
+    assert exited.get("exit_price") == 490.0
+    assert "s1_hit@495.00" in exited.get("reason", "")
+
+
+def test_check_exit_plain_sl_hit_when_neither_tsl_nor_s1_ever_promoted():
+    """Regression guard: a fresh position where NEITHER mechanism ever
+    activated must still report the original 'sl_option_swing_low' label,
+    not a misleading 's1_hit' just because s1_floor defaults to sl_price."""
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(475.0)
+
+    assert "sl_option_swing_low" in exited.get("reason", "")
+    assert "s1_hit" not in exited.get("reason", "")
+
+
+# ── option-strike lock (wall-drift-during-position fix) ──────────────────────
+
+@pytest.mark.asyncio
+async def test_option_tick_loop_locks_onto_position_strike_even_if_wall_drifts():
+    """2026-08-13 fix: _option_acc/_live_option_ltp used to ALWAYS follow
+    the CURRENT OI wall from the latest snapshot, even with an open
+    position at a DIFFERENT strike -- if the wall drifted intraday, these
+    would silently start tracking the NEW wall's premium instead of the
+    position's actual held strike (corrupting S1/EOD-fallback/dashboard
+    P&L). Drives the real _option_tick_loop with a position open at 57700
+    while the snapshot's wall has already moved to 57800, and proves only
+    57700 ticks are tracked."""
+    book = _make_book()
+    base = _base()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57800.0, max_put_oi_strike=57200.0, pcr=1.3)
+
+    q = asyncio.Queue()
+    book._loop_queues[Topic.OPTION_TICK] = q
+    await q.put(_real_option_tick(57800.0, "CE", 999.0, 1000, base))                         # drifted wall -- ignore
+    await q.put(_real_option_tick(57700.0, "CE", 505.0, 2000, base + timedelta(seconds=1)))  # the real held strike
+
+    try:
+        await asyncio.wait_for(book._option_tick_loop(), timeout=0.2)
+    except asyncio.TimeoutError:
+        pass
+
+    assert book._live_option_ltp["CE"] == 505.0   # never picked up the drifted wall's 999.0
+    assert len(book._option_acc["CE"].bars) == 0  # only one tick landed in the still-open bucket -- no bar closed yet
+
+
+@pytest.mark.asyncio
+async def test_option_tick_loop_check_exit_only_fires_for_the_position_strike():
+    """Same drift scenario, proving _check_exit() itself is never called
+    for the drifted wall's ticks -- only for the position's own strike."""
+    book = _make_book()
+    base = _base()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57800.0, max_put_oi_strike=57200.0, pcr=1.3)
+    exit_calls = []
+    book._check_exit = lambda ltp: exit_calls.append(ltp)
+
+    q = asyncio.Queue()
+    book._loop_queues[Topic.OPTION_TICK] = q
+    await q.put(_real_option_tick(57800.0, "CE", 400.0, 1000, base))   # would be a "SL hit" on the WRONG strike
+    await q.put(_real_option_tick(57700.0, "CE", 505.0, 2000, base + timedelta(seconds=1)))
+
+    try:
+        await asyncio.wait_for(book._option_tick_loop(), timeout=0.2)
+    except asyncio.TimeoutError:
+        pass
+
+    assert exit_calls == [505.0]   # only the real strike's tick reached _check_exit
 
 
 def test_check_exit_hard_risk_cap_backstop():

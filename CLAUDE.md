@@ -636,6 +636,34 @@ independently validated for OI-Flow**, since this strategy still can't be backte
 at all. Review against real forward telemetry before trusting them. Configurable per
 deployment via `strategy_params` (same JSON pattern as every other param).
 
+**S1 trailing stop — user's own framing, "S1 will act as TSL" (2026-08-13):** a second,
+structural trailing floor alongside the percentage ratchet above. `_maybe_promote_s1()`
+reuses `detector.swing_low()` (this strategy's own already-built utility, not another
+strategy's S&R code) against the position's own option-premium bars: as a new CONFIRMED
+swing low prints above the current `s1_floor`, the floor promotes to it (ratchets only,
+never lowers) — checked on every option-bar CLOSE for the position's own strike.
+`_check_exit()`'s effective stop is `max(percentage_floor, s1_floor)` — whichever is
+tighter binds, so S1 can pull the stop in tighter than the flat percentage alone would
+(a real confirmed price-action level, not an arbitrary step) without ever loosening
+protection the percentage ratchet already earned. Exit reason distinguishes `s1_hit`
+from `tsl_hit` from the plain `sl_option_swing_low` depending on which one actually
+promoted past the original anchor. Deliberately a **combination**, not a replacement of
+the percentage TSL — hedges against either single mechanism underperforming, since
+neither can be backtested.
+
+**⚠️ Related fix found while building S1 — option-strike lock during an open position:**
+`_option_acc[side]`/`_live_option_ltp[side]` used to ALWAYS follow whatever the
+*current* OI wall was (`snap.max_call_oi_strike`/`max_put_oi_strike`, re-derived on
+every `MATRIX_SNAPSHOT` regardless of position state). Correct while scanning/flat, but
+if the wall drifted to a *different* strike while a position was open, these would
+silently start tracking the new wall's premium — a different instrument's price series
+entirely — corrupting the EOD exit-price fallback, the dashboard's live P&L, and (had
+this shipped first) the S1 swing-low calculation above, while the actual held position
+sat at the old strike. `_option_tick_loop()` now locks onto the position's own strike
+the moment one opens, immune to wall drift, and reverts to following the current wall
+once flat again. 2 regression tests drive the real loop with a position open at one
+strike while the snapshot's wall has already moved to another.
+
 **Status (2026-08-13):** Phases 1-5 + the volume/absorption addition + the paper_route/
 dashboard integration + the critical PE fix + the target/TSL mechanic above are all
 built, unit-tested, and pushed. First real deployment (BOTH live and paper_route) is
