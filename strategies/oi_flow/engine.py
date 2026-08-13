@@ -57,6 +57,21 @@ _DEFAULT_HARD_RISK_RS_PER_LOT = 2000.0
 _EOD_TIME_DEFAULT = time(15, 15)
 _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 
+# Step-locked trailing profit-lock (2026-08-13, "target" concept -- there was
+# no take-profit/trailing mechanism at all before this; only SL + hard risk
+# cap + EOD). Same MECHANIC as strategies/fvg/engine.py's own validated
+# _check_exit_premium ratchet (a bought CE or PE is always long its own
+# premium, so "let a strong move run, then lock in gains as it extends" is
+# equally valid here) -- but these specific DEFAULT VALUES are FVG's own
+# tuned baseline (scripts/fvg_tsl_sweep.py), borrowed as a reasonable
+# starting point, NOT independently validated for OI-Flow (no backtest is
+# possible for this strategy at all -- see telemetry.py). Review against
+# OI-Flow's own forward telemetry before trusting these numbers.
+_DEFAULT_TRAIL_TRIGGER_PCT = 0.15
+_DEFAULT_FIRST_LOCK_PCT = 0.08
+_DEFAULT_STEP_PCT = 0.10
+_DEFAULT_STEP_LOCK_PCT = 0.05
+
 
 class OIFlowStrategy(AbstractStrategyBook):
     """One instance per (client, binding, underlying)."""
@@ -76,6 +91,10 @@ class OIFlowStrategy(AbstractStrategyBook):
         max_pcr_bias: float = _DEFAULT_MAX_PCR_BIAS,
         proximity_pct: float = _DEFAULT_PROXIMITY_PCT,
         hard_risk_rs_per_lot: float = _DEFAULT_HARD_RISK_RS_PER_LOT,
+        trail_trigger_pct: float = _DEFAULT_TRAIL_TRIGGER_PCT,
+        first_lock_pct: float = _DEFAULT_FIRST_LOCK_PCT,
+        step_pct: float = _DEFAULT_STEP_PCT,
+        step_lock_pct: float = _DEFAULT_STEP_LOCK_PCT,
         product_type: str = "MIS",
         squareoff_time: str = "15:15",
     ) -> None:
@@ -89,6 +108,10 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._max_pcr_bias = max_pcr_bias
         self._proximity_pct = proximity_pct
         self._hard_risk_rs_per_lot = hard_risk_rs_per_lot
+        self._trail_trigger_pct = trail_trigger_pct
+        self._first_lock_pct = first_lock_pct
+        self._step_pct = step_pct
+        self._step_lock_pct = step_lock_pct
         self._product_type = product_type
         try:
             _h, _m = str(squareoff_time or "15:15").split(":")
@@ -356,20 +379,41 @@ class OIFlowStrategy(AbstractStrategyBook):
 
     def _check_exit(self, ltp: float) -> None:
         # Both CE and PE positions BUY the option -- long its own premium
-        # either way, so the SL check is identical for both sides: premium
-        # falling to/through its own swing-low floor. 2026-08-13 fix: PE
-        # used to check `ltp >= sl_price` (fires on a RISE), a leftover
-        # from confirm_option_price_action()'s own now-fixed PE mirroring
-        # bug (detector.py) -- was never actually consistent with this
-        # line's own "sl_option_swing_low" label, which already assumed a
-        # falling-through-a-low semantic for both sides.
+        # either way, so every check here is identical for both sides:
+        # premium falling to/through a floor, regardless of which side's
+        # option it is. 2026-08-13 fix: PE used to check `ltp >= sl_price`
+        # (fires on a RISE), a leftover from confirm_option_price_action()'s
+        # own now-fixed PE mirroring bug (detector.py) -- was never actually
+        # consistent with this line's own "sl_option_swing_low" label,
+        # which already assumed a falling-through-a-low semantic for both
+        # sides.
         pos = self._position
         if pos is None or pos.get("_closing"):
             return
-        if ltp <= pos["sl_price"]:
-            self._exit(reason=f"sl_option_swing_low@{pos['sl_price']:.2f}", exit_price=ltp)
+
+        # Step-locked trailing profit-lock ("target" concept, 2026-08-13):
+        # once profit_pct >= trail_trigger_pct, lock first_lock_pct; every
+        # further step_pct of additional profit locks another
+        # step_lock_pct (repeating, never un-ratchets). No fixed take-
+        # profit ceiling -- once active, the floor only ever rises,
+        # letting a strong move keep running. Same formula as
+        # strategies/fvg/engine.py's own _check_exit_premium, written
+        # fresh here (no import) per this strategy's standalone mandate.
+        entry = pos["entry_price"]
+        profit_pct = (ltp - entry) / entry if entry else 0.0
+        if profit_pct >= self._trail_trigger_pct:
+            steps = int((profit_pct - self._trail_trigger_pct) // self._step_pct)
+            calc_lock = self._first_lock_pct + steps * self._step_lock_pct
+            pos["high_lock_pct"] = max(pos.get("high_lock_pct", 0.0), calc_lock)
+
+        high_lock_pct = pos.get("high_lock_pct", 0.0)
+        stop_price = entry * (1 + high_lock_pct) if high_lock_pct > 0 else pos["sl_price"]
+        if ltp <= stop_price:
+            reason = f"tsl_hit@{stop_price:.2f}" if high_lock_pct > 0 else f"sl_option_swing_low@{stop_price:.2f}"
+            self._exit(reason=reason, exit_price=ltp)
             return
-        risk_floor = pos["entry_price"] - (self._hard_risk_rs_per_lot / (self._lot_size * self._lot_multiplier))
+
+        risk_floor = entry - (self._hard_risk_rs_per_lot / (self._lot_size * self._lot_multiplier))
         if ltp <= risk_floor:
             self._exit(reason=f"hard_risk_cap@{risk_floor:.2f}", exit_price=ltp)
 
@@ -397,6 +441,7 @@ class OIFlowStrategy(AbstractStrategyBook):
             side=side, strike=strike, entry_price=entry_price,
             sl_price=(sl_price if sl_price is not None else entry_price * 0.8),
             entry_ts=datetime.now(IST), qty=qty, _event_id=eid,
+            high_lock_pct=0.0,   # step-locked TSL ratchet, see _check_exit
         )
         self._persist_position()
         logger.info(

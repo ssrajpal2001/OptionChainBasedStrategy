@@ -85,6 +85,10 @@ def _make_book() -> OIFlowStrategy:
     book._max_pcr_bias = 0.7
     book._proximity_pct = 0.005
     book._hard_risk_rs_per_lot = 2000.0
+    book._trail_trigger_pct = 0.15
+    book._first_lock_pct = 0.08
+    book._step_pct = 0.10
+    book._step_lock_pct = 0.05
     book._product_type = "MIS"
     from datetime import time as _time
     book._squareoff_time = _time(15, 15)
@@ -329,6 +333,85 @@ def test_check_exit_no_trigger_when_above_sl():
     book._check_exit(495.0)   # still above SL
 
     assert exited == {}
+
+
+# ── _check_exit: step-locked trailing profit-lock ("target" concept) ────────
+
+def test_check_exit_tsl_activates_above_trigger_without_exiting():
+    # entry=500, trigger=0.15 -> activation price 575; ltp=580 -> profit_pct=0.16
+    # -> steps=0 -> lock=first_lock_pct=0.08 -> floor=500*1.08=540; 580>540, no exit.
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(580.0)
+
+    assert exited == {}
+    assert book._position["high_lock_pct"] == pytest.approx(0.08)
+
+
+def test_check_exit_tsl_hit_after_activation_fires_on_pullback_to_locked_floor():
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(580.0)    # activates TSL, locks floor @ 540
+    assert exited == {}
+    book._check_exit(535.0)    # falls through the locked 540 floor (well below the original 480 SL too)
+
+    assert exited.get("exit_price") == 535.0
+    assert "tsl_hit@540.00" in exited.get("reason", "")
+
+
+def test_check_exit_tsl_ratchets_up_with_further_gains():
+    # profit_pct=0.26 -> steps=int((0.26-0.15)//0.10)=1 -> lock=0.08+1*0.05=0.13 -> floor=565.
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(630.0)   # profit_pct=0.26
+
+    assert exited == {}
+    assert book._position["high_lock_pct"] == pytest.approx(0.13)
+
+
+def test_check_exit_tsl_never_unlocks_on_a_pullback_that_stays_above_floor():
+    """The ratchet only ever tightens -- a pullback that still clears the
+    ALREADY-locked floor must not loosen it back down, even though that
+    pullback's OWN profit_pct would only justify a smaller lock on its own."""
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(630.0)   # locks 0.13 (floor 565)
+    assert book._position["high_lock_pct"] == pytest.approx(0.13)
+    book._check_exit(590.0)   # profit_pct=0.18 alone would only justify 0.08 -- must stay 0.13
+
+    assert book._position["high_lock_pct"] == pytest.approx(0.13)
+    assert exited == {}   # 590 still clears the 565 floor
+
+
+def test_check_exit_tsl_symmetric_for_pe():
+    """Same ratchet math for a bought PE -- long its own premium too."""
+    book = _make_book()
+    book._position = dict(side="PE", strike=57200.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0)
+    exited = {}
+    book._exit = lambda reason, exit_price: exited.update(reason=reason, exit_price=exit_price)
+
+    book._check_exit(580.0)
+    assert book._position["high_lock_pct"] == pytest.approx(0.08)
+    book._check_exit(535.0)
+
+    assert "tsl_hit@540.00" in exited.get("reason", "")
 
 
 def test_check_exit_hard_risk_cap_backstop():

@@ -34,6 +34,15 @@ _DEFAULT_PARAMS = {
     "max_pcr_bias": 0.7,
     "proximity_pct": 0.005,
     "hard_risk_rs_per_lot": 2000.0,
+    # Step-locked trailing profit-lock (2026-08-13) -- see engine.py's own
+    # _DEFAULT_TRAIL_TRIGGER_PCT etc. docstring: same mechanic as FVG's
+    # validated TSL, these specific numbers are FVG's tuned baseline
+    # borrowed as a starting point, not independently validated for
+    # OI-Flow (no backtest possible for this strategy at all).
+    "trail_trigger_pct": 0.15,
+    "first_lock_pct": 0.08,
+    "step_pct": 0.10,
+    "step_lock_pct": 0.05,
 }
 _FLOAT_KEYS = tuple(_DEFAULT_PARAMS.keys())
 
@@ -83,6 +92,8 @@ class OIFlowBookManager(StrategyBookManager):
             min_pcr_bias=value["min_pcr_bias"], max_pcr_bias=value["max_pcr_bias"],
             proximity_pct=value["proximity_pct"],
             hard_risk_rs_per_lot=value["hard_risk_rs_per_lot"],
+            trail_trigger_pct=value["trail_trigger_pct"], first_lock_pct=value["first_lock_pct"],
+            step_pct=value["step_pct"], step_lock_pct=value["step_lock_pct"],
             product_type=value["product_type"], squareoff_time=value["squareoff_time"],
         )
         logger.info(
@@ -105,6 +116,10 @@ class OIFlowBookManager(StrategyBookManager):
             or book._max_pcr_bias != value["max_pcr_bias"]
             or book._proximity_pct != value["proximity_pct"]
             or book._hard_risk_rs_per_lot != value["hard_risk_rs_per_lot"]
+            or book._trail_trigger_pct != value["trail_trigger_pct"]
+            or book._first_lock_pct != value["first_lock_pct"]
+            or book._step_pct != value["step_pct"]
+            or book._step_lock_pct != value["step_lock_pct"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

@@ -607,14 +607,44 @@ panels) show the OI wall + buildup per strike, the open position with running P&
 an in-memory "recent remarks" trail (last 30 signal evaluations, human-readable) — the
 live-UI counterpart to `telemetry.py`'s JSONL log.
 
+**⚠️ CRITICAL FIX — PE-side confirmation/SL was backwards (2026-08-13):**
+`confirm_option_price_action()` incorrectly mirrored CE/PE the way `detect_pre_
+breakout_signal()` correctly does for the SPOT-side gate (where CE/PE genuinely point
+opposite directions). But `confirm_option_price_action` runs on the **option's own
+premium chart** — a bought PE is still LONG its own premium, exactly like a bought CE
+(profit = premium up, loss = premium down). The old PE branch required `close < VWAP`
+(entering into weakness) and anchored SL to a swing **HIGH** — both backwards for a
+long position. Zero tests ever exercised the PE branch, so this shipped unnoticed
+until caught during a target/SL review ahead of the first live deployment.
+`OIFlowStrategy._check_exit()` had the matching bug (PE fired on `ltp >= sl_price`, a
+RISE, inconsistent with its own `"sl_option_swing_low"` label). Both fixed so `side`
+no longer changes the decision logic in either function — only labeling. 4 regression
+tests added (2 detector-level proving PE now matches CE byte-for-byte, 2 engine-level
+proving `_check_exit` fires on a fall for PE).
+
+**Step-locked trailing profit-lock — the "target" concept (2026-08-13):** before this,
+exits were only SL + the hard ₹2000/lot risk cap + EOD — no take-profit or trailing
+mechanism at all. `OIFlowStrategy._check_exit()` now runs the same ratchet FVG's own
+validated `_check_exit_premium()` uses (written fresh here, no import, per the
+standalone mandate): once `profit_pct >= trail_trigger_pct`, lock `first_lock_pct`;
+every further `step_pct` of gain locks another `step_lock_pct` (repeating, never
+un-ratchets). No fixed take-profit ceiling — a strong move keeps running until the
+rising floor catches it. **The mechanic is proven (same formula as FVG); the specific
+default numbers (`trail_trigger_pct=0.15, first_lock_pct=0.08, step_pct=0.10,
+step_lock_pct=0.05`) are FVG's own tuned baseline, borrowed as a starting point — NOT
+independently validated for OI-Flow**, since this strategy still can't be backtested
+at all. Review against real forward telemetry before trusting them. Configurable per
+deployment via `strategy_params` (same JSON pattern as every other param).
+
 **Status (2026-08-13):** Phases 1-5 + the volume/absorption addition + the paper_route/
-dashboard integration above are all built, unit-tested, and pushed. First real
-deployment (BOTH live and paper_route) is scheduled for the next trading session —
-**NIFTY**, not BANKNIFTY (the strategy is underlying-agnostic by design; the client's
-own choice for the first real run), one binding on `trading_mode=live` (real funds)
-and one on `trading_mode=paper_route` (order verified against the real broker, fill
-simulated) running side-by-side with `sell_straddle`. Deploy via the dashboard form,
-not a raw SQL row.
+dashboard integration + the critical PE fix + the target/TSL mechanic above are all
+built, unit-tested, and pushed. First real deployment (BOTH live and paper_route) is
+scheduled for the next trading session — **NIFTY** (and optionally **SENSEX**, one
+deployment row per underlying — the strategy is underlying-agnostic by design; the
+client's own choice for the first real run, not BANKNIFTY), one binding on
+`trading_mode=live` (real funds) and one on `trading_mode=paper_route` (order verified
+against the real broker, fill simulated) running side-by-side with `sell_straddle`.
+Deploy via the dashboard form, not a raw SQL row.
 **Before any FURTHER live-capital scale-up beyond this first deployment**, an explicit
 graduation criterion needs agreement: target ~20-30 real signal evaluations with a
 reviewable win/loss split first — there is no backtest number to compare against, so
