@@ -72,6 +72,14 @@ _DEFAULT_HARD_RISK_RS_PER_LOT = 2000.0
 _EOD_TIME_DEFAULT = time(15, 15)
 _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 _TICK_STALENESS_SEC = 60.0   # feed-staleness watchdog for an open position -- see _eod_loop
+_DEFAULT_SL_COOLDOWN_MINUTES = 15.0
+# Corrupt-tick date guard (2026-08-13, market-hours risk audit): a single
+# malformed/corrupt tick reporting an implausible date must never be
+# trusted to trigger a full session reset (wipes bars, tracked strike,
+# cooldown, remarks for a day that hasn't actually changed). Tolerance of
+# 1 day allows for reasonable boundary timing; anything further from the
+# real wall-clock date is rejected outright.
+_MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS = 1
 
 # Step-locked trailing profit-lock (2026-08-13, "target" concept -- there was
 # no take-profit/trailing mechanism at all before this; only SL + hard risk
@@ -111,6 +119,7 @@ class OIFlowStrategy(AbstractStrategyBook):
         first_lock_pct: float = _DEFAULT_FIRST_LOCK_PCT,
         step_pct: float = _DEFAULT_STEP_PCT,
         step_lock_pct: float = _DEFAULT_STEP_LOCK_PCT,
+        sl_cooldown_minutes: float = _DEFAULT_SL_COOLDOWN_MINUTES,
         product_type: str = "MIS",
         squareoff_time: str = "15:15",
     ) -> None:
@@ -128,6 +137,7 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._first_lock_pct = first_lock_pct
         self._step_pct = step_pct
         self._step_lock_pct = step_lock_pct
+        self._sl_cooldown_minutes = sl_cooldown_minutes
         self._product_type = product_type
         try:
             _h, _m = str(squareoff_time or "15:15").split(":")
@@ -167,6 +177,15 @@ class OIFlowStrategy(AbstractStrategyBook):
         # for this now. Alerted once per staleness episode (not every 5s).
         self._last_position_tick_ts: Optional[datetime] = None
         self._staleness_alerted = False
+        # Re-entry cooldown (2026-08-13, market-hours risk audit): after any
+        # stop-out exit (SL/TSL/S1/hard risk cap -- anything except a plain
+        # EOD squareoff), no new entry is evaluated for sl_cooldown_minutes.
+        # Book-wide (not per-side) -- the book is flat either way and this
+        # is a simple, conservative starting point against re-entering into
+        # a whipsaw right after a loss. NOT persisted across a restart (a
+        # restart mid-cooldown resets it) -- accepted, low-probability gap,
+        # not worth the added persistence complexity for this pass.
+        self._cooldown_until: Optional[datetime] = None
         self._day_done = False
         self._event_counter = 0
         self._fill_waiters: Dict[str, asyncio.Event] = {}
@@ -187,6 +206,7 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._tracked_option_strike = {"CE": None, "PE": None}
         self._last_position_tick_ts = None
         self._staleness_alerted = False
+        self._cooldown_until = None
         self._day_done = False
         self._recent_remarks.clear()
 
@@ -257,6 +277,22 @@ class OIFlowStrategy(AbstractStrategyBook):
             if not isinstance(ev, IndexTick) or not self._is_own_underlying_tick(ev.symbol):
                 continue
             today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
+            real_today = datetime.now(IST).date()
+            if abs((today - real_today).days) > _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS:
+                # Corrupt-tick date guard (2026-08-13, market-hours risk
+                # audit): a single malformed/corrupt tick reporting an
+                # implausible date must never be trusted to trigger
+                # reset_session() -- that wipes bars, tracked strike,
+                # cooldown, and remarks for a day that hasn't actually
+                # changed. Reject the tick entirely (not just its date --
+                # its overall integrity is suspect) rather than partially
+                # trusting it for bar bucketing.
+                logger.warning(
+                    "OIFlow[%s]: REJECTED tick with implausible date %s (real date %s, symbol=%s) "
+                    "-- ignoring (possible corrupt/malformed tick).",
+                    self._underlying, today, real_today, ev.symbol,
+                )
+                continue
             if self._today != today:
                 self.reset_session()
                 self._today = today
@@ -291,6 +327,13 @@ class OIFlowStrategy(AbstractStrategyBook):
         now_t = self._spot_acc.bars[-1].timestamp.time() if self._spot_acc.bars else datetime.now(IST).time()
         if now_t >= self._squareoff_time:
             return
+        if self._cooldown_until is not None:
+            now = datetime.now(IST)
+            if now < self._cooldown_until:
+                remaining_min = (self._cooldown_until - now).total_seconds() / 60.0
+                self._clog.info("COOLDOWN active -- %.1f min remaining before next entry evaluation", remaining_min)
+                return
+            self._cooldown_until = None   # expired -- clear so this branch stops running every bar
         for side in ("CE", "PE"):
             self._try_enter(side)
             if self._position is not None:
@@ -695,6 +738,19 @@ class OIFlowStrategy(AbstractStrategyBook):
 
             if self._position is pos:
                 self._position = None
+            if reason != "eod" and self._sl_cooldown_minutes > 0:
+                # Re-entry cooldown (2026-08-13, market-hours risk audit):
+                # ANY stop-out (SL/TSL/S1/hard risk cap) starts a book-wide
+                # cooldown before the next entry is even evaluated --
+                # guards against immediately re-entering into a whipsaw
+                # right after a loss. EOD is not a loss signal, so it's
+                # excluded (the day's over anyway; _day_done already blocks
+                # further entries).
+                self._cooldown_until = datetime.now(IST) + timedelta(minutes=self._sl_cooldown_minutes)
+                logger.info("OIFlow[%s]: cooldown active for %.0f min after %s exit (until %s)",
+                            self._underlying, self._sl_cooldown_minutes, reason, self._cooldown_until.isoformat())
+                self._clog.info("COOLDOWN started: %.0f min after exit reason=%s",
+                                 self._sl_cooldown_minutes, reason)
             self._persist_position()
             logger.info("OIFlow[%s]: SELL %s %d reason=%s exit=%.2f CONFIRMED (event_id=%s)",
                         self._underlying, pos["side"], pos["strike"], reason, exit_price, eid)

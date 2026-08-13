@@ -705,14 +705,11 @@ gaps beyond the wall-drift ones above:**
    60s, logs CRITICAL once per staleness episode (cleared the moment a fresh tick
    arrives) — an alert, not an auto-close, since a REST-poll fallback to keep the
    position genuinely protected during an outage is a bigger lift than this pass covers.
-3. Considered and explicitly **deferred** (design decisions, not bugs, worth discussing
-   before building): a re-entry cooldown after an SL/TSL/S1 stop-out (arguable either
-   way — pre-breakout signals may legitimately re-trigger quickly in a genuine breakout
-   attempt); a REST-poll fallback for genuinely stale feeds (needs a real endpoint
-   wired in); a defensive guard against a single corrupt/wrong-date tick triggering a
-   spurious mid-day session reset (low-probability edge case); CE-priority tie-break
-   when both CE and PE signals would fire on the exact same bar (arbitrary but
-   defensible, not wrong).
+3. Two of the design-decision items flagged above were subsequently approved and
+   **built** (see next section): the re-entry cooldown and the corrupt-tick date guard.
+   Still deferred: a REST-poll fallback for genuinely stale feeds (needs a real endpoint
+   wired in); CE-priority tie-break when both CE and PE signals would fire on the exact
+   same bar (arbitrary but defensible, not wrong).
 
 Also considered and explicitly rejected: pegging an exit **target** to a new/shifted OI
 wall level. The wall lives on spot; translating "spot distance to the wall" into an
@@ -720,6 +717,26 @@ option premium target reintroduces the same spot-premium desync problem the PE b
 FVG's own history already proved out (theta/IV/delta mean spot distance doesn't map
 cleanly to premium distance). If revisited, it should be a soft/logged signal (same
 tier as PCR and the volume spike), not a hard exit gate.
+
+**Re-entry cooldown + corrupt-tick date guard, approved and built (2026-08-13):**
+- `sl_cooldown_minutes` (default 15, `strategy_params`-configurable): after ANY stop-out
+  exit (SL/TSL/S1/hard risk cap — EOD explicitly excluded, since it isn't a loss signal
+  and `_day_done` already blocks further entries that day), `_on_spot_bar_close()` skips
+  entry evaluation entirely (not just blocks the resulting order) until
+  `self._cooldown_until` passes — book-wide, not per-side, since the book only ever
+  holds one position at a time anyway. Logged to `self._clog` both when it starts and on
+  every bar it's still active, so it's visible, not silent. **Not persisted across a
+  restart** — a restart mid-cooldown resets it; accepted as a low-probability gap, not
+  worth the added persistence complexity this pass.
+- Corrupt-tick date guard: `_index_tick_loop()` now validates a tick's own reported date
+  against the real wall-clock date (`datetime.now(IST).date()`) before trusting it for
+  anything — a single malformed/corrupt tick reporting an implausible date (more than 1
+  day off) is REJECTED outright (not bucketed, not used to decide a session reset),
+  rather than potentially triggering `reset_session()` and wiping all in-progress state
+  (bars, tracked strike, cooldown, remarks) for a day that hasn't actually changed.
+- 6 new tests: cooldown blocks/resumes evaluation, cooldown starts on a stop-out exit
+  but not on EOD, corrupt-date tick rejected without resetting session, plausible-date
+  tick still triggers a genuine first-of-day reset.
 
 **Status (2026-08-13):** Phases 1-5 + the volume/absorption addition + the paper_route/
 dashboard integration + the critical PE fix + the target/TSL mechanic above are all

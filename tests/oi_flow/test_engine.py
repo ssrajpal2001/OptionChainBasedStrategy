@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from config.global_config import IST, Topic
-from data_layer.base_feeder import OptionTick
+from data_layer.base_feeder import IndexTick, OptionTick
 import strategies.oi_flow.engine as engine_module
 from strategies.oi_flow.detector import Bar, BarAccumulator
 from strategies.oi_flow.engine import OIFlowStrategy
@@ -90,6 +90,8 @@ def _make_book() -> OIFlowStrategy:
     book._first_lock_pct = 0.08
     book._step_pct = 0.10
     book._step_lock_pct = 0.05
+    book._sl_cooldown_minutes = 15.0
+    book._cooldown_until = None
     book._product_type = "MIS"
     from datetime import time as _time
     book._squareoff_time = _time(15, 15)
@@ -260,6 +262,137 @@ def test_on_spot_bar_close_logs_wait_when_no_snapshot_yet():
 
     assert len(logged) == 1
     assert "WAIT" in logged[0][0]
+
+
+# ── re-entry cooldown ─────────────────────────────────────────────────────────
+
+def test_on_spot_bar_close_skips_evaluation_while_cooldown_active():
+    book = _make_book()
+    base = _base()
+    book._position = None
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0, pcr=1.3)
+    book._spot_acc.bars = _flat_spot_bars(base, price=57690.0)
+    book._cooldown_until = datetime.now(IST) + timedelta(minutes=10)
+    _try_enter_calls = []
+    book._try_enter = lambda side: _try_enter_calls.append(side)
+    logged = []
+    book._clog = type("FakeLog", (), {"info": staticmethod(lambda *a, **kw: logged.append(a))})()
+
+    book._on_spot_bar_close()
+
+    assert _try_enter_calls == []
+    assert any("COOLDOWN" in l[0] for l in logged)
+    assert book._cooldown_until is not None   # still active, not cleared early
+
+
+def test_on_spot_bar_close_resumes_once_cooldown_expires():
+    book = _make_book()
+    base = _base()
+    book._position = None
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0, pcr=1.3)
+    book._spot_acc.bars = _flat_spot_bars(base, price=57690.0)
+    book._cooldown_until = datetime.now(IST) - timedelta(seconds=1)   # already expired
+    _try_enter_calls = []
+    book._try_enter = lambda side: _try_enter_calls.append(side)
+
+    book._on_spot_bar_close()
+
+    assert "CE" in _try_enter_calls
+    assert book._cooldown_until is None   # cleared once expired
+
+
+@pytest.mark.asyncio
+async def test_square_off_starts_cooldown_after_stopout_exit():
+    book = _make_book()
+    pos = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+               entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._position = pos
+
+    async def _feed_full_fill():
+        await asyncio.sleep(0.01)
+        eid = next(iter(book._fill_waiters))
+        fill = OIFlowFillEvent(action="SELL", underlying="BANKNIFTY", option_type="CE", strike=57700,
+                                fill_price=475.0, qty=30, client_id="ssrajpal2001", binding_id="SA5770",
+                                event_id=eid)
+        book._on_fill(fill)
+
+    await asyncio.gather(
+        book._square_off(pos, "sl_option_swing_low@480.00", 475.0), _feed_full_fill(),
+    )
+
+    assert book._cooldown_until is not None
+    assert book._cooldown_until > datetime.now(IST)
+
+
+@pytest.mark.asyncio
+async def test_square_off_does_not_start_cooldown_after_eod_exit():
+    book = _make_book()
+    pos = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+               entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._position = pos
+
+    async def _feed_full_fill():
+        await asyncio.sleep(0.01)
+        eid = next(iter(book._fill_waiters))
+        fill = OIFlowFillEvent(action="SELL", underlying="BANKNIFTY", option_type="CE", strike=57700,
+                                fill_price=505.0, qty=30, client_id="ssrajpal2001", binding_id="SA5770",
+                                event_id=eid)
+        book._on_fill(fill)
+
+    await asyncio.gather(book._square_off(pos, "eod", 505.0), _feed_full_fill())
+
+    assert book._cooldown_until is None
+
+
+# ── corrupt-tick date guard ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_index_tick_loop_rejects_implausible_tick_date():
+    """A single malformed/corrupt tick reporting a wildly wrong date must
+    never trigger reset_session() -- would wipe bars/tracked-strike/
+    cooldown/remarks for a day that hasn't actually changed."""
+    book = _make_book()
+    book._today = date(2026, 8, 13)   # today, matching the real date
+    reset_calls = []
+    book.reset_session = lambda: reset_calls.append(True)
+
+    q = asyncio.Queue()
+    book._loop_queues[Topic.INDEX_TICK] = q
+    bad_tick = IndexTick(symbol="BANKNIFTY", ltp=57700.0, open=57600.0, high=57800.0, low=57500.0,
+                          close=57700.0, volume=0, timestamp=datetime(1970, 1, 1, tzinfo=IST))
+    await q.put(bad_tick)
+
+    try:
+        await asyncio.wait_for(book._index_tick_loop(), timeout=0.2)
+    except asyncio.TimeoutError:
+        pass
+
+    assert reset_calls == []
+    assert book._today == date(2026, 8, 13)   # unchanged
+    assert len(book._spot_acc.bars) == 0 and book._spot_acc._bucket is None   # tick never bucketed either
+
+
+@pytest.mark.asyncio
+async def test_index_tick_loop_accepts_plausible_tick_date():
+    book = _make_book()
+    book._today = None   # first tick of the "day"
+    reset_calls = []
+    book.reset_session = lambda: reset_calls.append(True)
+
+    q = asyncio.Queue()
+    book._loop_queues[Topic.INDEX_TICK] = q
+    real_today = datetime.now(IST).date()
+    good_tick = IndexTick(symbol="BANKNIFTY", ltp=57700.0, open=57600.0, high=57800.0, low=57500.0,
+                           close=57700.0, volume=0, timestamp=datetime.now(IST))
+    await q.put(good_tick)
+
+    try:
+        await asyncio.wait_for(book._index_tick_loop(), timeout=0.2)
+    except asyncio.TimeoutError:
+        pass
+
+    assert reset_calls == [True]   # first tick of the day -- genuine reset expected
+    assert book._today == real_today
 
 
 # ── _try_enter ────────────────────────────────────────────────────────────────

@@ -43,6 +43,10 @@ _DEFAULT_PARAMS = {
     "first_lock_pct": 0.08,
     "step_pct": 0.10,
     "step_lock_pct": 0.05,
+    # Re-entry cooldown (2026-08-13, market-hours risk audit): minutes of
+    # no new entry evaluation after any stop-out exit (SL/TSL/S1/hard risk
+    # cap -- EOD excluded). Book-wide, not per-side.
+    "sl_cooldown_minutes": 15.0,
 }
 _FLOAT_KEYS = tuple(_DEFAULT_PARAMS.keys())
 
@@ -94,6 +98,7 @@ class OIFlowBookManager(StrategyBookManager):
             hard_risk_rs_per_lot=value["hard_risk_rs_per_lot"],
             trail_trigger_pct=value["trail_trigger_pct"], first_lock_pct=value["first_lock_pct"],
             step_pct=value["step_pct"], step_lock_pct=value["step_lock_pct"],
+            sl_cooldown_minutes=value["sl_cooldown_minutes"],
             product_type=value["product_type"], squareoff_time=value["squareoff_time"],
         )
         logger.info(
@@ -120,6 +125,7 @@ class OIFlowBookManager(StrategyBookManager):
             or book._first_lock_pct != value["first_lock_pct"]
             or book._step_pct != value["step_pct"]
             or book._step_lock_pct != value["step_lock_pct"]
+            or book._sl_cooldown_minutes != value["sl_cooldown_minutes"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:
