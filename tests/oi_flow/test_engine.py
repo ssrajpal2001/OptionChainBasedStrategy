@@ -1038,7 +1038,9 @@ def test_try_enter_appends_a_remark_on_every_evaluation():
     assert len(book._recent_remarks) == 1
     remark = book._recent_remarks[0]
     assert remark["side"] == "CE"
-    assert "no spot signal" in remark["text"]
+    # 2026-08-13: now uses the SPECIFIC blocking condition (here, spot is
+    # nowhere near the wall) rather than the old generic "no spot signal".
+    assert "from wall" in remark["text"]
 
 
 @pytest.mark.asyncio

@@ -247,6 +247,93 @@ def detect_pre_breakout_signal(
     )
 
 
+def explain_no_signal(
+    side: str,
+    oi_tracker,
+    snap,
+    spot_bars_1m: List[Bar],
+    window_sec: int = 180,
+    max_opposing_roc_pct: float = -0.01,
+    min_supporting_roc_pct: float = 0.02,
+    min_pcr_bias: float = 1.2,
+    max_pcr_bias: float = 0.7,
+    proximity_pct: float = 0.005,
+    strike_step: float = 100.0,
+    swing_pivot: int = 2,
+    now: Optional[datetime] = None,
+) -> str:
+    """Diagnostic-only twin of detect_pre_breakout_signal(): re-runs the
+    EXACT same checks, in the EXACT same order, purely to report WHICH one
+    is actually blocking the signal, in plain English -- for the dashboard
+    remarks trail / telemetry, never for the real entry decision.
+
+    2026-08-13, built after a real production observation: NIFTY PE's
+    remark said "not consolidating at the wall yet" while spot was
+    genuinely only 0.19% from the PE wall (well inside the 0.5% proximity
+    threshold) -- the true blocker was PCR sitting neutral at 1.00 (needs
+    <0.7 for PE), but the old generic "spot_gate_no_signal" skip_reason
+    couldn't distinguish that from an actual proximity miss.
+
+    Deliberately duplicates detect_pre_breakout_signal()'s own condition
+    order rather than refactoring that function to return a reason code --
+    keeps the real decision function exactly as simple/pure as its own
+    docstring already commits to, at the cost of these two functions
+    needing to be kept in sync by hand if the gate logic ever changes
+    (same duplication tradeoff engine.py's _try_enter_inner already
+    accepts for its own raw-diagnostics capture)."""
+    if side not in ("CE", "PE"):
+        raise ValueError(f"side must be CE or PE, got {side!r}")
+    if not spot_bars_1m:
+        return "no spot bars yet"
+    spot = spot_bars_1m[-1].close
+
+    if side == "CE":
+        wall = snap.max_call_oi_strike
+        supporting_strike = wall - strike_step
+        opposing_type, supporting_type = "CE", "PE"
+        direction = "BULLISH"
+    else:
+        wall = snap.max_put_oi_strike
+        supporting_strike = wall + strike_step
+        opposing_type, supporting_type = "PE", "CE"
+        direction = "BEARISH"
+
+    if not wall:
+        return "no OI wall detected yet"
+
+    dist_pct = abs(spot - wall) / wall * 100
+    if abs(spot - wall) / wall > proximity_pct:
+        return f"spot {dist_pct:.2f}% from wall {wall:.0f}, needs <={proximity_pct * 100:.2f}%"
+
+    swings = find_swing_points(spot_bars_1m, pivot=swing_pivot)
+    if has_recent_structure_break(spot_bars_1m, swings, direction):
+        return f"structure already broken {direction.lower()} -- past the pre-breakout window"
+
+    opposing_now = oi_tracker.oi_now(wall, opposing_type)
+    opposing_roc = oi_tracker.oi_roc(wall, opposing_type, window_sec, now=now)
+    supporting_now = oi_tracker.oi_now(supporting_strike, supporting_type)
+    supporting_roc = oi_tracker.oi_roc(supporting_strike, supporting_type, window_sec, now=now)
+    if opposing_roc is None or supporting_roc is None:
+        return "insufficient OI history yet (tracker still warming up)"
+    if not opposing_now or not supporting_now:
+        return "no OI data yet for wall/supporting strike"
+
+    if opposing_roc > max_opposing_roc_pct * opposing_now:
+        return (f"opposing {opposing_type} wall OI still building ({opposing_roc:+d}, "
+                f"needs <={max_opposing_roc_pct * opposing_now:.0f}) -- writers still defending")
+    if supporting_roc < min_supporting_roc_pct * supporting_now:
+        return (f"supporting {supporting_type} OI not building fast enough ({supporting_roc:+d}, "
+                f"needs >={min_supporting_roc_pct * supporting_now:.0f})")
+
+    pcr = snap.pcr_smooth()
+    if side == "CE" and pcr <= min_pcr_bias:
+        return f"PCR {pcr:.2f} not bullish enough for CE (needs >{min_pcr_bias})"
+    if side == "PE" and pcr >= max_pcr_bias:
+        return f"PCR {pcr:.2f} not bearish enough for PE (needs <{max_pcr_bias})"
+
+    return "all gates passed -- signal should have fired (unexpected mismatch, please report)"
+
+
 # ── 2d. Option-side confirmation gate ────────────────────────────────────────
 
 @dataclass(frozen=True)

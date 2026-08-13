@@ -49,6 +49,13 @@ class SignalTelemetryRow:
     supporting_roc: Optional[int] = None
     pcr: Optional[float] = None
     spot_gate_fired: bool = False
+    # 2026-08-13: WHICH specific spot-gate condition blocked the signal
+    # (proximity/structure/OI-ROC/PCR), from detector.explain_no_signal() --
+    # the generic skip_reason="spot_gate_no_signal" alone can't distinguish
+    # these (a real production case: PE was well within the proximity
+    # threshold but the remark said "not consolidating" when the true
+    # blocker was a neutral PCR).
+    spot_gate_detail: str = ""
 
     # Option gate (confirm_option_price_action) diagnostics -- only
     # populated when the spot gate fired (that's the only time it runs).

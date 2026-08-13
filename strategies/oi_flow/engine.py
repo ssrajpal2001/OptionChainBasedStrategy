@@ -40,6 +40,7 @@ from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.oi_flow.detector import (
     BarAccumulator, detect_pre_breakout_signal, confirm_option_price_action, swing_low,
+    explain_no_signal,
 )
 from strategies.oi_flow.events import OIFlowOrderEvent, OIFlowFillEvent
 from strategies.oi_flow.telemetry import log_signal_evaluation, new_row
@@ -371,8 +372,17 @@ class OIFlowStrategy(AbstractStrategyBook):
                     else f"{row.side} ENTERED (strike={row.wall_strike})")
             level = "entry"
         elif row.skip_reason == "spot_gate_no_signal":
-            wall_txt = f"{row.wall_strike:.0f}" if row.wall_strike else "?"
-            text = f"{row.side}: no spot signal (spot={row.spot}, wall={wall_txt}) -- not consolidating at the wall yet"
+            # 2026-08-13: uses the SPECIFIC blocking condition (proximity vs
+            # structure vs OI-ROC vs PCR) from explain_no_signal() when
+            # available, rather than a generic "not consolidating" line --
+            # found in production to be actively misleading (PE was well
+            # within the proximity threshold; the real blocker was a
+            # neutral PCR, but the old generic text implied proximity).
+            if row.spot_gate_detail:
+                text = f"{row.side}: {row.spot_gate_detail}"
+            else:
+                wall_txt = f"{row.wall_strike:.0f}" if row.wall_strike else "?"
+                text = f"{row.side}: no spot signal (spot={row.spot}, wall={wall_txt})"
             level = "info"
         elif row.skip_reason == "option_gate_blocked":
             text = f"{row.side}: spot signal fired (wall={row.wall_strike:.0f}) but option chart blocked entry ({row.option_gate_reason})"
@@ -414,6 +424,15 @@ class OIFlowStrategy(AbstractStrategyBook):
         row.spot_gate_fired = spot_signal is not None
         if spot_signal is None:
             row.skip_reason = "spot_gate_no_signal"
+            if snap is not None:
+                row.spot_gate_detail = explain_no_signal(
+                    side, self._oi_tracker, self._latest_snap, self._spot_acc.bars,
+                    window_sec=self._window_sec,
+                    max_opposing_roc_pct=self._max_opposing_roc_pct,
+                    min_supporting_roc_pct=self._min_supporting_roc_pct,
+                    min_pcr_bias=self._min_pcr_bias, max_pcr_bias=self._max_pcr_bias,
+                    proximity_pct=self._proximity_pct, strike_step=self._strike_step,
+                )
             return
 
         option_bars = self._option_acc[side].bars

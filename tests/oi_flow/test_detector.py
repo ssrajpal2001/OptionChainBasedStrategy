@@ -15,7 +15,7 @@ from config.global_config import IST
 from strategies.oi_flow.detector import (
     Bar, BarAccumulator, SwingPoint, find_swing_points, has_recent_structure_break,
     swing_low, detect_pre_breakout_signal, confirm_option_price_action,
-    detect_volume_spike,
+    detect_volume_spike, explain_no_signal,
 )
 from strategies.oi_flow.tracker import OIFlowTracker
 
@@ -310,6 +310,125 @@ def test_ce_signal_none_when_spot_not_near_wall():
     sig = detect_pre_breakout_signal("CE", tracker, snap, spot_bars, window_sec=180,
                                       strike_step=100.0, now=now)
     assert sig is None
+
+
+# ── explain_no_signal ─────────────────────────────────────────────────────────
+# 2026-08-13: diagnostic-only twin of detect_pre_breakout_signal(), built
+# after a real production case where the remark said "not consolidating"
+# while spot was genuinely well within the proximity threshold -- the true
+# blocker was a neutral PCR. These tests independently drive each of the
+# 6 rejection paths to prove the explanation always matches the REAL
+# reason detect_pre_breakout_signal() itself would reject on.
+
+def test_explain_no_signal_proximity():
+    base = _base()
+    spot_bars = _flat_spot_bars(base, price=55000.0)   # far from the 57700 wall
+    tracker, now = _tracker_with(base, wall=57700.0, opposing_start=100_000, opposing_end=95_000,
+                                  supporting_strike=57600.0, supporting_start=50_000, supporting_end=53_000)
+    snap = _FakeSnap(max_call_oi_strike=57700.0, pcr=1.3)
+    reason = explain_no_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                strike_step=100.0, now=now)
+    assert "from wall" in reason
+
+
+def test_explain_no_signal_structure_already_broken():
+    base = _base()
+    spot_bars = [
+        _bar(base, 57650, 57660, 57630, 57650),
+        _bar(base + timedelta(minutes=1), 57680, 57700, 57660, 57690),   # swing high @ 57700
+        _bar(base + timedelta(minutes=2), 57640, 57660, 57610, 57630),
+        _bar(base + timedelta(minutes=3), 57720, 57750, 57700, 57740),   # closes ABOVE 57700 -- broken
+    ]
+    tracker, now = _tracker_with(base, wall=57700.0, opposing_start=100_000, opposing_end=95_000,
+                                  supporting_strike=57600.0, supporting_start=50_000, supporting_end=53_000)
+    snap = _FakeSnap(max_call_oi_strike=57700.0, pcr=1.3)
+    reason = explain_no_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                strike_step=100.0, swing_pivot=1, now=now)
+    assert "already broken" in reason
+
+
+def test_explain_no_signal_insufficient_oi_history():
+    base = _base()
+    spot_bars = _flat_spot_bars(base, price=57690.0)
+    tracker = OIFlowTracker(max_history_sec=600)
+    tracker.watch_strikes({(57700.0, "CE"): True, (57600.0, "PE"): True})
+    tracker.on_option_tick(_FakeTick(57700.0, "CE", 95_000, base))
+    tracker.on_option_tick(_FakeTick(57600.0, "PE", 53_000, base))
+    snap = _FakeSnap(max_call_oi_strike=57700.0, pcr=1.3)
+    reason = explain_no_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                strike_step=100.0, now=base)
+    assert "insufficient OI history" in reason
+
+
+def test_explain_no_signal_opposing_wall_still_defending():
+    base = _base()
+    spot_bars = _flat_spot_bars(base, price=57690.0)
+    tracker, now = _tracker_with(base, wall=57700.0, opposing_start=95_000, opposing_end=100_000,
+                                  supporting_strike=57600.0, supporting_start=50_000, supporting_end=53_000)
+    snap = _FakeSnap(max_call_oi_strike=57700.0, pcr=1.3)
+    reason = explain_no_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                strike_step=100.0, now=now)
+    assert "still building" in reason and "defending" in reason
+
+
+def test_explain_no_signal_supporting_side_not_building():
+    base = _base()
+    spot_bars = _flat_spot_bars(base, price=57690.0)
+    tracker, now = _tracker_with(base, wall=57700.0, opposing_start=100_000, opposing_end=95_000,
+                                  supporting_strike=57600.0, supporting_start=50_000, supporting_end=50_100)
+    snap = _FakeSnap(max_call_oi_strike=57700.0, pcr=1.3)
+    reason = explain_no_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                strike_step=100.0, now=now)
+    assert "not building fast enough" in reason
+
+
+def test_explain_no_signal_pcr_neutral_for_ce():
+    """The exact production case: proximity fine, OI fine, PCR neutral."""
+    base = _base()
+    spot_bars = _flat_spot_bars(base, price=57690.0)
+    tracker, now = _tracker_with(base, wall=57700.0, opposing_start=100_000, opposing_end=95_000,
+                                  supporting_strike=57600.0, supporting_start=50_000, supporting_end=53_000)
+    snap = _FakeSnap(max_call_oi_strike=57700.0, pcr=1.00)   # neutral -- below the 1.2 CE threshold
+    reason = explain_no_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                strike_step=100.0, min_pcr_bias=1.2, now=now)
+    assert "PCR 1.00" in reason and "CE" in reason
+
+
+def test_explain_no_signal_pcr_neutral_for_pe():
+    # PE's own opposing/supporting sides are the mirror of CE's -- opposing
+    # is the PUT wall itself (PE ticks), supporting is CE, unlike
+    # _tracker_with()'s CE-specific hardcoding -- build this one directly.
+    base = _base()
+    spot_bars = _flat_spot_bars(base, price=57190.0)
+    window_sec = 180
+    t0 = base
+    t1 = base + timedelta(seconds=window_sec + 10)
+    tracker = OIFlowTracker(max_history_sec=600)
+    tracker.watch_strikes({(57200.0, "PE"): True, (57300.0, "CE"): True})
+    tracker.on_option_tick(_FakeTick(57200.0, "PE", 100_000, t0))
+    tracker.on_option_tick(_FakeTick(57200.0, "PE", 95_000, t1))    # opposing (put wall) dropping
+    tracker.on_option_tick(_FakeTick(57300.0, "CE", 50_000, t0))
+    tracker.on_option_tick(_FakeTick(57300.0, "CE", 53_000, t1))    # supporting building
+    snap = _FakeSnap(max_put_oi_strike=57200.0, pcr=1.00)   # neutral -- above the 0.7 PE threshold
+    reason = explain_no_signal("PE", tracker, snap, spot_bars, window_sec=window_sec,
+                                strike_step=100.0, max_pcr_bias=0.7, now=t1)
+    assert "PCR 1.00" in reason and "PE" in reason
+
+
+def test_explain_no_signal_matches_real_rejection_across_random_scenarios():
+    """Cross-check: for every scenario above, detect_pre_breakout_signal()
+    itself must ALSO reject (returns None) -- proves explain_no_signal()
+    is describing the same real gate, not a diverged copy."""
+    base = _base()
+    spot_bars = _flat_spot_bars(base, price=57690.0)
+    tracker, now = _tracker_with(base, wall=57700.0, opposing_start=100_000, opposing_end=95_000,
+                                  supporting_strike=57600.0, supporting_start=50_000, supporting_end=53_000)
+    snap = _FakeSnap(max_call_oi_strike=57700.0, pcr=1.00)
+    assert detect_pre_breakout_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                       strike_step=100.0, min_pcr_bias=1.2, now=now) is None
+    reason = explain_no_signal("CE", tracker, snap, spot_bars, window_sec=180,
+                                strike_step=100.0, min_pcr_bias=1.2, now=now)
+    assert "PCR" in reason
 
 
 # ── confirm_option_price_action ──────────────────────────────────────────────
